@@ -96,14 +96,27 @@ def _mock_generate(
 ) -> base_rollout.RolloutOutput:
   del apply_chat_template, mode, micro_batch_size, trace_tags
   assert tokenizer is not None
+  if isinstance(prompts, str):
+    prompts = [prompts]
   batch_size = len(prompts)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
   tokens = [tokenizer.encode(text_i) for text_i in text]
   logprobs = [-np.random.rand(len(tokens[i])) for i in range(batch_size)]
+  prompt_tokens = []
+  for p in prompts:
+    if isinstance(p, str):
+      prompt_tokens.append(tokenizer.encode(p))
+    else:
+      prompt_tokens.append(tokenizer.encode(" ".join(m["content"] for m in p)))
+  max_p_len = max(len(pt) for pt in prompt_tokens)
+  padded_prompts = np.array([
+      np.pad(pt, (max(0, max_p_len - len(pt)), 0), constant_values=0)
+      for pt in prompt_tokens
+  ], dtype=np.int32)
   return base_rollout.RolloutOutput(
       text=text,
       tokens=tokens,
-      left_padded_prompt_tokens=np.ones((batch_size, 8), dtype=np.int32),
+      left_padded_prompt_tokens=padded_prompts,
       logits=None,
       logprobs=logprobs if output_logprobs else None,
   )

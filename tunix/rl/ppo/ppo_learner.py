@@ -361,6 +361,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
           old_per_token_logps,
           ref_per_token_logps,
           method=self.algo_config.kl_method,
+          clamp_value=self.algo_config.kl_clamp_value,
       )
       kl = kl * jax_completion_mask
       rewards = rewards - self.algo_config.beta * kl

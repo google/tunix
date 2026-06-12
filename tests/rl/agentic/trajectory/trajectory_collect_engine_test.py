@@ -104,7 +104,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           text=[text],
           logits=[jnp.zeros_like(tokens)],
           tokens=[tokens],
-          left_padded_prompt_tokens=np.array([1]),
+          left_padded_prompt_tokens=np.array([101]),
           logprobs=[np.ones_like(tokens)],
       )
 

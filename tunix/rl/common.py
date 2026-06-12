@@ -117,6 +117,7 @@ def compute_kl_divergence(
     per_token_logps: jax.Array,
     ref_per_token_logps: jax.Array,
     method: str = "low_var_kl",
+    clamp_value: float | None = None,
 ) -> jax.Array:
   """Compute per token KL divergence between trained and reference policy.
 
@@ -132,6 +133,13 @@ def compute_kl_divergence(
     per_token_logps: Per token log probabilities from the trained policy.
     ref_per_token_logps: Per token log probabilities from the reference policy.
     method: KL penalty method. Defaults to "low_var_kl".
+    clamp_value: Optional symmetric clamp applied to the returned KL,
+      i.e. `clip(kl, -clamp_value, +clamp_value)`. `None`
+      (default) disables the clamp and preserves prior behavior. Set to a
+      positive float (e.g. `10000.0`) to bound rare outliers — useful when
+      the trained policy briefly drifts far from the reference and the
+      `low_var_kl` estimator's `exp(diff)` term can overflow fp32 / saturate
+      bf16.
 
   Returns:
     KL divergence.
@@ -141,17 +149,21 @@ def compute_kl_divergence(
     ref_per_token_logps = ref_per_token_logps.astype(jnp.float32)
 
   if method == "kl":
-    return per_token_logps - ref_per_token_logps
+    kl = per_token_logps - ref_per_token_logps
   elif method == "mse_kl":
-    return 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
+    kl = 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
   elif method == "low_var_kl":
-    kl = ref_per_token_logps - per_token_logps
-    return jnp.exp(kl) - (kl) - 1
+    diff = ref_per_token_logps - per_token_logps
+    kl = jnp.exp(diff) - diff - 1
   else:
     raise ValueError(
         "`method` must be one of 'kl', 'mse_kl', 'low_var_kl'. Received:"
         f" {method}"
     )
+
+  if clamp_value is not None:
+    kl = jnp.clip(kl, -clamp_value, clamp_value)
+  return kl
 
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:

@@ -256,7 +256,10 @@ def ppo_policy_loss_fn(
   kl_coef = getattr(algo_config, "kl_coef", 0.0)
   if kl_coef > 0.0 and train_example.ref_per_token_logps is not None:
     kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps, "kl"
+        per_token_logps,
+        train_example.ref_per_token_logps,
+        "kl",
+        clamp_value=getattr(algo_config, "kl_clamp_value", None),
     )
     kl_loss = masked_mean(kl, completion_mask)
     loss = loss + kl_coef * kl_loss
@@ -521,6 +524,7 @@ def grpo_loss_fn(
         per_token_logps,
         train_example.ref_per_token_logps,
         algo_config.kl_loss_mode,
+        clamp_value=algo_config.kl_clamp_value,
     )
     # Log mean KL.
     aux["kl"] = jnp.astype(

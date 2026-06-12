@@ -1237,7 +1237,10 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       cache=None,
       attention_mask=None,
       decode_only_last_token=False,
+      segment_ids=None,
   ):
+    # Accepted for RL pipeline compatibility; unused until seq packing lands.
+    del segment_ids
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
       positions = jnp.tile(jnp.arange(T)[None, :], (B, 1))
@@ -1311,6 +1314,27 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         continue  # Skip shared layers.
       cache[f'layer_{i}'] = layer.init_cache(batch_size, max_seq_len, dtype)
     return cache
+
+  def get_model_input(self):
+    """Returns a dummy model input for the transformer.
+
+    This dummy input has a batch size compatible with FSDP sharding on a
+    2-device axis.
+    """
+    dummy_batch_size = 2
+    dummy_seq_len = 2
+    return {
+        'tokens': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
 
   @property
   def num_embed(self) -> int:

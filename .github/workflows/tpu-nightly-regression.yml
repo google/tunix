@@ -98,7 +98,6 @@ jobs:
 
     - name: Run SFT shell scripts
       id: sft_tests
-      continue-on-error: true
       shell: bash
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -145,15 +144,15 @@ jobs:
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
           echo "🚫 One or more SFT scripts failed." >&2
-          echo "SFT_FAILED=1" >> $GITHUB_ENV
+          exit 1
         fi
         echo "🎉 All SFT scripts completed execution."
 
 
     - name: Run RL shell scripts
       id: rl_tests
+      if: success() || failure()
       shell: bash
-      continue-on-error: true
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
@@ -205,17 +204,17 @@ jobs:
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
           echo "🚫 One or more RL scripts failed." >&2
-          echo "RL_FAILED=1" >> $GITHUB_ENV
+          exit 1
         fi
         echo "🎉 All RL scripts completed execution."
 
 
     - name: Run regression scripts
+      if: success() || failure()
       shell: bash
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       id: regression_tests
-      continue-on-error: true
       run: |
         echo "### Regression Scripts Summary" >> $GITHUB_STEP_SUMMARY
         echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
@@ -277,18 +276,11 @@ jobs:
 
         if [ "$FAILED" -ne 0 ]; then
           echo "🚫 One or more regression scripts failed." >&2
-          echo "REGRESSION_FAILED=1" >> $GITHUB_ENV
+          exit 1
         fi
         echo "🎉 All regression scripts completed execution."
 
-    - name: Fail if any run_prod suite failed
-      if: always()
-      run: |
-        if [ "$SFT_FAILED" == "1" ] || [ "$RL_FAILED" == "1" ] || [ "$REGRESSION_FAILED" == "1" ]; then
-          echo "❌ One or more test suites failed." >&2
-          exit 1
-        fi
-        echo "✅ All test suites passed."
+
 
   run_latest:
     runs-on: [linux-x86-ct5lp-224-8tpu]

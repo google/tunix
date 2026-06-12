@@ -33,7 +33,7 @@ from collections.abc import MutableMapping
 import dataclasses
 import importlib
 import os
-from types import ModuleType
+import types
 from typing import Any
 
 from absl import app
@@ -52,6 +52,7 @@ from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
+from tunix.utils import mesh as mesh_lib
 
 
 _PATHWAYS_BNS = flags.DEFINE_string(
@@ -85,7 +86,7 @@ class GrpoPipeline(config.HyperParameters):
   """
 
   def __init__(self, argv: list[str], **kwargs):
-    self.data_module: ModuleType | None = None
+    self.data_module: types.ModuleType | None = None
     super().__init__(argv, **kwargs)
 
   # ------------------------------------------------------------------
@@ -189,7 +190,25 @@ class GrpoPipeline(config.HyperParameters):
       role_to_owner[role] = resolve_owner(role, set())
     return role_to_owner
 
-  def _create_role_to_mesh(self):
+  def create_role_to_mesh(self):
+    """Builds the role-to-mesh mapping for GRPO execution.
+
+    Any role with an explicit ``*.mesh`` config gets a dedicated device slice.
+    Roles without a mesh share the actor mesh by default, or can point at
+    another role via ``same_mesh_as``.
+
+    All mesh owners participating in the same allocation pass must agree on
+    one ``mesh.allocation_policy`` value. That policy is then passed to the
+    mesh allocator so users can choose between compact packing and
+    performance-oriented cubical packing from config.
+
+    Returns:
+      A mapping from logical GRPO role to the concrete JAX mesh it should use.
+
+    Raises:
+      ValueError: If mesh ownership resolution is invalid or if mesh owners
+        request conflicting allocation policies.
+    """
     devices = list(jax.devices())
     role_to_owner = self._resolve_mesh_owners()
     owner_order = []
@@ -200,50 +219,37 @@ class GrpoPipeline(config.HyperParameters):
       if owner not in owner_order:
         owner_order.append(owner)
 
-    owner_to_mesh = {}
-    owner_to_device_slice = {}
-    device_offset = 0
+    mesh_requirements = []
+    allocation_policy = None
     for owner in owner_order:
       model_key = self._ROLE_TO_MODEL_KEY[owner]
-      axis_shapes, _ = self._parse_mesh_config(model_key)
-      required_devices = int(np.prod(axis_shapes))
-      next_offset = device_offset + required_devices
-      if next_offset > len(devices):
+      axis_shapes, _ = self.parse_mesh_config(model_key)
+      owner_policy = self._parse_mesh_allocation_policy(model_key)
+      if allocation_policy is None:
+        allocation_policy = owner_policy
+      elif owner_policy != allocation_policy:
         raise ValueError(
-            f"Mesh allocation requires {next_offset} devices after allocating"
-            f" {model_key}, but only {len(devices)} are available."
+            "All owned meshes must use the same mesh.allocation_policy, got "
+            f"{allocation_policy!r} and {owner_policy!r}."
         )
-      assigned_devices = devices[device_offset:next_offset]
-      owner_to_device_slice[owner] = assigned_devices
-      owner_to_mesh[owner] = self.create_mesh(
-          model_key, devices=assigned_devices
-      )
-      device_offset = next_offset
+      mesh_requirements.append((model_key, int(np.prod(axis_shapes))))
 
-    if device_offset < len(devices):
-      logging.warning(
-          "Mesh allocation used %d of %d devices; %d devices remain unused.",
-          device_offset,
-          len(devices),
-          len(devices) - device_offset,
-      )
-    logging.info(
-        "Mesh device allocation: %s",
-        {
-            self._ROLE_TO_MODEL_KEY[owner]: len(owner_to_device_slice[owner])
-            for owner in owner_order
-        },
+    allocated_devices = mesh_lib.allocate_named_mesh_device_slices(
+        mesh_requirements,
+        devices=devices,
+        allocation_policy=allocation_policy
+        or mesh_lib.normalize_allocation_policy(None),
     )
+
+    owner_to_mesh = {}
+    for owner in owner_order:
+      model_key = self._ROLE_TO_MODEL_KEY[owner]
+      axis_shapes, axis_names = self.parse_mesh_config(model_key)
+      assigned_devices = allocated_devices[model_key]
+      owner_to_mesh[owner] = mesh_lib.create_mesh(
+          axis_shapes, axis_names, devices=assigned_devices
+      )
     return {role: owner_to_mesh[owner] for role, owner in role_to_owner.items()}
-
-  def create_role_to_mesh(self):
-    """Build role→mesh mapping.
-
-    Any role with an explicit ``*.mesh`` config gets a dedicated device slice.
-    Roles without a mesh share the actor mesh by default, or can point at
-    another role via ``same_mesh_as``.
-    """
-    return self._create_role_to_mesh()
 
   # ------------------------------------------------------------------
   # Rollout config
@@ -261,6 +267,12 @@ class GrpoPipeline(config.HyperParameters):
     Agentic mode: same base. Same kv_cache_size calculation.
 
     Engine-specific extras (sglang_jax_config, vllm_config) are also applied.
+
+    Args:
+      role_to_mesh: Optional mapping from logical role to JAX mesh.
+
+    Returns:
+      The constructed RolloutConfig.
     """
     rollout_cfg = self._config_mapping("rollout_config")
     mode = self._config_string("training_mode", "grpo")
@@ -279,7 +291,6 @@ class GrpoPipeline(config.HyperParameters):
     max_response = rollout_cfg.get("total_generation_steps", 0)
 
     kv_cache_size = 0
-    max_concurrency = 0
     if mode == "agentic_grpo":
       agentic_cfg = self._config_mapping("agentic_grpo_config")
       kv_cache_size = max_prompt + max_response + 256
@@ -293,7 +304,8 @@ class GrpoPipeline(config.HyperParameters):
       if max_prompt and max_response:
         kv_cache_size = max_prompt + max_response + 256
         filtered["kv_cache_size"] = kv_cache_size
-      # Defaults to global batch size * num_generations to allow full concurrency
+      # Defaults to global batch size * num_generations to allow full
+      # concurrency.
       max_running_requests = self.config.get("batch_size", 1) * grpo_cfg.get(
           "num_generations", 1
       )
@@ -314,7 +326,7 @@ class GrpoPipeline(config.HyperParameters):
       kv_cache_size: int,
       max_running_requests: int,
       role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
-  ) -> dict:
+  ) -> dict[str, Any]:
     """Return engine-specific RolloutConfig fields for agentic mode."""
     model_id = self._config_mapping("actor_model_config").get("model_id", "")
 
@@ -474,7 +486,9 @@ class GrpoPipeline(config.HyperParameters):
   def create_rl_cluster(self, tokenizer):
     role_to_mesh = self.create_role_to_mesh()
     rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
-    reference_model_config = self._mutable_config_mapping("reference_model_config")
+    reference_model_config = self._mutable_config_mapping(
+        "reference_model_config"
+    )
     actor_model_config = self._mutable_config_mapping("actor_model_config")
     tokenizer_config = self._config_mapping("tokenizer_config")
     # Should not use LoRA for reference model.
@@ -484,8 +498,8 @@ class GrpoPipeline(config.HyperParameters):
           " LoRA."
       )
       del reference_model_config["lora_config"]
-    reference_model, tokenizer_path = model_lib.create_model(
-      dict(reference_model_config),
+    reference_model, _ = model_lib.create_model(
+        dict(reference_model_config),
         tokenizer_config,
         role_to_mesh[rl_cluster_lib.Role.REFERENCE],
     )
@@ -550,8 +564,8 @@ class GrpoPipeline(config.HyperParameters):
       train_fraction = 0.8
     elif train_fraction <= 0.0 and train_fraction > 1.0:
       logging.warning(
-          f"train_fraction {train_fraction:.2f} out of expected range. Setting"
-          " to 0.8"
+          "train_fraction %.2f out of expected range. Setting to 0.8",
+          train_fraction,
       )
       train_fraction = 0.8
 
@@ -570,7 +584,9 @@ class GrpoPipeline(config.HyperParameters):
     if isinstance(actor_opt_value, MutableMapping):
       actor_opt = actor_opt_value
     elif actor_opt_value is not None:
-      raise ValueError("rl_training_config.actor_optimizer_config must be a dict.")
+      raise ValueError(
+          "rl_training_config.actor_optimizer_config must be a dict."
+      )
     if actor_opt and not actor_opt.get("decay_steps"):
       actor_opt["decay_steps"] = max_steps
     if actor_opt and not actor_opt.get("warmup_steps"):
@@ -627,7 +643,9 @@ class GrpoPipeline(config.HyperParameters):
           data_source=self.config["data_source"],
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
-          split=self.config.get("train_split", self.config.get("split", "train")),
+          split=self.config.get(
+              "train_split", self.config.get("split", "train")
+          ),
           apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     elif self.config["data_source"] == "huggingface":
@@ -635,7 +653,9 @@ class GrpoPipeline(config.HyperParameters):
           data_source=self.config["data_source"],
           dataset=self.config["dataset_name"],
           tokenizer=tokenizer,
-          split=self.config.get("train_split", self.config.get("split", "train")),
+          split=self.config.get(
+              "train_split", self.config.get("split", "train")
+          ),
           apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     else:
@@ -682,8 +702,15 @@ class GrpoPipeline(config.HyperParameters):
       return chat_parser_lib.QwenChatTemplateParser(tokenizer)
     return chat_parser_lib.DefaultChatTemplateParser(tokenizer)
 
-  def _load_class_from_path(self, dotted_path: str) -> type:
-    """Load a Python class from a dotted module path."""
+  def _load_class_from_path(self, dotted_path: str) -> type[Any]:
+    """Load a Python class from a dotted module path.
+
+    Args:
+      dotted_path: Dotted module path to the class.
+
+    Returns:
+      The loaded Python class.
+    """
     module_path, class_name = dotted_path.rsplit(".", 1)
     return getattr(importlib.import_module(module_path), class_name)
 
@@ -692,9 +719,18 @@ class GrpoPipeline(config.HyperParameters):
 
     The module must expose ``create_dataset(**data_config) -> grain.MapDataset``
     and optionally a ``batch_fn`` used as ``custom_batch_fn``.
+
+    Args:
+      tokenizer: Tokenizer to use.
+
+    Returns:
+      A tuple (dataset, batch_fn) containing the loaded dataset and batch
+      function.
     """
     data_module = (
-        self._get_data_module() if self.config.get("data_module", None) else None
+        self._get_data_module()
+        if self.config.get("data_module", None)
+        else None
     )
     dataset = self._get_dataset(tokenizer)
     batch_fn = getattr(data_module, "batch_fn", None) if data_module else None
@@ -741,7 +777,7 @@ class GrpoPipeline(config.HyperParameters):
         tokenizer,
         batch_size=self.config.get("batch_size", 1),
         num_batches=self.config.get("num_batches"),
-      max_prompt_length=self._config_mapping("rollout_config").get(
+        max_prompt_length=self._config_mapping("rollout_config").get(
             "max_prompt_length"
         ),
         fraction=self.config.get("train_fraction", 1.0),
@@ -759,7 +795,7 @@ class GrpoPipeline(config.HyperParameters):
           rl_cluster=rl_cluster,
           reward_fns=self.obtain_reward_fn(),
           algo_config=grpo_learner.GrpoConfig(
-            **self._config_mapping("grpo_config")
+              **self._config_mapping("grpo_config")
           ),
       )
       grpo_trainer.train(dataset)

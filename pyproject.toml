@@ -38,10 +38,11 @@ dependencies = [
   "perfetto",  # Perfetto trace writer for metrics export
   "qwix>=0.1.6",
   "sentencepiece",
+  "safetensors<0.8", # higher versions breaks with jax >=0.9
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
-  "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
+  "transformers",
   "tenacity",
 ]
 

@@ -563,6 +563,77 @@ class CommonTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(kl, expected_kl, rtol=1e-3)
 
+  @parameterized.named_parameters(
+      ("kl", "kl"),
+      ("mse_kl", "mse_kl"),
+      ("low_var_kl", "low_var_kl"),
+  )
+  def test_compute_kl_divergence_output_clamp_default_is_no_op(self, method):
+    rng = jax.random.PRNGKey(0)
+    k1, k2 = jax.random.split(rng)
+    per_token_logps = jax.random.uniform(k1, shape=(2, 2, 4))
+    ref_per_token_logps = jax.random.uniform(k2, shape=(2, 2, 4))
+    baseline = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps, method=method
+    )
+    with_explicit_none = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method=method,
+        clamp_value=None,
+    )
+    np.testing.assert_array_equal(baseline, with_explicit_none)
+
+  @parameterized.named_parameters(
+      ("kl", "kl"),
+      ("mse_kl", "mse_kl"),
+      ("low_var_kl", "low_var_kl"),
+  )
+  def test_compute_kl_divergence_output_clamp_caps_outliers(self, method):
+    per_token_logps = jnp.array([-50.0, 0.0, 50.0], dtype=jnp.float32)
+    ref_per_token_logps = jnp.array([50.0, 0.0, -50.0], dtype=jnp.float32)
+    clamp = 10.0
+    kl = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method=method,
+        clamp_value=clamp,
+    )
+    self.assertTrue(bool(jnp.all(kl >= -clamp)))
+    self.assertTrue(bool(jnp.all(kl <= clamp)))
+
+  def test_compute_kl_divergence_output_clamp_passes_through_in_range(self):
+    per_token_logps = jnp.array([0.1, 0.2, 0.3], dtype=jnp.float32)
+    ref_per_token_logps = jnp.array([0.4, 0.5, 0.6], dtype=jnp.float32)
+    unclamped = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps, method="kl"
+    )
+    clamped = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method="kl",
+        clamp_value=10000.0,
+    )
+    np.testing.assert_array_equal(clamped, unclamped)
+
+  def test_compute_kl_divergence_output_clamp_symmetric(self):
+    per_token_logps = jnp.array([100.0], dtype=jnp.float32)
+    ref_per_token_logps = jnp.array([-100.0], dtype=jnp.float32)
+    pos = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method="kl",
+        clamp_value=5.0,
+    )
+    neg = common.compute_kl_divergence(
+        ref_per_token_logps,
+        per_token_logps,
+        method="kl",
+        clamp_value=5.0,
+    )
+    np.testing.assert_array_equal(pos, jnp.array([5.0]))
+    np.testing.assert_array_equal(neg, jnp.array([-5.0]))
+
   def test_aggregate_loss_bf16(self):
     per_token_loss = jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16)
     completion_mask = jnp.array([1, 1, 0], dtype=jnp.int32)

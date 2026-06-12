@@ -13,22 +13,11 @@
 # limitations under the License.
 """Checkpointing options for Tunix."""
 
-from collections.abc import Mapping
 import dataclasses
-from typing import Generic, Any, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar
 from absl import logging
 
 from orbax.checkpoint import v1 as ocp
-
-
-# The subset of config options that are used to allow for configuration of
-# save_decision_policy and preservation_policy.
-CONFIG_OPTIONS = frozenset([
-    "save_interval_steps",
-    "max_to_keep",
-    "enable_async_checkpointing",
-    "timeout_secs",
-])
 
 MetadataT = TypeVar("MetadataT")
 
@@ -152,7 +141,7 @@ def resolve_checkpointing_defaults(
   This function accepts any object fulfilling the `CheckpointingOptions`
   protocol and cleanly extracts fields essential for Tunix. Legacy v0 fields
   (`save_interval_steps` or `max_to_keep`) are applied strictly as second-tier
-  fallbacks, matching the explicit internal configuration logic used by Orbax V1
+  fallbacks, matching the explicit internal configuration logic used by Orbax V0
   for backwards compatibility.
 
   Args:
@@ -221,66 +210,5 @@ def resolve_checkpointing_defaults(
       preservation_policy=preserve_policy,
       step_name_format=step_name_format,
       enable_async_checkpointing=enable_async,
-      async_options=async_options,
-  )
-
-
-def checkpointing_options_from_dict(
-    options: Mapping[str, Any],
-) -> TunixCheckpointingOptions:
-  """Converts a mapping of options to Tunix CheckpointingOptions.
-
-  This functionality enforces that we use Tunix defaults for all options except
-  for those explicitly provided in the mapping. It also validates that no
-  unsupported options are provided.
-
-  Args:
-    options: The options to convert.
-
-  Returns:
-    The Tunix CheckpointingOptions derived from the input mapping.
-
-  Raises:
-    ValueError: If any of the options are not supported.
-  """
-  invalid_options = set(options) - CONFIG_OPTIONS
-  if invalid_options:
-    raise ValueError(
-        f"The following options {invalid_options!r} are not supported for"
-        " Checkpointing, please refer to the following set of configurable"
-        f" options: {CONFIG_OPTIONS!r}, alongside documentation found at"
-        " https://tunix.readthedocs.io/en/latest/launching.html#training-configuration-training-config."
-    )
-
-  save_interval_steps = options.get("save_interval_steps")
-  max_to_keep = options.get("max_to_keep")
-
-  if save_interval_steps is not None:
-    save_decision_policy = (
-        ocp.training.save_decision_policies.FixedIntervalPolicy(
-            save_interval_steps
-        )
-    )
-  else:
-    save_decision_policy = None
-
-  if max_to_keep is not None:
-    preservation_policy = ocp.training.preservation_policies.LatestN(
-        max_to_keep
-    )
-  else:
-    preservation_policy = None
-
-  timeout_secs = options.get("timeout_secs")
-  async_options = (
-      ocp.options.AsyncOptions(timeout_secs=timeout_secs)
-      if timeout_secs is not None
-      else None
-  )
-
-  return create_checkpointing_options(
-      save_decision_policy=save_decision_policy,
-      preservation_policy=preservation_policy,
-      enable_async_checkpointing=options.get("enable_async_checkpointing"),
       async_options=async_options,
   )

@@ -13,11 +13,12 @@
 # limitations under the License.
 
 model_config:
-  model_name: "gemma-3-1b-it"
-  model_id: "google/gemma-3-1b-it"
-  model_source: "gcs"
+  model_name: "gemma-4-e2b"
+  model_id: "google/gemma-4-e2b"
+  model_source: "internal"
+  model_path: ""
   mesh:
-    shape: "(2,4)"
+    shape: "(8,1)"
     axis_names: "('fsdp','tp')"
   rng_seed: 42
 actor_model_config:
@@ -26,7 +27,7 @@ actor_model_config:
     alpha: 64.0
     module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
   mesh:
-    shape: "(2,4)"
+    shape: "(8,1)"
     axis_names: "('fsdp','tp')"
 reference_model_config:
   mesh: null
@@ -35,14 +36,17 @@ rollout_model_config:
   mesh: null
   same_mesh_as: "actor"
 tokenizer_config:
-  tokenizer_type: "sentencepiece"
+  tokenizer_type: "huggingface"
+  tokenizer_path: ""
   add_bos: False
 dataset_name: "gsm8k"
-batch_size: 1
-num_batches: 3738
-num_test_batches: 100
+batch_size: 4
+num_batches: 935
+num_test_batches: 25
 num_train_epochs: 1
 rl_training_config:
+  mini_batch_size: 4
+  train_micro_batch_size: 1
   actor_optimizer_config:
     opt_type: "adamw"
     peak_value: 3e-6
@@ -50,14 +54,14 @@ rl_training_config:
     init_value: 0.0
     end_value: 0.0
     warmup_ratio: 0.1
-    warmup_steps: 374
-    decay_steps: 3738
+    warmup_steps: 94
+    decay_steps: 935
     b1: 0.9
     b2: 0.99
     weight_decay: 0.1
     max_grad_norm: 0.1
   eval_every_n_steps: 10
-  max_steps: 3738
+  max_steps: 935
   metrics_logging_options:
     flush_every_n_steps: 20
   checkpointing_options:
@@ -70,7 +74,6 @@ rollout_config:
   temperature: 0.9
   top_p: 1.0
   top_k: 50
-  eos_tokens: [1, 106]
 rollout_engine: "vanilla"
 offload_to_cpu: False
 grpo_config:

@@ -309,6 +309,40 @@ def create_dataset():
         ],
     )
 
+  def test_normalizes_bytes_prompt_key_to_sanitized_prompts(self):
+      tokenizer = _FakeTokenizer()
+      dataset = _BaseDataset([
+        {"question": b"<start_of_turn>short prompt", "answer": 1},
+        {"question": memoryview(b"another prompt"), "answer": 2},
+      ])
+
+      first, second = data_lib.post_init_dataset(
+        dataset,
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
+        batch_size=2,
+        num_batches=None,
+        max_prompt_length=None,
+        prompt_key="question",
+      )
+
+      self.assertIsNone(second)
+      batches = list(first)
+      self.assertEqual(
+        batches[0],
+        [
+          {
+            "question": b"<start_of_turn>short prompt",
+            "answer": 1,
+            "prompts": "short prompt",
+          },
+          {
+            "question": memoryview(b"another prompt"),
+            "answer": 2,
+            "prompts": "another prompt",
+          },
+        ],
+      )
+
   def test_num_epochs_repeats_dataset(self):
     tokenizer = _FakeTokenizer()
     dataset = _BaseDataset(

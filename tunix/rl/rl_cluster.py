@@ -712,9 +712,9 @@ class RLCluster:
 
       if agg_value.dtype.kind in {"U", "S"}:
         logging.info(
-            "Skipping logging metric %s (dtype: %s)",
+            "Rollout string metric %s: %s",
             metric_name,
-            agg_value.dtype,
+            agg_value,
         )
         continue
 
@@ -723,7 +723,7 @@ class RLCluster:
         if agg_value.size > 0 and isinstance(
             agg_value.ravel()[0], (str, np.str_)
         ):
-          logging.info("Skipping logging object metric %s", metric_name)
+          logging.info("Rollout string metric %s: %s", metric_name, agg_value)
           continue
 
       # Apply aggregation and Log

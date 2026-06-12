@@ -258,14 +258,15 @@ def create_gemma_model_from_params(
 # Currently, gemma2 uses _create_gemma_model_from_params while gemma3 uses
 # _create_gemma3_model_from_checkpoint.
 def create_gemma3_model_from_checkpoint(
-    ckpt_path: str, model_name: str, mesh: jax.sharding.Mesh
+    ckpt_path: str, model_name: str, mesh: jax.sharding.Mesh, **kwargs
 ) -> tuple[nnx.Module, Any]:
-  """Creates a Gemma3 model from a checkpoint.
+  """Creates a Gemma3/Gemma4 model from a checkpoint.
 
   Args:
       ckpt_path: The path to the checkpoint.
       model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama-3.2-3b").
       mesh: Mesh object for device layout.
+      **kwargs: Additional keyword arguments to override on model_params.
 
   Returns:
       A tuple containing:
@@ -273,6 +274,12 @@ def create_gemma3_model_from_checkpoint(
           - model_params: The model parameters.
   """
   model_params = call_model_config(model_name)
+  valid_kwargs = {
+      k: v
+      for k, v in kwargs.items()
+      if hasattr(model_params, k) and v is not None
+  }
+  model_params = dataclasses.replace(model_params, **valid_kwargs)
   params_lib = get_model_module(model_name, ModelModule.PARAMS)
   model = params_lib.create_model_from_checkpoint(ckpt_path, model_params, mesh)
   return model, model_params
@@ -494,11 +501,30 @@ class AutoModel:
             ckpt_path=resolved_model_path,
             model_name=naming_info.model_name,
             mesh=mesh,
+            **kwargs,
         )
       else:
         raise NotImplementedError(
             'Gemma 3 models are only supported from GCS or INTERNAL.'
             f' Specified model source: {model_source}'
+        )
+    # Gemma 4: Orbax loading for GCS/INTERNAL sources.
+    # Other sources (e.g., HuggingFace) fall through to the common
+    # SafeTensors path, which resolves to gemma4/params_safetensors.py.
+    elif naming_info.model_family == 'gemma4':
+      if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
+        # Name is legacy — dynamically resolves to gemma4 via ModelNaming.
+        model, model_params = create_gemma3_model_from_checkpoint(
+            ckpt_path=resolved_model_path,
+            model_name=naming_info.model_name,
+            mesh=mesh,
+            **kwargs,
+        )
+      else:
+        logging.info(
+            'Gemma 4 source %s is not GCS/INTERNAL, falling through to'
+            ' SafeTensors loader.',
+            model_source,
         )
     # For other native Tunix models with special handling cases for Gemma2 models
     elif naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2'):

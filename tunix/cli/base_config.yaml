@@ -91,6 +91,12 @@ model_config: &base_model_config
     shape: "(2,2)"
     # "('fsdp',)"
     axis_names: "('fsdp','tp')"
+    # Optional device allocation policy used when this mesh is carved from a
+    # larger device pool. Supported values:
+    #   COMPACT: pack into the smallest fitting remaining region.
+    #   PERFORMANCE: prefer more cubical supported extracted shapes.
+    # When omitted, Tunix defaults to COMPACT.
+    allocation_policy: "COMPACT"
 
 actor_model_config:
   <<: *base_model_config
@@ -173,8 +179,6 @@ training_config: &base_training_config
   checkpointing_options:
     max_to_keep: 1
     save_interval_steps: 180
-    enable_async_checkpointing: True
-    timeout_secs: 1200
   metrics_logging_options:
     project_name: "tunix"
     run_name: ""

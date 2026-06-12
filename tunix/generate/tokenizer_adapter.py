@@ -247,6 +247,7 @@ class Tokenizer(TokenizerAdapter):
           add_bos_token=add_bos,
           add_eos_token=add_eos,
           token=hf_access_token,
+          extra_special_tokens={},
       )
     elif tokenizer_type == 'sentencepiece':
       model_proto = epath.Path(tokenizer_path).read_bytes()
