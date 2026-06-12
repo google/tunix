@@ -250,7 +250,9 @@ parser.add_argument(
 
 parser.add_argument("--use_flash_attention", type=bool, default=True)
 parser.add_argument("--flash_attention_block_size", type=int, default=1024)
-parser.add_argument("--metrics_logger_dir", type=str, default=None)
+parser.add_argument(
+    "--metrics_logger_dir", type=str, default="/tmp/tunix-tb/deepswe"
+)
 parser.add_argument(
     "--logging_level",
     type=str,
@@ -703,8 +705,26 @@ checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
 
+wandb_config = vars(args)
+wandb_config.update({
+    "num_steps": MAX_STEPS,
+    "rollout_engine": ROLLOUT_ENGINE,
+    "model_id": f"Qwen/{MODEL_VERSION}",
+    "model_path": MODEL_PATH,
+    "kv_cache_size": KV_CACHE_SIZE,
+    "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
+    "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+    "num_devices": len(devices),
+    "rollout_mesh_shape": [dim for _, dim in rollout_dims],
+    "rollout_mesh_axes": [axis for axis, _ in rollout_dims],
+    "train_mesh_shape": [dim for _, dim in train_dims],
+    "train_mesh_axes": [axis for axis, _ in train_dims],
+})
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir=args.metrics_logger_dir, flush_every_n_steps=2
+    log_dir=args.metrics_logger_dir,
+    project_name="tunix-deepswe",
+    flush_every_n_steps=1,
+    backend_kwargs={"wandb": {"config": wandb_config}},
 )
 
 optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
@@ -970,38 +990,6 @@ def mixed_type_batch_fn(elements):
       batched_data[key] = [item[key] for item in elements]
 
   return batched_data
-
-try:
-  import datetime
-  import wandb # pytype: disable=import-error
-
-  settings = wandb.Settings(console="off")
-  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb_config = {
-      **vars(args),
-      # Derived values not present in args
-      "kv_cache_size": KV_CACHE_SIZE,
-      "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
-      "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-      # Stringify set so wandb can serialize it
-      "filter_statuses": (
-          [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
-      ),
-      "degenerate_group_masking": DEGENERATE_GROUP_MASKING,
-      # Mesh topology
-      "num_devices": len(devices),
-      "rollout_mesh_fsdp": rollout_fsdp,
-      "rollout_mesh_tp": rollout_tp,
-      "train_mesh_fsdp": train_fsdp,
-      "train_mesh_sp": train_sp,
-      "train_mesh_tp": train_tp,
-  }
-  wandb.init(
-      project="tunix", name=run_name, config=wandb_config, settings=settings
-  )
-except Exception as e:
-  print(f"W&B initialization failed with error: {e}")
-
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,
