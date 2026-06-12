@@ -782,7 +782,8 @@ vllm_rollout_dict = {
     "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
-    "rollout_vllm_async_scheduling": True,
+    "rollout_vllm_async_scheduling": False,
+    "rollout_vllm_init_with_random_weights": True,
     "tensor_parallel_size": rollout_mesh.shape.get("tp", 1),
     "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -790,7 +791,7 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": True,
+        "enable_prefix_caching": False,
     },
 }
 

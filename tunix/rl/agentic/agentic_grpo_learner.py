@@ -30,6 +30,7 @@ The data flow is designed around an asynchronous producer-consumer pattern:
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
@@ -288,6 +289,85 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
     ])
+
+  def _decode_token_debug(self, token_ids: Sequence[int]) -> str:
+    """Best-effort token decode that preserves special tokens when possible."""
+    ids = [int(x) for x in token_ids]
+    try:
+      return self.tokenizer.decode(ids, skip_special_tokens=False)
+    except TypeError:
+      return self.tokenizer.decode(ids)
+    except Exception:  # pylint: disable=broad-exception-caught
+      return repr(ids)
+
+  def _maybe_log_sampler_trainer_diff_debug(
+      self,
+      *,
+      group_id: Any,
+      completion_ids: jax.Array,
+      completion_mask: jax.Array,
+      rollout_per_token_logps: jax.Array,
+      trainer_per_token_logps: jax.Array,
+      completion_texts: Sequence[str],
+  ) -> None:
+    """Logs top sampler-vs-trainer logprob mismatches when requested."""
+    if not os.getenv("TUNIX_DEBUG_LOGP_DIFF"):
+      return
+    try:
+      limit = int(os.getenv("TUNIX_DEBUG_LOGP_DIFF_TOPK", "8"))
+    except ValueError:
+      limit = 8
+    if limit <= 0:
+      return
+    try:
+      completion_ids_np = np.asarray(jax.device_get(completion_ids))
+      mask_np = np.asarray(jax.device_get(completion_mask.astype(jnp.bool_)))
+      rollout_np = np.asarray(jax.device_get(rollout_per_token_logps))
+      trainer_np = np.asarray(jax.device_get(trainer_per_token_logps))
+      diff_np = np.abs(rollout_np - trainer_np)
+      masked_flat = np.where(mask_np, diff_np, -np.inf).reshape(-1)
+      if not np.isfinite(masked_flat).any():
+        logging.warning(
+            "sampler-trainer debug group=%s has no masked completion tokens",
+            group_id,
+        )
+        return
+      top_flat_idxs = np.argsort(masked_flat)[::-1][:limit]
+      for rank, flat_idx in enumerate(top_flat_idxs, start=1):
+        if not np.isfinite(masked_flat[flat_idx]):
+          continue
+        seq_idx, tok_idx = np.unravel_index(flat_idx, diff_np.shape)
+        token_id = int(completion_ids_np[seq_idx, tok_idx])
+        start = max(0, tok_idx - 8)
+        end = min(completion_ids_np.shape[1], tok_idx + 9)
+        window_ids = completion_ids_np[seq_idx, start:end]
+        text_snippet = (
+            completion_texts[seq_idx][:240]
+            if seq_idx < len(completion_texts)
+            else ""
+        )
+        logging.warning(
+            "sampler-trainer top_diff group=%s rank=%d seq=%d tok=%d"
+            " token_id=%d token=%r rollout_logp=%.6f trainer_logp=%.6f"
+            " diff=%.6f rollout_prob=%.6g trainer_prob=%.6g"
+            " window_ids=%r window_text=%r completion_prefix=%r",
+            group_id,
+            rank,
+            seq_idx,
+            tok_idx,
+            token_id,
+            self._decode_token_debug([token_id]),
+            float(rollout_np[seq_idx, tok_idx]),
+            float(trainer_np[seq_idx, tok_idx]),
+            float(diff_np[seq_idx, tok_idx]),
+            float(np.exp(rollout_np[seq_idx, tok_idx])),
+            float(np.exp(trainer_np[seq_idx, tok_idx])),
+            [int(x) for x in window_ids],
+            self._decode_token_debug(window_ids),
+            text_snippet,
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.exception("Failed sampler-trainer logp diff debug: %s", e)
 
   def _process_results(
       self,
@@ -656,6 +736,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           prob_diff_mean,
           prob_diff_max,
           pearson,
+      )
+      self._maybe_log_sampler_trainer_diff_debug(
+          group_id=group_id,
+          completion_ids=completion_ids,
+          completion_mask=completion_mask,
+          rollout_per_token_logps=rollout_per_token_logps,
+          trainer_per_token_logps=trainer_per_token_logps,
+          completion_texts=completion_texts,
       )
     # Truncated importance-sampling (TIS) correction weights.
     # Compute per-token TIS weights from the trainer-vs-sampler log-ratio,

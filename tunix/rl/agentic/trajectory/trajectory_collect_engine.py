@@ -21,6 +21,7 @@ multi-pair trajectory collection.
 """
 import asyncio
 import json
+import os
 import time
 from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optional, ParamSpec, Set, Tuple
 
@@ -152,6 +153,83 @@ class TrajectoryCollectEngine:
           " provided. response length limits will not be enforced.",
           self.max_response_length,
       )
+
+  def _decode_token_window(self, token_ids: np.ndarray) -> str:
+    """Best-effort decode helper for concise token debugging."""
+    try:
+      return self.tokenizer.decode([int(x) for x in token_ids])
+    except Exception:  # pylint: disable=broad-exception-caught
+      return repr([int(x) for x in token_ids])
+
+  def _flatten_recorded_context_tokens(self) -> np.ndarray:
+    """Returns the locally recorded prompt context before the next model call."""
+    chunks = []
+    prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
+    if len(prompt_tokens) > 0:
+      chunks.append(np.asarray(prompt_tokens, dtype=np.int32))
+    for step in self.agent.trajectory.steps:
+      assistant_tokens = getattr(step, "assistant_tokens", None)
+      if assistant_tokens is not None and len(assistant_tokens) > 0:
+        chunks.append(np.asarray(assistant_tokens, dtype=np.int32))
+      env_tokens = getattr(step, "env_tokens", None)
+      if env_tokens is not None and len(env_tokens) > 0:
+        chunks.append(np.asarray(env_tokens, dtype=np.int32))
+    if not chunks:
+      return np.asarray([], dtype=np.int32)
+    return np.concatenate(chunks, axis=0)
+
+  def _maybe_log_prompt_token_alignment(
+      self, rollout_output: base_rollout.RolloutOutput
+  ) -> None:
+    """Logs local-vs-vLLM prompt token mismatches when requested."""
+    if not os.getenv("TUNIX_DEBUG_LOGP_DIFF"):
+      return
+    if self.tokenizer is None or rollout_output.left_padded_prompt_tokens is None:
+      return
+    try:
+      actual = np.asarray(rollout_output.left_padded_prompt_tokens[0])
+      pad_id = self.tokenizer.pad_id()
+      actual = actual[actual != pad_id]
+      local = self._flatten_recorded_context_tokens()
+      local_tail = local[-len(actual) :] if len(actual) else local[:0]
+      if np.array_equal(local_tail, actual):
+        logging.info(
+            "%s prompt token alignment OK len=%d local_context_len=%d",
+            self._debug_prefix,
+            len(actual),
+            len(local),
+        )
+        return
+
+      compare_len = min(len(local_tail), len(actual))
+      mismatch_idx = 0
+      if compare_len:
+        mismatch_positions = np.nonzero(
+            local_tail[:compare_len] != actual[:compare_len]
+        )[0]
+        mismatch_idx = (
+            int(mismatch_positions[0]) if mismatch_positions.size else compare_len
+        )
+      start = max(0, mismatch_idx - 8)
+      end = min(max(len(local_tail), len(actual)), mismatch_idx + 9)
+      local_window = local_tail[start : min(end, len(local_tail))]
+      actual_window = actual[start : min(end, len(actual))]
+      logging.warning(
+          "%s prompt token mismatch: local_tail_len=%d actual_len=%d"
+          " local_context_len=%d first_mismatch=%d local_window=%r"
+          " actual_window=%r local_text=%r actual_text=%r",
+          self._debug_prefix,
+          len(local_tail),
+          len(actual),
+          len(local),
+          mismatch_idx,
+          local_window.tolist(),
+          actual_window.tolist(),
+          self._decode_token_window(local_window),
+          self._decode_token_window(actual_window),
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.exception("%s failed prompt alignment debug: %s", self._debug_prefix, e)
 
   async def _run_with_timing(
       self, func: Callable[..., Any], *args, timeout: Optional[float] = None
@@ -520,6 +598,7 @@ class TrajectoryCollectEngine:
         _safe_model_call,
     )
     logging.debug("%s model_call done", self._debug_prefix)
+    self._maybe_log_prompt_token_alignment(rollout_output)
 
     # Align trajectory prompt tokens with the rollout worker's actual
     # tokenization on the first turn to prevent prompt token desync.
