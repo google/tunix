@@ -20,7 +20,6 @@ author = "Tunix Developers"
 
 extensions = [
     "myst_nb",
-    "sphinx_gallery.gen_gallery",
     "sphinx_collections",
     # api docs
     "sphinx.ext.autodoc",
@@ -34,10 +33,9 @@ exclude_patterns = [
     "_build",
     "Thumbs.db",
     ".DS_Store",
-    (
-        "_collections/examples/model_load/from_safetensor_load/*"
-        "_collections/examples/rl/README.md"
-    ),
+    "_collections/examples/README.rst",
+    "_collections/examples/model_load/from_safetensor_load/*",
+    "_collections/examples/rl/README.md",
     "_collections/examples/sft/**",
     "_collections/examples/deepscaler/**",
 ]
@@ -59,17 +57,6 @@ html_theme_options = {
     "repository_url": "https://github.com/google/tunix",
     "use_repository_button": True,  # add a "link to repository" button
     "navigation_with_keys": False,
-}
-
-# -- Options for sphinx-gallery ----------------------------------------------
-
-sphinx_gallery_conf = {
-    "examples_dirs": "_collections/examples",  # path to your example scripts
-    "gallery_dirs": (
-        "_collections/gallery"
-    ),  # path to where to save gallery generated output
-    "filename_pattern": "*.py",
-    "ignore_pattern": r"rl/|sft/|deepscaler/",
 }
 
 # -- Options for myst -------------------------------------------------------
