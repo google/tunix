@@ -29,3 +29,10 @@ does not match the exact configuration listed in the table.
 | GRPO | **Qwen3 0.6b**| LoRA  | v5e-1         | Num of generation = 4, batch_size = 1 | Train: fsdp Rollout: tp | |
 | GRPO | **Qwen3 14b** | Full  | v5p-2         | Num of generation = 4, batch_size = 4 | Train: fsdp Rollout: tp | |
 | GRPO | **Qwen3 14b** | LoRA  | v5p-2         | Num of generation = 4, batch_size = 4 | Train: fsdp Rollout: tp | |
+
+## PPO
+
+| Algo | Model         | Type  | Min Resources | Max Training Micro Batch Size     | Sharding              | Launch Script                 |
+| :--- | :------------ | :---- | :------------ | :-------------------------------- | :-------------------- | :---------------------------- |
+| PPO  | **Gemma2-2b** | Full  | v5e-4         | Num of generation = 4, batch_size = 1 | Train: fsdp Rollout: tp | *[run_gemma2_2b.sh](examples/rl/ppo/gsm8k/run_gemma2_2b.sh)* |
+| PPO  | **Gemma2-2b** | LoRA  | v5e-4         | Num of generation = 4, batch_size = 1 | Train: fsdp Rollout: tp | *[run_gemma2_2b.sh](examples/rl/ppo/gsm8k/run_gemma2_2b.sh)* |
