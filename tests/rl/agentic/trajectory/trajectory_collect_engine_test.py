@@ -54,6 +54,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_tokenizer = mock.Mock()
     self.mock_tokenizer.encode.return_value = [1, 2, 3]
     self.mock_chat_parser = mock.Mock()
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens, content: (tokens, 0)
+    )
 
     self.trajectory = agent_types.Trajectory()
     self.mock_agent.trajectory = self.trajectory

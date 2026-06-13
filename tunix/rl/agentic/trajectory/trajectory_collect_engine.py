@@ -616,8 +616,21 @@ class TrajectoryCollectEngine:
 
       # Assistant tokens/masks
       if assistant_message:
-        cur_step.assistant_tokens = rollout_output.tokens[0]
-        cur_step.assistant_masks = np.ones_like(rollout_output.tokens[0])
+        cur_step.assistant_tokens, n_append = (
+            self.chat_parser.update_assistant_end_tokens(
+                rollout_output.tokens[0], assistant_message["content"]
+            )
+        )
+        cur_step.assistant_masks = np.concatenate(
+            [
+                np.ones(len(cur_step.logprobs), dtype=np.int32),
+                np.zeros(n_append, dtype=np.int32),
+            ],
+            axis=0,
+        )
+        cur_step.logprobs = np.concatenate(
+            [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
+        )
 
       # Environment tokens/masks
       # Terminal-step environment messages are not appended to the response
