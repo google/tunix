@@ -493,7 +493,9 @@ class TrajectoryCollectEngine:
     state, and optionally tokenizing the initial prompt messages.
     """
     logging.debug("%s env.reset starting", self._debug_prefix)
-    (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
+    (obs, info), wall_time, cpu_time = await self._run_with_timing(
+        self.env.reset
+    )
     logging.debug(
         "%s env.reset done in %.1fs",
         self._debug_prefix,
@@ -508,7 +510,14 @@ class TrajectoryCollectEngine:
         else None
     )
     self.agent.reset()
-    self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
+    self._start_ts = time.perf_counter()
+    self._response_token_count = 0
+    self.agent.update_from_env(
+        observation=obs,
+        reward=0.0,
+        done=False,
+        info=self._agent_env_info(info),
+    )
 
     if self.tokenizer is not None and self.chat_parser is not None:
       # Get the current messages (usually System + User)
@@ -521,10 +530,6 @@ class TrajectoryCollectEngine:
           contains_generation_msg=True,
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
-
-    self._start_ts = time.perf_counter()
-    self._response_token_count = 0
-
   @property
   def _debug_prefix(self) -> str:
     """Returns a consistent log prefix with step_idx, pair_index, and group_id."""
@@ -535,6 +540,15 @@ class TrajectoryCollectEngine:
     return (
         f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
     )
+
+  def _agent_env_info(
+      self, info: Optional[Dict[str, Any]] = None
+  ) -> Dict[str, Any]:
+    """Adds rollout state expected by SWE-style agents."""
+    enriched_info = dict(info or {})
+    enriched_info["max_steps"] = self.max_steps
+    enriched_info["cur_tokens"] = self._response_token_count
+    return enriched_info
 
   def _get_perf_tags(self) -> Dict[str, Any]:
     """Extracts performance tracing tags from the environment."""
@@ -683,7 +697,9 @@ class TrajectoryCollectEngine:
           self._debug_prefix,
           json.dumps(info, default=str, indent=2),
       )
-      self.agent.update_from_env(obs, rew, done, info)
+      self.agent.update_from_env(
+          obs, rew, done, self._agent_env_info(info)
+      )
     else:
       done = True
 
