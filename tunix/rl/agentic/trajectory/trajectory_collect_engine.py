@@ -117,6 +117,7 @@ class TrajectoryCollectEngine:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self._start_ts: float = 0.0
+    self._logged_clip_reasons: Set[str] = set()
     self.filter_statuses = filter_statuses or {
         agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
         agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
@@ -265,6 +266,13 @@ class TrajectoryCollectEngine:
     wall_delta = time.perf_counter() - wall_start
     return result, wall_delta, cpu_delta
 
+  def _log_trajectory_clip(self, reason: str) -> None:
+    """Logs the reason a trajectory was clipped."""
+    if reason in self._logged_clip_reasons:
+      return
+    self._logged_clip_reasons.add(reason)
+    logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
+
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
 
@@ -285,12 +293,14 @@ class TrajectoryCollectEngine:
     await self._reset()
 
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+    self._logged_clip_reasons.clear()
 
     while True:
       if len(self.agent.trajectory.steps) >= self.max_steps:
         self.agent.trajectory.status = (
             agent_types.TrajectoryStatus.MAX_STEPS_REACHED
         )
+        self._log_trajectory_clip("MAX_STEPS_REACHED")
         break
 
       done = await self._one_step()
@@ -307,12 +317,6 @@ class TrajectoryCollectEngine:
     try:
       if not masked_out:
         await self._append_final_reward()
-      else:
-        logging.debug(
-            "%s mask out trajectory due to status %s",
-            self._debug_prefix,
-            self.agent.trajectory.status.name,
-        )
       self.compute_mc_reward()
       self.compute_trajectory_reward()
     finally:
@@ -557,7 +561,7 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.status = (
           agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
       )
-      logging.debug("%s MAX_CONTEXT_LIMIT_REACHED", self._debug_prefix)
+      self._log_trajectory_clip("MAX_CONTEXT_LIMIT_REACHED")
       return True
     return False
 
@@ -642,6 +646,7 @@ class TrajectoryCollectEngine:
           )
       except asyncio.TimeoutError:
         self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
+        self._log_trajectory_clip("ENV_TIMEOUT")
         if step_idx == 0:
           logging.error(
               "%s env.step hung at step 0 (first action) and was killed after"
@@ -715,7 +720,7 @@ class TrajectoryCollectEngine:
 
     if step_timed_out:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
-      logging.warning("Episode timed out after %d seconds.", self.timeout)
+      self._log_trajectory_clip("TIMEOUT")
       self.agent.get_current_step().done = True
       return True
 

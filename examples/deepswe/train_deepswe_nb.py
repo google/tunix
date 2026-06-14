@@ -127,7 +127,9 @@ parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 
 # DeepSWE Agentic Specifics
 parser.add_argument("--max_turns", type=int, default=50)
-parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
+parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
+parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
+parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--max_concurrency", type=int, default=200)
 
 # Mesh / Topology Config Override
@@ -463,7 +465,9 @@ MAX_STEPS = args.max_steps
 
 # Max turns in mult-agent interaction (set to 1 for single-turn)
 MAX_TURNS = args.max_turns
-PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
+EPISODE_TIMEOUT_SECS = args.episode_timeout_secs
+STEP_TIMEOUT_SECS = args.step_timeout_secs
+REWARD_TIMEOUT_SECS = args.reward_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
@@ -863,7 +867,7 @@ config_kwargs = {
     "max_concurrency": MAX_CONCURRENCY,
     "epsilon_high": EPSILON_HIGH,
     "off_policy_steps": OFF_POLICY_STEPS,
-    "episode_timeout": PER_TURN_TIMEOUT_SECS * MAX_TURNS,
+    "episode_timeout": EPISODE_TIMEOUT_SECS,
     "overlong_filter": OVERLONG_FILTER,
     "filter_statuses": FILTER_STATUSES,
     "loss_agg_mode": LOSS_AGG_MODE,
@@ -953,7 +957,11 @@ agentic_grpo_learner = DebugGRPOLearner(
     agent_class=SWEAgent,
     agent_kwargs={},
     env_class=SWEEnv,
-    env_kwargs={"max_steps": MAX_TURNS},
+    env_kwargs={
+        "max_steps": MAX_TURNS,
+        "step_timeout": STEP_TIMEOUT_SECS,
+        "reward_timeout": REWARD_TIMEOUT_SECS,
+    },
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
