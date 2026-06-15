@@ -164,6 +164,7 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   expert_dim: int | None = None
   moe_dense_hidden_dim: int | None = None
+  skip_lm_head: bool = False
 
   # Vision config
   vision_encoder: vision.VisionEncoderConfig | None = None

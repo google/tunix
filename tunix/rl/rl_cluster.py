@@ -1137,7 +1137,8 @@ class RLCluster:
           stop=batch_size, step=micro_batch_size
       ):
         outs.append(
-            common.compute_per_token_logps(
+            common.chunked_compute_per_token_logps(
+            # common.compute_per_token_logps(
                 graphdef,
                 anchor_policy_state,
                 prompt_tokens=dest_prompt_tokens[batch_slice],

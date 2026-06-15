@@ -999,7 +999,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             for key, label in (
                 ("grad_norm", "grad_norm"),
                 ("pg_loss", "pg_loss"),
-                ("entropy", "entropy"),
+                # ("entropy", "entropy"),
                 ("kl", "kl"),
                 ("log_ratio/abs_mean", "log_ratio_abs"),
                 ("pg_clipfrac", "clipfrac"),
