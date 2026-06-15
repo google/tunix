@@ -455,6 +455,9 @@ vllm_rollout_dict = {
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
     },
+    "rollout_vllm_sampling_kwargs": {
+        "skip_special_tokens": False,
+    },
 }
 rollout_engine_config = base_rollout.RolloutConfig(
     **base_rollout_dict, **vllm_rollout_dict

@@ -41,6 +41,7 @@ import optax
 from orbax import checkpoint as ocp
 import qwix
 
+# jax.config.update("jax_debug_nans", True)
 # ====== Logging Configuration ======
 absl_logging.use_python_logging()
 logging.basicConfig(
@@ -541,8 +542,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         train_micro_batch_size=1,
         compute_logps_micro_batch_size=1,
         metrics_logging_options=metrics_logging_options,
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
     ),
     rollout_config=rollout_engine_config,
 )
