@@ -516,7 +516,7 @@ class TrajectoryCollectEngine:
         observation=obs,
         reward=0.0,
         done=False,
-        info=self._agent_env_info(info),
+        info=self._rollout_state_info(info),
     )
 
     if self.tokenizer is not None and self.chat_parser is not None:
@@ -541,10 +541,10 @@ class TrajectoryCollectEngine:
         f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
     )
 
-  def _agent_env_info(
+  def _rollout_state_info(
       self, info: Optional[Dict[str, Any]] = None
   ) -> Dict[str, Any]:
-    """Adds rollout state expected by SWE-style agents."""
+    """Adds engine-managed rollout metadata for agents."""
     enriched_info = dict(info or {})
     enriched_info["max_steps"] = self.max_steps
     enriched_info["cur_tokens"] = self._response_token_count
@@ -698,7 +698,7 @@ class TrajectoryCollectEngine:
           json.dumps(info, default=str, indent=2),
       )
       self.agent.update_from_env(
-          obs, rew, done, self._agent_env_info(info)
+          obs, rew, done, self._rollout_state_info(info)
       )
     else:
       done = True
