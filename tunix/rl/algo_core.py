@@ -195,7 +195,8 @@ def ppo_policy_loss_fn(
   completion_mask = train_example.completion_mask
 
   graphdef, state = nnx.split(model)
-  per_token_logps, logits = common.compute_per_token_logps(
+  per_token_logps = common.chunked_compute_per_token_logps(
+  # per_token_logps = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
@@ -536,11 +537,11 @@ def grpo_loss_fn(
     if beta is not None and beta != 0.0:
       loss = loss + beta * kl_loss
 
-  token_entropy = compute_entropy_from_logits(logits)
-  entropy_loss = common.aggregate_loss(
-      token_entropy, completion_mask, loss_aggregation_mode
-  )
-  aux["entropy"] = entropy_loss
+  # token_entropy = compute_entropy_from_logits(logits)
+  # entropy_loss = common.aggregate_loss(
+      # token_entropy, completion_mask, loss_aggregation_mode
+  # )
+  # aux["entropy"] = entropy_loss
 
   return loss, aux
 

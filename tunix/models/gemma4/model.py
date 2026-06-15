@@ -145,6 +145,7 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   expert_dim: int | None = None
   moe_dense_hidden_dim: int | None = None
+  skip_lm_head: bool = False
 
   def __post_init__(self):
     if self.use_sliding_window_kv_cache and self.use_flash_attention:
@@ -1420,17 +1421,16 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       # memory requirements during prefill (when sampling), since we only need
       # the logits for the last token to sample from.
       x = x[:, -1:, :]
-    # logits = self.embedder.decode(x).astype(jnp.float32)
+    if self.config.skip_lm_head:
+      return x, (new_cache if return_cache else None)
+    logits = self.embedder.decode(x).astype(jnp.float32)
 
-    # if self.config.final_logit_softcap is not None:
-      # logits /= self.config.final_logit_softcap
-      # logits = jnp.tanh(logits) * self.config.final_logit_softcap
+    if self.config.final_logit_softcap is not None:
+      logits /= self.config.final_logit_softcap
+      logits = jnp.tanh(logits) * self.config.final_logit_softcap
 
-    # return logits, (new_cache if return_cache else None)  # pytype: disable=container-type-mismatch
+    return logits, (new_cache if return_cache else None)  # pytype: disable=container-type-mismatch
     
-    pre_decode = x.astype(jnp.float32)
-    return pre_decode, (new_cache if return_cache else None)
-
   def init_cache(self, batch_size, max_seq_len, dtype):
     cache = {}
     for i, layer in enumerate(self.layers):
