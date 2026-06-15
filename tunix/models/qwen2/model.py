@@ -233,6 +233,29 @@ class ModelConfig:
   def qwen2p5_coder_7b(cls):
     return cls.qwen2p5_7b()
 
+  @classmethod
+  def qwen2p5_14b(cls):
+    return cls(
+        num_layers=48,
+        vocab_size=152064,
+        embed_dim=5120,
+        hidden_dim=13824,
+        num_heads=40,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-05,
+        rope_theta=1_000_000,
+        use_tied_embedding=False,
+    )
+
+  @classmethod
+  def qwen2p5_14b_instruct(cls):
+    return cls.qwen2p5_14b()
+
+  @classmethod
+  def qwen2p5_coder_14b(cls):
+    return cls.qwen2p5_14b()
+
   # TODO(linchai): add other qwen2.5 model configs.
 
 
