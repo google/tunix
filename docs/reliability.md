@@ -21,6 +21,33 @@ training step count. By default, checkpointing is disabled if
 `checkpoint_root_directory` is not specified. Users can further customize
 checkpointing behavior via `checkpointing_options` in the config.
 
+Users customize background preservation behavior granularly using components
+defined inside `checkpoint_options`:
+
+*   **Save Decision Policies**: Dictates when to initiate a checkpoint based on
+    defined steps or intervals. Supported configurations include
+    `FixedIntervalPolicy` and `ContinuousCheckpointingPolicy`. The default is
+    `ContinuousCheckpointingPolicy(minimum_interval_secs=180)` (saves every 180
+    seconds). See Orbax v1 [`save_decision_policies.py`](https://github.com/google/orbax/blob/main/checkpoint/orbax/checkpoint/experimental/v1/_src/training/save_decision_policies.py)
+    for the complete interface contracts.
+*   **Preservation Policies**: Sets specifications regarding tracking
+    checkpoints over bounded timelines (e.g., `LatestN`, `EveryNSteps`). The
+    default is `LatestN(n=3)` (keeps the latest 3 checkpoints). You can use
+    `keep_every_nth_step` in parallel with `max_to_keep` to retain exact
+    performance steps indefinitely. See Orbax v1
+    [`preservation_policies.py`](https://github.com/google/orbax/blob/main/checkpoint/orbax/checkpoint/experimental/v1/_src/training/preservation_policies.py)
+    for the complete interface contracts.
+*   **Step Name Format**: Defines the representation of directory names for step
+    checkpoints. The default is `ocp.path.step.standard_name_format()` (uses
+    simple integer step names).
+*   **Asynchronous Processing**: Manage asynchronous behavior by specifying:
+    *   `enable_async_checkpointing`: Whether to use async checkpointing.
+        Defaults to `True`. **It is recommended to keep this enabled** to
+        prevent the main thread from blocking during training runs while
+        checkpoints are written to storage.
+    *   `timeout_secs`: The timeout for asynchronous operations.
+        Defaults to `1200` seconds.
+
 ## Fault Tolerance
 
 Tunix ensures fault tolerance primarily through its checkpointing mechanism,
