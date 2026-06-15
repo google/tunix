@@ -446,6 +446,10 @@ def compute_chunked_logps(
     # Peak memory: [Batch, ChunkSize, VocabSize]
     if getattr(model.config, "use_tied_embedding", False):
       logits_chunk = model.embedder.decode(hs_chunk)
+      if getattr(model.config, "final_logit_softcap ", None) is not None:
+        logits_chunk /= model.config.final_logit_softcap
+        logits_chunk = jnp.tanh(logits_chunk) * model.config.final_logit_softcap
+      
     else:
       logits_chunk = model.lm_head(hs_chunk)
 

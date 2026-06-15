@@ -1420,13 +1420,16 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       # memory requirements during prefill (when sampling), since we only need
       # the logits for the last token to sample from.
       x = x[:, -1:, :]
-    logits = self.embedder.decode(x).astype(jnp.float32)
+    # logits = self.embedder.decode(x).astype(jnp.float32)
 
-    if self.config.final_logit_softcap is not None:
-      logits /= self.config.final_logit_softcap
-      logits = jnp.tanh(logits) * self.config.final_logit_softcap
+    # if self.config.final_logit_softcap is not None:
+      # logits /= self.config.final_logit_softcap
+      # logits = jnp.tanh(logits) * self.config.final_logit_softcap
 
-    return logits, (new_cache if return_cache else None)  # pytype: disable=container-type-mismatch
+    # return logits, (new_cache if return_cache else None)  # pytype: disable=container-type-mismatch
+    
+    pre_decode = x.astype(jnp.float32)
+    return pre_decode, (new_cache if return_cache else None)
 
   def init_cache(self, batch_size, max_seq_len, dtype):
     cache = {}
