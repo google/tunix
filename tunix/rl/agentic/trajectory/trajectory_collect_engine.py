@@ -272,6 +272,56 @@ class TrajectoryCollectEngine:
       return
     self._logged_clip_reasons.add(reason)
     logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
+    if reason == agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name:
+      logging.warning(
+          "%s MAX_CONTEXT_LIMIT_REACHED trajectory dump:\n%s",
+          self._debug_prefix,
+          self._trajectory_debug_dump(),
+      )
+
+  def _trajectory_debug_dump(self) -> str:
+    """Returns a text-focused trajectory dump for context-limit debugging."""
+
+    def _field_len(value: Any) -> int:
+      if value is None:
+        return 0
+      try:
+        return len(value)
+      except TypeError:
+        return 0
+
+    trajectory = self.agent.trajectory
+    steps = []
+    for index, step in enumerate(trajectory.steps):
+      action = getattr(step, "action", None)
+      if hasattr(action, "action"):
+        action = action.action
+      steps.append({
+          "index": index,
+          "model_response": getattr(step, "model_response", ""),
+          "action": action,
+          "observation": getattr(step, "observation", None),
+          "reward": float(getattr(step, "reward", 0.0)),
+          "done": bool(getattr(step, "done", False)),
+          "info": getattr(step, "info", {}),
+          "assistant_tokens_len": _field_len(
+              getattr(step, "assistant_tokens", None)
+          ),
+          "env_tokens_len": _field_len(getattr(step, "env_tokens", None)),
+          "logprobs_len": _field_len(getattr(step, "logprobs", None)),
+      })
+
+    payload = {
+        "status": trajectory.status.name,
+        "response_token_count": self._response_token_count,
+        "max_response_length": self.max_response_length,
+        "max_steps": self.max_steps,
+        "steps_len": len(trajectory.steps),
+        "task": trajectory.task,
+        "chat_completions": self.agent.chat_completions,
+        "steps": steps,
+    }
+    return json.dumps(payload, default=str, ensure_ascii=False, indent=2)
 
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
