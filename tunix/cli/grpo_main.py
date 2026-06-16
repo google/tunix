@@ -697,11 +697,15 @@ class GrpoPipeline(config.HyperParameters):
     """Instantiate a chat parser based on chat_parser_config.type."""
     from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib  # pylint: disable=g-import-not-at-top
 
-    parser_type = self._config_mapping("chat_parser_config").get(
-        "type", "default"
-    )
+    chat_cfg = self._config_mapping("chat_parser_config")
+    parser_type = chat_cfg.get("type", "default")
     if parser_type == "qwen":
       return chat_parser_lib.QwenChatTemplateParser(tokenizer)
+    if parser_type == "gemma4":
+      return chat_parser_lib.Gemma4ChatTemplateParser(
+          tokenizer,
+          enable_thinking=chat_cfg.get("enable_thinking", True)
+      )
     return chat_parser_lib.DefaultChatTemplateParser(tokenizer)
 
   def _load_class_from_path(self, dotted_path: str) -> type[Any]:
