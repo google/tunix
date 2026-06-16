@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import abc
+import time
 from concurrent import futures
 import itertools
 import math
@@ -766,17 +767,24 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               mode=rl_cluster_lib.Mode.EVAL,
           )
           curr_eval_ds = eval_data_queue.get(block=True)
+        start_update = time.perf_counter()
         self.rl_cluster.update_actor(
             curr_train_ds,
             curr_eval_ds,
             skip_jit,
         )  # loop over μ num_iterations
+        actor_update_time = time.perf_counter() - start_update
+        logging.info("[RLSP step=%d] update_actor took %.4f seconds", self.rl_cluster.global_steps, actor_update_time)
+
         if hasattr(self.rl_cluster, "critic_trainer"):
+          start_critic = time.perf_counter()
           self.rl_cluster.update_critic(
               curr_train_ds,
               curr_eval_ds,
               skip_jit,
           )  # loop over μ num_iterations
+          critic_update_time = time.perf_counter() - start_critic
+          logging.info("[RLSP step=%d] update_critic took %.4f seconds", self.rl_cluster.global_steps, critic_update_time)
 
     # call to throw stop iteration as a signal to break the loop
     future.result()
