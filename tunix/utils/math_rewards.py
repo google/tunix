@@ -23,6 +23,63 @@ THOUGHT_DELIMITER_END = "</think>"
 RewardOutput = reward_types.RewardOutput
 
 
+def math_reward_env(task: Dict[str, Any], action: str):
+  print(f"math_reward_env: {task = }")
+  print(f"math_reward_env: {action = }")
+  answer = task["answer"][0]
+  model_response = action
+
+  # Handle None or empty response
+  if model_response is None or model_response == "":
+    return 0.0
+
+  # Extract solution.
+  if THOUGHT_DELIMITER_END in model_response:
+    model_solution = model_response.split(THOUGHT_DELIMITER_END)[1]
+  else:
+    model_solution = model_response
+
+  model_answer = math_utils.extract_answer(model_solution)
+  if model_answer is None:
+    return 0.0
+
+  # Process the ground truth(s)
+  ground_truths = answer
+  if ground_truths is None:
+    return 0.0
+
+  # Convert single answer to list for uniform processing
+  if isinstance(ground_truths, str | float | int):
+    ground_truths = [ground_truths]
+
+  # Process each ground truth
+  processed_ground_truths = []
+  for truth in ground_truths:
+    truth = str(truth)
+    if "\\boxed" in truth:
+      processed_truth = math_utils.extract_answer(truth)
+      if processed_truth is not None:
+        processed_ground_truths.append(processed_truth)
+    else:
+      processed_ground_truths.append(truth)
+
+  if not processed_ground_truths:
+    return 0.0
+
+  # Check against all possible correct answers
+  for ground_truth in processed_ground_truths:
+    is_correct = (
+        math_utils.grade_answer_mathd(model_answer, ground_truth)
+        or math_utils.grade_answer_sympy(model_answer, ground_truth)
+        or math_utils.grade_answer_special_handling(
+            model_answer, ground_truth
+        )
+    )
+    if is_correct:
+      return 1.0
+  return 0.0
+
+
 @reward.register("deepscaler_math")
 def math_reward(prompts: List[str], completions: List[str], answer: List[str], **kwargs):
   """

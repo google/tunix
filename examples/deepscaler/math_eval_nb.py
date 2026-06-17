@@ -228,7 +228,7 @@ class Qwen25MathEvaluator:
       mesh_config=None,
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
-      sampler_type: str = "vanilla",  # vanilla, vllm, or sglang-jax
+      sampler_type: str = "vllm",  # vanilla, vllm, or sglang-jax
   ):
     self.model_config = model_config
     self.model_version = model_version

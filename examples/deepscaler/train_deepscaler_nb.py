@@ -83,23 +83,23 @@ from tunix.perf.experimental.export import PerfMetricsExport
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
-arg_parser.add_argument("--batch_size", type=int, default=64)
-arg_parser.add_argument("--mini_batch_size", type=int, default=64)
+arg_parser.add_argument("--batch_size", type=int, default=8)
+arg_parser.add_argument("--mini_batch_size", type=int, default=8)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
-arg_parser.add_argument("--num_batches", type=int, default=600)
+arg_parser.add_argument("--num_batches", type=int, default=2)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.003)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.005)
 arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
-arg_parser.add_argument("--max_response_length", type=int, default=8192)
+arg_parser.add_argument("--max_response_length", type=int, default=1024)
 arg_parser.add_argument("--temperature", type=float, default=0.6)
-arg_parser.add_argument("--top_p", type=float, default=1)
+arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=512)
+arg_parser.add_argument("--max_concurrency", type=int, default=1)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -128,8 +128,8 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
+ROLLOUT_MESH = [(2, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(2, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -168,8 +168,8 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
-ENABLE_FLASH_ATTENTION = True
-ENABLE_MIX_PRECISION = True
+ENABLE_FLASH_ATTENTION = False
+ENABLE_MIX_PRECISION = False
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -264,7 +264,6 @@ file_open = fsspec.open
 
 
 DATA_PATH_PREFIX = "gs://tunix/data"
-MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
 CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/gspo/02")
@@ -339,7 +338,7 @@ def create_datasets(
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 
-chat_parser = parser.DefaultChatTemplateParser(tokenizer)
+chat_parser = parser.DefaultChatTemplateParser(tokenizer, enable_thinking=False)
 
 # %%
 train_dataset, test_dataset = create_datasets()
@@ -558,6 +557,7 @@ grpo_trainer = GRPOLearner(
     metric_fns=[metric_fn],
     agent_class=model_agent.ModelAgent,
     env_class=task_environment.TaskEnvironment,
+    env_kwargs={"reward_fn": math_rewards.math_reward_env},
 )
 show_hbm_usage("after GRPOLearner creation")
 

@@ -50,11 +50,14 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
         compatibility with a common environment config interface.
     """
     if reward_fn is None:
-      logging.log_first_n(
-          logging.WARNING,
-          "No reward_fn provided.",
-          1,
-      )
+      if "reward_fn" in kwargs:
+        reward_fn = kwargs["reward_fn"]
+      else:
+        logging.log_first_n(
+            logging.WARNING,
+            "No reward_fn provided.",
+            1,
+        )
 
     super().__init__(
         task=single_example, reward_fn=reward_fn, max_steps=1, **kwargs

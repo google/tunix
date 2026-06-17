@@ -893,6 +893,7 @@ class TrajectoryCollectEngine:
           obs, rew, done, self._rollout_state_info(info)
       )
     else:
+      print("-------exceeding max response length")
       done = True
 
     cur_step = self.agent.get_current_step()
