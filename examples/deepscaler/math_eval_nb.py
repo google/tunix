@@ -698,43 +698,43 @@ print(f"Accuracy: {results['accuracy']:.2f}%")
 print("=" * 60)
 # %%
 # AIME-2024
-model_version = "agentica-org/DeepScaleR-1.5B-Preview"
+# model_version = "agentica-org/DeepScaleR-1.5B-Preview"
 # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-dataset = AIME_2024_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
+# dataset = AIME_2024_DATA_PATH
+# model_config, model_path = MODEL_MAPPING[model_version]
 
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=2048,  # Increased
-    max_generation_steps=32768,  # Increased
-)
+# evaluator = Qwen25MathEvaluator(
+    # model_config=model_config,
+    # model_version=model_version,
+    # model_path=model_path,
+    # dataset=dataset,
+    # mesh_config=mesh_config,
+    # max_prompt_length=2048,  # Increased
+    # max_generation_steps=32768,  # Increased
+# )
 
-evaluator.load_model()
+# evaluator.load_model()
 
-print("\nStarting evaluation...")
+# print("\nStarting evaluation...")
 
-results = evaluator.evaluate(
-    batch_size=1,
-    num_batches=num_batches,
-    temperature=0.6,
-    top_k=None,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
+# results = evaluator.evaluate(
+    # batch_size=1,
+    # num_batches=num_batches,
+    # temperature=0.6,
+    # top_k=None,
+    # top_p=0.95,
+    # num_passes=1,
+    # debug_first_n=5,
+# )
 
 # Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
+# print("\n" + "=" * 60)
+# print("Evaluation Results")
+# print("=" * 60)
+# print(f"Model: {model_path}")
+# print(f"Dataset: {dataset}")
+# print(f"Correct: {results['correct']}/{results['total']}")
+# print(f"Accuracy: {results['accuracy']:.2f}%")
+# print("=" * 60)
 # %%
