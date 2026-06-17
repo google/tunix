@@ -557,7 +557,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
     # To support multisampling, just return the whole list of SamplerOutput 
-    print(f"sampling output: {decoded_outputs[0]}")
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
         logits=None,

@@ -83,23 +83,23 @@ from tunix.perf.experimental.export import PerfMetricsExport
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
-arg_parser.add_argument("--batch_size", type=int, default=8)
-arg_parser.add_argument("--mini_batch_size", type=int, default=8)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
-arg_parser.add_argument("--num_batches", type=int, default=25)
+arg_parser.add_argument("--num_batches", type=int, default=600)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.003)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.005)
 arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
-arg_parser.add_argument("--max_response_length", type=int, default=1024)
+arg_parser.add_argument("--max_response_length", type=int, default=8192)
 arg_parser.add_argument("--temperature", type=float, default=0.6)
 arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=64)
+arg_parser.add_argument("--max_concurrency", type=int, default=512)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -128,7 +128,7 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
 TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -267,7 +267,7 @@ DATA_PATH_PREFIX = "gs://tunix/data"
 MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
 CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/gspo/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/gspo/02")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 
