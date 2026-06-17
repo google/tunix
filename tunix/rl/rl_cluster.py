@@ -99,6 +99,14 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     rollout_micro_batch_size: The micro-batch size used for model rollouts.
     compute_logps_micro_batch_size: The micro-batch size used for computing log
       probabilities (e.g. for reference and old policy models).
+    compute_logps_chunk_size: The chunk size used for computing log
+      probabilities. Instead of using final logits from model, where size is [B,
+      T, V], this will use the last hidden output with size [B, T, D] from model
+      and compute logps in a chunked manner.
+      Good values to pick are like 256, 512, etc. When value is 0, it means this
+      feature is disabled.
+      This also requires model to support `skip_lm_head` in its `__call__`
+      method and have a `compute_final_logits` method.
   """
 
   actor_optimizer: optax.GradientTransformation
@@ -107,6 +115,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   train_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
+  compute_logps_chunk_size: int = 0
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
@@ -1067,7 +1076,8 @@ class RLCluster:
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
-    Mirrors `get_ref_per_token_logps` — must pass through the rollout temperature
+    Mirrors `get_ref_per_token_logps` — must pass through the rollout
+    temperature
     so the actor's recomputed logps match the temperature scaling used at
     sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
     yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
@@ -1127,8 +1137,8 @@ class RLCluster:
                 pad_id=pad_id,
                 eos_id=eos_id,
                 stop_gradient=True,
-                return_logits=False,
                 temperature=temperature,
+                chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)

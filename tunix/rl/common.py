@@ -14,6 +14,7 @@
 """Common RL helper classes and functions."""
 
 from functools import partial  # pylint: disable=g-importing-member
+import inspect
 from typing import Any, Iterable
 
 import flax
@@ -278,8 +279,9 @@ def process_ids(
         "pad_id",
         "eos_id",
         "stop_gradient",
-        "return_logits",
+        "return_entropy",
         "temperature",
+        "chunk_size",
     ),
 )
 def compute_per_token_logps(
@@ -291,10 +293,11 @@ def compute_per_token_logps(
     eos_id: int,
     images: jax.Array | None = None,
     stop_gradient: bool = True,
-    return_logits: bool = False,
+    return_entropy: bool = False,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
     temperature: float = 1.0,
+    chunk_size: int = 0,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -312,10 +315,12 @@ def compute_per_token_logps(
     eos_id: end of sequence identifier.
     images: optional images array.
     stop_gradient: whether to stop gradient.
-    return_logits: whether to return logits.
+    return_entropy: whether to return per token entropy.
     segment_ids: optional 1D sequential document identifiers used for packing.
     segment_positions: optional 1D local position indices used for packing.
     temperature: temperature used for rollout.
+    chunk_size: If not 0, computes the log probabilities in sequence chunks of
+      this size.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -324,10 +329,11 @@ def compute_per_token_logps(
       probs for the full packed sequence padded out (since prompts and
       completions of multiple sequences are concatenated), with shape `[B,
       FullSeqLen]`.
-    logits: optional output tensor associated directly when tracking
-    derivatives.
+    entropy: optional per-token entropy jax.Array of shape matches per_token_logps,
+      returned if return_entropy is True.
   """
   model = nnx.merge(graphdef, state)
+
   input_tokens, calculated_positions, attn_mask, input_seg_ids = process_ids(
       prompt_tokens,
       completion_tokens,
@@ -342,13 +348,23 @@ def compute_per_token_logps(
       "cache": None,
       "attention_mask": attn_mask,
   }
+  if chunk_size > 0:
+    sig = inspect.signature(model.__call__)
+    if "skip_lm_head" not in sig.parameters:
+      raise ValueError("Model __call__ must accept skip_lm_head.")
+    if not hasattr(model, "compute_final_logits") or not callable(
+        getattr(model, "compute_final_logits")
+    ):
+      raise ValueError(
+          "Model must contain a function called compute_final_logits."
+      )
+    model_kwargs["skip_lm_head"] = True
+
   # Pass through any segment ids so the model's attention kernel can respect
   # them only if the model signature accepts it: caller-provided packing ids take
   # precedence; otherwise we pass the per-position non-pad mask derived in
   # ``process_ids`` so flash-attention variants that lack a separate
   # padding-mask input still skip pad positions.
-  import inspect  # pylint: disable=g-import-not-at-top
-
   try:
     sig = inspect.signature(model.__call__)
     has_segment_ids = ("segment_ids" in sig.parameters) or any(
@@ -365,7 +381,7 @@ def compute_per_token_logps(
   if images is not None:
     model_kwargs["images"] = images
 
-  logits, _ = model(input_tokens, **model_kwargs)
+  outputs, _ = model(input_tokens, **model_kwargs)
 
   if segment_ids is not None:
     # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
@@ -375,34 +391,72 @@ def compute_per_token_logps(
   else:
     logits_to_keep = completion_tokens.shape[1]
 
-  logits = logits[:, -logits_to_keep - 1 : -1, :]
-  if temperature != 0.0 and temperature != 1.0:
-    logits /= temperature
-
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
-  per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
 
-  if segment_ids is not None:
-    # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
-    # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
-    per_token_logps = jnp.pad(
-        per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+  if chunk_size > 0:
+    hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
+    out = compute_chunked_logps(
+        model,
+        hidden_state,
+        input_tokens_to_keep,
+        temperature,
+        chunk_size,
+        return_entropy,
     )
-    if return_logits:
+    if return_entropy:
+      per_token_logps, per_token_entropy = out
+    else:
+      per_token_logps = out
+
+    if segment_ids is not None:
+      per_token_logps = jnp.pad(
+          per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+      )
+      if return_entropy:
+        per_token_entropy = jnp.pad(
+            per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0
+        )
+
+    if stop_gradient:
+      per_token_logps = jax.lax.stop_gradient(per_token_logps)
+      if return_entropy:
+        per_token_entropy = jax.lax.stop_gradient(per_token_entropy)
+
+    if return_entropy:
+      return per_token_logps, per_token_entropy
+    return per_token_logps
+  else:
+    logits = outputs[:, -logits_to_keep - 1 : -1, :]
+    if temperature != 0.0 and temperature != 1.0:
+      logits /= temperature
+
+    per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
+
+    if segment_ids is not None:
+      # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
+      # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
+      per_token_logps = jnp.pad(
+          per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+      )
       logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
 
-  if stop_gradient:
-    per_token_logps = jax.lax.stop_gradient(per_token_logps)
-    logits = jax.lax.stop_gradient(logits)
+    if stop_gradient:
+      per_token_logps = jax.lax.stop_gradient(per_token_logps)
+      logits = jax.lax.stop_gradient(logits)
 
-  if return_logits:
-    return per_token_logps, logits
-  else:
+    if return_entropy:
+      entropy = compute_entropy_from_logits(logits)
+      return per_token_logps, entropy
     return per_token_logps
 
 
 def compute_chunked_logps(
-    model, hidden_states, target_ids, temperature, chunk_size
+    model,
+    hidden_states,
+    target_ids,
+    temperature,
+    chunk_size,
+    return_entropy,
 ):
   """Computes per-token log probabilities in sequence chunks to save VRAM.
 
@@ -413,7 +467,7 @@ def compute_chunked_logps(
       chunk_size:    Number of tokens to process at a time per sequence.
 
   Returns:
-      per_token_logps: [Batch, SeqLen]
+     per_token_logps: [Batch, SeqLen]
   """
   batch_size, seq_len, hidden_dim = hidden_states.shape
 
@@ -440,135 +494,52 @@ def compute_chunked_logps(
   @nnx.remat
   def logp_step(carry, xs):
     hs_chunk, ids_chunk = xs
+
     # Project to vocabulary for just this chunk
     # Peak memory: [Batch, ChunkSize, VocabSize]
-    if getattr(model.config, "use_tied_embedding", False):
-      logits_chunk = model.embedder.decode(hs_chunk)
-    else:
-      logits_chunk = model.lm_head(hs_chunk)
-
-    logits_chunk = logits_chunk.astype(jnp.float32)
+    logits_chunk = model.compute_final_logits(hs_chunk).astype(jnp.float32)
 
     if temperature != 0.0 and temperature != 1.0:
       logits_chunk /= temperature
 
     logps_chunk = selective_log_softmax(logits_chunk, ids_chunk)
 
-    return None, logps_chunk
+    if return_entropy:
+      entropy_chunk = compute_entropy_from_logits(logits_chunk)
+      return None, (logps_chunk, entropy_chunk)
+    else:
+      return None, logps_chunk
 
   # 4. Scan over the NumChunks dimension
-  _, logps_chunked = jax.lax.scan(
+  _, scanned_out = jax.lax.scan(
       logp_step, init=None, xs=(hs_scannable, ids_scannable)
   )
-  # logps_chunked shape is [NumChunks, Batch, ChunkSize]
-  # 5. Swap back to batch-major and flatten the sequence dimension
-  logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
-  per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)
 
-  # 6. Slice off any padding we added initially.
-  per_token_logps = per_token_logps[:, :seq_len]
-
-  return per_token_logps
-
-
-@partial(
-    jax.jit,
-    static_argnames=(
-        "pad_id",
-        "eos_id",
-        "stop_gradient",
-        "return_logits",
-        "temperature",
-        "chunk_size",
-    ),
-)
-def chunked_compute_per_token_logps(
-    graphdef,
-    state,
-    prompt_tokens: jax.Array,
-    completion_tokens: jax.Array,
-    pad_id: int,
-    eos_id: int,
-    images: jax.Array | None = None,
-    stop_gradient: bool = True,
-    return_logits: bool = False,
-    segment_ids: jax.Array | None = None,
-    segment_positions: jax.Array | None = None,
-    temperature: float = 1.0,
-    chunk_size: int = 256,  # adjust this for compute and memory efficiency
-) -> jax.Array | tuple[jax.Array, jax.Array]:
-  """Memory efficient version of compute_per_token_logps."""
-
-  model = nnx.merge(graphdef, state)
-  input_tokens, calculated_positions, attn_mask, input_seg_ids = process_ids(
-      prompt_tokens,
-      completion_tokens,
-      pad_id,
-      eos_id,
-      segment_ids,
-      segment_positions,
-  )
-
-  model_kwargs = {
-      "positions": calculated_positions,
-      "cache": None,
-      "attention_mask": attn_mask,
-  }
-  # Pass through any segment ids so the model's attention kernel can respect
-  # them only if the model signature accepts it: caller-provided packing ids take
-  # precedence; otherwise we pass the per-position non-pad mask derived in
-  # ``process_ids`` so flash-attention variants that lack a separate
-  # padding-mask input still skip pad positions.
-  import inspect  # pylint: disable=g-import-not-at-top
-
-  try:
-    sig = inspect.signature(model.__call__)
-    has_segment_ids = ("segment_ids" in sig.parameters) or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-  except Exception:
-    has_segment_ids = False
-
-  if has_segment_ids:
-    if segment_ids is not None:
-      model_kwargs["segment_ids"] = segment_ids
-    elif input_seg_ids is not None:
-      model_kwargs["segment_ids"] = input_seg_ids
-  if images is not None:
-    model_kwargs["images"] = images
-
-  # TODO(tsbao): this is bit ugly... consider explicitly config this.
-  orig_config = model.config.skip_lm_head
-  model.config.skip_lm_head = True
-  hidden_state, _ = model(input_tokens, **model_kwargs)
-  model.config.skip_lm_head = orig_config
-
-  if segment_ids is not None:
-    # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
-    # Since predicting token[i] requires logit[i-1], we skip the first token.
-    # This shrinks the output shape to [Batch, FullSeqLen - 1]
-    logits_to_keep = input_tokens.shape[1] - 1
+  if return_entropy:
+    logps_chunked, entropy_chunked = scanned_out
+    # 5. Swap back to batch-major and flatten the sequence dimension
+    logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
+    entropy_reshaped = jnp.swapaxes(entropy_chunked, 0, 1)
+    # 6. Slice off any padding we added initially.
+    per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)[
+        :, :seq_len
+    ]
+    per_token_entropy = entropy_reshaped.reshape(batch_size, padded_seq_len)[
+        :, :seq_len
+    ]
+    return per_token_logps, per_token_entropy
   else:
-    logits_to_keep = completion_tokens.shape[1]
+    logps_chunked = scanned_out
+    # 5. Swap back to batch-major and flatten the sequence dimension
+    logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
+    # 6. Slice off any padding we added initially.
+    per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)[
+        :, :seq_len
+    ]
+    return per_token_logps
 
-  hidden_state = hidden_state[:, -logits_to_keep - 1 : -1, :]
-  input_tokens = input_tokens[:, -logits_to_keep:]
-  per_token_logps = compute_chunked_logps(
-      model, hidden_state, input_tokens, temperature, chunk_size
-  )
-  if stop_gradient:
-    per_token_logps = jax.lax.stop_gradient(per_token_logps)
 
-  if segment_ids is not None:
-    # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
-    # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
-    per_token_logps = jnp.pad(
-        per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
-    )
 
-  # TODO(tsbao): remove return logits and merge cross entropy compute here
-  # (need to have chunked cross entropy)
-  return per_token_logps
 
 
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
@@ -764,6 +735,21 @@ def aggregate_loss(
         " 'sequence-mean-token-sum-norm'."
     )
   return loss
+
+
+def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
+  """Computes the entropy of a distribution given its logits.
+
+  Args:
+    logits: Logits as returned by the model. Of shape `[batch_size, seq_len,
+      emb_dim]`.
+
+  Returns:
+    A JAX array of shape `[batch_size, seq_len]`, containing the entropy values.
+  """
+  log_probs = jax.nn.log_softmax(logits, axis=-1)
+  probs = jax.nn.softmax(log_probs)
+  return -jnp.sum(probs * log_probs, axis=-1)
 
 
 def _check_get_norm(
