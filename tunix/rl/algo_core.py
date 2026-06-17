@@ -195,8 +195,8 @@ def ppo_policy_loss_fn(
   completion_mask = train_example.completion_mask
 
   graphdef, state = nnx.split(model)
-  per_token_logps = common.chunked_compute_per_token_logps(
-  # per_token_logps = common.compute_per_token_logps(
+  # per_token_logps = common.chunked_compute_per_token_logps(
+  per_token_logps = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,

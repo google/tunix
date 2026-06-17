@@ -543,9 +543,6 @@ class Attention(nnx.Module):
       )
 
       shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
-      if shd_b is not None and shd_b in mesh.shape:
-        if query_proj.shape[0] % mesh.shape[shd_b] != 0:
-          shd_b = None
       head_shards = (
           mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
       )
@@ -560,19 +557,30 @@ class Attention(nnx.Module):
           q_seq_shards=q_seq_shards,
       )
 
-      shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      unsharded_seq = P(shd_b, shd_n, None, shd_h)
+      actual_shd_b = (
+          shd_b
+          if (
+              mesh is not None
+              and shd_b is not None
+              and shd_b in mesh.shape
+              and b % mesh.shape[shd_b] == 0
+          )
+          else None
+      )
+
+      shd_spec = P(actual_shd_b, shd_n, shd_t, shd_h)
+      unsharded_seq = P(actual_shd_b, shd_n, None, shd_h)
       kernel_spec = splash_attn_kernel.manual_sharding_spec(
           shd.NamedSharding(mesh, P(shd_n, shd_t))
       )
 
-      # Segment IDs are used to implement sequence packing
+      # Per-position segment ids let splash suppress cross-segment attention
+      # (e.g. real-token to pad-token, or sequence-packing cross-boundary).
+      # The pallas splash kernel only accepts a static causal mask kernel-side,
+      # so per-batch dynamic padding masks have to flow in via segment_ids.
       if segment_ids is not None:
-        seg_spec = P(shd_b, shd_t)
-        unsharded_seg_spec = P(shd_b, None)
-        splash_segment_ids = splash.SegmentIds(
-            q=segment_ids, kv=segment_ids
-        )
+        seg_spec = P(actual_shd_b, shd_t)
+        unsharded_seg_spec = P(actual_shd_b, None)
 
         @partial(
             shard_map,
@@ -601,8 +609,8 @@ class Attention(nnx.Module):
             query_proj,
             key_proj,
             value_proj,
-            splash_segment_ids.q,
-            splash_segment_ids.kv,
+            segment_ids,
+            segment_ids,
         )
       else:
 
@@ -677,7 +685,9 @@ class Attention(nnx.Module):
           self, x, cache, attn_mask, sin, cos, segment_ids
       )
     else:
-      return self.block(x, cache, attn_mask, sin, cos, segment_ids)
+      return self.block(
+          x, cache, attn_mask, sin, cos, segment_ids=segment_ids
+      )
 
   @property
   def head_dim(self):

@@ -444,13 +444,12 @@ def compute_chunked_logps(
     hs_chunk, ids_chunk = xs
     # Project to vocabulary for just this chunk
     # Peak memory: [Batch, ChunkSize, VocabSize]
-    print(f"{getattr(model.config, "use_tied_embedding", False) = }")
     if getattr(model, "lm_head", None) is not None:
       logits_chunk = model.lm_head(hs_chunk)
     elif getattr(model.config, "use_tied_embedding", False) or getattr(model, "embedder", None) is not None:
       print(f"chunk right")
       logits_chunk = model.embedder.decode(hs_chunk).astype(jnp.float32)
-      if getattr(model.config, "final_logit_softcap ", None) is not None:
+      if getattr(model.config, "final_logit_softcap", None) is not None:
         logits_chunk /= model.config.final_logit_softcap
         logits_chunk = jnp.tanh(logits_chunk) * model.config.final_logit_softcap 
 
