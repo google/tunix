@@ -221,11 +221,9 @@ def load_and_create_model_orig(
             if reshape:
               v = v.reshape(reshape)
 
-          current_arr = v
-          if dtype:
-            np_dtype = to_np_dtype(dtype) or dtype
-            if current_arr.dtype != np_dtype:
-              current_arr = current_arr.astype(np_dtype)
+          current_arr = jnp.array(v)
+          if dtype and current_arr.dtype != dtype:
+            current_arr = current_arr.astype(dtype)
 
           if jax_key_mapped in file_loaded_tensors:
             raise ValueError(

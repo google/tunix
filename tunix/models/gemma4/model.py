@@ -30,6 +30,7 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
+import numpy as np
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma4 import moe
 from tunix.models.gemma4 import vision
@@ -171,6 +172,7 @@ class ModelConfig:
   use_bidirectional_attention: str | None = None
 
   def __post_init__(self):
+    # TODO(tunix-dev): support flash attention with sliding window KV cache
     if self.use_sliding_window_kv_cache and self.use_flash_attention:
       raise ValueError(
           'Flash attention and sliding window KV cache are mutually exclusive.'
@@ -738,42 +740,11 @@ class Attention(nnx.Module):
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
-    # Retrieve TP size from the active JAX mesh
-    tp_size = 1
-    mesh = None
-    if hasattr(jax.sharding, 'get_abstract_mesh'):
-      try:
-        m = jax.sharding.get_abstract_mesh()
-        if m is not None and not getattr(m, 'empty', False):
-          mesh = m
-      except Exception:
-        pass
-    if mesh is None:
-      mesh = pxla.thread_resources.env.physical_mesh
-    if mesh is not None and 'tp' in mesh.axis_names:
-      tp_size = mesh.shape['tp']
-
-    self.act_btnh_kv = config.shd_config.act_btnh
-    if self.num_kv_heads % tp_size != 0:
-      import logging as python_logging
-      python_logging.info(
-          f"num_kv_heads={self.num_kv_heads} is not divisible by TP size {tp_size}, "
-          f"sharding k/v projections on head_dim instead of kv-heads."
-      )
-      fsdp = config.shd_config.act_btnh[0]
-      self.act_btnh_kv = (fsdp, None, None, 'tp')
-
 
     k_eq_v = (
         config.k_eq_v_global if attn_type == AttentionType.GLOBAL else False
     )
     if k_eq_v:
-      k_sharding = config.shd_config.q_weight_ndh
-      if self.num_kv_heads % tp_size != 0:
-        fsdp = config.shd_config.q_weight_ndh[1]
-        k_sharding = (None, fsdp, 'tp')
-
-
       self.k_einsum = Einsum(
           einsum_str='BSD,KDH->BSKH',
           shape=(
@@ -782,7 +753,7 @@ class Attention(nnx.Module):
               self.head_dim,
           ),
           rngs=rngs,
-          sharding=k_sharding,
+          sharding=config.shd_config.q_weight_ndh,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
@@ -928,7 +899,6 @@ class Attention(nnx.Module):
       query_proj = query_proj.transpose(0, 2, 1, 3)
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
-
 
       mesh = pxla.thread_resources.env.physical_mesh
       if self.attn_type == AttentionType.LOCAL_SLIDING:
@@ -1152,7 +1122,7 @@ class Attention(nnx.Module):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument. graph_updates=False prevents TraceContextError
       # when mutating params across jax transformation trace levels.
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
       )
     else:
@@ -1251,7 +1221,7 @@ class FeedForward(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__)(self, x)
+      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
       return self.block(x)
 
@@ -1422,7 +1392,7 @@ class DecoderLayer(nnx.Module):
         remat_config == RematConfig.DECODER
         or remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self,
           x,
           segment_pos,

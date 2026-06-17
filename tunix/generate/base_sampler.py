@@ -47,8 +47,6 @@ class SamplerOutput:
 
   logprobs: Optional[list[float]]
 
-  prompt_logprobs: Optional[list[float]] = None
-
 
 class BaseSampler(ABC):
   """Base class for samplers."""
@@ -66,7 +64,7 @@ class BaseSampler(ABC):
   @abstractmethod
   def __call__(
       self,
-      input_strings: str | List[str] | List[List[int]] | List[np.ndarray],
+      input_strings: str | List[str],
       max_generation_steps,
       max_prompt_length=None,
       temperature=0.0,
