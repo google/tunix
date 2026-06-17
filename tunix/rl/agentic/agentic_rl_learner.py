@@ -427,7 +427,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   def _model_call(
       self,
-      chat_lists: List[Dict[str, str]] | List[int] | np.ndarray,
+      chat_lists: List[Dict[str, str]],
       env: Any = None,
       max_generation_steps: int | None = None,
   ) -> base_rollout.RolloutOutput:
@@ -435,23 +435,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if env:
       env.task["policy_version"] = self.policy_version
 
-    is_token_input = False
-    if len(chat_lists) > 0 and isinstance(chat_lists[0], (int, np.integer)):
-      is_token_input = True
-
-    if is_token_input:
-      prompts = [chat_lists]
-      apply_chat_template = False
-    else:
-      if self.chat_parser:
-        chat_lists = self.chat_parser.parse(
-            messages=chat_lists,
-            add_generation_prompt=True,
-            is_first_msg=True,  # no op if system msg is populated in reset
-        )
-      prompts = chat_lists
-      apply_chat_template = False if self.chat_parser else True
-
+    if self.chat_parser:
+      chat_lists = self.chat_parser.parse(
+          messages=chat_lists,
+          add_generation_prompt=True,
+          is_first_msg=True,  # no op if system msg is populated in reset
+      )
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
       if "group_id" in env.extra_kwargs:
@@ -464,8 +453,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
     result = self.rl_cluster.generate(
-        prompts=prompts,
-        apply_chat_template=apply_chat_template,
+        prompts=chat_lists,
+        apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
@@ -480,7 +469,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,
-        # max_response_length=self.algo_config.max_response_length,
+        max_response_length=self.algo_config.max_response_length,
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
         perf_v2=self.rl_cluster.perf_v2,
@@ -998,7 +987,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             for key, label in (
                 ("grad_norm", "grad_norm"),
                 ("pg_loss", "pg_loss"),
-                # ("entropy", "entropy"),
+                ("entropy", "entropy"),
                 ("kl", "kl"),
                 ("log_ratio/abs_mean", "log_ratio_abs"),
                 ("pg_clipfrac", "clipfrac"),
