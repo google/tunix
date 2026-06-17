@@ -25,6 +25,7 @@ from unittest import mock
 from absl.testing import absltest
 import omegaconf
 from tunix.cli import grpo_main
+from tunix.cli import base_rl_main
 from tunix.rl import rl_cluster as rl_cluster_lib
 
 # ---------------------------------------------------------------------------
@@ -801,14 +802,14 @@ vllm_config:
 
     with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
       with mock.patch.object(
-          grpo_main.mesh_lib,
+          base_rl_main.mesh_lib,
           "allocate_named_mesh_device_slices",
           return_value={
               "actor_model_config": [0, 1],
               "rollout_model_config": [2, 3],
           },
       ) as allocate_mock, mock.patch.object(
-          grpo_main.mesh_lib,
+          base_rl_main.mesh_lib,
           "create_mesh",
           side_effect=[object(), object()],
       ):
