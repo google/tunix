@@ -155,6 +155,13 @@ class BaseChatTemplateParser(ABC):
     """Returns the tokenized newline "\n"."""
     return []
 
+  def update_assistant_end_tokens(
+      self,
+      tokens: np.ndarray,
+  ) -> Tuple[np.ndarray, int]:
+    """Ensures the assistant response ends with the correct tokens."""
+    return tokens, 0
+
 
 class DefaultChatTemplateParser(BaseChatTemplateParser):
   """Default parser using tokenizer's built-in chat template."""
@@ -306,8 +313,6 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
       enable_thinking: bool = True,
   ):
     super().__init__(tokenizer, enable_thinking=enable_thinking)
-    # no strip with disable thinking lowers the  difference between initial rollout and trainer logps from 0.4  to 0.3.
-    self._strip_past_thinking = strip_past_thinking and enable_thinking
     # Also sanitize the base <turn|> token (without trailing newline) to guard
     # against model-generated control tokens trailing in message contents.
     self._tokens_to_sanitize.add("<turn|>")
@@ -392,11 +397,11 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
   @property
   def newline_tokens(self) -> list[int]:
     """Returns the tokenized newline "\n"."""
-    suffix_str = "\n"
+    nl_str = "\n"
     try:
-      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+      suffix_tokens = self.tokenizer.encode(nl_str, add_special_tokens=False)
     except TypeError:
-      suffix_tokens = self.tokenizer.encode(suffix_str)
+      suffix_tokens = self.tokenizer.encode(nl_str)
     bos_id = getattr(self.tokenizer, "bos_id", None)
     if bos_id is not None:
       bos_id = bos_id() if callable(bos_id) else bos_id
@@ -404,5 +409,3 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if eos_id is not None:
       eos_id = eos_id() if callable(eos_id) else eos_id
     return [t for t in suffix_tokens if t != bos_id and t != eos_id]
-
-
