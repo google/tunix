@@ -1,4 +1,3 @@
-
 import asyncio
 from pprint import pprint
 from typing import Any, Sequence
@@ -14,8 +13,8 @@ from transformers import AutoTokenizer
 
 from tunix.cli.utils import data as data_lib
 from tunix.generate import tokenizer_adapter
-from tunix.models.gemma4 import model as model_lib
-from tunix.models.gemma4 import params_safetensors as params_lib
+from tunix.models.qwen2 import model as model_lib
+from tunix.models.qwen2 import params as params_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import tool_agent
@@ -27,57 +26,40 @@ from tunix.rl.agentic.tools import calculator_tool
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.rollout import base_rollout
 from tunix.sft import sharding_utils
-from examples.frozenlake.agent import FrozenLakeAgent
-from examples.frozenlake.env import FrozenLakeEnv
-
+from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.environments import task_environment
 
 # %% [markdown]
 # ## Configuration
-#
-# Hyperparameters for generation, training, and the environment.
 
-# %%
-# Generation Config
-MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 2048
+MAX_PROMPT_LENGTH = 1024
+TOTAL_GENERATION_STEPS = 8192
 TEMPERATURE = 0.0
 TOP_P = 1.0
 TOP_K = None
 
-# MODEL_VERSION = "google/gemma-4-26B-A4B-it"
-MODEL_VERSION = "google/gemma-4-e2b-it"
+MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
-mesh = jax.sharding.Mesh(
+rollout_mesh = jax.sharding.Mesh(
     np.asarray(jax.local_devices()[:4]).reshape(1, 4), ("fsdp", "tp")
 )
 
-# config = model_lib.ModelConfig.gemma4_26b_a4b()
-config = model_lib.ModelConfig.gemma4_e2b()
+trainer_mesh = jax.sharding.Mesh(np.asarray(jax.local_devices()[4:]).reshape(4, 1), ("fsdp", "tp"))
 
-config.dtype = jnp.bfloat16
-config.param_dtype = jnp.bfloat16
+config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+
+config.dtype = jnp.float32
+config.param_dtype = jnp.float32
 config.use_flash_attention = True
 config.flash_attention_block_size = 256
-config.use_sliding_window_kv_cache = False
-
-import dataclasses
-new_shd = dataclasses.replace(
-    config.shd_config,
-    act_btd=("fsdp", None, None),
-    rms_norm_weight=(None,),
-)
-config.shd_config = new_shd
 
 from huggingface_hub import snapshot_download
 
 MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/6e6f6edea8c52db2094dca3086e4b963a0034dfc"
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
 print(f"{MODEL_PATH=}")
-gemma4 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh)
+qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, trainer_mesh)
 
 optimizer = optax.adamw(learning_rate=1e-6)
-
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -90,7 +72,6 @@ base_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
@@ -100,23 +81,11 @@ vllm_rollout_dict = {
     "rollout_vllm_init_with_random_weights": False,
     "rollout_vllm_max_num_seqs": 16,
     "rollout_vllm_max_num_batched_tokens": 4096,
-    "rollout_vllm_logprobs_mode": "raw_logprobs",
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
-        "limit_mm_per_prompt": {
-            "image": 0,
-            "video": 0,
-            "audio": 0,
-        },
-        "hf_overrides": {
-            "final_logit_softcapping": 30.0,
-            "text_config": {
-                "final_logit_softcapping": 30.0,
-            },
-        },
     },
     "rollout_vllm_sampling_kwargs": {
         "skip_special_tokens": False,
@@ -127,9 +96,9 @@ rollout_engine_config = base_rollout.RolloutConfig(
 )
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_cluster_lib.Role.ACTOR: trainer_mesh,
+        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine="vllm",
     offload_to_cpu=False,
@@ -143,8 +112,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=gemma4,
-    reference=gemma4,
+    actor=qwen2,
+    reference=qwen2,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
@@ -160,44 +129,31 @@ def patched_model_fn(*args, **kwargs):
 
 rl_cluster.rollout._sampler._model_runner.model_fn = patched_model_fn
 
-CHAT_PARSER = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False, strip_past_thinking=False)
+CHAT_PARSER = parser.DeepseekQwenChatTemplateParser(tokenizer)
 
-# Constants for tools
 TOOL_AGENT_CLS = tool_agent.ToolAgent
 TOOL_ENV_CLS = tool_environment.ToolEnvironment
 TRAJ_ENGINE_CLS = trajectory_collect_engine.TrajectoryCollectEngine
 CALCULATOR_TOOL = calculator_tool.CalculatorTool
 
-
-# %% [markdown]
-# ## Define Tasks and Agents
-#
-# Prepare the math questions and helper functions to create agent-environment
-# pairs.
-
-# %%
-
-
 def inference(prompt: Sequence[str], env: Any = None, **kwargs: Any) -> str:
-  """Wrapper for RL cluster generation."""
   chat_lists = CHAT_PARSER.parse(
       messages=prompt,
       add_generation_prompt=True,
-      is_first_msg=True,  # no op if system msg is populated in reset
+      is_first_msg=True,
   )
+  print(f"{chat_lists = }")
   result = rl_cluster.generate(
-      prompts=[chat_lists],
-      apply_chat_template=False,
+      prompts=[prompt],
+      apply_chat_template=True,
       mode=rl_cluster_lib.Mode.TRAIN,
       max_generation_steps=TOTAL_GENERATION_STEPS,
   )
   return result
 
 import os
-# TRAIN_DATA_PATH = os.path.join("/mnt/disks/linchai-data/gemma4_flax/workspace/tunix_gemma4_2b/tunix/examples/frozenlake/data/frozenlake/train.parquet")
-# TEST_DATA_PATH = os.path.join("/mnt/disks/linchai-data/gemma4_flax/workspace/tunix_gemma4_2b/tunix/examples/frozenlake/data/frozenlake/test.parquet")
-TRAIN_DATA_PATH = "gs://tunix/data/Frozenlake/train.parquet"
-TEST_DATA_PATH = "gs://tunix/data/Frozenlake/test.parquet"
+TRAIN_DATA_PATH = "gs://tunix/data/DeepScaleR-Preview-Dataset/deepscaler.json"
+TEST_DATA_PATH = "gs://tunix/data/HuggingFaceH4/aime_2024/train-00000-of-00001.parquet"
 
 import grain
 from google.cloud import storage
@@ -212,18 +168,36 @@ def create_datasets(
     train_ds_path: str = TRAIN_DATA_PATH,
     test_ds_path: str = TEST_DATA_PATH,
 ):
+  def preprocess_fn(example, index):
+    return {
+        "question": example["problem"],
+        "ground_truth": example["answer"],
+        "data_source": "math",
+    }
+
   with file_open(train_ds_path) as train_f, file_open(
       test_ds_path, "rb"
   ) as test_f:
-    train_df = pd.read_parquet(train_f)
+    train_df = pd.read_json(train_f)
     test_df = pd.read_parquet(test_f)
 
-  train_ds = Dataset.from_pandas(train_df)
-  test_ds = Dataset.from_pandas(test_df)
+  train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True).shuffle(123)
+  test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True).shuffle(123)
 
   def process_item(item):
-    item["prompts"] = ""
-    return item
+    question = item["question"]
+    answer = item["answer"]
+
+    instruction = (
+        "Let's think step by step, and put your final answer within \\boxed{}."
+    )
+    prompt = f"{question} {instruction}"
+
+    return {
+        "prompts": prompt,
+        "question": question,
+        "answer": answer,
+    }
 
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
   test_ds = grain.MapDataset.source(test_ds).map(process_item)
@@ -235,23 +209,15 @@ def make_pair(
     input: TrainingInputT,
     group_id: int | None = None,
     pair_index: int | None = None,
-) -> tuple[tool_agent.ToolAgent, tool_environment.ToolEnvironment]:
-  """Creates an agent-environment pair."""
-  agent = FrozenLakeAgent()
+) -> tuple[model_agent.ModelAgent, task_environment.TaskEnvironment]:
+  agent = model_agent.ModelAgent(system_prompt="")
 
-  env = FrozenLakeEnv(
-      entry=input,
+  env = task_environment.TaskEnvironment(
+      single_example=input,
       group_id=group_id,
       pair_index=pair_index,
-      max_steps=8,
   )
   return agent, env
-
-
-# %% [markdown]
-# ## Main Execution Loop
-#
-# Run the `RolloutOrchestrator` to collect trajectories asynchronously.
 
 def unbatch_inputs(batched_dataset):
   for batch in batched_dataset:
@@ -281,32 +247,40 @@ def compare_layers(vllm_model, trainer_model, captured_args):
   layer_name_to_kvcache_index = dict(captured_args[6])
   num_active_tokens = int(np.sum(attn_metadata.seq_lens))
 
-  gemma4_model = vllm_model.model
-  # Compare per_layer_model_projection weights
-  w_vllm = gemma4_model.per_layer_model_projection.weight.value if hasattr(gemma4_model.per_layer_model_projection.weight, 'value') else gemma4_model.per_layer_model_projection.weight
-  w_trainer = trainer_model.embedder.per_layer_model_projection.w.value if hasattr(trainer_model.embedder.per_layer_model_projection.w, 'value') else trainer_model.embedder.per_layer_model_projection.w
-  diff_w = np.abs(np.asarray(w_vllm) - np.asarray(w_trainer).reshape(1536, 8960))
-  print(
-      f"Weight Model Proj | Mean Abs Diff: {float(diff_w.mean()):.6e} | Max Abs"
-      f" Diff: {float(diff_w.max()):.6e}"
-  )
-  print(f"DEBUG act_btnh at runtime: {trainer_model.config.shd_config.act_btnh}")
+  qwen2_model = vllm_model.model
 
-
+  vllm_q0_w = getattr(qwen2_model.layers[0].self_attn.q_proj, "weight", None)
+  if vllm_q0_w is not None:
+    if hasattr(vllm_q0_w, "value"):
+      vllm_q0_w = vllm_q0_w.value
+    trainer_q0_w = trainer_model.layers[0].attn.q_proj.w.value if hasattr(trainer_model.layers[0].attn.q_proj.w, "value") else trainer_model.layers[0].attn.q_proj.w
+    # vLLM is typically shape (N*H, D) -> (1536, 1536). Trainer is (D, N, H) -> (1536, 12, 128)
+    vllm_q0_w_np = np.asarray(vllm_q0_w)
+    trainer_q0_w_np = np.asarray(trainer_q0_w)
+    if vllm_q0_w_np.ndim == 2:
+      # Try transposing vLLM weights to match Trainer weights shape logic
+      vllm_q0_reshaped = vllm_q0_w_np.reshape(12, 128, 1536).transpose(2, 0, 1)
+      diff_w = np.abs(vllm_q0_reshaped - trainer_q0_w_np)
+      print(f"Layer 0 Q_Proj Weight | Mean Abs Diff: {float(diff_w.mean()):.6e} | Max Abs: {float(diff_w.max()):.6e}")
+  
   if inputs_embeds is not None:
     x_vllm = inputs_embeds
   else:
-    x_vllm = gemma4_model.embed_tokens(input_ids) * gemma4_model.embedding_scale
+    x_vllm = qwen2_model.embed_tokens(input_ids)
 
-  per_layer_inputs_vllm = gemma4_model.compute_per_layer_inputs(
-      input_ids, x_vllm, is_multimodal=None
-  )
+  fsdp_size = 4
+  try:
+      from jax.interpreters import pxla
+      if pxla.thread_resources.env.physical_mesh and "fsdp" in pxla.thread_resources.env.physical_mesh.shape:
+          fsdp_size = pxla.thread_resources.env.physical_mesh.shape["fsdp"]
+  except Exception:
+      pass
 
   tokens_trainer = sharding_utils.shard_input(
-      input_ids[None, :], ("fsdp",)
+      jnp.tile(input_ids[None, :], (fsdp_size, 1)), ("fsdp",)
   )
   positions_trainer = sharding_utils.shard_input(
-      input_positions[None, :], ("fsdp",)
+      jnp.tile(input_positions[None, :], (fsdp_size, 1)), ("fsdp",)
   )
 
   pos_vllm = np.asarray(captured_args[5])[:num_active_tokens]
@@ -316,107 +290,6 @@ def compare_layers(vllm_model, trainer_model, captured_args):
   print(f"DEBUG positions max diff: {np.abs(pos_vllm - pos_trainer).max()}")
 
   x_trainer = trainer_model.embedder.encode(tokens_trainer)
-
-  if trainer_model.config.per_layer_input_dim > 0:
-    per_layer_inputs_trainer = trainer_model.embedder.encode_per_layer_input(
-        x_trainer, tokens_trainer
-    )
-  else:
-    per_layer_inputs_trainer = None
-
-  if per_layer_inputs_trainer is not None:
-    # Track A lookup comparison
-    ple_input_ids = input_ids
-    ple_input_ids = jnp.where(
-        ple_input_ids < gemma4_model.vocab_size_per_layer_input, ple_input_ids, 0
-    )
-    vllm_embeds = gemma4_model.embed_tokens_per_layer(ple_input_ids) * gemma4_model.embed_scale_per_layer
-    vllm_embeds = vllm_embeds[:num_active_tokens].reshape(num_active_tokens, gemma4_model.num_hidden_layers, gemma4_model.hidden_size_per_layer_input)
-
-    t_trainer = jnp.where(
-        jnp.logical_and(tokens_trainer >= 0, tokens_trainer < trainer_model.embedder.vocab_size),
-        tokens_trainer,
-        jnp.zeros_like(tokens_trainer)
-    )
-    trainer_embeds = trainer_model.embedder.per_layer_input_embedding.value[t_trainer]
-    trainer_embeds *= jnp.sqrt(trainer_model.config.per_layer_input_dim).astype(trainer_embeds.dtype)
-    trainer_embeds_sliced = trainer_embeds[0, :num_active_tokens]
-
-    diff_track_a = np.abs(np.asarray(vllm_embeds) - np.asarray(trainer_embeds_sliced))
-    print(
-        f"Track A (Lookup) | Mean Abs Diff: {float(diff_track_a.mean()):.6e} | Max Abs"
-        f" Diff: {float(diff_track_a.max()):.6e}"
-    )
-
-    # Track B projection comparison
-    vllm_proj_raw = gemma4_model.per_layer_model_projection(x_vllm) * gemma4_model.per_layer_projection_scale
-    vllm_proj_raw = vllm_proj_raw[:num_active_tokens].reshape(num_active_tokens, gemma4_model.num_hidden_layers, gemma4_model.hidden_size_per_layer_input)
-
-    trainer_proj_raw = trainer_model.embedder.per_layer_model_projection(x_trainer)
-    trainer_proj_raw_sliced = trainer_proj_raw[0, :num_active_tokens]
-
-    diff_track_b_raw = np.abs(np.asarray(vllm_proj_raw) - np.asarray(trainer_proj_raw_sliced))
-    print(
-        f"Track B (Proj Raw) | Mean Abs Diff: {float(diff_track_b_raw.mean()):.6e} | Max Abs"
-        f" Diff: {float(diff_track_b_raw.max()):.6e}"
-    )
-
-    # vLLM after norm
-    vllm_proj_norm = gemma4_model.per_layer_projection_norm(vllm_proj_raw)
-
-    # Trainer after norm
-    trainer_proj_norm = trainer_model.embedder.per_layer_projection_norm(trainer_proj_raw)
-    trainer_proj_norm_sliced = trainer_proj_norm[0, :num_active_tokens]
-
-    diff_track_b_norm = np.abs(np.asarray(vllm_proj_norm) - np.asarray(trainer_proj_norm_sliced))
-    print(
-        f"Track B (Proj Norm)| Mean Abs Diff: {float(diff_track_b_norm.mean()):.6e} | Max Abs"
-        f" Diff: {float(diff_track_b_norm.max()):.6e}"
-    )
-
-    # Detailed debug print of the max difference in Track B Norm
-    max_idx = np.unravel_index(np.argmax(diff_track_b_norm), diff_track_b_norm.shape)
-    tok_idx, layer_idx, dim_idx = max_idx
-
-    vllm_raw_seq = np.asarray(vllm_proj_raw)[tok_idx, layer_idx]
-    trainer_raw_seq = np.asarray(trainer_proj_raw_sliced)[tok_idx, layer_idx]
-
-    @jax.jit
-    def compute_jax_var(x):
-      x_fp32 = jnp.astype(x, jnp.float32)
-      return jnp.mean(jnp.square(x_fp32), axis=-1, keepdims=True)
-
-    vllm_vars = compute_jax_var(vllm_proj_raw)
-    trainer_vars = compute_jax_var(trainer_proj_raw_sliced)
-
-    vllm_var_val = float(np.asarray(vllm_vars)[tok_idx, layer_idx, 0])
-    trainer_var_val = float(np.asarray(trainer_vars)[tok_idx, layer_idx, 0])
-
-    vllm_val = float(vllm_raw_seq[dim_idx])
-    trainer_val = float(trainer_raw_seq[dim_idx])
-    vllm_norm_val = float(np.asarray(vllm_proj_norm)[tok_idx, layer_idx, dim_idx])
-    trainer_norm_val = float(np.asarray(trainer_proj_norm_sliced)[tok_idx, layer_idx, dim_idx])
-
-    vllm_scale = gemma4_model.per_layer_projection_norm.weight.value if hasattr(gemma4_model.per_layer_projection_norm.weight, 'value') else gemma4_model.per_layer_projection_norm.weight
-    trainer_scale = trainer_model.embedder.per_layer_projection_norm.scale.value if hasattr(trainer_model.embedder.per_layer_projection_norm.scale, 'value') else trainer_model.embedder.per_layer_projection_norm.scale
-
-    print(f"DEBUG Track B Norm Max Diff at tok_idx={tok_idx}, layer_idx={layer_idx}, dim_idx={dim_idx}:")
-    print(f"  vLLM raw val hex: {vllm_val.hex()}, var hex: {vllm_var_val.hex()}, rsqrt(var+1e-6) hex: {(1.0/np.sqrt(vllm_var_val+1e-6)).hex()}")
-    print(f"  Trainer raw val hex: {trainer_val.hex()}, var hex: {trainer_var_val.hex()}, rsqrt(var+1e-6) hex: {(1.0/np.sqrt(trainer_var_val+1e-6)).hex()}")
-    print(f"  Exact raw diff: {vllm_val - trainer_val:.10e}")
-    print(f"  Exact var diff: {vllm_var_val - trainer_var_val:.10e}")
-    print(f"  vLLM scale hex: {float(np.asarray(vllm_scale)[dim_idx]).hex()}")
-    print(f"  Trainer scale hex: {float(np.asarray(trainer_scale)[dim_idx]).hex()}")
-    print(f"  vLLM norm val hex: {vllm_norm_val.hex()}")
-    print(f"  Trainer norm val hex: {trainer_norm_val.hex()}")
-
-    pli_vllm_np = np.asarray(per_layer_inputs_vllm)[:num_active_tokens]
-    pli_trainer_np = np.asarray(per_layer_inputs_trainer[0])[:num_active_tokens]
-    pli_diff = np.abs(pli_vllm_np - pli_trainer_np)
-    print(
-        f"PLE Inputs    | Mean Abs Diff: {float(pli_diff.mean()):.6e} | Max Abs"
-        f" Diff: {float(pli_diff.max()):.6e}"
-    )
 
   x_vllm_np = np.asarray(x_vllm)[:num_active_tokens]
   x_trainer_np = np.asarray(x_trainer[0])[:num_active_tokens]
@@ -437,80 +310,52 @@ def compare_layers(vllm_model, trainer_model, captured_args):
   same_segment = segment_ids_np[:, None] == segment_ids_np[None, :]
   causal = np.tril(np.ones((seq_len, seq_len)))
   attn_mask_trainer = jnp.asarray(causal * same_segment)[None, None, :, :]
+  attn_mask_trainer = jnp.tile(attn_mask_trainer, (fsdp_size, 1, 1, 1))
 
   segment_ids_trainer = sharding_utils.shard_input(
-      segment_ids_np[None, :], ("fsdp",)
+      jnp.tile(segment_ids_np[None, :], (fsdp_size, 1)), ("fsdp",)
   )
 
-  print(f"DEBUG: query_start_loc_np = {query_start_loc_np}")
-  print(f"DEBUG: attn_metadata.seq_lens = {np.asarray(attn_metadata.seq_lens)}")
-  print(f"DEBUG: input_positions = {np.asarray(input_positions)}")
-  print(f"DEBUG: segment_ids_np = {segment_ids_np}")
-  print(f"DEBUG: num_active_tokens = {num_active_tokens}")
+  sin, cos = model_lib._generate_pos_embeddings(
+      positions_trainer, trainer_model.config.head_dim, trainer_model.config.rope_theta
+  )
+  sin, cos = sin.astype(x_trainer.dtype), cos.astype(x_trainer.dtype)
 
   @nnx.jit
-  def run_trainer_layer(
-      layer, x, pos, cache, mask, pli, kv_shared_cache=None, segment_ids=None
-  ):
+  def run_trainer_layer(layer, x, cache, mask, sin_in, cos_in, segment_ids=None):
     return layer(
         x,
-        pos,
         cache,
-        mask,
-        per_layer_input=pli,
-        kv_shared_cache=kv_shared_cache,
+        attn_mask=mask,
+        sin=sin_in,
+        cos=cos_in,
         segment_ids=segment_ids,
     )
 
-  transient_kvs = {}
-  for i in range(len(gemma4_model.layers)):
-    vllm_layer = gemma4_model.layers[i]
+  for i in range(len(qwen2_model.layers)):
+    vllm_layer = qwen2_model.layers[i]
     layer_name = f"layer.{i}"
     cache_idx = layer_name_to_kvcache_index.get(layer_name, i)
     kv_cache = kv_caches[cache_idx]
-    kv_cache_input = kv_cache
-    target_sharding = per_layer_inputs_vllm[:, i, :].sharding
     x_vllm_input = x_vllm
     x_trainer_input = x_trainer
 
-    layer_per_input_vllm = jax.device_put(
-        jnp.asarray(per_layer_inputs_trainer[0, :, i, :]),
-        target_sharding
-    )
-
-    _, x_vllm, _ = vllm_layer(
+    kv_cache, x_vllm = vllm_layer(
         kv_cache,
         x_vllm,
         attn_metadata,
-        per_layer_input=layer_per_input_vllm,
     )
 
     trainer_layer = trainer_model.layers[i]
-
-    shared_idx = trainer_model.kv_cache_sharing_patterns[i]
-    is_shared = shared_idx != i
-    if is_shared:
-      shared_layer_name = f"layer_{shared_idx}"
-      shared_k, shared_v = transient_kvs[shared_layer_name]
-      kv_shared_cache_trainer = {"k": shared_k, "v": shared_v}
-    else:
-      kv_shared_cache_trainer = None
-
-    _, x_trainer, layers_kvs = run_trainer_layer(
+    _, x_trainer = run_trainer_layer(
         trainer_layer,
         x_trainer,
-        positions_trainer,
         None,
         attn_mask_trainer,
-        per_layer_inputs_trainer[:, :, i, :]
-        if per_layer_inputs_trainer is not None
-        else None,
-        kv_shared_cache=kv_shared_cache_trainer,
+        sin,
+        cos,
         segment_ids=segment_ids_trainer,
     )
-
-    if i in trainer_model.shared_layer_origins:
-      transient_kvs[f"layer_{i}"] = layers_kvs
 
     x_vllm_np = np.asarray(x_vllm)[:num_active_tokens]
     x_trainer_np = np.asarray(x_trainer[0])[:num_active_tokens]
@@ -546,80 +391,61 @@ def compare_layers(vllm_model, trainer_model, captured_args):
     if i == 0:
       @nnx.jit
       def run_vllm_layer0_steps(vllm_l, x_in, kv_c_in):
-        # Step 1: Input Norm
         norm_vllm = vllm_l.input_layernorm(x_in)
-        # Step 2: Self Attention Output (before post-attention norm)
+        q_vllm = vllm_l.self_attn.q_proj(norm_vllm)
+        k_vllm = vllm_l.self_attn.k_proj(norm_vllm)
+        v_vllm = vllm_l.self_attn.v_proj(norm_vllm)
         _, attn_vllm = vllm_l.self_attn(kv_c_in, norm_vllm, attn_metadata)
-        # Step 3: Post Attention Norm
-        post_attn_norm_vllm = vllm_l.post_attention_layernorm(attn_vllm)
-        # Step 4: Pre MLP Norm (on residual + post_attn_norm)
-        x_vllm_post_attn = x_in + post_attn_norm_vllm
-        norm_ffw_vllm = vllm_l.pre_feedforward_layernorm(x_vllm_post_attn)
-        # Step 5: MLP Output
-        ffw_vllm = vllm_l.mlp(norm_ffw_vllm)
-        return norm_vllm, attn_vllm, post_attn_norm_vllm, norm_ffw_vllm, ffw_vllm
+        post_attn_norm_vllm = vllm_l.post_attention_layernorm(x_in + attn_vllm)
+        ffw_vllm = vllm_l.mlp(post_attn_norm_vllm)
+        return norm_vllm, attn_vllm, post_attn_norm_vllm, ffw_vllm, q_vllm, k_vllm, v_vllm
 
       @nnx.jit
-      def run_trainer_layer0_steps(trainer_l, x_in):
-        # Step 1: Input Norm
-        norm_trainer = trainer_l.pre_attention_norm(x_in)
-        # Step 2: Self Attention Output (before post-attention norm)
-        _, attn_trainer, _ = trainer_l.attn(
+      def run_trainer_layer0_steps(trainer_l, x_in, sin_in, cos_in):
+        norm_trainer = trainer_l.input_layernorm(x_in)
+        
+        q_trainer = trainer_l.attn.q_proj(norm_trainer)
+        b, t, n, h = q_trainer.shape
+        q_trainer = jnp.reshape(q_trainer, (b, t, n * h)) + trainer_l.attn.q_bias.astype(jnp.float32)
+        q_trainer = jnp.reshape(q_trainer, (b, t, n, h))
+        
+        k_trainer = trainer_l.attn.k_proj(norm_trainer)
+        _, s, k, h = k_trainer.shape
+        k_trainer = jnp.reshape(k_trainer, (b, s, k * h)) + trainer_l.attn.k_bias.astype(jnp.float32)
+        k_trainer = jnp.reshape(k_trainer, (b, s, k, h))
+
+        v_trainer = trainer_l.attn.v_proj(norm_trainer)
+        v_trainer = jnp.reshape(v_trainer, (b, s, k * h)) + trainer_l.attn.v_bias.astype(jnp.float32)
+        v_trainer = jnp.reshape(v_trainer, (b, s, k, h))
+        
+        _, attn_trainer = trainer_l.attn(
             norm_trainer,
-            positions_trainer,
             None,
-            attn_mask_trainer,
+            attn_mask=attn_mask_trainer,
+            sin=sin_in,
+            cos=cos_in,
             segment_ids=segment_ids_trainer,
         )
-        # Step 3: Post Attention Norm
-        post_attn_norm_trainer = trainer_l.post_attention_norm(attn_trainer)
-        # Step 4: Pre MLP Norm (on residual + post_attn_norm)
-        x_trainer_post_attn = x_in + post_attn_norm_trainer
-        norm_ffw_trainer = trainer_l.pre_ffw_norm(x_trainer_post_attn)
-        # Step 5: MLP Output
-        ffw_trainer = trainer_l.mlp(norm_ffw_trainer)
-        return norm_trainer, attn_trainer, post_attn_norm_trainer, norm_ffw_trainer, ffw_trainer
+        post_attn_norm_trainer = trainer_l.post_attention_layernorm(x_in + attn_trainer)
+        ffw_trainer = trainer_l.mlp(post_attn_norm_trainer)
+        return norm_trainer, attn_trainer, post_attn_norm_trainer, ffw_trainer, q_trainer, k_trainer, v_trainer
 
-      (norm_vllm, attn_vllm, post_attn_norm_vllm, norm_ffw_vllm, ffw_vllm) = run_vllm_layer0_steps(
-          vllm_layer, x_vllm_input, kv_cache_input
+      (norm_vllm, attn_vllm, post_attn_norm_vllm, ffw_vllm, q_vllm, k_vllm, v_vllm) = run_vllm_layer0_steps(
+          vllm_layer, x_vllm_input, kv_cache
       )
-      (norm_trainer, attn_trainer, post_attn_norm_trainer, norm_ffw_trainer, ffw_trainer) = run_trainer_layer0_steps(
-          trainer_layer, x_trainer_input
+      (norm_trainer, attn_trainer, post_attn_norm_trainer, ffw_trainer, q_trainer, k_trainer, v_trainer) = run_trainer_layer0_steps(
+          trainer_layer, x_trainer_input, sin, cos
       )
 
       diff_norm = np.abs(np.asarray(norm_vllm) - np.asarray(norm_trainer[0]))
       print(f"            | Step 1 (Input Norm) Max Diff: {float(diff_norm.max()):.6e}")
-
-      # Debug prints
-      print(f"            |   vLLM input max: {float(np.abs(np.asarray(x_vllm_input)).max()):.6e}")
-      print(f"            |   Trainer input max: {float(np.abs(np.asarray(x_trainer_input[0])).max()):.6e}")
-      print(f"            | DEBUG Step 1 values:")
-      print(f"            |   vLLM input norm shape: {norm_vllm.shape}, Trainer input norm shape: {norm_trainer[0].shape}")
-      print(f"            |   vLLM input norm max: {float(np.abs(np.asarray(norm_vllm)).max()):.6e}")
-      print(f"            |   Trainer input norm max: {float(np.abs(np.asarray(norm_trainer[0])).max()):.6e}")
-      print(f"            |   vLLM input norm mean: {float(np.asarray(norm_vllm).mean()):.6e}")
-      print(f"            |   Trainer input norm mean: {float(np.asarray(norm_trainer[0]).mean()):.6e}")
       
-      max_diff_norm_idx = np.unravel_index(np.argmax(diff_norm), diff_norm.shape)
-      t_idx, d_idx = max_diff_norm_idx
-      vllm_val = float(np.asarray(norm_vllm)[t_idx, d_idx])
-      trainer_val = float(np.asarray(norm_trainer[0])[t_idx, d_idx])
-      print(f"            | Step 1 Max Diff at token idx={t_idx}, dim={d_idx}: vLLM={vllm_val.hex()}, Trainer={trainer_val.hex()}, diff={vllm_val - trainer_val:.6e}")
-      
-      vllm_x_val = float(np.asarray(x_vllm_input)[t_idx, d_idx])
-      trainer_x_val = float(np.asarray(x_trainer_input[0])[t_idx, d_idx])
-      print(f"            |   Input value x at idx={t_idx}, dim={d_idx}: vLLM={vllm_x_val.hex()}, Trainer={trainer_x_val.hex()}")
-      
-      vllm_x_row = np.asarray(x_vllm_input)[t_idx]
-      trainer_x_row = np.asarray(x_trainer_input[0])[t_idx]
-      vllm_var_calc = np.mean(np.square(vllm_x_row))
-      trainer_var_calc = np.mean(np.square(trainer_x_row))
-      print(f"            |   Calculated var (numpy): vLLM={float(vllm_var_calc):.10e}, Trainer={float(trainer_var_calc):.10e}")
-
-      w_vllm_norm = vllm_layer.input_layernorm.weight.value if hasattr(vllm_layer.input_layernorm.weight, 'value') else vllm_layer.input_layernorm.weight
-      w_trainer_norm = trainer_layer.pre_attention_norm.scale.value if hasattr(trainer_layer.pre_attention_norm.scale, 'value') else trainer_layer.pre_attention_norm.scale
-      diff_w_norm = np.abs(np.asarray(w_vllm_norm) - np.asarray(w_trainer_norm))
-      print(f"            | Input Norm Weight Max Diff: {float(diff_w_norm.max()):.6e}")
+      diff_q = np.abs(np.asarray(q_vllm) - np.asarray(q_trainer[0]))
+      print(f"            | Q Projection Max Diff: {float(diff_q.max()):.6e}")
+      diff_k = np.abs(np.asarray(k_vllm) - np.asarray(k_trainer[0]))
+      print(f"            | K Projection Max Diff: {float(diff_k.max()):.6e}")
+      diff_v = np.abs(np.asarray(v_vllm) - np.asarray(v_trainer[0]))
+      print(f"            | V Projection Max Diff: {float(diff_v.max()):.6e}")
 
       diff_attn = np.abs(np.asarray(attn_vllm)[:num_active_tokens] - np.asarray(attn_trainer[0])[:num_active_tokens])
       print(f"            | Step 2 (Attn Output) Max Diff: {float(diff_attn.max()):.6e}")
@@ -627,24 +453,17 @@ def compare_layers(vllm_model, trainer_model, captured_args):
       diff_post_attn_norm = np.abs(np.asarray(post_attn_norm_vllm)[:num_active_tokens] - np.asarray(post_attn_norm_trainer[0])[:num_active_tokens])
       print(f"            | Step 3 (Post Attn Norm) Max Diff: {float(diff_post_attn_norm.max()):.6e}")
 
-      diff_norm_ffw = np.abs(np.asarray(norm_ffw_vllm)[:num_active_tokens] - np.asarray(norm_ffw_trainer[0])[:num_active_tokens])
-      print(f"            | Step 4 (Pre MLP Norm) Max Diff: {float(diff_norm_ffw.max()):.6e}")
-
       diff_ffw = np.abs(np.asarray(ffw_vllm)[:num_active_tokens] - np.asarray(ffw_trainer[0])[:num_active_tokens])
-      print(f"            | Step 5 (MLP Output) Max Diff: {float(diff_ffw.max()):.6e}")
+      print(f"            | Step 4 (MLP Output) Max Diff: {float(diff_ffw.max()):.6e}")
 
-  x_vllm_normed = gemma4_model.norm(x_vllm)
+  x_vllm_normed = qwen2_model.norm(x_vllm)
   vllm_logits = vllm_model.compute_logits(x_vllm_normed)
 
   trainer_normed = trainer_model.final_norm(x_trainer)
-  trainer_logits = (
-      trainer_model.embedder.decode(trainer_normed).astype(jnp.float32)
-  )
-  if trainer_model.config.final_logit_softcap is not None:
-    trainer_logits /= trainer_model.config.final_logit_softcap
-    trainer_logits = (
-        jnp.tanh(trainer_logits) * trainer_model.config.final_logit_softcap
-    )
+  if trainer_model.config.use_tied_embedding:
+    trainer_logits = trainer_model.embedder.decode(trainer_normed).astype(jnp.float32)
+  else:
+    trainer_logits = trainer_model.lm_head(trainer_normed).astype(jnp.float32)
 
   vllm_logits_np = np.asarray(vllm_logits)[:num_active_tokens]
   trainer_logits_np = np.asarray(trainer_logits[0])[:num_active_tokens]
@@ -656,12 +475,10 @@ def compare_layers(vllm_model, trainer_model, captured_args):
   print("=" * 45 + " END LAYER COMPARISON " + "=" * 45)
 
 
-# %%
 async def main():
-  """Runs the rollout orchestrator."""
-  BATCH_SIZE = 8
+  BATCH_SIZE = 1
   NUM_BATCHES = 1
-  MAX_PROMPT_LENGTH = 2048
+  MAX_PROMPT_LENGTH = 1024
   train_ds, _ = create_datasets()
   train_ds, _ = data_lib.post_init_dataset(
     train_ds,
@@ -701,10 +518,8 @@ async def main():
       )
   )
 
-  # Yield control to allow producer initialization
   await asyncio.sleep(0)
 
-  # Ensure anchor policy state is initialized for trainer logp recomputation
   rl_cluster.sync_weights()
 
   all_rollout_logps = []
@@ -731,7 +546,6 @@ async def main():
         pad_value = rl_cluster.rollout.pad_id()
         eos_value = rl_cluster.rollout.eos_id()
 
-        # 1. Compare initial turn prompt tokens in rollout vs trainer
         init_messages = []
         if conversation_text:
           for msg in conversation_text:
@@ -758,7 +572,8 @@ async def main():
         )
 
         print("\n--- 1. Initial Turn Prompt Tokens Comparison ---")
-        unpadded_rollout_prompt = prompt_tokens[prompt_tokens != pad_value]
+        print(f"{len(prompt_tokens)=}, {pad_value=}")
+        unpadded_rollout_prompt = np.array(prompt_tokens)[np.array(prompt_tokens) != pad_value]
         print(
             f"Python Initial Prompt Tokens (unpadded len={len(python_prompt_tokens)}):"
             f" {python_prompt_tokens[:20]}..."
@@ -892,11 +707,10 @@ async def main():
       prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
       prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
 
-      # Extract first item details for token-level logging
       first_item = batch[0]
-      prompt_tokens = first_item.traj.get("prompt_tokens")
-      completion_tokens = first_item.traj.get("conversation_tokens")
-      completion_mask = first_item.traj.get("conversation_masks")
+      prompt_tokens = np.array(first_item.traj.get("prompt_tokens"))
+      completion_tokens = np.array(first_item.traj.get("conversation_tokens"))
+      completion_mask = np.array(first_item.traj.get("conversation_masks"))
       old_logprobs = first_item.traj.get("old_logprobs")
       print("Trajectory Conversation:")
       pprint(first_item.traj.get("conversation_text"), width=120)
@@ -931,26 +745,26 @@ async def main():
 
       active_indices = [i for i, m in enumerate(completion_mask) if m > 0]
       print(f"Total Active (Assistant) Tokens in Trajectory: {len(active_indices)}")
-      print("Sample Active Tokens (Index, TokenID, Decoded, Rollout Logp, Trainer Logp, Diff):")
+      # print("Sample Active Tokens (Index, TokenID, Decoded, Rollout Logp, Trainer Logp, Diff):")
 
-      idx_to_print = active_indices[:20] + active_indices[-5:] if len(active_indices) > 25 else active_indices
+      # idx_to_print = active_indices[:20] + active_indices[-5:] if len(active_indices) > 25 else active_indices
 
       rp_np = np.array(rollout_per_token_logps[0])
       tp_np = np.array(trainer_per_token_logps[0])
 
-      for idx in idx_to_print:
-        tok_id = completion_tokens[idx]
-        try:
-          decoded_tok = repr(tokenizer.decode([tok_id]))
-        except Exception:
-          decoded_tok = "<unknown>"
-        r_logp = rp_np[idx]
-        t_logp = tp_np[idx]
-        diff_val = abs(r_logp - t_logp)
-        print(f"  Pos {idx:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {diff_val:8.4f}")
-      print("=" * 148)
+      # for idx in idx_to_print:
+      #   tok_id = completion_tokens[idx]
+      #   try:
+      #     decoded_tok = repr(tokenizer.decode([tok_id]))
+      #   except Exception:
+      #     decoded_tok = "<unknown>"
+      #   r_logp = rp_np[idx]
+      #   t_logp = tp_np[idx]
+      #   diff_val = abs(r_logp - t_logp)
+      #   print(f"  Pos {idx:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {diff_val:8.4f}")
+      # print("=" * 148)
 
-      print("\n" + "=" * 60 + " Deep Token & Logit Debug Info " + "=" * 60)
+      # print("\n" + "=" * 60 + " Deep Token & Logit Debug Info " + "=" * 60)
       p_toks = prompt_tokens[-20:] if len(prompt_tokens) > 20 else prompt_tokens
       c_toks = completion_tokens[:20] if len(completion_tokens) > 20 else completion_tokens
       print("Last 20 Prompt Tokens (ID -> Decoded):")
@@ -1013,7 +827,6 @@ async def main():
       else:
         print("No active (assistant) tokens in the first trajectory of the batch.\n")
 
-    # After the loop completes, compute global stats over all accumulated batches
     if all_rollout_logps:
       print("\n" + "X" * 50 + " GLOBAL SAMPLER-VS-TRAINER ANALYSIS (ALL BATCHES) " + "X" * 50)
       global_rp_logps = np.concatenate(all_rollout_logps, axis=0)
@@ -1034,7 +847,6 @@ async def main():
       global_prob_diff_mean = float((global_prob_diff * global_mask_f).sum() / global_mask_sum)
       global_prob_diff_max = float(np.where(global_mask, global_prob_diff, 0.0).max())
 
-      # Global Pearson correlation computation
       global_rp_flat = global_rp.flatten()
       global_tp_flat = global_tp.flatten()
       global_mf = global_mask_f.flatten()
@@ -1062,13 +874,13 @@ async def main():
       )
       print("X" * 149 + "\n")
 
-    # if captured_arguments is not None:
-    #   with rl_cluster._get_mesh_and_logical_axis_rules_cm(rl_cluster_lib.Role.ACTOR):
-    #     compare_layers(
-    #         vllm_model=rl_cluster.rollout._sampler._model_runner.model,
-    #         trainer_model=rl_cluster.actor_trainer.model,
-    #         captured_args=captured_arguments,
-    #     )
+    if captured_arguments is not None:
+      with rl_cluster._get_mesh_and_logical_axis_rules_cm(rl_cluster_lib.Role.ACTOR):
+        compare_layers(
+            vllm_model=rl_cluster.rollout._sampler._model_runner.model,
+            trainer_model=rl_cluster.actor_trainer.model,
+            captured_args=captured_arguments,
+        )
 
   finally:
     await producer_task
