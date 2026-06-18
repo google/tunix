@@ -439,19 +439,16 @@ class SWEAgent(ConversationAgentBase):
       observation += (
           "\nYou are running out of tokens. Stop exploring now. Do not call"
           " file_editor, str_replace_editor, search, execute_bash, or any"
-          " view command again. You must immediately submit a final answer"
-          " using the final tool. If the finish tool is available, use exactly"
-          " this XML shape:\n"
+          " view command again. You must immediately submit using the final"
+          " tool. Output exactly this XML and nothing else:\n"
           "<function=finish>\n"
           "<parameter=command>submit</parameter>\n"
-          "<parameter=result>FINAL_RESULT</parameter>\n"
           "</function>\n"
-          "If the submit tool is available instead, use exactly this XML"
-          " shape:\n"
+          "Do not include reasoning text. Do not include a result parameter."
+          " Do not summarize the fix. If the submit tool is available instead"
+          " of finish, output exactly this XML and nothing else:\n"
           "<function=submit>\n"
           "</function>\n"
-          "Replace FINAL_RESULT with a concise final answer or best-effort"
-          " summary. Do not output plain text without a final tool call."
       )
 
     super().update_from_env(observation, reward, done, info)
