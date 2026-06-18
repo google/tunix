@@ -15,6 +15,7 @@
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import MutableMapping
+import dataclasses
 import importlib
 import os
 import types
@@ -22,8 +23,10 @@ from typing import Any
 
 from absl import flags
 from absl import logging
+from flax import nnx
 import jax
 import numpy as np
+import jax.numpy as jnp
 from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
@@ -44,6 +47,11 @@ class BasePipeline(ABC, config.HyperParameters):
     self.data_module: types.ModuleType | None = None
     super().__init__(argv, **kwargs)
 
+  @property
+  @abstractmethod
+  def _default_training_mode(self):
+    pass
+
   # ------------------------------------------------------------------
   # Mesh
   # ------------------------------------------------------------------
@@ -61,6 +69,10 @@ class BasePipeline(ABC, config.HyperParameters):
       "reward": rl_cluster_lib.Role.REWARD,
       "rollout": rl_cluster_lib.Role.ROLLOUT,
   }
+
+  def _is_agentic_mode(self, mode:str) -> bool:
+    """Checks if the given mode is agentic."""
+    return mode == "agentic_ppo" or "agentic_grpo"
 
   def _resolve_split_role(self, role_name: str) -> rl_cluster_lib.Role:
     normalized = role_name.strip().lower()
@@ -217,7 +229,6 @@ class BasePipeline(ABC, config.HyperParameters):
   # ------------------------------------------------------------------
   # Rollout config
   # ------------------------------------------------------------------
-  @abstractmethod
   def create_rollout_config(
       self,
       role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
@@ -227,6 +238,8 @@ class BasePipeline(ABC, config.HyperParameters):
     Standard mode: pass rollout_config fields through with kv_cache_size =
     max_prompt_length + total_generation_steps + 256.
 
+    Agentic mode: same base. Same kv_cache_size calculation.
+
     Engine-specific extras (sglang_jax_config, vllm_config) are also applied.
 
     Args:
@@ -235,8 +248,51 @@ class BasePipeline(ABC, config.HyperParameters):
     Returns:
       The constructed RolloutConfig.
     """
+    rollout_cfg = self._config_mapping("rollout_config")
+    mode = self._config_string("training_mode", self._default_training_mode)
+    engine = self._config_string("rollout_engine", "vanilla")
 
-    pass
+    valid_fields = {
+        f.name for f in dataclasses.fields(base_rollout.RolloutConfig)
+    }
+
+    # Base pass-through (same as original create_rollout_config)
+    filtered = {k: v for k, v in rollout_cfg.items() if k in valid_fields}
+    if "total_generation_steps" in rollout_cfg:
+      filtered["max_tokens_to_generate"] = rollout_cfg["total_generation_steps"]
+
+    max_prompt = rollout_cfg.get("max_prompt_length", 0)
+    max_response = rollout_cfg.get("total_generation_steps", 0)
+
+    kv_cache_size = 0
+    if self._is_agentic_mode(mode):
+      agentic_cfg = self._config_mapping(f"{mode}_config")
+      kv_cache_size = max_prompt + max_response + 256
+      filtered["kv_cache_size"] = kv_cache_size
+      logging.info("kv_cache_size: %d", kv_cache_size)
+
+      max_running_requests = agentic_cfg.get("max_concurrency", 16)
+    else:
+      rl_algm_cfg = self._config_mapping(f"{mode}_config")
+      # Standard: kv_cache_size = max_prompt + max_response + 256
+      if max_prompt and max_response:
+        kv_cache_size = max_prompt + max_response + 256
+        filtered["kv_cache_size"] = kv_cache_size
+      # Defaults to global batch size * num_generations to allow full
+      # concurrency.
+      max_running_requests = self.config.get("batch_size", 1) * rl_algm_cfg.get(
+          "num_generations", 1
+      )
+
+    # Engine-specific extras
+    extra = self._rollout_engine_extra(
+        engine,
+        kv_cache_size,
+        max_running_requests,
+        role_to_mesh=role_to_mesh,
+    )
+    filtered.update({k: v for k, v in extra.items() if k in valid_fields})
+    return base_rollout.RolloutConfig(**filtered)
 
   def _rollout_engine_extra(
       self,
@@ -401,13 +457,140 @@ class BasePipeline(ABC, config.HyperParameters):
         )
     return perf_config
 
-  @abstractmethod
   def create_rl_cluster(self, tokenizer):
-    pass
+    role_to_mesh = self.create_role_to_mesh()
+    rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
+    reference_model_config = self._mutable_config_mapping(
+        "reference_model_config"
+    )
+    actor_model_config = self._mutable_config_mapping("actor_model_config")
+    tokenizer_config = self._config_mapping("tokenizer_config")
+    # Should not use LoRA for reference model.
+    if reference_model_config.get("lora_config"):
+      logging.warning(
+          "LoRA config is not supported for the reference model. Disabling"
+          " LoRA."
+      )
+      del reference_model_config["lora_config"]
+    reference_model, _ = model_lib.create_model(
+        dict(reference_model_config),
+        tokenizer_config,
+        role_to_mesh[rl_cluster_lib.Role.REFERENCE],
+    )
+    if actor_model_config.get("lora_config", None):
+      actor_model = model_lib.apply_lora_to_model(
+          reference_model,
+          role_to_mesh[rl_cluster_lib.Role.ACTOR],
+          actor_model_config["lora_config"],
+      )
+    else:
+      graph_def, params = nnx.split(reference_model)
+      actor_model = nnx.merge(
+          graph_def,
+          jax.tree.map(jnp.copy, params),
+      )
 
-  @abstractmethod
+    critic_model = None
+    critic_model_config = self._mutable_config_mapping("critic_model_config")
+    if critic_model_config:
+      critic_model, _ = model_lib.create_model(
+          dict(critic_model_config),
+          tokenizer_config,
+          role_to_mesh[rl_cluster_lib.Role.CRITIC],
+      )     
+
+      if critic_model_config.get("lora_config", None):
+        critic_model = model_lib.apply_lora_to_model(
+            critic_model,
+            role_to_mesh[rl_cluster_lib.Role.CRITIC],
+            critic_model_config["lora_config"],
+        )
+
+      rngs = nnx.Rngs(
+          params=jax.random.key(critic_model_config.get("rng_seed", 0))
+      )
+      # TODO (yatla2): Support all critic model types, not just Gemma 
+      critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
+
+    cluster_config = self.create_cluster_config(
+        role_to_mesh=role_to_mesh,
+        rollout_config=rollout_config,
+    )
+    perf_config = self.create_perf_config(cluster_config)
+    return rl_cluster_lib.RLCluster(
+        actor=actor_model,
+        critic=critic_model,
+        reference=reference_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+        perf_config=perf_config,
+    )
+
+  def _compute_max_steps(self, dataset, rl_training_config):
+    max_steps = None
+    if rl_training_config.get("max_steps"):
+      max_steps = rl_training_config.get("max_steps")
+    elif not hasattr(dataset, "__len__"):
+      raise ValueError(
+          "max_steps must be specified since the dataset length cannot be"
+          " determined."
+      )
+
+    dataset_length = len(dataset)
+
+    batch_size = self.config.get("batch_size", 1)
+    num_batches = self.config.get("num_batches")
+    if not num_batches:
+      num_batches = dataset_length // batch_size
+      self.config["num_batches"] = num_batches
+      logging.info(
+          "Dynamically computed num_batches=%d with batch_size=%d",
+          num_batches,
+          batch_size,
+      )
+    self.config["num_batches"] = num_batches
+    num_train_epochs = self.config.get("num_train_epochs")
+    if not num_train_epochs:
+      num_train_epochs = 1
+
+    train_fraction = self.config.get("train_fraction")
+    if not train_fraction:
+      train_fraction = 0.8
+    elif train_fraction <= 0.0 and train_fraction > 1.0:
+      logging.warning(
+          "train_fraction %.2f out of expected range. Setting to 0.8",
+          train_fraction,
+      )
+      train_fraction = 0.8
+
+    allowed_max_steps = int(num_batches * num_train_epochs * train_fraction)
+    if not max_steps:
+      max_steps = allowed_max_steps
+    elif max_steps > allowed_max_steps:
+      raise ValueError(
+          f"Maximum allowed value for max_steps is {allowed_max_steps}, but"
+          f" {max_steps} is specified."
+      )
+
+    logging.info(
+        "Dynamically computed max_steps=%d based on dataset length %d",
+        max_steps,
+        dataset_length,
+    )
+
+    return max_steps 
+
   def compute_params(self, dataset):
-    pass
+    rl_training_config = self._mutable_config_mapping("rl_training_config")
+    max_steps = self._compute_max_steps(dataset, rl_training_config)
+
+    rl_training_config["max_steps"] = max_steps
+    self._apply_optimizer_step_limits(
+        rl_training_config, "actor_optimizer_config", max_steps
+    )
+    self._apply_optimizer_step_limits(
+        rl_training_config, "critic_optimizer_config", max_steps
+    )
 
   def _apply_optimizer_step_limits(
       self,
@@ -570,11 +753,42 @@ class BasePipeline(ABC, config.HyperParameters):
   # ------------------------------------------------------------------
   # Agentic training
   # ------------------------------------------------------------------
+  def _create_rl_cluster(self, mode: str):
+    self._setup_kubernetes()
+
+    tokenizer = self._get_tokenizer()
+
+    chat_parser = self._create_chat_parser(tokenizer)
+
+    raw_dataset, custom_batch_fn = self._load_raw_dataset(tokenizer)
+
+    self.compute_params(raw_dataset)
+
+    dataset, _ = data_lib.post_init_dataset(
+        raw_dataset,
+        tokenizer,
+        batch_size=self.config.get("batch_size", 1),
+        num_batches=self.config.get("num_batches"),
+        max_prompt_length=self._config_mapping("rollout_config").get(
+            "max_prompt_length"
+        ),
+        fraction=self.config.get("train_fraction", 1.0),
+        num_epochs=self.config.get("num_train_epochs", 1),
+        prompt_key=self.config.get("prompt_key", "prompts"),
+        custom_batch_fn=custom_batch_fn,
+    )
+
+    rl_cluster = self.create_rl_cluster(tokenizer)
 
   @abstractmethod
   def _run(self, mode: str):
     """Execute agentic training (DeepScaleR, DeepSWE, etc.)."""
     pass
+
+  def run_trainer(self):
+    """Dispatch to standard or agentic trainer based on training_mode."""
+    mode = self.config.get("training_mode", self._default_training_mode)
+    self._run(mode=mode)
 
 
 def setup_jax_pathways(pathways_bns: str):
