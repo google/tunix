@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Config and CLI launched interface."""
+
 import ast
 import collections
-from collections.abc import Callable
-from collections.abc import Mapping
-from collections.abc import MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 import copy
 import importlib
 import inspect
@@ -245,10 +244,11 @@ class HyperParameters:
     current_model_config = self.config.get("model_config", {})
     for config_key in [
         "actor_model_config",
+        "critic_model_config",
         "reference_model_config",
         "rollout_model_config",
     ]:
-      if config_key in self.config:
+      if config_key in self.config and self.config[config_key] is not None:
         for k, v in current_model_config.items():
           if k not in self.config[config_key] or self.config[config_key][
               k

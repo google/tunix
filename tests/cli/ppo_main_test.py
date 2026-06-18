@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests that grpo_main dispatches correctly for both training modes.
+"""Tests that ppo__main dispatches correctly for standard training.
 
-Also tests that KV cache / GRPOConfig computation is correct.
+Also tests that KV cache / PPOConfig computation is correct.
 """
 
 import os
@@ -24,7 +24,7 @@ from unittest import mock
 
 from absl.testing import absltest
 import omegaconf
-from tunix.cli import grpo_main
+from tunix.cli import ppo_main
 from tunix.cli import base_rl_main
 from tunix.rl import rl_cluster as rl_cluster_lib
 
@@ -35,8 +35,8 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
-def _make_pipeline(extra_yaml: str) -> grpo_main.GrpoPipeline:
-  """Write a minimal valid YAML and instantiate GrpoPipeline against it."""
+def _make_pipeline(extra_yaml: str) -> ppo_main.PpoPipeline:
+  """Write a minimal valid YAML and instantiate PpoPipeline against it."""
   base = """
 model_config:
   model_name: "test_model"
@@ -47,6 +47,11 @@ model_config:
   intermediate_ckpt_dir: "/tmp/ckpt"
 
 actor_model_config:
+  mesh:
+    shape: "(1,1)"
+    axis_names: "('fsdp','tp')"
+
+critic_model_config:
   mesh:
     shape: "(1,1)"
     axis_names: "('fsdp','tp')"
@@ -93,6 +98,18 @@ rl_training_config:
     b2: 0.99
     weight_decay: 0.01
     max_grad_norm: 1.0
+  critic_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 1.0e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+
   metrics_logging_options:
     log_dir: "/tmp/tb_test"
     flush_every_n_steps: 1
@@ -112,15 +129,15 @@ train_fraction: 1.0
 
   # Patch HF_TOKEN so tokenizer validation passes
   with mock.patch.dict(os.environ, {"HF_TOKEN": "fake"}):
-    pipeline = grpo_main.GrpoPipeline(["", path])
+    pipeline = ppo_main.PpoPipeline(["", path])
   os.unlink(path)
   return pipeline
 
 
 def _make_pipeline_with_cli_args(
     extra_yaml: str, cli_args: list[str]
-) -> grpo_main.GrpoPipeline:
-  """Write a minimal valid YAML and instantiate GrpoPipeline with CLI args."""
+) -> ppo_main.PpoPipeline:
+  """Write a minimal valid YAML and instantiate PpoPipeline with CLI args."""
   base = """
 model_config:
   model_name: "test_model"
@@ -131,6 +148,11 @@ model_config:
   intermediate_ckpt_dir: "/tmp/ckpt"
 
 actor_model_config:
+  mesh:
+    shape: "(1,1)"
+    axis_names: "('fsdp','tp')"
+
+critic_model_config:
   mesh:
     shape: "(1,1)"
     axis_names: "('fsdp','tp')"
@@ -177,6 +199,17 @@ rl_training_config:
     b2: 0.99
     weight_decay: 0.01
     max_grad_norm: 1.0
+  critic_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 1.0e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.01
+    max_grad_norm: 1.0
   metrics_logging_options:
     log_dir: "/tmp/tb_test"
     flush_every_n_steps: 1
@@ -195,7 +228,7 @@ train_fraction: 1.0
     path = f.name
 
   with mock.patch.dict(os.environ, {"HF_TOKEN": "fake"}):
-    pipeline = grpo_main.GrpoPipeline(["", path, *cli_args])
+    pipeline = ppo_main.PpoPipeline(["", path, *cli_args])
   os.unlink(path)
   return pipeline
 
@@ -206,198 +239,9 @@ train_fraction: 1.0
 
 
 class DispatchTest(absltest.TestCase):
-
-  def test_agentic_data_module_receives_data_config_for_raw_dataset(self):
+  def test_standard_ppo_dispatches_to_standard(self):
     extra = """
-training_mode: "agentic_grpo"
-data_module: "tunix.cli.recipes.deepscaler_data"
-apply_chat_template_to_dataset: false
-data_config:
-  train_data_path: "gs://fake/train.json"
-  eval_data_path: "gs://fake/eval.parquet"
-prompt_key: "prompts"
-reward_functions: []
-verl_compatible: false
-chat_parser_config:
-  type: "default"
-agent_class_path: null
-agent_kwargs: {}
-env_class_path: null
-env_kwargs: {}
-kubernetes_config: null
-agentic_grpo_config:
-  num_generations: 2
-  num_iterations: 1
-  beta: 0.0
-  epsilon: 0.2
-  epsilon_high: 0.28
-  system_prompt: ""
-  max_concurrency: 1
-  off_policy_steps: 0
-  max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
-vllm_config:
-  hbm_utilization: 0.4
-"""
-    pipeline = _make_pipeline(extra)
-    fake_module = mock.Mock(batch_fn=mock.sentinel.batch_fn)
-
-    with mock.patch.object(
-        pipeline, "_get_data_module", return_value=fake_module
-    ):
-      with mock.patch.object(
-          pipeline,
-          "_get_dataset",
-          return_value=mock.sentinel.dataset,
-      ) as get_dataset:
-        dataset, batch_fn = pipeline._load_raw_dataset(mock.sentinel.tokenizer)
-
-    self.assertIs(dataset, mock.sentinel.dataset)
-    self.assertIs(batch_fn, mock.sentinel.batch_fn)
-    get_dataset.assert_called_once_with(
-        mock.sentinel.tokenizer,
-    )
-
-  def test_agentic_nullable_string_can_be_overridden_from_cli(self):
-    extra = """
-training_mode: "agentic_grpo"
-data_module: "tunix.cli.recipes.deepscaler_data"
-apply_chat_template_to_dataset: false
-data_config:
-  train_data_path: "gs://fake/train.json"
-  eval_data_path: "gs://fake/eval.parquet"
-prompt_key: "prompts"
-reward_functions: []
-verl_compatible: false
-chat_parser_config:
-  type: "default"
-agent_class_path: null
-agent_kwargs: {}
-env_class_path: null
-env_kwargs: {}
-kubernetes_config: null
-agentic_grpo_config:
-  num_generations: 2
-  num_iterations: 1
-  beta: 0.0
-  epsilon: 0.2
-  epsilon_high: 0.28
-  system_prompt: ""
-  max_concurrency: 1
-  off_policy_steps: 0
-  max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
-vllm_config:
-  hbm_utilization: 0.4
-"""
-    pipeline = _make_pipeline_with_cli_args(
-        extra,
-        ["agent_class_path=examples.deepswe.swe_agent.SWEAgent"],
-    )
-
-    self.assertEqual(
-        pipeline.config["agent_class_path"],
-        "examples.deepswe.swe_agent.SWEAgent",
-    )
-
-  def test_agentic_nullable_dict_can_be_overridden_from_cli(self):
-    extra = """
-training_mode: "agentic_grpo"
-data_module: "tunix.cli.recipes.deepscaler_data"
-apply_chat_template_to_dataset: false
-data_config:
-  train_data_path: "gs://fake/train.json"
-  eval_data_path: "gs://fake/eval.parquet"
-prompt_key: "prompts"
-reward_functions: []
-verl_compatible: false
-chat_parser_config:
-  type: "default"
-agent_class_path: null
-agent_kwargs: {}
-env_class_path: null
-env_kwargs: {}
-kubernetes_config: null
-agentic_grpo_config:
-  num_generations: 2
-  num_iterations: 1
-  beta: 0.0
-  epsilon: 0.2
-  epsilon_high: 0.28
-  system_prompt: ""
-  max_concurrency: 1
-  off_policy_steps: 0
-  max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
-vllm_config:
-  hbm_utilization: 0.4
-"""
-    pipeline = _make_pipeline_with_cli_args(
-        extra,
-        [
-            "kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool",
-            "kubernetes_config.node_selector_val=deepswe-cpu-pool",
-        ],
-    )
-
-    self.assertEqual(
-        pipeline.config["kubernetes_config"],
-        {
-            "node_selector_key": "cloud.google.com/gke-nodepool",
-            "node_selector_val": "deepswe-cpu-pool",
-        },
-    )
-
-  def test_agentic_nullable_string_can_be_overridden_from_env(self):
-    extra = """
-training_mode: "agentic_grpo"
-data_module: "tunix.cli.recipes.deepscaler_data"
-apply_chat_template_to_dataset: false
-data_config:
-  train_data_path: "gs://fake/train.json"
-  eval_data_path: "gs://fake/eval.parquet"
-prompt_key: "prompts"
-reward_functions: []
-verl_compatible: false
-chat_parser_config:
-  type: "default"
-agent_class_path: null
-agent_kwargs: {}
-env_class_path: null
-env_kwargs: {}
-kubernetes_config: null
-agentic_grpo_config:
-  num_generations: 2
-  num_iterations: 1
-  beta: 0.0
-  epsilon: 0.2
-  epsilon_high: 0.28
-  system_prompt: ""
-  max_concurrency: 1
-  off_policy_steps: 0
-  max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
-vllm_config:
-  hbm_utilization: 0.4
-"""
-    with mock.patch.dict(
-        os.environ,
-        {"T_AGENT_CLASS_PATH": "examples.deepswe.swe_agent.SWEAgent"},
-    ):
-      pipeline = _make_pipeline_with_cli_args(extra, [])
-
-    self.assertEqual(
-        pipeline.config["agent_class_path"],
-        "examples.deepswe.swe_agent.SWEAgent",
-    )
-
-  def test_standard_grpo_dispatches_to_standard(self):
-    extra = """
-grpo_config:
+ppo_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -409,55 +253,15 @@ reward_functions: []
 verl_compatible: false
 """
     pipeline = _make_pipeline(extra)
-    self.assertEqual(pipeline.config.get("training_mode", "grpo"), "grpo")
+    self.assertEqual(pipeline.config.get("training_mode", "ppo"), "ppo")
     with mock.patch.object(pipeline, "_run") as mock_run:
       pipeline.run_trainer()
-      mock_run.assert_called_once_with(mode="grpo")
-
-  def test_agentic_grpo_dispatches_to_agentic(self):
-    extra = """
-training_mode: "agentic_grpo"
-data_module: "tunix.cli.recipes.deepscaler_data"
-apply_chat_template_to_dataset: false
-data_config:
-  train_data_path: "gs://fake/train.json"
-  eval_data_path: "gs://fake/eval.parquet"
-prompt_key: "prompts"
-reward_functions:
-  - "tunix/utils/math_rewards.py"
-verl_compatible: false
-chat_parser_config:
-  type: "default"
-agent_class_path: null
-agent_kwargs: {}
-env_class_path: null
-env_kwargs: {}
-kubernetes_config: null
-agentic_grpo_config:
-  num_generations: 2
-  num_iterations: 1
-  beta: 0.0
-  epsilon: 0.2
-  epsilon_high: 0.28
-  system_prompt: ""
-  max_concurrency: 1
-  off_policy_steps: 0
-  max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
-vllm_config:
-  hbm_utilization: 0.4
-"""
-    pipeline = _make_pipeline(extra)
-    self.assertEqual(pipeline.config["training_mode"], "agentic_grpo")
-    with mock.patch.object(pipeline, "_run") as mock_run:
-      pipeline.run_trainer()
-      mock_run.assert_called_once_with(mode="agentic_grpo")
+      mock_run.assert_called_once_with(mode="ppo")
 
   def test_unknown_mode_raises(self):
     # Build pipeline with standard config then manually set bad mode
     extra = """
-grpo_config:
+ppo_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -478,29 +282,24 @@ verl_compatible: false
       ):
         with mock.patch.object(
             pipeline,
-            "_create_chat_parser",
-            return_value=mock.sentinel.chat_parser,
+            "_load_raw_dataset",
+            return_value=(raw_dataset, None),
         ):
-          with mock.patch.object(
-              pipeline,
-              "_load_raw_dataset",
-              return_value=(raw_dataset, None),
-          ):
-            with mock.patch.object(pipeline, "compute_params"):
+          with mock.patch.object(pipeline, "compute_params"):
+            with mock.patch.object(
+                ppo_main.data_lib,
+                "post_init_dataset",
+                return_value=(mock.sentinel.dataset, None),
+            ):
               with mock.patch.object(
-                  grpo_main.data_lib,
-                  "post_init_dataset",
-                  return_value=(mock.sentinel.dataset, None),
+                  pipeline,
+                  "create_rl_cluster",
+                  return_value=mock.sentinel.rl_cluster,
               ):
-                with mock.patch.object(
-                    pipeline,
-                    "create_rl_cluster",
-                    return_value=mock.sentinel.rl_cluster,
+                with self.assertRaisesRegex(
+                    ValueError, "Unsupported training_mode 'bad_mode'"
                 ):
-                  with self.assertRaisesRegex(
-                      ValueError, "Unsupported training_mode 'bad_mode'"
-                  ):
-                    pipeline.run_trainer()
+                  pipeline.run_trainer()
 
 
 # ---------------------------------------------------------------------------
@@ -509,10 +308,9 @@ verl_compatible: false
 
 
 class RolloutConfigTest(absltest.TestCase):
-
-  def _make_agentic_pipeline(self, max_turns):
-    extra = f"""
-training_mode: "agentic_grpo"
+  def _make_pipeline(self, max_turns):
+      extra = f"""
+training_mode: "ppo"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -528,7 +326,7 @@ agent_kwargs: {{}}
 env_class_path: null
 env_kwargs: {{}}
 kubernetes_config: null
-agentic_grpo_config:
+ppo_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -543,22 +341,22 @@ sglang_jax_config:
 vllm_config:
   hbm_utilization: 0.4
 """
-    return _make_pipeline(extra)
+      return _make_pipeline(extra)
 
   def test_single_turn_kv_cache(self):
-    p = self._make_agentic_pipeline(max_turns=1)
+    p = self._make_pipeline(max_turns=1)
     cfg = p.create_rollout_config()
     # max_prompt=256, max_response=512, single-turn → +256
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
 
   def test_multi_turn_kv_cache(self):
-    p = self._make_agentic_pipeline(max_turns=20)
+    p = self._make_pipeline(max_turns=20)
     cfg = p.create_rollout_config()
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
 
-  def test_standard_grpo_kv_cache(self):
+  def test_standard_ppo_kv_cache(self):
     extra = """
-grpo_config:
+ppo_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -578,74 +376,11 @@ verl_compatible: false
 # GRPOConfig construction
 # ---------------------------------------------------------------------------
 
-
-class AgenticConfigTest(absltest.TestCase):
-
-  def _base_extra(self, agentic_overrides="", system_prompt='""'):
-    return f"""
-training_mode: "agentic_grpo"
-data_module: "tunix.cli.recipes.deepscaler_data"
-apply_chat_template_to_dataset: false
-data_config:
-  train_data_path: "gs://fake/train.json"
-  eval_data_path: "gs://fake/eval.parquet"
-prompt_key: "prompts"
-reward_functions: []
-verl_compatible: false
-chat_parser_config:
-  type: "default"
-agent_class_path: null
-agent_kwargs: {{}}
-env_class_path: null
-env_kwargs: {{}}
-kubernetes_config: null
-agentic_grpo_config:
-  num_generations: 2
-  num_iterations: 1
-  beta: 0.001
-  epsilon: 0.2
-  epsilon_high: 0.28
-  system_prompt: {system_prompt}
-  max_concurrency: 1
-  off_policy_steps: 0
-  {agentic_overrides}
-sglang_jax_config:
-  mem_fraction_static: 0.8
-vllm_config:
-  hbm_utilization: 0.4
-"""
-
-  def test_episode_timeout_computed(self):
-    p = _make_pipeline(
-        self._base_extra("max_turns: 20\n  per_turn_timeout_secs: 300")
-    )
-    algo = p._create_agentic_grpo_config()
-    self.assertEqual(algo.episode_timeout, 300 * 20)
-
-  def test_max_response_length_from_rollout(self):
-    p = _make_pipeline(self._base_extra("max_turns: 1"))
-    algo = p._create_agentic_grpo_config()
-    # rollout_config.total_generation_steps = 512
-    self.assertEqual(algo.max_response_length, 512)
-
-  def test_num_generations_passed_through(self):
-    p = _make_pipeline(self._base_extra("max_turns: 1"))
-    algo = p._create_agentic_grpo_config()
-    self.assertEqual(algo.num_generations, 2)
-
-  def test_cli_empty_system_prompt_stays_empty_string(self):
-    p = _make_pipeline_with_cli_args(
-        self._base_extra("max_turns: 1", system_prompt='"base"'),
-        ['agentic_grpo_config.system_prompt=""'],
-    )
-    self.assertEqual(p.config["agentic_grpo_config"]["system_prompt"], "")
-
-
 class SplitMeshConfigTest(absltest.TestCase):
 
   def test_split_mesh_uses_explicit_role_meshes(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "ppo"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -661,7 +396,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+ppo_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -680,6 +415,12 @@ vllm_config:
     actor_model_config = pipeline.config["actor_model_config"]
     if isinstance(actor_model_config, omegaconf.dictconfig.DictConfig):
       actor_model_config["mesh"] = {
+          "shape": "(2,1)",
+          "axis_names": "('fsdp','tp')",
+      }
+    critic_model_config = pipeline.config["critic_model_config"]
+    if isinstance(critic_model_config, omegaconf.dictconfig.DictConfig):
+      critic_model_config["mesh"] = {
           "shape": "(2,1)",
           "axis_names": "('fsdp','tp')",
       }
@@ -705,6 +446,8 @@ vllm_config:
         FakeDevice(1, (1, 0)),
         FakeDevice(2, (0, 1)),
         FakeDevice(3, (1, 1)),
+        FakeDevice(4, (0, 2)),
+        FakeDevice(5, (1, 2)),
     ]
 
     class FakeMesh:
@@ -714,9 +457,9 @@ vllm_config:
         self.axis_names = axis_names
         self.axis_types = axis_types
 
-    with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
+    with mock.patch.object(ppo_main.jax, "devices", return_value=fake_devices):
       with mock.patch.object(
-          grpo_main.jax.sharding, "Mesh", side_effect=FakeMesh
+          ppo_main.jax.sharding, "Mesh", side_effect=FakeMesh
       ):
         role_to_mesh = pipeline.create_role_to_mesh()
 
@@ -735,15 +478,30 @@ vllm_config:
         [
             device.id
             for device in (
-                role_to_mesh[rl_cluster_lib.Role.ROLLOUT]
+                role_to_mesh[rl_cluster_lib.Role.CRITIC]
                 .devices.flatten()
                 .tolist()
             )
         ],
         [2, 3],
     )
+    self.assertSequenceEqual(
+        [
+            device.id
+            for device in (
+                role_to_mesh[rl_cluster_lib.Role.ROLLOUT]
+                .devices.flatten()
+                .tolist()
+            )
+        ],
+        [4, 5],
+    )
     self.assertEqual(
         role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.shape,
+        (2, 1),
+    )
+    self.assertEqual(
+        role_to_mesh[rl_cluster_lib.Role.CRITIC].devices.shape,
         (2, 1),
     )
     self.assertEqual(
@@ -753,11 +511,12 @@ vllm_config:
     self.assertIs(
         role_to_mesh[rl_cluster_lib.Role.REFERENCE],
         role_to_mesh[rl_cluster_lib.Role.ACTOR],
+        role_to_mesh[rl_cluster_lib.Role.CRITIC]
     )
 
   def test_create_role_to_mesh_passes_configured_allocation_policy(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "ppo"
 verl_compatible: false
 chat_parser_config:
   type: "default"
@@ -766,7 +525,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+ppo_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -789,6 +548,13 @@ vllm_config:
           "axis_names": "('fsdp','tp')",
           "allocation_policy": "PERFORMANCE",
       }
+    critic_model_config = pipeline.config["critic_model_config"]
+    if isinstance(critic_model_config, omegaconf.dictconfig.DictConfig):
+      critic_model_config["mesh"] = {
+          "shape": "(2,1)",
+          "axis_names": "('fsdp','tp')",
+          "allocation_policy": "PERFORMANCE",
+      }
     pipeline.config["reference_model_config"] = {"same_mesh_as": "actor"}
     rollout_model_config = pipeline.config["rollout_model_config"]
     if isinstance(rollout_model_config, omegaconf.dictconfig.DictConfig):
@@ -798,25 +564,26 @@ vllm_config:
           "allocation_policy": "PERFORMANCE",
       }
 
-    fake_devices = list(range(4))
+    fake_devices = list(range(6))
 
-    with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
+    with mock.patch.object(ppo_main.jax, "devices", return_value=fake_devices):
       with mock.patch.object(
           base_rl_main.mesh_lib,
           "allocate_named_mesh_device_slices",
           return_value={
               "actor_model_config": [0, 1],
-              "rollout_model_config": [2, 3],
+              "critic_model_config": [2, 3],
+              "rollout_model_config": [4, 5],
           },
       ) as allocate_mock, mock.patch.object(
           base_rl_main.mesh_lib,
           "create_mesh",
-          side_effect=[object(), object()],
+          side_effect=[object(), object(), object()],
       ):
         pipeline.create_role_to_mesh()
 
     allocate_mock.assert_called_once_with(
-        [("actor_model_config", 2), ("rollout_model_config", 2)],
+        [("actor_model_config", 2), ("critic_model_config", 2), ("rollout_model_config", 2)],
         devices=fake_devices,
         allocation_policy="PERFORMANCE",
     )

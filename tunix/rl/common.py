@@ -365,6 +365,7 @@ def compute_per_token_logps(
   # precedence; otherwise we pass the per-position non-pad mask derived in
   # ``process_ids`` so flash-attention variants that lack a separate
   # padding-mask input still skip pad positions.
+
   try:
     sig = inspect.signature(model.__call__)
     has_segment_ids = ("segment_ids" in sig.parameters) or any(
@@ -539,9 +540,6 @@ def compute_chunked_logps(
     return per_token_logps
 
 
-
-
-
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_score(
     model,
@@ -568,12 +566,26 @@ def compute_score(
       segment_positions,
   )
 
+  try:
+    if hasattr(model, "transformer"):
+      target_call = model.transformer.__call__
+    else:
+      target_call = model.__call__
+
+    sig = inspect.signature(target_call)
+    has_segment_ids = ("segment_ids" in sig.parameters) or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+  except Exception as e:
+    has_segment_ids = False
+
   model_kwargs = {"positions": calculated_positions, "cache": None}
-  if segment_ids is not None:
+  if has_segment_ids and segment_ids is not None:
     model_kwargs["segment_ids"] = segment_ids
   else:
     model_kwargs["attention_mask"] = attn_mask
-    if input_seg_ids is not None:
+
+    if has_segment_ids and input_seg_ids is not None:
       model_kwargs["segment_ids"] = input_seg_ids
 
   out = model(prompt_completion_ids, **model_kwargs)
