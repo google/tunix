@@ -180,7 +180,7 @@ class ConversationAgentBase(LLMBaseAgent):
           )
       elif isinstance(prompts, str):
         self._messages.append(
-            {"role": "user", "content": observation["prompts"] or ""}
+            {"role": "user", "content": prompts or ""}
         )
       else:
         raise ValueError(f"we expect a string-typed prompts field in observation while prompts is {type(prompts)}")

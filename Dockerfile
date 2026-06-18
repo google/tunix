@@ -64,7 +64,7 @@ RUN apt-get update && apt-get install -y cmake && \
 WORKDIR /app/vllm_tpu_inference/tpu_inference
 RUN pip install --no-build-isolation -e .
 
-WORKDIR /app=
+WORKDIR /app
 RUN pip install --force-reinstall protobuf==6.33.5
 RUN pip install --upgrade flax
 

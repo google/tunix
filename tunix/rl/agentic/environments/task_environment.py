@@ -87,7 +87,7 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
     else:
       reward_val = 0.0
     return base_environment.EnvStepResult(
-        observation={},
+        observation=None,
         reward=reward_val,
         done=True,
         info={"response": action},

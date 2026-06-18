@@ -83,23 +83,23 @@ from tunix.perf.experimental.export import PerfMetricsExport
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
-arg_parser.add_argument("--batch_size", type=int, default=8)
-arg_parser.add_argument("--mini_batch_size", type=int, default=8)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
-arg_parser.add_argument("--num_batches", type=int, default=2)
+arg_parser.add_argument("--num_batches", type=int, default=600)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
-arg_parser.add_argument("--epsilon", type=float, default=0.003)
-arg_parser.add_argument("--epsilon_high", type=float, default=0.005)
+arg_parser.add_argument("--epsilon", type=float, default=0.2)
+arg_parser.add_argument("--epsilon_high", type=float, default=0.2)
 arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
-arg_parser.add_argument("--max_response_length", type=int, default=1024)
+arg_parser.add_argument("--max_response_length", type=int, default=8192)
 arg_parser.add_argument("--temperature", type=float, default=0.6)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=1)
+arg_parser.add_argument("--max_concurrency", type=int, default=512)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -112,11 +112,11 @@ arg_parser.add_argument(
 # advantages than "grpo" (z-score with /std), which interacts gently with very
 # tight PPO clip ratios. "grpo" is the registry default; switch via CLI.
 arg_parser.add_argument(
-    "--advantage_estimator", type=str, default="rloo",
+    "--advantage_estimator", type=str, default="grpo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
 arg_parser.add_argument(
-    "--loss_algo", type=str, default="gspo-token",
+    "--loss_algo", type=str, default="grpo",
     help="'grpo' (per-token PPO) or 'gspo-token' (sequence-mean IS).",
 )
 args, _ = arg_parser.parse_known_args()
@@ -128,8 +128,8 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(2, 1), ("fsdp", "tp")]
-TRAINER_MESH = [(2, 1), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -152,7 +152,7 @@ VLLM_MAX_NUM_SEQS = MAX_CONCURRENCY
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -168,8 +168,8 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
-ENABLE_FLASH_ATTENTION = False
-ENABLE_MIX_PRECISION = False
+ENABLE_FLASH_ATTENTION = True
+ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -266,7 +266,7 @@ file_open = fsspec.open
 DATA_PATH_PREFIX = "gs://tunix/data"
 CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/gspo/02")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/grpo/03")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 
@@ -321,10 +321,10 @@ def create_datasets(
     instruction = (
         "Let's think step by step, and put your final answer within \\boxed{}."
     )
-    prompt = f"{question} {instruction}"
+    question = f"{question} {instruction}"
 
     return {
-        "prompts": prompt,
+        "prompts": question,
         "question": question,
         "answer": answer,
     }
@@ -338,7 +338,7 @@ def create_datasets(
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 
-chat_parser = parser.DefaultChatTemplateParser(tokenizer, enable_thinking=False)
+chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 
 # %%
 train_dataset, test_dataset = create_datasets()
@@ -404,7 +404,7 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="gs://linchai-bucket-dev/tensorboard/grpo",
     project_name=os.getenv("WANDB_PROJECT", "tunix-deepscaler"),
     flush_every_n_steps=1,
-    backend_kwargs={"wandb": {"config": wandb_config}},
+    backend_kwargs={"wandb": {"config": wandb_config, "settings": wandb.Settings(console="off")}},
 )
 
 # %%
@@ -562,4 +562,4 @@ grpo_trainer = GRPOLearner(
 show_hbm_usage("after GRPOLearner creation")
 
 # %%
-grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+grpo_trainer.train(train_dataset, test_dataset)
