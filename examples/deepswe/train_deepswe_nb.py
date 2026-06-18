@@ -488,7 +488,11 @@ DO_MEM_PROFILING = args.do_mem_profiling
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = args.rollout_engine
-CKPT_DIR = args.ckpt_dir
+CKPT_DIR = (
+    args.ckpt_dir
+    if args.ckpt_dir and args.ckpt_dir.lower() not in ("none", "null")
+    else None
+)
 
 # Max number of sequences to be processed in parallel by vllm.
 VLLM_MAX_NUM_SEQS = (
@@ -706,9 +710,12 @@ dataset = dataset.map(
 # ==========================================
 # 9. Optimizer & Checkpointing
 # ==========================================
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
-)
+if CKPT_DIR:
+  checkpointing_options = ocp.CheckpointManagerOptions(
+      save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+  )
+else:
+  checkpointing_options = None
 
 wandb_config = vars(args)
 wandb_config.update({
@@ -724,6 +731,9 @@ wandb_config.update({
     "rollout_mesh_axes": [axis for axis, _ in rollout_dims],
     "train_mesh_shape": [dim for _, dim in train_dims],
     "train_mesh_axes": [axis for axis, _ in train_dims],
+    "checkpoint_root_directory": CKPT_DIR,
+    "save_interval_steps": SAVE_INTERVAL_STEPS,
+    "max_to_keep": MAX_TO_KEEP,
 })
 is_internal_env = env_utils.is_internal_env()
 print(
@@ -732,6 +742,9 @@ print(
     f"jax_process_index={jax.process_index()} "
     f"metrics_log_dir={args.metrics_logger_dir} "
     f"project_name=tunix-deepswe "
+    f"checkpoint_root_directory={CKPT_DIR} "
+    f"save_interval_steps={SAVE_INTERVAL_STEPS} "
+    f"max_to_keep={MAX_TO_KEEP} "
     f"default_backend={'CluBackend' if is_internal_env else 'TensorboardBackend+WandbBackend'} "
     f"wandb_backend_available={metrics_logger.WandbBackend is not None} "
     f"clu_backend_available={metrics_logger.CluBackend is not None}"
@@ -836,8 +849,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
-        checkpoint_root_directory=None,
-        checkpointing_options=None,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
         # optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
