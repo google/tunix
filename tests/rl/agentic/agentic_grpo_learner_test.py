@@ -1886,12 +1886,22 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       self.assertLen(logged_items, grpo_config.num_generations)
 
       for traj in logged_items:
+        self.assertEqual(
+            set(traj),
+            {
+                "global_step",
+                "group_id",
+                "pair_index",
+                "trajectory_reward",
+                "conversation_text",
+                "original_input",
+            },
+        )
         self.assertIn("conversation_text", traj)
         conversation = traj["conversation_text"]
         assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
         self.assertNotEmpty(assistant_msgs)
         self.assertIn(assistant_msgs[0]["content"], _MOCK_RESPONSES)
-        self.assertEqual(traj.get("policy_version"), 0)
 
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.

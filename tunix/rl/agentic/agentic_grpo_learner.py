@@ -369,6 +369,20 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.exception("Failed sampler-trainer logp diff debug: %s", e)
 
+  def _trajectory_log_item(
+      self, item: Any, expected_step: int | None
+  ) -> dict[str, Any]:
+    """Builds a lightweight trajectory record for CSV logging."""
+    traj = item.traj
+    return {
+        "global_step": expected_step,
+        "group_id": item.group_id,
+        "pair_index": item.pair_index,
+        "trajectory_reward": traj.get("trajectory_reward"),
+        "conversation_text": traj.get("conversation_text"),
+        "original_input": traj.get("original_input"),
+    }
+
   def _process_results(
       self,
       trajectories: List[Any],
@@ -420,7 +434,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     trajectories_to_log = []
 
     for item in trajectories:
-      trajectories_to_log.append(item.traj)
+      trajectories_to_log.append(self._trajectory_log_item(item, expected_step))
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(
           (
