@@ -247,7 +247,17 @@ def main():
   tokens = build_image_prompt_tokens(
       tokenizer, args.prompt, hf_cfg.image_token_id, num_soft, bos_id
   )
-  eos_ids = {tokenizer.eos_token_id} if tokenizer.eos_token_id else {1}
+  # Collect all EOS token IDs (Gemma4-IT uses both token 1 and token 106 as stop signals)
+  raw_eos = tokenizer.eos_token_id
+  if isinstance(raw_eos, (list, tuple)):
+    eos_ids = set(raw_eos)
+  elif raw_eos is not None:
+    eos_ids = {raw_eos}
+  else:
+    eos_ids = {1}
+  eot = tokenizer.convert_tokens_to_ids('<end_of_turn>')
+  if eot and eot != tokenizer.unk_token_id:
+    eos_ids.add(eot)
   print(f'Prompt: {args.prompt!r}  (total prompt length: {tokens.shape[1]} tokens)',
         flush=True)
 
