@@ -239,7 +239,26 @@ def main():
       param_dtype=jnp.bfloat16,
       dtype=jnp.bfloat16,
   )
-  text_cfg = model_lib.ModelConfig.gemma4_e2b()
+  # Auto-detect the Gemma4 text variant from the checkpoint, keyed by
+  # (num_hidden_layers, hidden_size), and pick the matching tunix preset.
+  tc = hf_cfg.text_config
+  variants = {
+      (35, 1536): ('E2B', model_lib.ModelConfig.gemma4_e2b),
+      (42, 2560): ('E4B', model_lib.ModelConfig.gemma4_e4b),
+      (60, 5376): ('31B', model_lib.ModelConfig.gemma4_31b),
+      (30, 2816): ('26B-A4B', model_lib.ModelConfig.gemma4_26b_a4b),
+  }
+  key = (tc.num_hidden_layers, tc.hidden_size)
+  if key not in variants:
+    print(f'ERROR: no tunix ModelConfig preset for this Gemma4 text variant '
+          f'(num_hidden_layers={key[0]}, hidden_size={key[1]}). '
+          f'Known variants: {[v[0] for v in variants.values()]}. '
+          f'(The 12B model has no preset yet.)', file=sys.stderr)
+    sys.exit(2)
+  variant_name, cfg_factory = variants[key]
+  print(f'Detected Gemma4 text variant: {variant_name}', flush=True)
+
+  text_cfg = cfg_factory()
   # Run computation in bfloat16 to match weights and KV cache dtype.
   text_cfg.dtype = jnp.bfloat16
   text_cfg.param_dtype = jnp.bfloat16
@@ -289,7 +308,7 @@ def main():
 
   # Enter the mesh context so the activation-level shard() constraints inside
   # the model forward resolve against our tensor-parallel mesh.
-  with mesh:
+  with jax.set_mesh(mesh):
     out_ids = greedy_generate(
         model, tokens, px, pos_ids,
         max_new_tokens=args.max_new_tokens,
