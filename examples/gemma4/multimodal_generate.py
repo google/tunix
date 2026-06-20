@@ -184,7 +184,27 @@ def main():
   ap.add_argument('--image', required=True, help='Image file path')
   ap.add_argument('--prompt', default='Describe this image.')
   ap.add_argument('--max-new-tokens', type=int, default=64)
+  ap.add_argument('--tp-size', type=int, default=1,
+                  help='Tensor-parallel degree (default 1 = single device). '
+                       'TP shards each weight across GPUs, but for a model that '
+                       'fits on one GPU at batch=1 it is SLOWER than single-GPU '
+                       '(per-token all-reduces dominate): measured 46 tok/s at '
+                       'TP=4 vs 136 tok/s at TP=1 for Gemma4 2B on A100. Only '
+                       'raise this for models too large for one device.')
   args = ap.parse_args()
+
+  # ---- Tensor-parallel mesh ------------------------------------------------
+  # Weights carry per-array sharding metadata (ShardingConfig); the safetensors
+  # loader reads it via nnx.get_named_sharding(mesh) and device_puts each tensor
+  # onto its target shards as it loads (no single-GPU bottleneck). XLA's SPMD
+  # partitioner then inserts the cross-device collectives automatically.
+  tp = args.tp_size if args.tp_size > 0 else jax.device_count()
+  mesh = jax.make_mesh(
+      (1, tp), ('fsdp', 'tp'),
+      axis_types=(jax.sharding.AxisType.Auto,) * 2,
+  )
+  print(f'Mesh: {tp}-way tensor parallel over {jax.device_count()} device(s)',
+        flush=True)
 
   try:
     from PIL import Image
@@ -223,12 +243,18 @@ def main():
   # Run computation in bfloat16 to match weights and KV cache dtype.
   text_cfg.dtype = jnp.bfloat16
   text_cfg.param_dtype = jnp.bfloat16
+  # Inference (Megatron-style) sharding: residual stream replicated, inner
+  # attention/FFN dims sharded along 'tp'. is_sampling=True drops the FSDP
+  # axis used in training.
+  text_cfg.shd_config = model_lib.ShardingConfig.get_default_sharding(
+      is_sampling=True
+  )
 
   print('Loading checkpoint (text + vision)...', flush=True)
   t0 = time.time()
   model = mm_lib.create_multimodal_from_safe_tensors(
       args.ckpt, text_cfg, vision_cfg,
-      image_token_id=hf_cfg.image_token_id, dtype=jnp.bfloat16,
+      image_token_id=hf_cfg.image_token_id, mesh=mesh, dtype=jnp.bfloat16,
   )
   print(f'  checkpoint loaded in {time.time() - t0:.1f}s', flush=True)
   tokenizer = AutoTokenizer.from_pretrained(args.ckpt)
@@ -261,12 +287,15 @@ def main():
   print(f'Prompt: {args.prompt!r}  (total prompt length: {tokens.shape[1]} tokens)',
         flush=True)
 
-  out_ids = greedy_generate(
-      model, tokens, px, pos_ids,
-      max_new_tokens=args.max_new_tokens,
-      eos_ids=eos_ids,
-      tokenizer=tokenizer,
-  )
+  # Enter the mesh context so the activation-level shard() constraints inside
+  # the model forward resolve against our tensor-parallel mesh.
+  with mesh:
+    out_ids = greedy_generate(
+        model, tokens, px, pos_ids,
+        max_new_tokens=args.max_new_tokens,
+        eos_ids=eos_ids,
+        tokenizer=tokenizer,
+    )
 
   print('\n=== Caption ===')
   print(tokenizer.decode(out_ids, skip_special_tokens=True))
