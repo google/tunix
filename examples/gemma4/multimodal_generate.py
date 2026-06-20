@@ -49,7 +49,8 @@ def _prefill(model, tokens, pixel_values, pixel_position_ids, max_new_tokens):
   Returns (next_token_ids (B,), kv_cache).
   """
   B, L = tokens.shape
-  cache = model.text_model.init_cache(B, L + max_new_tokens, jnp.bfloat16)
+  cache_dtype = model.text_model.config.dtype  # match computation dtype
+  cache = model.text_model.init_cache(B, L + max_new_tokens, cache_dtype)
   attn_mask = model.get_attention_mask(tokens)  # (B, L, L) causal
   logits, new_cache = model(
       tokens, pixel_values, pixel_position_ids,
@@ -196,6 +197,9 @@ def main():
       dtype=jnp.bfloat16,
   )
   text_cfg = model_lib.ModelConfig.gemma4_e2b()
+  # Run computation in bfloat16 to match weights and KV cache dtype.
+  text_cfg.dtype = jnp.bfloat16
+  text_cfg.param_dtype = jnp.bfloat16
 
   print('Loading checkpoint (text + vision)...', flush=True)
   t0 = time.time()
