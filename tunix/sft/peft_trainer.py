@@ -31,12 +31,12 @@ import jax.sharding as shd
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import checkpoint_manager
+from tunix.sft import checkpoint_options
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger as sft_metrics_logger
@@ -63,7 +63,10 @@ class TrainingConfig:
   # contains the model params and the train data iterator state.
   checkpoint_root_directory: str | None = None
   # Checkpoint configurations. If None, the default options will be used.
-  checkpointing_options: ocp.CheckpointManagerOptions | None = None
+  checkpointing_options: (
+      checkpoint_options.CheckpointingOptions
+      | None
+  ) = None
 
   # Configs for the metrics logger.
   metrics_logging_options: MetricsLoggerOptions | None = None

@@ -109,6 +109,26 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
   return np.exp(np.mean(np.log(x)))
 
 
+# Orbax publishes per-array checkpoint telemetry on the jax.monitoring scalar
+# bus (e.g. "/jax/orbax/write/sharded_array_gb") — one event per array, fired
+# synchronously on the serialize path. Forwarding that flood into a blocking
+# backend (TensorBoard's bounded multiprocessing queue) stalls the save under
+# Orbax v1's async checkpointer. We only want Tunix's own metrics (named
+# "<prefix>/<mode>/<name>"), so drop anything under these namespaces.
+_EXCLUDED_SCALAR_PREFIXES: tuple[str, ...] = ("/jax/orbax/",)
+
+
+def _filtering_listener(log_scalar):
+  """Wrap a backend's `log_scalar` so library (non-Tunix) scalars are ignored."""
+
+  def _listener(event: str, value, **kwargs):
+    if event.startswith(_EXCLUDED_SCALAR_PREFIXES):
+      return
+    log_scalar(event, value, **kwargs)
+
+  return _listener
+
+
 class MetricsLogger:
   """Simple Metrics logger.
 
@@ -126,9 +146,12 @@ class MetricsLogger:
         if metrics_logger_options
         else []
     )
+    self._scalar_listeners = []
     if metrics_logger_options and jax.process_index() == 0:
       for backend in self._backends:
-        jax.monitoring.register_scalar_listener(backend.log_scalar)
+        listener = _filtering_listener(backend.log_scalar)
+        jax.monitoring.register_scalar_listener(listener)
+        self._scalar_listeners.append(listener)
 
   def log(
       self,
@@ -186,8 +209,14 @@ class MetricsLogger:
     """Closes all registered logging backends."""
     for backend in self._backends:
       backend.close()
-    try:
-      jax.monitoring.clear_event_listeners()
-    except Exception:  # pylint: disable=broad-exception-caught
-      # We didn't register the scalar listener, so this is expected.
-      pass
+    # Unregister exactly the listeners we added. NOTE: jax.monitoring.
+    # clear_event_listeners() does NOT clear scalar listeners — its `global`
+    # statement omits _scalar_listeners, so `_scalar_listeners = []` inside it
+    # just makes a discarded local. The old code therefore *leaked* this backend
+    # onto the process-global bus across MetricsLogger instances.
+    for listener in self._scalar_listeners:
+      try:
+        jax.monitoring.unregister_scalar_listener(listener)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    self._scalar_listeners = []

@@ -38,8 +38,11 @@ class MetricLoggerTest(absltest.TestCase):
           )
       )
 
+  @mock.patch.object(jax.monitoring, "unregister_scalar_listener")
   @mock.patch.object(jax.monitoring, "register_scalar_listener")
-  def test_custom_backends_override_defaults(self, mock_register):
+  def test_custom_backends_override_defaults(
+      self, mock_register, mock_unregister
+  ):
     """Tests that providing a 'backends' list overrides the defaults."""
     mock_backend_instance = mock.Mock(spec=metrax_logging.LoggingBackend)
     mock_factory = mock.Mock(return_value=mock_backend_instance)
@@ -54,10 +57,23 @@ class MetricLoggerTest(absltest.TestCase):
     mock_factory.assert_called_once()
     self.assertIn(mock_backend_instance, logger._backends)
     self.assertLen(logger._backends, 1)
-    mock_register.assert_called_once_with(mock_backend_instance.log_scalar)
+    self.assertLen(logger._scalar_listeners, 1)
+    listener = logger._scalar_listeners[0]
+    mock_register.assert_called_once_with(listener)
+
+    # Test filtering behavior
+    listener("/jax/orbax/write/sharded_array_gb", 123, step=1)
+    mock_backend_instance.log_scalar.assert_not_called()
+
+    listener("train/train/loss", 0.1, step=1)
+    mock_backend_instance.log_scalar.assert_called_once_with(
+        "train/train/loss", 0.1, step=1
+    )
 
     logger.close()
     mock_backend_instance.close.assert_called_once()
+    mock_unregister.assert_called_once_with(listener)
+    self.assertEmpty(logger._scalar_listeners)
 
   @mock.patch.object(jax.monitoring, "register_scalar_listener")
   def test_defaults_are_used_when_no_backends_provided(self, mock_register):
@@ -92,7 +108,7 @@ class MetricLoggerTest(absltest.TestCase):
     logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
     self.assertIn(mock_tensorboard_instance, logger._backends)
     self.assertLen(logger._backends, 1)
-    mock_register.assert_called_once_with(mock_tensorboard_instance.log_scalar)
+    mock_register.assert_called_once_with(logger._scalar_listeners[0])
 
     logger.close()
     mock_tensorboard_instance.close.assert_called_once()
