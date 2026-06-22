@@ -44,6 +44,7 @@ dependencies = [
   "tqdm",
   "transformers!=4.57.2", # Issue: https://github.com/google/tunix/pull/795
   "tenacity",
+  "wandb",
 ]
 
 [project.optional-dependencies]
