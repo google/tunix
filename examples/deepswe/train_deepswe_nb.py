@@ -188,6 +188,16 @@ parser.add_argument(
         f" {VALID_STATUS_NAMES}. Defaults to None."
     ),
 )
+parser.add_argument(
+    "--group_clip_filter_threshold",
+    type=float,
+    default=0.25,
+    help=(
+        "Skip and replace a rollout group before training when the fraction of"
+        " clipped/masked trajectories in that group is greater than this"
+        " threshold. Set to -1 to disable. Default is 0.25."
+    ),
+)
 
 parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-scale"
@@ -514,6 +524,12 @@ FILTER_STATUSES = (
     {agent_types.TrajectoryStatus[name] for name in args.filter_statuses}
     if args.filter_statuses is not None
     else None
+)
+GROUP_CLIP_FILTER_THRESHOLD = (
+    None
+    if args.group_clip_filter_threshold is None
+    or args.group_clip_filter_threshold < 0
+    else args.group_clip_filter_threshold
 )
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
@@ -883,6 +899,7 @@ config_kwargs = {
     "episode_timeout": EPISODE_TIMEOUT_SECS,
     "overlong_filter": OVERLONG_FILTER,
     "filter_statuses": FILTER_STATUSES,
+    "group_clip_filter_threshold": GROUP_CLIP_FILTER_THRESHOLD,
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
