@@ -424,13 +424,14 @@ class TrajectoryCollectEngine:
     if self.tokenizer is not None and self.chat_parser is not None:
       # Get the current messages (usually System + User)
       init_messages = self.agent.chat_completions
-      prompt_tokens, _ = utils.tokenize_and_generate_masks(
-          init_messages,
-          tokenizer=self.tokenizer,
-          parser=self.chat_parser,
-          contains_first_msg=True,
-          contains_generation_msg=True,
-      )
+      if init_messages:
+        prompt_tokens, _ = utils.tokenize_and_generate_masks(
+            init_messages,
+            tokenizer=self.tokenizer,
+            parser=self.chat_parser,
+            contains_first_msg=True,
+            contains_generation_msg=True,
+        )
       self.agent.trajectory.prompt_tokens = prompt_tokens
 
     self._start_ts = time.perf_counter()

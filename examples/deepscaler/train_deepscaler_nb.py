@@ -7,6 +7,12 @@ import math
 import os
 import sys
 
+#TODO(linchai):
+# exp1: with parser but gspo-token and rloo instead of grpo
+# exp2: no parser, directly parse from rl_cluster
+# exp3: increase batch size to 128
+
+
 from absl import logging as absl_logging
 # from etils import ecolab
 from flax import nnx
@@ -87,17 +93,17 @@ arg_parser.add_argument("--batch_size", type=int, default=64)
 arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
-arg_parser.add_argument("--b2", type=float, default=0.99)
+arg_parser.add_argument("--b2", type=float, default=0.95)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=600)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
-arg_parser.add_argument("--epsilon", type=float, default=0.2)
-arg_parser.add_argument("--epsilon_high", type=float, default=0.2)
+arg_parser.add_argument("--epsilon", type=float, default=0.003)
+arg_parser.add_argument("--epsilon_high", type=float, default=0.005)
 arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
-arg_parser.add_argument("--max_response_length", type=int, default=8192)
+arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.6)
-arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=512)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
@@ -112,11 +118,11 @@ arg_parser.add_argument(
 # advantages than "grpo" (z-score with /std), which interacts gently with very
 # tight PPO clip ratios. "grpo" is the registry default; switch via CLI.
 arg_parser.add_argument(
-    "--advantage_estimator", type=str, default="grpo",
+    "--advantage_estimator", type=str, default="rloo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
 arg_parser.add_argument(
-    "--loss_algo", type=str, default="grpo",
+    "--loss_algo", type=str, default="gspo-token",
     help="'grpo' (per-token PPO) or 'gspo-token' (sequence-mean IS).",
 )
 args, _ = arg_parser.parse_known_args()
@@ -128,8 +134,8 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
+ROLLOUT_MESH = [(2, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(2, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -440,7 +446,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.4,
+    "rollout_vllm_hbm_utilization": 0.3,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": False,
@@ -454,9 +460,9 @@ vllm_rollout_dict = {
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
     },
-    "rollout_vllm_sampling_kwargs": {
-        "skip_special_tokens": False,
-    },
+    # "rollout_vllm_sampling_kwargs": {
+        # "skip_special_tokens": False,
+    # },
 }
 rollout_engine_config = base_rollout.RolloutConfig(
     **base_rollout_dict, **vllm_rollout_dict
