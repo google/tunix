@@ -121,6 +121,16 @@ class RolloutConfig:
   # Whether to run rollout in vLLM server mode or batch inference mode.
   rollout_vllm_server_mode: bool = False
 
+  # Only drain the vLLM server-mode submission queue once at least this many
+  # requests have accumulated. 0 disables the threshold.
+  rollout_vllm_server_mode_submission_threshold: int = 0
+
+  # Flush the vLLM server-mode submission queue after this many seconds have
+  # elapsed since the first request of the current window arrived, even if the
+  # submission threshold has not been reached. This bounds latency when fewer
+  # than the threshold accumulate. 0 disables the timeout.
+  rollout_vllm_server_mode_submission_timeout_s: float = 0.0
+
   # Model version for vLLM rollout engine.
   rollout_vllm_model_version: str = ""
 

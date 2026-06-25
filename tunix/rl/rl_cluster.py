@@ -549,7 +549,7 @@ class RLCluster:
       critic_config = copy.deepcopy(self.cluster_config.training_config)
       critic_config.metrics_prefix = "critic"
       critic_config.pbar_description = "Critic Training"
-      if critic_config.checkpoint_root_directory is not None:
+      if critic_config.checkpoint_root_directory:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
         )
@@ -573,7 +573,7 @@ class RLCluster:
     actor_config = copy.deepcopy(self.cluster_config.training_config)
     actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
-    if actor_config.checkpoint_root_directory is not None:
+    if actor_config.checkpoint_root_directory:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )

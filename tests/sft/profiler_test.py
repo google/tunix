@@ -14,13 +14,13 @@
 
 """Unit tests for `profiler`."""
 
+import tempfile
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from tunix.sft import profiler
-import tempfile
 
 
 class ProfilerTest(parameterized.TestCase):
@@ -303,6 +303,91 @@ class ProfilerTest(parameterized.TestCase):
           max_step=max_step,
           profiler_options=profiler_options,
       )
+
+  def test_profiler_with_max_num_hosts_supported(self):
+    def dummy_start_trace(
+        log_dir, *, profiler_options=None, max_num_hosts=None
+    ):
+      del log_dir, profiler_options, max_num_hosts
+
+    mock_start_trace = mock.create_autospec(dummy_start_trace)
+
+    with mock.patch.object(jax.profiler, 'start_trace', mock_start_trace):
+      profiler_options = profiler.ProfilerOptions(
+          log_dir=self.log_dir,
+          skip_first_n_steps=10,
+          profiler_steps=5,
+          max_num_hosts=5,
+      )
+      p = profiler.Profiler(
+          initial_step=0, max_step=100, profiler_options=profiler_options
+      )
+      p.maybe_activate(10)
+
+      mock_start_trace.assert_called_once_with(
+          log_dir=self.log_dir,
+          profiler_options=mock.ANY,
+          max_num_hosts=5,
+      )
+
+  @mock.patch.object(profiler.logging, 'warning')
+  def test_profiler_with_max_num_hosts_unsupported(self, mock_warning):
+    def dummy_start_trace(log_dir, *, profiler_options=None):
+      del log_dir, profiler_options
+
+    mock_start_trace = mock.create_autospec(dummy_start_trace)
+
+    with mock.patch.object(jax.profiler, 'start_trace', mock_start_trace):
+      profiler_options = profiler.ProfilerOptions(
+          log_dir=self.log_dir,
+          skip_first_n_steps=10,
+          profiler_steps=5,
+          max_num_hosts=5,
+      )
+      p = profiler.Profiler(
+          initial_step=0, max_step=100, profiler_options=profiler_options
+      )
+      p.maybe_activate(10)
+
+      mock_start_trace.assert_called_once_with(
+          log_dir=self.log_dir,
+          profiler_options=mock.ANY,
+      )
+      mock_warning.assert_called_once_with(
+          'max_num_hosts is specified in ProfilerOptions but '
+          'jax.profiler.start_trace does not accept it. This is '
+          'only supported for Pathways workloads using pathwaysutils.'
+      )
+
+  @mock.patch.object(profiler.inspect, 'signature')
+  @mock.patch.object(jax.profiler, 'start_trace')
+  @mock.patch.object(profiler.logging, 'warning')
+  def test_profiler_with_signature_inspection_failure(
+      self, mock_warning, mock_start_trace, mock_signature
+  ):
+    mock_signature.side_effect = ValueError('Incompatible object')
+    profiler_options = profiler.ProfilerOptions(
+        log_dir=self.log_dir,
+        skip_first_n_steps=10,
+        profiler_steps=5,
+        max_num_hosts=5,
+    )
+    p = profiler.Profiler(
+        initial_step=0, max_step=100, profiler_options=profiler_options
+    )
+    p.maybe_activate(10)
+
+    # It should fall back to calling start_trace without max_num_hosts.
+    mock_start_trace.assert_called_once_with(
+        log_dir=self.log_dir,
+        profiler_options=mock.ANY,
+    )
+    # It should log a warning about the failed inspection.
+    mock_warning.assert_called_once_with(
+        'Failed to inspect signature of jax.profiler.start_trace: %s. '
+        'Not passing max_num_hosts.',
+        mock_signature.side_effect,
+    )
 
 
 if __name__ == '__main__':

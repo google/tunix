@@ -237,6 +237,39 @@ def map_from_upstream_checkpoint(params: Mapping[str, Any]) -> dict[str, Any]:
     if parts and parts[0] == 'transformer':
       parts = parts[1:]
 
+    if parts and parts[0] == 'vision_encoder':
+      param_name = parts[-1]
+      module_path = parts[:-1]
+
+      # Entry level:
+      if module_path == ['vision_encoder', 'entry', 'input_projection']:
+        new_params[('vision_encoder', 'entry', 'input_projection', 'w')] = value
+        continue
+      if module_path == ['vision_encoder', 'entry'] and param_name == 'pos_emb':
+        new_params[('vision_encoder', 'entry', 'pos_emb')] = value
+        continue
+
+      # Stacked layers under transformer/stacked_layers:
+      if 'stacked_layers' in module_path:
+        num_layers = value.shape[0]
+        block_idx = module_path.index('stacked_layers')
+        sub_components = parts[block_idx + 2 : -1] # skips 'stacked_layers' and 'block'
+
+        # Norms normalization
+        if sub_components and sub_components[-1] in ('query_norm', '_query_norm'):
+          sub_components = sub_components[:-1] + ['_query_norm']
+        elif sub_components and sub_components[-1] in ('key_norm', '_key_norm'):
+          sub_components = sub_components[:-1] + ['_key_norm']
+
+        for i in range(num_layers):
+          new_params[('vision_encoder', 'layers', i, *sub_components, param_name)] = value[i]
+        continue
+
+      # Standardize:
+      if module_path == ['vision_encoder', 'standardize']:
+        new_params[('vision_encoder', 'standardize', param_name)] = value
+        continue
+
     if not parts:
       logging.warning('Skipping empty key path: %r', key_path)
       continue

@@ -299,13 +299,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ),  # 1.0 + 2.0 + 0.5 (final reward from final_reward_fn)
         'env_time': {
             'reset_latency': 0.0,
-            'reset_cpu_time': 0.0,
             'step_latency': 0.0,
-            'step_cpu_time': 0.0,
         },
         'reward_time': {
             'reward_latency': 0.0,
-            'reward_cpu_time': 0.0,
         },
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1]),
         'policy_version': None,

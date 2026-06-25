@@ -25,7 +25,7 @@ from concurrent.futures import Future
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Union
 
 from absl import logging
 from vllm import envs
@@ -47,6 +47,7 @@ envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
 
 StreamCallback = Callable[[Union[RequestOutput, PoolingRequestOutput]], None]
 RequestFuture = Future[Union[RequestOutput, PoolingRequestOutput]]
+QueuedRequest = dict[str, Any]
 
 
 class VLLMInProcessDriver:
@@ -56,14 +57,23 @@ class VLLMInProcessDriver:
       self,
       llm_engine: LLMEngine,
       *,
-      poll_interval_s: float = 0.005,
+      poll_interval_s: float = 0.004,
+      submission_threshold: int = 0,
+      submission_timeout_s: float = 0.0,
       log_stats_interval_s: float = 10.0,
       stream_callback: Optional[StreamCallback] = None,
       auto_start: bool = True,
   ) -> None:
     self._llm_engine = llm_engine
     self._poll_interval_s = poll_interval_s
+    self._submission_threshold = submission_threshold
+    self._submission_timeout_s = submission_timeout_s
     self._stream_callback = stream_callback
+
+    if self._submission_threshold < 0:
+      raise ValueError("submission_threshold must be >= 0.")
+    if self._submission_timeout_s < 0:
+      raise ValueError("submission_timeout_s must be >= 0.")
 
     self._engine_lock = threading.Lock()
     self._work_event = threading.Event()
@@ -73,6 +83,11 @@ class VLLMInProcessDriver:
     self._log_stats_interval_s: float = log_stats_interval_s
 
     self._pending: Dict[str, RequestFuture] = {}
+    self._submission_queue: list[QueuedRequest] = []
+    # Monotonic (``time.perf_counter``) timestamp of the first request in the
+    # current submission window; used to flush a partial batch once
+    # ``submission_timeout_s`` elapses. Reset to ``None`` on each drain.
+    self._submission_window_start: Optional[float] = None
     self._last_error: Optional[Exception] = None
 
     if auto_start:
@@ -85,6 +100,8 @@ class VLLMInProcessDriver:
       *,
       usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
       poll_interval_s: float = 0.005,
+      submission_threshold: int = 0,
+      submission_timeout_s: float = 0.0,
       log_stats_interval_s: float = 1.0,
       stream_callback: Optional[StreamCallback] = None,
       auto_start: bool = True,
@@ -101,9 +118,30 @@ class VLLMInProcessDriver:
     return cls(
         llm_engine,
         poll_interval_s=poll_interval_s,
+        submission_threshold=submission_threshold,
+        submission_timeout_s=submission_timeout_s,
         stream_callback=stream_callback,
         auto_start=auto_start,
     )
+
+  def _submission_queue_ready_locked(self) -> bool:
+    if not self._submission_queue:
+      return False
+    if self._submission_threshold == 0:
+      return True
+    if len(self._submission_queue) >= self._submission_threshold:
+      return True
+    # Flush a partial batch if the submission timeout has elapsed since the
+    # first request of the current window arrived. Without this, fewer than
+    # ``submission_threshold`` requests would stall in the queue indefinitely.
+    if (
+        self._submission_timeout_s > 0
+        and self._submission_window_start is not None
+        and time.perf_counter() - self._submission_window_start
+        >= self._submission_timeout_s
+    ):
+      return True
+    return False
 
   def submit_request(
       self,
@@ -117,16 +155,8 @@ class VLLMInProcessDriver:
       trace_headers: Optional[dict[str, str]] = None,
       priority: int = 0,
   ) -> RequestFuture:
-    future: RequestFuture = Future()
     with self._engine_lock:
-      if request_id in self._pending:
-        raise ValueError(f"Request {request_id} already pending.")
-      self._pending[request_id] = future
-      logging.debug(
-          f"VLLMInProcessDriver submitting request {request_id} with prompt"
-          f" {prompt} and sampling params {params} to vLLM engine."
-      )
-      self._llm_engine.add_request(
+      future = self._queue_request_locked(
           request_id=request_id,
           prompt=prompt,
           params=params,
@@ -138,6 +168,92 @@ class VLLMInProcessDriver:
       )
       self._work_event.set()
     return future
+
+  def submit_requests(
+      self,
+      requests: Sequence[QueuedRequest],
+  ) -> list[RequestFuture]:
+    futures: list[RequestFuture] = []
+    with self._engine_lock:
+      for request in requests:
+        futures.append(
+            self._queue_request_locked(
+                request_id=request["request_id"],
+                prompt=request["prompt"],
+                params=request["params"],
+                arrival_time=request.get("arrival_time"),
+                lora_request=request.get("lora_request"),
+                tokenization_kwargs=request.get("tokenization_kwargs"),
+                trace_headers=request.get("trace_headers"),
+                priority=request.get("priority", 0),
+            )
+        )
+
+      if futures:
+        self._work_event.set()
+    return futures
+
+  def _queue_request_locked(
+      self,
+      *,
+      request_id: str,
+      prompt: Union[EngineCoreRequest, PromptType],
+      params: Union[SamplingParams, PoolingParams],
+      arrival_time: Optional[float] = None,
+      lora_request: Optional[LoRARequest] = None,
+      tokenization_kwargs: Optional[dict[str, Any]] = None,
+      trace_headers: Optional[dict[str, str]] = None,
+      priority: int = 0,
+  ) -> RequestFuture:
+    if request_id in self._pending:
+      raise ValueError(f"Request {request_id} already pending.")
+
+    future: RequestFuture = Future()
+    self._pending[request_id] = future
+    if self._submission_window_start is None:
+      # Start the flush-timeout clock from the first request of this window.
+      self._submission_window_start = time.perf_counter()
+    self._submission_queue.append({
+        "request_id": request_id,
+        "prompt": prompt,
+        "params": params,
+        "arrival_time": arrival_time,
+        "lora_request": lora_request,
+        "tokenization_kwargs": tokenization_kwargs,
+        "trace_headers": trace_headers,
+        "priority": priority,
+    })
+    logging.debug(
+        "VLLMInProcessDriver queued request %s for loop-side submission.",
+        request_id,
+    )
+    return future
+
+  def _drain_submission_queue_locked(self) -> None:
+    if not self._submission_queue_ready_locked():
+      return
+
+    queued_requests = self._submission_queue
+    self._submission_queue = []
+    self._submission_window_start = None
+    for request in queued_requests:
+      future = self._pending.get(request["request_id"])
+      if future is None or future.cancelled():
+        continue
+      logging.debug(
+          "VLLMInProcessDriver submitting queued request %s to vLLM engine.",
+          request["request_id"],
+      )
+      self._llm_engine.add_request(
+          request_id=request["request_id"],
+          prompt=request["prompt"],
+          params=request["params"],
+          arrival_time=request.get("arrival_time"),
+          lora_request=request.get("lora_request"),
+          tokenization_kwargs=request.get("tokenization_kwargs"),
+          trace_headers=request.get("trace_headers"),
+          priority=request.get("priority", 0),
+      )
 
   def start(self) -> None:
     if self._loop_thread and self._loop_thread.is_alive():
@@ -218,14 +334,17 @@ class VLLMInProcessDriver:
       self._record_error(exc)
 
   def _wait_for_work(self) -> bool:
-    with self._engine_lock:
-      has_work = self._llm_engine.has_unfinished_requests()
-      if has_work:
-        return True
-      self._work_event.clear()
+    while not self._stop_event.is_set():
+      with self._engine_lock:
+        has_work = self._submission_queue_ready_locked()
+        if not has_work:
+          has_work = self._llm_engine.has_unfinished_requests()
+        if has_work:
+          return True
+        self._work_event.clear()
 
-    self._work_event.wait(timeout=self._poll_interval_s)
-    return not self._stop_event.is_set()
+      self._work_event.wait(timeout=self._poll_interval_s)
+    return False
 
   def _step_engine(
       self,
@@ -236,6 +355,7 @@ class VLLMInProcessDriver:
         100,
     )
     with self._engine_lock:
+      self._drain_submission_queue_locked()
       logging.log_every_n(
           logging.DEBUG,
           "VLLMInProcessDriver has"

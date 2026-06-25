@@ -726,6 +726,68 @@ class SamplerTest(parameterized.TestCase):
       self.assertEqual(l_opt.shape, l_unopt.shape)
       np.testing.assert_allclose(l_opt, l_unopt, atol=1e-5, rtol=1e-5)
 
+  def test_sampler_gemma4_multimodal(self):
+    vocab = tc.MockVocab(
+        mapping_text_to_id={
+            '<pad>': 0,
+            '<s>': 1,
+            '</s>': 2,
+            'Describe:': 3,
+            '<img>': 258880,
+            '<soi>': 258881,
+            '<eoi>': 258882,
+        }
+    )
+
+    config = gemma4_model_lib.ModelConfig.gemma4_e2b()
+    config = dataclasses.replace(
+        config,
+        num_layers=1,
+        num_heads=2,
+        head_dim=16,
+        embed_dim=32,
+        hidden_dim=64,
+        num_embed=vocab.GetPieceSize(),
+        frac_shared_layers=0.0,
+    )
+    config.vision_encoder = gemma4_model_lib.vision.VisionEncoderConfig(
+        d_model=16,
+        num_layers=1,
+        num_heads=2,
+        ffw_hidden=32,
+        patch_size=4,
+        output_length=5,
+    )
+
+    rngs = nnx.Rngs(42)
+    transformer = gemma4_model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=1,
+            num_kv_heads=1,
+            head_dim=16,
+        ),
+    )
+
+    # Let prompt contain image placeholder tag
+    prompt = "Describe: <img>"
+    dummy_image = np.ones((16, 16, 3), dtype=np.uint8)
+
+    result = sampler(
+        [prompt],
+        images=[dummy_image],
+        max_prompt_length=32,
+        max_generation_steps=5,
+    )
+
+    self.assertIsNotNone(result)
+    self.assertIsNotNone(result.tokens)
+    self.assertGreater(len(result.tokens[0]), 0)
+
 
 if __name__ == '__main__':
   absltest.main()

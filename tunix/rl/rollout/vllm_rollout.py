@@ -44,6 +44,12 @@ class VllmRollout(base_rollout.BaseRollout):
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
             server_mode=rollout_config.rollout_vllm_server_mode,
+            server_mode_submission_threshold=(
+              rollout_config.rollout_vllm_server_mode_submission_threshold
+            ),
+            server_mode_submission_timeout_s=(
+              rollout_config.rollout_vllm_server_mode_submission_timeout_s
+            ),
             mapping_config=mapping_config,
             return_logprobs=rollout_config.return_logprobs,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,

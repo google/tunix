@@ -36,7 +36,7 @@ from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
-from tunix.processors import image_processor as image_processor_lib
+from tunix.processors import image_processor
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -195,7 +195,7 @@ def _init_cache(
       f'layer_{i}': {
           'k': jnp.zeros(shape, dtype=dtype),
           'v': jnp.zeros(shape, dtype=dtype),
-          'end_index': jnp.zeros((batch_size,), dtype=jnp.int32)
+          'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
       }
       for i in range(n_layers)
   }
@@ -209,7 +209,7 @@ class Sampler(base_sampler.BaseSampler):
       transformer: nnx.Module,
       tokenizer: Any,
       cache_config: CacheConfig,
-      image_processor: image_processor_lib.ImageProcessor | None = None,
+      image_processor: image_processor.ImageProcessor | None = None,
   ):
     """Initializes the sampler.
 
@@ -601,10 +601,7 @@ class Sampler(base_sampler.BaseSampler):
 
     transformer = nnx.merge(self._transformer_graphdef, params)
     kwargs = {} if images is None else {'images': images}
-    decode_only_last_token = (
-        self._supports_decode_only_last_token
-        and not echo
-    )
+    decode_only_last_token = self._supports_decode_only_last_token and not echo
     if decode_only_last_token:
       kwargs['decode_only_last_token'] = True
     logits, cache = transformer(
@@ -807,7 +804,20 @@ class Sampler(base_sampler.BaseSampler):
     tokens = [self.tokenize(x) for x in input_strings]
 
     processed_images = images
-    if images is not None and self.image_processor is not None:
+    is_gemma4_multimodal = (
+        hasattr(self.transformer, 'vision_encoder')
+        and self.transformer.vision_encoder is not None
+    )
+
+    if is_gemma4_multimodal and images is not None:
+      processed_images, tokens = image_processor.process_gemma4_inputs(
+          images,
+          tokens,
+          self.transformer.vision_encoder,
+          self.tokenizer.pad_id(),
+      )
+
+    elif images is not None and self.image_processor is not None:
       processed_images = self.image_processor(images)
       processed_images = jnp.array(processed_images)
 

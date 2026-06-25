@@ -437,7 +437,21 @@ class SWEAgent(ConversationAgentBase):
     cur_tokens = info.get("cur_tokens", None)
     if cur_tokens is not None and cur_tokens >= TOKEN_WARNING_THRESHOLD:
       observation += (
-          "\nYou are running out of tokens. Please submit your answer NOW."
+          "\nYou are running out of tokens. Stop exploring now. Do not call"
+          " file_editor, str_replace_editor, search, execute_bash, or any"
+          " view command again. You must immediately submit a final answer"
+          " using the final tool. If the finish tool is available, use exactly"
+          " this XML shape:\n"
+          "<function=finish>\n"
+          "<parameter=command>submit</parameter>\n"
+          "<parameter=result>FINAL_RESULT</parameter>\n"
+          "</function>\n"
+          "If the submit tool is available instead, use exactly this XML"
+          " shape:\n"
+          "<function=submit>\n"
+          "</function>\n"
+          "Replace FINAL_RESULT with a concise final answer or best-effort"
+          " summary. Do not output plain text without a final tool call."
       )
 
     super().update_from_env(observation, reward, done, info)

@@ -73,6 +73,9 @@ test = [
 cli = [
   "tensorflow",
 ]
+frozenlake = [
+  "gymnasium",
+]
 
 [project.urls]
 Source = "https://github.com/google/tunix"

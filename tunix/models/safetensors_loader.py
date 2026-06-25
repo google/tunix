@@ -24,6 +24,7 @@ import mmap
 import os
 import struct
 import threading
+from typing import Any
 
 from absl import logging
 from etils import epath
@@ -140,6 +141,7 @@ def load_safetensors_with_offsets(filepath):
 def load_and_create_model_orig(
     file_dir: str,
     model_class,
+    model_class_kwargs,
     config,
     key_mapping,
     mesh=None,
@@ -151,6 +153,7 @@ def load_and_create_model_orig(
   Args:
       file_dir: Directory containing safetensors files
       model_class: Model class to instantiate
+      model_class_kwargs: Optional keyword arguments to pass to the model class.
       config: Model configuration
       key_mapping: Function that returns key mapping dictionary
       mesh: Optional JAX mesh for sharding
@@ -160,7 +163,6 @@ def load_and_create_model_orig(
   Returns:
       Model instance with loaded weights
   """
-
   if file_dir.startswith('gs://'):
     file_dir = load_file_from_gcs(file_dir)
 
@@ -175,7 +177,11 @@ def load_and_create_model_orig(
   )
 
   with context_manager:
-    model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))
+    model = nnx.eval_shape(
+        lambda: model_class(
+            config, rngs=nnx.Rngs(params=0), **model_class_kwargs
+        )
+    )
 
   graph_def, abs_state = nnx.split(model)
   state_dict = abs_state.to_pure_dict()
@@ -300,6 +306,7 @@ def load_and_create_model_orig(
 def load_and_create_model_opt(
     file_dir: str,
     model_class,
+    model_class_kwargs,
     config,
     key_mapping,
     mesh=None,
@@ -313,6 +320,7 @@ def load_and_create_model_opt(
   Args:
     file_dir: Directory containing the safetensors files.
     model_class: The NNX model class to instantiate.
+    model_class_kwargs: Optional keyword arguments to pass to the model class.
     config: The configuration object for the model.
     key_mapping: A function that takes the config and returns a mapping from
       torch keys to jax keys and optional transformations.
@@ -341,7 +349,11 @@ def load_and_create_model_opt(
   )
 
   with context_manager:
-    model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))
+    model = nnx.eval_shape(
+        lambda: model_class(
+            config, rngs=nnx.Rngs(params=0), **model_class_kwargs
+        )
+    )
 
   graph_def, abs_state = nnx.split(model)
   nnx_state_dict = abs_state.to_pure_dict()
@@ -443,6 +455,7 @@ def load_and_create_model(
     preprocess_fn=None,
     dtype: jnp.dtype | None = None,
     mode: str = 'auto',
+    model_class_kwargs: dict[str, Any] | None = None,
 ):
   """Loads safetensors files and creates an NNX model.
 
@@ -458,10 +471,14 @@ def load_and_create_model(
     dtype: Optional dtype to cast the loaded tensors to.
     mode: The mode to use for loading the model. Options are ('auto',
       'optimized', 'original').
+    model_class_kwargs: Optional keyword arguments to pass to the model class.
 
   Returns:
     An NNX model instance with weights loaded from the safetensors files.
   """
+  if model_class_kwargs is None:
+    model_class_kwargs = {}
+
   if mode == 'auto':
     if env_utils.is_internal_env() or env_utils.is_pathways_initialized():
       mode = 'original'
@@ -482,11 +499,17 @@ def load_and_create_model(
     ):
       logging.warning('Optimized mode is faster and recommended if possible.')
 
+  args = (
+      file_dir,
+      model_class,
+      model_class_kwargs,
+      config,
+      key_mapping,
+      mesh,
+      preprocess_fn,
+      dtype,
+  )
   if mode == 'optimized':
-    return load_and_create_model_opt(
-        file_dir, model_class, config, key_mapping, mesh, preprocess_fn, dtype
-    )
+    return load_and_create_model_opt(*args)
   else:
-    return load_and_create_model_orig(
-        file_dir, model_class, config, key_mapping, mesh, preprocess_fn, dtype
-    )
+    return load_and_create_model_orig(*args)

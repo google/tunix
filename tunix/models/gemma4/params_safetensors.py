@@ -246,6 +246,186 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
       ),
   }
 
+  if cfg.vision_encoder is not None:
+    mapping.update({
+        r"model\.embed_vision\.embedding_projection\.weight": (
+            "embedder.mm_input_projection.w",
+            ((1, 0), None),
+        ),
+        # Vision Tower / Encoder Entry
+        r"(?:model\.)?vision_tower\.patch_embedder\.position_embedding_table": (
+            "vision_encoder.entry.pos_emb",
+            ((1, 0, 2), None),
+        ),
+        r"(?:model\.)?vision_tower\.patch_embedder\.input_proj\.weight": (
+            "vision_encoder.entry.input_projection.w",
+            ((1, 0), None),
+        ),
+        # Vision Tower / Encoder Block Norms
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.input_layernorm\.weight": (
+            r"vision_encoder.layers.\1.pre_attention_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
+            r"vision_encoder.layers.\1.post_attention_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
+            r"vision_encoder.layers.\1.pre_ffw_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.post_feedforward_layernorm\.weight": (
+            r"vision_encoder.layers.\1.post_ffw_norm.scale",
+            None,
+        ),
+        # Query/Key norm scale
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
+            r"vision_encoder.layers.\1.attn.query_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (
+            r"vision_encoder.layers.\1.attn.key_norm.scale",
+            None,
+        ),
+        # Vision Attention Projections (temporaries)
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.q",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.k",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.v",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.o",
+            None,
+        ),
+        # Vision Attention Clipped Parameters
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.input_min": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.input_max": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.output_min": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.output_max": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_output_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.input_min": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.input_max": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.output_min": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.output_max": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_output_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.input_min": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.input_min": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.input_max": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.output_min": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.output_max": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_output_max",
+            None,
+        ),
+        # Vision MLP Gate/Up (temporaries)
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.mlp.gate",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.up_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.mlp.up",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.linear\.weight": (
+            r"vision_encoder.layers.\1.mlp.linear.w",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
+            r"tmp.vision_layers.\1.mlp.gate",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
+            r"tmp.vision_layers.\1.mlp.up",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
+            r"vision_encoder.layers.\1.mlp.linear.w",
+            ((1, 0), None),
+        ),
+        # Vision MLP Clipped Parameters
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.input_min": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.input_max": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.output_min": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.output_max": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_output_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.input_min": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.input_max": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.output_min": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.output_max": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_output_max",
+            None,
+        ),
+        # Vision exit / standardize
+        r"(?:model\.)?vision_tower\.std_scale": (
+            "vision_encoder.standardize.scale.value",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.std_bias": (
+            "vision_encoder.standardize.bias.value",
+            None,
+        ),
+    })
+
   return mapping
 
 
@@ -255,7 +435,15 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
   k_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.k$")
   v_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.v$")
 
+  vq_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.q$")
+  vk_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.k$")
+  vv_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.v$")
+  vo_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.o$")
+  vgate_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.mlp\.gate$")
+  vup_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.mlp\.up$")
+
   pending: dict[str, dict[str, jnp.ndarray]] = {}
+  pending_vision: dict[str, dict[str, jnp.ndarray]] = {}
 
   def _to_ndh(q: jnp.ndarray, head_dim: int) -> jnp.ndarray:
     if q.shape == (cfg.num_heads, cfg.embed_dim, head_dim):
@@ -276,7 +464,8 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
         x = jnp.reshape(x, (cfg.embed_dim, num_kv_heads, head_dim))
         return jnp.transpose(x, (1, 0, 2))
       raise ValueError(
-          f"Unexpected 2D kv shape: {x.shape}, expected dims to contain {num_kv_heads * head_dim} and {cfg.embed_dim}"
+          f"Unexpected 2D kv shape: {x.shape}, expected dims to contain"
+          f" {num_kv_heads * head_dim} and {cfg.embed_dim}"
       )
 
     # 3D shape handling
@@ -289,7 +478,8 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
       x = jnp.transpose(x, (h_axis, f_axis, k_axis))
       return x[:num_kv_heads]
     raise ValueError(
-        f"Unexpected kv shape: {x.shape}, expected dims to contain {cfg.embed_dim} and {head_dim}"
+        f"Unexpected kv shape: {x.shape}, expected dims to contain"
+        f" {cfg.embed_dim} and {head_dim}"
     )
 
   def preprocess(tensors: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
@@ -297,12 +487,43 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
 
     for key in list(out):
       m = q_pat.fullmatch(key) or k_pat.fullmatch(key) or v_pat.fullmatch(key)
-      if not m:
+      if m:
+        layer_id = m.group(1)
+        arr = out.pop(key)
+        slot = (
+            "q" if key.endswith(".q") else ("k" if key.endswith(".k") else "v")
+        )
+        pending.setdefault(layer_id, {})[slot] = arr
         continue
-      layer_id = m.group(1)
-      arr = out.pop(key)
-      slot = "q" if key.endswith(".q") else ("k" if key.endswith(".k") else "v")
-      pending.setdefault(layer_id, {})[slot] = arr
+
+      m_v = (
+          vq_pat.fullmatch(key)
+          or vk_pat.fullmatch(key)
+          or vv_pat.fullmatch(key)
+          or vo_pat.fullmatch(key)
+      )
+      if m_v:
+        layer_id = m_v.group(1)
+        arr = out.pop(key)
+        slot = (
+            "q"
+            if key.endswith(".q")
+            else (
+                "k"
+                if key.endswith(".k")
+                else ("v" if key.endswith(".v") else "o")
+            )
+        )
+        pending_vision.setdefault(layer_id, {})[slot] = arr
+        continue
+
+      m_vg = vgate_pat.fullmatch(key) or vup_pat.fullmatch(key)
+      if m_vg:
+        layer_id = m_vg.group(1)
+        arr = out.pop(key)
+        slot = "gate" if key.endswith(".gate") else "up"
+        pending_vision.setdefault(layer_id, {})[slot] = arr
+        continue
 
     # Resolve attention type for each layer using the pattern
     pattern = (
@@ -351,6 +572,51 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
         slots.pop("k", None)
         slots.pop("v", None)
 
+    if cfg.vision_encoder is not None:
+      for layer_id_str, slots in list(pending_vision.items()):
+        q = slots.get("q")
+        k = slots.get("k")
+        v = slots.get("v")
+        o = slots.get("o")
+        gate = slots.get("gate")
+        up = slots.get("up")
+
+        v_num_heads = cfg.vision_encoder.num_heads
+        v_d_model = cfg.vision_encoder.d_model
+        v_head_dim = v_d_model // v_num_heads
+
+        if q is not None:
+          q_reshaped = jnp.reshape(q, (v_num_heads, v_head_dim, v_d_model))
+          q_final = jnp.transpose(q_reshaped, (0, 2, 1))
+          out[f"vision_encoder.layers.{layer_id_str}.attn.q_einsum.w"] = q_final
+          slots.pop("q", None)
+
+        if k is not None and v is not None:
+          k_reshaped = jnp.reshape(k, (v_num_heads, v_head_dim, v_d_model))
+          k_final = jnp.transpose(k_reshaped, (0, 2, 1))
+          v_reshaped = jnp.reshape(v, (v_num_heads, v_head_dim, v_d_model))
+          v_final = jnp.transpose(v_reshaped, (0, 2, 1))
+          out[f"vision_encoder.layers.{layer_id_str}.attn.kv_einsum.w"] = (
+              jnp.stack([k_final, v_final], axis=0)
+          )
+          slots.pop("k", None)
+          slots.pop("v", None)
+
+        if o is not None:
+          o_reshaped = jnp.reshape(o, (v_d_model, v_num_heads, v_head_dim))
+          o_final = jnp.transpose(o_reshaped, (1, 2, 0))
+          out[
+              f"vision_encoder.layers.{layer_id_str}.attn.attn_vec_einsum.w"
+          ] = o_final
+          slots.pop("o", None)
+
+        if gate is not None and up is not None:
+          out[f"vision_encoder.layers.{layer_id_str}.mlp.gating_einsum.w"] = (
+              jnp.stack([gate, up], axis=0)
+          )
+          slots.pop("gate", None)
+          slots.pop("up", None)
+
     return out
 
   return preprocess
@@ -362,6 +628,7 @@ def create_model_from_safe_tensors(
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
     mode: str = "auto",
+    text_only: bool = True,
 ):
   return safetensors_loader.load_and_create_model(
       file_dir=file_dir,
@@ -372,4 +639,5 @@ def create_model_from_safe_tensors(
       preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
       mode=mode,
+      model_class_kwargs={"text_only": text_only},
   )

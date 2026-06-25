@@ -19,6 +19,9 @@
 set -euo pipefail
 set -x
 
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REQ_FILE=${REQ_FILE:-"${ROOT_DIR}/requirements/requirements.txt"}
 SPECIAL_REQ_FILE=${SPECIAL_REQ_FILE:-"${ROOT_DIR}/requirements/special_requirements.txt"}
@@ -31,5 +34,6 @@ pip install aiohttp==3.12.15
 # Install Python packages that enable pip to authenticate with Google Artifact Registry automatically.
 pip install keyring keyrings.google-artifactregistry-auth
 
-VLLM_TARGET_DEVICE="tpu" python3 -m pip install -r "${REQ_FILE}"
-python3 -m pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall
+VLLM_TARGET_DEVICE="tpu" uv pip install -r "${REQ_FILE}" --torch-backend=cpu
+uv pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall --torch-backend=cpu
+uv pip install --no-deps "qwix>=0.1.6"
