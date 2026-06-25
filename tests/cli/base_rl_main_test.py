@@ -51,7 +51,7 @@ class DummyPipeline(base_rl_main.BasePipeline):
     return mode == "agentic_dummy"
   
   @property  
-  def _rl_algorithm_type(self):
+  def _default_training_mode(self):
     return "dummy" 
 
   def _create_agentic_dummy_config(self):
