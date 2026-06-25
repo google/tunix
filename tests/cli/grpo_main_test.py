@@ -411,7 +411,7 @@ verl_compatible: false
     pipeline = _make_pipeline(extra)
     self.assertEqual(pipeline.config.get("training_mode", "grpo"), "grpo")
     with mock.patch.object(pipeline, "_run") as mock_run:
-      pipeline.run_grpo_trainer()
+      pipeline.run_trainer()
       mock_run.assert_called_once_with(mode="grpo")
 
   def test_agentic_grpo_dispatches_to_agentic(self):
@@ -451,7 +451,7 @@ vllm_config:
     pipeline = _make_pipeline(extra)
     self.assertEqual(pipeline.config["training_mode"], "agentic_grpo")
     with mock.patch.object(pipeline, "_run") as mock_run:
-      pipeline.run_grpo_trainer()
+      pipeline.run_trainer()
       mock_run.assert_called_once_with(mode="agentic_grpo")
 
   def test_unknown_mode_raises(self):
@@ -500,7 +500,7 @@ verl_compatible: false
                   with self.assertRaisesRegex(
                       ValueError, "Unsupported training_mode 'bad_mode'"
                   ):
-                    pipeline.run_grpo_trainer()
+                    pipeline.run_trainer()
 
 
 # ---------------------------------------------------------------------------
