@@ -426,6 +426,146 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
         ),
     })
 
+  if cfg.audio_encoder is not None:
+    mapping.update({
+        # Audio projector
+        r"model\.embed_audio\.embedding_projection\.weight": (
+            "embedder.mm_audio_input_projection.w",
+            ((1, 0), None),
+        ),
+        # Audio subsampling
+        r"model\.audio_tower\.subsample_conv_projection\.layer0\.conv\.weight": (
+            "audio_encoder.subsampling.conv0.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"model\.audio_tower\.subsample_conv_projection\.layer0\.norm\.weight": (
+            "audio_encoder.subsampling.norm0.scale",
+            None,
+        ),
+        r"model\.audio_tower\.subsample_conv_projection\.layer1\.conv\.weight": (
+            "audio_encoder.subsampling.conv1.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"model\.audio_tower\.subsample_conv_projection\.layer1\.norm\.weight": (
+            "audio_encoder.subsampling.norm1.scale",
+            None,
+        ),
+        r"model\.audio_tower\.subsample_conv_projection\.input_proj_linear\.weight": (
+            "audio_encoder.subsampling.input_proj.kernel",
+            ((1, 0), None),
+        ),
+        # Conformer Blocks
+        # FFN Blocks
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_1\.linear\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_start.ffn_layer1.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_2\.linear\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_start.ffn_layer2.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward1\.pre_layer_norm\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_start.pre_layer_norm.scale",
+            None,
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward1\.post_layer_norm\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_start.post_layer_norm.scale",
+            None,
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_1\.linear\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_end.ffn_layer1.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_2\.linear\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_end.ffn_layer2.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward2\.pre_layer_norm\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_end.pre_layer_norm.scale",
+            None,
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.feed_forward2\.post_layer_norm\.weight": (
+            r"audio_encoder.blocks.\1.fflayer_end.post_layer_norm.scale",
+            None,
+        ),
+        # Attention Block
+        r"model\.audio_tower\.layers\.([0-9]+)\.self_attn\.q_proj\.linear\.weight": (
+            r"audio_encoder.blocks.\1.trans_atten.self_atten.query.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.self_attn\.k_proj\.linear\.weight": (
+            r"audio_encoder.blocks.\1.trans_atten.self_atten.key.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.self_attn\.v_proj\.linear\.weight": (
+            r"audio_encoder.blocks.\1.trans_atten.self_atten.value.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.self_attn\.per_dim_scale": (
+            r"audio_encoder.blocks.\1.trans_atten.self_atten.per_dim_scale.value",
+            None,
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.self_attn\.relative_k_proj\.weight": (
+            r"audio_encoder.blocks.\1.trans_atten.self_atten.relative_position_embedding.pos_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.self_attn\.post\.linear\.weight": (
+            r"audio_encoder.blocks.\1.trans_atten.post.w",
+            (
+                (1, 0),
+                (
+                    cfg.audio_encoder.atten_num_heads,
+                    cfg.audio_encoder.model_dims
+                    // cfg.audio_encoder.atten_num_heads,
+                    cfg.audio_encoder.model_dims,
+                ),
+            ),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.norm_pre_attn\.weight": (
+            r"audio_encoder.blocks.\1.trans_atten.pre_norm.scale",
+            None,
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.norm_post_attn\.weight": (
+            r"audio_encoder.blocks.\1.trans_atten.post_norm.scale",
+            None,
+        ),
+        # Lightweight Conv Block
+        r"model\.audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_start\.linear\.weight": (
+            r"audio_encoder.blocks.\1.lconv.linear_start.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.lconv1d\.depthwise_conv1d\.weight": (
+            r"audio_encoder.blocks.\1.lconv.depthwise_conv1d.kernel",
+            ((2, 1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_end\.linear\.weight": (
+            r"audio_encoder.blocks.\1.lconv.linear_end.w",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.lconv1d\.pre_layer_norm\.weight": (
+            r"audio_encoder.blocks.\1.lconv.ln.scale",
+            None,
+        ),
+        r"model\.audio_tower\.layers\.([0-9]+)\.lconv1d\.conv_norm\.weight": (
+            r"audio_encoder.blocks.\1.lconv.conv_norm.scale",
+            None,
+        ),
+        # Final Norm
+        r"model\.audio_tower\.layers\.([0-9]+)\.norm_out\.weight": (
+            r"audio_encoder.blocks.\1.final_ln.scale",
+            None,
+        ),
+        # Output Projection
+        r"model\.audio_tower\.output_proj\.weight": (
+            "audio_encoder.output_projection.kernel",
+            ((1, 0), None),
+        ),
+        r"model\.audio_tower\.output_proj\.bias": (
+            "audio_encoder.output_projection.bias",
+            None,
+        ),
+    })
+
   return mapping
 
 
