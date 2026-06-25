@@ -17,7 +17,7 @@
 from typing import Any
 import numpy as np
 from PIL import Image
-from tunix.models.gemma4.model import PreprocessedVisionInput
+from tunix.models.gemma4 import model as model_lib
 
 
 class ImageProcessor:
@@ -424,7 +424,7 @@ def add_variable_extra_tokens_for_images(
 ) -> np.ndarray:
   """Expand placeholder token with a variable number of placeholders."""
   double_new_line_token = 108
-  soft_token_placeholder = -2  # img soft tokens
+  soft_token_placeholder = model_lib.VISION_TOKEN_PLACEHOLDER  # img soft tokens
 
   batch_size = tokens.shape[0]
   results = []
@@ -553,7 +553,7 @@ def process_gemma4_inputs(
         dtype=jnp.int32,
     )
 
-  processed_images = PreprocessedVisionInput(
+  processed_images = model_lib.PreprocessedVisionInput(
       patches=patches,
       positions_xy=positions_xy,
       soft_token_counts=tuple(all_soft_token_counts),

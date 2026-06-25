@@ -36,6 +36,7 @@ from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
+from tunix.processors import audio_processor
 from tunix.processors import image_processor
 
 LayerCache = dict[str, jaxtyping.Array]
@@ -562,6 +563,7 @@ class Sampler(base_sampler.BaseSampler):
       params: statelib.State,
       sampler_state: _SamplingState,
       images: jnp.ndarray | None = None,
+      audios: Any = None,
       echo: bool = True,
   ) -> _SamplingState:
     """Performs prefill."""
@@ -600,7 +602,11 @@ class Sampler(base_sampler.BaseSampler):
       )
 
     transformer = nnx.merge(self._transformer_graphdef, params)
-    kwargs = {} if images is None else {'images': images}
+    kwargs = {}
+    if images is not None:
+      kwargs['images'] = images
+    if audios is not None:
+      kwargs['audios'] = audios
     decode_only_last_token = self._supports_decode_only_last_token and not echo
     if decode_only_last_token:
       kwargs['decode_only_last_token'] = True
@@ -759,6 +765,13 @@ class Sampler(base_sampler.BaseSampler):
           | jnp.ndarray
           | None
       ) = None,
+      audios: (
+          str
+          | np.ndarray
+          | list[str | np.ndarray | list[str | np.ndarray] | None]
+          | jnp.ndarray
+          | None
+      ) = None,
   ) -> base_sampler.SamplerOutput:
     """Samples a completion of the input string.
 
@@ -804,16 +817,16 @@ class Sampler(base_sampler.BaseSampler):
     tokens = [self.tokenize(x) for x in input_strings]
 
     processed_images = images
-    is_gemma4_multimodal = (
+    is_gemma4_vision = (
         hasattr(self.transformer, 'vision_encoder')
         and self.transformer.vision_encoder is not None
     )
 
-    if is_gemma4_multimodal and images is not None:
+    if is_gemma4_vision and images is not None:
       processed_images, tokens = image_processor.process_gemma4_inputs(
           images,
           tokens,
-          self.transformer.vision_encoder,
+          getattr(self.transformer, 'vision_encoder'),
           self.tokenizer.pad_id(),
       )
 

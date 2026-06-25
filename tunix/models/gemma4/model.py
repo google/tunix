@@ -32,13 +32,15 @@ from jax.sharding import PartitionSpec as P
 import jaxtyping
 import numpy as np
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models.gemma4 import audio
 from tunix.models.gemma4 import moe
 from tunix.models.gemma4 import vision
 from tunix.utils import compat
 from tunix.utils import env_utils
 from tunix.utils.sharding_utils import shard
 
-TOKEN_PLACEHOLDER = -2
+VISION_TOKEN_PLACEHOLDER = -2
+AUDIO_TOKEN_PLACEHOLDER = -4
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +53,20 @@ class PreprocessedVisionInput:
 jax.tree_util.register_dataclass(
     PreprocessedVisionInput,
     data_fields=['patches', 'positions_xy'],
+    meta_fields=['soft_token_counts'],
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class PreprocessedAudioInput:
+  audio: Any
+  audio_lengths: Any
+  soft_token_counts: tuple[tuple[int, ...], ...]
+
+
+jax.tree_util.register_dataclass(
+    PreprocessedAudioInput,
+    data_fields=['audio', 'audio_lengths'],
     meta_fields=['soft_token_counts'],
 )
 
@@ -85,6 +101,7 @@ class ShardingConfig:
   act_btnh: Tuple[str | None, ...]
   vision_proj: Tuple[str | None, ...]
   vision_soft_emb_norm_weight: Tuple[str | None, ...]
+  audio_proj: Tuple[str | None, ...]
   # MoE sharding
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
@@ -113,13 +130,16 @@ class ShardingConfig:
         act_btnh=('fsdp', None, 'tp', None),
         vision_proj=(fsdp, 'tp'),
         vision_soft_emb_norm_weight=('tp',),
+        audio_proj=(fsdp, 'tp'),
         exp_weight_edf=(fsdp, None, None, 'tp'),
         exp_weight_efd=(fsdp, 'tp', None),
         per_layer_model_projection=(fsdp, None, 'tp'),
         per_layer_input_gate=(fsdp, 'tp'),
         per_layer_projection=('tp', fsdp),
         per_layer_input_embedding=('tp', None, fsdp),
-        vision_shd=vision.VisionShardingConfig.get_default_sharding(is_sampling),
+        vision_shd=vision.VisionShardingConfig.get_default_sharding(
+            is_sampling
+        ),
     )
 
 
@@ -169,6 +189,9 @@ class ModelConfig:
   # Vision config
   vision_encoder: vision.VisionEncoderConfig | None = None
   use_bidirectional_attention: str | None = None
+
+  # Audio config
+  audio_encoder: audio.AudioEncoderConfig | None = None
 
   def __post_init__(self):
     # TODO(tunix-dev): support flash attention with sliding window KV cache
@@ -377,6 +400,24 @@ class Embedder(nnx.Module):
           with_scale=False,
       )
 
+    if config.audio_encoder is not None:
+      self.mm_audio_input_projection = Einsum(
+          einsum_str='...tm,md->...td',
+          shape=(config.audio_encoder.lm_model_dims, self.embed_dim),
+          sharding=config.shd_config.audio_proj,
+          rngs=rngs,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+      )
+      self.mm_audio_pre_projection_norm = RMSNorm(
+          config.audio_encoder.lm_model_dims,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+          with_scale=False,
+      )
+
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
@@ -387,6 +428,11 @@ class Embedder(nnx.Module):
   def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.mm_pre_projection_norm(x)
     x = self.mm_input_projection(x)
+    return x
+
+  def encode_audio(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    x = self.mm_audio_pre_projection_norm(x)
+    x = self.mm_audio_input_projection(x)
     return x
 
   def encode_per_layer_input(
@@ -1423,8 +1469,10 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       self, config: ModelConfig, *, rngs: nnx.Rngs, text_only: bool = True
   ):
     self.text_only = text_only
-    if text_only and config.vision_encoder is not None:
-      config = dataclasses.replace(config, vision_encoder=None)
+    if text_only:
+      config = dataclasses.replace(
+          config, vision_encoder=None, audio_encoder=None
+      )
     self.config = config
     self.embedder = Embedder(config, rngs=rngs)
 
@@ -1434,6 +1482,12 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           config=config.vision_encoder,
           param_dtype=config.param_dtype,
           shd_config=config.shd_config.vision_shd,
+      )
+
+    if config.audio_encoder is not None:
+      self.audio_encoder = audio.AudioEncoder(
+          config=config.audio_encoder,
+          rngs=rngs,
       )
 
     pattern = (
@@ -1491,6 +1545,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       segment_ids=None,
       decode_only_last_token: bool = False,
       images: PreprocessedVisionInput | None = None,
+      audios: PreprocessedAudioInput | None = None,
       skip_lm_head: bool = False,
   ):
     if positions is None:
@@ -1504,11 +1559,20 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     x = self.embedder.encode(tokens)
     if self.config.vision_encoder is not None and images is not None:
       soft_embeddings = self._encode_vision(images)
-      mask = tokens == TOKEN_PLACEHOLDER
+      mask = tokens == VISION_TOKEN_PLACEHOLDER
       x = merge_flat_embeddings(
           text_embeddings=x,
           multimodal_embeddings=soft_embeddings,
           mask=mask,
+      )
+
+    if self.config.audio_encoder is not None and audios is not None:
+      soft_audio_embeddings = self._encode_audio(audios)
+      audio_mask = tokens == AUDIO_TOKEN_PLACEHOLDER
+      x = merge_flat_embeddings(
+          text_embeddings=x,
+          multimodal_embeddings=soft_audio_embeddings,
+          mask=audio_mask,
       )
 
     sliding_attention_mask = None
@@ -1518,7 +1582,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         and images is not None
         and attention_mask is not None
     ):
-      bidirectional_mask = tokens == TOKEN_PLACEHOLDER
+      bidirectional_mask = tokens == VISION_TOKEN_PLACEHOLDER
       sliding_attention_mask = _add_bidirectional_mask(
           attention_mask, bidirectional_mask
       )
@@ -1653,6 +1717,70 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     all_tokens = jnp.stack(padded_batch_tokens, axis=0)
     all_tokens = self.embedder.encode_vision(all_tokens[:, None, :, :])
     all_tokens = all_tokens[:, 0, :, :]
+    return all_tokens
+
+  def _encode_audio(self, audio_input: PreprocessedAudioInput):
+    """Encode audio into the same space as the text embeddings."""
+    assert self.audio_encoder is not None
+
+    batch_size = audio_input.audio.shape[0]
+
+    if len(audio_input.soft_token_counts) > 0 and isinstance(
+        audio_input.soft_token_counts[0], int
+    ):
+      soft_token_counts = (audio_input.soft_token_counts,)
+    else:
+      soft_token_counts = audio_input.soft_token_counts
+
+    max_n_audios = max((len(counts) for counts in soft_token_counts), default=0)
+    if max_n_audios == 0:
+      return jnp.zeros((batch_size, 0, self.config.embed_dim))
+
+    audio = audio_input.audio
+    audio_lengths = audio_input.audio_lengths
+
+    time_steps = audio.shape[2]
+    audio_flat = jnp.reshape(audio, (batch_size * max_n_audios, time_steps))
+    audio_lengths_flat = jnp.reshape(
+        audio_lengths, (batch_size * max_n_audios,)
+    )
+
+    # Run audio encoder
+    # embeddings: [batch * max_n_audios, reduced_time, lm_model_dims]
+    # mask: [batch * max_n_audios, reduced_time] (True for valid)
+    embeddings, mask = self.audio_encoder(audio_flat, audio_lengths_flat)
+
+    batch_tokens = []
+    max_tokens_per_batch = 0
+    for b in range(batch_size):
+      per_audio_tokens = []
+      counts = soft_token_counts[b] if b < len(soft_token_counts) else ()
+      for i in range(len(counts)):
+        idx = b * max_n_audios + i
+        expected_count = counts[i]
+        if mask is not None:
+          valid_indices = jnp.nonzero(mask[idx], size=expected_count)[0]
+          real_tokens = embeddings[idx][valid_indices]
+        else:
+          real_tokens = embeddings[idx][:expected_count]
+        per_audio_tokens.append(real_tokens)
+
+      if per_audio_tokens:
+        b_tokens = jnp.concatenate(per_audio_tokens, axis=0)
+      else:
+        b_tokens = jnp.zeros((0, embeddings.shape[-1]))
+      batch_tokens.append(b_tokens)
+      max_tokens_per_batch = max(max_tokens_per_batch, b_tokens.shape[0])
+
+    padded_batch_tokens = []
+    for b_tokens in batch_tokens:
+      pad_len = max_tokens_per_batch - b_tokens.shape[0]
+      if pad_len > 0:
+        b_tokens = jnp.pad(b_tokens, ((0, pad_len), (0, 0)))
+      padded_batch_tokens.append(b_tokens)
+
+    all_tokens = jnp.stack(padded_batch_tokens, axis=0)
+    all_tokens = self.embedder.encode_audio(all_tokens)
     return all_tokens
 
   def compute_final_logits(

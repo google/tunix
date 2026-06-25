@@ -220,7 +220,7 @@ class ModelTest(absltest.TestCase):
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
     )
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.VISION_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -277,7 +277,7 @@ class ModelTest(absltest.TestCase):
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
     )
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.VISION_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -337,9 +337,9 @@ class ModelTest(absltest.TestCase):
         jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.num_embed
     )
     # Image placeholders: token shape represents visual soft tokens within sequences.
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
-    tokens = tokens.at[1, 5:8].set(model_lib.TOKEN_PLACEHOLDER)
-    tokens = tokens.at[1, 20:25].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.VISION_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:8].set(model_lib.VISION_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 20:25].set(model_lib.VISION_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -374,6 +374,117 @@ class ModelTest(absltest.TestCase):
         positions=positions,
         attention_mask=attn_mask,
         images=images,
+    )
+    self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
+
+  def test_forward_pass_audio(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.AudioEncoderConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=128,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
+    )
+    tokens = tokens.at[0, 10:15].set(model_lib.AUDIO_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+
+    soft_token_counts = (5,)
+    audio_data = jnp.zeros((1, 1, 16000), dtype=jnp.float32)
+    audio_lengths = jnp.full((1, 1), 16000, dtype=jnp.int32)
+
+    audios = model_lib.PreprocessedAudioInput(
+        audio=audio_data,
+        audio_lengths=audio_lengths,
+        soft_token_counts=soft_token_counts,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
+    )
+    self.assertEqual(logits.shape, (1, 32, config.num_embed))
+
+  def test_forward_pass_audio_batch(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.AudioEncoderConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=128,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    batch_size = 2
+    seq_len = 32
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.num_embed
+    )
+    tokens = tokens.at[0, 10:15].set(model_lib.AUDIO_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:8].set(model_lib.AUDIO_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 20:25].set(model_lib.AUDIO_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    soft_token_counts = ((5,), (3, 5))
+    max_n_audios = 2
+    max_samples = 16000
+
+    audio_data = jnp.zeros(
+        (batch_size, max_n_audios, max_samples), dtype=jnp.float32
+    )
+    audio_lengths = jnp.full(
+        (batch_size, max_n_audios), max_samples, dtype=jnp.int32
+    )
+    audio_lengths = audio_lengths.at[0, 1].set(0)
+
+    audios = model_lib.PreprocessedAudioInput(
+        audio=audio_data,
+        audio_lengths=audio_lengths,
+        soft_token_counts=soft_token_counts,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
     )
     self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
 
