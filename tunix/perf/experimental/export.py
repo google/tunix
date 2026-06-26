@@ -49,6 +49,7 @@ class PerfMetricsExport:
       cluster_config: rl_cluster.ClusterConfig,
       enable_trace_writer: bool = True,
       trace_dir: str | None = None,
+      trace_shard_steps: int | None = None,
   ) -> PerfMetricsExport:
     """Creates an instance from a ClusterConfig.
 
@@ -56,6 +57,9 @@ class PerfMetricsExport:
       cluster_config: The ClusterConfig to extract role_to_mesh from.
       enable_trace_writer: Whether to initialize the trace writer.
       trace_dir: The directory to write the Perfetto trace files to.
+      trace_shard_steps: Number of committed steps per sealed perfetto trace
+        shard. ``None`` defers to the trace writer's resolution path (env var
+        ``TUNIX_TRACE_SHARD_STEPS`` then the built-in default).
 
     Returns:
       A new PerfMetricsExport instance configured with role to device mappings.
@@ -72,6 +76,7 @@ class PerfMetricsExport:
         enable_trace_writer=enable_trace_writer,
         trace_dir=trace_dir,
         role_to_devices=role_to_devices,
+        trace_shard_steps=trace_shard_steps,
     )
 
   def __init__(
@@ -80,6 +85,7 @@ class PerfMetricsExport:
       enable_trace_writer: bool = True,
       trace_dir: str | None = None,
       role_to_devices: Mapping[str, Any] | None = None,
+      trace_shard_steps: int | None = None,
   ):
     """Initializes the instance.
 
@@ -91,13 +97,18 @@ class PerfMetricsExport:
         used.
       role_to_devices: An optional mapping from role names to their assigned
         devices, passed to the trace writer.
+      trace_shard_steps: Number of committed steps per sealed perfetto trace
+        shard. ``None`` defers to the trace writer's resolution path (env var
+        ``TUNIX_TRACE_SHARD_STEPS`` then the built-in default).
     """
     self._trace_writer_enabled = enable_trace_writer
     self._writer: trace_writer_lib.TraceWriter
     if enable_trace_writer:
       resolved_trace_dir = trace_dir or DEFAULT_TRACE_DIR
       self._writer = trace_writer_lib.PerfettoTraceWriter(
-          resolved_trace_dir, role_to_devices=role_to_devices
+          resolved_trace_dir,
+          role_to_devices=role_to_devices,
+          shard_steps=trace_shard_steps,
       )
       # We need to keep max_workers = 1 to serialize writes
       self._executor = concurrent.futures.ThreadPoolExecutor(

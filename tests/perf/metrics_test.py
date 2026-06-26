@@ -27,6 +27,23 @@ class MetricsTest(parameterized.TestCase):
     self.assertEqual(options.custom_export_fn_path_v2, "")
     self.assertTrue(options.enable_trace_writer)
     self.assertEqual(options.trace_dir, "")
+    self.assertEqual(options.trace_shard_steps, 100)
+
+  def test_perf_metrics_options_trace_shard_steps_override(self):
+    options = metrics.PerfMetricsOptions(trace_shard_steps=25)
+    self.assertEqual(options.trace_shard_steps, 25)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="zero", trace_shard_steps=0),
+      dict(testcase_name="negative", trace_shard_steps=-1),
+  )
+  def test_perf_metrics_options_trace_shard_steps_invalid(
+      self, trace_shard_steps
+  ):
+    with self.assertRaisesRegex(
+        ValueError, "trace_shard_steps must be a positive integer"
+    ):
+      metrics.PerfMetricsOptions(trace_shard_steps=trace_shard_steps)
 
   @parameterized.named_parameters(
       dict(
