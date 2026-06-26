@@ -5,6 +5,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+import numpy as np
 import optax
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -96,6 +97,65 @@ class RLLearnerTest(parameterized.TestCase):
       self.assertEqual(
           learner._compute_logps_micro_batch_size, expected_compute_logps_micro
       )
+
+  @parameterized.named_parameters(
+      (
+          "exact",
+          ["p0", "p1", "p2", "p3"],
+          2,
+          [2, 2],
+      ),
+      (
+          "with_tail",
+          ["p0", "p1", "p2", "p3", "p4"],
+          2,
+          [2, 2, 1],
+      ),
+  )
+  def test_create_micro_batch_iterator(
+      self,
+      prompts,
+      micro_batch_size,
+      expected_sizes,
+  ):
+    config = rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        mini_batch_size=4,
+        train_micro_batch_size=2,
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    actor_model = DummyModel()
+    rollout_model = DummyModel()
+    mock_cluster = mock.MagicMock()
+    mock_cluster.actor_trainer.model = actor_model
+    mock_cluster.rollout.model.return_value = rollout_model
+    mock_cluster.cluster_config.training_config = config
+    mock_cluster.actor_trainer.train_steps = 0
+    mock_cluster.actor_trainer.iter_steps = 0
+
+    learner = DummyLearner(
+        rl_cluster=mock_cluster,
+        algo_config=DummyConfig(),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    full_batch_iterator = iter(
+        [
+            {
+                "prompts": np.array(prompts),
+            }
+        ]
+    )
+
+    micro_batches = list(
+        learner._create_micro_batch_iterator(full_batch_iterator, micro_batch_size)
+    )
+
+    self.assertEqual([len(batch["prompts"]) for batch in micro_batches], expected_sizes)
+    self.assertEqual(
+        np.concatenate([batch["prompts"] for batch in micro_batches]).tolist(),
+        prompts,
+    )
 
 
 if __name__ == '__main__':
