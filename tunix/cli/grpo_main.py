@@ -30,25 +30,18 @@ Usage::
     python -m tunix.cli.grpo_main examples/deepswe/configs/qwen3_32b.yaml
 """
 
-from collections.abc import MutableMapping
 import dataclasses
 import os
 from typing import Any
 
 from absl import app
-from absl import flags
 from absl import logging
-from flax import nnx
-import jax
-import jax.numpy as jnp
 from tunix.cli.base_rl_main import BasePipeline
+from tunix.cli.base_rl_main import PATHWAYS_BNS
 from tunix.cli.base_rl_main import setup_jax_pathways
 from tunix.cli.base_rl_main import setup_pathways_on_cloud
-from tunix.cli.base_rl_main import PATHWAYS_BNS
 from tunix.cli.utils import data as data_lib
-from tunix.cli.utils import model as model_lib
-from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.rollout import base_rollout
+
 
 class GrpoPipeline(BasePipeline):
   """Runs standard GRPO or agentic GRPO depending on ``training_mode``.
@@ -77,10 +70,10 @@ class GrpoPipeline(BasePipeline):
 
   def __init__(self, argv: list[str], **kwargs):
     super().__init__(argv, **kwargs)
-  
+
   @property
   def _default_training_mode(self):
-    return "grpo" 
+    return "grpo"
 
   # ------------------------------------------------------------------
   # Agentic GRPO helpers
@@ -191,9 +184,10 @@ class GrpoPipeline(BasePipeline):
     logging.info("Starting agentic GRPO training...")
     GRPOLearner(**learner_kwargs).train(dataset)
 
+
 def main(argv, **kwargs):
   if PATHWAYS_BNS.value:
-    setup_jax_pathways(_PATHWAYS_BNS.value)
+    setup_jax_pathways(PATHWAYS_BNS.value)
 
   if os.getenv("JAX_PLATFORMS") == "proxy":
     setup_pathways_on_cloud()

@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC
-from abc import abstractmethod
+import abc
 from collections.abc import MutableMapping
 import dataclasses
 import importlib
@@ -25,12 +24,13 @@ from absl import flags
 from absl import logging
 from flax import nnx
 import jax
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
+from tunix.models.gemma import model as gemma_lib
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
@@ -42,13 +42,14 @@ PATHWAYS_BNS = flags.DEFINE_string(
     "pathways_bns", None, "BNS address of the Pathways server."
 )
 
-class BasePipeline(ABC, config.HyperParameters):
+
+class BasePipeline(abc.ABC, config.HyperParameters):
   def __init__(self, argv: list[str], **kwargs):
     self.data_module: types.ModuleType | None = None
     super().__init__(argv, **kwargs)
 
   @property
-  @abstractmethod
+  @abc.abstractmethod
   def _default_training_mode(self):
     pass
 
@@ -70,7 +71,7 @@ class BasePipeline(ABC, config.HyperParameters):
       "rollout": rl_cluster_lib.Role.ROLLOUT,
   }
 
-  def _is_agentic_mode(self, mode:str) -> bool:
+  def _is_agentic_mode(self, mode: str) -> bool:
     """Checks if the given mode is agentic."""
     return mode == "agentic_ppo" or "agentic_grpo"
 
@@ -507,7 +508,7 @@ class BasePipeline(ABC, config.HyperParameters):
           dict(critic_model_config),
           tokenizer_config,
           role_to_mesh[rl_cluster_lib.Role.CRITIC],
-      )     
+      )
 
       if critic_model_config.get("lora_config", None):
         critic_model = model_lib.apply_lora_to_model(
@@ -519,7 +520,8 @@ class BasePipeline(ABC, config.HyperParameters):
       rngs = nnx.Rngs(
           params=jax.random.key(critic_model_config.get("rng_seed", 0))
       )
-      # TODO (yatla2): Support all critic model types, not just Gemma 
+
+      # TODO (yatla2): Support all critic model types, not just Gemma
       critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
 
     cluster_config = self.create_cluster_config(
@@ -588,7 +590,7 @@ class BasePipeline(ABC, config.HyperParameters):
         dataset_length,
     )
 
-    return max_steps 
+    return max_steps
 
   def compute_params(self, dataset):
     rl_training_config = self._mutable_config_mapping("rl_training_config")
@@ -763,34 +765,7 @@ class BasePipeline(ABC, config.HyperParameters):
   # ------------------------------------------------------------------
   # Agentic training
   # ------------------------------------------------------------------
-  def _create_rl_cluster(self, mode: str):
-    self._setup_kubernetes()
-
-    tokenizer = self._get_tokenizer()
-
-    chat_parser = self._create_chat_parser(tokenizer)
-
-    raw_dataset, custom_batch_fn = self._load_raw_dataset(tokenizer)
-
-    self.compute_params(raw_dataset)
-
-    dataset, _ = data_lib.post_init_dataset(
-        raw_dataset,
-        tokenizer,
-        batch_size=self.config.get("batch_size", 1),
-        num_batches=self.config.get("num_batches"),
-        max_prompt_length=self._config_mapping("rollout_config").get(
-            "max_prompt_length"
-        ),
-        fraction=self.config.get("train_fraction", 1.0),
-        num_epochs=self.config.get("num_train_epochs", 1),
-        prompt_key=self.config.get("prompt_key", "prompts"),
-        custom_batch_fn=custom_batch_fn,
-    )
-
-    rl_cluster = self.create_rl_cluster(tokenizer)
-
-  @abstractmethod
+  @abc.abstractmethod
   def _run(self, mode: str):
     """Execute agentic training (DeepScaleR, DeepSWE, etc.)."""
     pass
