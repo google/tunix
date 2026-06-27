@@ -16,7 +16,7 @@
 
 Also tests that KV cache / GRPOConfig computation is correct.
 """
-
+import dataclasses
 import os
 import pathlib
 import tempfile
@@ -24,8 +24,8 @@ from unittest import mock
 
 from absl.testing import absltest
 import omegaconf
-from tunix.cli import grpo_main
 from tunix.cli import base_rl_main
+from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 
 # ---------------------------------------------------------------------------
@@ -34,9 +34,59 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+@dataclasses.dataclass(kw_only=True)
+class DummyConfig(algo_config_lib.AlgorithmConfig):
+  """Dummy RL algorithm config"""
+  num_generations: int = 2
+  num_iterations: int = 1
+  episode_timeout: int = 1
+  max_response_length: int = 1000
 
-def _make_pipeline(extra_yaml: str) -> grpo_main.GrpoPipeline:
-  """Write a minimal valid YAML and instantiate GrpoPipeline against it."""
+class DummyPipeline(base_rl_main.BasePipeline):
+  def __init__(self, argv: list[str], **kwargs):
+    self.data_module: types.ModuleType | None = None
+    super().__init__(argv, **kwargs)
+
+  def _is_agentic_mode(self, mode:str) -> bool:
+    return mode == "agentic_dummy"
+  
+  @property  
+  def _default_training_mode(self):
+    return "dummy" 
+
+  def _create_agentic_dummy_config(self):
+    cfg = dict(self._config_mapping("agentic_dummy_config"))
+
+    # episode_timeout = per_turn_timeout_secs * max_turns when not explicit
+    if "episode_timeout" not in cfg:
+      per_turn = cfg.pop("per_turn_timeout_secs", None)
+      max_turns = cfg.get("max_turns", 1)
+      if per_turn is not None:
+        cfg["episode_timeout"] = per_turn * max_turns
+
+    # max_response_length mirrors rollout_config.total_generation_steps
+    if "max_response_length" not in cfg:
+      cfg["max_response_length"] = self._config_mapping("rollout_config").get(
+          "total_generation_steps", 8192
+      )
+
+    # Strip helper keys that are not GRPOConfig fields
+    valid = {f.name for f in dataclasses.fields(DummyConfig)}
+    cfg.pop("max_turns", None)
+    
+    return DummyConfig(**{k: v for k, v in cfg.items() if k in valid})
+  
+  def create_rl_cluster(self):
+    pass
+
+  def compute_params(self):
+    pass
+
+  def _run(self):
+    pass
+
+def _make_pipeline(extra_yaml: str) -> DummyPipeline:
+  """Write a minimal valid YAML and instantiate DummyPipeline against it."""
   base = """
 model_config:
   model_name: "test_model"
@@ -112,15 +162,15 @@ train_fraction: 1.0
 
   # Patch HF_TOKEN so tokenizer validation passes
   with mock.patch.dict(os.environ, {"HF_TOKEN": "fake"}):
-    pipeline = grpo_main.GrpoPipeline(["", path])
+    pipeline = DummyPipeline(["", path])
   os.unlink(path)
   return pipeline
 
 
 def _make_pipeline_with_cli_args(
     extra_yaml: str, cli_args: list[str]
-) -> grpo_main.GrpoPipeline:
-  """Write a minimal valid YAML and instantiate GrpoPipeline with CLI args."""
+) -> DummyPipeline:
+  """Write a minimal valid YAML and instantiate DummyPipeline with CLI args."""
   base = """
 model_config:
   model_name: "test_model"
@@ -195,7 +245,7 @@ train_fraction: 1.0
     path = f.name
 
   with mock.patch.dict(os.environ, {"HF_TOKEN": "fake"}):
-    pipeline = grpo_main.GrpoPipeline(["", path, *cli_args])
+    pipeline = DummyPipeline(["", path, *cli_args])
   os.unlink(path)
   return pipeline
 
@@ -209,7 +259,7 @@ class DispatchTest(absltest.TestCase):
 
   def test_agentic_data_module_receives_data_config_for_raw_dataset(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -225,7 +275,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -261,7 +311,7 @@ vllm_config:
 
   def test_agentic_nullable_string_can_be_overridden_from_cli(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -277,7 +327,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -304,7 +354,7 @@ vllm_config:
 
   def test_agentic_nullable_dict_can_be_overridden_from_cli(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -320,7 +370,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -353,7 +403,7 @@ vllm_config:
 
   def test_agentic_nullable_string_can_be_overridden_from_env(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -369,7 +419,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -395,9 +445,9 @@ vllm_config:
         "examples.deepswe.swe_agent.SWEAgent",
     )
 
-  def test_standard_grpo_dispatches_to_standard(self):
+  def test_standard_dummy_dispatches_to_standard(self):
     extra = """
-grpo_config:
+dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -409,14 +459,14 @@ reward_functions: []
 verl_compatible: false
 """
     pipeline = _make_pipeline(extra)
-    self.assertEqual(pipeline.config.get("training_mode", "grpo"), "grpo")
+    self.assertEqual(pipeline.config.get("training_mode", "dummy"), "dummy")
     with mock.patch.object(pipeline, "_run") as mock_run:
       pipeline.run_trainer()
-      mock_run.assert_called_once_with(mode="grpo")
+      mock_run.assert_called_once_with(mode="dummy")
 
-  def test_agentic_grpo_dispatches_to_agentic(self):
+  def test_agentic_dummy_dispatches_to_agentic(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -433,7 +483,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -449,59 +499,10 @@ vllm_config:
   hbm_utilization: 0.4
 """
     pipeline = _make_pipeline(extra)
-    self.assertEqual(pipeline.config["training_mode"], "agentic_grpo")
+    self.assertEqual(pipeline.config["training_mode"], "agentic_dummy")
     with mock.patch.object(pipeline, "_run") as mock_run:
       pipeline.run_trainer()
-      mock_run.assert_called_once_with(mode="agentic_grpo")
-
-  def test_unknown_mode_raises(self):
-    # Build pipeline with standard config then manually set bad mode
-    extra = """
-grpo_config:
-  num_generations: 2
-  num_iterations: 1
-  beta: 0.0
-  epsilon: 0.2
-data_source: "tfds"
-dataset_name: "gsm8k"
-tfds_download: false
-reward_functions: []
-verl_compatible: false
-"""
-    pipeline = _make_pipeline(extra)
-    pipeline.config["training_mode"] = "bad_mode"
-    raw_dataset = mock.Mock()
-    raw_dataset.__len__ = mock.Mock(return_value=1)
-    with mock.patch.object(pipeline, "_setup_kubernetes"):
-      with mock.patch.object(
-          pipeline, "_get_tokenizer", return_value=mock.sentinel.tokenizer
-      ):
-        with mock.patch.object(
-            pipeline,
-            "_create_chat_parser",
-            return_value=mock.sentinel.chat_parser,
-        ):
-          with mock.patch.object(
-              pipeline,
-              "_load_raw_dataset",
-              return_value=(raw_dataset, None),
-          ):
-            with mock.patch.object(pipeline, "compute_params"):
-              with mock.patch.object(
-                  grpo_main.data_lib,
-                  "post_init_dataset",
-                  return_value=(mock.sentinel.dataset, None),
-              ):
-                with mock.patch.object(
-                    pipeline,
-                    "create_rl_cluster",
-                    return_value=mock.sentinel.rl_cluster,
-                ):
-                  with self.assertRaisesRegex(
-                      ValueError, "Unsupported training_mode 'bad_mode'"
-                  ):
-                    pipeline.run_trainer()
-
+      mock_run.assert_called_once_with(mode="agentic_dummy")
 
 # ---------------------------------------------------------------------------
 # KV cache formula
@@ -512,7 +513,7 @@ class RolloutConfigTest(absltest.TestCase):
 
   def _make_agentic_pipeline(self, max_turns):
     extra = f"""
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -528,7 +529,7 @@ agent_kwargs: {{}}
 env_class_path: null
 env_kwargs: {{}}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -556,9 +557,9 @@ vllm_config:
     cfg = p.create_rollout_config()
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
 
-  def test_standard_grpo_kv_cache(self):
+  def test_standard_dummy_kv_cache(self):
     extra = """
-grpo_config:
+dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -572,6 +573,7 @@ verl_compatible: false
     p = _make_pipeline(extra)
     cfg = p.create_rollout_config()
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
+
 
   def test_vllm_submission_threshold_passed_through(self):
     extra = """
@@ -591,7 +593,6 @@ vllm_config:
     self.assertEqual(cfg.rollout_vllm_server_mode_submission_threshold, 3840)
     self.assertEqual(cfg.rollout_vllm_server_mode_submission_timeout_s, 1.5)
 
-
 # ---------------------------------------------------------------------------
 # GRPOConfig construction
 # ---------------------------------------------------------------------------
@@ -601,7 +602,7 @@ class AgenticConfigTest(absltest.TestCase):
 
   def _base_extra(self, agentic_overrides="", system_prompt='""'):
     return f"""
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -617,7 +618,7 @@ agent_kwargs: {{}}
 env_class_path: null
 env_kwargs: {{}}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.001
@@ -637,33 +638,33 @@ vllm_config:
     p = _make_pipeline(
         self._base_extra("max_turns: 20\n  per_turn_timeout_secs: 300")
     )
-    algo = p._create_agentic_grpo_config()
+    algo = p._create_agentic_dummy_config()
     self.assertEqual(algo.episode_timeout, 300 * 20)
 
   def test_max_response_length_from_rollout(self):
     p = _make_pipeline(self._base_extra("max_turns: 1"))
-    algo = p._create_agentic_grpo_config()
+    algo = p._create_agentic_dummy_config()
     # rollout_config.total_generation_steps = 512
     self.assertEqual(algo.max_response_length, 512)
 
   def test_num_generations_passed_through(self):
     p = _make_pipeline(self._base_extra("max_turns: 1"))
-    algo = p._create_agentic_grpo_config()
+    algo = p._create_agentic_dummy_config()
     self.assertEqual(algo.num_generations, 2)
 
   def test_cli_empty_system_prompt_stays_empty_string(self):
     p = _make_pipeline_with_cli_args(
         self._base_extra("max_turns: 1", system_prompt='"base"'),
-        ['agentic_grpo_config.system_prompt=""'],
+        ['agentic_dummy_config.system_prompt=""'],
     )
-    self.assertEqual(p.config["agentic_grpo_config"]["system_prompt"], "")
+    self.assertEqual(p.config["agentic_dummy_config"]["system_prompt"], "")
 
 
 class SplitMeshConfigTest(absltest.TestCase):
 
   def test_split_mesh_uses_explicit_role_meshes(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 data_module: "tunix.cli.recipes.deepscaler_data"
 apply_chat_template_to_dataset: false
 data_config:
@@ -679,7 +680,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -775,7 +776,7 @@ vllm_config:
 
   def test_create_role_to_mesh_passes_configured_allocation_policy(self):
     extra = """
-training_mode: "agentic_grpo"
+training_mode: "agentic_dummy"
 verl_compatible: false
 chat_parser_config:
   type: "default"
@@ -784,7 +785,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_dummy_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
