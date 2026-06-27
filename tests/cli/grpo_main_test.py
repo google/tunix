@@ -732,9 +732,9 @@ vllm_config:
         self.axis_names = axis_names
         self.axis_types = axis_types
 
-    with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
+    with mock.patch.object(base_rl_main.jax, "devices", return_value=fake_devices):
       with mock.patch.object(
-          grpo_main.jax.sharding, "Mesh", side_effect=FakeMesh
+          base_rl_main.jax.sharding, "Mesh", side_effect=FakeMesh
       ):
         role_to_mesh = pipeline.create_role_to_mesh()
 
@@ -818,7 +818,7 @@ vllm_config:
 
     fake_devices = list(range(4))
 
-    with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
+    with mock.patch.object(base_rl_main.jax, "devices", return_value=fake_devices):
       with mock.patch.object(
           base_rl_main.mesh_lib,
           "allocate_named_mesh_device_slices",
