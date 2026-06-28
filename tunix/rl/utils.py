@@ -16,7 +16,7 @@
 
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, Iterator, List, Optional
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from absl import logging
 from flax import nnx
@@ -162,7 +162,7 @@ def get_batch_slice(tree: Any, batch_slice: slice) -> Any:
   )
 
 
-def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
+def merge_micro_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
   """Merges micro-batch dictionaries into a single batch.
 
   Concatenates values from a list of micro-batch dicts. Values are concatenated
@@ -178,11 +178,12 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
   merged = {}
-
-  for key in batches[0].keys():
+  first_batch, *_ = batches
+  for key in first_batch.keys():
     all_values = [item[key] for item in batches]
+    first_value, *_ = all_values
 
-    if isinstance(all_values[0], list):
+    if isinstance(first_value, list):
       merged[key] = list(chain.from_iterable(all_values))
     else:
       merged[key] = tree_util.tree_map(
@@ -314,6 +315,9 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
     p_len = int(np.sum(p_mask[i]))
     c_len = int(np.sum(c_mask[i]))
 
+    # `policy_version` is per-row: row `i` of the input maps to scalar
+    # `policy_version_np[i]`. We slice with `i:i+1` to keep a 1-D shape so that
+    # `pack_sequences` can stack scalars from multiple items unambiguously.
     item = {
         "prompt_ids": p_ids[i, -p_len:] if p_len > 0 else p_ids[i, :0],
         "prompt_mask": p_mask[i, -p_len:] if p_len > 0 else p_mask[i, :0],
@@ -325,27 +329,93 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "old_per_token_logps": old_logps[i, :c_len] if has_old else None,
         "returns": returns_np[i, :c_len] if has_returns else None,
         "old_values": old_values_np[i, :c_len] if has_old_values else None,
-        "policy_version": policy_version_np if has_policy_version else None,
+        "policy_version": (
+            policy_version_np[i : i + 1] if has_policy_version else None
+        ),
     }
     res.append(item)
   return res
 
 
 def pack_sequences(
-    item_iterator: Iterator[list[common.TrainExample]],
+    item_iterator: Iterator[Sequence[common.TrainExample]],
     max_token_budget: int,
     pad_id: int = 0,
+    num_packs: int = 1,
 ) -> Iterator[list[common.TrainExample]]:
-  """Packs a stream of TrainExamples into 1D sequences up to a token budget."""
-  buffer = []
-  current_tokens = 0
-  example_cls = common.TrainExample
+  """Packs a stream of TrainExamples into 1D sequences up to a token budget and stacks them into 2D batches of shape [num_packs, max_token_budget].
 
-  def _flush_buffer() -> list[common.TrainExample]:
-    nonlocal buffer, current_tokens
-    if not buffer:
-      return []
+  Args:
+    item_iterator: An iterator that yields lists of TrainExamples (one
+      micro-batch).
+    max_token_budget: The maximum number of tokens allowed per packed sequence.
+    pad_id: The token ID to use for padding. Defaults to 0.
+    num_packs: The number of packs to yield together. Set this to the FSDP
+      dimension size to ensure the yielded batch size is shardable by JAX. Packs
+      will be padded with dummy data to ensure the total number of yields is a
+      multiple of this number. Defaults to 1.
 
+  Yields:
+    A list of size 1 containing a single TrainExample whose arrays are stacked
+    along the batch axis to shape [num_packs, MaxTokenBudget].
+  """
+
+  def _flush_pack(
+      pack_items: Sequence[Mapping[str, Any]],
+      example_cls: type[common.TrainExample],
+      first_item: Mapping[str, Any],
+  ) -> common.TrainExample:
+    """Flushes a pack of items into a single TrainExample.
+
+    Args:
+      pack_items: A list of dictionaries, each representing a single sequence to
+        be packed.
+      example_cls: The class of the TrainExample to be created.
+      first_item: The first item in the pack, used to determine which fields to
+        track.
+
+    Returns:
+      A single TrainExample with the packed sequences.
+    """
+    # Find optional keys to be populated.
+    tracked_per_token_keys = [
+        k for k in _OPTIONAL_PER_TOKEN_KEYS if first_item.get(k) is not None
+    ]
+    has_policy_version = first_item.get("policy_version") is not None
+
+    if not pack_items:
+      # Create a dummy pack filled with zeros/pads
+      p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+      p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+      c_ids_arr = jnp.full((1, max_token_budget), pad_id, dtype=jnp.int32)
+      c_mask_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+      adv_arr = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
+      seg_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+      pos_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+
+      kwargs = dict(
+          prompt_ids=p_ids_arr,
+          prompt_mask=p_mask_arr,
+          completion_ids=c_ids_arr,
+          completion_mask=c_mask_arr,
+          advantages=adv_arr,
+          ref_per_token_logps=None,
+          old_per_token_logps=None,
+          segment_ids=seg_arr,
+          segment_positions=pos_arr,
+      )
+
+      for k in tracked_per_token_keys:
+        kwargs[k] = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
+
+      if has_policy_version:
+        kwargs["policy_version"] = first_item["policy_version"]
+
+      return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
+
+    current_tokens = sum(
+        len(it["prompt_ids"]) + len(it["completion_ids"]) for it in pack_items
+    )
     # TODO(noghabi): Pad to the next power of 2 instead of user defined
     # max_token_budget if the seq is short. This will incur an additional
     # compilation on trainer side, but also will result in faster compute.
@@ -357,13 +427,22 @@ def pack_sequences(
     packed_segment_ids = []
     packed_positions = []
 
-    tracked_per_token_keys = [
-        k for k in _OPTIONAL_PER_TOKEN_KEYS if buffer[0].get(k) is not None
-    ]
     per_token_feature_buffers = {k: [] for k in tracked_per_token_keys}
-    has_policy_version = buffer[0].get("policy_version") is not None
 
-    for i, item in enumerate(buffer, start=1):
+    if has_policy_version:
+
+      # Homogeneity invariant: every item in a single pack must share the same
+      # policy_version (enforced by the version-aware flush below). If this
+      # fires it indicates a bug in the buffering logic, not in caller data.
+      versions = [
+          int(np.asarray(item["policy_version"]).item()) for item in pack_items
+      ]
+      assert all(v == versions[0] for v in versions), (
+          "pack_sequences invariant violation: heterogeneous policy_versions"
+          f" within a single pack: {versions}"
+      )
+
+    for i, item in enumerate(pack_items, start=1):
       p_ids = item["prompt_ids"]
       c_ids = item["completion_ids"]
       seq_len = len(p_ids) + len(c_ids)
@@ -426,40 +505,91 @@ def pack_sequences(
     )
     for k in tracked_per_token_keys:
       kwargs[k] = per_token_features[k]
+
     if has_policy_version:
-      kwargs["policy_version"] = buffer[0]["policy_version"]
+      kwargs["policy_version"] = pack_items[0]["policy_version"]
 
-    packed_example = example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
-
-    buffer.clear()
-    current_tokens = 0
-    return [packed_example]
+    return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
 
   for item_list in item_iterator:
+    all_unpadded_items = []
+    example_cls = common.TrainExample
     for example in item_list:
       example_cls = type(example)
-      unpadded_items = unpad_train_example(example)
-      for item in unpadded_items:
-        tokens = len(item["prompt_ids"]) + len(item["completion_ids"])
+      all_unpadded_items.extend(unpad_train_example(example))
 
-        # If a single item is strictly larger than budget, we skip or truncate.
-        # Ideally, budget > max_prompt_length + max_response_length.
-        if tokens > max_token_budget:
-          logging.warning(
-              "Skipping single sequence with length %d exceeding budget %d",
-              tokens,
-              max_token_budget,
+    if not all_unpadded_items:
+      continue
+
+    first_item, *_ = all_unpadded_items
+
+    # Sequential Packing per micro-batch
+    packs = []
+    current_pack_items = []
+    current_tokens = 0
+
+    def _version_changed(item: Mapping[str, Any]) -> bool:
+      if not current_pack_items:
+        return False
+      a = current_pack_items[0].get("policy_version")
+      b = item.get("policy_version")
+      if a is None or b is None:
+        return False
+      return int(np.asarray(a).item()) != int(np.asarray(b).item())
+
+    for item in all_unpadded_items:
+      tokens = len(item["prompt_ids"]) + len(item["completion_ids"])
+
+      # If a single item is strictly larger than budget, we skip or truncate.
+      # Ideally, budget > max_prompt_length + max_response_length.
+      if tokens > max_token_budget:
+        logging.warning(
+            "Skipping single sequence with length %d exceeding budget %d",
+            tokens,
+            max_token_budget,
+        )
+        continue
+
+      if current_tokens + tokens > max_token_budget or _version_changed(item):
+        packs.append(current_pack_items)
+        current_pack_items = []
+        current_tokens = 0
+
+      current_pack_items.append(item)
+      current_tokens += tokens
+
+    # Flush the last pack.
+    if current_pack_items:
+      packs.append(current_pack_items)
+
+    if not packs:
+      continue
+
+    # Extend with empty packs to make the total number of packs a multiple of
+    # num_packs. Later packs will be filled with dummy data.
+    while len(packs) % num_packs != 0:
+      packs.append([])
+
+    for i in range(0, len(packs), num_packs):
+      chunk = packs[i : i + num_packs]
+      chunk_examples = []
+      for p in chunk:
+        chunk_examples.append(
+            _flush_pack(
+                p,
+                example_cls,
+                first_item,
+            )
+        )
+
+      yield [
+          jax.tree.map(
+              lambda first_x, *rest_xs: None
+              if first_x is None
+              else jnp.concatenate((first_x, *rest_xs), axis=0),
+              *chunk_examples,
           )
-          continue
-
-        if current_tokens + tokens > max_token_budget:
-          yield _flush_buffer()
-
-        buffer.append(item)
-        current_tokens += tokens
-
-  if buffer:
-    yield _flush_buffer()
+      ]
 
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"

@@ -15,6 +15,7 @@
 import os
 from absl.testing import absltest
 import chex
+import flax
 from flax import nnx
 import jax
 from jax import sharding
@@ -175,28 +176,174 @@ class UtilsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'memory_kind must be one of'):
       utils.put_params_on_memory_kind(params, 'invalid_kind')
 
+  def _create_mock_train_example(
+      self,
+      prompt_len: int,
+      completion_len: int,
+      pad_len: int = 0,
+      cls=common.TrainExample,
+      **kwargs
+  ) -> common.TrainExample:
+    p_ids = jnp.concatenate(
+        [
+            jnp.zeros((1, pad_len), dtype=jnp.int32),
+            jnp.ones((1, prompt_len), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    p_mask = jnp.concatenate(
+        [
+            jnp.zeros((1, pad_len), dtype=jnp.int32),
+            jnp.ones((1, prompt_len), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+
+    c_ids = jnp.concatenate(
+        [
+            jnp.ones((1, completion_len), dtype=jnp.int32) * 2,
+            jnp.zeros((1, pad_len), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    c_mask = jnp.concatenate(
+        [
+            jnp.ones((1, completion_len), dtype=jnp.int32),
+            jnp.zeros((1, pad_len), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+
+    base_kwargs = dict(
+        prompt_ids=p_ids,
+        prompt_mask=p_mask,
+        completion_ids=c_ids,
+        completion_mask=c_mask,
+        advantages=jnp.array([1.5], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        segment_ids=None,
+        segment_positions=None,
+    )
+    base_kwargs.update(kwargs)
+    return cls(**base_kwargs)
+
+  def test_unpad_train_example(self):
+    example = self._create_mock_train_example(2, 3, pad_len=2)
+    unpadded = utils.unpad_train_example(example)
+    self.assertLen(unpadded, 1)
+    [item] = unpadded
+    self.assertEqual(item['prompt_ids'].shape, (2,))
+    self.assertEqual(item['completion_ids'].shape, (3,))
+    self.assertFalse(item['adv_is_per_token'])
+
+  def test_pack_sequences_skips_large(self):
+    # A sequence larger than budget should be skipped.
+    example1 = self._create_mock_train_example(5, 6)  # size 11
+    example2 = self._create_mock_train_example(2, 3)  # size 5
+    packed_iterator = utils.pack_sequences(
+        iter([[example1, example2]]), max_token_budget=10
+    )
+    packed_batches = list(packed_iterator)
+    self.assertLen(packed_batches, 1)
+    self.assertEqual(packed_batches[0][0].segment_ids.shape, (1, 10))
+    # Check that only example2 was packed (length 5)
+    self.assertEqual(np.max(packed_batches[0][0].segment_ids), 1)
+
+  def test_pack_sequences_with_dummy_padding(self):
+
+    @flax.struct.dataclass(frozen=True)
+    class PPOTrainExample(common.TrainExample):
+      returns: jax.Array | None = None
+      old_values: jax.Array | None = None
+      policy_version: jax.Array | None = None
+
+    example = self._create_mock_train_example(
+        2,
+        3,
+        cls=PPOTrainExample,
+        ref_per_token_logps=jnp.ones((1, 3)),
+        returns=jnp.ones((1, 3)),
+        old_values=jnp.ones((1, 3)),
+        policy_version=jnp.array([1]),
+    )
+
+    # num_packs=2 with 1 example generates 1 dummy pack.
+    packed_iterator = utils.pack_sequences(
+        iter([[example]]), max_token_budget=10, num_packs=2
+    )
+    packed_batches = list(packed_iterator)
+    [[pack]] = packed_batches
+
+    with self.subTest(name='pack_counts'):
+      self.assertLen(packed_batches, 1)
+      self.assertLen(packed_batches[0], 1)
+
+    with self.subTest(name='batch_size'):
+      self.assertEqual(pack.prompt_ids.shape, (2, 0))
+      self.assertEqual(pack.completion_ids.shape, (2, 10))
+
+    with self.subTest(name='valid_pack_check'):
+      # The arrays are shifted by prompt_len (=2).
+      self.assertEqual(pack.returns[0, 2], 1.0)
+      self.assertEqual(pack.old_values[0, 2], 1.0)
+      self.assertEqual(pack.ref_per_token_logps[0, 2], 1.0)
+      self.assertEqual(pack.policy_version[0], 1)
+
+    with self.subTest(name='dummy_pack_check'):
+      # Dummy pack check (index 1) - per-token features are zero (mask=0
+      # ensures it contributes nothing to loss). policy_version is inherited
+      # from the first real pack so off-policy filtering does not see a
+      # sentinel for padding rows.
+      self.assertEqual(pack.returns[1, 0], 0.0)
+      self.assertEqual(pack.old_values[1, 0], 0.0)
+      self.assertEqual(pack.ref_per_token_logps[1, 0], 0.0)
+      self.assertEqual(pack.policy_version[1], 1)
+
+    with self.subTest(name='policy_version_shape_is_per_row'):
+      # policy_version is a per-row array of shape (num_packs,) where row i
+      # carries the version of pack i. With num_packs=2 we expect length-2.
+      self.assertEqual(pack.policy_version.shape, (2,))
+
+  def test_pack_sequences_version_aware_flush(self):
+    """Items with different policy_versions must land in separate packs."""
+
+    @flax.struct.dataclass(frozen=True)
+    class VersionedExample(common.TrainExample):
+      policy_version: jax.Array | None = None
+
+    # Two examples with different policy_versions. Both fit in the budget so
+    # without version-aware flushing they would share a pack.
+    example_v3 = self._create_mock_train_example(
+        2, 3, cls=VersionedExample, policy_version=jnp.array([3])
+    )
+    example_v7 = self._create_mock_train_example(
+        2, 3, cls=VersionedExample, policy_version=jnp.array([7])
+    )
+
+    packed_iterator = utils.pack_sequences(
+        iter([[example_v3, example_v7]]),
+        max_token_budget=20,  # plenty of room for both
+        num_packs=2,
+    )
+    packed_batches = list(packed_iterator)
+    [[pack]] = packed_batches
+
+    with self.subTest(name='packs_are_separated'):
+      # Each example becomes its own pack -> shape (2, ...) after num_packs=2.
+      self.assertEqual(pack.completion_ids.shape[0], 2)
+
+    with self.subTest(name='per_row_policy_version'):
+      self.assertEqual(pack.policy_version.shape, (2,))
+      self.assertEqual(int(pack.policy_version[0]), 3)
+      self.assertEqual(int(pack.policy_version[1]), 7)
+
   def test_pack_sequences(self):
-    def _create_mock_train_example(
-        prompt_len: int, completion_len: int
-    ) -> common.TrainExample:
-      return common.TrainExample(
-          prompt_ids=jnp.ones((1, prompt_len), dtype=jnp.int32),
-          prompt_mask=jnp.ones((1, prompt_len), dtype=jnp.int32),
-          completion_ids=jnp.ones((1, completion_len), dtype=jnp.int32) * 2,
-          completion_mask=jnp.ones((1, completion_len), dtype=jnp.int32),
-          advantages=jnp.array([1.5], dtype=jnp.float32),
-          ref_per_token_logps=None,
-          old_per_token_logps=None,
-          segment_ids=None,
-          segment_positions=None,
-      )
-
     # 3 sequences with lengths (P+C): (2+3=5), (1+2=3), (3+4=7)
-    example1 = _create_mock_train_example(2, 3)
-    example2 = _create_mock_train_example(1, 2)
-    example3 = _create_mock_train_example(3, 4)
-
-    item_iterator = iter([[example1], [example2], [example3]])
+    example1 = self._create_mock_train_example(2, 3)
+    example2 = self._create_mock_train_example(1, 2)
+    example3 = self._create_mock_train_example(3, 4)
+    item_iterator = iter([[example1, example2, example3]])
 
     # Budget of 10. We expect item 1 (5) and item 2 (3) to fit in the first pack (8).
     # Item 3 (7) will go to the second pack (because 8+7 > 10).
@@ -205,9 +352,6 @@ class UtilsTest(absltest.TestCase):
     )
 
     packed_batches = list(packed_iterator)
-    with self.subTest('pack_counts'):
-      self.assertLen(packed_batches, 2)
-
     pack1 = packed_batches[0][0]
     # Segment IDs should be (5 ones, 3 twos, 2 padding zeros)
     expected_segments_1 = jnp.array(
@@ -224,15 +368,6 @@ class UtilsTest(absltest.TestCase):
         [[0, 0, 1, 1, 1, 0, 1, 1, 0, 0]], dtype=jnp.int32
     )
 
-    with self.subTest('pack1_contents'):
-      self.assertEqual(pack1.prompt_ids.shape, (1, 0))  # prompt_ids is empty
-      self.assertEqual(pack1.completion_ids.shape, (1, 10))  # filled + padded
-      self.assertEqual(pack1.segment_ids.shape, (1, 10))
-      self.assertEqual(pack1.segment_positions.shape, (1, 10))
-      np.testing.assert_array_equal(pack1.segment_ids, expected_segments_1)
-      np.testing.assert_array_equal(pack1.segment_positions, expected_positions_1)
-      np.testing.assert_array_equal(pack1.completion_mask, expected_mask_1)
-
     pack2 = packed_batches[1][0]
     expected_segments_2 = jnp.array([[1] * 7 + [0] * 3], dtype=jnp.int32)
     # Positions should be (0..6, 0, 0, 0)
@@ -244,13 +379,29 @@ class UtilsTest(absltest.TestCase):
         [[0, 0, 0, 1, 1, 1, 1, 0, 0, 0]], dtype=jnp.int32
     )
 
-    with self.subTest('pack2_contents'):
+    with self.subTest(name='pack_counts'):
+      self.assertLen(packed_batches, 2)
+
+    with self.subTest(name='pack1_contents'):
+      self.assertEqual(pack1.prompt_ids.shape, (1, 0))  # prompt_ids is empty
+      self.assertEqual(pack1.completion_ids.shape, (1, 10))  # filled + padded
+      self.assertEqual(pack1.segment_ids.shape, (1, 10))
+      self.assertEqual(pack1.segment_positions.shape, (1, 10))
+      np.testing.assert_array_equal(pack1.segment_ids, expected_segments_1)
+      np.testing.assert_array_equal(
+          pack1.segment_positions, expected_positions_1
+      )
+      np.testing.assert_array_equal(pack1.completion_mask, expected_mask_1)
+
+    with self.subTest(name='pack2_contents'):
       self.assertEqual(pack2.prompt_ids.shape, (1, 0))
       self.assertEqual(pack2.completion_ids.shape, (1, 10))
       self.assertEqual(pack2.segment_ids.shape, (1, 10))
       self.assertEqual(pack2.segment_positions.shape, (1, 10))
       np.testing.assert_array_equal(pack2.segment_ids, expected_segments_2)
-      np.testing.assert_array_equal(pack2.segment_positions, expected_positions_2)
+      np.testing.assert_array_equal(
+          pack2.segment_positions, expected_positions_2
+      )
       np.testing.assert_array_equal(pack2.completion_mask, expected_mask_2)
 
 

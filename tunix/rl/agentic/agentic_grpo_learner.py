@@ -557,6 +557,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     logging.debug("Advantages computed: %s", advantages)
 
     if self.algo_config.degenerate_group_masking:
+      # Masking runs *before* sequence packing, requiring 1-D per-generation
+      # advantages. If 2-D per-token advantages are ever supplied, `jnp.all`
+      # would incorrectly zero out the entire batch instead of per-segment.
+      assert advantages.ndim == 1, (
+          "degenerate_group_masking expects 1-D advantages "
+          f"(per-generation), got shape {advantages.shape}. "
+          "Sequence-packed (2-D) advantages must be filtered before packing."
+      )
       if jnp.all(jnp.isclose(advantages, 0.0)):
         logging.info(
             "Filtering degenerate group %s with all-0 advantages.", group_id
