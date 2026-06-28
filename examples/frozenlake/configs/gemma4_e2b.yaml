@@ -1,0 +1,113 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+model_config:
+  model_name: "gemma-4-e2b"
+  model_id: "google/gemma-4-E2B-it"
+  model_source: "huggingface"
+  model_path: ""
+  mesh:
+    shape: "(4,1)"
+    axis_names: "('fsdp','tp')"
+  rng_seed: 42
+actor_model_config:
+  mesh:
+    shape: "(4,1)"
+    axis_names: "('fsdp','tp')"
+reference_model_config:
+  mesh: null
+  same_mesh_as: "actor"
+rollout_model_config:
+  mesh:
+    shape: "(1,4)"
+    axis_names: "('fsdp','tp')"
+tokenizer_config:
+  tokenizer_type: "huggingface"
+  tokenizer_path: ""
+  add_bos: True
+
+# Agentic GRPO configuration
+training_mode: "agentic_grpo"
+agent_class_path: "tunix.oss.examples.frozenlake.agent.FrozenLakeAgent"
+agent_kwargs:
+  use_multistep_prompt: True
+env_class_path: "tunix.oss.examples.frozenlake.env.FrozenLakeEnv"
+env_kwargs:
+  max_steps: 8
+
+data_module: "tunix.oss.examples.frozenlake.data"
+data_config:
+  split: "train"
+  shuffle: True
+  seed: 42
+  data_dir: "gs://tunix/data/Frozenlake"
+
+chat_parser_config:
+  type: "gemma4"
+  enable_thinking: False
+
+batch_size: 64
+num_batches: 3
+num_test_batches: 0
+num_train_epochs: 1
+
+rl_training_config:
+  mini_batch_size: 64
+  train_micro_batch_size: 1
+  actor_optimizer_config:
+    opt_type: "adamw"
+    peak_value: 1e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: 15
+    decay_steps: 150
+    b1: 0.9
+    b2: 0.95
+    weight_decay: 0.0
+    max_grad_norm: 0.1
+  eval_every_n_steps: 10
+  max_steps: 150
+  metrics_logging_options:
+    flush_every_n_steps: 1
+  checkpointing_options:
+    save_interval_steps: 50
+    max_to_keep: 4
+  profiler_options: {}
+
+rollout_config:
+  total_generation_steps: 2048
+  max_prompt_length: 2048
+  temperature: 0.7
+  top_p: 1.0
+  top_k: 0
+  
+rollout_engine: "vanilla"
+offload_to_cpu: False
+
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.003
+  epsilon_high: 0.005
+  loss_algo: "gspo-token"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "low_var_kl"
+  advantage_estimator: "rloo"
+  sampler_is: "token"
+  sampler_is_threshold: 2.0
+  degenerate_group_masking: False
+  max_concurrency: 512
