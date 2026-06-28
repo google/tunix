@@ -101,6 +101,8 @@ model_config: &base_model_config
 actor_model_config:
   <<: *base_model_config
 
+critic_model_config: null
+
 reference_model_config:
  <<: *base_model_config
 
