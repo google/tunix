@@ -181,6 +181,10 @@ class RolloutConfig:
   # Set to a smaller value to reduce peak HBM pressure on large models.
   rollout_vllm_reshard_chunk_size: Optional[int] = None
 
+  # Whether to fuse expert scales into out-projection weights for MoE models during weight synchronization. 
+  # This can improve decode performance for MoE models, but requires extra fusion time during weight synchronization.
+  rollout_vllm_fuse_expert_scales: bool = False
+
   # Additional keyword arguments forwarded directly to the vLLM engine constructor.
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
