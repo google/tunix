@@ -568,12 +568,25 @@ def compute_score(
       segment_positions,
   )
 
+  try:
+    if hasattr(model, "transformer"):
+      target_call = model.transformer.__call__
+    else:
+      target_call = model.__call__
+
+    sig = inspect.signature(target_call)
+    has_segment_ids = ("segment_ids" in sig.parameters) or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+  except Exception:
+    has_segment_ids = False
+
   model_kwargs = {"positions": calculated_positions, "cache": None}
-  if segment_ids is not None:
+  if has_segment_ids and segment_ids is not None:
     model_kwargs["segment_ids"] = segment_ids
   else:
     model_kwargs["attention_mask"] = attn_mask
-    if input_seg_ids is not None:
+    if has_segment_ids and input_seg_ids is not None:
       model_kwargs["segment_ids"] = input_seg_ids
 
   out = model(prompt_completion_ids, **model_kwargs)
