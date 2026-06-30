@@ -702,7 +702,7 @@ MODEL_MAPPING = {
     ),
 }
 
-mesh_config = [[64, 1], ["fsdp", "tp"]]  # 64 DP x 1 TP for 64 chips
+mesh_config = [[8, 8], ["fsdp", "tp"]]  # 8 DP x 8 TP for 64 chips
 # %%
 # MATH-500
 num_batches_env = os.environ.get("NUM_BATCHES")
