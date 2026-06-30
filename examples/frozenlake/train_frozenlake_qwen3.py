@@ -145,7 +145,7 @@ SEED = args.seed
 # Single shared mesh across actor / reference / rollout. Pure tensor-parallel
 # (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
 # fsdp axis.
-SHARED_MESH_SHAPE = (1, jax.device_count())
+SHARED_MESH_SHAPE = (16, 4)
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
