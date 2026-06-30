@@ -81,8 +81,8 @@ spec:
                 git reset --hard FETCH_HEAD
                 
                 # --- Hot Patch tpu-inference (PR #2838) ---
-                echo "Installing patched tpu-inference to fix ROPE bugs..."
-                pip install git+https://github.com/vllm-project/tpu-inference.git@refs/pull/2838/head --no-deps --force-reinstall
+                echo "Applying local sed patch for ROPE bugs in qwen3.py..."
+                sed -i 's/self.rope_theta = config.rope_parameters\["rope_theta"\]/self.rope_theta = getattr(config, "rope_theta", 1000000.0)/g' /opt/venv/lib/python3.12/site-packages/tpu_inference/models/jax/qwen3.py
                 # ------------------------------------------
 
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
