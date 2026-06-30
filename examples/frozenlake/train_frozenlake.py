@@ -191,7 +191,7 @@ NUM_GENERATIONS = args.num_generations
 # some headroom without provisioning a huge unused KV-cache pool — on a
 # shared trainer+rollout mesh that KV-cache pool consumes HBM that the
 # trainer needs at peak (logits + activations + optimizer state).
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = 32
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
 
 NUM_ITERATIONS = 1
