@@ -75,6 +75,7 @@ spec:
                 echo XPK Start: $(date);
                 echo "Syncing latest code from yuxzhang/swe-evaluation-dev..."
                 git config --global --add safe.directory $(pwd)
+                git init
                 git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
                 git fetch origin yuxzhang/swe-evaluation-dev
                 git reset --hard FETCH_HEAD
