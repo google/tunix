@@ -187,6 +187,7 @@ class GrpoPipeline(config.HyperParameters):
       else:
         role_to_owner[role] = resolve_owner(role, set())
         continue
+
       role_to_owner[role] = resolve_owner(role, set())
     return role_to_owner
 
@@ -250,6 +251,7 @@ class GrpoPipeline(config.HyperParameters):
           axis_shapes, axis_names, devices=assigned_devices
       )
     return {role: owner_to_mesh[owner] for role, owner in role_to_owner.items()}
+
 
   # ------------------------------------------------------------------
   # Rollout config
@@ -395,10 +397,11 @@ class GrpoPipeline(config.HyperParameters):
           rollout_vllm_server_mode_submission_threshold=submission_threshold,
           rollout_vllm_server_mode_submission_timeout_s=submission_timeout_s,
           rollout_vllm_async_scheduling=vllm.get("async_scheduling", True),
-          tensor_parallel_size=(
-              rollout_shape[1] if len(rollout_shape) > 1 else 1
+          tensor_parallel_size=vllm.get(
+              "tensor_parallel_size",
+              rollout_shape[1] if len(rollout_shape) > 1 else 1,
           ),
-          data_parallel_size=rollout_shape[0],
+          data_parallel_size=vllm.get("data_parallel_size", rollout_shape[0]),
           rollout_vllm_max_num_seqs=max_num_seqs,
           rollout_vllm_max_num_batched_tokens=max_batched_tokens,
           rollout_vllm_kwargs=vllm.get(
@@ -521,10 +524,13 @@ class GrpoPipeline(config.HyperParameters):
       )
     else:
       graph_def, params = nnx.split(reference_model)
-      actor_model = nnx.merge(
-          graph_def,
-          jax.tree.map(jnp.copy, params),
-      )
+      actor_dtype_str = actor_model_config.get("load_dtype")
+      if actor_dtype_str:
+        actor_dtype = getattr(jnp, actor_dtype_str)
+        params = jax.tree.map(lambda x: x.astype(actor_dtype), params)
+      else:
+        params = jax.tree.map(jnp.copy, params)
+      actor_model = nnx.merge(graph_def, params)
 
     cluster_config = self.create_cluster_config(
         role_to_mesh=role_to_mesh,
@@ -707,11 +713,15 @@ class GrpoPipeline(config.HyperParameters):
     """Instantiate a chat parser based on chat_parser_config.type."""
     from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib  # pylint: disable=g-import-not-at-top
 
-    parser_type = self._config_mapping("chat_parser_config").get(
-        "type", "default"
-    )
+    chat_cfg = self._config_mapping("chat_parser_config")
+    parser_type = chat_cfg.get("type", "default")
     if parser_type == "qwen":
       return chat_parser_lib.QwenChatTemplateParser(tokenizer)
+    if parser_type == "gemma4":
+      return chat_parser_lib.Gemma4ChatTemplateParser(
+          tokenizer,
+          enable_thinking=chat_cfg.get("enable_thinking", False)
+      )
     return chat_parser_lib.DefaultChatTemplateParser(tokenizer)
 
   def _load_class_from_path(self, dotted_path: str) -> type[Any]:

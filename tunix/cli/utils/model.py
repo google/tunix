@@ -196,6 +196,9 @@ def create_model(
           'flash_attention_block_size', 1024
       ),
       remat_config=model_config.get('remat_config', 1),
+      dtype=model_config.get('dtype'),
+      load_dtype=model_config.get('load_dtype'),
+      use_sliding_window_kv_cache=model_config.get('use_sliding_window_kv_cache'),
   )
 
   if model_config.get('lora_config'):

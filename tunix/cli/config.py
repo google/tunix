@@ -279,6 +279,8 @@ class HyperParameters:
           f"Expected config section {key!r} to be a mapping, got"
           f" {type(value).__name__}."
       )
+    if isinstance(value, omegaconf.DictConfig):
+      return omegaconf.OmegaConf.to_container(value, resolve=True)
     return dict(value)
 
   def _mutable_config_mapping(self, key: str) -> MutableMapping[str, Any]:
@@ -475,36 +477,25 @@ class HyperParameters:
     supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
+    supported_sources["gemma4"] = ["kaggle", "huggingface"]
 
-    if model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
-      expected_sources = supported_sources["gemma3"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
-    elif model_name.startswith("gemma2") or model_name.startswith("gemma-2"):
-      expected_sources = supported_sources["gemma2"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
+    if model_name.startswith(("gemma4", "gemma-4")):
+      model_family = "gemma4"
+    elif model_name.startswith(("gemma3", "gemma-3")):
+      model_family = "gemma3"
+    elif model_name.startswith(("gemma2", "gemma-2")):
+      model_family = "gemma2"
     elif model_name.startswith("gemma"):
-      expected_sources = supported_sources["gemma"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
+      model_family = "gemma"
     else:
-      # Default case for other models
-      expected_sources = supported_sources["other"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
+      model_family = "other"
+
+    expected_sources = supported_sources[model_family]
+    if model_source not in expected_sources:
+      raise ValueError(
+          f"Model '{model_name}' must use source(s) {expected_sources}, but"
+          f" got '{model_source}'."
+      )
 
   def _get_nested_config(self, keys: Sequence[str]) -> Any:
     """Helper to retrieve a value from a nested dictionary."""

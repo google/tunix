@@ -231,6 +231,13 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma4_e2b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_e2b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma4_e4b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),

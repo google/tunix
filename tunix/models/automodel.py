@@ -568,11 +568,22 @@ class AutoModel:
       # pick corresponding config based on model version
       model_params = call_model_config(naming_info.model_name)
 
+      # Get load_dtype explicitly from kwargs
+      load_dtype_str = kwargs.get('load_dtype')
+      load_dtype = getattr(jnp, load_dtype_str) if load_dtype_str and isinstance(load_dtype_str, str) else load_dtype_str
+
       # Apply any model config field overrides passed via kwargs (e.g.
       # use_flash_attention, flash_attention_block_size).
       if dataclasses.is_dataclass(model_params):
         valid_fields = {f.name for f in dataclasses.fields(model_params)}
-        overrides = {k: v for k, v in kwargs.items() if k in valid_fields}
+        overrides = {k: v for k, v in kwargs.items() if k in valid_fields and v is not None}
+        if 'remat_config' in overrides and isinstance(overrides['remat_config'], str):
+          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)
+          if hasattr(model_module, 'RematConfig'):
+            overrides['remat_config'] = getattr(model_module.RematConfig, overrides['remat_config'])
+        if 'dtype' in overrides and isinstance(overrides['dtype'], str):
+          overrides['dtype'] = getattr(jnp, overrides['dtype'])
+        
         if overrides:
           logging.info('Applying model config overrides: %s', overrides)
           model_params = dataclasses.replace(model_params, **overrides)
@@ -583,6 +594,7 @@ class AutoModel:
             resolved_model_path,
             model_params,
             mesh,
+            dtype=load_dtype,
         )
 
     return model, resolved_model_path
