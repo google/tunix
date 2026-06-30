@@ -557,11 +557,32 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     logging.debug("Advantages computed: %s", advantages)
 
     if self.algo_config.degenerate_group_masking:
-      if jnp.all(jnp.isclose(advantages, 0.0)):
-        logging.info(
-            "Filtering degenerate group %s with all-0 advantages.", group_id
+      advantages_np = np.asarray(advantages)
+      advantages_grouped = advantages_np.reshape(-1, self.algo_config.num_generations)
+      is_degenerate = np.all(np.isclose(advantages_grouped, 0.0), axis=-1)
+      if np.any(is_degenerate):
+        group_ids = []
+        for i in range(advantages_grouped.shape[0]):
+          idx = i * self.algo_config.num_generations
+          g_id = trajectories[idx].traj.get("group_id")
+          if g_id is None:
+            g_id = trajectories[idx].traj.get("original_input", {}).get("group_id")
+          group_ids.append(g_id)
+
+        for i, degenerate in enumerate(is_degenerate):
+          if degenerate:
+            logging.info(
+                "Filtering degenerate group %s with all-0 advantages.",
+                group_ids[i],
+            )
+
+        is_degenerate_expanded = np.repeat(is_degenerate, self.algo_config.num_generations)
+        is_degenerate_expanded_jax = jnp.asarray(is_degenerate_expanded)
+        completion_mask = jnp.where(
+            is_degenerate_expanded_jax[:, None],
+            jnp.zeros_like(completion_mask),
+            completion_mask,
         )
-        completion_mask = jnp.zeros_like(completion_mask)
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 

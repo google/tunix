@@ -996,6 +996,95 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       [res_group4] = learner._process_results(group4)
       self.assertTrue(jnp.any(res_group4.old_per_token_logps == 0.0))
 
+  def test_process_results_masks_zero_advantage_multi_group(self):
+    class MockTraj:
+
+      def __init__(self, index, group_id, reward):
+        self.traj = {
+            "conversation_text": [
+                {"role": "user", "content": "user query"},
+                {"role": "assistant", "content": f"msg {index}"},
+            ],
+            "conversation_tokens": np.array([1, 2, 3]),
+            "conversation_masks": np.array([1, 1, 1]),
+            "old_logprobs": None,
+            "policy_version": 0,
+            "trajectory_reward": reward,
+            "prompt_tokens": np.array([4, 5]),
+            "original_input": {"prompts": "hello"},
+            "group_id": group_id,
+        }
+
+    # Group 1: non-degenerate (different rewards)
+    group1 = [MockTraj(0, "group1", -1.0), MockTraj(1, "group1", 1.0)]
+    # Group 2: degenerate (same rewards)
+    group2 = [MockTraj(2, "group2", 0.0), MockTraj(3, "group2", 0.0)]
+    combined_groups = group1 + group2
+
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=100,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.1,
+        epsilon=0.2,
+        num_generations=2,
+        loss_algo="grpo",
+        degenerate_group_masking=True,
+        max_response_length=10,
+    )
+
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=None,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+
+    with mock.patch.object(
+        learner.rl_cluster,
+        "get_ref_per_token_logps",
+        return_value=jnp.zeros((4, 10)),
+        autospec=True,
+    ) as mock_get_ref:
+      [res] = learner._process_results(combined_groups)
+
+      # Group 1 should remain intact
+      self.assertTrue(jnp.any(res.completion_mask[:2] > 0))
+      # Group 2 should be masked out
+      self.assertFalse(jnp.any(res.completion_mask[2:] > 0))
+
   def test_checkpointing(self):
     ckpt_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, ckpt_dir)
