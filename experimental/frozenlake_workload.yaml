@@ -80,6 +80,11 @@ spec:
                 git fetch origin yuxzhang/swe-evaluation-dev
                 git reset --hard FETCH_HEAD
                 
+                # --- Hot Patch tpu-inference (PR #2838) ---
+                echo "Installing patched tpu-inference to fix ROPE bugs..."
+                pip install git+https://github.com/vllm-project/tpu-inference.git@refs/pull/2838/head --no-deps --force-reinstall
+                # ------------------------------------------
+
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
                 sleep 60;
                 echo "Generating dataset..."
