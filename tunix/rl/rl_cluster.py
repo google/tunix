@@ -275,6 +275,8 @@ class RLCluster:
     # algorithm. E.g. when loading from a checkpoint with additional inner loops
     # that update the model, we should properly update the global steps.
     self.global_steps = 0
+    self._generate_call_count = 0
+    self._last_seed_global_step = -1
 
   def _init_backbone_sharing_map(
       self,
@@ -943,12 +945,27 @@ class RLCluster:
           mesh.devices,
           tags=perf_tags,
       ) as span_v2:
-        outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(string_prompts), step=micro_batch_size
+        outputs = []
+        for s in rl_utils.chunk_slices_by_size(
+            stop=len(string_prompts), step=micro_batch_size
+        ):
+          chunk_config = rollout_config
+          # Auto-set a unique seed per rollout chunk for sampling diversity.
+          # fold_in(PRNGKey(global_steps), counter) where counter resets each
+          # global step for determinism across checkpoint restarts.
+          if rollout_config.seed is None:
+            if self._last_seed_global_step != self.global_steps:
+              self._generate_call_count = 0
+              self._last_seed_global_step = self.global_steps
+            chunk_config = dataclasses.replace(
+                rollout_config,
+                seed=jax.random.fold_in(
+                    jax.random.PRNGKey(self.global_steps),
+                    self._generate_call_count,
+                ),
             )
-        ]
+            self._generate_call_count += 1
+          outputs.append(self.rollout.generate(string_prompts[s], chunk_config))
         span.device_end([o.tokens for o in outputs])
         span_v2.async_end([o.tokens for o in outputs])
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
