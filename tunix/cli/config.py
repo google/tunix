@@ -184,6 +184,8 @@ class HyperParameters:
   a command-line argument or override file.
   """
 
+  config: collections.OrderedDict[str, Any]
+
   def __init__(self, argv: list[str], **kwargs):
     # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
 
