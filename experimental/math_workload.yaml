@@ -74,20 +74,31 @@ spec:
               - |
                 echo XPK Start: $(date);
                 echo "Injecting latest codebase...";
-                git config --global --add safe.directory /app
-                git fetch origin swe-evaluation-dev
+                git config --global --add safe.directory $(pwd)
+                git init
+                git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
+                git fetch origin yuxzhang/swe-evaluation-dev
                 git reset --hard FETCH_HEAD
                 
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
                 sleep 60
                 
-                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$INJECTED_HF_TOKEN WANDB_API_KEY=$INJECTED_WANDB_API_KEY PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 MODEL_VERSION="Qwen/Qwen3-32B" BATCH_SIZE=128 NUM_BATCHES=4 python3 -X faulthandler -u experimental/math_eval_test.py
-              envFrom:
-              - secretRef:
-                  name: yuxzhang-secrets
+                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 MODEL_VERSION="Qwen/Qwen3-32B" BATCH_SIZE=128 NUM_BATCHES=4 python3 -X faulthandler -u experimental/math_eval_test.py
               env:
               - name: PATHWAYS_HEAD
                 value: localhost
+              - name: INJECTED_HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: HF_TOKEN
+                    optional: true
+              - name: INJECTED_WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: WANDB_API_KEY
+                    optional: true
               - name: HF_HOME
                 value: /mnt/disks/linchai_data/huggingface
               - name: JAX_PLATFORMS
