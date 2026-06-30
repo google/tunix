@@ -51,12 +51,20 @@ with cm:
   from tunix.utils import math_utils
 # %%
 from typing import Any, Dict, Optional
-if "proxy" in os.environ.get("JAX_PLATFORMS", "").lower():
+_DISTRIBUTED_INITIALIZED = False
+try:
+  import pathwaysutils
+  pathwaysutils.initialize()
+  _DISTRIBUTED_INITIALIZED = True
+except Exception:
+  pass
+
+if not _DISTRIBUTED_INITIALIZED:
   try:
-    import pathwaysutils
-    pathwaysutils.initialize()
-  except ImportError:
-    pass
+    import jax
+    jax.distributed.initialize()
+  except Exception as exc:
+    print(f"jax.distributed.initialize() skipped: {exc}")
 
 import jax
 from jax import numpy as jnp
@@ -254,14 +262,17 @@ class Qwen25MathEvaluator:
 
   def model_from_safe_tensors(self):
     print("Loading model from safe tensors...")
+    self.model_config.use_flash_attention = True
+    self.model_config.flash_attention_block_size = 256
+    self.model_config.dtype = jnp.bfloat16
     with self.mesh:
       if "Qwen3" in self.model_version:
         self.model = qwen3_params_lib.create_model_from_safe_tensors(
-            file_dir=self.model_path, config=self.model_config, mesh=self.mesh
+            file_dir=self.model_path, config=self.model_config, mesh=self.mesh, dtype=jnp.bfloat16
         )
       else:
         self.model = qwen2_params_lib.create_model_from_safe_tensors(
-            file_dir=self.model_path, config=self.model_config, mesh=self.mesh
+            file_dir=self.model_path, config=self.model_config, mesh=self.mesh, dtype=jnp.bfloat16
         )
 
   def model_from_orbax_ckpt(self):
@@ -378,7 +389,7 @@ class Qwen25MathEvaluator:
           config=vllm_sampler.VllmConfig(
               mesh=self.mesh,
               hbm_utilization=0.8,
-              init_with_random_weights=False,
+              init_with_random_weights=True,
               mapping_config=mapping_config,
               tensor_parallel_size=self.mesh.shape["tp"] if "tp" in self.mesh.shape else 1,
               data_parallel_size=self.mesh.shape["fsdp"] if "fsdp" in self.mesh.shape else self.mesh.size,
@@ -389,6 +400,9 @@ class Qwen25MathEvaluator:
                   ),
                   "max_num_seqs": 30,
                   "max_num_batched_tokens": 30 * 10 * 1024 // 8,
+                  "dtype": "bfloat16",
+                  "disable_log_stats": False,
+                  "enable_prefix_caching": False,
               },
           ),
       )
@@ -688,6 +702,10 @@ MODEL_MAPPING = {
         qwen3_lib.ModelConfig.qwen3_32b(),
         os.path.join(MODEL_PATH_PREFIX, "qwen3/torch/32b-it"),
     ),
+    "Qwen/Qwen3-8B": (
+        qwen3_lib.ModelConfig.qwen3_8b(),
+        os.path.join(MODEL_PATH_PREFIX, "qwen3/torch/8b-it"),
+    ),
     "Qwen/Qwen2.5-1.5B-Instruct": (
         qwen2_lib.ModelConfig.qwen2p5_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it"),
@@ -702,7 +720,7 @@ MODEL_MAPPING = {
     ),
 }
 
-mesh_config = [[64, 1], ["fsdp", "tp"]]  # 64 DP x 1 TP for 64 chips (ideal for small 1.5B model)
+mesh_config = [[16, 4], ["fsdp", "tp"]]  # Aligned with frozenlake
 # %%
 # MATH-500
 num_batches_env = os.environ.get("NUM_BATCHES")
@@ -710,7 +728,7 @@ num_batches = int(num_batches_env) if num_batches_env and int(num_batches_env) >
 
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
 # model_version = "Qwen/Qwen3-32B"
-model_version = os.environ.get("MODEL_VERSION", "Qwen/Qwen3-32B")
+model_version = os.environ.get("MODEL_VERSION", "Qwen/Qwen3-8B")
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -733,9 +751,9 @@ print("\nStarting evaluation...")
 results = evaluator.evaluate(
     batch_size=batch_size,
     num_batches=num_batches,
-    temperature=0.6,
-    top_k=50,
-    top_p=0.95,
+    temperature=0.7,
+    top_k=0,
+    top_p=1.0,
     num_passes=1,
     debug_first_n=5,
 )
