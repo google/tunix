@@ -380,8 +380,8 @@ class Qwen25MathEvaluator:
               hbm_utilization=0.8,
               init_with_random_weights=False,
               mapping_config=mapping_config,
-              tensor_parallel_size=2,
-              data_parallel_size=32,
+              tensor_parallel_size=self.mesh.shape["tp"] if "tp" in self.mesh.shape else 1,
+              data_parallel_size=self.mesh.shape["fsdp"] if "fsdp" in self.mesh.shape else self.mesh.size,
               engine_kwargs={
                   "model": self.model_version,
                   "max_model_len": (
