@@ -83,7 +83,7 @@ spec:
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
                 sleep 60
                 
-                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 MODEL_VERSION="Qwen/Qwen2.5-1.5B-Instruct" BATCH_SIZE=128 NUM_BATCHES=4 python3 -X faulthandler -u experimental/math_eval_test.py
+                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 MODEL_VERSION="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" BATCH_SIZE=128 NUM_BATCHES=4 python3 -X faulthandler -u experimental/math_eval_test.py
               env:
               - name: PATHWAYS_HEAD
                 value: localhost
