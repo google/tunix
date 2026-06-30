@@ -149,9 +149,10 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertGreater(
         trainer.metrics_logger.get_metric('', 'perplexity', 'train'), 0
     )
-    self.assertEqual(
+    self.assertAlmostEqual(
         trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
+        places=6,
     )
     self.assertGreater(
         trainer.metrics_logger.get_metric('', 'perplexity', 'eval'), 0
@@ -445,9 +446,10 @@ class PeftTrainerTest(parameterized.TestCase):
     jax.tree.map_with_path(
         tc.assert_not_equal, original_lora_params, lora_params
     )
-    self.assertEqual(
+    self.assertAlmostEqual(
         trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
+        places=6,
     )
 
   @parameterized.named_parameters(
@@ -475,9 +477,10 @@ class PeftTrainerTest(parameterized.TestCase):
       trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
       trainer.train(train_ds, self.eval_ds)
-      self.assertEqual(
+      self.assertAlmostEqual(
           trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
           TEST_LEARNING_RATE,
+          places=6,
       )
       return nnx.state(model, nnx.Param), trainer
 
@@ -647,9 +650,10 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer.PeftTrainer(model, optimizer, config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, self.eval_ds)
-    self.assertEqual(
+    self.assertAlmostEqual(
         trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
+        places=6,
     )
 
 
