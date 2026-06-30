@@ -73,8 +73,18 @@ spec:
               - -c
               - |
                 echo XPK Start: $(date);
+                echo "Injecting latest codebase...";
+                git config --global --add safe.directory /app
+                git fetch origin swe-evaluation-dev
+                git reset --hard FETCH_HEAD
+                
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
-                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=hf_REDACTED WANDB_API_KEY=wandb_REDACTED PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python3 -X faulthandler -u experimental/math_eval_test.py
+                sleep 60
+                
+                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$INJECTED_HF_TOKEN WANDB_API_KEY=$INJECTED_WANDB_API_KEY PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 MODEL_VERSION="Qwen/Qwen3-32B" BATCH_SIZE=128 NUM_BATCHES=4 python3 -X faulthandler -u experimental/math_eval_test.py
+              envFrom:
+              - secretRef:
+                  name: yuxzhang-secrets
               env:
               - name: PATHWAYS_HEAD
                 value: localhost

@@ -702,7 +702,7 @@ MODEL_MAPPING = {
     ),
 }
 
-mesh_config = [[32, 2], ["fsdp", "tp"]]  # 32 DP x 2 TP for 64 chips
+mesh_config = [[64, 1], ["fsdp", "tp"]]  # 64 DP x 1 TP for 64 chips
 # %%
 # MATH-500
 num_batches_env = os.environ.get("NUM_BATCHES")
@@ -710,9 +710,11 @@ num_batches = int(num_batches_env) if num_batches_env and int(num_batches_env) >
 
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
 # model_version = "Qwen/Qwen3-32B"
-model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+model_version = os.environ.get("MODEL_VERSION", "Qwen/Qwen3-32B")
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
+
+batch_size = int(os.environ.get("BATCH_SIZE", 128))
 
 evaluator = Qwen25MathEvaluator(
     model_config=model_config,
@@ -729,7 +731,7 @@ evaluator.load_model()
 
 print("\nStarting evaluation...")
 results = evaluator.evaluate(
-    batch_size=16,
+    batch_size=batch_size,
     num_batches=num_batches,
     temperature=0.6,
     top_k=50,
