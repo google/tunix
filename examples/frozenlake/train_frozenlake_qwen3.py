@@ -468,8 +468,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # dominant allocation on small TPU slices) at the cost of more
         # micro-step launches per optimizer update. It does NOT change the
         # effective optimizer batch size or training dynamics.
-        train_micro_batch_size=4,
-        compute_logps_micro_batch_size=4,
+        train_micro_batch_size=16,
+        compute_logps_micro_batch_size=16,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
