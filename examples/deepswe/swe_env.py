@@ -1,8 +1,11 @@
 import json
+import logging
 import os
+import time
 from typing import Any, Optional, cast
 import numpy as np
 
+logger = logging.getLogger(__name__)
 try:
   import r2egym  # pytype: disable=import-error
   from r2egym.agenthub.action import Action  # pytype: disable=import-error
@@ -101,8 +104,17 @@ class SWEEnv(BaseTaskEnv):
     self.extra_kwargs["pair_index"] = pair_index
 
   def _initial_observation(self) -> Any:
+    t0 = time.perf_counter()
+    instance_id = self.entry.get("instance_id", "unknown")
+    logger.debug(
+        "[SWEEnv] reset start instance_id=%s backend=%s scaffold=%s",
+        instance_id,
+        self.backend,
+        self.scaffold,
+    )
     if not self.env:
       # Initialize environment if not created yet.
+      logger.debug("[SWEEnv] creating RepoEnv ...")
       env_args = EnvArgs(ds=self.entry)
       self.env = RepoEnv(
           env_args,
@@ -111,17 +123,31 @@ class SWEEnv(BaseTaskEnv):
           reward_timeout=self.reward_timeout,
           verbose=self.verbose,
       )
+      logger.debug(
+          "[SWEEnv] RepoEnv created in %.1fs", time.perf_counter() - t0
+      )
     else:
+      logger.debug("[SWEEnv] reusing existing RepoEnv, calling env.reset() ...")
       self.env.reset()
     self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
+      logger.debug("[SWEEnv] adding r2egym commands ...")
       self.env.add_commands(R2EGYM_COMMAND_FILES)
     else:
+      logger.debug("[SWEEnv] adding sweagent commands ...")
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
+    logger.debug("[SWEEnv] commands added in %.1fs", time.perf_counter() - t0)
     self.total_steps = 0
 
     # Polls docker runtime to get task instruction.
-    return self.env.get_task_instruction()
+    logger.debug("[SWEEnv] fetching task instruction ...")
+    instruction = self.env.get_task_instruction()
+    logger.debug(
+        "[SWEEnv] reset done in %.1fs (instruction_len=%d)",
+        time.perf_counter() - t0,
+        len(str(instruction)),
+    )
+    return instruction
 
   def _step_impl(self, action: Any) -> EnvStepResult:
     if isinstance(action, str):
@@ -142,6 +168,12 @@ class SWEEnv(BaseTaskEnv):
     return EnvStepResult(
         observation=str(obs), reward=reward, done=done, info=info
     )
+
+  def compute_final_reward(self, *args) -> float:
+    """Run tests in the Docker container and return reward."""
+    if not self.env:
+      raise ValueError("Environment not initialized")
+    return float(self.env.compute_reward())
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
