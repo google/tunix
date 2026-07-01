@@ -409,6 +409,62 @@ class SamplerTest(parameterized.TestCase):
     )
     self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)  # pytype: disable=attribute-error
 
+  def test_decode_stops_after_prefill_for_single_generation_step(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    sampler.eos_ids = jnp.array([vocab.eos_id()])
+    max_prompt_length = 4
+    max_generation_steps = 1
+    prompt_tokens = sampler.tokenize('input string')
+    all_input_ids = jnp.array([
+        utils.pad_to_length(
+            prompt_tokens,
+            target_length=max_prompt_length,
+            pad_value=vocab.pad_id(),
+            left=True,
+        )
+    ])
+    total_sampling_steps = max_prompt_length + max_generation_steps
+    sampling_state = sampler.init_sample_state(
+        all_input_ids=all_input_ids,
+        total_sampling_steps=total_sampling_steps,
+        include_logits=False,
+        forbidden_token_ids=None,
+        temperature=0.0,
+        top_p=None,
+        top_k=None,
+        seed=jax.random.PRNGKey(0),
+        beam_size=None,
+        include_logprobs=False,
+    )
+
+    after_prefill = sampler._prefill_fn(
+        sampler._flattened_transformer_state, sampling_state, None, echo=False
+    )
+    self.assertEqual(after_prefill.decoding_step, total_sampling_steps - 1)
+
+    after_decode = sampler._decode_fn(
+        sampler._flattened_transformer_state, after_prefill
+    )
+    self.assertEqual(after_decode.decoding_step, total_sampling_steps - 1)
+    np.testing.assert_array_equal(
+        np.asarray(after_decode.token_buffer),
+        np.asarray(after_prefill.token_buffer),
+    )
+
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(

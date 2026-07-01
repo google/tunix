@@ -691,7 +691,7 @@ class Sampler(base_sampler.BaseSampler):
 
     def cond_fn(sampler_state: _SamplingState):
       return (
-          sampler_state.decoding_step < sampler_state.total_sampling_steps
+          sampler_state.decoding_step < sampler_state.total_sampling_steps - 1
       ) & jnp.any(jnp.logical_not(sampler_state.done))
 
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
