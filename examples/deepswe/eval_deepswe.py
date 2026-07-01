@@ -192,13 +192,13 @@ if GOLD_JSONL:
       if not line:
         continue
       rec = json.loads(line)
-      iid = rec.get("instance_id") or rec.get("metadata", {}).get("instance_id")
+      iid = rec.get("instance_id") or rec.get("instance") or rec.get("metadata", {}).get("instance_id")
       if iid:
         wanted_ids.add(iid)
   if not wanted_ids:
     raise ValueError(f"GOLD_JSONL={GOLD_JSONL} contained zero instance_ids")
   before = len(entries)
-  entries = [e for e in entries if e.get("instance_id") in wanted_ids]
+  entries = [e for e in entries if (e.get("instance_id") or e.get("instance")) in wanted_ids]
   logger.info(
       "Gold filter %s: kept %d/%d entries (unique wanted ids=%d)",
       GOLD_JSONL,
