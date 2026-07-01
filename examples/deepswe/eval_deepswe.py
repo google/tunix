@@ -107,6 +107,16 @@ MAX_RESPONSE_LENGTH = int(
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "256"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "0"))
+# --- n-sample difficulty report ---
+# N_SAMPLE trajectories per task. TEMPERATURE MUST be > 0, otherwise decoding is
+# greedy, all N_SAMPLE trajectories are identical, and every task collapses to
+# 0/N or N/N (you can never observe the partial band).
+N_SAMPLE = int(os.getenv("N_SAMPLE", "8"))
+TEMPERATURE = float(os.getenv("TEMPERATURE", "1.0"))
+# Optional path to a gold-verified jsonl. When set, only dataset entries whose
+# instance_id appears in it are evaluated. Accepts either {"instance_id": ...}
+# or {"metadata": {"instance_id": ...}} per line.
+GOLD_JSONL = os.getenv("GOLD_JSONL", "")
 MAX_CONTEXT_LIMIT = int(
     os.getenv("MAX_CONTEXT_LIMIT", str(max(1, MAX_MODEL_LEN - 256)))
 )
@@ -173,6 +183,30 @@ dataset = load_dataset(
 )
 
 entries = [e for e in dataset if "docker_image" in e]
+
+if GOLD_JSONL:
+  wanted_ids = set()
+  with open(GOLD_JSONL) as gold_f:
+    for line in gold_f:
+      line = line.strip()
+      if not line:
+        continue
+      rec = json.loads(line)
+      iid = rec.get("instance_id") or rec.get("metadata", {}).get("instance_id")
+      if iid:
+        wanted_ids.add(iid)
+  if not wanted_ids:
+    raise ValueError(f"GOLD_JSONL={GOLD_JSONL} contained zero instance_ids")
+  before = len(entries)
+  entries = [e for e in entries if e.get("instance_id") in wanted_ids]
+  logger.info(
+      "Gold filter %s: kept %d/%d entries (unique wanted ids=%d)",
+      GOLD_JSONL,
+      len(entries),
+      before,
+      len(wanted_ids),
+  )
+
 if TASKS_LIMIT > 0:
   entries = entries[:TASKS_LIMIT]
 
@@ -210,19 +244,22 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
 devices = jax.devices()
-# Force pure tensor parallelism for eval: DP=1, TP=8.
 # Qwen3-32B has tensors such as (5120, 8, 128), so TP must not exceed 8 for
 # shardings that partition that dimension on the tp axis.
+# We utilize all available devices by spreading them across FSDP (Data Parallel).
 TP_SIZE = 8
-mesh_devices = np.array(devices[:TP_SIZE]).reshape(1, TP_SIZE)
+num_devices = len(devices)
+num_fsdp = max(1, num_devices // TP_SIZE)
+usable_devices = num_fsdp * TP_SIZE
+
+mesh_devices = np.array(devices[:usable_devices]).reshape(num_fsdp, TP_SIZE)
 mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
 logger.info(
-    "Using mesh shape fsdp=%d tp=%d (pure TP eval, total_devices=%d,"
-    " used_devices=%d)",
+    "Using mesh shape fsdp=%d tp=%d (total_devices=%d, used_devices=%d)",
     mesh.shape["fsdp"],
     mesh.shape["tp"],
-    len(devices),
-    TP_SIZE,
+    num_devices,
+    usable_devices,
 )
 
 if MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
@@ -388,6 +425,7 @@ def model_call(chat_completions, env_unused):
       out = sampler(
           prompt,
           max_generation_steps=MAX_RESPONSE_LENGTH,
+          temperature=TEMPERATURE,
           echo=False,
           eos_tokens=qwen_eos_tokens,
       )
@@ -396,6 +434,7 @@ def model_call(chat_completions, env_unused):
         out = sampler(
             prompt,
             max_generation_steps=MAX_RESPONSE_LENGTH,
+            temperature=TEMPERATURE,
             echo=False,
             eos_tokens=qwen_eos_tokens,
         )
@@ -516,22 +555,36 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
 
 
 def pairs_generator():
-  """Yield one full (agent, env) trajectory task per dataset entry."""
-  for pair_index, entry in enumerate(entries):
-    agent = SWEAgent()
-    env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
-    env = env_cls(
-        entry=entry,
-        max_steps=MAX_STEPS,
-        pair_index=pair_index,
-        group_id=pair_index,
-    )
-    yield agent, env
+  """Yield N_SAMPLE (agent, env) trajectory tasks per dataset entry.
+
+  All N_SAMPLE samples of one task share pair_index=task_index (so
+  item.pair_index maps back to the same entry for aggregation), but each gets a
+  unique group_id so that with group_size=1 every trajectory is released
+  independently by the orchestrator.
+  """
+  gid = 0
+  for task_index, entry in enumerate(entries):
+    for _ in range(N_SAMPLE):
+      agent = SWEAgent()
+      env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
+      env = env_cls(
+          entry=entry,
+          max_steps=MAX_STEPS,
+          pair_index=task_index,
+          group_id=gid,
+      )
+      gid += 1
+      yield agent, env
 
 
 async def run_evaluation():
   """Run evaluation with orchestrator-managed task-level parallelism."""
   os.makedirs(OUTPUT_DIR, exist_ok=True)
+  raw_path = os.path.join(
+      OUTPUT_DIR, f"raw_trajectories_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+  )
+  raw_f = open(raw_path, "a")
+  logger.info("Streaming per-trajectory results to %s", raw_path)
 
   orchestrator = RolloutOrchestrator(
       engine_cls=EvalTrajectoryCollectEngine,
@@ -572,6 +625,7 @@ async def run_evaluation():
       result = {
           "pair_index": item.pair_index,
           "instance_id": entry.get("instance_id", item.pair_index),
+          "docker_image": entry.get("docker_image", ""),
           "reward": float(traj.reward),
           "num_steps": len(traj.steps),
           "status": getattr(traj.status, "name", str(traj.status)),
@@ -583,6 +637,8 @@ async def run_evaluation():
           "guard_reasons": guard_reasons,
       }
       results.append(result)
+      raw_f.write(json.dumps(result) + "\n")
+      raw_f.flush()
       elapsed = time.time() - start_time
       logger.info(
           "[%d/%d] Instance %s: reward=%.1f, steps=%d, status=%s (%.0fs"
@@ -604,6 +660,7 @@ async def run_evaluation():
       )
 
   await producer
+  raw_f.close()
   return results
 
 
@@ -701,6 +758,61 @@ def save_results(results):
   return output_file
 
 
+def save_task_report(results):
+  """Aggregate per-trajectory results by instance_id into per-task solve rates.
+
+  Emits one line per task with k (samples where reward>0), n (total samples),
+  solve_rate=k/n, and status in {all_fail (k==0), partial (0<k<n),
+  all_pass (k==n)}. Downstream data curation keeps status=="partial".
+
+  Args:
+    results: list of per-trajectory dicts, N_SAMPLE per instance_id.
+
+  Returns:
+    Path to the written per-task report jsonl.
+  """
+  by_task = collections.defaultdict(list)
+  for r in results:
+    by_task[r["instance_id"]].append(r)
+
+  os.makedirs(OUTPUT_DIR, exist_ok=True)
+  timestamp = time.strftime("%Y%m%d_%H%M%S")
+  output_file = os.path.join(OUTPUT_DIR, f"task_report_{timestamp}.jsonl")
+
+  n_all_fail = n_partial = n_all_pass = 0
+  with open(output_file, "w") as f:
+    for iid, rs in by_task.items():
+      n = len(rs)
+      k = sum(1 for r in rs if r["reward"] > 0)
+      if k == 0:
+        status = "all_fail"
+        n_all_fail += 1
+      elif k == n:
+        status = "all_pass"
+        n_all_pass += 1
+      else:
+        status = "partial"
+        n_partial += 1
+      record = {
+          "instance_id": iid,
+          "docker_image": rs[0].get("docker_image", ""),
+          "k": k,
+          "n": n,
+          "solve_rate": k / n if n else 0.0,
+          "status": status,
+      }
+      f.write(json.dumps(record) + "\n")
+
+  logger.info("=" * 50)
+  logger.info("Per-task report: %d tasks", len(by_task))
+  logger.info("  all_fail (k==0):  %d", n_all_fail)
+  logger.info("  partial  (0<k<n): %d   <-- keep these for training", n_partial)
+  logger.info("  all_pass (k==n):  %d", n_all_pass)
+  logger.info("Task report saved to %s", output_file)
+  logger.info("=" * 50)
+  return output_file
+
+
 # ========================== Main ==========================
 
 if __name__ == "__main__":
@@ -716,3 +828,4 @@ if __name__ == "__main__":
   eval_results = asyncio.run(run_evaluation())
   compute_pass_at_k(eval_results)
   save_results(eval_results)
+  save_task_report(eval_results)
