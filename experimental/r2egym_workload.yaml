@@ -142,7 +142,7 @@ spec:
                 pip3 install kubernetes datasets
                 
                 echo "Cloning and patching R2E-Gym..."
-                git clone https://github.com/namanjain12/R2E-Gym.git
+                git clone https://github.com/R2E-Gym/R2E-Gym.git
                 cd R2E-Gym
                 git apply ../experimental/r2egym.patch
                 pip3 install -e .
