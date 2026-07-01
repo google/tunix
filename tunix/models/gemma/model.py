@@ -243,7 +243,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
-    x = shard(x, self.shd_config.act_btd)
+    x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -409,9 +409,9 @@ class Attention(nnx.Module):
       query_proj = self.q_einsum(x)
       key_proj, value_proj = self.kv_einsum(x)
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)
-    key_proj = shard(key_proj, self.shd_config.act_btnh)
-    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rope(
         query_proj,
@@ -460,7 +460,7 @@ class Attention(nnx.Module):
       sliding_mask = _create_sliding_mask(
           segment_pos,
           cache_len=attn_mask.shape[-1],
-          sliding_window_size=self.sliding_window_size,
+          sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
       )
       attn_mask = sliding_mask * attn_mask
 
@@ -482,7 +482,7 @@ class Attention(nnx.Module):
       encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = shard(attn_output, self.shd_config.act_btd)
+    attn_output = shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -585,12 +585,12 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def block(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    ff_gate = self.gate_proj(x)
+    ff_gate = self.gate_proj(x)  # pyrefly: ignore[bad-argument-type]
     gate_value = nnx.gelu(ff_gate)
 
-    ff1 = self.up_proj(x)
+    ff1 = self.up_proj(x)  # pyrefly: ignore[bad-argument-type]
     activations = gate_value * ff1
-    activations = shard(activations, self.config.shd_config.act_btf)
+    activations = shard(activations, self.config.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
 
     outputs = self.down_proj(activations)
     return outputs
@@ -700,7 +700,7 @@ class RMSNorm(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.scale = nnx.Param(
-        nnx.initializers.zeros_init()(rngs.params(), dim),
+        nnx.initializers.zeros_init()(rngs.params(), dim),  # pyrefly: ignore[bad-argument-type]
         sharding=shd_config.rms_norm_weight,
     )
 
@@ -776,7 +776,7 @@ def module_from_linen_variables(
         mapped_path: tuple[str | int, ...],
         val: Any,
     ) -> dict[tuple[str, ...], Any]:
-      state[mapped_path].value = val
+      state[mapped_path].value = val  # pyrefly: ignore[bad-index]
       return state
 
   mdl: nnx.Module = nnx.eval_shape(module_factory)
@@ -828,10 +828,10 @@ def _assign_linen_params_to_nnx_state(
     val: Any,
 ) -> dict[tuple[str, ...], Any]:
   if 'gate_proj' in mapped_path:
-    state[mapped_path].value = val[0]
-    state[mapped_path[:-2] + ('up_proj', 'kernel')].value = val[1]
+    state[mapped_path].value = val[0]  # pyrefly: ignore[bad-index]
+    state[mapped_path[:-2] + ('up_proj', 'kernel')].value = val[1]  # pyrefly: ignore[bad-index]
   else:
-    state[mapped_path].value = val
+    state[mapped_path].value = val  # pyrefly: ignore[bad-index]
   return state
 
 
@@ -855,7 +855,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
     except AttributeError as exc:
       raise ValueError(f'Unsupported version: {version}') from exc
 
-    return module_from_linen_variables(
+    return module_from_linen_variables(  # pyrefly: ignore[bad-return]
         module_factory=lambda: cls(config, rngs=nnx.Rngs(params=0)),
         variables=params['transformer'],
         map_key_fn=_map_linen_var_names,

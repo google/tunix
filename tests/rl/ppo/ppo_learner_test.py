@@ -360,7 +360,7 @@ class PPOLearnerTest(parameterized.TestCase):
         actor=model,
         critic=value_model,
         reference=ref_model,
-        reward=reward_model if use_reward_model else None,  # pylint: disable=undefined-variable
+        reward=reward_model if use_reward_model else None,  # pylint: disable=undefined-variable  # pyrefly: ignore[unbound-name]
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
@@ -421,11 +421,11 @@ class PPOLearnerTest(parameterized.TestCase):
       expected_metrics.append('pg_clipfrac_lower')
     for metric_name in expected_metrics:
       self.assertLen(
-          actor_metric_logger.get_metric_history('actor', metric_name, 'train'),
+          actor_metric_logger.get_metric_history('actor', metric_name, 'train'),  # pyrefly: ignore[missing-attribute]
           ppo_learner._iter_steps,
       )
       self.assertLen(
-          actor_metric_logger.get_metric_history('actor', metric_name, 'eval'),
+          actor_metric_logger.get_metric_history('actor', metric_name, 'eval'),  # pyrefly: ignore[missing-attribute]
           ppo_learner.rl_cluster.actor_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
           msg=f'metric_name: {metric_name}',
@@ -434,13 +434,13 @@ class PPOLearnerTest(parameterized.TestCase):
     critic_metric_logger = ppo_learner.rl_cluster.critic_trainer.metrics_logger
     for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:
       self.assertLen(
-          critic_metric_logger.get_metric_history(
+          critic_metric_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               'critic', metric_name, 'train'
           ),
           ppo_learner.rl_cluster.critic_trainer.train_steps,
       )
       self.assertLen(
-          critic_metric_logger.get_metric_history(
+          critic_metric_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               'critic', metric_name, 'eval'
           ),
           ppo_learner.rl_cluster.critic_trainer.train_steps

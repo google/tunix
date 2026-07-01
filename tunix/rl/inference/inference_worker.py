@@ -57,7 +57,7 @@ class InferenceWorker:
       eos_id: int,
       temperature: float = 1.0,
   ) -> jax.Array:
-    graphdef, state = self._model_states.get("reference")
+    graphdef, state = self._model_states.get("reference")  # pyrefly: ignore[not-iterable]
     if graphdef is None:
       raise ValueError("Reference model is not available.")
     return common.compute_per_token_logps(
@@ -78,7 +78,7 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    graphdef, state = self._model_states.get("critic")
+    graphdef, state = self._model_states.get("critic")  # pyrefly: ignore[not-iterable]
     critic_model = nnx.merge(graphdef, state)
     if critic_model is None:
       raise ValueError("Critic model is not available.")

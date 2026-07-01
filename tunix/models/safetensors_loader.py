@@ -246,7 +246,7 @@ def load_and_create_model_orig(
 
       for future in concurrent.futures.as_completed(futures):
         if future.exception():
-          raise future.exception()
+          raise future.exception()  # pyrefly: ignore[bad-raise]
 
     # Apply preprocessing if provided (e.g., for MoE expert stacking)
     if preprocess_fn is not None:

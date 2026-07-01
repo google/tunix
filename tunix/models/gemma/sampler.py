@@ -159,7 +159,7 @@ class Sampler:
     """
     self.vocab = vocab
     self.cache_size = cache_size
-    self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)
+    self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)  # pyrefly: ignore[bad-assignment]
     self._transformer_state: list[statelib.State] = nnx.variables(transformer)
     self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
         self._transformer_state,
@@ -173,7 +173,7 @@ class Sampler:
 
   @property
   def transformer(self) -> gemma_lib.Gemma:
-    return nnx.merge(
+    return nnx.merge(  # pyrefly: ignore[no-matching-overload]
         self._transformer_graphdef, self._flattened_transformer_state
     )
 
@@ -359,7 +359,7 @@ class Sampler:
     input_mask = tokens != self.vocab.pad_id()
     attention_mask = make_causal_attn_mask(input_mask, self.cache_size)
 
-    transformer = nnx.merge(self._transformer_graphdef, params)
+    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
     logits, cache = transformer(
         tokens,
         step_positions,
@@ -377,7 +377,7 @@ class Sampler:
           key,
           sampler_state.temperature,
           sampler_state.top_p,
-          sampler_state.top_k,
+          sampler_state.top_k,  # pyrefly: ignore[bad-argument-type]
       )
     else:
       next_token_candidate = sample_best(logits)
@@ -450,7 +450,7 @@ class Sampler:
         decoding_step, self.cache_size, input_mask
     )
 
-    transformer = nnx.merge(self._transformer_graphdef, params)
+    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
     logits, cache = transformer(
         last_token,
         step_positions,
@@ -467,7 +467,7 @@ class Sampler:
           key,
           sampler_state.temperature,
           sampler_state.top_p,
-          sampler_state.top_k,
+          sampler_state.top_k,  # pyrefly: ignore[bad-argument-type]
       )
     else:
       next_token_candidate = sample_best(logits)
@@ -571,9 +571,9 @@ class Sampler:
     total_sampling_steps = max_prompt_length + max_generation_steps
 
     if seed is None:
-      seed = jax.random.PRNGKey(0)
+      seed = jax.random.PRNGKey(0)  # pyrefly: ignore[bad-assignment]
     elif isinstance(seed, int):
-      seed = jax.random.PRNGKey(seed)
+      seed = jax.random.PRNGKey(seed)  # pyrefly: ignore[bad-assignment]
     sampling_state = self.init_sample_state(
         all_input_ids,
         include_logits=return_logits,
@@ -581,8 +581,8 @@ class Sampler:
         forbidden_token_ids=forbidden_token_ids,
         temperature=temperature,
         top_p=top_p,
-        top_k=top_k,
-        seed=seed,
+        top_k=top_k,  # pyrefly: ignore[bad-argument-type]
+        seed=seed,  # pyrefly: ignore[bad-argument-type]
     )
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state, sampling_state

@@ -64,8 +64,8 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
     super().__init__(student_model, optimizer, training_config)
     self.strategy = strategy
     self.teacher_model = teacher_model
-    self.loss_fn = self.get_train_loss
-    self.eval_loss_fn = self.get_eval_loss
+    self.loss_fn = self.get_train_loss  # pyrefly: ignore[bad-assignment]
+    self.eval_loss_fn = self.get_eval_loss  # pyrefly: ignore[bad-assignment]
 
     # Since distillation strategies return (loss, metrics),
     # we explicitly enable auxiliary metric handling.
@@ -147,7 +147,7 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
       teacher_output: Any,
       inputs: dict[str, ArrayLike],
   ) -> tuple[ArrayLike, dict[str, Any]]:
-    output = self.strategy.get_train_loss(model, teacher_output, inputs)
+    output = self.strategy.get_train_loss(model, teacher_output, inputs)  # pyrefly: ignore[bad-argument-type]
     return self._standardize_loss_output(output)
 
   def get_eval_loss(
@@ -157,7 +157,7 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
       inputs: dict[str, ArrayLike],
   ) -> tuple[ArrayLike, dict[str, Any]]:
     del teacher_output  # Not computed in eval.
-    output = self.strategy.get_eval_loss(model, inputs)
+    output = self.strategy.get_eval_loss(model, inputs)  # pyrefly: ignore[bad-argument-type]
     return self._standardize_loss_output(output)
 
   def close(self):

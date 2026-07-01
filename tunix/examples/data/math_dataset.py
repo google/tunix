@@ -150,7 +150,7 @@ def get_huggingface_dataset(
       split=split,
   )
   data = data.shuffle(seed=shuffle_seed)
-  return grain.MapDataset.source(data)
+  return grain.MapDataset.source(data)  # pyrefly: ignore[bad-argument-type]
 
 
 def create_dataset(
