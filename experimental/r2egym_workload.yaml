@@ -137,6 +137,10 @@ spec:
                 # The whitelist must be checked into the git repo at this path
                 export GOLD_JSONL="examples/deepswe/good_gold_whitelist.jsonl"
                 
+                # Install missing dependencies for deepswe evaluation
+                echo "Installing missing dependencies (kubernetes, datasets)..."
+                pip3 install kubernetes datasets
+                
                 TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python3 -X faulthandler -u examples/deepswe/eval_deepswe.py
                 
                 # Backup output jsonl to persistent disk
