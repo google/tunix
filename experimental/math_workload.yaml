@@ -83,45 +83,47 @@ spec:
                 # --- Hot Patch tpu-inference (PR #2838) ---
                 echo "Applying python script patch for ROPE bugs in qwen3.py..."
                 cat << 'EOF' > /tmp/patch_qwen3.py
-file_path = "/opt/venv/lib/python3.12/site-packages/tpu_inference/models/jax/qwen3.py"
-with open(file_path, "r") as f:
-    code = f.read()
-
-injected_functions = """
-from typing import Any, Dict, Optional
-
-def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
-    if rope_scaling is not None:
-        rope_scaling = dict(rope_scaling)
-        if (rope_scaling.get("rope_type", "default") == "default"
-                and "factor" not in rope_scaling
-                and "scale_factor" not in rope_scaling
-                and "mrope_section" not in rope_scaling):
-            rope_scaling = None
-        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
-            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
-    return rope_scaling
-
-def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
-    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
-        config, "rope_scaling", None)
-    return normalize_rope_scaling(rope_scaling)
-
-def get_rope_theta(config: Any, default: float = 10000.0) -> float:
-    rope_parameters = getattr(config, "rope_parameters", None)
-    if rope_parameters is not None and "rope_theta" in rope_parameters:
-        return float(rope_parameters["rope_theta"])
-    return float(getattr(config, "rope_theta", default))
-
-"""
-
-code = injected_functions + code
-code = code.replace('self.rope_theta = config.rope_parameters["rope_theta"]', 'self.rope_theta = get_rope_theta(config, default=1000000.0)')
-code = code.replace('self.rope_scaling = getattr(config, "rope_scaling", None)', 'self.rope_scaling = get_rope_scaling(config)')
-
-with open(file_path, "w") as f:
-    f.write(code)
-EOF
+                file_path = "/opt/venv/lib/python3.12/site-packages/tpu_inference/models/jax/qwen3.py"
+                with open(file_path, "r") as f:
+                    code = f.read()
+                
+                injected_functions = """
+                from typing import Any, Dict, Optional
+                
+                def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
+                    if rope_scaling is not None:
+                        rope_scaling = dict(rope_scaling)
+                        if (rope_scaling.get("rope_type", "default") == "default"
+                                and "factor" not in rope_scaling
+                                and "scale_factor" not in rope_scaling
+                                and "mrope_section" not in rope_scaling):
+                            rope_scaling = None
+                        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
+                            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
+                    return rope_scaling
+                
+                def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
+                    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
+                        config, "rope_scaling", None)
+                    return normalize_rope_scaling(rope_scaling)
+                
+                def get_rope_theta(config: Any, default: float = 10000.0) -> float:
+                    rope_parameters = getattr(config, "rope_parameters", None)
+                    if rope_parameters is not None and "rope_theta" in rope_parameters:
+                        return float(rope_parameters["rope_theta"])
+                    return float(getattr(config, "rope_theta", default))
+                
+                """
+                
+                import textwrap
+                code = textwrap.dedent(injected_functions) + code
+                code = code.replace('self.rope_theta = config.rope_parameters["rope_theta"]', 'self.rope_theta = get_rope_theta(config, default=1000000.0)')
+                code = code.replace('self.rope_scaling = getattr(config, "rope_scaling", None)', 'self.rope_scaling = get_rope_scaling(config)')
+                
+                with open(file_path, "w") as f:
+                    f.write(code)
+                EOF
+                sed -i 's/^ \{16\}//' /tmp/patch_qwen3.py
                 python3 /tmp/patch_qwen3.py
                 # ------------------------------------------
 
