@@ -265,6 +265,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       configs_to_check = rollout_config
 
     for mode, config in configs_to_check.items():
+      if config.rollout_vllm_sampling_kwargs is None:
+        config.rollout_vllm_sampling_kwargs = {}
+      if (
+          "skip_special_tokens" not in config.rollout_vllm_sampling_kwargs
+          or config.rollout_vllm_sampling_kwargs["skip_special_tokens"]
+      ):
+        config.rollout_vllm_sampling_kwargs["skip_special_tokens"] = False
+
       if config.max_tokens_to_generate != self.algo_config.max_response_length:
         raise ValueError(
             f"RolloutConfig ({mode}) max_tokens_to_generate "
