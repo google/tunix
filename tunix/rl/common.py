@@ -13,7 +13,7 @@
 # limitations under the License.
 """Common RL helper classes and functions."""
 
-from functools import partial  # pylint: disable=g-importing-member
+import functools
 import inspect
 from typing import Any, Iterable
 
@@ -212,7 +212,7 @@ def get_per_token_logps(
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@partial(jax.jit, static_argnames=("pad_id", "eos_id"))
+@functools.partial(jax.jit, static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
@@ -272,8 +272,26 @@ def process_ids(
 
   return prompt_completion_ids, positions, attn_mask, input_seg_ids
 
+@functools.cache
+def _call_contains_by_type(target_cls: type, target_arg: str) -> bool:
+  """Determines if a class' call function contains a target argument and caches the result"""
 
-@partial(
+  try:
+    sig = inspect.signature(target_cls.__call__)
+    return (target_arg in sig.parameters) or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+  except Exception:
+    return False
+
+def model_call_contains(model, target_arg: str) -> bool:
+  """Determines if a model's call function contains a target argument"""
+
+  target_obj = model.transformer if hasattr(model, "transformer") else model
+
+  return _call_contains_by_type(type(target_obj), target_arg)
+
+@functools.partial(
     jax.jit,
     static_argnames=(
         "pad_id",
@@ -365,15 +383,7 @@ def compute_per_token_logps(
   # precedence; otherwise we pass the per-position non-pad mask derived in
   # ``process_ids`` so flash-attention variants that lack a separate
   # padding-mask input still skip pad positions.
-  try:
-    sig = inspect.signature(model.__call__)
-    has_segment_ids = ("segment_ids" in sig.parameters) or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-  except Exception:
-    has_segment_ids = False
-
-  if has_segment_ids:
+  if model_call_contains(model, "segment_ids"):
     if segment_ids is not None:
       model_kwargs["segment_ids"] = segment_ids
     elif input_seg_ids is not None:
@@ -568,19 +578,7 @@ def compute_score(
       segment_positions,
   )
 
-  try:
-    if hasattr(model, "transformer"):
-      target_call = model.transformer.__call__
-    else:
-      target_call = model.__call__
-
-    sig = inspect.signature(target_call)
-    has_segment_ids = ("segment_ids" in sig.parameters) or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-  except Exception:
-    has_segment_ids = False
-
+  has_segment_ids = model_call_contains(model, "segment_ids")
   model_kwargs = {"positions": calculated_positions, "cache": None}
   if has_segment_ids and segment_ids is not None:
     model_kwargs["segment_ids"] = segment_ids
