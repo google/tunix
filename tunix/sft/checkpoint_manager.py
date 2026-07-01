@@ -50,7 +50,11 @@ class CheckpointManager:
     if root_directory:
       # When using Pathways, the checkpoint manager only supports persistence
       # APIs now.
-      if 'proxy' in os.getenv('JAX_PLATFORMS', ''):
+      platforms = jax.config.jax_platforms or ''
+      if (
+          'proxy' in platforms
+          or 'pathways' in platforms
+      ):
         item_handlers = {
             'model_params': ocp.PyTreeCheckpointHandler(
                 use_ocdbt=False,
@@ -64,6 +68,11 @@ class CheckpointManager:
         if os.getenv('ENABLE_PATHWAYS_PERSISTENCE', ''):
           logging.info(
               'Using persistence API for checkpointing with Pathways.'
+          )
+          ocp.pathways.register_type_handlers(
+              checkpointing_impl=ocp.pathways.CheckpointingImpl.from_options(
+                  use_remote_python=True,
+              )
           )
         else:
           logging.warning(
