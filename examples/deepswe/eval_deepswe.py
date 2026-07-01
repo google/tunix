@@ -185,26 +185,30 @@ dataset = load_dataset(
 entries = [e for e in dataset if "docker_image" in e]
 
 if GOLD_JSONL:
-  wanted_ids = set()
+  # Join on docker_image: it is the only key that is reliably present and
+  # identical in BOTH the gold whitelist and the HF dataset entries. The
+  # whitelist's `instance` (repo@hash) is constructed and does not match any
+  # native HF field, so joining on instance_id/instance yields 0 matches.
+  wanted_images = set()
   with open(GOLD_JSONL) as gold_f:
     for line in gold_f:
       line = line.strip()
       if not line:
         continue
       rec = json.loads(line)
-      iid = rec.get("instance_id") or rec.get("instance") or rec.get("metadata", {}).get("instance_id")
-      if iid:
-        wanted_ids.add(iid)
-  if not wanted_ids:
-    raise ValueError(f"GOLD_JSONL={GOLD_JSONL} contained zero instance_ids")
+      img = rec.get("docker_image")
+      if img:
+        wanted_images.add(img)
+  if not wanted_images:
+    raise ValueError(f"GOLD_JSONL={GOLD_JSONL} contained zero docker_image values")
   before = len(entries)
-  entries = [e for e in entries if (e.get("instance_id") or e.get("instance")) in wanted_ids]
+  entries = [e for e in entries if e.get("docker_image") in wanted_images]
   logger.info(
-      "Gold filter %s: kept %d/%d entries (unique wanted ids=%d)",
+      "Gold filter %s: kept %d/%d entries (unique wanted docker_images=%d)",
       GOLD_JSONL,
       len(entries),
       before,
-      len(wanted_ids),
+      len(wanted_images),
   )
 
 if TASKS_LIMIT > 0:
@@ -223,7 +227,10 @@ os.environ.setdefault("KUBECONFIG", "~/.kube/config")
 os.environ.setdefault("NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool")
 os.environ.setdefault("NODE_SELECTOR_VAL", "deepswe-cpu-pool")
 
-k8s_config.load_kube_config()
+try:
+  k8s_config.load_incluster_config()
+except k8s_config.config_exception.ConfigException:
+  k8s_config.load_kube_config()
 k8s_client = client.CoreV1Api()
 k8s_client.list_namespace(timeout_seconds=5)
 logger.info("Kubernetes connection verified.")

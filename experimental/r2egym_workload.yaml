@@ -134,6 +134,16 @@ spec:
                 export TASKS_LIMIT=32
                 export MAX_CONCURRENT=8
                 export MODEL_VERSION="Qwen/Qwen3-32B"
+                # Dataset the gold whitelist was generated from. The gold filter
+                # joins on docker_image, so this MUST be the same source dataset
+                # or the join keeps 0 entries. If "kept 0/..." appears in logs,
+                # try R2E-Gym/R2E-Gym-V1 instead.
+                export DATASET_NAME="R2E-Gym/R2E-Gym-Subset"
+                export DATASET_SPLIT="train"
+                # Write results straight to the persistent disk so they survive
+                # the pod being deleted (the final `cp` below copied from the
+                # wrong dir; streaming raw_trajectories are now safe mid-run too).
+                export OUTPUT_DIR="/mnt/disks/linchai_data/deepswe_eval_outputs"
                 # The whitelist must be checked into the git repo at this path
                 export GOLD_JSONL="experimental/good_gold_whitelist.jsonl"
                 
