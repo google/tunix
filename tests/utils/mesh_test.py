@@ -480,6 +480,27 @@ class MeshUtilsTest(absltest.TestCase):
         [device.id for device in allocated], [0, 1, 4, 5, 8, 9, 12, 13]
     )
 
+  def test_allocate_devices_by_coords_supports_edge_family_2d_subslice(self):
+    class FakeDevice:
+
+      def __init__(self, device_id, coords):
+        self.id = device_id
+        self.coords = coords
+        self.process_index = 0
+        self.slice_index = 0
+        self.device_kind = "TPU v5e"
+
+    fake_devices = [
+        FakeDevice(0, (0, 0)),
+        FakeDevice(1, (1, 0)),
+        FakeDevice(2, (0, 1)),
+        FakeDevice(3, (1, 1)),
+    ]
+
+    allocated, _ = mesh._allocate_devices_by_coords(fake_devices, 2)
+
+    self.assertEqual([device.id for device in allocated], [0, 1])
+
   def test_allocate_named_mesh_device_slices_prefers_coord_boxes(self):
     class FakeDevice:
 
@@ -552,6 +573,55 @@ class MeshUtilsTest(absltest.TestCase):
         (None, None),
     )
 
+  def test_find_best_candidate_coords_does_not_fallback_when_candidate_shapes_empty(
+      self,
+  ):
+    class FakeDevice:
+
+      def __init__(self, device_id, coords):
+        self.id = device_id
+        self.coords = coords
+
+    fake_devices = [
+        FakeDevice(0, (0, 0, 0)),
+        FakeDevice(1, (1, 0, 0)),
+        FakeDevice(2, (0, 1, 0)),
+        FakeDevice(3, (1, 1, 0)),
+    ]
+
+    coord_topology = mesh.get_coord_topology(fake_devices)
+
+    self.assertIsNotNone(coord_topology)
+    self.assertIsNone(
+        mesh.find_best_candidate_coords(
+            coord_topology,
+            4,
+            candidate_shapes=[],
+        )
+    )
+
+  def test_allocate_devices_by_coords_rejects_unsupported_generic_fish_box(
+      self,
+  ):
+    class FakeDevice:
+
+      def __init__(self, device_id, coords):
+        self.id = device_id
+        self.coords = coords
+        self.device_kind = "TPU v7"
+
+    fake_devices = []
+    device_id = 0
+    for x in range(4):
+      for y in range(4):
+        for z in range(8):
+          fake_devices.append(FakeDevice(device_id, (x, y, z)))
+          device_id += 1
+
+    allocated, _ = mesh._allocate_devices_by_coords(fake_devices, 48)
+
+    self.assertIsNone(allocated)
+
   def test_allocate_devices_by_coords_returns_best_contiguous_box(self):
     class FakeDevice:
 
@@ -606,6 +676,42 @@ class MeshUtilsTest(absltest.TestCase):
     self.assertLen(allocated, 256)
     self.assertEqual(mins, (0, 0, 0))
     self.assertEqual(maxs, (3, 7, 7))
+
+  def test_allocate_devices_by_coords_compact_policy_prefers_simpler_remainder(
+      self,
+  ):
+    class FakeDevice:
+
+      def __init__(self, device_id, coords):
+        self.id = device_id
+        self.coords = coords
+        self.device_kind = "TPU v7"
+
+    fake_devices = []
+    device_id = 0
+    for x in range(16):
+      for y in range(16):
+        for z in range(16):
+          fake_devices.append(FakeDevice(device_id, (x, y, z)))
+          device_id += 1
+
+    allocated, _ = mesh._allocate_devices_by_coords(
+        fake_devices,
+        512,
+        allocation_policy="COMPACT",
+    )
+
+    allocated_coords = [device.coords for device in allocated]
+    mins = tuple(
+        min(coords[dim] for coords in allocated_coords) for dim in range(3)
+    )
+    maxs = tuple(
+        max(coords[dim] for coords in allocated_coords) for dim in range(3)
+    )
+
+    self.assertLen(allocated, 512)
+    self.assertEqual(mins, (0, 0, 0))
+    self.assertEqual(maxs, (3, 7, 15))
 
   def test_allocate_devices_tracks_remaining_coord_regions(self):
     class FakeDevice:
@@ -1232,6 +1338,18 @@ class MeshUtilsTest(absltest.TestCase):
         assigned_devices,
     )
     self.assertEqual(created_mesh.axis_names, ("x", "y"))
+
+  def test_create_mesh_raises_assigned_device_count_mismatch(self):
+    with self.assertRaises(ValueError) as exc:
+      mesh.create_mesh(
+          (2, 2),
+          ("x", "y"),
+          devices=["d0", "d1", "d2", "d3", "d4"],
+      )
+
+    self.assertIn("but was assigned 5", str(exc.exception))
+    self.assertIn("axis_names=('x', 'y')", str(exc.exception))
+    self.assertIn("assigned_device_sample", str(exc.exception))
 
   def test_allocate_named_mesh_device_slices_uses_jax_devices_by_default(self):
     class FakeDevice:
