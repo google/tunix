@@ -83,7 +83,7 @@ spec:
                 # --- Hot Patch tpu-inference (PR #2838) ---
                 echo "Applying python script patch for ROPE bugs in qwen3.py..."
                 cat << 'EOF' > /tmp/patch_qwen3.py
-                file_path = "/opt/venv/lib/python3.12/site-packages/tpu_inference/models/jax/qwen3.py"
+                file_path = "/app/vllm_tpu_inference/tpu_inference/tpu_inference/models/jax/qwen3.py"
                 with open(file_path, "r") as f:
                     code = f.read()
                 
