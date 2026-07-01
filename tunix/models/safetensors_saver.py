@@ -17,14 +17,65 @@
 import os
 import shutil
 from typing import Any, Callable
-
+import re
 from flax import nnx
 import jax.numpy as jnp
 import safetensors.numpy as safe_np
-
+from safetensors import safe_open
+import json
 
 def join_path(path) -> str:
   return '.'.join([str(field) for field in path])
+
+def load_base_state(local_model_path): # for sharded check points such as gemma-3-4b...
+    single_file = os.path.join(local_model_path, "model.safetensors")
+    index_file = os.path.join(local_model_path, "model.safetensors.index.json")
+
+    # Case 1: single file
+    if os.path.exists(single_file):
+        return safe_np.load_file(single_file)
+
+    # Case 2: sharded checkpoint
+    if os.path.exists(index_file):
+        with open(index_file, "r") as f:
+            index_data = json.load(f)
+
+        tensors = {}
+        shard_files = set(index_data["weight_map"].values())
+
+        for shard in shard_files:
+            shard_path = os.path.join(local_model_path, shard)
+            with safe_open(shard_path, framework="np") as f:
+                for k in f.keys():
+                    tensors[k] = f.get_tensor(k)
+
+        return tensors
+
+    raise FileNotFoundError("No safetensors found")
+
+
+def map_tunix_to_hf_key(state_key: str) -> str:
+    m = re.match(r"layers\.(\d+)\.(.*)", state_key)
+    if not m:
+        return state_key
+
+    layer_id = m.group(1)
+    suffix = m.group(2)
+
+    prefix = f"language_model.model.layers.{layer_id}"
+
+    mapping = {
+        "attn.q_einsum": f"{prefix}.self_attn.q_proj.weight",
+        "attn.k_einsum": f"{prefix}.self_attn.k_proj.weight",
+        "attn.v_einsum": f"{prefix}.self_attn.v_proj.weight",
+        "attn.attn_vec_einsum": f"{prefix}.self_attn.o_proj.weight",
+        "attn.o_einsum": f"{prefix}.self_attn.o_proj.weight",
+        "mlp.gate_proj": f"{prefix}.mlp.gate_proj.weight",
+        "mlp.up_proj": f"{prefix}.mlp.up_proj.weight",
+        "mlp.down_proj": f"{prefix}.mlp.down_proj.weight",
+    }
+
+    return mapping.get(suffix, state_key)
 
 
 def save_lora_merged_model_as_safetensors(
@@ -82,15 +133,29 @@ def save_lora_merged_model_as_safetensors(
     lora_layers = custom_layer_extractor_fn(lora_layers)
 
   # Load base model state
-  base_state = safe_np.load_file(local_model_path + '/model.safetensors')
+  # base_state = safe_np.load_file(local_model_path + '/model.safetensors') original
+    base_state = load_base_state(local_model_path)
+    
 
   # Apply LoRA deltas
   for path, (lora_a, lora_b) in lora_layers.items():
-    state_key = state_key_transform_fn(path)
+    #tunix original as of Apr 1st 2026
+    '''state_key = state_key_transform_fn(path)
     assert state_key in base_state, (
         f'LoRA layer {path} not found in base model state dict'
         f' {base_state.keys()}'
     )
+    '''
+    state_key = state_key_transform_fn(path)
+    hf_key = map_tunix_to_hf_key(state_key)
+
+    if hf_key not in base_state:
+        print(f"[WARNING] Skipping unmatched key:")
+        print(f"  Tunix key: {state_key}")
+        print(f"  HF key: {hf_key}")
+        continue
+
+    state_key = hf_key
 
     lora_a_val = jnp.asarray(getattr(lora_a, 'value', lora_a))
     lora_b_val = jnp.asarray(getattr(lora_b, 'value', lora_b))
