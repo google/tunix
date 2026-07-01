@@ -1,0 +1,37 @@
+diff --git a/src/r2egym/agenthub/runtime/docker.py b/src/r2egym/agenthub/runtime/docker.py
+index 8f0bb94..845d595 100644
+--- a/src/r2egym/agenthub/runtime/docker.py
++++ b/src/r2egym/agenthub/runtime/docker.py
+@@ -234,10 +234,15 @@ class DockerRuntime(ExecutionEnvironment):
+ 
+         env_vars = {"PATH": DOCKER_PATH, **docker_kwargs.get("environment", {})}
+         env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
++        # task-local (tasks/filter_r2egym_docker_images): make pod spec portable to GKE via env
++        _pull_secret = os.environ.get("R2E_K8S_PULL_SECRET", "dockerhub-secret")
++        _node_selector = json.loads(os.environ.get("R2E_K8S_NODE_SELECTOR", "{}") or "{}")
++        _cpu = os.environ.get("R2E_K8S_CPU", "2")
++        _mem = os.environ.get("R2E_K8S_MEM", "4Gi")
+         pod_body = {
+             "apiVersion": "v1",
+             "kind": "Pod",
+-            "metadata": {"name": pod_name},
++            "metadata": {"name": pod_name, "labels": {"app": "r2e-gold-check"}},
+             "spec": {
+                 "restartPolicy": "Never",
+                 "containers": [
+@@ -250,12 +255,12 @@ class DockerRuntime(ExecutionEnvironment):
+                         "tty": True,
+                         "env": env_spec,
+                         "resources": {
+-                            "requests": {"cpu": "1", "memory": "1Gi"},
++                            "requests": {"cpu": _cpu, "memory": _mem},
+                         },
+                     }
+                 ],
+-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
+-                "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
++                "imagePullSecrets": [{"name": _pull_secret}],
++                **({"nodeSelector": _node_selector} if _node_selector else {}),
+                 "tolerations": [
+                     {
+                         "key": "node.kubernetes.io/disk-pressure",
