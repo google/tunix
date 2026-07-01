@@ -144,6 +144,7 @@ spec:
                 # the pod being deleted (the final `cp` below copied from the
                 # wrong dir; streaming raw_trajectories are now safe mid-run too).
                 export OUTPUT_DIR="/mnt/disks/linchai_data/deepswe_eval_outputs"
+                export MODEL_BASE_DIR="/mnt/disks/linchai_data/models"
                 # The whitelist must be checked into the git repo at this path
                 export GOLD_JSONL="experimental/good_gold_whitelist.jsonl"
                 

@@ -97,7 +97,7 @@ DATASET_SPLIT = os.getenv("DATASET_SPLIT", "test")
 DATASET_CACHE = os.getenv("DATASET_CACHE", "/scratch/dataset_cache")
 
 MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
-MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
+MODEL_PATH = os.path.join(os.environ.get("MODEL_BASE_DIR", "/scratch/models/"), MODEL_VERSION)
 
 MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
 MAX_MODEL_LEN = int(os.getenv("MAX_MODEL_LEN", "32768"))

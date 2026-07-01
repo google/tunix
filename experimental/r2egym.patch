@@ -19,7 +19,7 @@ index 8f0bb94..845d595 100644
              "spec": {
                  "restartPolicy": "Never",
                  "containers": [
-@@ -250,12 +255,12 @@ class DockerRuntime(ExecutionEnvironment):
+@@ -250,11 +255,11 @@ class DockerRuntime(ExecutionEnvironment):
                          "tty": True,
                          "env": env_spec,
                          "resources": {
@@ -35,3 +35,9 @@ index 8f0bb94..845d595 100644
                  "tolerations": [
                      {
                          "key": "node.kubernetes.io/disk-pressure",
+                         "operator": "Exists",
+                         "effect": "NoExecute",
+                         "tolerationSeconds": 10800
+                     }
+                 ],
+             },
