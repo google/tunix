@@ -486,6 +486,38 @@ class EvalTrajectoryCollectEngine(
         self.agent.trajectory.steps[-1].done = True
       return True
 
+  async def collect(self, mode: str = "Conversation"):
+    """Isolate per-task failures so one bad env cannot abort the whole run.
+
+    ``super().collect()`` covers _reset() (env/pod creation), the step loop, and
+    the final reward computation. Any non-timeout exception from those
+    (e.g. k8s pod-create failure, docker error, reward exec failure) would
+    otherwise propagate to the orchestrator and crash every remaining task.
+    Here we catch it, mark the trajectory FAILED with reward 0, best-effort
+    close the env, and return the trajectory so the run continues. FAILED
+    samples are treated as invalid (not counted) by save_task_report.
+    ``PromptTooLongError`` is already handled gracefully in _one_step and does
+    not reach here.
+    """
+    try:
+      return await super().collect(mode)
+    except Exception as exc:  # noqa: BLE001 - deliberate per-task isolation
+      logger.exception(
+          "[pair=%s instance=%s] trajectory FAILED (isolated): %s",
+          self.env.extra_kwargs.get("pair_index"),
+          self.env.entry.get("instance_id", "unknown"),
+          exc,
+      )
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.FAILED
+      self.agent.trajectory.reward = 0.0
+      self._skip_final_reward = True
+      try:
+        await self._close()
+      except Exception:  # noqa: BLE001 - env may already be closed/half-created
+        pass
+      # Eval always collects in "Trajectory" mode; return the trajectory object.
+      return self.agent.trajectory
+
   async def _append_final_reward(self):
     if getattr(self, "_skip_final_reward", False):
       return
@@ -765,59 +797,98 @@ def save_results(results):
   return output_file
 
 
-def save_task_report(results):
-  """Aggregate per-trajectory results by instance_id into per-task solve rates.
+# A sample only counts as a real measurement if its trajectory actually ran to
+# completion. Everything else (timeouts, context overflow, isolated failures)
+# is "invalid" and excluded from k / valid_n, so a task whose env is broken is
+# reported as `broken` rather than masquerading as `all_fail` (too hard).
+VALID_STATUSES = {"SUCCEEDED", "MAX_STEPS_REACHED"}
 
-  Emits one line per task with k (samples where reward>0), n (total samples),
-  solve_rate=k/n, and status in {all_fail (k==0), partial (0<k<n),
-  all_pass (k==n)}. Downstream data curation keeps status=="partial".
+
+def save_task_report(results):
+  """Aggregate per-trajectory results into per-task solve rates and emit 3 lists.
+
+  Samples are grouped by task (pair_index). Only samples whose status is in
+  VALID_STATUSES count as real measurements; k = valid samples with reward>0,
+  over valid_n valid samples. Each task is classified as:
+    - broken   : valid_n == 0        (env never produced a usable trajectory)
+    - all_fail : valid_n > 0, k == 0  (genuinely hard)
+    - all_pass : k == valid_n         (too easy)
+    - partial  : 0 < k < valid_n      (usable for GRPO training)
+
+  Writes three files:
+    - task_report_complete_<ts>.jsonl : every task, full stats
+    - task_report_good_<ts>.jsonl     : status == partial
+    - task_report_unusable_<ts>.jsonl : status == broken
 
   Args:
-    results: list of per-trajectory dicts, N_SAMPLE per instance_id.
+    results: list of per-trajectory dicts, N_SAMPLE per task (pair_index).
 
   Returns:
-    Path to the written per-task report jsonl.
+    Path to the complete per-task report jsonl.
   """
   by_task = collections.defaultdict(list)
   for r in results:
-    by_task[r["instance_id"]].append(r)
+    by_task[r["pair_index"]].append(r)
 
   os.makedirs(OUTPUT_DIR, exist_ok=True)
   timestamp = time.strftime("%Y%m%d_%H%M%S")
-  output_file = os.path.join(OUTPUT_DIR, f"task_report_{timestamp}.jsonl")
+  complete_file = os.path.join(
+      OUTPUT_DIR, f"task_report_complete_{timestamp}.jsonl"
+  )
+  good_file = os.path.join(OUTPUT_DIR, f"task_report_good_{timestamp}.jsonl")
+  unusable_file = os.path.join(
+      OUTPUT_DIR, f"task_report_unusable_{timestamp}.jsonl"
+  )
 
-  n_all_fail = n_partial = n_all_pass = 0
-  with open(output_file, "w") as f:
-    for iid, rs in by_task.items():
+  counts = {"broken": 0, "all_fail": 0, "all_pass": 0, "partial": 0}
+  with open(complete_file, "w") as fc, open(good_file, "w") as fg, open(
+      unusable_file, "w"
+  ) as fu:
+    for _, rs in by_task.items():
       n = len(rs)
-      k = sum(1 for r in rs if r["reward"] > 0)
-      if k == 0:
+      valid = [r for r in rs if r["status"] in VALID_STATUSES]
+      valid_n = len(valid)
+      k = sum(1 for r in valid if r["reward"] > 0)
+      if valid_n == 0:
+        status = "broken"
+      elif k == 0:
         status = "all_fail"
-        n_all_fail += 1
-      elif k == n:
+      elif k == valid_n:
         status = "all_pass"
-        n_all_pass += 1
       else:
         status = "partial"
-        n_partial += 1
+      counts[status] += 1
       record = {
-          "instance_id": iid,
+          "instance_id": rs[0].get("instance_id"),
           "docker_image": rs[0].get("docker_image", ""),
           "k": k,
+          "valid_n": valid_n,
           "n": n,
-          "solve_rate": k / n if n else 0.0,
+          "broken_samples": n - valid_n,
+          "solve_rate": (k / valid_n) if valid_n else None,
           "status": status,
+          "status_breakdown": dict(
+              collections.Counter(r["status"] for r in rs)
+          ),
       }
-      f.write(json.dumps(record) + "\n")
+      line = json.dumps(record) + "\n"
+      fc.write(line)
+      if status == "partial":
+        fg.write(line)
+      elif status == "broken":
+        fu.write(line)
 
   logger.info("=" * 50)
   logger.info("Per-task report: %d tasks", len(by_task))
-  logger.info("  all_fail (k==0):  %d", n_all_fail)
-  logger.info("  partial  (0<k<n): %d   <-- keep these for training", n_partial)
-  logger.info("  all_pass (k==n):  %d", n_all_pass)
-  logger.info("Task report saved to %s", output_file)
+  logger.info("  partial  (usable):  %d   <-- keep these for training", counts["partial"])
+  logger.info("  all_fail (too hard):%d", counts["all_fail"])
+  logger.info("  all_pass (too easy):%d", counts["all_pass"])
+  logger.info("  broken   (unusable):%d", counts["broken"])
+  logger.info("Complete list: %s", complete_file)
+  logger.info("Good list:     %s", good_file)
+  logger.info("Unusable list: %s", unusable_file)
   logger.info("=" * 50)
-  return output_file
+  return complete_file
 
 
 # ========================== Main ==========================
