@@ -401,7 +401,7 @@ def _is_prompt_overflow_error(exc: Exception) -> bool:
   )
 
 
-def model_call(chat_completions, env_unused):
+def model_call(chat_completions, env_unused, max_generation_steps=None, **kwargs):
   """Model inference via tunix sampler."""
   pair_index = None
   instance_id = "unknown"
@@ -431,10 +431,11 @@ def model_call(chat_completions, env_unused):
     )
   t0 = time.time()
   try:
+    _steps = max_generation_steps or MAX_RESPONSE_LENGTH
     if sampler_lock is None:
       out = sampler(
           prompt,
-          max_generation_steps=MAX_RESPONSE_LENGTH,
+          max_generation_steps=_steps,
           temperature=TEMPERATURE,
           echo=False,
           eos_tokens=qwen_eos_tokens,
@@ -443,7 +444,7 @@ def model_call(chat_completions, env_unused):
       with sampler_lock:
         out = sampler(
             prompt,
-            max_generation_steps=MAX_RESPONSE_LENGTH,
+            max_generation_steps=_steps,
             temperature=TEMPERATURE,
             echo=False,
             eos_tokens=qwen_eos_tokens,
