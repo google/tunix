@@ -129,10 +129,10 @@ spec:
                 sleep 60;
                 echo "Starting R2E-Gym Eval using deepswe script..."
                 
-                export N_SAMPLE=4
+                export N_SAMPLE=8
                 export TEMPERATURE=0.7
-                export TASKS_LIMIT=8
-                export MAX_CONCURRENT=8
+                export TASKS_LIMIT=32
+                export MAX_CONCURRENT=256
                 export MODEL_VERSION="Qwen/Qwen3-8B"
                 # Dataset the gold whitelist was generated from. The gold filter
                 # joins on docker_image, so this MUST be the same source dataset
