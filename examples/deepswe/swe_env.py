@@ -7,7 +7,9 @@ try:
   import r2egym  # pytype: disable=import-error
   from r2egym.agenthub.action import Action  # pytype: disable=import-error
   from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
-except ImportError:
+except ImportError as e:
+  import logging
+  logging.error("Failed to import r2egym: %s", e)
   r2egym = cast(Any, None)
   EnvArgs = cast(Any, None)
   RepoEnv = cast(Any, None)
