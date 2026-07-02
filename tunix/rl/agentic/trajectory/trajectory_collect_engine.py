@@ -431,7 +431,7 @@ class TrajectoryCollectEngine:
           contains_first_msg=True,
           contains_generation_msg=True,
       )
-      self.agent.trajectory.prompt_tokens = prompt_tokens
+      self.agent.trajectory.prompt_tokens = prompt_tokens  # pyrefly: ignore[missing-attribute]
 
   @property
   def _debug_prefix(self) -> str:
@@ -526,7 +526,7 @@ class TrajectoryCollectEngine:
         not self.agent.trajectory.steps
         and rollout_output.left_padded_prompt_tokens is not None
     ):
-      self.agent.trajectory.prompt_tokens = (
+      self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
           rollout_output.left_padded_prompt_tokens[0]
       )
 
@@ -653,7 +653,7 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
       self._log_trajectory_clip("TIMEOUT")
-      self.agent.get_current_step().done = True
+      self.agent.get_current_step().done = True  # pyrefly: ignore[missing-attribute]
       return True
 
     return done

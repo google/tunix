@@ -297,7 +297,7 @@ class PerfettoTraceWriter(TraceWriter):
     # Write track descriptors for parent tracks.
     for track_info in self._track_info.values():
       packet = builder.add_packet()
-      packet.track_descriptor.uuid = track_info.uuid
+      packet.track_descriptor.uuid = track_info.uuid  # pyrefly: ignore[bad-assignment]
       packet.track_descriptor.name = track_info.name
 
     # Sort timelines by ID to ensure consistent track ordering.
@@ -325,7 +325,7 @@ class PerfettoTraceWriter(TraceWriter):
 
       if tl_id in self._timeline_tracks:
         track_info = self._track_info[self._timeline_tracks[tl_id]]
-        packet.track_descriptor.parent_uuid = track_info.uuid
+        packet.track_descriptor.parent_uuid = track_info.uuid  # pyrefly: ignore[bad-assignment]
 
       # TODO: noghabi -  limit processing to last steps. we don't need to start
       # from the beginning every time.
@@ -355,7 +355,7 @@ class PerfettoTraceWriter(TraceWriter):
             "timestamp": start_ns,
             "type": TrackEvent.Type.TYPE_SLICE_BEGIN,
             "uuid": lane_uuid,
-            "name": _create_span_name(s.name, s.tags),
+            "name": _create_span_name(s.name, s.tags),  # pyrefly: ignore[bad-argument-type]
         })
 
         if s.ended:

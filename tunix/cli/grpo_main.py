@@ -375,7 +375,7 @@ class GrpoPipeline(config.HyperParameters):
           "rollout_vllm_max_num_batched_tokens",
           vllm.get(
               "max_num_batched_tokens",
-              (max_num_seqs * kv_cache_size) // 4,
+              (max_num_seqs * kv_cache_size) // 4,  # pyrefly: ignore[unsupported-operation]
           ),
       )
       submission_threshold = rollout_cfg.get(
@@ -655,7 +655,7 @@ class GrpoPipeline(config.HyperParameters):
           data_source=self.config["data_source"],
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
-          split=self.config.get(
+          split=self.config.get(  # pyrefly: ignore[bad-argument-type]
               "train_split", self.config.get("split", "train")
           ),
           apply_chat_template_to_dataset=apply_chat_template_to_dataset,
@@ -665,7 +665,7 @@ class GrpoPipeline(config.HyperParameters):
           data_source=self.config["data_source"],
           dataset=self.config["dataset_name"],
           tokenizer=tokenizer,
-          split=self.config.get(
+          split=self.config.get(  # pyrefly: ignore[bad-argument-type]
               "train_split", self.config.get("split", "train")
           ),
           apply_chat_template_to_dataset=apply_chat_template_to_dataset,

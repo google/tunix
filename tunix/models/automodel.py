@@ -95,13 +95,13 @@ def call_model_config(model_name: str) -> Any:
   model_lib_module = get_model_module(model_name, ModelModule.MODEL)
   target_obj = model_lib_module.ModelConfig
 
-  if not hasattr(target_obj, config_id):
+  if not hasattr(target_obj, config_id):  # pyrefly: ignore[bad-argument-type]
     raise AttributeError(
         f"Error: Function '{config_id}' not found on the target object "
         f"for model '{model_name}'. Target object type: {type(target_obj)}"
     )
 
-  method_to_call = getattr(target_obj, config_id)
+  method_to_call = getattr(target_obj, config_id)  # pyrefly: ignore[bad-argument-type]
 
   if not callable(method_to_call):
     raise TypeError(
@@ -198,7 +198,7 @@ def create_gemma_model_with_nnx_conversion(
       else:  # gemma
         dir_name = version_dashed
 
-    params_path = os.path.join(ckpt_path, dir_name)
+    params_path = os.path.join(ckpt_path, dir_name)  # pyrefly: ignore[no-matching-overload]
 
     model, params = create_gemma_model_from_params(params_path, model_name)
 
@@ -310,11 +310,11 @@ def download_model(
   if model_source == ModelSource.KAGGLE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)
+    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
   elif model_source == ModelSource.HUGGINGFACE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
+    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
   elif model_source in (ModelSource.GCS, ModelSource.MAXTEXT):
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
@@ -428,7 +428,7 @@ class AutoModel:
         The path where the model was downloaded to.
     """
     # TODO(b/477915179): Allow model_id to be config_id or a Kaggle_id
-    model: nnx.Module = None
+    model: nnx.Module = None  # pyrefly: ignore[bad-assignment]
     model_params: Any = None
     naming_info = naming.ModelNaming(model_id=model_id)
 
@@ -499,7 +499,7 @@ class AutoModel:
       if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         model, model_params = create_gemma3_model_from_checkpoint(
             ckpt_path=resolved_model_path,
-            model_name=naming_info.model_name,
+            model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
             mesh=mesh,
             **kwargs,
         )
@@ -516,7 +516,7 @@ class AutoModel:
         # Name is legacy — dynamically resolves to gemma4 via ModelNaming.
         model, model_params = create_gemma3_model_from_checkpoint(
             ckpt_path=resolved_model_path,
-            model_name=naming_info.model_name,
+            model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
             mesh=mesh,
             **kwargs,
         )
@@ -539,16 +539,16 @@ class AutoModel:
         intermediate_ckpt_dir = kwargs.get('intermediate_ckpt_dir')
         rng_seed = kwargs.get('rng_seed', 0)
         model, model_params = create_gemma_model_with_nnx_conversion(
-            model_name=naming_info.model_name,
+            model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
             ckpt_path=resolved_model_path,
-            intermediate_ckpt_dir=intermediate_ckpt_dir,
+            intermediate_ckpt_dir=intermediate_ckpt_dir,  # pyrefly: ignore[bad-argument-type]
             rng_seed=rng_seed,
             mesh=mesh,
             model_path=model_path,
         )
       elif model_source == ModelSource.INTERNAL:
         model, model_params = create_gemma_model_from_params(
-            params_path=resolved_model_path, model_name=naming_info.model_name
+            params_path=resolved_model_path, model_name=naming_info.model_name  # pyrefly: ignore[bad-argument-type]
         )
       else:
         raise NotImplementedError(
@@ -566,7 +566,7 @@ class AutoModel:
     # Common path for all other native Tunix models -- create model from safe tensors
     if not model_params:
       # pick corresponding config based on model version
-      model_params = call_model_config(naming_info.model_name)
+      model_params = call_model_config(naming_info.model_name)  # pyrefly: ignore[bad-argument-type]
 
       # Apply any model config field overrides passed via kwargs (e.g.
       # use_flash_attention, flash_attention_block_size).
@@ -579,7 +579,7 @@ class AutoModel:
 
       with mesh:
         model = create_model_from_safe_tensors(
-            naming_info.model_name,
+            naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
             resolved_model_path,
             model_params,
             mesh,

@@ -61,17 +61,17 @@ class Span:
       key: The tag key.
       value: The tag value.
     """
-    if key in self.tags:
+    if key in self.tags:  # pyrefly: ignore[not-iterable]
       logging.warning(
           "Span '%s' (id=%s): Tag %r already exists with value %r."
           " Overwriting with %r.",
           self.name,
           self.id,
           key,
-          self.tags[key],
+          self.tags[key],  # pyrefly: ignore[unsupported-operation]
           value,
       )
-    self.tags[key] = value
+    self.tags[key] = value  # pyrefly: ignore[unsupported-operation]
 
   def _format_relative(self, born_at: float) -> str:
     """Returns a string representation of the span with relative times.

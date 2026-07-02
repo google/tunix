@@ -280,7 +280,7 @@ try:
 except ImportError as e:
   print(f"❌ Still missing a module: {e}")
 
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":  # pyrefly: ignore[unbound-name]
   pathwaysutils.initialize()
 
 
@@ -356,7 +356,7 @@ if not os.path.exists(MODEL_PATH) or not os.listdir(MODEL_PATH):
   os.makedirs(MODEL_PATH, exist_ok=True)
 
   # Assumes "Qwen/" organization prefix for HF download. Adjust if using other models.
-  snapshot_download(
+  snapshot_download(  # pyrefly: ignore[no-matching-overload]
       repo_id=f"Qwen/{MODEL_VERSION}",
       local_dir=MODEL_PATH,
       local_dir_use_symlinks=False,
@@ -651,7 +651,7 @@ def transform(entry):
 
 dataset = dataset.map(
     transform,
-    keep_in_memory=True,
+    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
 )
 
 # %%
@@ -822,7 +822,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 # ==========================================
 
 dataset = dataset.shuffle(seed=SEED)
-grain_dataset = grain.MapDataset.source(dataset)
+grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
 
 def mixed_type_batch_fn(elements):
   """elements: A list of dicts."""

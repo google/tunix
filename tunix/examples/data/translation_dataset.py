@@ -70,7 +70,7 @@ def create_datasets(
     )
   elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
     train_ds, eval_ds = datasets.load_dataset(
-        dataset_name, data_dir="en-fr", split=("train", "validation")
+        dataset_name, data_dir="en-fr", split=("train", "validation")  # pyrefly: ignore[bad-argument-type]
     )
   else:
     raise ValueError(f"Unsupported dataset: {dataset_name}")
@@ -78,7 +78,7 @@ def create_datasets(
   input_template = INPUT_TEMPLATE_IT if instruct_tuned else INPUT_TEMPLATE
 
   train_loader = _build_data_loader(
-      data_source=train_ds,
+      data_source=train_ds,  # pyrefly: ignore[bad-argument-type]
       batch_size=global_batch_size,
       num_epochs=num_train_epochs,
       max_seq_len=max_target_length,
@@ -86,7 +86,7 @@ def create_datasets(
       input_template=input_template,
   )
   eval_loader = _build_data_loader(
-      data_source=eval_ds,
+      data_source=eval_ds,  # pyrefly: ignore[bad-argument-type]
       batch_size=global_batch_size,
       num_epochs=1,
       max_seq_len=max_target_length,
@@ -168,7 +168,7 @@ class _BuildTrainInput(grain.MapTransform):
 
     # The input sequence fed to the model is simply the concatenation of the
     # source and the destination.
-    tokens = np.concat([src_tokens, dst_tokens], axis=0)
+    tokens = np.concat([src_tokens, dst_tokens], axis=0)  # pyrefly: ignore[bad-assignment]
 
     # To prevent the model from updating based on the source (input)
     # tokens, add a target mask to each input.
@@ -178,12 +178,12 @@ class _BuildTrainInput(grain.MapTransform):
 
     # If the input tokens sequence is smaller than the target sequence size,
     # then pad it with pad tokens.
-    tokens = self._pad_up_to_max_len(tokens, self._pad_value)
+    tokens = self._pad_up_to_max_len(tokens, self._pad_value)  # pyrefly: ignore[bad-argument-type, bad-assignment]
 
     # Don't want to perform the backward pass on the pad tokens.
     mask = self._pad_up_to_max_len(mask, 0)
 
-    return TrainingInput(input_tokens=tokens, input_mask=mask)
+    return TrainingInput(input_tokens=tokens, input_mask=mask)  # pyrefly: ignore[bad-argument-type]
 
   def _pad_up_to_max_len(
       self, input_tensor: np.ndarray, pad_value: int

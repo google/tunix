@@ -421,7 +421,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     assert "pair_index" not in self.env_kwargs
     env = self.env_class(
         single_example,
-        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
+        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
     )
 
     return agent, env
@@ -454,7 +454,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
     result = self.rl_cluster.generate(
-        prompts=chat_lists,
+        prompts=chat_lists,  # pyrefly: ignore[bad-argument-type]
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
@@ -508,7 +508,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # with mini-batch.
       group_id = self.rl_cluster.global_steps * self._full_batch_size
       if is_async_iterator:
-        async for single_example in prompt_iterator:
+        async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -525,7 +525,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             yield agent, env
           group_id += 1
       else:
-        for single_example in prompt_iterator:
+        for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
                   None,
@@ -725,7 +725,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    full_batch_size = len(next(iter(first_item.values())))
+    full_batch_size = len(next(iter(first_item.values())))  # pyrefly: ignore[bad-argument-type]
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -1158,7 +1158,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           len(train_micro_batch),
           self.policy_version,
           str([
-              train_example.policy_version[0]
+              train_example.policy_version[0]  # pyrefly: ignore[unsupported-operation]
               for train_example in train_micro_batch
           ]),
           self.algo_config.off_policy_steps,

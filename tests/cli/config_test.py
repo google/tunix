@@ -688,7 +688,7 @@ class ConfigTest(parameterized.TestCase):
       overrides = [o.format(log_dir=log_dir) for o in overrides]
       argv = [main_command, "base_config.yaml"] + overrides
       if expected_error:
-        with self.assertRaisesRegex(expected_error, error_regex):
+        with self.assertRaisesRegex(expected_error, error_regex):  # pyrefly: ignore[bad-argument-type]
           config.initialize(argv)
       else:
         config.initialize(argv)

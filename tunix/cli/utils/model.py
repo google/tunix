@@ -70,10 +70,10 @@ def apply_lora_to_model(base_model, mesh, lora_config, rng_seed=0):
   )
 
   if original_remat is not None:
-    lora_model.config.remat_config = original_remat
+    lora_model.config.remat_config = original_remat  # pyrefly: ignore[missing-attribute]
 
   if mesh is not None:
-    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)  # pyrefly: ignore[bad-argument-type]
   return lora_model
 
 

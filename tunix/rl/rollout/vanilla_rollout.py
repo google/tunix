@@ -59,17 +59,17 @@ class VanillaRollout(base_rollout.BaseRollout):
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
-        seed=rollout_config.seed,
+        seed=rollout_config.seed,  # pyrefly: ignore[bad-argument-type]
         pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
         return_logprobs=rollout_config.return_logprobs,
     )
     return base_rollout.RolloutOutput(
         text=output.text,
-        logits=output.logits,
-        tokens=output.tokens,
+        logits=output.logits,  # pyrefly: ignore[bad-argument-type]
+        tokens=output.tokens,  # pyrefly: ignore[bad-argument-type]
         left_padded_prompt_tokens=output.padded_prompt_tokens,
-        logprobs=output.logprobs,
+        logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
     )
 
   def get_per_token_logps(
@@ -117,7 +117,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         operator.ior, [flat_old_params, flat_new_params], {}
     )
     merged_params = jax.tree.unflatten(tree_def, merged_params.values())
-    new_model = nnx.merge(self._sampler._transformer_graphdef, merged_params)  # pylint: disable=protected-access
+    new_model = nnx.merge(self._sampler._transformer_graphdef, merged_params)  # pylint: disable=protected-access  # pyrefly: ignore[no-matching-overload]
     self._sampler.transformer_state = nnx.variables(new_model, nnx.Param)
 
   def pad_id(self) -> int:

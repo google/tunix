@@ -228,7 +228,7 @@ mesh = None
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
 
-if trainer_devices + rollout_devices > jax.device_count():
+if trainer_devices + rollout_devices > jax.device_count():  # pyrefly: ignore[unsupported-operation]
   raise ValueError(
       "Trainer devices must be less than or equal to the number of devices"
       " available."
@@ -237,7 +237,7 @@ if trainer_devices + rollout_devices > jax.device_count():
 
 if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
   rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]  # pyrefly: ignore[bad-argument-type, bad-index]
   )
 
   rollout_mesh = jax.sharding.Mesh(
@@ -252,7 +252,7 @@ if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
   # )
   print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
   trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
-      TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+      TRAINER_MESH[0], jax.devices()[-trainer_devices:]  # pyrefly: ignore[bad-argument-type, unsupported-operation]
   )
   # trainer_mesh = jax.make_mesh(
   #     *TRAINER_MESH,
@@ -545,7 +545,7 @@ if ROLLOUT_ENGINE == "sglang_jax":
   )
 elif ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(
-      **base_rollout_dict, **vllm_rollout_dict
+      **base_rollout_dict, **vllm_rollout_dict  # pyrefly: ignore[bad-argument-type]
   )
 elif ROLLOUT_ENGINE == "vanilla":
   rollout_engine_config = base_rollout.RolloutConfig(**base_rollout_dict)
@@ -553,7 +553,7 @@ else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
 cluster_config = rl_cluster_lib.ClusterConfig(
-    role_to_mesh={
+    role_to_mesh={  # pyrefly: ignore[bad-argument-type]
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
         rl_cluster_lib.Role.REFERENCE: trainer_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,

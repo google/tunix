@@ -153,7 +153,7 @@ class SWEEnv(BaseTaskEnv):
       os.system(f"docker rmi {docker_image}")
 
   @staticmethod
-  def from_dict(extra_info: dict | str) -> "SWEEnv":
+  def from_dict(extra_info: dict | str) -> "SWEEnv":  # pyrefly: ignore[bad-override]
     """Create an environment instance from JSON configuration.
 
     Args:
