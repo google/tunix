@@ -42,11 +42,10 @@ def _unpack_entry(entry: dict) -> dict:
     if isinstance(v, np.ndarray):
       unpacked_entry[k] = v.item()
     elif isinstance(v, list):
-      if len(v) != 1:
-        raise ValueError(
-            f"Can only convert a list of size 1; got size {len(v)}"
-        )
-      unpacked_entry[k] = v[0]
+      if len(v) == 1:
+        unpacked_entry[k] = v[0]
+      else:
+        unpacked_entry[k] = v
     else:
       unpacked_entry[k] = v
   return unpacked_entry

@@ -255,7 +255,7 @@ devices = jax.devices()
 # Qwen3-32B has tensors such as (5120, 8, 128), so TP must not exceed 8 for
 # shardings that partition that dimension on the tp axis.
 # We utilize all available devices by spreading them across FSDP (Data Parallel).
-TP_SIZE = 8
+TP_SIZE = int(os.getenv("TP_SIZE", "8"))
 num_devices = len(devices)
 num_fsdp = max(1, num_devices // TP_SIZE)
 usable_devices = num_fsdp * TP_SIZE
