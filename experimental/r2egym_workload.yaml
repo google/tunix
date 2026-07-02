@@ -133,6 +133,7 @@ spec:
                 export TEMPERATURE=0.7
                 export TASKS_LIMIT=32
                 export MAX_CONCURRENT=256
+                export TIMEOUT=2400
                 export MODEL_VERSION="Qwen/Qwen3-8B"
                 # Dataset the gold whitelist was generated from. The gold filter
                 # joins on docker_image, so this MUST be the same source dataset
