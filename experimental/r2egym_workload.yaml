@@ -158,7 +158,7 @@ spec:
                 cd R2E-Gym
                 git apply ../experimental/r2egym.patch
                 sed -i 's/, HfFolder//g' src/r2egym/agenthub/utils/utils.py
-                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 2400,/g' src/r2egym/agenthub/runtime/docker.py
+                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 3600,/g' src/r2egym/agenthub/runtime/docker.py
                 sed -i 's/datasets==2.19/datasets/g' pyproject.toml
                 sed -i 's/anthropic\[vertex\]==0.43.0/anthropic[vertex]/g' pyproject.toml
                 pip3 install -e .
