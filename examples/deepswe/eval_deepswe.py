@@ -272,6 +272,8 @@ logger.info(
 
 if MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
   model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
+elif MODEL_VERSION == "Qwen/Qwen3-8B":
+  model_config = model_lib.ModelConfig.qwen3_8b()
 elif MODEL_VERSION == "Qwen/Qwen3-32B":
   model_config = model_lib.ModelConfig.qwen3_32b()
 else:
