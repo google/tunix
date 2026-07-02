@@ -131,8 +131,8 @@ spec:
                 
                 export N_SAMPLE=8
                 export TEMPERATURE=0.7
-                export TASKS_LIMIT=0
-                export MAX_CONCURRENT=32
+                export TASKS_LIMIT=32
+                export MAX_CONCURRENT=8
                 export MODEL_VERSION="Qwen/Qwen3-8B"
                 # Dataset the gold whitelist was generated from. The gold filter
                 # joins on docker_image, so this MUST be the same source dataset
@@ -146,7 +146,7 @@ spec:
                 export OUTPUT_DIR="/mnt/disks/linchai_data/deepswe_eval_outputs"
                 export MODEL_BASE_DIR="/mnt/disks/linchai_data/models"
                 # The whitelist must be checked into the git repo at this path
-                export GOLD_JSONL="experimental/smoke_test_whitelist.jsonl"
+                export GOLD_JSONL="experimental/good_gold_whitelist.jsonl"
                 
                 # Install missing dependencies for deepswe evaluation
                 echo "Installing missing dependencies (kubernetes, datasets)..."
