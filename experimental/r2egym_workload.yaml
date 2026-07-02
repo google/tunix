@@ -131,10 +131,10 @@ spec:
                 
                 export N_SAMPLE=8
                 export TEMPERATURE=0.7
-                export TASKS_LIMIT=8
-                export MAX_CONCURRENT=32
-                export TIMEOUT=1800
-                export MODEL_VERSION="Qwen/Qwen3-8B"
+                export TASKS_LIMIT=0
+                export MAX_CONCURRENT=128
+                export TIMEOUT=3600
+                export MODEL_VERSION="Qwen/Qwen3-32B"
                 # Dataset the gold whitelist was generated from. The gold filter
                 # joins on docker_image, so this MUST be the same source dataset
                 # or the join keeps 0 entries. If "kept 0/..." appears in logs,
@@ -158,7 +158,7 @@ spec:
                 cd R2E-Gym
                 git apply ../experimental/r2egym.patch
                 sed -i 's/, HfFolder//g' src/r2egym/agenthub/utils/utils.py
-                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 1800,/g' src/r2egym/agenthub/runtime/docker.py
+                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 2400,/g' src/r2egym/agenthub/runtime/docker.py
                 sed -i 's/datasets==2.19/datasets/g' pyproject.toml
                 sed -i 's/anthropic\[vertex\]==0.43.0/anthropic[vertex]/g' pyproject.toml
                 pip3 install -e .
