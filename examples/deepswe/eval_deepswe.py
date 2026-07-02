@@ -633,7 +633,6 @@ async def run_evaluation():
       engine_kwargs=dict(
           model_call=model_call,
           timeout=TIMEOUT,
-          max_context_limit=MAX_CONTEXT_LIMIT,
           tokenizer=tokenizer_for_agentic,
           chat_parser=chat_parser,
       ),
