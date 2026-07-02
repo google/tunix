@@ -156,7 +156,9 @@ spec:
                 git clone https://github.com/R2E-Gym/R2E-Gym.git
                 cd R2E-Gym
                 git apply ../experimental/r2egym.patch
-                pip3 install -e .
+                sed -i 's/, HfFolder//g' src/r2egym/agenthub/utils/utils.py
+                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 1800,/g' src/r2egym/agenthub/runtime/docker.py
+                pip3 install --no-deps -e .
                 cd ..
 
                 # export JAX_PLATFORMS=proxy,cpu 
