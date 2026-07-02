@@ -524,10 +524,10 @@ class TrajectoryCollectEngine:
     # tokenization on the first turn to prevent prompt token desync.
     if (
         not self.agent.trajectory.steps
-        and rollout_output.left_padded_prompt_tokens is not None
+        and getattr(rollout_output, "padded_prompt_tokens", None) is not None
     ):
       self.agent.trajectory.prompt_tokens = (
-          rollout_output.left_padded_prompt_tokens[0]
+          rollout_output.padded_prompt_tokens[0]
       )
 
     if rollout_output.tokens:
