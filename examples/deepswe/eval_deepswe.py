@@ -165,10 +165,11 @@ logger = logging.getLogger("deepswe_eval")
 
 # ========================== JAX / Pathways ==========================
 
-if os.getenv("JAX_PLATFORMS", None) == "proxy":
+if "proxy" in os.getenv("JAX_PLATFORMS", ""):
   import pathwaysutils
 
   pathwaysutils.initialize()
+  logger.info("Successfully initialized pathwaysutils for proxy backend.")
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
