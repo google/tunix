@@ -56,6 +56,7 @@ Usage:
 
 import asyncio
 import collections
+import glob
 import json
 import logging
 import os
@@ -146,6 +147,21 @@ SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 OUTPUT_DIR = os.getenv(
     "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "eval_results")
 )
+
+
+def _sanitize_tag(s):
+  return "".join(c if (c.isalnum() or c in "._-") else "-" for c in s)
+
+
+# RUN_TAG namespaces the raw/report files so resume only counts THIS config's
+# runs: same model+dataset -> same tag -> auto-resume; different config -> its
+# own namespace. Set RUN_TAG explicitly to force a fresh start (or reuse one to
+# resume). Because pre-existing files were written untagged, the tagged glob
+# below does not match them, so switching to this scheme starts cleanly from 0.
+RUN_TAG = os.getenv("RUN_TAG") or _sanitize_tag(
+    f"{MODEL_VERSION}_{DATASET_NAME}_{DATASET_SPLIT}"
+)
+
 ANSI_RED = "\033[31m"
 ANSI_RESET = "\033[0m"
 
@@ -597,17 +613,61 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
   pass
 
 
-def pairs_generator():
-  """Yield N_SAMPLE (agent, env) trajectory tasks per dataset entry.
+RESUME = os.getenv("RESUME", "1") == "1"
 
-  All N_SAMPLE samples of one task share pair_index=task_index (so
-  item.pair_index maps back to the same entry for aggregation), but each gets a
-  unique group_id so that with group_size=1 every trajectory is released
-  independently by the orchestrator.
+
+def _traj_key(rec_or_entry):
+  """Stable per-task key: docker_image, falling back to instance_id."""
+  return rec_or_entry.get("docker_image") or rec_or_entry.get("instance_id")
+
+
+def _scan_raw_outputs():
+  """Read every raw_trajectories_<RUN_TAG>_*.jsonl in OUTPUT_DIR for this config.
+
+  Returns (records, done_counts):
+    records:     list of every per-trajectory dict written for this RUN_TAG
+    done_counts: dict key -> number of trajectories already written for that task
+  Only files matching the current RUN_TAG are read (other configs are isolated).
+  A torn/partial trailing line (from a crash mid-write) is skipped.
   """
+  records = []
+  done_counts = collections.defaultdict(int)
+  for path in sorted(
+      glob.glob(os.path.join(OUTPUT_DIR, f"raw_trajectories_{RUN_TAG}_*.jsonl"))
+  ):
+    try:
+      with open(path) as f:
+        for line in f:
+          line = line.strip()
+          if not line:
+            continue
+          try:
+            rec = json.loads(line)
+          except json.JSONDecodeError:
+            continue  # torn last line from a crash; skip
+          records.append(rec)
+          key = _traj_key(rec)
+          if key is not None:
+            done_counts[key] += 1
+    except FileNotFoundError:
+      continue
+  return records, done_counts
+
+
+def pairs_generator(done_counts=None):
+  """Yield only the REMAINING (N_SAMPLE - already_done) samples per task.
+
+  All samples of one task share pair_index=task_index (so item.pair_index maps
+  back to the same entry), but each gets a unique group_id so that with
+  group_size=1 every trajectory is released independently by the orchestrator.
+  ``done_counts`` (key -> completed count) lets a restart skip trajectories
+  already written for this RUN_TAG.
+  """
+  done_counts = done_counts or {}
   gid = 0
   for task_index, entry in enumerate(entries):
-    for _ in range(N_SAMPLE):
+    already = min(done_counts.get(_traj_key(entry), 0), N_SAMPLE)
+    for _ in range(N_SAMPLE - already):  # 0 if this task is already complete
       agent = SWEAgent()
       env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
       env = env_cls(
@@ -623,8 +683,26 @@ def pairs_generator():
 async def run_evaluation():
   """Run evaluation with orchestrator-managed task-level parallelism."""
   os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+  done_counts = {}
+  if RESUME:
+    _, done_counts = _scan_raw_outputs()  # scan BEFORE creating this run's file
+  total_target = len(entries) * N_SAMPLE
+  already_total = sum(
+      min(done_counts.get(_traj_key(e), 0), N_SAMPLE) for e in entries
+  )
+  logger.info(
+      "Resume=%s tag=%s: %d/%d trajectories already done; generating %d this run.",
+      RESUME,
+      RUN_TAG,
+      already_total,
+      total_target,
+      total_target - already_total,
+  )
+
   raw_path = os.path.join(
-      OUTPUT_DIR, f"raw_trajectories_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+      OUTPUT_DIR,
+      f"raw_trajectories_{RUN_TAG}_{time.strftime('%Y%m%d_%H%M%S')}.jsonl",
   )
   raw_f = open(raw_path, "a")
   logger.info("Streaming per-trajectory results to %s", raw_path)
@@ -646,7 +724,7 @@ async def run_evaluation():
 
   producer = asyncio.create_task(
       orchestrator.run_producers_from_stream(
-          pairs_stream=pairs_generator(),
+          pairs_stream=pairs_generator(done_counts),
           group_size=1,
           group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
           collect_mode="Trajectory",
@@ -700,6 +778,19 @@ async def run_evaluation():
           result["reward"],
           ANSI_RESET,
       )
+      done_now = already_total + len(results)
+      if len(results) % 50 == 0:
+        rate = len(results) / max(elapsed, 1e-9)
+        eta_h = (
+            (total_target - done_now) / rate / 3600 if rate > 0 else float("inf")
+        )
+        logger.info(
+            "PROGRESS %d/%d done (%.1f traj/hr this run, ETA %.1fh)",
+            done_now,
+            total_target,
+            rate * 3600,
+            eta_h,
+        )
 
   await producer
   raw_f.close()
@@ -829,18 +920,28 @@ def save_task_report(results):
   Returns:
     Path to the complete per-task report jsonl.
   """
+  # Aggregate the full accumulated set on disk for this RUN_TAG (all matching
+  # raw_trajectories_*.jsonl), not just this run's in-memory `results` (ignored),
+  # so the report is complete across resumes. Group by the resume key
+  # (docker_image), scoped to the current task-set.
+  all_records, _ = _scan_raw_outputs()
+  wanted = {_traj_key(e) for e in entries}
   by_task = collections.defaultdict(list)
-  for r in results:
-    by_task[r["pair_index"]].append(r)
+  for r in all_records:
+    key = _traj_key(r)
+    if key in wanted:
+      by_task[key].append(r)
 
   os.makedirs(OUTPUT_DIR, exist_ok=True)
   timestamp = time.strftime("%Y%m%d_%H%M%S")
   complete_file = os.path.join(
-      OUTPUT_DIR, f"task_report_complete_{timestamp}.jsonl"
+      OUTPUT_DIR, f"task_report_complete_{RUN_TAG}_{timestamp}.jsonl"
   )
-  good_file = os.path.join(OUTPUT_DIR, f"task_report_good_{timestamp}.jsonl")
+  good_file = os.path.join(
+      OUTPUT_DIR, f"task_report_good_{RUN_TAG}_{timestamp}.jsonl"
+  )
   unusable_file = os.path.join(
-      OUTPUT_DIR, f"task_report_unusable_{timestamp}.jsonl"
+      OUTPUT_DIR, f"task_report_unusable_{RUN_TAG}_{timestamp}.jsonl"
   )
 
   counts = {"broken": 0, "all_fail": 0, "all_pass": 0, "partial": 0}
