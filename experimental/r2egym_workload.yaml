@@ -132,7 +132,7 @@ spec:
                 export N_SAMPLE=8
                 export TEMPERATURE=0.7
                 export TASKS_LIMIT=0
-                export MAX_CONCURRENT=128
+                export MAX_CONCURRENT=1024
                 export TIMEOUT=3600
                 export MODEL_VERSION="Qwen/Qwen3-32B"
                 # Dataset the gold whitelist was generated from. The gold filter
