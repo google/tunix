@@ -132,8 +132,7 @@ spec:
                 export N_SAMPLE=8
                 export TEMPERATURE=0.7
                 export TASKS_LIMIT=0
-                export MAX_CONCURRENT=512
-                export R2E_K8S_CPU="1"
+                export MAX_CONCURRENT=128
                 export TIMEOUT=3600
                 export MODEL_VERSION="Qwen/Qwen3-32B"
                 # Dataset the gold whitelist was generated from. The gold filter
@@ -160,20 +159,6 @@ spec:
                 git apply ../experimental/r2egym.patch
                 sed -i 's/, HfFolder//g' src/r2egym/agenthub/utils/utils.py
                 sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 3600,/g' src/r2egym/agenthub/runtime/docker.py
-                
-                cat << 'EOF' > patch_docker.py
-                with open('src/r2egym/agenthub/runtime/docker.py', 'r') as f:
-                    c = f.read()
-                c = c.replace(
-                    '"tolerations": [',
-                    '"tolerations": [{"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"}, '
-                )
-                with open('src/r2egym/agenthub/runtime/docker.py', 'w') as f:
-                    f.write(c)
-                EOF
-                sed -i 's/^ \{16\}//' patch_docker.py
-                python3 patch_docker.py
-                
                 sed -i 's/datasets==2.19/datasets/g' pyproject.toml
                 sed -i 's/anthropic\[vertex\]==0.43.0/anthropic[vertex]/g' pyproject.toml
                 pip3 install -e .
