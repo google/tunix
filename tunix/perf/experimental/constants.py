@@ -28,6 +28,7 @@ NAME = "NAME"
 DATA_LOADING = "data_loading"
 # TODO(noghabi): Consider renaming to train, inference, etc.
 ROLLOUT = "rollout"
+PRE_WEIGHT_SYNC_BARRIER = "pre_weight_sync_barrier"
 WEIGHT_SYNC = "weight_sync"
 REFERENCE_INFERENCE = "reference_inference"
 OLD_ACTOR_INFERENCE = "old_actor_inference"

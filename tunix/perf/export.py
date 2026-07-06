@@ -225,6 +225,14 @@ class PerfMetricsExport:
     if not global_step_groups:
       raise ValueError("global_step_groups is empty")
     global_step_group = global_step_groups[0]
+    pre_weight_sync_barrier_span = global_step_group.find_last_inner_span(
+        "pre_weight_sync_barrier"
+    )
+    if pre_weight_sync_barrier_span is None:
+      pre_weight_sync_barrier_span = Span(
+          "pre_weight_sync_barrier", global_step_group.end
+      )
+      pre_weight_sync_barrier_span.end = global_step_group.end
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
@@ -235,6 +243,7 @@ class PerfMetricsExport:
     # Step 2: compute metrics from spans and span groups
 
     global_step_time: float = global_step_group.duration
+    pre_weight_sync_barrier_time: float = pre_weight_sync_barrier_span.duration
     weight_sync_time: float = weight_sync_span.duration
 
     rollout_time: list[float] = [span.duration for span in rollout_spans]
@@ -262,6 +271,7 @@ class PerfMetricsExport:
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
+        "perf/pre_weight_sync_barrier_time": (pre_weight_sync_barrier_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
         "perf/sum/refer_inference_time": (np.sum(refer_inference_time), None),
@@ -307,6 +317,14 @@ class PerfMetricsExport:
     if not global_step_groups:
       raise ValueError("global_step_groups is empty")
     global_step_group = global_step_groups[0]
+    pre_weight_sync_barrier_span = global_step_group.find_last_inner_span(
+        "pre_weight_sync_barrier"
+    )
+    if pre_weight_sync_barrier_span is None:
+      pre_weight_sync_barrier_span = Span(
+          "pre_weight_sync_barrier", global_step_group.end
+      )
+      pre_weight_sync_barrier_span.end = global_step_group.end
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
@@ -317,6 +335,7 @@ class PerfMetricsExport:
     # Step 2: compute metrics from spans and span groups
 
     global_step_time: float = global_step_group.duration
+    pre_weight_sync_barrier_time: float = pre_weight_sync_barrier_span.duration
     weight_sync_time: float = weight_sync_span.duration
 
     rollout_time: list[float] = [span.duration for span in rollout_spans]
@@ -355,6 +374,7 @@ class PerfMetricsExport:
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
+        "perf/pre_weight_sync_barrier_time": (pre_weight_sync_barrier_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
         "perf/rollout_idle_time": (rollout_idle_time, None),
         "perf/first_micro_batch_rollout_time": (first_micro_batch_rollout_time, None),
@@ -404,6 +424,14 @@ class PerfMetricsExport:
     if not global_step_groups:
       raise ValueError("global_step_groups is empty")
     global_step_group = global_step_groups[0]
+    pre_weight_sync_barrier_span = global_step_group.find_last_inner_span(
+        "pre_weight_sync_barrier"
+    )
+    if pre_weight_sync_barrier_span is None:
+      pre_weight_sync_barrier_span = Span(
+          "pre_weight_sync_barrier", global_step_group.end
+      )
+      pre_weight_sync_barrier_span.end = global_step_group.end
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     if weight_sync_span is None:
       logging.warning("weight_sync is None")
@@ -412,6 +440,7 @@ class PerfMetricsExport:
     # Step 2: compute metrics from spans and span groups
 
     global_step_time: float = global_step_group.duration
+    pre_weight_sync_barrier_time: float = pre_weight_sync_barrier_span.duration
     weight_sync_time: float = weight_sync_span.duration
 
     rollout_time: list[float] = [span.duration for span in rollout_spans]
@@ -455,6 +484,7 @@ class PerfMetricsExport:
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
+        "perf/pre_weight_sync_barrier_time": (pre_weight_sync_barrier_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
         "perf/rollout_idle_time": (rollout_idle_time, None),
         "perf/first_micro_batch_rollout_time": (first_micro_batch_rollout_time, None),

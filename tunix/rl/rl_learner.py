@@ -595,6 +595,23 @@ class RLLearner(abc.ABC, Generic[TConfig]):
                 f" {self._iter_steps}"
             )
             with self.rl_cluster.perf.span(
+                "pre_weight_sync_barrier", self.rl_cluster.perf.all_devices
+            ), self.rl_cluster.perf_v2.span(
+                perf_constants.PRE_WEIGHT_SYNC_BARRIER,
+                self.rl_cluster.perf_v2.all_devices,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                },
+            ):
+              with jax.profiler.StepTraceAnnotation(
+                  "pre_weight_sync_barrier", step_num=initial_steps
+              ):
+                jax.effects_barrier()
+                for device in jax.devices():
+                  jax.device_put(
+                      np.array(0.0, dtype=np.float32), device=device
+                  ).block_until_ready()
+            with self.rl_cluster.perf.span(
                 "weight_sync", self.rl_cluster.perf.all_devices
             ), self.rl_cluster.perf_v2.span(
                 perf_constants.WEIGHT_SYNC,
