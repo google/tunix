@@ -307,12 +307,27 @@ absl_logging.set_stderrthreshold(args.logging_level.lower())
 
 # Use the current working directory as ROOT folder
 script_dir = os.path.dirname(os.path.abspath(__file__))
+repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+workspace_root = os.path.dirname(repo_root)
 workdir = os.getcwd()
-tunix_root = os.path.join(workdir, "tunix")
-pathways_root = os.path.join(workdir, "pathways-utils")
-r2egym_root = os.path.join(workdir, "r2egym")
 
-for root in [script_dir, workdir, tunix_root, pathways_root, r2egym_root]:
+candidate_roots = [
+    script_dir,
+    repo_root,
+    workspace_root,
+    workdir,
+    os.path.join(repo_root, "tunix"),
+    os.path.join(repo_root, "pathways-utils"),
+    os.path.join(repo_root, "r2egym"),
+    os.path.join(workdir, "tunix"),
+    os.path.join(workdir, "pathways-utils"),
+    os.path.join(workdir, "r2egym"),
+    os.path.join(workspace_root, "tunix"),
+    os.path.join(workspace_root, "pathways-utils"),
+    os.path.join(workspace_root, "r2egym"),
+]
+
+for root in candidate_roots:
   if root not in sys.path:
     sys.path.insert(0, root)
 
