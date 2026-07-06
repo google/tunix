@@ -202,7 +202,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self.to_hf_key_mappings:
       preprocess_fn = self.config.mapping_config.preprocess_src_state
       if preprocess_fn:
-        updated_weights = preprocess_fn(updated_weights)
+        updated_weights = preprocess_fn(
+            updated_weights, tp_size=self.args.get("tensor_parallel_size", 1)
+        )
 
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
