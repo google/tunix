@@ -7,8 +7,52 @@ import os
 import time
 
 
+def ensure_huggingface_hub_hffolder_compat() -> bool:
+  """Provide ``huggingface_hub.HfFolder`` for r2egym on newer hub versions.
+
+  Recent huggingface_hub releases removed the top-level HfFolder export, while
+  r2egym imports it during runtime module initialization. r2egym only needs the
+  legacy token helpers, so expose a tiny compatibility class when missing.
+  """
+  try:
+    import huggingface_hub
+  except Exception as exc:  # pragma: no cover - environment setup helper
+    logging.warning("huggingface_hub compatibility shim skipped: %r", exc)
+    return False
+
+  try:
+    getattr(huggingface_hub, "HfFolder")
+    return False
+  except AttributeError:
+    pass
+
+  class _HfFolderCompat:
+
+    @staticmethod
+    def get_token():
+      return huggingface_hub.get_token()
+
+    @staticmethod
+    def save_token(token: str) -> None:
+      huggingface_hub.login(token=token, add_to_git_credential=False)
+
+    @staticmethod
+    def delete_token() -> None:
+      huggingface_hub.logout()
+
+  huggingface_hub.HfFolder = _HfFolderCompat
+  logging.info(
+      "Installed huggingface_hub.HfFolder compatibility shim for r2egym."
+  )
+  return True
+
+
+ensure_huggingface_hub_hffolder_compat()
+
+
 def apply_repoenv_kubernetes_watch_patch() -> str | None:
   """Monkey-patch installed r2egym to avoid hanging forever on pod watches."""
+  ensure_huggingface_hub_hffolder_compat()
   try:
     from r2egym.agenthub.runtime import docker as docker_mod
   except Exception as exc:  # pragma: no cover - debug helper path
