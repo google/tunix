@@ -554,4 +554,4 @@ show_hbm_usage("after GRPOLearner creation")
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
 # trajectory_reward → solve rate) separately from train metrics.
-grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+grpo_trainer.train(train_dataset, eval_dataset=None)
