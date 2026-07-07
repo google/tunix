@@ -724,7 +724,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.max_seq_token_per_tpu,
       )
       train_data_gen = rl_utils.pack_sequences(
-          train_data_gen, self._training_config.max_seq_token_per_tpu
+          train_data_gen,
+          self._training_config.max_seq_token_per_tpu,
+          target_items_per_update=grad_acc_steps,
       )
 
     curr_eval_ds = None
