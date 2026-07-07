@@ -1165,12 +1165,34 @@ class RLCluster:
           if sft_utils.is_lora_enabled(self.actor_trainer.model)
           else nnx.Param,
       )
-      src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
-      self.rollout.update_params(src_filtered_params, filter_types)
+      with self.perf.span(
+          perf_constants.WEIGHT_SYNC_GET_ACTOR_PARAMS, self.perf.all_devices
+      ), self.perf_v2.span(
+          perf_constants.WEIGHT_SYNC_GET_ACTOR_PARAMS,
+          self.perf_v2.all_devices,
+          tags={perf_constants.STEP: self.global_steps},
+      ):
+        src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
+      with self.perf.span(
+          perf_constants.WEIGHT_SYNC_ROLLOUT_UPDATE_PARAMS,
+          self.perf.all_devices,
+      ), self.perf_v2.span(
+          perf_constants.WEIGHT_SYNC_ROLLOUT_UPDATE_PARAMS,
+          self.perf_v2.all_devices,
+          tags={perf_constants.STEP: self.global_steps},
+      ):
+        self.rollout.update_params(src_filtered_params, filter_types)
       # The anchor policy state is snapshotted from actor_trainer.model.
-      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-          nnx.state(self.actor_trainer.model), "pinned_host"
-      )
+      with self.perf.span(
+          perf_constants.WEIGHT_SYNC_ANCHOR_SNAPSHOT, self.perf.all_devices
+      ), self.perf_v2.span(
+          perf_constants.WEIGHT_SYNC_ANCHOR_SNAPSHOT,
+          self.perf_v2.all_devices,
+          tags={perf_constants.STEP: self.global_steps},
+      ):
+        self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            nnx.state(self.actor_trainer.model), "pinned_host"
+        )
 
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1

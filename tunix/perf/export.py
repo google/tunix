@@ -71,6 +71,17 @@ class PerfMetricsExport:
   """
 
   @staticmethod
+  def _find_last_inner_span_or_zero(
+      global_step_group: SpanGroup, name: str
+  ) -> Span:
+    found_span = global_step_group.find_last_inner_span(name)
+    if found_span is not None:
+      return found_span
+    found_span = Span(name, global_step_group.end)
+    found_span.end = global_step_group.end
+    return found_span
+
+  @staticmethod
   def from_role_to_devices(
       role_to_devices: dict[str, list[str]],
       trace_writer: PerfettoTraceWriter | None = None,
@@ -225,14 +236,26 @@ class PerfMetricsExport:
     if not global_step_groups:
       raise ValueError("global_step_groups is empty")
     global_step_group = global_step_groups[0]
-    pre_weight_sync_barrier_span = global_step_group.find_last_inner_span(
-        "pre_weight_sync_barrier"
+    pre_weight_sync_barrier_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "pre_weight_sync_barrier"
+        )
     )
-    if pre_weight_sync_barrier_span is None:
-      pre_weight_sync_barrier_span = Span(
-          "pre_weight_sync_barrier", global_step_group.end
-      )
-      pre_weight_sync_barrier_span.end = global_step_group.end
+    weight_sync_get_actor_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_get_actor_params"
+        )
+    )
+    weight_sync_rollout_update_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_rollout_update_params"
+        )
+    )
+    weight_sync_anchor_snapshot_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_anchor_snapshot"
+        )
+    )
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
@@ -244,6 +267,15 @@ class PerfMetricsExport:
 
     global_step_time: float = global_step_group.duration
     pre_weight_sync_barrier_time: float = pre_weight_sync_barrier_span.duration
+    weight_sync_get_actor_params_time: float = (
+        weight_sync_get_actor_params_span.duration
+    )
+    weight_sync_rollout_update_params_time: float = (
+        weight_sync_rollout_update_params_span.duration
+    )
+    weight_sync_anchor_snapshot_time: float = (
+        weight_sync_anchor_snapshot_span.duration
+    )
     weight_sync_time: float = weight_sync_span.duration
 
     rollout_time: list[float] = [span.duration for span in rollout_spans]
@@ -273,6 +305,9 @@ class PerfMetricsExport:
         "perf/global_step_time": (global_step_time, None),
         "perf/pre_weight_sync_barrier_time": (pre_weight_sync_barrier_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
+        "perf/weight_sync_get_actor_params_time": (weight_sync_get_actor_params_time, None),
+        "perf/weight_sync_rollout_update_params_time": (weight_sync_rollout_update_params_time, None),
+        "perf/weight_sync_anchor_snapshot_time": (weight_sync_anchor_snapshot_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
         "perf/sum/refer_inference_time": (np.sum(refer_inference_time), None),
         "perf/sum/actor_train_time": (np.sum(actor_train_time), None),
@@ -317,14 +352,26 @@ class PerfMetricsExport:
     if not global_step_groups:
       raise ValueError("global_step_groups is empty")
     global_step_group = global_step_groups[0]
-    pre_weight_sync_barrier_span = global_step_group.find_last_inner_span(
-        "pre_weight_sync_barrier"
+    pre_weight_sync_barrier_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "pre_weight_sync_barrier"
+        )
     )
-    if pre_weight_sync_barrier_span is None:
-      pre_weight_sync_barrier_span = Span(
-          "pre_weight_sync_barrier", global_step_group.end
-      )
-      pre_weight_sync_barrier_span.end = global_step_group.end
+    weight_sync_get_actor_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_get_actor_params"
+        )
+    )
+    weight_sync_rollout_update_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_rollout_update_params"
+        )
+    )
+    weight_sync_anchor_snapshot_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_anchor_snapshot"
+        )
+    )
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
@@ -336,6 +383,15 @@ class PerfMetricsExport:
 
     global_step_time: float = global_step_group.duration
     pre_weight_sync_barrier_time: float = pre_weight_sync_barrier_span.duration
+    weight_sync_get_actor_params_time: float = (
+        weight_sync_get_actor_params_span.duration
+    )
+    weight_sync_rollout_update_params_time: float = (
+        weight_sync_rollout_update_params_span.duration
+    )
+    weight_sync_anchor_snapshot_time: float = (
+        weight_sync_anchor_snapshot_span.duration
+    )
     weight_sync_time: float = weight_sync_span.duration
 
     rollout_time: list[float] = [span.duration for span in rollout_spans]
@@ -376,6 +432,9 @@ class PerfMetricsExport:
         "perf/global_step_time": (global_step_time, None),
         "perf/pre_weight_sync_barrier_time": (pre_weight_sync_barrier_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
+        "perf/weight_sync_get_actor_params_time": (weight_sync_get_actor_params_time, None),
+        "perf/weight_sync_rollout_update_params_time": (weight_sync_rollout_update_params_time, None),
+        "perf/weight_sync_anchor_snapshot_time": (weight_sync_anchor_snapshot_time, None),
         "perf/rollout_idle_time": (rollout_idle_time, None),
         "perf/first_micro_batch_rollout_time": (first_micro_batch_rollout_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
@@ -424,14 +483,26 @@ class PerfMetricsExport:
     if not global_step_groups:
       raise ValueError("global_step_groups is empty")
     global_step_group = global_step_groups[0]
-    pre_weight_sync_barrier_span = global_step_group.find_last_inner_span(
-        "pre_weight_sync_barrier"
+    pre_weight_sync_barrier_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "pre_weight_sync_barrier"
+        )
     )
-    if pre_weight_sync_barrier_span is None:
-      pre_weight_sync_barrier_span = Span(
-          "pre_weight_sync_barrier", global_step_group.end
-      )
-      pre_weight_sync_barrier_span.end = global_step_group.end
+    weight_sync_get_actor_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_get_actor_params"
+        )
+    )
+    weight_sync_rollout_update_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_rollout_update_params"
+        )
+    )
+    weight_sync_anchor_snapshot_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            global_step_group, "weight_sync_anchor_snapshot"
+        )
+    )
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     if weight_sync_span is None:
       logging.warning("weight_sync is None")
@@ -441,6 +512,15 @@ class PerfMetricsExport:
 
     global_step_time: float = global_step_group.duration
     pre_weight_sync_barrier_time: float = pre_weight_sync_barrier_span.duration
+    weight_sync_get_actor_params_time: float = (
+        weight_sync_get_actor_params_span.duration
+    )
+    weight_sync_rollout_update_params_time: float = (
+        weight_sync_rollout_update_params_span.duration
+    )
+    weight_sync_anchor_snapshot_time: float = (
+        weight_sync_anchor_snapshot_span.duration
+    )
     weight_sync_time: float = weight_sync_span.duration
 
     rollout_time: list[float] = [span.duration for span in rollout_spans]
@@ -486,6 +566,9 @@ class PerfMetricsExport:
         "perf/global_step_time": (global_step_time, None),
         "perf/pre_weight_sync_barrier_time": (pre_weight_sync_barrier_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
+        "perf/weight_sync_get_actor_params_time": (weight_sync_get_actor_params_time, None),
+        "perf/weight_sync_rollout_update_params_time": (weight_sync_rollout_update_params_time, None),
+        "perf/weight_sync_anchor_snapshot_time": (weight_sync_anchor_snapshot_time, None),
         "perf/rollout_idle_time": (rollout_idle_time, None),
         "perf/first_micro_batch_rollout_time": (first_micro_batch_rollout_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
