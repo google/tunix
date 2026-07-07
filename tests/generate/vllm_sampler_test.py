@@ -594,3 +594,50 @@ class VllmSamplerConfigTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
+
+from flax import traverse_util
+from tunix.rl import reshard
+
+class MockConverter:
+    def convert(self, weights):
+        return {'layers': {'0': {'attention': {'wq': jnp.ones((128, 128)) * 2}}}}
+
+class MockConfig:
+    reshard_chunk_size = 128
+    delete_dst_buffers = False
+
+class VllmSamplerUpdateParamsTest(absltest.TestCase):
+    def test_chunked_resharding(self):
+        # Mock the real VllmSampler but avoid __init__ overhead
+        class DummySampler:
+            def __init__(self):
+                self.converter = MockConverter()
+                self.config = MockConfig()
+                self.transformer_state = nnx.State({'layers': {'0': {'attention': {'wq': nnx.Param(jnp.zeros((128, 128)))}}}})
+            
+            # Copy of the real logic
+            def update_params(self, updated_weights):
+                vllm_state = self.converter.convert(updated_weights)
+                if self.config.reshard_chunk_size is not None:
+                    src_flat = traverse_util.flatten_dict(vllm_state)
+                    state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
+                    spec_flat = traverse_util.flatten_dict(state_dict)
+                    from tunix.generate import utils
+                    resharded_flat = utils._reshard_in_chunks(
+                        src_flat,
+                        spec_flat,
+                        reshard.reshard_pytree,
+                        self.config.reshard_chunk_size,
+                        self.config.delete_dst_buffers,
+                    )
+                    resharded_weights = traverse_util.unflatten_dict(resharded_flat)
+                else:
+                    resharded_weights = reshard.reshard_pytree(source=vllm_state, target=self.transformer_state)
+                nnx.update(self.transformer_state, resharded_weights)
+
+        sampler = DummySampler()
+        sampler.update_params({})
+        
+        # Verify the value was successfully updated from 0 to 2
+        val = sampler.transformer_state.layers['0'].attention.wq.value
+        self.assertTrue(jnp.allclose(val, 2.0))
