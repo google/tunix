@@ -809,7 +809,6 @@ def transfer_state_with_mappings(
     key_mappings,
     key_mapping_hook_fns=None,
     transpose_keys=None,
-    reshard_fn=None,
     rollout_engine=None,
     **kwargs,
 ):
@@ -887,33 +886,7 @@ def transfer_state_with_mappings(
   del unscanned_src_to_tgt_flat
   gc.collect()
 
-  # Batch reshard and assign if resharding is configured
-  if reshard_fn:
-    tgt_flat_dict = {
-        key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
-        for key, tgt_params in tgt_flat_list
-    }
-    if kwargs.get('reshard_chunk_size', None) is not None:
-      resharded_values_flat_dict = _reshard_in_chunks(
-          src_flat=tgt_flat_dict,
-          spec_flat=sharding_dict,  # pyrefly: ignore[bad-argument-type]
-          reshard_fn=reshard_fn,
-          chunk_size=kwargs['reshard_chunk_size'],
-          delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
-      )
-    else:
-      if kwargs.get('delete_dst_buffers', False):
-        _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
-      resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
-    for tgt_key, tgt_param in tgt_flat_list:
-      assert (
-          tgt_key in resharded_values_flat_dict
-      ), f'Key {tgt_key} not in resharded values'
-      if hasattr(tgt_param, 'value'):
-        tgt_param.value = resharded_values_flat_dict[tgt_key]
-      else:
-        tgt_param = resharded_values_flat_dict[tgt_key]
 
   return dst_state.from_flat_path(tgt_flat_list)
 
@@ -1526,11 +1499,8 @@ def _reshard_in_chunks(
 def transfer_state_directly(
     src_state: Mapping[str, Any],
     dst_state: Mapping[str, Any],
-    reshard_fn: Callable[..., Mapping[str, Any]],
     scan_axis: int = 1,
-    delete_dst_buffers: bool = False,
-    reshard_chunk_size: Optional[int] = None,
-) -> None:
+) -> Mapping[str, Any]:
   """Transfers state directly by matching structure, stripping wrappers.
 
   This handles the logic for syncing weights where no explicit mapping is provided,
@@ -1766,47 +1736,7 @@ def transfer_state_directly(
   # Filter both to their intersection / mapping
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
 
-  # Reshard and Update
-  if reshard_chunk_size is not None:
-    # Chunked path: split the flat weight dict into groups of reshard_chunk_size
-    # entries and reshard each group independently. This keeps peak contiguous
-    # HBM allocation proportional to chunk_size, avoiding XLA fragmentation
-    # errors on large models without needing to clear the compilation cache.
-    src_flat = traverse_util.flatten_dict(final_source)
-    spec_flat = traverse_util.flatten_dict(final_spec)
-    del final_source, final_spec
-    resharded_flat = _reshard_in_chunks(
-        src_flat,
-        spec_flat,
-        reshard_fn,
-        reshard_chunk_size,
-        delete_dst_buffers,
-    )
-    resharded_weights = traverse_util.unflatten_dict(resharded_flat)
-  else:
-    src_flat = traverse_util.flatten_dict(final_source)
-    spec_flat = traverse_util.flatten_dict(final_spec)
-
-    # Snapshot dst shardings before any deletion so reshard_fn never has to
-    # touch a deleted jax.Array. reshard_pytree's _get_dst_sharding accepts
-    # NamedSharding leaves directly, so this is a drop-in substitute for
-    # passing the array objects.
-    dst_shardings_flat = {
-        k: _snapshot_dst_sharding(
-            tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
-        )
-        for k, tgt_val in spec_flat.items()
-    }
-
-    if delete_dst_buffers:
-      _delete_target_buffers(spec_flat, src_flat)
-
-    del final_spec
-    resharded_weights = reshard_fn(
-        source=final_source,
-        target=traverse_util.unflatten_dict(dst_shardings_flat),
-    )
-  nnx.update(dst_state, resharded_weights)
+  return final_source
 
 
 def resolve_parallelism_sizes(
