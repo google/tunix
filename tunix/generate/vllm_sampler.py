@@ -124,12 +124,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       tokenizer: Any,
       config: VllmConfig,
+      converter: Any = None,
   ):
     """Initializes the VllmSampler.
 
     Args:
         tokenizer (Any): A tokenizer compatible with the model.
         config: The vllm related configurations
+        converter: The WeightConverter to convert training weights to vllm weights
     """
 
     # Select vllm TPU backend type, there are jax, torchax and torchxla
@@ -150,6 +152,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
+    self.converter = converter
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -159,15 +162,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       atexit.register(self.stop)
     else:
       self.llm = LLM(**self.args)
-
-    self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
-    self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
-    self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
-
-    # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
-    # lora.
-    if config.lora_config and config.mapping_config.lora_to_hf_mappings:
-      self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
 
   @property
   def mesh(self) -> jax.sharding.Mesh:
@@ -181,7 +175,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           " jax.sharding.Mesh."
       )
 
-  # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
       self,
       updated_weights: jaxtyping.PyTree,
@@ -199,55 +192,34 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # Synchronization point before weight sync
     jax.effects_barrier()
 
-    if self.to_hf_key_mappings:
-      preprocess_fn = self.config.mapping_config.preprocess_src_state
-      if preprocess_fn:
-        updated_weights = preprocess_fn(updated_weights)
+    vllm_state = self.converter.convert(updated_weights)
 
-      utils.transfer_state_with_mappings(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          key_mappings=self.to_hf_key_mappings,
-          key_mapping_hook_fns=self.to_hf_hook_fns,
-          transpose_keys=self.to_hf_transpose_keys,
-          reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=self.config.delete_dst_buffers,
-          reshard_chunk_size=self.config.reshard_chunk_size,
-          num_kv_heads=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.get_total_num_kv_heads()
-          ),
-          head_dim=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.get_head_size()
-          ),
-          tp_size=self.args.get("tensor_parallel_size", 1),
+    if self.config.reshard_chunk_size is not None:
+      from flax import traverse_util
+      src_flat = traverse_util.flatten_dict(vllm_state)
+      
+      # Convert self.transformer_state to a standard dict for flattening
+      if isinstance(self.transformer_state, nnx.State):
+          state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
+      else:
+          state_dict = self.transformer_state
+      spec_flat = traverse_util.flatten_dict(state_dict)
+
+      resharded_flat = utils._reshard_in_chunks(
+          src_flat,
+          spec_flat,
+          reshard.reshard_pytree,
+          self.config.reshard_chunk_size,
+          self.config.delete_dst_buffers,
       )
+      resharded_weights = traverse_util.unflatten_dict(resharded_flat)
     else:
-      # Direct Weight Sync (e.g. MaxText -> MaxText)
-      logging.debug(
-          "No key mappings configuration found. Proceeding with direct"
-          " structural weight synchronization (assuming matching source/target"
-          " structures)."
+      resharded_weights = reshard.reshard_pytree(
+          source=vllm_state,
+          target=self.transformer_state,
       )
 
-      additional_config = self.config.additional_config or {}
-      if "maxtext_config" not in additional_config:
-        raise ValueError(
-            "Direct weight synchronization is currently supported only for "
-            "MaxText models. The required 'maxtext_config' key is missing "
-            "from 'additional_config'."
-        )
-
-      utils.transfer_state_directly(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
-          reshard_chunk_size=self.config.reshard_chunk_size,
-      )
+    nnx.update(self.transformer_state, resharded_weights)
 
     if hasattr(self._model_runner, "state_leaves"):
       if isinstance(self._model_runner.state, nnx.State):
