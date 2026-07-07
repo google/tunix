@@ -133,6 +133,17 @@ class MetricsBuffer:
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
+def _compute_legacy_aux(loss_output: utils.LossOutput) -> Dict[str, Any]:
+  """Computes legacy aux metrics from a LossOutput."""
+  legacy_aux = {}
+  for k, v in loss_output.aux_metrics.items():
+    if isinstance(v, utils.WeightedMetric):
+      legacy_aux[k] = v.compute()
+    else:
+      legacy_aux[k] = v
+  return legacy_aux
+
+
 def _calculate_global_batch_size(train_example: Any) -> int:
   """Calculates the global batch size from a training example.
 
@@ -299,7 +310,8 @@ class PeftTrainer:
   def with_loss_fn(
       self,
       loss_fn: Callable[
-          Concatenate[nnx.Module, P], ArrayLike | Tuple[ArrayLike, Any]
+          Concatenate[nnx.Module, P],
+          ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
   ):
@@ -344,26 +356,49 @@ class PeftTrainer:
     """
     inputs = self.gen_model_input_fn(inputs)
 
+    @functools.wraps(self.loss_fn)
+    def diff_fn(model, *args, **kwargs):
+      out = self.loss_fn(model, *args, **kwargs)
+      if isinstance(out, utils.LossOutput):
+        return out.primary_loss.unreduced_sum, out
+      elif self._has_aux:
+        return out[0], out[1]
+      else:
+        return out, None
+
     grad_fn = nnx.value_and_grad(
-        self.loss_fn,
+        diff_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
-        has_aux=self._has_aux,
+        has_aux=True,
     )
-    out, grads = grad_fn(model, **inputs)
+    (loss_val, aux), grads = grad_fn(model, **inputs)
+
+    if isinstance(aux, utils.LossOutput):
+      # Scale the unreduced gradients using the metric's scale computation
+      scale = aux.primary_loss.compute_scale()
+      grads = jax.tree.map(lambda g: g * scale, grads)
+
+      # Compute exactly equivalent legacy loss val
+      loss_val = aux.primary_loss.compute()
+
     grad_norm = optax.global_norm(grads)
     optimizer.update(model, grads)
-    if self._has_aux:
-      loss, aux = out
-      return loss, aux, grad_norm
+
+    if isinstance(aux, utils.LossOutput):
+      return loss_val, _compute_legacy_aux(aux), grad_norm
+    elif self._has_aux:
+      return loss_val, aux, grad_norm
     else:
-      return out, None, grad_norm
+      return loss_val, None, grad_norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
-    if self._has_aux:
+    if isinstance(out, utils.LossOutput):
+      return out.primary_loss.compute(), _compute_legacy_aux(out)
+    elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
     else:
@@ -375,7 +410,9 @@ class PeftTrainer:
     """Creates the train step function."""
     return self._train_step
 
-  def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
+  def create_eval_step_fn(
+      self,
+  ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
     """Creates the eval step function."""
     return self._eval_step  # pyrefly: ignore[bad-return]
 
@@ -857,7 +894,7 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> ArrayLike:
+) -> utils.LossOutput | ArrayLike:
   """Default loss function for PEFT training."""
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}
@@ -875,8 +912,12 @@ def _default_loss_fn(
   one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
 
   # Define the normalization factor.
-  norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
+  denominator = jnp.sum(target_mask)
 
   # Return the negative log likelihood (NLL) loss.
   # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
-  return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+  unreduced_loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot)
+  return utils.LossOutput(
+      primary_loss=utils.WeightedMetric(unreduced_loss, denominator, eps=1e-8),
+      aux_metrics={},
+  )

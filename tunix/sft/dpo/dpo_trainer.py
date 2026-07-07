@@ -26,17 +26,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+
 # TODO(abheesht): We should move TokenizerAdapter outside `generate`.
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common
 from tunix.sft import peft_trainer
+from tunix.sft import utils as sft_utils
 from typing_extensions import override
 
-
 RawImageType = (
-    str
-    | np.ndarray
-    | list[str | np.ndarray | list[str | np.ndarray] | None]
+    str | np.ndarray | list[str | np.ndarray | list[str | np.ndarray] | None]
 )
 
 
@@ -450,7 +449,7 @@ def dpo_loss_fn(
     label_smoothing: float = 0.0,
     enable_prompt_loss_orpo: bool = False,
     average_log_prob_orpo: bool = False,
-) -> tuple[jax.Array, dict[str, jax.Array]]:
+) -> sft_utils.LossOutput:
   """DPO/ORPO loss function.
 
   Args:
@@ -535,19 +534,47 @@ def dpo_loss_fn(
     # Compute odds ratio for logging
     odds_ratio = jnp.exp(log_odds)
 
+    denominator = jnp.array(batch_size, dtype=jnp.float32)
     aux = {
-        "rewards/chosen": chosen_rewards.mean(),
-        "rewards/rejected": rejected_rewards.mean(),
-        "rewards/margin": (chosen_rewards - rejected_rewards).mean(),
-        "rewards/accuracy": (chosen_rewards > rejected_rewards).mean(),
-        "log_probs/chosen": chosen_logps.mean(),
-        "log_probs/rejected": rejected_logps.mean(),
-        "odds_ratio": odds_ratio.mean(),
-        "sft_loss": sft_loss.mean(),
-        "or_loss": or_loss.mean(),
+        "rewards/chosen": sft_utils.WeightedMetric(
+            chosen_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/rejected": sft_utils.WeightedMetric(
+            rejected_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/margin": sft_utils.WeightedMetric(
+            (chosen_rewards - rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "rewards/accuracy": sft_utils.WeightedMetric(
+            (chosen_rewards > rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "log_probs/chosen": sft_utils.WeightedMetric(
+            chosen_logps.sum(), denominator, min_denom=1.0
+        ),
+        "log_probs/rejected": sft_utils.WeightedMetric(
+            rejected_logps.sum(), denominator, min_denom=1.0
+        ),
+        "odds_ratio": sft_utils.WeightedMetric(
+            odds_ratio.sum(), denominator, min_denom=1.0
+        ),
+        "sft_loss": sft_utils.WeightedMetric(
+            sft_loss.sum(), denominator, min_denom=1.0
+        ),
+        "or_loss": sft_utils.WeightedMetric(
+            or_loss.sum(), denominator, min_denom=1.0
+        ),
     }
 
-    return total_loss.mean(), aux
+    return sft_utils.LossOutput(
+        primary_loss=sft_utils.WeightedMetric(
+            total_loss.sum(), denominator, min_denom=1.0
+        ),
+        aux_metrics=aux,
+    )
   else:
     # DPO loss
     chosen_log_ratio = chosen_logps
@@ -566,16 +593,39 @@ def dpo_loss_fn(
     chosen_rewards = beta * chosen_log_ratio
     rejected_rewards = beta * rejected_log_ratio
 
+    batch_size = train_example.completion_mask.shape[0] // 2
+    denominator = jnp.array(batch_size, dtype=jnp.float32)
     aux = {
-        "rewards/chosen": chosen_rewards.mean(),
-        "rewards/rejected": rejected_rewards.mean(),
-        "rewards/margin": (chosen_rewards - rejected_rewards).mean(),
-        "rewards/accuracy": (chosen_rewards > rejected_rewards).mean(),
-        "log_probs/chosen": chosen_logps.mean(),
-        "log_probs/rejected": rejected_logps.mean(),
+        "rewards/chosen": sft_utils.WeightedMetric(
+            chosen_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/rejected": sft_utils.WeightedMetric(
+            rejected_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/margin": sft_utils.WeightedMetric(
+            (chosen_rewards - rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "rewards/accuracy": sft_utils.WeightedMetric(
+            (chosen_rewards > rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "log_probs/chosen": sft_utils.WeightedMetric(
+            chosen_logps.sum(), denominator, min_denom=1.0
+        ),
+        "log_probs/rejected": sft_utils.WeightedMetric(
+            rejected_logps.sum(), denominator, min_denom=1.0
+        ),
     }
 
-    return losses.mean(), aux
+    return sft_utils.LossOutput(
+        primary_loss=sft_utils.WeightedMetric(
+            losses.sum(), denominator, min_denom=1.0
+        ),
+        aux_metrics=aux,
+    )
 
 
 def _generate_ids_and_masks(
@@ -667,9 +717,9 @@ def process_dpo_record(
   Args:
       record: A dictionary, containing "prompts", "images", "chosen_responses",
         "rejected_responses" as keys. For text fields, the values can be a
-        single string, or a list of strings. For `"images"`, the fields can be
-        a path (str), a NumPy array, list of paths, list of arrays, list of
-        lists of paths/arrays, or just None.
+        single string, or a list of strings. For `"images"`, the fields can be a
+        path (str), a NumPy array, list of paths, list of arrays, list of lists
+        of paths/arrays, or just None.
       tokenizer: The tokenizer or processor to use for converting text into
         token IDs.
       max_prompt_length: The maximum length for the tokenized prompts. Any
