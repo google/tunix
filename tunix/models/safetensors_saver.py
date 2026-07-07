@@ -14,6 +14,7 @@
 
 """Utilities for saving models with merged LoRA weights in safetensors format."""
 
+import json
 import os
 import shutil
 from typing import Any, Callable
@@ -81,41 +82,72 @@ def save_lora_merged_model_as_safetensors(
   if custom_layer_extractor_fn:
     lora_layers = custom_layer_extractor_fn(lora_layers)
 
-  # Load base model state
-  base_state = safe_np.load_file(local_model_path + '/model.safetensors')
-
-  # Apply LoRA deltas
+  # Build a mapping from state_key -> (lora_a, lora_b) for fast lookup
+  lora_deltas: dict[str, tuple[Any, Any]] = {}
   for path, (lora_a, lora_b) in lora_layers.items():
     state_key = state_key_transform_fn(path)
-    assert state_key in base_state, (
-        f'LoRA layer {path} not found in base model state dict'
-        f' {base_state.keys()}'
+    lora_deltas[state_key] = (lora_a, lora_b)
+
+  # Determine shard files (single-file vs. multi-file model)
+  single_path = os.path.join(local_model_path, 'model.safetensors')
+  index_path = os.path.join(local_model_path, 'model.safetensors.index.json')
+
+  if os.path.exists(single_path):
+    shard_files = ['model.safetensors']
+  elif os.path.exists(index_path):
+    with open(index_path) as f:
+      index_data = json.load(f)
+    # Collect unique shard filenames in order
+    seen: set[str] = set()
+    shard_files = []
+    for shard in index_data['weight_map'].values():
+      if shard not in seen:
+        seen.add(shard)
+        shard_files.append(shard)
+  else:
+    raise FileNotFoundError(
+        f'No safetensors weights found in {local_model_path}'
     )
 
-    lora_a_val = jnp.asarray(getattr(lora_a, 'value', lora_a))
-    lora_b_val = jnp.asarray(getattr(lora_b, 'value', lora_b))
+  # Process each shard independently to avoid loading all weights at once
+  applied_keys: set[str] = set()
+  for shard_filename in shard_files:
+    shard_path = os.path.join(local_model_path, shard_filename)
+    shard_state = safe_np.load_file(shard_path)
 
-    # Reshape 3D tensors to 2D if necessary
-    if lora_a_val.ndim == 3:
-      d0, d1, d2 = lora_a_val.shape
-      lora_a_val = lora_a_val.reshape(d0 * d1, d2)
-    if lora_b_val.ndim == 3:
-      d0, d1, d2 = lora_b_val.shape
-      lora_b_val = lora_b_val.reshape(d0, d1 * d2)
+    for state_key, (lora_a, lora_b) in lora_deltas.items():
+      if state_key not in shard_state:
+        continue
 
-    # Compute and apply LoRA delta
-    combined_lora = (lora_a_val @ lora_b_val) * (alpha / rank)
-    if transpose_rules:
-      for t_key, rule in transpose_rules.items():
-        if t_key in state_key:
-          combined_lora = combined_lora.transpose(rule)
-          break
+      lora_a_val = jnp.asarray(getattr(lora_a, 'value', lora_a))
+      lora_b_val = jnp.asarray(getattr(lora_b, 'value', lora_b))
 
-    base_state[state_key] += combined_lora.astype(base_state[state_key].dtype)
+      # Reshape 3D tensors to 2D if necessary
+      if lora_a_val.ndim == 3:
+        d0, d1, d2 = lora_a_val.shape
+        lora_a_val = lora_a_val.reshape(d0 * d1, d2)
+      if lora_b_val.ndim == 3:
+        d0, d1, d2 = lora_b_val.shape
+        lora_b_val = lora_b_val.reshape(d0, d1 * d2)
 
-  # Save merged model
-  safetensors_path = os.path.join(output_dir, 'model.safetensors')
-  safe_np.save_file(base_state, safetensors_path)
+      # Compute and apply LoRA delta
+      combined_lora = (lora_a_val @ lora_b_val) * (alpha / rank)
+      if transpose_rules:
+        for t_key, rule in transpose_rules.items():
+          if t_key in state_key:
+            combined_lora = combined_lora.transpose(rule)
+            break
+
+      shard_state[state_key] += combined_lora.astype(shard_state[state_key].dtype)
+      applied_keys.add(state_key)
+
+    safe_np.save_file(shard_state, os.path.join(output_dir, shard_filename))
+
+  # Verify all LoRA layers were applied
+  missing = set(lora_deltas.keys()) - applied_keys
+  assert not missing, (
+      f'LoRA layers not found in any base model shard: {missing}'
+  )
 
   # Copy non-safetensors files (config, tokenizer, etc.)
   for filename in os.listdir(local_model_path):
