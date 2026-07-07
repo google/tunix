@@ -142,10 +142,11 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-# Single shared mesh across actor / reference / rollout. Pure tensor-parallel
-# (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
-# fsdp axis.
-SHARED_MESH_SHAPE = (1, jax.device_count())
+# Single shared mesh across actor / reference / rollout.
+# fsdp=16 x tp=4 = 64 chips (v5p 4x4x4), matching the known-good google_dev
+# multi-host config. tp=4 divides Qwen3-8B's 32 Q / 8 KV heads cleanly; a pure
+# tp=device_count mesh would give tp=64 which cannot shard those heads.
+SHARED_MESH_SHAPE = (16, 4)
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
@@ -468,8 +469,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # dominant allocation on small TPU slices) at the cost of more
         # micro-step launches per optimizer update. It does NOT change the
         # effective optimizer batch size or training dynamics.
-        train_micro_batch_size=4,
-        compute_logps_micro_batch_size=4,
+        train_micro_batch_size=16,
+        compute_logps_micro_batch_size=16,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
