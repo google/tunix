@@ -792,7 +792,9 @@ def main() -> None:
 
   # ====== Training ======
   try:
-    grpo_trainer.train(train_dataset, eval_dataset=eval_dataset)
+    # eval disabled (eval_dataset=None) to match the known-good frozenlake run
+    # and avoid the EVAL_AT_START rollout path.
+    grpo_trainer.train(train_dataset, eval_dataset=None)
   except Exception:
     rl_cluster.close()
     raise
