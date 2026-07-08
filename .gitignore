@@ -2,6 +2,7 @@
 *.so
 *.egg-info
 *.whl
+*.lock
 /dist/
 .ipynb_checkpoints
 .DS_Store
@@ -10,8 +11,17 @@
 .idea
 .vscode
 .envrc
+.env
+.ui
+
+# proto compile output
+**/*_pb2.py
+**/*_pb2_grpc.py
 
 # virtualenv/venv directories
+/.*/
+/tests/
+/data/
 /venv/
 /bin/
 /include/
