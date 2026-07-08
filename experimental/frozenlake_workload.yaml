@@ -1,7 +1,7 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: frozenlake-unreduced-loss
+  name: frozenlake-seqpack
   namespace: default
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
@@ -73,11 +73,11 @@ spec:
               - -c
               - |
                 echo XPK Start: $(date);
-                echo "Syncing latest code from yuxzhang/sequence_packing_unreduced_loss_frozenlake_test..."
+                echo "Syncing latest code from yuxzhang/seqpack_frozenlake_test..."
                 git config --global --add safe.directory $(pwd)
                 git init
                 git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
-                git fetch origin yuxzhang/sequence_packing_unreduced_loss_frozenlake_test
+                git fetch origin yuxzhang/seqpack_frozenlake_test
                 git reset --hard FETCH_HEAD
                 
                 # --- Hot Patch tpu-inference (PR #2838) ---
@@ -200,7 +200,7 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
                 - --server_port=29000
-                - --resource_manager_address=frozenlake-unreduced-loss-pathways-head-0-0.frozenlake-unreduced-loss:29001
+                - --resource_manager_address=frozenlake-seqpack-pathways-head-0-0.frozenlake-seqpack:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x4x4
               env:
