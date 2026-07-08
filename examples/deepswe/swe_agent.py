@@ -322,13 +322,7 @@ from tunix.rl.agentic.agents.agent_types import Trajectory
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 
 
-try:
-  from r2egym.agenthub.action import Action as SWEAction  # pytype: disable=import-error
-except ImportError:
-  logging.error(
-      "Failed to load SWEAction. Please ensure 'r2egym' is installed properly."
-  )
-  raise  # This halts execution and preserves the original traceback
+from r2egym.agenthub.action.action import Action as SWEAction
 
 TOKEN_WARNING_THRESHOLD = 28000
 
