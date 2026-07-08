@@ -481,6 +481,17 @@ class VTCRawTextParser:
         parts.append(content)
     return "\n".join(parts)
 
+  def update_assistant_end_tokens(self, tokens):
+    """No-op end-token handling for raw text (matches BaseChatTemplateParser).
+
+    The trajectory collect engine calls this on the chat parser to append any
+    assistant-turn end markers and report how many tokens it added (used to
+    build assistant_masks). A raw-text parser appends no markers, so it returns
+    the tokens unchanged with 0 appended — identical to the base parser's
+    default at parser.py:158.
+    """
+    return tokens, 0
+
 
 class VTCGRPOLearner(GRPOLearner):
   """Demo-local learner that normalizes TFDS string payloads to Python str."""
