@@ -132,10 +132,9 @@ spec:
                 export N_SAMPLE=8
                 export TEMPERATURE=0.7
                 export TASKS_LIMIT=0
-                export MAX_CONCURRENT=256
+                export MAX_CONCURRENT=128
                 export VLLM_HBM_UTILIZATION=0.8
-                export VLLM_MAX_NUM_SEQS=256
-                export RUN_TAG="qwen3_256_full_test"
+                export RUN_TAG="qwen3_128_retry"
                 export R2E_K8S_NODE_SELECTOR='{"cloud.google.com/gke-nodepool":"deepswe-cpu-pool"}'
                 export TIMEOUT=3600
                 export MODEL_VERSION="Qwen/Qwen3-32B"
