@@ -75,8 +75,9 @@ import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
 
-# For OSS usage
-# import tensorflow_datasets.text.gsm8k
+# For OSS usage: registers the `gsm8k` tfds builder (else tfds.data_source raises
+# DatasetNotFoundError).
+import tensorflow_datasets.text.gsm8k  # noqa: F401  pylint: disable=unused-import
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
