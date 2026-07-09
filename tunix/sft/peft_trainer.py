@@ -225,6 +225,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
+    self.forward_fn = None
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
@@ -270,6 +271,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_eval_step_fn = None
     self._jitted_grad_step_fn = None
     self._jitted_apply_grads_fn = None
+    self._jitted_forward_fn = None
     self._skip_jit = False
     self._cache_nnx_graph = True
     # Internal gradient accumulation buffer (caller-driven accumulation).
@@ -308,6 +310,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_eval_step_fn = None
     self._jitted_grad_step_fn = None
     self._jitted_apply_grads_fn = None
+    self._jitted_forward_fn = None
 
   def with_loss_fn(
       self,
@@ -339,6 +342,24 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """
     self.clear_jit_cache()
     self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
+    return self
+
+  def with_forward_fn(
+      self, forward_fn: Callable[Concatenate[nnx.Module, P], Any]
+  ):
+    """Sets the function used by `forward_batch`.
+
+    Args:
+      forward_fn: Called as `forward_fn(model, **inputs)` inside the jitted
+        forward-only step; returns model outputs as a pytree of arrays
+        (e.g., per-token log-probs). Inputs are the output of
+        `gen_model_input_fn`, same as the loss functions.
+
+    Returns:
+      PeftTrainer.
+    """
+    self._jitted_forward_fn = None
+    self.forward_fn = forward_fn
     return self
 
   def _train_step(
@@ -415,6 +436,21 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ) -> None:
     """Applies (already averaged) gradients with the optimizer."""
     optimizer.update(model, grads)
+
+  def _forward_step(self, model: nnx.Module, inputs: Any) -> Any:
+    """Forward-only step returning model outputs (no loss, no grads)."""
+    inputs = self.gen_model_input_fn(inputs)
+    return self.forward_fn(model, **inputs)  # pylint: disable=not-callable
+
+  def _get_forward_fn(self) -> Callable[..., Any]:
+    """Returns the (jitted) forward-only step function, cached."""
+    if self._skip_jit:
+      return functools.partial(self._forward_step, self.model)
+    if self._jitted_forward_fn is None:
+      self._jitted_forward_fn = functools.partial(
+          nnx.jit(self._forward_step), self.model
+      )
+    return self._jitted_forward_fn
 
   def _accum_step_fns(self) -> Tuple[Callable[..., Any], Callable[..., Any]]:
     """Returns (grad_step_fn, apply_grads_fn), jitted and cached."""
@@ -731,6 +767,40 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     loss, aux = eval_step_fn(inputs)
     loss = jax.lax.stop_gradient(loss)
     return StepMetrics(loss=loss, aux=aux)
+
+  def forward_batch(
+      self, payload: TrainerPayload | Any, **kwargs
+  ) -> Any:
+    """Executes a forward-only pass and returns model outputs.
+
+    Runs the function configured via `with_forward_fn` (e.g., per-token
+    log-prob computation for RL recompute) inside a jitted, forward-only
+    step. Does not mutate trainer state or counters.
+
+    Args:
+      payload: A `TrainerPayload` or a raw batch.
+      **kwargs: Unused.
+
+    Returns:
+      Model outputs as a pytree of arrays, with gradients stopped.
+
+    Raises:
+      ValueError: If no forward function has been configured.
+    """
+    del kwargs
+    if self.forward_fn is None:
+      raise ValueError(
+          "No forward function configured; call with_forward_fn() first."
+      )
+    inputs = (
+        payload.inputs if isinstance(payload, TrainerPayload) else payload
+    )
+    inputs = self._prepare_inputs(inputs)
+    inputs = sharding_utils.shard_input(
+        inputs, self.config.data_sharding_axis
+    )
+    outputs = self._get_forward_fn()(inputs)
+    return jax.lax.stop_gradient(outputs)
 
   def save_checkpoint(self, path: str | None = None, **kwargs) -> str:
     """Serializes the current model and optimizer state now.

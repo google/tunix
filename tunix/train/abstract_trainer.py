@@ -109,6 +109,28 @@ class AbstractTrainer(abc.ABC):
       Metrics for this step.
     """
 
+  def forward_batch(self, payload: TrainerPayload, **kwargs) -> Any:
+    """Executes a forward-only pass and returns model outputs.
+
+    Unlike `eval_step` (which returns loss metrics), this returns the model
+    outputs themselves (e.g., per-token log-probs recomputed with the
+    trainer's exact parallelism, for RL log-prob recomputation). Must not
+    mutate any trainer state.
+
+    Optional capability: implementations that don't support it inherit this
+    default, which raises NotImplementedError.
+
+    Args:
+      payload: The batch to run the forward pass on.
+      **kwargs: Implementation-specific options.
+
+    Returns:
+      Model outputs as a pytree of arrays (gradients stopped).
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement forward_batch."
+    )
+
   @abc.abstractmethod
   def eval_step(self, payload: TrainerPayload, **kwargs) -> StepMetrics:
     """Executes a forward-only evaluation step.
