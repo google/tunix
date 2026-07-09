@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Scratchpad for the loop driver. just concept demonstration. """
+
 """Loop layer driving a step-level trainer.
 
 `TrainLoop` owns loop policy: data iteration, gradient-accumulation call
@@ -46,21 +48,38 @@ if TYPE_CHECKING:
 _METRICS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 def _process_metrics_async(trainer, metrics_data):
-  for step_metrics, step_id, apply_gradients in metrics_data:
+  for i, (step_metrics, step_id, is_eval, apply_gradients) in enumerate(metrics_data):
     trainer._throttler.add_computation(step_metrics.loss.unreduced_sum)  # pylint: disable=protected-access
-    trainer._buffered_train_metrics = trainer._buffer_metrics(  # pylint: disable=protected-access
-        trainer._buffered_train_metrics,  # pylint: disable=protected-access
-        loss=step_metrics.loss,
-        step=step_id,
-        additional_metrics={
-            "grad_norm": (step_metrics.grad_norm, np.mean)
-        },
-    )
-    # NB: put this after t._buffer_metrics is important.
-    trainer._post_process_train_step(step_metrics.aux)  # pylint: disable=protected-access
+    
+    if is_eval:
+      trainer._buffered_eval_metrics = trainer._buffer_metrics(  # pylint: disable=protected-access
+          trainer._buffered_eval_metrics,  # pylint: disable=protected-access
+          loss=step_metrics.loss,
+          step=step_id,
+      )
+      trainer._post_process_eval_step(step_metrics.aux)  # pylint: disable=protected-access
+      
+      is_last_eval = True
+      if i + 1 < len(metrics_data) and metrics_data[i + 1][2] == True:
+        is_last_eval = False
+        
+      if is_last_eval:
+        trainer._write_metrics(trainer._buffered_eval_metrics)  # pylint: disable=protected-access
+        trainer._buffered_eval_metrics = None  # pylint: disable=protected-access
+    else:
+      trainer._buffered_train_metrics = trainer._buffer_metrics(  # pylint: disable=protected-access
+          trainer._buffered_train_metrics,  # pylint: disable=protected-access
+          loss=step_metrics.loss,
+          step=step_id,
+          additional_metrics={
+              "grad_norm": (step_metrics.grad_norm, np.mean)
+          },
+      )
+      # NB: put this after t._buffer_metrics is important.
+      trainer._post_process_train_step(step_metrics.aux)  # pylint: disable=protected-access
 
-    if apply_gradients:
-      trainer._write_train_metrics()  # pylint: disable=protected-access
+      if apply_gradients:
+        trainer._write_train_metrics()  # pylint: disable=protected-access
 
 
 def train_minibatch(
@@ -88,6 +107,7 @@ def train_minibatch(
     # but at runtime trainer will be a PeftTrainer or similar.
     trainer.train(train_ds=[micro_batch], **kwargs)  # type: ignore
 
+  # metrics getting can be in any frequency controlled by caller. No need to be in the boundary of mini_batch.
   metrics_data = trainer.get_metrics()
   if metrics_data:
     # !! Waiting for the metrics ready may live in worker to move metrics to local host
@@ -230,13 +250,8 @@ class TrainLoop:
         if t.training_hooks:
           t.training_hooks.on_eval_step_start(t)
         step_metrics = t.eval_step(eval_example)
-        t._buffered_eval_metrics = t._buffer_metrics(  # pylint: disable=protected-access
-            t._buffered_eval_metrics,  # pylint: disable=protected-access
-            loss=step_metrics.loss,
-            step=t.train_steps,
-        )
-        t._post_process_eval_step(step_metrics.aux)  # pylint: disable=protected-access
-        eval_loss += step_metrics.loss
+        
+        eval_loss += step_metrics.loss.compute()
         eval_steps += 1
 
       if eval_steps == 0:
@@ -245,15 +260,5 @@ class TrainLoop:
         )
         return
 
-      t._write_metrics(t._buffered_eval_metrics)  # pylint: disable=protected-access
-      logging.info(
-          "Train step %d eval loss: %f - eval perplexity: %f",
-          t.train_steps,
-          t.metrics_logger.get_metric(t.metrics_prefix, "loss", "eval"),  # pyrefly: ignore[missing-attribute]
-          t.metrics_logger.get_metric(  # pyrefly: ignore[missing-attribute]
-              t.metrics_prefix, "perplexity", "eval"
-          ),
-      )
-      t._buffered_eval_metrics = None  # pylint: disable=protected-access
       if t.training_hooks:
         t.training_hooks.on_eval_step_end(t, eval_loss)

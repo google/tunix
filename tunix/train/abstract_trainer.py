@@ -239,11 +239,11 @@ class AbstractTrainer(abc.ABC):
     """
 
   @abc.abstractmethod
-  def get_metrics(self) -> List[Tuple[StepMetrics, int, bool]]:
+  def get_metrics(self) -> List[Tuple[StepMetrics, int, bool, bool]]:
     """Returns and clears the recently collected step metrics.
 
     Returns:
-      A list of tuples: (step_metrics, step_id, apply_gradients)
+      A list of tuples: (step_metrics, step_id, is_eval, apply_gradients)
     """
 
   def close(self) -> None:

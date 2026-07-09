@@ -794,7 +794,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     step_metrics = StepMetrics(loss=loss, grad_norm=grad_norm, aux=aux)
     if not hasattr(self, "_pending_metrics"):
       self._pending_metrics = []
-    self._pending_metrics.append((step_metrics, step_id, apply_gradients))
+    self._pending_metrics.append((step_metrics, step_id, False, apply_gradients))
     return step_metrics
 
   def eval_step(
@@ -814,7 +814,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     loss, aux = eval_step_fn(inputs)
     loss = jax.lax.stop_gradient(loss)
-    return StepMetrics(loss=loss, aux=aux)
+    step_metrics = StepMetrics(loss=loss, aux=aux)
+    
+    if not hasattr(self, "_pending_metrics"):
+      self._pending_metrics = []
+    self._pending_metrics.append((step_metrics, self.train_steps, True, False))
+    return step_metrics
 
   def forward_batch(
       self, payload: TrainerPayload | Any, **kwargs
@@ -1001,7 +1006,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """Override this function to return the custom metadata for the checkpoint manager."""
     return {}
 
-  def get_metrics(self) -> list[tuple[abstract_trainer.StepMetrics, int, bool]]:
+  def get_metrics(self) -> list[tuple[abstract_trainer.StepMetrics, int, bool, bool]]:
     """Returns and clears the recently collected step metrics."""
     metrics = getattr(self, "_pending_metrics", [])
     self._pending_metrics = []
