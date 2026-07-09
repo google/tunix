@@ -33,7 +33,6 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import trace as trace_lib
 from tunix.perf.experimental import tracer as perf_tracer_v2
-from tunix.rl import algo_core as grpo_core
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
@@ -113,11 +112,13 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
               'gradient_accumulation_steps', None
           ),
           max_seq_token_per_tpu=kwargs.get('max_seq_token_per_tpu', None),
+          rollout_micro_batch_size=kwargs.get('rollout_micro_batch_size', None),
       ),
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=10,
           max_prompt_length=256,
           kv_cache_size=1024,
+          return_logprobs=kwargs.get('return_logprobs', False),
       ),
   )
   rl_cluster = rl_cluster_lib.RLCluster(
@@ -359,6 +360,139 @@ class GRPOLearnerTest(parameterized.TestCase):
           msg=f'metric_name: {metric_name}',
       )
 
+  def test_use_rollout_logps_false_uses_trainer_recomputed_old_logps(self):
+    rl_cluster, _, _ = setup({'rollout_micro_batch_size': 1})
+    actor_logps_calls = []
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -7.0, dtype=jnp.float32)
+    rl_cluster.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        use_rollout_logps=False,
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -7.0, dtype=np.float32),
+    )
+    self.assertIsNone(train_example.sampler_is_weights)
+
+  def test_sampler_is_token_uses_trainer_logps_and_sets_weights(self):
+    rl_cluster, _, _ = setup(
+        {'return_logprobs': True, 'rollout_micro_batch_size': 1}
+    )
+    actor_logps_calls = []
+
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -3.0, dtype=jnp.float32)
+
+    rl_cluster.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        sampler_is='token',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -3.0, dtype=np.float32),
+    )
+    assert train_example.sampler_is_weights is not None
+    self.assertEqual(
+        train_example.sampler_is_weights.shape,
+        train_example.completion_ids.shape,
+    )
+
+  def test_recompute_ignores_returned_rollout_logps_like_agentic(self):
+    rl_cluster, _, _ = setup({'return_logprobs': True, 'rollout_micro_batch_size': 1})
+    actor_logps_calls = []
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -5.0, dtype=jnp.float32)
+    rl_cluster.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        use_rollout_logps=False,
+        sampler_is='token',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -5.0, dtype=np.float32),
+    )
+    self.assertIsNone(train_example.sampler_is_weights)
+
+  def test_vllm_missing_rollout_logps_does_not_recompute_on_rollout(self):
+    rl_cluster, _, _ = setup({'return_logprobs': False, 'rollout_micro_batch_size': 1})
+    rollout_logps_calls = []
+    def fake_get_old_per_token_logps(*args, **kwargs):
+      del args, kwargs
+      rollout_logps_calls.append(True)
+      raise AssertionError('vLLM should not use rollout-side logp recompute.')
+    rl_cluster.get_old_per_token_logps = fake_get_old_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        beta=0.0,
+        num_iterations=2,
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    with self.assertRaisesRegex(
+        RuntimeError,
+        'old_per_token_logps is not available',
+    ):
+      grpo_learner._generate_and_compute_advantage({
+          'prompts': np.array(['input string', 'input string']),
+          'answer': np.array(['answer', 'answer']),
+      })
+    self.assertEmpty(rollout_logps_calls)
+
   @parameterized.named_parameters(
       dict(
           testcase_name='multi_iter_without_gradient_accumulation',
@@ -368,7 +502,7 @@ class GRPOLearnerTest(parameterized.TestCase):
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 2, 4, 6, 8],
           expected_inference_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
-          expected_rollout_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
+          expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
           testcase_name='multi_iter_with_gradient_accumulation',
@@ -387,16 +521,7 @@ class GRPOLearnerTest(parameterized.TestCase):
               12,
               12,
           ],
-          expected_rollout_worker_logps_fn_call_at_step=[
-              0,
-              0,
-              0,
-              6,
-              6,
-              6,
-              12,
-              12,
-          ],
+          expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
           testcase_name='multi_iter_without_kl',
@@ -406,16 +531,7 @@ class GRPOLearnerTest(parameterized.TestCase):
           gradient_accumulation_steps=3,
           expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6, 12, 12],
           expected_inference_worker_logps_fn_call_at_step=[],
-          expected_rollout_worker_logps_fn_call_at_step=[
-              0,
-              0,
-              0,
-              6,
-              6,
-              6,
-              12,
-              12,
-          ],
+          expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
           testcase_name='singler_iter_with_gradient_accumulation',
@@ -499,6 +615,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     kwargs = {
         'eval_every_n_steps': 12,
         'gradient_accumulation_steps': gradient_accumulation_steps,
+        'return_logprobs': num_iterations > 1,
     }
     rl_cluster, model, original_variables = setup(kwargs)
     grpo_config = grpo_lib.GRPOConfig(
