@@ -611,8 +611,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
                   jax.device_put(
                       np.array(0.0, dtype=np.float32), device=device
                   ).block_until_ready()
-            with self.rl_cluster.perf.span(
-                "weight_sync", self.rl_cluster.perf.all_devices
+            with self.rl_cluster.perf.span_group(
+                "weight_sync"
             ), self.rl_cluster.perf_v2.span(
                 perf_constants.WEIGHT_SYNC,
                 self.rl_cluster.perf_v2.all_devices,

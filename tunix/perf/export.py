@@ -256,7 +256,10 @@ class PerfMetricsExport:
             global_step_group, "weight_sync_anchor_snapshot"
         )
     )
-    weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
+    weight_sync_span = (
+        global_step_group.find_last_inner_span("weight_sync")
+        or global_step_group.find_last_inner_group("weight_sync")
+    )
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
     if weight_sync_span is None:
@@ -372,7 +375,10 @@ class PerfMetricsExport:
             global_step_group, "weight_sync_anchor_snapshot"
         )
     )
-    weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
+    weight_sync_span = (
+        global_step_group.find_last_inner_span("weight_sync")
+        or global_step_group.find_last_inner_group("weight_sync")
+    )
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
     if weight_sync_span is None:
@@ -503,7 +509,10 @@ class PerfMetricsExport:
             global_step_group, "weight_sync_anchor_snapshot"
         )
     )
-    weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
+    weight_sync_span = (
+        global_step_group.find_last_inner_span("weight_sync")
+        or global_step_group.find_last_inner_group("weight_sync")
+    )
     if weight_sync_span is None:
       logging.warning("weight_sync is None")
       return {}
