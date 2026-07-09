@@ -156,6 +156,9 @@ arg_parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
 arg_parser.add_argument(
     "--rollout_vllm_max_num_batched_tokens", type=int, default=None
 )
+# Sequence packing: token budget per pack (per fsdp shard). None = packing off.
+# When set, pack_sequences stacks [num_packs=fsdp*dp, max_seq_token_per_tpu].
+arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
 args, _ = arg_parser.parse_known_args()
 
 
@@ -723,6 +726,7 @@ def main() -> None:
           mini_batch_size=MINI_BATCH_SIZE,
           train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
+          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
               CHECKPOINT_ROOT if ENABLE_CHECKPOINTING else None
