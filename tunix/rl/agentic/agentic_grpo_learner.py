@@ -284,6 +284,41 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         else None,
     ])
 
+  def _compute_packed_logps(self, example: TrainExample) -> TrainExample:
+    # pack-first: old/ref logp were deferred in _process_results (left None);
+    # compute them here on the packed buffer via the segment-aware forward.
+    pad_value = self.rl_cluster.rollout.pad_id()
+    eos_value = self.rl_cluster.rollout.eos_id()
+    micro = (
+        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+    )
+    updates = {}
+    if example.old_per_token_logps is None and not self.algo_config.use_rollout_logps:
+      updates["old_per_token_logps"] = self.rl_cluster.get_actor_per_token_logps(
+          prompt_tokens=example.prompt_ids,
+          completion_tokens=example.completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=micro,
+          segment_ids=example.segment_ids,
+          segment_positions=example.segment_positions,
+      )
+    if example.ref_per_token_logps is None and (
+        self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
+    ):
+      updates["ref_per_token_logps"] = self.rl_cluster.get_ref_per_token_logps(
+          prompt_tokens=example.prompt_ids,
+          completion_tokens=example.completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=micro,
+          segment_ids=example.segment_ids,
+          segment_positions=example.segment_positions,
+      )
+    if updates:
+      example = example.replace(**updates)
+    return example
+
   def _process_results(
       self,
       trajectories: List[Any],
@@ -436,6 +471,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # when active: one extra trainer forward pass per training step.
     actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
+    # pack-first: defer old/ref logp to the packed buffer (computed after
+    # pack_sequences in the consumer). Leave the non-packed path untouched.
+    is_packed = (
+        self.rl_cluster.cluster_config.training_config.max_seq_token_per_tpu
+        is not None
+    )
     rollout_per_token_logps = None
     trainer_per_token_logps = None
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
@@ -467,6 +508,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps = trainer_per_token_logps
     elif self.algo_config.use_rollout_logps:
       old_per_token_logps = None
+    elif is_packed:
+      old_per_token_logps = None
     else:
       trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
           prompt_tokens=prompt_ids,
@@ -496,7 +539,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if group_id is not None:
       perf_tags[perf_constants.GROUP_ID] = group_id
 
-    if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0:
+    if (
+        self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
+    ) and not is_packed:
       with self.rl_cluster.perf_v2.span(
           perf_constants.REFERENCE_INFERENCE,
           devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
