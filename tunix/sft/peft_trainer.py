@@ -1026,15 +1026,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self._pbar.close()
       self._pbar = None
 
-  def _run_eval(
-      self,
-      eval_ds: Iterable[Any],
-      eval_step_fn: Callable[..., Any] | None = None,
-  ) -> None:
-    """Runs evaluation loop. Delegates to `TrainLoop.run_eval`."""
-    del eval_step_fn  # Unused; kept for backward compatibility.
-    train_loop_lib.TrainLoop(self).run_eval(eval_ds)
-
 
 def _default_loss_fn(
     model: nnx.Module,
