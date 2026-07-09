@@ -734,7 +734,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     Gradient accumulation is caller-driven: with `apply_gradients=False`,
     gradients are accumulated internally; with True, the accumulated mean
     gradients (including this step's) are applied and the buffer is reset.
-    `global_step` increments only when gradients are applied.
 
     Args:
       payload: A `TrainerPayload` or a raw training batch.
@@ -960,11 +959,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if gather:
       state = jax.device_get(state)
     return state
-
-  @property
-  def global_step(self) -> int:
-    """Number of optimizer updates applied. Alias of `train_steps`."""
-    return self._train_steps
 
   # --- Loop-level convenience API ---
 

@@ -230,14 +230,6 @@ class AbstractTrainer(abc.ABC):
       The model weights as an nnx.State.
     """
 
-  @property
-  @abc.abstractmethod
-  def global_step(self) -> int:
-    """Number of optimizer updates applied (the model's version number).
-
-    Increments only when `train_step` applies gradients, not per micro-batch.
-    """
-
   @abc.abstractmethod
   def get_metrics(self) -> List[Tuple[StepMetrics, int, bool, bool]]:
     """Returns and clears the recently collected step metrics.
