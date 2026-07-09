@@ -106,6 +106,7 @@ class TrainExample:
   old_per_token_logps: jax.Array | None
   segment_ids: jax.Array | None = None
   segment_positions: jax.Array | None = None
+  is_update_step: jax.Array | None = None
   # Truncated importance-sampling correction weights for off-policy
   # correction between the rollout sampler and the trainer. Per-token,
   # detached, multiplied into the policy-gradient loss BEFORE aggregation
@@ -676,7 +677,7 @@ def aggregate_loss(
     completion_mask: jax.Array,
     loss_agg_mode: str,
     **kwargs: Any,
-) -> jax.Array:
+) -> utils.WeightedMetric:
   """Aggregate loss based on the loss aggregation mode.
 
   Args:
@@ -693,15 +694,17 @@ def aggregate_loss(
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
     # in the batch
-    loss = (per_token_loss * completion_mask).sum() / (
-        jnp.clip(completion_mask.sum(), min=1)
-    )
+    unreduced_sum = (per_token_loss * completion_mask).sum()
+    denominator = completion_mask.sum()
+    min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-mean":
     seq_mask = completion_mask.sum(axis=-1)  # per-sequence token count
     seq_loss = ((per_token_loss * completion_mask).sum(axis=-1)) / jnp.clip(
-        seq_mask, min=1
+        seq_mask, min=1.0
     )
-    loss = seq_loss.mean()
+    unreduced_sum = seq_loss.sum()
+    denominator = per_token_loss.shape[0]
+    min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
@@ -710,20 +713,23 @@ def aggregate_loss(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    loss = seq_loss.mean()
+    unreduced_sum = seq_loss.sum()
+    denominator = per_token_loss.shape[0]
+    min_denom = 1.0
   elif loss_agg_mode == "seq-mean-token-sum":
     # 1) sum token losses within each sequence
     # 2) average only across sequences that have at least one valid token
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
     seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
-    loss = (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+    unreduced_sum = (seq_loss * seq_mask).sum()
+    denominator = seq_mask.sum()
+    min_denom = 1e-6
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
     # Get custom normalization factor from kwargs, default to batch size.
     norm = _check_get_norm(kwargs, per_token_loss.shape[0])
-
-    # Sum the per-sequence sums and normalize
-    # TODO(sizhi): Experiment with loss in precision if loss is fp16.
-    loss = (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+    unreduced_sum = (per_token_loss * completion_mask).sum()
+    denominator = norm
+    min_denom = 1e-6
   else:
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
@@ -731,7 +737,11 @@ def aggregate_loss(
         " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
         " 'sequence-mean-token-sum-norm'."
     )
-  return loss
+  return utils.WeightedMetric(
+      jnp.asarray(unreduced_sum, dtype=jnp.float32),
+      jnp.asarray(denominator, dtype=jnp.float32),
+      min_denom=min_denom,
+  )
 
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
