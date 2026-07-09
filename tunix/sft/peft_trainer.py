@@ -34,6 +34,7 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
@@ -132,6 +133,12 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
+    if self.losses and hasattr(self.losses[0], "unreduced_sum"):
+      total_sum = sum(np.array(x.unreduced_sum) for x in self.losses)
+      total_denom = sum(np.array(x.denominator) for x in self.losses)
+      if total_denom == 0:
+        return 0.0
+      return total_sum / total_denom
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
@@ -277,6 +284,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # Internal gradient accumulation buffer (caller-driven accumulation).
     self._accum_grads = None
     self._accum_count = 0
+    self._mini_batch_size: int | None = None
+    self._pending_metrics: list[Tuple[StepMetrics, int, bool]] = []
+
     max_step = None
     if self.config.max_steps is not None:
       max_step = self.config.max_steps * self.config.get_with_default(
@@ -378,12 +388,21 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """
     inputs = self.gen_model_input_fn(inputs)
 
+    def grad_loss_fn(model, *args, **kwargs):
+      out = self.loss_fn(model, *args, **kwargs)
+      if self._has_aux:
+        loss_metrics, aux = out
+        return loss_metrics.compute(), (loss_metrics, aux)
+      else:
+        loss_metrics = out
+        return loss_metrics.compute(), loss_metrics
+
     grad_fn = nnx.value_and_grad(
-        self.loss_fn,
+        grad_loss_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
-        has_aux=self._has_aux,
+        has_aux=True,
     )
-    out, grads = grad_fn(model, **inputs)
+    (_, out), grads = grad_fn(model, **inputs)
     grad_norm = optax.global_norm(grads)
     optimizer.update(model, grads)
     if self._has_aux:
@@ -418,12 +437,21 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ) -> Tuple[ArrayLike, Any | None, ArrayLike, Any]:
     """Computes loss and gradients without applying an optimizer update."""
     inputs = self.gen_model_input_fn(inputs)
+    def grad_loss_fn(model, *args, **kwargs):
+      out = self.loss_fn(model, *args, **kwargs)
+      if self._has_aux:
+        loss_metrics, aux = out
+        return loss_metrics.compute(), (loss_metrics, aux)
+      else:
+        loss_metrics = out
+        return loss_metrics.compute(), loss_metrics
+
     grad_fn = nnx.value_and_grad(
-        self.loss_fn,
+        grad_loss_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
-        has_aux=self._has_aux,
+        has_aux=True,
     )
-    out, grads = grad_fn(model, **inputs)
+    (_, out), grads = grad_fn(model, **inputs)
     grad_norm = optax.global_norm(grads)
     if self._has_aux:
       loss, aux = out
@@ -724,30 +752,50 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     inputs = sharding_utils.shard_input(
         inputs, self.config.data_sharding_axis
     )
-    if apply_gradients and self._accum_count == 0:
-      # Fast path: single fused grad+update step, no pending accumulation.
-      train_step_fn, _ = self.jit_train_and_eval_step(
-          self._skip_jit, self._cache_nnx_graph
-      )
-      loss, aux, grad_norm = train_step_fn(inputs)
-    else:
-      grad_step_fn, apply_grads_fn = self._accum_step_fns()
-      loss, aux, grad_norm, grads = grad_step_fn(inputs)
-      if self._accum_grads is None:
-        self._accum_grads = grads
+
+    tags = self._perf_tags()
+    with self._perf_tracer.span(
+        "peft_train_step",
+        pxla.thread_resources.env.physical_mesh.devices,
+    ) as span, self._perf_tracer_v2.span(
+        perf_constants.PEFT_TRAIN,
+        pxla.thread_resources.env.physical_mesh.devices,
+        tags=tags,
+    ) as span_v2:
+      if apply_gradients and self._accum_count == 0:
+        # Fast path: single fused grad+update step, no pending accumulation.
+        train_step_fn, _ = self.jit_train_and_eval_step(
+            self._skip_jit, self._cache_nnx_graph
+        )
+        loss, aux, grad_norm = train_step_fn(inputs)
       else:
-        self._accum_grads = jax.tree.map(jnp.add, self._accum_grads, grads)
-      self._accum_count += 1
-      if apply_gradients:
-        count = self._accum_count
-        mean_grads = jax.tree.map(lambda g: g / count, self._accum_grads)
-        apply_grads_fn(mean_grads)
-        self._accum_grads = None
-        self._accum_count = 0
+        grad_step_fn, apply_grads_fn = self._accum_step_fns()
+        loss, aux, grad_norm, grads = grad_step_fn(inputs)
+        if self._accum_grads is None:
+          self._accum_grads = grads
+        else:
+          self._accum_grads = jax.tree.map(jnp.add, self._accum_grads, grads)
+        self._accum_count += 1
+        if apply_gradients:
+          count = self._accum_count
+          mean_grads = jax.tree.map(lambda g: g / count, self._accum_grads)
+          apply_grads_fn(mean_grads)
+          self._accum_grads = None
+          self._accum_count = 0
+          
+      span.device_end([loss])
+      span_v2.async_end([loss])
+
     self._iter_steps += 1
+    step_id = self.train_steps
     if apply_gradients:
       self._train_steps += 1
-    return StepMetrics(loss=loss, grad_norm=grad_norm, aux=aux)
+
+    step_metrics = StepMetrics(loss=loss, grad_norm=grad_norm, aux=aux)
+    if not hasattr(self, "_pending_metrics"):
+      self._pending_metrics = []
+    self._pending_metrics.append((step_metrics, step_id, apply_gradients))
+    return step_metrics
 
   def eval_step(
       self, payload: TrainerPayload | Any, **kwargs
@@ -913,16 +961,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """Number of optimizer updates applied. Alias of `train_steps`."""
     return self._train_steps
 
-  def _maybe_save_checkpoint(self) -> None:
-    """Saves per the checkpointing_options policy (called by the loop)."""
-    self.checkpoint_manager.save(
-        self._train_steps,
-        self.model,
-        self.optimizer,
-        save_only_lora_params=self._lora_enabled,
-        custom_metadata=self.custom_checkpoint_metadata(),
-    )
-
   # --- Loop-level convenience API ---
 
   def train(
@@ -962,6 +1000,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def custom_checkpoint_metadata(self) -> dict[str, Any]:
     """Override this function to return the custom metadata for the checkpoint manager."""
     return {}
+
+  def get_metrics(self) -> list[tuple[abstract_trainer.StepMetrics, int, bool]]:
+    """Returns and clears the recently collected step metrics."""
+    metrics = getattr(self, "_pending_metrics", [])
+    self._pending_metrics = []
+    return metrics
 
   def close(self):
     """Closes the trainer and its associated resources.

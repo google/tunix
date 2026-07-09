@@ -23,7 +23,7 @@ a separate loop/driver layer built on top of this API.
 
 import abc
 import dataclasses
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import flax
 from flax import nnx
@@ -50,6 +50,43 @@ class TrainerPayload:
   )
 
 
+@flax.struct.dataclass
+class WeightedMetrics:
+  """A metric that requires weighted reduction.
+
+  Attributes:
+    unreduced_sum: The sum of the metric values. Should be a scalar ().
+    denominator: The weight or count of valid tokens/examples. Should be a
+      scalar ().
+    eps: Optional epsilon added to denominator for numerical stability.
+    min_denom: Optional minimum bound for the denominator.
+  """
+
+  unreduced_sum: jax.Array
+  denominator: jax.Array
+  eps: float | None = flax.struct.field(default=None, pytree_node=False)
+  min_denom: float | None = flax.struct.field(default=None, pytree_node=False)
+
+  def compute_scale(self) -> jax.Array:
+    """Safely computes the scale factor (1 / denominator) with bounds."""
+    denom = self.denominator
+    if self.eps is not None:
+      denom = denom + self.eps
+    if self.min_denom is not None:
+      denom = jnp.maximum(denom, self.min_denom)
+
+    # JAX Safe Division: Prevent division-by-zero NaNs from poisoning gradients
+    # We replace 0s with 1.0 *before* dividing.
+    safe_denom = jnp.where(denom == 0, 1.0, denom)
+
+    # Calculate scale, masking out pure zero denominators to 0.0
+    scale = 1.0 / safe_denom
+    return jnp.where(denom == 0, 0.0, scale)
+
+  def compute(self) -> jax.Array:
+    """Safely computes total / count with optional legacy equivalence bounds."""
+    return self.unreduced_sum * self.compute_scale()
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class StepMetrics:
   """Per-step result.
@@ -58,17 +95,16 @@ class StepMetrics:
   inflight computation overlap is preserved.
 
   Attributes:
-    loss: The step loss.
+    loss: The step loss as a WeightedMetrics object.
     grad_norm: Global gradient norm. None for eval steps.
     aux: Auxiliary output of the loss function, if any.
     additional: Extra named metrics.
   """
 
-  loss: jax.Array
+  loss: WeightedMetrics
   grad_norm: jax.Array | None = None
   aux: Any = None
-  additional: Dict[str, jax.Array] = dataclasses.field(default_factory=dict)
-
+  additional: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 class AbstractTrainer(abc.ABC):
   """The pure ML algorithmic core of a trainer.
@@ -203,6 +239,12 @@ class AbstractTrainer(abc.ABC):
     """
 
   @abc.abstractmethod
-  def get_metrics(self) -> 
+  def get_metrics(self) -> List[Tuple[StepMetrics, int, bool]]:
+    """Returns and clears the recently collected step metrics.
+
+    Returns:
+      A list of tuples: (step_metrics, step_id, apply_gradients)
+    """
+
   def close(self) -> None:
     """Releases resources held by the trainer. Default: no-op."""

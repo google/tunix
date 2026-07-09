@@ -26,6 +26,7 @@ the trainer so that existing subclass overrides (e.g.
 """
 
 from collections.abc import Iterable, Sequence
+import concurrent.futures
 import time
 from typing import Any, List, TYPE_CHECKING
 
@@ -42,12 +43,33 @@ if TYPE_CHECKING:
   from tunix.sft import peft_trainer
 
 
+_METRICS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+def _process_metrics_async(trainer, metrics_data):
+  for step_metrics, step_id, apply_gradients in metrics_data:
+    trainer._throttler.add_computation(step_metrics.loss.unreduced_sum)  # pylint: disable=protected-access
+    trainer._buffered_train_metrics = trainer._buffer_metrics(  # pylint: disable=protected-access
+        trainer._buffered_train_metrics,  # pylint: disable=protected-access
+        loss=step_metrics.loss,
+        step=step_id,
+        additional_metrics={
+            "grad_norm": (step_metrics.grad_norm, np.mean)
+        },
+    )
+    # NB: put this after t._buffer_metrics is important.
+    trainer._post_process_train_step(step_metrics.aux)  # pylint: disable=protected-access
+
+    if apply_gradients:
+      trainer._write_train_metrics()  # pylint: disable=protected-access
+
+
 def train_minibatch(
     trainer: abstract_trainer.AbstractTrainer,
     payloads: Sequence[abstract_trainer.TrainerPayload | Any],
     **kwargs,
 ) -> None:
   """Executes one optimizer update over a mini-batch.
+  !!!Demo purpose!!! Just highlevel idea on the batch driving flow.
 
   Iterates over the micro-batches in `payloads` and delegates to
   `trainer.train` which will run the `TrainLoop` over each micro-batch.
@@ -66,41 +88,20 @@ def train_minibatch(
     # but at runtime trainer will be a PeftTrainer or similar.
     trainer.train(train_ds=[micro_batch], **kwargs)  # type: ignore
 
+  metrics_data = trainer.get_metrics()
+  if metrics_data:
+    # !! Waiting for the metrics ready may live in worker to move metrics to local host
+    # before RPC transfer to orchestrator.
+    _METRICS_EXECUTOR.submit(_process_metrics_async, trainer, metrics_data)
+
+  trainer.save_checkpoint(force=False)
+
 
 class TrainLoop:
   """Drives a step-level trainer over train/eval datasets."""
 
   def __init__(self, trainer: "peft_trainer.PeftTrainer"):
     self.trainer = trainer
-    self._mini_batch_size: int | None = None
-
-  def _perf_tags(self) -> dict[str, Any]:
-    """Collects tags for the perf tracer span."""
-    t = self.trainer
-    metadata = t.custom_checkpoint_metadata()
-    global_step = metadata.get("global_step")
-
-    if global_step is not None:
-      # Offset by 1 since global_step is incremented for checkpointing.
-      global_step -= 1
-      if global_step > 0:
-        if self._mini_batch_size is None:
-          self._mini_batch_size = max(1, t.train_steps // global_step)
-        mini_batch = t.train_steps % self._mini_batch_size
-      else:
-        mini_batch = t.train_steps
-    else:
-      mini_batch = None
-      global_step = None
-    micro_batch = t.iter_steps % t.config.get_with_default(
-        "gradient_accumulation_steps", 1
-    )
-    return {
-        perf_constants.STEP: global_step,
-        perf_constants.ROLE: metadata.get("role"),
-        perf_constants.MICRO_BATCH: micro_batch,
-        perf_constants.MINI_BATCH: mini_batch,
-    }
 
   def run(
       self,
@@ -185,39 +186,11 @@ class TrainLoop:
         if t.training_hooks:
           t.training_hooks.on_train_step_start(t)
 
-        tags = self._perf_tags()
-        step_id = t.train_steps
         apply_gradients = ((t.iter_steps + 1) % grad_accum_steps == 0)
 
-        with t._perf_tracer.span(  # pylint: disable=protected-access
-            "peft_train_step",
-            pxla.thread_resources.env.physical_mesh.devices,
-        ) as span, t._perf_tracer_v2.span(  # pylint: disable=protected-access
-            perf_constants.PEFT_TRAIN,
-            pxla.thread_resources.env.physical_mesh.devices,
-            tags=tags,
-        ) as span_v2:
-          step_metrics = t.train_step(train_example, apply_gradients=apply_gradients)
-          span.device_end([step_metrics.loss])
-          span_v2.async_end([step_metrics.loss])
-
-        t._throttler.add_computation(step_metrics.loss)  # pylint: disable=protected-access
-        t._buffered_train_metrics = t._buffer_metrics(  # pylint: disable=protected-access
-            t._buffered_train_metrics,  # pylint: disable=protected-access
-            loss=step_metrics.loss,
-            step=step_id,
-            additional_metrics={
-                "grad_norm": (step_metrics.grad_norm, np.mean)
-            },
-        )
-        # NB: put this after t._buffer_metrics is important.
-        t._post_process_train_step(step_metrics.aux)  # pylint: disable=protected-access
+        t.train_step(train_example, apply_gradients=apply_gradients)
 
         if apply_gradients:
-          t._write_train_metrics()  # pylint: disable=protected-access
-
-          # Checkpoint frequency is configured by checkpointing_options.
-          t._maybe_save_checkpoint()  # pylint: disable=protected-access
 
           if (
               eval_ds
