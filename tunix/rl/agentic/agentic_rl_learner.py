@@ -803,16 +803,43 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
     )
+    if self._process_in_consumer:
+      # Convert raw Trajectory groups into TrainExamples up front, before
+      # `pack_sequences` wraps the generator below. Otherwise `pack_sequences`
+      # (via `unpad_train_example`) receives raw lists and crashes on
+      # `.prompt_ids`.
+      def _to_train_examples(raw_gen):
+        for group_batch in raw_gen:
+          all_trajectories = [t for group in group_batch for t in group]
+          yield self._batch_to_train_example(
+              batch_results=all_trajectories,
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+
+      train_data_gen = _to_train_examples(train_data_gen)
     is_packed = self._training_config.max_seq_token_per_tpu is not None
     if is_packed:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh[
+          rl_cluster_lib.Role.ACTOR
+      ]
+      # The packed batch size must be a multiple of the FSDP and DP mesh axis
+      # sizes.
+      pack_size = rl_utils.compute_pack_size(mesh)
+
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d",
+          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          " pack_size: %d",
           self._training_config.max_seq_token_per_tpu,
+          pack_size,
       )
+
+      # Update boundary in sequences (mini-batch semantics): packing is
+      # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
           self._training_config.max_seq_token_per_tpu,
-          target_items_per_update=grad_acc_steps,
+          sequences_per_update=mini_batch_size * self._num_generations(),
+          pack_size=pack_size,
       )
     update_steps_since_last_sync = 0
     update_steps_per_full_batch = full_batch_size // mini_batch_size
@@ -842,20 +869,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       #   continue
       # train_micro_batch = filtered_train_micro_batch
 
-      if self._process_in_consumer:
-        # train_micro_batch is a list of lists of trajectories.
-        all_trajectories = [t for group in train_micro_batch for t in group]
-        train_examples = self._batch_to_train_example(
-            batch_results=all_trajectories,
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
-        # GRPO returns a list with a single TrainExample.
-        merged_train_micro_batch = train_examples[0]
-      else:
-        # TODO(b/491970038): handle seq packing case differently
-        merged_train_micro_batch = jax.tree.map(
-            lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
-        )
+      # `train_micro_batch` is always a Sequence[TrainExample] now:
+      #  - _process_in_consumer: converted up front (GRPO -> single-element list)
+      #  - producer-side processing: TrainExamples straight from the queue
+      #  - is_packed: a single packed TrainExample from pack_sequences
+      # jax.tree.map(concatenate) over a single-element list is a no-op, so this
+      # equals the old `train_examples[0]` for the GRPO consumer path.
+      merged_train_micro_batch = jax.tree.map(
+          lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+      )
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the
@@ -946,10 +968,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # `is_update_step` flips True every `grad_acc_steps` micro-batches.
         unpacked_micro_step_counter += 1
         is_update = unpacked_micro_step_counter % grad_acc_steps == 0
-        
+
       if is_update:
         update_steps_since_last_sync += 1
-        
+
       if update_steps_since_last_sync == update_steps_per_full_batch:
         # --- Remaining Iterations Training Step ---
         iterations = self._num_iterations()
@@ -958,7 +980,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           # TODO(b/483779605) Sub-step checkpointing.
           self._iter_steps += len(full_batch_chunks)
 
-          # TODO(yixuanm): Eval during iteration too. Skipping for now as we 
+          # TODO(yixuanm): Eval during iteration too. Skipping for now as we
           # will refactor the learner soon.
           self.rl_cluster.update_actor(
               full_batch_chunks, None, skip_jit
@@ -968,7 +990,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 full_batch_chunks, None, skip_jit
             )
         full_batch_chunks.clear()
-
 
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
