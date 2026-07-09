@@ -46,38 +46,25 @@ def train_minibatch(
     trainer: abstract_trainer.AbstractTrainer,
     payloads: Sequence[abstract_trainer.TrainerPayload | Any],
     **kwargs,
-) -> List[abstract_trainer.StepMetrics]:
-  """Executes one optimizer update over a sequence of micro-batches.
+) -> None:
+  """Executes one optimizer update over a mini-batch.
 
-  Standalone loop-layer helper over `AbstractTrainer.train_step`: accumulates
-  gradients for all micro-batches and applies the (mean) update with the last
-  one, so the accumulation window can never be left open or interleaved.
-  `trainer.global_step` increments exactly once.
-
-  Callers own the mini-batch loop: `TrainLoop` uses this per accumulation
-  window, and orchestrators can drive it directly with their own grouping.
+  Iterates over the micro-batches in `payloads` and delegates to
+  `trainer.train` which will run the `TrainLoop` over each micro-batch.
 
   Args:
     trainer: The trainer to step.
     payloads: The micro-batches for one optimizer update, in order.
-    **kwargs: Forwarded to `trainer.train_step`.
-
-  Returns:
-    Per-micro-batch metrics, in input order.
-
-  Raises:
-    ValueError: If `payloads` is empty.
+    **kwargs: Forwarded to `trainer.train`.
   """
   payloads = list(payloads)
   if not payloads:
     raise ValueError("train_minibatch requires at least one payload.")
-  metrics = []
-  last = len(payloads) - 1
-  for i, payload in enumerate(payloads):
-    metrics.append(
-        trainer.train_step(payload, apply_gradients=(i == last), **kwargs)
-    )
-  return metrics
+
+  for micro_batch in payloads:
+    # We use a type ignore here since AbstractTrainer does not define train(),
+    # but at runtime trainer will be a PeftTrainer or similar.
+    trainer.train(train_ds=[micro_batch], **kwargs)  # type: ignore
 
 
 class TrainLoop:
@@ -166,32 +153,24 @@ class TrainLoop:
     while True:
       t._prof.maybe_activate(t.iter_steps)  # pylint: disable=protected-access
       with jax.profiler.StepTraceAnnotation("train", step_num=t.iter_steps):
-        # Collect one mini-batch: `grad_accum_steps` micro-batches.
-        group = []
-        data_exhausted = False
-        while len(group) < grad_accum_steps:
-          train_example = None
-          if t.data_hooks:
-            train_example = t.data_hooks.load_next_train_batch(t)
-          else:
-            try:
-              train_example = next(train_iterator)
-              if not t.is_managed_externally:
-                # TODO(mridulsahu): Add support to restore the iterator state
-                # instead of skipping the already trained examples.
-                if index < t.iter_steps:
-                  # Skip the examples that are already trained.
-                  index += 1
-                  continue
+        train_example = None
+        if t.data_hooks:
+          train_example = t.data_hooks.load_next_train_batch(t)
+        else:
+          try:
+            train_example = next(train_iterator)
+            if not t.is_managed_externally:
+              # TODO(mridulsahu): Add support to restore the iterator state
+              # instead of skipping the already trained examples.
+              if index < t.iter_steps:
+                # Skip the examples that are already trained.
+                index += 1
+                continue
               index += 1
-            except StopIteration:
-              pass
-          if train_example is None:
-            data_exhausted = True
-            break
-          group.append(train_example)
-
-        if not group:
+          except StopIteration:
+            pass
+            
+        if train_example is None:
           break
 
         # Stop training if max_steps is reached.
@@ -208,7 +187,7 @@ class TrainLoop:
 
         tags = self._perf_tags()
         step_id = t.train_steps
-        apply_gradients = len(group) == grad_accum_steps
+        apply_gradients = ((t.iter_steps + 1) % grad_accum_steps == 0)
 
         with t._perf_tracer.span(  # pylint: disable=protected-access
             "peft_train_step",
@@ -218,30 +197,21 @@ class TrainLoop:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          if apply_gradients:
-            metrics_list = train_minibatch(t, group)
-          else:
-            # Tail micro-batches that don't fill a full accumulation window:
-            # accumulate without applying (matches pre-refactor semantics,
-            # where a partial window never triggered an optimizer update).
-            metrics_list = [
-                t.train_step(p, apply_gradients=False) for p in group
-            ]
-          span.device_end([metrics_list[-1].loss])
-          span_v2.async_end([metrics_list[-1].loss])
+          step_metrics = t.train_step(train_example, apply_gradients=apply_gradients)
+          span.device_end([step_metrics.loss])
+          span_v2.async_end([step_metrics.loss])
 
-        t._throttler.add_computation(metrics_list[-1].loss)  # pylint: disable=protected-access
-        for step_metrics in metrics_list:
-          t._buffered_train_metrics = t._buffer_metrics(  # pylint: disable=protected-access
-              t._buffered_train_metrics,  # pylint: disable=protected-access
-              loss=step_metrics.loss,
-              step=step_id,
-              additional_metrics={
-                  "grad_norm": (step_metrics.grad_norm, np.mean)
-              },
-          )
-          # NB: put this after t._buffer_metrics is important.
-          t._post_process_train_step(step_metrics.aux)  # pylint: disable=protected-access
+        t._throttler.add_computation(step_metrics.loss)  # pylint: disable=protected-access
+        t._buffered_train_metrics = t._buffer_metrics(  # pylint: disable=protected-access
+            t._buffered_train_metrics,  # pylint: disable=protected-access
+            loss=step_metrics.loss,
+            step=step_id,
+            additional_metrics={
+                "grad_norm": (step_metrics.grad_norm, np.mean)
+            },
+        )
+        # NB: put this after t._buffer_metrics is important.
+        t._post_process_train_step(step_metrics.aux)  # pylint: disable=protected-access
 
         if apply_gradients:
           t._write_train_metrics()  # pylint: disable=protected-access
@@ -254,9 +224,6 @@ class TrainLoop:
               and t.train_steps % t.config.eval_every_n_steps == 0
           ):
             self.run_eval(eval_ds)
-
-        if data_exhausted:
-          break
 
       t._prof.maybe_deactivate(t.iter_steps)  # pylint: disable=protected-access
 

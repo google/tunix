@@ -202,5 +202,7 @@ class AbstractTrainer(abc.ABC):
     Increments only when `train_step` applies gradients, not per micro-batch.
     """
 
+  @abc.abstractmethod
+  def get_metrics(self) -> 
   def close(self) -> None:
     """Releases resources held by the trainer. Default: no-op."""
