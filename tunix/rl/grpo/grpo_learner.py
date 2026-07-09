@@ -73,6 +73,14 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
     loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the paper.
       For GSPO, we use gspo-token loss which is more flexible.
+    use_rollout_logps: Whether to use rollout-side log probabilities as
+      old-policy log probabilities. If False, recompute old-policy log
+      probabilities on the trainer actor.
+    sampler_is: Optional truncated importance-sampling correction between the
+      rollout sampler and trainer actor. Set to "token" to use trainer
+      recomputed logps as old-policy logps and multiply the policy loss by
+      detached per-token sampler/trainer correction weights.
+    sampler_is_threshold: Maximum per-token TIS correction weight.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
@@ -95,6 +103,9 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
   beta: float = 0.04
   kl_loss_mode: str = "kl"
   epsilon: float = 0.2
+  use_rollout_logps: bool = True
+  sampler_is: str | None = None
+  sampler_is_threshold: float = 2.0
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -107,6 +118,11 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
       raise ValueError(
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
+      )
+    if self.sampler_is not in (None, "token"):
+      raise ValueError(
+          "sampler_is should be either None or 'token'. Received: "
+          f"{self.sampler_is}"
       )
 
 
@@ -198,6 +214,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "pg_clipfrac": np.mean,
+        "sampler_is/weight_mean": np.mean,
+        "sampler_is/weight_min": np.min,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
@@ -259,6 +277,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     # Convert completion_ids and completion_mask to jax arrays
     jax_completion_ids = jnp.array(padded_completion_ids)
     jax_completion_mask = jnp.array(completion_mask)
+    compute_logps_micro_batch_size = (
+        self._compute_logps_micro_batch_size * self.algo_config.num_generations
+        if self._compute_logps_micro_batch_size
+        else len(training_input["prompts"])
+    )
 
     if self.algo_config.beta != 0.0:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
@@ -273,34 +296,92 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             completion_tokens=jax_completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=(
-                self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
-                * self.algo_config.num_generations
-            ),
+            micro_batch_size=compute_logps_micro_batch_size,
         )
         interval.device_end([ref_per_token_logps])
         interval_v2.async_end([ref_per_token_logps])
     else:
       ref_per_token_logps = None
-    if self.algo_config.num_iterations > 1:
+    rollout_per_token_logps = None
+    trainer_per_token_logps = None
+    old_per_token_logps = None
+    sampler_is_weights = None
+
+    if self.algo_config.use_rollout_logps and rollout_output.logprobs is not None:
+      rollout_per_token_logps = jnp.asarray([
+          utils.pad_to_length(
+              np.asarray(logprobs),
+              target_length=rollout_config.max_tokens_to_generate,
+              pad_value=0.0,
+              left=False,
+          )[: rollout_config.max_tokens_to_generate]
+          for logprobs in rollout_output.logprobs
+      ])
+      old_per_token_logps = rollout_per_token_logps
+
+    needs_rollout_logps = (
+        self.algo_config.use_rollout_logps
+        and rollout_per_token_logps is None
+        and (
+            self.algo_config.num_iterations > 1
+            or self.algo_config.sampler_is == "token"
+        )
+    )
+    if needs_rollout_logps:
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ROLLOUT].devices
+      with self.rl_cluster.perf.span(
+          "old_actor_inference", devices
+      ) as interval, self.rl_cluster.perf_v2.span(
+          perf_constants.OLD_ACTOR_INFERENCE, devices, tags=perf_tags
+      ) as interval_v2:
+        rollout_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=jax_completion_ids,
+            micro_batch_size=compute_logps_micro_batch_size,
+        )
+        interval.device_end([rollout_per_token_logps])
+        interval_v2.async_end([rollout_per_token_logps])
+      old_per_token_logps = rollout_per_token_logps
+
+    actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
+    have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
+    needs_trainer_logps = (
+        not self.algo_config.use_rollout_logps
+        or self.algo_config.sampler_is == "token"
+        or (rollout_per_token_logps is not None and have_actor_mesh)
+    )
+    if needs_trainer_logps:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
       with self.rl_cluster.perf.span(
           "old_actor_inference", devices
       ) as interval, self.rl_cluster.perf_v2.span(
           perf_constants.OLD_ACTOR_INFERENCE, devices, tags=perf_tags
       ) as interval_v2:
-        old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+        trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=jax_completion_ids,
-            micro_batch_size=(
-                self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
-                * self.algo_config.num_generations
-            ),
+            pad_id=pad_value,
+            eos_id=eos_value,
+            micro_batch_size=compute_logps_micro_batch_size,
         )
-        interval.device_end([old_per_token_logps])
-        interval_v2.async_end([old_per_token_logps])
-    else:
-      old_per_token_logps = None
+        interval.device_end([trainer_per_token_logps])
+        interval_v2.async_end([trainer_per_token_logps])
+
+    if not self.algo_config.use_rollout_logps:
+      old_per_token_logps = trainer_per_token_logps
+    elif (
+        self.algo_config.sampler_is == "token"
+        and trainer_per_token_logps is not None
+    ):
+      old_per_token_logps = trainer_per_token_logps
+
+    if self.algo_config.num_iterations > 1 and old_per_token_logps is None:
+      raise RuntimeError(
+          "old_per_token_logps is not available for off-policy RL. Enable "
+          "`return_logprobs` in RolloutConfig, keep rollout logp computation "
+          "available, or set use_rollout_logps=False to recompute on the "
+          "trainer actor."
+      )
 
     with self.rl_cluster.perf.span(
         "advantage_computation"
@@ -351,6 +432,82 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         mode=mode,
     )
 
+    if (
+        rollout_per_token_logps is not None
+        and trainer_per_token_logps is not None
+    ):
+      mask = jax_completion_mask.astype(jnp.bool_)
+      mask_f = mask.astype(jnp.float32)
+      mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+      diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
+      diff_mean = float((diff * mask_f).sum() / mask_sum)
+      diff_max = float(jnp.where(mask, diff, 0.0).max())
+      rp = jnp.exp(rollout_per_token_logps)
+      tp = jnp.exp(trainer_per_token_logps)
+      prob_diff = jnp.abs(rp - tp)
+      prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+      prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
+      rp_flat = rp.reshape(-1)
+      tp_flat = tp.reshape(-1)
+      mf = mask_f.reshape(-1)
+      rp_mean = (rp_flat * mf).sum() / mask_sum
+      tp_mean = (tp_flat * mf).sum() / mask_sum
+      rp_d = (rp_flat - rp_mean) * mf
+      tp_d = (tp_flat - tp_mean) * mf
+      cov = (rp_d * tp_d).sum() / mask_sum
+      rp_var = (rp_d * rp_d).sum() / mask_sum
+      tp_var = (tp_d * tp_d).sum() / mask_sum
+      pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+      self.rl_cluster.buffer_metrics(
+          {
+              "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
+              "sampler_trainer/logp_diff_max": (diff_max, np.max),
+              "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
+              "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
+              "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
+          },
+          mode=mode,
+      )
+
+    if (
+        self.algo_config.sampler_is == "token"
+        and rollout_per_token_logps is not None
+        and trainer_per_token_logps is not None
+    ):
+      asst_mask_f = jax_completion_mask.astype(jnp.float32)
+      log_ratio = trainer_per_token_logps - rollout_per_token_logps
+      log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
+      sampler_is_weights = jax.lax.stop_gradient(
+          jnp.minimum(
+              jnp.exp(log_ratio),
+              self.algo_config.sampler_is_threshold,
+          )
+          * asst_mask_f
+      )
+      mask_sum = jnp.maximum(asst_mask_f.sum(), 1.0)
+      is_mean = float((sampler_is_weights * asst_mask_f).sum() / mask_sum)
+      is_max = float(jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max())
+      frac_clipped = float(
+          (
+              (
+                  (jnp.exp(log_ratio) > self.algo_config.sampler_is_threshold)
+                  & (asst_mask_f > 0)
+              ).astype(jnp.float32)
+          ).sum()
+          / mask_sum
+      )
+      self.rl_cluster.buffer_metrics(
+          {
+              "sampler_is/weight_mean": (is_mean, np.mean),
+              "sampler_is/weight_max": (is_max, np.max),
+              "sampler_is/frac_clipped_at_threshold": (
+                  frac_clipped,
+                  np.mean,
+              ),
+          },
+          mode=mode,
+      )
+
     # log user defined metrics
     for m_fn in self.metric_fns:
       user_defined_metric = m_fn(
@@ -370,6 +527,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ref_per_token_logps=ref_per_token_logps,
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
+        sampler_is_weights=sampler_is_weights,
     )
 
   def _compute_trajectory_ids(

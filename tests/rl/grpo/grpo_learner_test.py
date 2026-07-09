@@ -118,6 +118,7 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
           max_tokens_to_generate=10,
           max_prompt_length=256,
           kv_cache_size=1024,
+          return_logprobs=kwargs.get('return_logprobs', False),
       ),
   )
   rl_cluster = rl_cluster_lib.RLCluster(
@@ -358,6 +359,82 @@ class GRPOLearnerTest(parameterized.TestCase):
           / kwargs['eval_every_n_steps'],
           msg=f'metric_name: {metric_name}',
       )
+
+  def test_use_rollout_logps_false_uses_trainer_recomputed_old_logps(self):
+    rl_cluster, _, _ = setup()
+    actor_logps_calls = []
+
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -7.0, dtype=jnp.float32)
+
+    rl_cluster.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        use_rollout_logps=False,
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -7.0, dtype=np.float32),
+    )
+    self.assertIsNone(train_example.sampler_is_weights)
+
+  def test_sampler_is_token_uses_trainer_logps_and_sets_weights(self):
+    rl_cluster, _, _ = setup({'return_logprobs': True})
+    actor_logps_calls = []
+
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -3.0, dtype=jnp.float32)
+
+    rl_cluster.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        sampler_is='token',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -3.0, dtype=np.float32),
+    )
+    self.assertIsNotNone(train_example.sampler_is_weights)
+    self.assertEqual(
+        train_example.sampler_is_weights.shape,
+        train_example.completion_ids.shape,
+    )
 
   @parameterized.named_parameters(
       dict(
