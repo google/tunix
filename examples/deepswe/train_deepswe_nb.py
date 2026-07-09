@@ -309,7 +309,7 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as template_pars
 from tunix import PerfMetricsConfig
 from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from examples.deepswe.swe_agent import (
+from swe_agent import (
     SWE_SYSTEM_PROMPT,
     SWE_SYSTEM_PROMPT_FN_CALL,
     SWE_USER_PROMPT,
@@ -319,8 +319,8 @@ from examples.deepswe.swe_agent import (
 )
 
 # Assumed custom imports based on usage
-from examples.deepswe.swe_agent import SWEAgent
-from examples.deepswe.swe_env import SWEEnv
+from swe_agent import SWEAgent
+from swe_env import SWEEnv
 
 # %%
 # ==========================================
