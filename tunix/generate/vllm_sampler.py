@@ -19,6 +19,7 @@ import dataclasses
 import gc
 from itertools import count
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from absl import logging
@@ -153,6 +154,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
+    self._last_update_params_timings: Dict[str, float] = {}
 
     if config.server_mode:
       self._driver = self._create_driver()
@@ -168,6 +170,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # lora.
     if config.lora_config and config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
+
+  @property
+  def last_update_params_timings(self) -> Dict[str, float]:
+    return dict(self._last_update_params_timings)
 
   @property
   def mesh(self) -> jax.sharding.Mesh:
@@ -189,78 +195,99 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   ):
     del filter_types
 
-    if self.llm is not None:
-      self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache") # will free hbm
-    elif self._driver is not None:
-      self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    timings = {}
+    total_start = time.perf_counter()
+    try:
+      start = time.perf_counter()
+      if self.llm is not None:
+        self.llm.reset_prefix_cache()
+        self.llm.collective_rpc("delete_kv_cache")  # will free hbm
+      elif self._driver is not None:
+        self._driver.llm_engine.reset_prefix_cache()
+        self._driver.llm_engine.collective_rpc("delete_kv_cache")
+      timings["cache_delete"] = time.perf_counter() - start
 
-    # Synchronization point before weight sync
-    jax.effects_barrier()
+      # Synchronization point before weight sync
+      start = time.perf_counter()
+      jax.effects_barrier()
+      timings["barrier"] = time.perf_counter() - start
 
-    if self.to_hf_key_mappings:
-      preprocess_fn = self.config.mapping_config.preprocess_src_state
-      if preprocess_fn:
-        updated_weights = preprocess_fn(updated_weights)
+      if self.to_hf_key_mappings:
+        start = time.perf_counter()
+        preprocess_fn = self.config.mapping_config.preprocess_src_state
+        if preprocess_fn:
+          updated_weights = preprocess_fn(updated_weights)
+        timings["preprocess"] = time.perf_counter() - start
 
-      utils.transfer_state_with_mappings(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          key_mappings=self.to_hf_key_mappings,
-          key_mapping_hook_fns=self.to_hf_hook_fns,
-          transpose_keys=self.to_hf_transpose_keys,
-          reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=self.config.delete_dst_buffers,
-          reshard_chunk_size=self.config.reshard_chunk_size,
-          num_kv_heads=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.get_total_num_kv_heads()
-          ),
-          head_dim=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.get_head_size()
-          ),
-          tp_size=self.args.get("tensor_parallel_size", 1),
-      )
-    else:
-      # Direct Weight Sync (e.g. MaxText -> MaxText)
-      logging.debug(
-          "No key mappings configuration found. Proceeding with direct"
-          " structural weight synchronization (assuming matching source/target"
-          " structures)."
-      )
-
-      additional_config = self.config.additional_config or {}
-      if "maxtext_config" not in additional_config:
-        raise ValueError(
-            "Direct weight synchronization is currently supported only for "
-            "MaxText models. The required 'maxtext_config' key is missing "
-            "from 'additional_config'."
+        start = time.perf_counter()
+        utils.transfer_state_with_mappings(
+            src_state=updated_weights,
+            dst_state=self.transformer_state,
+            key_mappings=self.to_hf_key_mappings,
+            key_mapping_hook_fns=self.to_hf_hook_fns,
+            transpose_keys=self.to_hf_transpose_keys,
+            reshard_fn=reshard.reshard_pytree,
+            delete_dst_buffers=self.config.delete_dst_buffers,
+            reshard_chunk_size=self.config.reshard_chunk_size,
+            num_kv_heads=(
+                None
+                if not self._model_runner
+                else self._model_runner.model_config.get_total_num_kv_heads()
+            ),
+            head_dim=(
+                None
+                if not self._model_runner
+                else self._model_runner.model_config.get_head_size()
+            ),
+            tp_size=self.args.get("tensor_parallel_size", 1),
         )
-
-      utils.transfer_state_directly(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
-          reshard_chunk_size=self.config.reshard_chunk_size,
-      )
-
-    if hasattr(self._model_runner, "state_leaves"):
-      if isinstance(self._model_runner.state, nnx.State):
-        self._model_runner.state_leaves = tuple(
-            jax.tree_util.tree_leaves(self._model_runner.state)
-        )
+        timings["transfer"] = time.perf_counter() - start
       else:
-        self._model_runner.state_leaves = self._model_runner.state
+        timings["preprocess"] = 0.0
+        # Direct Weight Sync (e.g. MaxText -> MaxText)
+        logging.debug(
+            "No key mappings configuration found. Proceeding with direct"
+            " structural weight synchronization (assuming matching source/target"
+            " structures)."
+        )
 
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+        additional_config = self.config.additional_config or {}
+        if "maxtext_config" not in additional_config:
+          raise ValueError(
+              "Direct weight synchronization is currently supported only for "
+              "MaxText models. The required 'maxtext_config' key is missing "
+              "from 'additional_config'."
+          )
+
+        start = time.perf_counter()
+        utils.transfer_state_directly(
+            src_state=updated_weights,
+            dst_state=self.transformer_state,
+            reshard_fn=reshard.reshard_pytree,
+            delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
+            reshard_chunk_size=self.config.reshard_chunk_size,
+        )
+        timings["transfer"] = time.perf_counter() - start
+
+      start = time.perf_counter()
+      if hasattr(self._model_runner, "state_leaves"):
+        if isinstance(self._model_runner.state, nnx.State):
+          self._model_runner.state_leaves = tuple(
+              jax.tree_util.tree_leaves(self._model_runner.state)
+          )
+        else:
+          self._model_runner.state_leaves = self._model_runner.state
+      timings["state_leaves"] = time.perf_counter() - start
+
+      start = time.perf_counter()
+      if self.llm is not None:
+        self.llm.collective_rpc("reinitialize_kv_cache")
+      elif self._driver is not None:
+        self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+      timings["cache_reinit"] = time.perf_counter() - start
+    finally:
+      timings["total"] = time.perf_counter() - total_start
+      self._last_update_params_timings = timings
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading

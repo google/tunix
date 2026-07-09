@@ -136,6 +136,13 @@ class VllmRollout(base_rollout.BaseRollout):
   ) -> None:
     self._sampler.update_params(params, filter_types)
 
+  def get_last_update_params_metrics(self) -> Dict[str, Tuple[float, Any]]:
+    timings = getattr(self._sampler, "last_update_params_timings", {})
+    return {
+        f"perf/weight_sync_vllm_{name}_time": (value, None)
+        for name, value in timings.items()
+    }
+
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()
 
