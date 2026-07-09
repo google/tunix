@@ -241,21 +241,6 @@ class PerfMetricsExport:
             global_step_group, "pre_weight_sync_barrier"
         )
     )
-    weight_sync_get_actor_params_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_get_actor_params"
-        )
-    )
-    weight_sync_rollout_update_params_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_rollout_update_params"
-        )
-    )
-    weight_sync_anchor_snapshot_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_anchor_snapshot"
-        )
-    )
     weight_sync_span = (
         global_step_group.find_last_inner_span("weight_sync")
         or global_step_group.find_last_inner_group("weight_sync")
@@ -265,6 +250,27 @@ class PerfMetricsExport:
     if weight_sync_span is None:
       weight_sync_span = Span("weight_sync", global_step_group.end)
       weight_sync_span.end = global_step_group.end
+
+    search_root = (
+        weight_sync_span
+        if isinstance(weight_sync_span, SpanGroup)
+        else global_step_group
+    )
+    weight_sync_get_actor_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_get_actor_params"
+        )
+    )
+    weight_sync_rollout_update_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_rollout_update_params"
+        )
+    )
+    weight_sync_anchor_snapshot_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_anchor_snapshot"
+        )
+    )
 
     # Step 2: compute metrics from spans and span groups
 
@@ -360,21 +366,6 @@ class PerfMetricsExport:
             global_step_group, "pre_weight_sync_barrier"
         )
     )
-    weight_sync_get_actor_params_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_get_actor_params"
-        )
-    )
-    weight_sync_rollout_update_params_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_rollout_update_params"
-        )
-    )
-    weight_sync_anchor_snapshot_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_anchor_snapshot"
-        )
-    )
     weight_sync_span = (
         global_step_group.find_last_inner_span("weight_sync")
         or global_step_group.find_last_inner_group("weight_sync")
@@ -384,6 +375,27 @@ class PerfMetricsExport:
     if weight_sync_span is None:
       weight_sync_span = Span("weight_sync", global_step_group.end)
       weight_sync_span.end = global_step_group.end
+
+    search_root = (
+        weight_sync_span
+        if isinstance(weight_sync_span, SpanGroup)
+        else global_step_group
+    )
+    weight_sync_get_actor_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_get_actor_params"
+        )
+    )
+    weight_sync_rollout_update_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_rollout_update_params"
+        )
+    )
+    weight_sync_anchor_snapshot_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_anchor_snapshot"
+        )
+    )
 
     # Step 2: compute metrics from spans and span groups
 
@@ -494,21 +506,6 @@ class PerfMetricsExport:
             global_step_group, "pre_weight_sync_barrier"
         )
     )
-    weight_sync_get_actor_params_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_get_actor_params"
-        )
-    )
-    weight_sync_rollout_update_params_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_rollout_update_params"
-        )
-    )
-    weight_sync_anchor_snapshot_span = (
-        PerfMetricsExport._find_last_inner_span_or_zero(
-            global_step_group, "weight_sync_anchor_snapshot"
-        )
-    )
     weight_sync_span = (
         global_step_group.find_last_inner_span("weight_sync")
         or global_step_group.find_last_inner_group("weight_sync")
@@ -516,6 +513,27 @@ class PerfMetricsExport:
     if weight_sync_span is None:
       logging.warning("weight_sync is None")
       return {}
+
+    search_root = (
+        weight_sync_span
+        if isinstance(weight_sync_span, SpanGroup)
+        else global_step_group
+    )
+    weight_sync_get_actor_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_get_actor_params"
+        )
+    )
+    weight_sync_rollout_update_params_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_rollout_update_params"
+        )
+    )
+    weight_sync_anchor_snapshot_span = (
+        PerfMetricsExport._find_last_inner_span_or_zero(
+            search_root, "weight_sync_anchor_snapshot"
+        )
+    )
 
     # Step 2: compute metrics from spans and span groups
 
