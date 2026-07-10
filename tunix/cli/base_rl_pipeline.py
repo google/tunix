@@ -36,6 +36,7 @@ from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.utils import create_critic_model
 from tunix.rl.rollout import base_rollout
 from tunix.utils import mesh as mesh_lib
 
@@ -590,7 +591,10 @@ class BasePipeline(abc.ABC, config.HyperParameters):
       )
 
       # TODO: b/531803907 - Support all critic model types, not just Gemma
-      critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
+      if isinstance(critic_model, gemma_lib.Gemma):
+        critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
+      else:
+        critic_model = create_critic_model(critic_model, seed=rngs)
 
     cluster_config = self.create_cluster_config(
         role_to_mesh=role_to_mesh,
