@@ -239,6 +239,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
+    # Static upper bound on real sequences per packed micro-batch (train_micro
+    # prompts x num_generations); used to unpack [P, T] -> [n_max, T] for
+    # sequence-packing-aware loss aggregation. Only consumed when packing is on.
+    training_cfg = self.rl_cluster.cluster_config.training_config
+    unpack_n_max = (
+        training_cfg.train_micro_batch_size or training_cfg.mini_batch_size or 0
+    ) * self.algo_config.num_generations
     loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
         model,
         train_example,
@@ -246,6 +253,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         pad_id=self.rl_cluster.rollout.pad_id(),
         eos_id=self.rl_cluster.rollout.eos_id(),
         compute_logps_chunk_size=self.rl_cluster.cluster_config.training_config.compute_logps_chunk_size,
+        unpack_n_max=unpack_n_max,
     )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
