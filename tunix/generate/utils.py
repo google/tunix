@@ -843,15 +843,9 @@ def transfer_state_with_mappings(
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
-  dst_buffer_dict = None
 
   stage_start = time.perf_counter()
   if reshard_fn:
-    if kwargs.get('delete_dst_buffers', False):
-      dst_buffer_dict = {
-          key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
-          for key, tgt_params in tgt_flat_list
-      }
     sharding_dict = {
         key: (
             tgt_params.value.sharding
@@ -935,21 +929,17 @@ def transfer_state_with_mappings(
       stage_start = time.perf_counter()
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
-          spec_flat=(
-              dst_buffer_dict if dst_buffer_dict is not None else sharding_dict
-          ),  # pyrefly: ignore[bad-argument-type]
+          spec_flat=sharding_dict,  # pyrefly: ignore[bad-argument-type]
           reshard_fn=reshard_fn,
           chunk_size=kwargs['reshard_chunk_size'],
           delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
-      dst_buffer_dict = None
       if profile_timings is not None:
         profile_timings['reshard_chunks'] = time.perf_counter() - stage_start
     else:
       if kwargs.get('delete_dst_buffers', False):
         stage_start = time.perf_counter()
-        _delete_target_buffers(dst_buffer_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
-        dst_buffer_dict = None
+        _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
         if profile_timings is not None:
           profile_timings['delete_dst_buffers'] = (
               time.perf_counter() - stage_start
