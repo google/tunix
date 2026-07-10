@@ -166,7 +166,7 @@ def compute_logps(
     completion_logps = (completion_logps * completion_mask).sum(axis=-1)
 
     # Extract log probs for prompt + completion (excluding first token)
-    full_sequence_mask = full_mask[:, 1:]
+    full_sequence_mask = full_mask[:, 1:]  # pyrefly: ignore[unsupported-operation]
     full_logps = (token_logps * full_sequence_mask).sum(axis=-1)
 
     batch_size = token_logps.shape[0]
@@ -257,7 +257,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
     if self.algorithm == "orpo":
       self.with_gen_model_input_fn(
-          lambda x: {
+          lambda x: {  # pyrefly: ignore[bad-argument-type]
               "train_example": x,
               "algorithm": "orpo",
               "lambda_orpo": self.dpo_config.lambda_orpo,
@@ -278,7 +278,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
       }
     else:
       self.with_gen_model_input_fn(
-          lambda x: {
+          lambda x: {  # pyrefly: ignore[bad-argument-type]
               "train_example": x,
               "algorithm": "dpo",
               "beta": self.dpo_config.beta,
@@ -342,7 +342,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         )
 
       training_input = process_dpo_record(
-          record={
+          record={  # pyrefly: ignore[bad-argument-type]
               "prompts": training_input.prompts,
               "images": training_input.images,
               "chosen_responses": training_input.chosen_responses,
@@ -499,7 +499,7 @@ def dpo_loss_fn(
     # SFT log probs (can include prompt)
     if enable_prompt_loss_orpo:
       if average_log_prob_orpo:
-        chosen_full_mask = train_example.full_mask[:batch_size, 1:]
+        chosen_full_mask = train_example.full_mask[:batch_size, 1:]  # pyrefly: ignore[unsupported-operation]
         chosen_sft_lengths = jnp.maximum(chosen_full_mask.sum(axis=-1), 1.0)
         sft_loss = -prompt_chosen_logps / chosen_sft_lengths
       else:
@@ -627,7 +627,7 @@ def _preprocess_dict(
       for field in tokenized_input_fields
       if field != "images"
   ):
-    return TrainingInput(**{
+    return TrainingInput(**{  # pyrefly: ignore[bad-argument-type]
         field: training_input.get(field, None)
         for field in tokenized_input_fields
     })
@@ -636,7 +636,7 @@ def _preprocess_dict(
       for field in data_input_fields
       if field != "images"
   ):
-    return DataInput(**{
+    return DataInput(**{  # pyrefly: ignore[bad-argument-type]
         field: training_input.get(field, None) for field in data_input_fields
     })
   else:
@@ -697,16 +697,16 @@ def process_dpo_record(
 
   # Only prompt is left padded, others are right padded.
   prompt_ids, prompt_mask = _generate_ids_and_masks(
-      prompts,
+      prompts,  # pyrefly: ignore[bad-argument-type]
       tokenizer,
       max_prompt_length,
       left_pad=True,
   )
   chosen_ids, chosen_mask = _generate_ids_and_masks(
-      chosen_responses, tokenizer, max_response_length, left_pad=False
+      chosen_responses, tokenizer, max_response_length, left_pad=False  # pyrefly: ignore[bad-argument-type]
   )
   rejected_ids, rejected_mask = _generate_ids_and_masks(
-      rejected_responses, tokenizer, max_response_length, left_pad=False
+      rejected_responses, tokenizer, max_response_length, left_pad=False  # pyrefly: ignore[bad-argument-type]
   )
   if images is not None:
     if image_processor is None:
@@ -725,7 +725,7 @@ def process_dpo_record(
     chosen_mask = jnp.squeeze(chosen_mask, axis=0)
     rejected_mask = jnp.squeeze(rejected_mask, axis=0)
     if images is not None:
-      images = jnp.squeeze(images, axis=0)
+      images = jnp.squeeze(images, axis=0)  # pyrefly: ignore[bad-argument-type]
 
   return TrainingInput(
       prompt_ids=prompt_ids,
@@ -734,7 +734,7 @@ def process_dpo_record(
       chosen_mask=chosen_mask,
       rejected_ids=rejected_ids,
       rejected_mask=rejected_mask,
-      images=images,
+      images=images,  # pyrefly: ignore[bad-argument-type]
   )
 
 

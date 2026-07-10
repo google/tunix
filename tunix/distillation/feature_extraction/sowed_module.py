@@ -96,7 +96,7 @@ def wrap_model_with_sowed_modules(
       if isinstance(part, str):
         current_parent_obj = getattr(current_parent_obj, part)
       elif isinstance(part, int):
-        current_parent_obj = current_parent_obj[part]
+        current_parent_obj = current_parent_obj[part]  # pyrefly: ignore[bad-index]
       else:
         raise TypeError(
             f"Unsupported path part type: {type(part)}. Path: {path}"
@@ -112,7 +112,7 @@ def wrap_model_with_sowed_modules(
       setattr(current_parent_obj, last_key, wrapped_instance)
     elif isinstance(last_key, int):
       # If the parent is a sequence, try to modify in-place
-      current_parent_obj[last_key] = wrapped_instance
+      current_parent_obj[last_key] = wrapped_instance  # pyrefly: ignore[unsupported-operation]
     else:
       raise TypeError(
           f"Unsupported key type for replacement: {type(last_key)}. Path:"
@@ -160,7 +160,7 @@ def unwrap_sowed_modules(model: nnx.Module):
       if isinstance(part, str):
         current_parent_obj = getattr(current_parent_obj, part)
       elif isinstance(part, int):
-        current_parent_obj = current_parent_obj[part]
+        current_parent_obj = current_parent_obj[part]  # pyrefly: ignore[bad-index]
       else:
         raise TypeError(
             f"Unsupported path part type: {type(part)}. Path: {path}"
@@ -171,7 +171,7 @@ def unwrap_sowed_modules(model: nnx.Module):
     if isinstance(last_key, str):
       setattr(current_parent_obj, last_key, original_module)
     elif isinstance(last_key, int):
-      current_parent_obj[last_key] = original_module
+      current_parent_obj[last_key] = original_module  # pyrefly: ignore[unsupported-operation]
     else:
       raise TypeError(
           f"Unsupported key type for replacement: {type(last_key)}. Path:"

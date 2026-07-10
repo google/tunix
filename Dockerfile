@@ -35,13 +35,7 @@ COPY . .
 # Install the project in editable mode
 RUN pip install -e .
 
-ENV VLLM_TARGET_DEVICE=tpu
-
-RUN pip install -r /app/requirements/requirements.txt
-RUN pip install -r /app/requirements/special_requirements.txt
-
-# Tpu-inference pins qwix to 0.1.2 causing lora issues.
-RUN pip install --no-deps "qwix>=0.1.6"
+RUN bash /app/scripts/install_tunix_vllm_requirement.sh
 
 # Set the default command to bash
 CMD ["bash"]

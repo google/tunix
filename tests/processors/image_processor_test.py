@@ -108,7 +108,7 @@ class ImageProcessorTest(parameterized.TestCase):
     img1 = np.zeros((100, 100, 3), dtype=np.uint8)
     img2 = np.zeros((50, 50, 3), dtype=np.uint8)
     images = [img1, img2]
-    processed_images = self.processor(images=images)
+    processed_images = self.processor(images=images)  # pyrefly: ignore[bad-argument-type]
     np.testing.assert_allclose(
         processed_images[0][0], -1.0 * np.ones((self.height, self.width, 3))
     )
@@ -129,7 +129,7 @@ class ImageProcessorTest(parameterized.TestCase):
     else:
       images = [img1, [img1, img2]]
 
-    processed_images = self.processor(images=images)
+    processed_images = self.processor(images=images)  # pyrefly: ignore[bad-argument-type]
     np.testing.assert_allclose(
         processed_images[0][0], -1.0 * np.ones((self.height, self.width, 3))
     )
@@ -148,7 +148,7 @@ class ImageProcessorTest(parameterized.TestCase):
     img1 = np.zeros((100, 100, 3), dtype=np.uint8)
     img2 = self._create_dummy_image_file()
     images = [img1, [img1, img2]]
-    processed_images = self.processor(images=images)
+    processed_images = self.processor(images=images)  # pyrefly: ignore[bad-argument-type]
     np.testing.assert_allclose(
         processed_images[0][0], -1.0 * np.ones((self.height, self.width, 3))
     )
@@ -164,7 +164,7 @@ class ImageProcessorTest(parameterized.TestCase):
 
   def test_call_with_none_in_batch(self):
     images = [None, [np.zeros((100, 100, 3), dtype=np.uint8)]]
-    processed_images = self.processor(images=images)
+    processed_images = self.processor(images=images)  # pyrefly: ignore[bad-argument-type]
     np.testing.assert_allclose(
         processed_images[0][0], np.zeros((self.height, self.width, 3))
     )

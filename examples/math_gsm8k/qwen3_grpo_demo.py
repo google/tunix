@@ -14,8 +14,7 @@
 
 """Agentic GSM8K VTC GRPO recipe for Qwen3-1.7B.
 
-This script keeps the current VTC recipe content intact while following the
-same pipeline layout as the FrozenLake Qwen3 recipe:
+This script contains the following components:
 
 1. logging / runtime setup
 2. argparse + recipe defaults
@@ -75,6 +74,7 @@ import numpy as np
 import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
+
 # For OSS usage
 # import tensorflow_datasets.text.gsm8k
 from transformers import AutoTokenizer

@@ -424,9 +424,9 @@ class Attention(nnx.Module):
     value_proj = self.value_norm(value_proj)
 
     if self.shd_config:
-      query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)
-      key_proj = sharding_utils.shard(key_proj, self.shd_config.act_bskh)
-      value_proj = sharding_utils.shard(value_proj, self.shd_config.act_bskh)
+      query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+      key_proj = sharding_utils.shard(key_proj, self.shd_config.act_bskh)  # pyrefly: ignore[bad-argument-type]
+      value_proj = sharding_utils.shard(value_proj, self.shd_config.act_bskh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_multidimensional_rope(
         query_proj,
@@ -446,11 +446,11 @@ class Attention(nnx.Module):
     )
 
     if self.shd_config:
-      attn_vec = sharding_utils.shard(attn_vec, self.shd_config.act_btnh)
+      attn_vec = sharding_utils.shard(attn_vec, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     attn_output = self.attn_vec_einsum('BTNH,NHD->BTD', attn_vec)
     if self.shd_config:
-      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
+      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return attn_output
 
   def _compute_attn_vec(
@@ -488,7 +488,7 @@ class Attention(nnx.Module):
         attn_logits += attn_mask[:, None, None, :, :]
 
     if self.shd_config:
-      attn_logits = sharding_utils.shard(attn_logits, self.shd_config.act_bkgts)
+      attn_logits = sharding_utils.shard(attn_logits, self.shd_config.act_bkgts)  # pyrefly: ignore[bad-argument-type]
 
     attn_weights = jax.nn.softmax(attn_logits, axis=-1).astype(v.dtype)
     result = jnp.einsum('bkgts,bskh->btkgh', attn_weights, v)
@@ -527,10 +527,10 @@ class FeedForward(nnx.Module):
     gate = self.gating_einsum('btd,cfd->btcf', x)
     activations = nnx.gelu(gate[..., 0, :]) * gate[..., 1, :]
     if self.shd_config:
-      activations = sharding_utils.shard(activations, self.shd_config.act_btf)
+      activations = sharding_utils.shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
     out = self.linear('btf,fd->btd', activations)
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)
+      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return out
 
 
@@ -604,11 +604,11 @@ class VisionBlock(nnx.Module):
       attn_mask: jax.Array | None,
   ) -> jax.Array:
     if self.shd_config:
-      inputs = sharding_utils.shard(inputs, self.shd_config.act_btd)
+      inputs = sharding_utils.shard(inputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     normed_inputs = self.pre_attention_norm(inputs)
     if self.shd_config:
       normed_inputs = sharding_utils.shard(
-          normed_inputs, self.shd_config.act_btd
+          normed_inputs, self.shd_config.act_btd  # pyrefly: ignore[bad-argument-type]
       )
     attn_output = self.attn(
         x=normed_inputs,
@@ -617,15 +617,15 @@ class VisionBlock(nnx.Module):
     )
     attn_output = self.post_attention_norm(attn_output)
     if self.shd_config:
-      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
+      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     attn_output += inputs
     outputs = self.pre_ffw_norm(attn_output)
     if self.shd_config:
-      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)
+      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     outputs = self.mlp(outputs)
     outputs = self.post_ffw_norm(outputs)
     if self.shd_config:
-      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)
+      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     outputs += attn_output
     return outputs
 
@@ -671,15 +671,15 @@ class VisionEntry(nnx.Module):
     patches = 2.0 * (patches - 0.5)
     x = self.input_projection('btm,md->btd', patches)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)
+      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     pos_embed = factorized_posemb(self.pos_emb.value, positions_xy).astype(
         x.dtype
     )
     if self.shd_config:
-      pos_embed = sharding_utils.shard(pos_embed, self.shd_config.act_btd)
+      pos_embed = sharding_utils.shard(pos_embed, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     out = x + pos_embed
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)
+      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return out
 
 
@@ -841,7 +841,7 @@ class VisionEncoder(nnx.Module):
     if self.shd_config:
       sharded_outputs = []
       for emb, mask in outputs:
-        emb = sharding_utils.shard(emb, self.shd_config.act_btd)
+        emb = sharding_utils.shard(emb, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
         sharded_outputs.append((emb, mask))
       outputs = tuple(sharded_outputs)
 

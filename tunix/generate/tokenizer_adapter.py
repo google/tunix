@@ -26,9 +26,9 @@ import sentencepiece as spm
 
 
 class TokenizerType(enum.Enum):
-  SP: str = 'sp'  # sentencepiece tokenizer
-  HF: str = 'hf'  # huggingface tokenizer
-  NONE: str = 'none'  # Represents no tokenizer
+  SP: str = 'sp'  # sentencepiece tokenizer  # pyrefly: ignore[invalid-annotation]
+  HF: str = 'hf'  # huggingface tokenizer  # pyrefly: ignore[invalid-annotation]
+  NONE: str = 'none'  # Represents no tokenizer  # pyrefly: ignore[invalid-annotation]
 
 
 class TokenizerAdapter:
@@ -98,7 +98,7 @@ class TokenizerAdapter:
       # e.g. llama3 HF tokenizers do not have pad_id
       if self._tokenizer.pad_token_id is None:
         self._tokenizer.pad_token = self._tokenizer.eos_token
-      return self._tokenizer.pad_token_id
+      return self._tokenizer.pad_token_id  # pyrefly: ignore[bad-return]
     else:
       return self._tokenizer.pad_id()
 

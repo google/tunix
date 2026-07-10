@@ -336,7 +336,7 @@ class Embedder(nnx.Module):
           vision_proj_dim,
           rngs=rngs,
           param_dtype=param_dtype,
-          sharding=shd_config.vision_soft_emb_norm_weight,
+          sharding=shd_config.vision_soft_emb_norm_weight,  # pyrefly: ignore[bad-argument-type]
       )
       self.mm_input_projection = Einsum(
           einsum_str='...TM,MD->...TD',
@@ -351,7 +351,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
-    x = sharding_utils.shard(x, self.shd_config.act_btd)
+    x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -360,7 +360,7 @@ class Embedder(nnx.Module):
 
   @jax.named_scope('embedder_encode_vision')
   def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    x = self.mm_soft_embedding_norm(x)
+    x = self.mm_soft_embedding_norm(x)  # pyrefly: ignore[bad-argument-type]
     x = self.mm_input_projection(x)
     return x
 
@@ -576,9 +576,9 @@ class Attention(nnx.Module):
       query_proj = self.q_einsum(x)
       key_proj, value_proj = self.kv_einsum(x)
 
-    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)
-    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)
-    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)
+    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = self._query_norm(query_proj)
     key_proj = self._key_norm(key_proj)
@@ -630,13 +630,13 @@ class Attention(nnx.Module):
       if segment_pos.shape[1] == 1:  # for decoding
         sliding_mask = create_sliding_window_mask(
             attn_mask,
-            sliding_window_size=self.sliding_window_size,
+            sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
         )
       else:  # for prefill
         all_ones = jnp.ones_like(attn_mask)
         sliding_mask = jnp.triu(
-            all_ones, -1 * self.sliding_window_size + 1
-        ) * jnp.tril(all_ones, self.sliding_window_size - 1)
+            all_ones, -1 * self.sliding_window_size + 1  # pyrefly: ignore[unsupported-operation]
+        ) * jnp.tril(all_ones, self.sliding_window_size - 1)  # pyrefly: ignore[unsupported-operation]
       attn_mask = sliding_mask * attn_mask
 
     padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
@@ -657,7 +657,7 @@ class Attention(nnx.Module):
       encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
+    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -784,7 +784,7 @@ class FeedForward(nnx.Module):
     ff1 = self.up_proj(x)
     activations = gate_value * ff1
     activations = sharding_utils.shard(
-        activations, self.config.shd_config.act_btf
+        activations, self.config.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
     )
     outputs = self.down_proj(activations)
     return outputs
@@ -794,7 +794,7 @@ class FeedForward(nnx.Module):
     if self.config.remat_config == RematConfig.BLOCK:
       return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
-      return self.block(x)
+      return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
 
 class DecoderLayer(nnx.Module):
@@ -811,7 +811,7 @@ class DecoderLayer(nnx.Module):
     self.pre_attention_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
     self.attn = Attention(
@@ -836,13 +836,13 @@ class DecoderLayer(nnx.Module):
     self.post_attention_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
     self.pre_ffw_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
     self.mlp = FeedForward(
@@ -852,7 +852,7 @@ class DecoderLayer(nnx.Module):
     self.post_ffw_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
 
@@ -908,7 +908,7 @@ class RMSNorm(nnx.Module):
       param_dtype: jnp.dtype = jnp.bfloat16,
   ):
     self.scale = nnx.Param(
-        nnx.initializers.zeros_init()(rngs.params(), dim).astype(param_dtype),
+        nnx.initializers.zeros_init()(rngs.params(), dim).astype(param_dtype),  # pyrefly: ignore[bad-argument-type]
         sharding=sharding,
     )
 
@@ -965,7 +965,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
 
@@ -1012,9 +1012,9 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       with jax.named_scope(layer_name):
         layer_cache, x = layer(
             x,
-            positions,
+            positions,  # pyrefly: ignore[bad-argument-type]
             layer_cache,
-            attention_mask,
+            attention_mask,  # pyrefly: ignore[bad-argument-type]
         )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch

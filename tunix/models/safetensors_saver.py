@@ -69,12 +69,12 @@ def save_lora_merged_model_as_safetensors(
       path_str = join_path(path[:-1])
       if path_str in lora_layers:
         assert (
-            'lora_b' in path[-1]
+            'lora_b' in path[-1]  # pyrefly: ignore[not-iterable]
         ), f'Expect second LoRAParam to be lora_b, got {path[-1]}'
         lora_layers[path_str].append(value)
       else:
         assert (
-            'lora_a' in path[-1]
+            'lora_a' in path[-1]  # pyrefly: ignore[not-iterable]
         ), f'Expect first LoRAParam to be lora_a, got {path[-1]}'
         lora_layers[path_str] = [value]
 

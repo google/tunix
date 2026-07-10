@@ -1,6 +1,6 @@
 """Agentic FrozenLake GRPO recipe for Gemma4-2B on a single TPU host.
 
-Designed for v5p-8 / v6e-4 -class hosts where actor, reference, and rollout
+Designed for v5p-4 / v6e-8 -class hosts where actor, reference, and rollout
 share a single mesh. Configuration is env-driven so the same image runs
 unchanged on any spot VM:
 
@@ -175,7 +175,7 @@ SEED = args.seed
 # if _mesh_env:
 #   SHARED_MESH_SHAPE = tuple(int(x) for x in _mesh_env.split(","))
 # else:
-ROLLOUT_MESH_SHAPE = (1, jax.device_count())
+ROLLOUT_MESH_SHAPE = (2, jax.device_count()//2)
 TRAINER_MESH_SHAPE = (jax.device_count(), 1)
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 # ====== GRPO ======
@@ -191,7 +191,7 @@ NUM_GENERATIONS = args.num_generations
 # some headroom without provisioning a huge unused KV-cache pool — on a
 # shared trainer+rollout mesh that KV-cache pool consumes HBM that the
 # trainer needs at peak (logits + activations + optimizer state).
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = 32
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
 
 NUM_ITERATIONS = 1
@@ -369,7 +369,7 @@ show_hbm_usage("Done with loading datasets")
 
 config = model_lib.ModelConfig.gemma4_e2b()
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
@@ -453,7 +453,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.28,
+    "rollout_vllm_hbm_utilization": 0.2,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -470,16 +470,12 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
-        "limit_mm_per_prompt": {
-            "image": 0,
-            "video": 0,
-            "audio": 0,
-        },
         "hf_overrides": {
             "final_logit_softcapping": 30.0,
             "text_config": {
                 "final_logit_softcapping": 30.0,
             },
+            "architectures": ["Gemma4ForCausalLM"],
         },
     },
     "rollout_vllm_sampling_kwargs": {
@@ -529,11 +525,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # invokes the trainer ``mini_batch_size // train_micro_batch_size``
         # times, so the optimizer still sees a ``mini_batch_size`` gradient
         # per update.
-        train_micro_batch_size=1,
-        compute_logps_micro_batch_size=1,
+        train_micro_batch_size=2,
+        compute_logps_micro_batch_size=2,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
+        compute_logps_chunk_size=2048,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -561,7 +558,6 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     advantage_estimator=args.advantage_estimator,
-    degenerate_group_masking=False,
 )
 
 rl_cluster = rl_cluster_lib.RLCluster(

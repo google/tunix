@@ -210,7 +210,7 @@ class PeftTrainer:
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(
+      optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
           optimizer, training_config.gradient_accumulation_steps
       )
     if self._lora_enabled:
@@ -304,8 +304,8 @@ class PeftTrainer:
       has_aux: bool = False,
   ):
     self.clear_jit_cache()
-    self.loss_fn = loss_fn
-    self.eval_loss_fn = loss_fn
+    self.loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
+    self.eval_loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
     self._has_aux = has_aux
     return self
 
@@ -325,7 +325,7 @@ class PeftTrainer:
       PeftTrainer.
     """
     self.clear_jit_cache()
-    self.gen_model_input_fn = gen_model_input_fn
+    self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
     return self
 
   def _train_step(
@@ -364,7 +364,7 @@ class PeftTrainer:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if self._has_aux:
-      loss, aux = out
+      loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
     else:
       return out, None
@@ -377,7 +377,7 @@ class PeftTrainer:
 
   def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
     """Creates the eval step function."""
-    return self._eval_step
+    return self._eval_step  # pyrefly: ignore[bad-return]
 
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
     """Optimizer states should be sharded before calling the jit function.
@@ -470,13 +470,13 @@ class PeftTrainer:
   ):
     """Logs the metrics to the metrics logger and console."""
     perplexity = np.exp(jax.device_get(loss))
-    self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)
-    self.metrics_logger.log(
+    self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)  # pyrefly: ignore[missing-attribute]
+    self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
     )
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
-      self.metrics_logger.log(
+      self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
           self.metrics_prefix,
           "learning_rate",
           jax.device_get(learning_rate),
@@ -492,7 +492,7 @@ class PeftTrainer:
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)
+      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
 
   def _buffer_metrics(
       self,
@@ -618,7 +618,7 @@ class PeftTrainer:
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
           metrics_prefix=self.metrics_prefix,
-          metrics_logger=self.metrics_logger,
+          metrics_logger=self.metrics_logger,  # pyrefly: ignore[bad-argument-type]
           initial_steps=self._train_steps,
           max_steps=self.config.max_steps,
           description=self.config.pbar_description,
@@ -788,7 +788,7 @@ class PeftTrainer:
     self._write_train_metrics()
     self._save_last_checkpoint()
     self.checkpoint_manager.close()
-    self.metrics_logger.close()
+    self.metrics_logger.close()  # pyrefly: ignore[missing-attribute]
     if self._pbar is not None:
       self._pbar.close()
       self._pbar = None
@@ -836,12 +836,12 @@ class PeftTrainer:
         )
         return
 
-      self._write_metrics(self._buffered_eval_metrics)
+      self._write_metrics(self._buffered_eval_metrics)  # pyrefly: ignore[bad-argument-type]
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
           self._train_steps,
-          self.metrics_logger.get_metric(self.metrics_prefix, "loss", "eval"),
-          self.metrics_logger.get_metric(
+          self.metrics_logger.get_metric(self.metrics_prefix, "loss", "eval"),  # pyrefly: ignore[missing-attribute]
+          self.metrics_logger.get_metric(  # pyrefly: ignore[missing-attribute]
               self.metrics_prefix, "perplexity", "eval"
           ),
       )

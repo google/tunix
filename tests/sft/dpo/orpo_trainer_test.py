@@ -155,13 +155,13 @@ class ORPOTrainerTest(parameterized.TestCase):
         "odds_ratio",
     ]:
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           orpo_trainer._train_steps,
       )
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "eval"
           ),
           3,
@@ -221,7 +221,7 @@ class ORPOTrainerTest(parameterized.TestCase):
         "rewards/accuracy",
     ]:
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           orpo_trainer._train_steps,

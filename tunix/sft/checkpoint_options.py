@@ -99,10 +99,10 @@ class TunixCheckpointingOptions:
 # - Use async checkpointing.
 # - Timeout for async operations is 1200 seconds.
 DEFAULT_CHECKPOINTING_OPTIONS = TunixCheckpointingOptions(
-    save_decision_policy=ocp.training.save_decision_policies.ContinuousCheckpointingPolicy(
+    save_decision_policy=ocp.training.save_decision_policies.ContinuousCheckpointingPolicy(  # pyrefly: ignore[bad-argument-type]
         minimum_interval_secs=180,
     ),
-    preservation_policy=ocp.training.preservation_policies.LatestN(n=3),
+    preservation_policy=ocp.training.preservation_policies.LatestN(n=3),  # pyrefly: ignore[bad-argument-type]
     step_name_format=ocp.path.step.standard_name_format(),
     enable_async_checkpointing=True,
     async_options=ocp.options.AsyncOptions(timeout_secs=1200),
@@ -206,9 +206,9 @@ def resolve_checkpointing_defaults(
     async_options = DEFAULT_CHECKPOINTING_OPTIONS.async_options
 
   return create_checkpointing_options(
-      save_decision_policy=save_policy,
-      preservation_policy=preserve_policy,
-      step_name_format=step_name_format,
+      save_decision_policy=save_policy,  # pyrefly: ignore[bad-argument-type]
+      preservation_policy=preserve_policy,  # pyrefly: ignore[bad-argument-type]
+      step_name_format=step_name_format,  # pyrefly: ignore[bad-argument-type]
       enable_async_checkpointing=enable_async,
       async_options=async_options,
   )

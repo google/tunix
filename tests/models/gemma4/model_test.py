@@ -220,7 +220,7 @@ class ModelTest(absltest.TestCase):
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
     )
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -277,7 +277,7 @@ class ModelTest(absltest.TestCase):
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
     )
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -337,9 +337,9 @@ class ModelTest(absltest.TestCase):
         jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.num_embed
     )
     # Image placeholders: token shape represents visual soft tokens within sequences.
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
-    tokens = tokens.at[1, 5:8].set(model_lib.TOKEN_PLACEHOLDER)
-    tokens = tokens.at[1, 20:25].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:8].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 20:25].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -374,6 +374,124 @@ class ModelTest(absltest.TestCase):
         positions=positions,
         attention_mask=attn_mask,
         images=images,
+    )
+    self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
+
+  def test_forward_pass_audio(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=256,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    key = jax.random.key(0)
+
+    batch_size = 1
+    num_clips = 1
+    num_samples = 16000
+    key, audio_key = jax.random.split(key)
+    audio = jax.random.normal(audio_key, (batch_size, num_clips, num_samples))
+    audio_seq_len = jnp.array([[num_samples]])
+    audios = model_lib.PreprocessedAudioInput(
+        audios=audio,
+        sequence_lengths=audio_seq_len,
+    )
+
+    seq_len = 32  # total num of tokens
+    _, token_key = jax.random.split(key)
+    tokens = jax.random.randint(
+        token_key, (batch_size, seq_len), 0, config.num_embed
+    )
+    # 16000 audio samples => 25 soft tokens
+    tokens = tokens.at[0, 5:30].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(jnp.arange(seq_len)[None, :], (batch_size, 1))
+    attn_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
+    )
+    self.assertEqual(logits.shape, (batch_size, 32, config.num_embed))
+
+  def test_forward_pass_audio_heterogeneous(self):
+    """Test batch with varying number of clips and audio sequence_lengths."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=256,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    key = jax.random.key(0)
+
+    batch_size = 2
+    max_clips = 2
+    num_samples = 16000  # Max samples per clip
+
+    # Batch 0: 1 valid clip (16000), 1 padding clip (0)
+    # Batch 1: 1 valid clip (16000), 1 valid clip (8000)
+    sequence_lengths = jnp.array([[16000, 0], [16000, 8000]])
+
+    key, audio_key = jax.random.split(key)
+    audio = jax.random.normal(audio_key, (batch_size, max_clips, num_samples))
+
+    # Total soft tokens:
+    # 16000 samples => 25 soft tokens
+    # 8000 samples => 12 soft tokens
+    # Batch 0: 25 + 0 = 25 valid soft tokens
+    # Batch 1: 25 + 12 = 37 valid soft tokens
+
+    seq_len = 64  # Total text sequence length
+    _, token_key = jax.random.split(key)
+    tokens = jax.random.randint(
+        token_key, (batch_size, seq_len), 0, config.num_embed
+    )
+
+    # Inject placeholders
+    tokens = tokens.at[0, 5:30].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:42].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(jnp.arange(seq_len)[None, :], (batch_size, 1))
+    attn_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    audios = model_lib.PreprocessedAudioInput(
+        audios=audio,
+        sequence_lengths=sequence_lengths,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
     )
     self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
 

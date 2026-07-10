@@ -166,7 +166,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = self.rl_cluster.get_rollout_config(
+    self.algo_config.temperature = self.rl_cluster.get_rollout_config(  # pyrefly: ignore[missing-attribute]
         mode=rl_cluster_lib.Mode.TRAIN
     ).temperature
 
@@ -190,7 +190,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {
+        lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
             "algo_config": self.algo_config,
         }
@@ -199,7 +199,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         "kl": np.mean,
         "pg_clipfrac": np.mean,
     })
-    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
+    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
 
@@ -224,7 +224,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    training_input["prompts"] = list(training_input["prompts"])
+    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type]
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
 
@@ -237,7 +237,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         prompts=training_input["prompts"],
         mode=mode,
         micro_batch_size=(
-            self._rollout_micro_batch_size * self.algo_config.num_generations
+            self._rollout_micro_batch_size * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
         ),
         trace_tags=perf_tags,
     )
@@ -274,7 +274,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=(
-                self._compute_logps_micro_batch_size
+                self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
                 * self.algo_config.num_generations
             ),
         )
@@ -293,7 +293,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             prompt_tokens=prompt_ids,
             completion_tokens=jax_completion_ids,
             micro_batch_size=(
-                self._compute_logps_micro_batch_size
+                self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
                 * self.algo_config.num_generations
             ),
         )
@@ -312,7 +312,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           prompts=training_input["prompts"],
           completions=rollout_output.text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},
+          **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
       )
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
@@ -388,7 +388,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
-    batch_size = len(example["prompts"]) // self.algo_config.num_generations
+    batch_size = len(example["prompts"]) // self.algo_config.num_generations  # pyrefly: ignore[bad-argument-type]
     row_offset = steps * batch_size
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),

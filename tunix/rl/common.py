@@ -79,8 +79,8 @@ class RepeatIterable(Iterable[Any]):
 
     # Slice the rollout batch into mini-batches.
     for i in range(num_mini_batches):
-      start = i * self._mini_batch_size
-      end = start + self._mini_batch_size
+      start = i * self._mini_batch_size  # pyrefly: ignore[unsupported-operation]
+      end = start + self._mini_batch_size  # pyrefly: ignore[unsupported-operation]
       batch_indices = shuffled_indices[start:end]
 
       mini_batch = jtu.tree_map(
@@ -424,16 +424,16 @@ def compute_per_token_logps(
       )
       if return_entropy:
         per_token_entropy = jnp.pad(
-            per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0
+            per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0  # pyrefly: ignore[unbound-name]
         )
 
     if stop_gradient:
       per_token_logps = jax.lax.stop_gradient(per_token_logps)
       if return_entropy:
-        per_token_entropy = jax.lax.stop_gradient(per_token_entropy)
+        per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
 
     if return_entropy:
-      return per_token_logps, per_token_entropy
+      return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
     return per_token_logps
   else:
     logits = outputs[:, -logits_to_keep - 1 : -1, :]
@@ -700,8 +700,6 @@ def aggregate_loss(
   """
 
   per_token_loss = per_token_loss.astype(jnp.float32)
-  seq_mask = completion_mask.sum(axis=-1)
-  non_zero_rows = jnp.clip((seq_mask > 0).sum(), min=1)
 
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
@@ -714,7 +712,7 @@ def aggregate_loss(
     seq_loss = ((per_token_loss * completion_mask).sum(axis=-1)) / jnp.clip(
         seq_mask, min=1
     )
-    loss = seq_loss.sum() / non_zero_rows
+    loss = seq_loss.mean()
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
@@ -723,7 +721,7 @@ def aggregate_loss(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    loss = seq_loss.sum() / non_zero_rows
+    loss = seq_loss.mean()
   elif loss_agg_mode == "seq-mean-token-sum":
     # 1) sum token losses within each sequence
     # 2) average only across sequences that have at least one valid token
@@ -731,9 +729,8 @@ def aggregate_loss(
     seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
     loss = (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
-    # Get custom normalization factor from kwargs, default to number of
-    # non-empty rows.
-    norm = _check_get_norm(kwargs, non_zero_rows)
+    # Get custom normalization factor from kwargs, default to batch size.
+    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
 
     # Sum the per-sequence sums and normalize
     # TODO(sizhi): Experiment with loss in precision if loss is fp16.
@@ -764,8 +761,8 @@ def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
 
 
 def _check_get_norm(
-    arguments: dict[str, Any], default: float | int | jax.Array
-) -> float | jax.Array:
+  arguments: dict[str, Any], default: float | int
+) -> float:
   """Get custom normalization factor from kwargs with a default value.
 
   Args:
@@ -778,16 +775,9 @@ def _check_get_norm(
   Raises:
       ValueError: If the 'norm' key is present but has an invalid value or type.
   """
-  norm = arguments.get("norm", default)
-  if isinstance(norm, (int, float, jax.Array, np.ndarray)):
-    if isinstance(norm, (int, float)):
-      if norm <= 0:
-        raise ValueError(
-            f"Invalid 'norm' value: {norm}. Must be a positive number."
-        )
-    return norm
-
-  raise ValueError(
-      f"Invalid 'norm' value: {norm}. Must be a positive number (int, float,"
-      " or jax.Array)."
-  )
+  norm = arguments.get("norm", float(default))
+  if not isinstance(norm, (int, float)) or norm <= 0:
+    raise ValueError(
+        f"Invalid 'norm' value: {norm}. Must be a positive number."
+    )
+  return norm  # pyrefly: ignore[bad-return]

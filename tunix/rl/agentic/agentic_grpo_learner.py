@@ -83,7 +83,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     off_policy_steps: Number of off-policy steps can be accepted before a policy
       update.
     degenerate_group_masking: Whether to mask out degenerate groups with all-0
-      advantages.
+      advantages. Deprecated. Will remove in the next release.
   """
 
   algo_variant: str = "agentic_grpo"
@@ -106,6 +106,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
+  # Deprecated. Will remove in the next release.
   degenerate_group_masking: bool = (
       False  # Whether to mask out degenerate groups with all-0 advantages.
   )
@@ -230,7 +231,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
-    self.algo_config.temperature = self.rl_cluster.get_rollout_config(
+    self.algo_config.temperature = self.rl_cluster.get_rollout_config(  # pyrefly: ignore[missing-attribute]
         mode=rl_cluster_lib.Mode.TRAIN
     ).temperature
 
@@ -252,7 +253,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {
+        lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
             "algo_config": self.algo_config,
         }
@@ -277,7 +278,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "sampler_is/weight_mean": np.mean,
         "sampler_is/weight_min": np.min,
     })
-    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
+    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
         if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
@@ -385,8 +386,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         clipped_completion_count += 1
       padded_prompt, padded_completion, _ = (
           agentic_utils.pad_prompt_and_completion(
-              prompt_tokens,
-              completion_tokens,
+              prompt_tokens,  # pyrefly: ignore[bad-argument-type]
+              completion_tokens,  # pyrefly: ignore[bad-argument-type]
               rollout_config.max_prompt_length,
               max_response_length,
               pad_value,
@@ -528,7 +529,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "generation/prompts/min_length": (prompt_token_len, np.min),
         },
         mode=mode,
-        step=expected_step,
+        step=expected_step,  # pyrefly: ignore[bad-argument-type]
     )
 
     reward_kwargs = {
@@ -555,13 +556,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
 
     logging.debug("Advantages computed: %s", advantages)
-
-    if self.algo_config.degenerate_group_masking:
-      if jnp.all(jnp.isclose(advantages, 0.0)):
-        logging.info(
-            "Filtering degenerate group %s with all-0 advantages.", group_id
-        )
-        completion_mask = jnp.zeros_like(completion_mask)
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
@@ -713,9 +707,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"{prefix}/{sub_key}/min": (np.min(vals), np.min),
         })
         self.rl_cluster.buffer_metrics_async(
-            metrics_to_log,
+            metrics_to_log,  # pyrefly: ignore[bad-argument-type]
             mode=mode,
-            step=expected_step,
+            step=expected_step,  # pyrefly: ignore[bad-argument-type]
         )
 
     for metric_fn in self.metric_fns:
@@ -731,7 +725,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           },
       )
       self.rl_cluster.buffer_metrics_async(
-          user_defined_metric, mode=mode, step=expected_step
+          user_defined_metric, mode=mode, step=expected_step  # pyrefly: ignore[bad-argument-type]
       )
 
     combined_batch = TrainExample(

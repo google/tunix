@@ -239,7 +239,7 @@ def ppo_policy_loss_fn(
   loss = policy_loss
 
   if return_entropy:
-    entropy_loss = masked_mean(token_entropy, completion_mask)
+    entropy_loss = masked_mean(token_entropy, completion_mask)  # pyrefly: ignore[unbound-name]
     loss = loss - entropy_coef * entropy_loss
     aux["loss/entropy"] = entropy_loss
 
@@ -519,12 +519,12 @@ def grpo_loss_fn(
         clamp_value=algo_config.kl_clamp_value,
     )
     # Log mean KL.
-    aux["kl"] = jnp.astype(
+    aux["kl"] = jnp.astype(  # pyrefly: ignore[bad-assignment]
         (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
         jnp.float32,
     )
     kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
-    aux["kl_loss"] = kl_loss
+    aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
     if beta is not None and beta != 0.0:
       loss = loss + beta * kl_loss
 

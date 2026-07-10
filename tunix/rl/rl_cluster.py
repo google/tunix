@@ -474,7 +474,7 @@ class RLCluster:
     ) or (
         isinstance(self.cluster_config.rollout_engine, functools.partial)
         and issubclass(
-            self.cluster_config.rollout_engine.func,
+            self.cluster_config.rollout_engine.func,  # pyrefly: ignore[bad-argument-type]
             base_rollout.BaseRollout,
         )
     ):
@@ -556,7 +556,7 @@ class RLCluster:
       with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
         self._critic_trainer = rl_trainer.Trainer(
             model=self.critic,
-            optimizer=self.cluster_config.training_config.critic_optimizer,
+            optimizer=self.cluster_config.training_config.critic_optimizer,  # pyrefly: ignore[bad-argument-type]
             training_config=critic_config,
             custom_checkpoint_metadata_fn=lambda: {
                 "global_step": self.global_steps + 1,
@@ -748,7 +748,7 @@ class RLCluster:
       self._rl_metrics_logger.log(
           prefix,
           metric_name,
-          agg_value,
+          agg_value,  # pyrefly: ignore[bad-argument-type]
           metrics_buffer.mode,
           metrics_buffer.global_steps,
       )
@@ -960,7 +960,7 @@ class RLCluster:
     logprobs = None
     if outputs[0].logprobs is not None:
       logprobs = list(
-          itertools.chain.from_iterable(out.logprobs for out in outputs)
+          itertools.chain.from_iterable(out.logprobs for out in outputs)  # pyrefly: ignore[bad-argument-type]
       )
 
     logits = None

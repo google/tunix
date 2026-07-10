@@ -194,6 +194,7 @@ def load_and_create_model_orig(
   key_map = key_mapping(config)
 
   file_lock = threading.Lock()
+  dict_lock = threading.Lock()  # guards the duplicate-key check and write
 
   # Load tensors from all files
   skipped_keys = []
@@ -225,11 +226,12 @@ def load_and_create_model_orig(
           if dtype and current_arr.dtype != dtype:
             current_arr = current_arr.astype(dtype)
 
-          if jax_key_mapped in file_loaded_tensors:
-            raise ValueError(
-                f'Duplicate key {jax_key_mapped} found within file {f.name}.'
-            )
-          file_loaded_tensors[jax_key_mapped] = current_arr
+          with dict_lock:
+            if jax_key_mapped in file_loaded_tensors:
+              raise ValueError(
+                  f'Duplicate key {jax_key_mapped} found within file {f.name}.'
+              )
+            file_loaded_tensors[jax_key_mapped] = current_arr
 
         except Exception as e:
           raise RuntimeError(
@@ -246,7 +248,7 @@ def load_and_create_model_orig(
 
       for future in concurrent.futures.as_completed(futures):
         if future.exception():
-          raise future.exception()
+          raise future.exception()  # pyrefly: ignore[bad-raise]
 
     # Apply preprocessing if provided (e.g., for MoE expert stacking)
     if preprocess_fn is not None:

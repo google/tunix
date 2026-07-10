@@ -148,7 +148,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         self._last_iter_step = 0
         self.algo_config = grpo_config
         self._data_shuffle_seed = None
-        self.rl_cluster = types.SimpleNamespace(
+        self.rl_cluster = types.SimpleNamespace(  # pyrefly: ignore[bad-assignment]
             global_steps=0,
             cluster_config=types.SimpleNamespace(
                 training_config=types.SimpleNamespace(
@@ -167,7 +167,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         if 'trajectory_ids' in example:
           del example['trajectory_ids']
         prompts = example['prompts']
-        num_samples = len(prompts)
+        num_samples = len(prompts)  # pyrefly: ignore[bad-argument-type]
         # Return a SimpleNamespace to mimic TrainExample attributes
         return types.SimpleNamespace(
             prompt_ids=np.array(prompts),
@@ -348,12 +348,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
     for metric_name in ['loss', 'kl']:
       self.assertLen(
-          metric_logger.get_metric_history('actor', metric_name, 'train'),
+          metric_logger.get_metric_history('actor', metric_name, 'train'),  # pyrefly: ignore[missing-attribute]
           grpo_learner.rl_cluster.actor_trainer.train_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
-          metric_logger.get_metric_history('actor', metric_name, 'eval'),
+          metric_logger.get_metric_history('actor', metric_name, 'eval'),  # pyrefly: ignore[missing-attribute]
           grpo_learner.rl_cluster.actor_trainer.train_steps
           / kwargs['eval_every_n_steps'],
           msg=f'metric_name: {metric_name}',
@@ -546,7 +546,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         // (kwargs.get('gradient_accumulation_steps') or 1),
     )
     self.assertLen(
-        grpo_learner.rl_cluster.actor_trainer.metrics_logger.get_metric_history(
+        grpo_learner.rl_cluster.actor_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
             'actor', 'kl', 'train'
         ),
         grpo_learner.rl_cluster.actor_trainer.train_steps,

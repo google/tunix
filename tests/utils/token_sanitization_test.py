@@ -65,7 +65,7 @@ class TokenSanitizationTest(parameterized.TestCase):
     expected = 'hello world'
     self.assertEqual(
         token_sanitization.sanitize_control_tokens(
-            content, extra_tokens=extra_tokens
+            content, extra_tokens=extra_tokens  # pyrefly: ignore[bad-argument-type]
         ),
         expected,
     )

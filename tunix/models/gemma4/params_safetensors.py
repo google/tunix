@@ -337,10 +337,6 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
             r"vision_encoder.layers.\1.attn.kv_einsum.clip_output_max",
             None,
         ),
-        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.input_min": (
-            r"vision_encoder.layers.\1.attn.kv_einsum.clip_input_min",
-            None,
-        ),
         r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.input_min": (
             r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_input_min",
             None,
@@ -426,6 +422,174 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
         ),
     })
 
+  if cfg.audio_encoder is not None:
+    mapping.update({  # pyrefly: ignore[no-matching-overload]
+        # Audio Embedder
+        r"(?:model\.)?embed_audio\.embedding_projection\.weight": (
+            "embedder.audio_input_projection.w",
+            ((1, 0), None),
+        ),
+        # Audio Encoder
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer0\.conv\.weight": (
+            "audio_encoder.feature.subsampling_0.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer0\.norm\.weight": (
+            "audio_encoder.feature.norm_0.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer1\.conv\.weight": (
+            "audio_encoder.feature.subsampling_1.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer1\.norm\.weight": (
+            "audio_encoder.feature.norm_1.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.input_proj_linear\.weight": (
+            "tmp.audio_encoder.feature.input_proj",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.output_proj\.weight": (
+            "audio_encoder.output_projection.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.output_proj\.bias": (
+            "audio_encoder.output_projection.bias",
+            None,
+        ),
+        # Conformer Layers
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.pre_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.pre_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_1\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer1.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_2\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer2.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.post_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.post_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.pre_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.pre_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_1\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer1.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_2\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer2.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.post_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.post_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.norm_pre_attn\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.pre_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.q_proj\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.query.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.k_proj\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.key.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.v_proj\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.value.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.per_dim_scale": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.per_dim_scale.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.post\.linear\.weight": (
+            r"tmp.audio_encoder.conformer_layers.\1.trans_atten.post",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.relative_k_proj\.weight": (
+            r"tmp.audio_encoder.conformer_layers.\1.trans_atten.self_atten.relative_position_embedding.pos_proj",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.norm_post_attn\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.post_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.pre_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.ln.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_start\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_start.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.depthwise_conv1d\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.depthwise_conv1d.kernel",
+            ((2, 1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.conv_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.conv_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_end\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_end.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.norm_out\.weight": (
+            r"audio_encoder.conformer_layers.\1.final_ln.scale",
+            None,
+        ),
+        # Clip buffers for ClippedEinsum in Audio
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_1\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer1.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_2\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer2.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_1\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer1.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_2\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer2.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.post\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.post.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.q_proj\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.query.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.k_proj\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.key.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.v_proj\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.value.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_start\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_start.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_end\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_end.clip_\2.value",
+            None,
+        ),
+    })
+
   return mapping
 
 
@@ -441,6 +605,13 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
   vo_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.o$")
   vgate_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.mlp\.gate$")
   vup_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.mlp\.up$")
+
+  audio_post_pat = re.compile(
+      r"tmp\.audio_encoder\.conformer_layers\.([0-9]+)\.trans_atten\.post$"
+  )
+  audio_pos_proj_pat = re.compile(
+      r"tmp\.audio_encoder\.conformer_layers\.([0-9]+)\.trans_atten\.self_atten\.relative_position_embedding\.pos_proj$"
+  )
 
   pending: dict[str, dict[str, jnp.ndarray]] = {}
   pending_vision: dict[str, dict[str, jnp.ndarray]] = {}
@@ -616,6 +787,55 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
           )
           slots.pop("gate", None)
           slots.pop("up", None)
+
+    if cfg.audio_encoder is not None:
+      atten_num_heads = cfg.audio_encoder.atten_num_heads
+
+      # Process audio input proj
+      if "tmp.audio_encoder.feature.input_proj" in out:
+        arr = out.pop("tmp.audio_encoder.feature.input_proj")
+        # HF shape: (out_features, 1024)
+        # 1024 = 32_freq * 32_channels
+        out_features = arr.shape[0]
+        arr_reshaped = jnp.reshape(arr, (out_features, 32, 32))
+        arr_final = jnp.transpose(arr_reshaped, (1, 2, 0))
+        out["audio_encoder.feature.input_proj.kernel"] = arr_final
+
+      # Process per-layer audio params
+      for key in list(out):
+        m_post = audio_post_pat.fullmatch(key)
+        if m_post:
+          layer_id = m_post.group(1)
+          arr = out.pop(key)
+          # HF shape: (model_dims, num_heads * units_per_head)
+          # Tunix expects: (num_heads, units_per_head, model_dims)
+          model_dims = arr.shape[0]
+          units_per_head = model_dims // atten_num_heads
+          arr_reshaped = jnp.reshape(
+              arr, (model_dims, atten_num_heads, units_per_head)
+          )
+          arr_final = jnp.transpose(arr_reshaped, (1, 2, 0))
+          out[
+              f"audio_encoder.conformer_layers.{layer_id}.trans_atten.post.kernel"
+          ] = arr_final
+          continue
+
+        m_pos = audio_pos_proj_pat.fullmatch(key)
+        if m_pos:
+          layer_id = m_pos.group(1)
+          arr = out.pop(key)
+          # HF shape: (num_heads * units_per_head, model_dims)
+          # Tunix expects: (model_dims, num_heads, units_per_head)
+          model_dims = arr.shape[1]
+          units_per_head = model_dims // atten_num_heads
+          arr_reshaped = jnp.reshape(
+              arr, (atten_num_heads, units_per_head, model_dims)
+          )
+          arr_final = jnp.transpose(arr_reshaped, (2, 0, 1))
+          out[
+              f"audio_encoder.conformer_layers.{layer_id}.trans_atten.self_atten.relative_position_embedding.pos_proj.kernel"
+          ] = arr_final
+          continue
 
     return out
 

@@ -41,7 +41,7 @@ env:
 
 jobs:
   run_prod:
-    runs-on: [linux-x86-ct5lp-224-8tpu]
+    runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
       image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
@@ -280,7 +280,7 @@ jobs:
 
 
   run_latest:
-    runs-on: [linux-x86-ct5lp-224-8tpu]
+    runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
       image: vllm/vllm-tpu:nightly

@@ -187,12 +187,12 @@ def _safe_eval(expr_str: str) -> float:
       op_type = type(node.op)
       if op_type not in _OP_MAP:
         raise ValueError(f"Unsupported operator: {op_type}")
-      return _OP_MAP[op_type](_eval(node.left), _eval(node.right))
+      return _OP_MAP[op_type](_eval(node.left), _eval(node.right))  # pyrefly: ignore[bad-argument-count]
     elif isinstance(node, ast.UnaryOp):
       op_type = type(node.op)
       if op_type not in _OP_MAP:
         raise ValueError(f"Unsupported operator: {op_type}")
-      return _OP_MAP[op_type](_eval(node.operand))
+      return _OP_MAP[op_type](_eval(node.operand))  # pyrefly: ignore[bad-argument-count, no-matching-overload]
     raise ValueError(f"Unsupported node: {type(node)}")
 
   tree = ast.parse(expr_str, mode="eval")

@@ -322,7 +322,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       results.append(item)
 
     prompt_ids = [r.prompt_ids[0] for r in results]
-    self.assertEqual(prompt_ids, [0, 0, 0, 0, 1, 1, 1, 1])
+    self.assertEqual(prompt_ids, [0, 0, 1, 1])
 
   def test_grpo_config_validation(self):
     with self.assertRaisesRegex(
@@ -521,9 +521,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       _, kwargs = mock_get_ref.call_args_list[0]
       self.assertEqual(kwargs["prompt_tokens"].shape[0], 4)
 
-      # For each batch of 4 trajectories, it does 2 iterations.
-      # So update_actor should be called 2 * 2 = 4 times!
-      self.assertEqual(mock_update_actor.call_count, 4)
+      # The full batch has 2 microbatches.
+      # First iteration parallelized: 2 calls (1 per microbatch).
+      # Remaining 1 iteration: 1 call (passing the full batch of 2 microbatches).
+      # Total: 3 calls.
+      self.assertEqual(mock_update_actor.call_count, 3)
 
   def test_compute_logps_chunk_size(self):
     vocab = test_common.MockVocab()
@@ -669,11 +671,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     chex.assert_shape(loss, ())
     self.assertIn("kl", aux)
 
-  @parameterized.named_parameters(
-      dict(testcase_name="unmasked", apply_masking=False),
-      dict(testcase_name="masked", apply_masking=True),
-  )
-  def test_grpo_loss_fn_respects_mask(self, apply_masking):
+  def test_grpo_loss_fn_respects_mask(self):
     seq_len = 8
     prompt_ids = jnp.asarray(
         [
@@ -687,8 +685,6 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     completion_ids = jnp.ones((4, seq_len), dtype=jnp.int32)
     completion_mask = jnp.ones((4, seq_len), dtype=jnp.bool_)
     # Two prompts with two generations each.
-    # Prompt 1 has a non-degenerate advantage group; prompt 2 is degenerate
-    # (which would be filtered in _process_results with degenerate_group_masking=True).
     advantages = jnp.asarray([-1.0, 1.0, 0.0, 0.0], dtype=jnp.float32)
     ref_per_token_logps = jnp.asarray(
         [
@@ -718,18 +714,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             None,
         )
 
-    if apply_masking:
-      # Masked example (simulating what _process_results would do)
-      final_completion_mask = completion_mask.at[2:].set(0)
-    else:
-      # Unmasked example
-      final_completion_mask = completion_mask
-
     train_example = agentic_grpo_learner.TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_ids > -1,
         completion_ids=completion_ids,
-        completion_mask=final_completion_mask,
+        completion_mask=completion_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         old_per_token_logps=None,
@@ -774,10 +763,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     per_sequence_loss = -advantages + config.beta * per_token_kl[:, 0]
 
-    if apply_masking:
-      expected_loss = float(jnp.mean(per_sequence_loss[:2]))
-    else:
-      expected_loss = float(jnp.mean(per_sequence_loss))
+    expected_loss = float(jnp.mean(per_sequence_loss))
 
     np.testing.assert_allclose(loss, expected_loss, rtol=1e-6, atol=1e-6)
 
@@ -867,11 +853,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
 
-  @parameterized.named_parameters(
-      dict(testcase_name="masking_disabled", masking=False),
-      dict(testcase_name="masking_enabled", masking=True),
-  )
-  def test_process_results_masks_zero_advantage_group(self, masking):
+  def test_process_results_zero_advantage_group(self):
     class MockTraj:
 
       def __init__(
@@ -946,7 +928,6 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         epsilon=0.2,
         num_generations=2,
         loss_algo="grpo",
-        degenerate_group_masking=masking,
         max_response_length=10,
     )
 
@@ -966,16 +947,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       [res_group1] = learner._process_results(group1)
       [res_group2] = learner._process_results(group2)
 
-      # Group 1 should always be intact as it's non-degenerate
       self.assertTrue(jnp.any(res_group1.completion_mask > 0))
-
-      # Group 2 should be masked based on the 'masking' parameter
-      if masking:
-        # Masking enabled: degenerate group should be masked out
-        self.assertFalse(jnp.any(res_group2.completion_mask > 0))
-      else:
-        # Masking disabled: degenerate group should remain intact
-        self.assertTrue(jnp.any(res_group2.completion_mask > 0))
+      self.assertTrue(jnp.any(res_group2.completion_mask > 0))
 
       # Test group with missing assistant message
       group3 = [
@@ -983,10 +956,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           MockTraj(5, "group3", 0.0),
       ]
       [res_group3] = learner._process_results(group3)
-      if masking:
-        self.assertFalse(jnp.any(res_group3.completion_mask > 0))
-      else:
-        self.assertTrue(jnp.any(res_group3.completion_mask > 0))
+
+      self.assertTrue(jnp.any(res_group3.completion_mask > 0))
 
       # Test group with partially missing old_logprobs
       group4 = [

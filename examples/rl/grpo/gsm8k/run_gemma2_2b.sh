@@ -34,7 +34,7 @@ echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
-max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
+max_steps_float=$(awk "BEGIN {print $num_batches * $num_train_epochs * $train_fraction}")
 
 max_steps=$(printf "%.0f" "$max_steps_float")
 
@@ -67,4 +67,3 @@ python3 -m tunix.cli.grpo_main \
   rollout_config.total_generation_steps=$total_generation_steps \
   rollout_config.max_prompt_length=$max_prompt_length \
   "$@"
-

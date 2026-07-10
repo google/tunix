@@ -67,8 +67,8 @@ class DAPOlearnerTest(parameterized.TestCase):
   def test_diff_loss(self):
     dapo_config = dapo_lib.DAPOConfig()
     grpo_config = grpo_lib.GRPOConfig()
-    dapo_config.temperature = 1.0
-    grpo_config.temperature = 1.0
+    dapo_config.temperature = 1.0  # pyrefly: ignore[missing-attribute]
+    grpo_config.temperature = 1.0  # pyrefly: ignore[missing-attribute]
 
     dapo_loss_fn_impl = fr.default_registry.get(
         "policy_loss_fn", dapo_config.policy_loss_fn

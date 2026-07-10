@@ -32,13 +32,15 @@ from jax.sharding import PartitionSpec as P
 import jaxtyping
 import numpy as np
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models.gemma4 import audio
 from tunix.models.gemma4 import moe
 from tunix.models.gemma4 import vision
 from tunix.utils import compat
 from tunix.utils import env_utils
 from tunix.utils.sharding_utils import shard
 
-TOKEN_PLACEHOLDER = -2
+IMAGE_SOFT_TOKEN_PLACEHOLDER = -2
+AUDIO_SOFT_TOKEN_PLACEHOLDER = -4
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,6 +56,21 @@ jax.tree_util.register_dataclass(
     meta_fields=['soft_token_counts'],
 )
 
+
+@dataclasses.dataclass(frozen=True)
+class PreprocessedAudioInput:
+  """PyTree container for audio input.
+
+  Attributes:
+      audios: waveforms with shape (batch_size, num_clips, samples)
+      sequence_lengths: shape (batch_size, num_clips)
+  """
+
+  audios: jax.Array
+  sequence_lengths: jax.Array
+
+
+jax.tree_util.register_dataclass(PreprocessedAudioInput)
 
 env_utils.setup_sharding_environment()
 
@@ -85,6 +102,7 @@ class ShardingConfig:
   act_btnh: Tuple[str | None, ...]
   vision_proj: Tuple[str | None, ...]
   vision_soft_emb_norm_weight: Tuple[str | None, ...]
+  audio_proj: Tuple[str | None, ...]
   # MoE sharding
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
@@ -113,6 +131,7 @@ class ShardingConfig:
         act_btnh=('fsdp', None, 'tp', None),
         vision_proj=(fsdp, 'tp'),
         vision_soft_emb_norm_weight=('tp',),
+        audio_proj=(fsdp, 'tp'),  # TODO check if good!
         exp_weight_edf=(fsdp, None, None, 'tp'),
         exp_weight_efd=(fsdp, 'tp', None),
         per_layer_model_projection=(fsdp, 'tp'),
@@ -172,6 +191,9 @@ class ModelConfig:
   vision_encoder: vision.VisionEncoderConfig | None = None
   use_bidirectional_attention: str | None = None
 
+  # Audio config
+  audio_encoder: audio.ConformerConfig | None = None
+
   def __post_init__(self):
     # TODO(tunix-dev): support flash attention with sliding window KV cache
     if self.use_sliding_window_kv_cache and self.use_flash_attention:
@@ -205,7 +227,15 @@ class ModelConfig:
             AttentionType.GLOBAL,
         ),
         vision_encoder=vision.VisionEncoderConfig(use_clipped_linears=True),
+        audio_encoder=audio.ConformerConfig(),
     )
+
+  @classmethod
+  def gemma4_e2b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_e2b(sharding_config=sharding_config)
 
   @classmethod
   def gemma4_e4b(
@@ -233,6 +263,7 @@ class ModelConfig:
             AttentionType.GLOBAL,
         ),
         vision_encoder=vision.VisionEncoderConfig(use_clipped_linears=True),
+        audio_encoder=audio.ConformerConfig(),
     )
 
   @classmethod
@@ -382,23 +413,47 @@ class Embedder(nnx.Module):
           with_scale=False,
       )
 
+    if config.audio_encoder is not None:
+      self.audio_input_projection = Einsum(
+          einsum_str='...tm,md->...td',
+          shape=(config.audio_encoder.lm_model_dims, self.embed_dim),
+          rngs=rngs,
+          sharding=config.shd_config.audio_proj,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+      )
+      self.audio_soft_embedding_norm = RMSNorm(
+          self.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+          with_scale=False,
+      )
+
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
     x = jnp.astype(x, self.config.dtype)
-    x = shard(x, self.config.shd_config.act_btd)
+    x = shard(x, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    x = self.mm_pre_projection_norm(x)
+    x = self.mm_pre_projection_norm(x)  # pyrefly: ignore[bad-argument-type]
     x = self.mm_input_projection(x)
+    return x
+
+  def encode_audio(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    # projection and then norm is consistent with upstream gemma4.
+    x = self.audio_input_projection(x)
+    x = self.audio_soft_embedding_norm(x)
     return x
 
   def encode_per_layer_input(
       self, x: jaxtyping.ArrayLike, t: jaxtyping.ArrayLike
   ) -> jaxtyping.Array:
     t = jnp.where(
-        jnp.logical_and(t >= 0, t < self.vocab_size), t, jnp.zeros_like(t)
+        jnp.logical_and(t >= 0, t < self.vocab_size), t, jnp.zeros_like(t)  # pyrefly: ignore[unsupported-operation]
     )
     x = self.per_layer_model_projection(x)
     x = jnp.reshape(
@@ -464,11 +519,10 @@ def _add_bidirectional_mask(
       pad_len = attn_kv_len - kv_shape[-1]
       kv_block_indices = jnp.pad(kv_block_indices, [(0, 0), (0, pad_len)])
     else:
-      kv_block_indices = kv_block_indices[..., -attn_kv_len:]
+      kv_block_indices = kv_block_indices[..., -attn_kv_len:]  # pyrefly: ignore[bad-index]
 
-  bidir_cond = (
-      (kv_block_indices[:, None, :] == q_block_indices[..., None])
-      & (q_block_indices[..., None] > 0)
+  bidir_cond = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (  # pyrefly: ignore[bad-index]
+      q_block_indices[..., None] > 0  # pyrefly: ignore[bad-index]
   )
 
   if len(attn_shape) == 4:
@@ -598,7 +652,7 @@ class RMSNorm(nnx.Module):
     self.with_scale = with_scale
     if with_scale:
       self.scale = nnx.Param(
-          nnx.initializers.ones_init()(rngs.params(), dim).astype(param_dtype),
+          nnx.initializers.ones_init()(rngs.params(), dim).astype(param_dtype),  # pyrefly: ignore[bad-argument-type]
           sharding=sharding.rms_norm_weight,
       )
     self.dtype = dtype
@@ -827,7 +881,7 @@ class Attention(nnx.Module):
     x = x.astype(self.config.dtype)
     seq_len = x.shape[1]
     query_proj = self.q_einsum(x)
-    query_proj = shard(query_proj, self.config.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
     query_proj = self._query_norm(query_proj)
     query_proj = apply_rope(
         query_proj,
@@ -848,8 +902,8 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
-      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
+      key_proj = shard(key_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+      value_proj = shard(value_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -924,7 +978,7 @@ class Attention(nnx.Module):
       if self.attn_type == AttentionType.LOCAL_SLIDING:
         mask = mask_lib.LocalMask(
             (seq_len, seq_len),
-            window_size=(self.config.sliding_window_size - 1, 0),
+            window_size=(self.config.sliding_window_size - 1, 0),  # pyrefly: ignore[unsupported-operation]
             offset=0,
         )
       else:
@@ -1092,14 +1146,14 @@ class Attention(nnx.Module):
           # for decoding without sliding window cache
           sliding_mask = create_sliding_window_mask(
               attn_mask,
-              sliding_window_size=self.config.sliding_window_size,
+              sliding_window_size=self.config.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
           )
           attn_mask = sliding_mask * attn_mask
         else:  # for prefill
           all_ones = jnp.ones_like(attn_mask)
           sliding_mask = jnp.triu(
-              all_ones, -1 * self.config.sliding_window_size + 1
-          ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)
+              all_ones, -1 * self.config.sliding_window_size + 1  # pyrefly: ignore[unsupported-operation]
+          ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)  # pyrefly: ignore[unsupported-operation]
           attn_mask = sliding_mask * attn_mask
 
       attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
@@ -1118,7 +1172,7 @@ class Attention(nnx.Module):
         encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = shard(attn_output, self.config.shd_config.act_btd)
+    attn_output = shard(attn_output, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return new_cache, attn_output, (key_proj, value_proj)
 
   @property
@@ -1166,18 +1220,18 @@ class Attention(nnx.Module):
 
     cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
     k = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
+        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
+        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
         eager=True,
     )
     v = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
+        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
+        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
         eager=True,
     )
     end_index = shard(
-        np.zeros((batch_size,), np.int32),
-        self.config.shd_config.act_btnh[:1],
+        np.zeros((batch_size,), np.int32),  # pyrefly: ignore[bad-argument-type]
+        self.config.shd_config.act_btnh[:1],  # pyrefly: ignore[bad-argument-type]
         eager=True,
     )
     return {'k': k, 'v': v, 'end_index': end_index}
@@ -1444,8 +1498,10 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       self, config: ModelConfig, *, rngs: nnx.Rngs, text_only: bool = True
   ):
     self.text_only = text_only
-    if text_only and config.vision_encoder is not None:
-      config = dataclasses.replace(config, vision_encoder=None)
+    if text_only:
+      config = dataclasses.replace(
+          config, vision_encoder=None, audio_encoder=None
+      )
     self.config = config
     self.embedder = Embedder(config, rngs=rngs)
 
@@ -1455,6 +1511,12 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           config=config.vision_encoder,
           param_dtype=config.param_dtype,
           shd_config=config.shd_config.vision_shd,
+      )
+
+    if config.audio_encoder is not None:
+      self.audio_encoder = audio.AudioTokenizer(
+          rngs=rngs,
+          config=config.audio_encoder,
       )
 
     pattern = (
@@ -1512,6 +1574,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       segment_ids=None,
       decode_only_last_token: bool = False,
       images: PreprocessedVisionInput | None = None,
+      audios: PreprocessedAudioInput | None = None,
       skip_lm_head: bool = False,
   ):
     if positions is None:
@@ -1525,7 +1588,16 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     x = self.embedder.encode(tokens)
     if self.config.vision_encoder is not None and images is not None:
       soft_embeddings = self._encode_vision(images)
-      mask = tokens == TOKEN_PLACEHOLDER
+      mask = tokens == IMAGE_SOFT_TOKEN_PLACEHOLDER
+      x = merge_flat_embeddings(
+          text_embeddings=x,
+          multimodal_embeddings=soft_embeddings,
+          mask=mask,
+      )
+
+    if self.config.audio_encoder is not None and audios is not None:
+      soft_embeddings = self._encode_audio(audios)
+      mask = tokens == AUDIO_SOFT_TOKEN_PLACEHOLDER
       x = merge_flat_embeddings(
           text_embeddings=x,
           multimodal_embeddings=soft_embeddings,
@@ -1539,7 +1611,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         and images is not None
         and attention_mask is not None
     ):
-      bidirectional_mask = tokens == TOKEN_PLACEHOLDER
+      bidirectional_mask = tokens == IMAGE_SOFT_TOKEN_PLACEHOLDER
       sliding_attention_mask = _add_bidirectional_mask(
           attention_mask, bidirectional_mask
       )
@@ -1623,7 +1695,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     else:
       soft_token_counts = vision_input.soft_token_counts
 
-    max_n_images = max((len(counts) for counts in soft_token_counts), default=0)
+    max_n_images = max((len(counts) for counts in soft_token_counts), default=0)  # pyrefly: ignore[bad-argument-type]
     if max_n_images == 0:
       return jnp.zeros((batch_size, 0, self.config.embed_dim))
 
@@ -1635,7 +1707,8 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         patches, (batch_size * max_n_images, max_patches, patches.shape[2])
     )
     positions_xy = jnp.reshape(
-        positions_xy, (batch_size * max_n_images, max_patches, positions_xy.shape[2])
+        positions_xy,
+        (batch_size * max_n_images, max_patches, positions_xy.shape[2]),
     )
 
     encoder_outputs = self.vision_encoder(patches, positions_xy)
@@ -1647,11 +1720,11 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     for b in range(batch_size):
       per_image_tokens = []
       counts = soft_token_counts[b] if b < len(soft_token_counts) else ()
-      for i in range(len(counts)):
+      for i in range(len(counts)):  # pyrefly: ignore[bad-argument-type]
         idx = b * max_n_images + i
-        expected_count = counts[i]
+        expected_count = counts[i]  # pyrefly: ignore[bad-index]
         if mask is not None:
-          valid_indices = jnp.nonzero(mask[idx], size=expected_count)[0]
+          valid_indices = jnp.nonzero(mask[idx], size=expected_count)[0]  # pyrefly: ignore[bad-argument-type]
           real_tokens = embeddings[idx][valid_indices]
         else:
           real_tokens = embeddings[idx][:expected_count]
@@ -1675,6 +1748,45 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     all_tokens = self.embedder.encode_vision(all_tokens[:, None, :, :])
     all_tokens = all_tokens[:, 0, :, :]
     return all_tokens
+
+  def _encode_audio(self, audio_input: PreprocessedAudioInput):
+    """Encode audio.
+
+    Args:
+      audio_input: The audio input.
+
+    Returns:
+      Padded audio embeddings as a tensor of shape, with padding
+      at the end of the sequences. (batch_size, max_tokens)
+    """
+    batch_size, num_clips = audio_input.audios.shape[:2]
+
+    # Encode audio clips.
+    clips = audio_input.audios.reshape(batch_size * num_clips, -1)
+    clip_lengths = audio_input.sequence_lengths.reshape(batch_size * num_clips)
+    embeddings, pad_mask = self.audio_encoder(clips, clip_lengths)
+
+    flat_embeddings = embeddings.reshape(batch_size, -1, embeddings.shape[-1])
+    flat_pad_mask = pad_mask.reshape(batch_size, -1)  # True => Pad.
+
+    # Handle padding in the embeddings.
+    # To avoid JIT recompilation, we want to keep the output shape consistent
+    # across invocations with differring values of audio_input.sequence_lengths
+    # (of course, as long as audio_input.audios is padded to the same shape).
+    # Thus, we don't simply truncate each clip's embeddings as that would create
+    # variable length output. We keep the length of embeddings the same, but
+    # move valid (non-padding) embeddings to the beginning of sequence
+    # (i.e. pack valid embeddings into one contiguous sequence).
+    max_tokens = flat_pad_mask.shape[-1]
+    indices = jnp.arange(max_tokens)
+    indices = jnp.where(flat_pad_mask, max_tokens, indices)
+    sorted_indices = jnp.argsort(indices, axis=-1)
+    packed_embeddings = jnp.take_along_axis(
+        flat_embeddings, sorted_indices[..., None], axis=1
+    )
+
+    result = self.embedder.encode_audio(packed_embeddings)
+    return result
 
   def compute_final_logits(
       self,

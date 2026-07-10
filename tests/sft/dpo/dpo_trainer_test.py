@@ -169,13 +169,13 @@ class DPOTrainerTest(parameterized.TestCase):
         "log_probs/rejected",
     ]:
       self.assertLen(
-          dpo_trainer.metrics_logger.get_metric_history(
+          dpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           dpo_trainer._train_steps,
       )
       self.assertLen(
-          dpo_trainer.metrics_logger.get_metric_history(
+          dpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "eval"
           ),
           3,
@@ -246,7 +246,7 @@ class DPOTrainerTest(parameterized.TestCase):
         "rewards/accuracy",
     ]:
       self.assertLen(
-          dpo_trainer.metrics_logger.get_metric_history(
+          dpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           dpo_trainer._train_steps,

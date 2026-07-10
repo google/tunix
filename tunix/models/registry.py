@@ -188,6 +188,14 @@ MODEL_CATALOG = (
         model_config_category='gemma4',
     ),
     naming.ModelNaming(
+        model_id='google/gemma-4-e2b-it',
+        model_name='gemma-4-e2b-it',
+        model_family='gemma4',
+        model_version='e2b_it',
+        model_config_id='gemma4_e2b_it',
+        model_config_category='gemma4',
+    ),
+    naming.ModelNaming(
         model_id='google/gemma-4-e4b',
         model_name='gemma-4-e4b',
         model_family='gemma4',

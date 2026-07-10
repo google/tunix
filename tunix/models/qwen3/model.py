@@ -114,13 +114,13 @@ class ShardingConfig:
     fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        emb_dv=(fsdp, 'tp'),
-        q_weight_dnh=(fsdp, 'tp', None),
-        kv_weight_dnh=(fsdp, 'tp', None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
+        emb_vd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_dv=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        q_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
         rms_norm_weight=('tp',),
         act_btd=('fsdp', sp, None if is_sampling else 'tp'),
         act_btf=('fsdp', sp, 'tp'),
@@ -356,7 +356,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x = jnp.astype(x, self.dtype)
-    x = shard(x, self.shd_config.act_btd)
+    x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -404,7 +404,7 @@ class RMSNorm(nnx.Module):
       param_dtype: jnp.dtype,
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim, param_dtype),
+        nnx.initializers.ones_init()(rngs.params(), dim, param_dtype),  # pyrefly: ignore[bad-argument-type]
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
@@ -495,9 +495,9 @@ class Attention(nnx.Module):
     key_proj = self.k_norm(self.k_proj(x))
     value_proj = self.v_proj(x)
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)
-    key_proj = shard(key_proj, self.shd_config.act_btnh)
-    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rope(
         query_proj,
@@ -643,7 +643,7 @@ class Attention(nnx.Module):
       qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
-    outputs = shard(outputs, self.shd_config.act_btd)
+    outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -704,7 +704,7 @@ class MoELayer(nnx.Module):
     self.num_experts = config.num_experts
     self.router = nnx.Linear(
         in_features=config.embed_dim,
-        out_features=config.num_experts,
+        out_features=config.num_experts,  # pyrefly: ignore[bad-argument-type]
         use_bias=False,
         rngs=rngs,
         dtype=config.dtype,
@@ -736,7 +736,7 @@ class MoELayer(nnx.Module):
   def __call__(self, x, use_megablox=True):
     scores = self.router(x).astype(jnp.float32)  # [B,T,E]
     routing_weights, routing_idx = jax.lax.top_k(
-        jax.nn.softmax(scores, axis=-1), self.experts_per_tok
+        jax.nn.softmax(scores, axis=-1), self.experts_per_tok  # pyrefly: ignore[bad-argument-type]
     )
     routing_weights = (
         routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
@@ -751,7 +751,7 @@ class MoELayer(nnx.Module):
     # -------------------------------------------------------------
     if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
       dispatch_mask = jax.nn.one_hot(
-          routing_idx, num_classes=self.num_experts, dtype=self.dtype
+          routing_idx, num_classes=self.num_experts, dtype=self.dtype  # pyrefly: ignore[bad-argument-type]
       )  # [B, T, K, E]
       dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
       dispatched_input = jnp.einsum(
@@ -759,7 +759,7 @@ class MoELayer(nnx.Module):
       ).astype(self.dtype)
 
       expert_outputs = []
-      for i in range(self.num_experts):
+      for i in range(self.num_experts):  # pyrefly: ignore[bad-argument-type]
         expert_input = dispatched_input[:, :, i, :]
         gate_proj = jnp.astype(self.gate_proj.value[i], self.dtype)
         up_proj = jnp.astype(self.up_proj.value[i], self.dtype)
@@ -824,10 +824,10 @@ class MoELayer(nnx.Module):
         num_ep = 1
         ep_shard_idx = 0
 
-      num_local_experts = self.num_experts // num_ep
+      num_local_experts = self.num_experts // num_ep  # pyrefly: ignore[unsupported-operation]
 
       flat_repeated_inputs = jnp.repeat(
-          inputs.reshape(B * T, D_global), self.experts_per_tok, axis=0
+          inputs.reshape(B * T, D_global), self.experts_per_tok, axis=0  # pyrefly: ignore[bad-argument-type]
       )
       flat_selected_indices = indices.reshape(-1)
 
@@ -860,7 +860,7 @@ class MoELayer(nnx.Module):
         local_output_offsets = global_out_offsets[ep_shard_idx]
 
         output_buffer_size = (
-            min(self.experts_per_tok, num_local_experts) * B * T * num_ep
+            min(self.experts_per_tok, num_local_experts) * B * T * num_ep  # pyrefly: ignore[bad-specialization]
         )
         output_buffer = jax.lax.empty(
             shape=(output_buffer_size, D_global), dtype=inputs.dtype
@@ -939,9 +939,9 @@ class MoELayer(nnx.Module):
         )
 
         global_in_offsets, global_out_offsets = get_global_input_output_offsets(
-            global_send_sizes.T, num_ep  # pylint: disable=undefined-variable
+            global_send_sizes.T, num_ep  # pylint: disable=undefined-variable  # pyrefly: ignore[unbound-name]
         )
-        local_send_sizes, local_recv_sizes = local_recv_sizes, local_send_sizes  # pylint: disable=undefined-variable
+        local_send_sizes, local_recv_sizes = local_recv_sizes, local_send_sizes  # pylint: disable=undefined-variable  # pyrefly: ignore[unbound-name]
 
         output_buffer = jax.lax.empty(
             shape=(B * T * self.experts_per_tok, D_global), dtype=inputs.dtype
@@ -1033,7 +1033,7 @@ class MLP(nnx.Module):
       x: jaxtyping.Array,
   ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
+    activations = shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
     outputs = self.down_proj(activations)
     return outputs
 
@@ -1045,7 +1045,7 @@ class MLP(nnx.Module):
     ):
       return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
-      return self.block(x)
+      return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
 
 class DecoderLayer(nnx.Module):

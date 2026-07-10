@@ -75,7 +75,7 @@ class CheckpointManager:
             'model_params': ocp.PyTreeCheckpointHandler(),
             'optimizer_state': ocp.PyTreeCheckpointHandler(),
         }
-      item_handlers['custom_metadata'] = ocp.JsonCheckpointHandler()
+      item_handlers['custom_metadata'] = ocp.JsonCheckpointHandler()  # pyrefly: ignore[unsupported-operation]
       self._checkpoint_manager = ocp.CheckpointManager(
           root_directory,
           item_handlers=item_handlers,
@@ -201,11 +201,11 @@ class CheckpointManager:
             for s in jax.tree_util.tree_leaves(shardings)
             if isinstance(s, jax.sharding.NamedSharding)
         )
-        return nnx.get_named_sharding(optimizer_state, named_sharding.mesh)
+        return nnx.get_named_sharding(optimizer_state, named_sharding.mesh)  # pyrefly: ignore[bad-argument-type]
       except StopIteration:
         return shardings
 
-    if optimizer is not None and 'optimizer_state' in metadata.item_metadata:
+    if optimizer is not None and 'optimizer_state' in metadata.item_metadata:  # pyrefly: ignore[not-iterable]
       optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
       fixed_sharding = fix_sharding(optimizer_state)
       optimizer_cp_args = ocp.args.PyTreeRestore(
@@ -221,7 +221,7 @@ class CheckpointManager:
               optimizer_state=optimizer_cp_args,
           ),
       )
-      nnx.update(optimizer, ckpt.optimizer_state)
+      nnx.update(optimizer, ckpt.optimizer_state)  # pyrefly: ignore[missing-attribute]
     else:
       ckpt = self._checkpoint_manager.restore(
           step,
@@ -230,7 +230,7 @@ class CheckpointManager:
           ),
       )
     # Update the model state with params from the restored checkpoint.
-    nnx.update(model, ckpt.model_params)
+    nnx.update(model, ckpt.model_params)  # pyrefly: ignore[missing-attribute]
     logging.info(
         'Restored params from step: %d in %.3f seconds',
         step,

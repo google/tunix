@@ -90,7 +90,7 @@ def get_pytree_mesh_info(tree: jaxtyping.PyTree) -> Mesh | None:
 
 def _is_same_state(s1: jaxtyping.PyTree, s2: jaxtyping.PyTree) -> bool:
   """Returns whether two states refer to the same Params."""
-  return np.all(
+  return np.all(  # pyrefly: ignore[bad-return]
       jax.tree.map(
           lambda x, y: x is y,
           jax.tree_util.tree_leaves(s1),
@@ -321,11 +321,11 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "completion_mask": c_mask[i, :c_len],
         "advantages": adv[i, :c_len] if adv_is_per_token else adv[i],
         "adv_is_per_token": adv_is_per_token,
-        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,
-        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,
-        "returns": returns_np[i, :c_len] if has_returns else None,
-        "old_values": old_values_np[i, :c_len] if has_old_values else None,
-        "policy_version": policy_version_np if has_policy_version else None,
+        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,  # pyrefly: ignore[unbound-name]
+        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,  # pyrefly: ignore[unbound-name]
+        "returns": returns_np[i, :c_len] if has_returns else None,  # pyrefly: ignore[unbound-name]
+        "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
+        "policy_version": policy_version_np if has_policy_version else None,  # pyrefly: ignore[unbound-name]
     }
     res.append(item)
   return res

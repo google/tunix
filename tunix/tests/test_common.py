@@ -254,8 +254,8 @@ def get_lora_model(
       model, lora_provider, **dummy_model_input
   )
   if mesh is not None:
-    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
-  return lora_model
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)  # pyrefly: ignore[bad-argument-type]
+  return lora_model  # pyrefly: ignore[bad-return]
 
 
 class MockVocab(spm.SentencePieceProcessor):
@@ -342,7 +342,7 @@ class ToyTransformerWithScoreHead(nnx.Module):
 
     self.transformer = transformer
     self.score = nnx.Linear(
-        in_features=transformer.head_dim,
+        in_features=transformer.head_dim,  # pyrefly: ignore[missing-attribute]
         out_features=1,
         use_bias=False,
         rngs=rngs,

@@ -523,40 +523,6 @@ class CommonTest(parameterized.TestCase):
           expected_loss=0.0,
       ),
       dict(
-          testcase_name="sequence_mean_token_mean_partial_zero_mask",
-          loss_agg_mode="sequence-mean-token-mean",
-          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
-          completion_mask_list=[[1, 1], [0, 0]],
-          kwargs={},
-          expected_loss=(0.1 + 0.2) / 2.0 / 1.0,
-      ),
-      dict(
-          testcase_name="sequence_mean_token_scale_partial_zero_mask_default",
-          loss_agg_mode="sequence-mean-token-scale",
-          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
-          completion_mask_list=[[1, 1], [0, 0]],
-          kwargs={},
-          expected_loss=(0.1 + 0.2) / 2.0 / 1.0,
-      ),
-      dict(
-          testcase_name="sequence_mean_token_scale_partial_zero_mask",
-          loss_agg_mode="sequence-mean-token-scale",
-          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
-          completion_mask_list=[[1, 1], [0, 0]],
-          kwargs={"norm": 4.0},
-          expected_loss=(0.1 + 0.2) / 4.0 / 1.0,
-      ),
-      dict(
-          testcase_name=(
-              "sequence_mean_token_sum_norm_partial_zero_mask_default"
-          ),
-          loss_agg_mode="sequence-mean-token-sum-norm",
-          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
-          completion_mask_list=[[1, 1], [0, 0]],
-          kwargs={},
-          expected_loss=(0.1 + 0.2) / 1.0,
-      ),
-      dict(
           testcase_name="seq_mean_token_sum",
           loss_agg_mode="seq-mean-token-sum",
           per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],

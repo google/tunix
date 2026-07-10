@@ -104,8 +104,8 @@ class CheckpointManagerTest(parameterized.TestCase):
   def test_empty_root_directory(self):
     cp_manager = checkpoint_manager.CheckpointManager(root_directory=None)
     self.assertIsNone(cp_manager.latest_step())
-    self.assertFalse(cp_manager.save(1, None))
-    self.assertEqual(cp_manager.maybe_restore(None), (0, {}))
+    self.assertFalse(cp_manager.save(1, None))  # pyrefly: ignore[bad-argument-type]
+    self.assertEqual(cp_manager.maybe_restore(None), (0, {}))  # pyrefly: ignore[bad-argument-type]
 
   def test_checkpoint_manager_options_none_sets_default(self):
     cp_path = f'{self.temp_path}/{self.id()}'
@@ -210,7 +210,7 @@ class CheckpointManagerTest(parameterized.TestCase):
     )
 
     # Save the model params.
-    self.assertTrue(cp_manager.save(1, model, save_only_lora_params=True))
+    self.assertTrue(cp_manager.save(1, model, save_only_lora_params=True))  # pyrefly: ignore[bad-argument-type]
     cp_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
 
     # Change the model state.
@@ -219,7 +219,7 @@ class CheckpointManagerTest(parameterized.TestCase):
 
     # Restore the model lora params.
     self.assertEqual(
-        cp_manager.maybe_restore(model, restore_only_lora_params=True),
+        cp_manager.maybe_restore(model, restore_only_lora_params=True),  # pyrefly: ignore[bad-argument-type]
         (1, {}),
     )
     # Check the model lora params are restored correctly.

@@ -107,7 +107,7 @@ class Profiler:
       jax.profiler.start_trace(  # pytype: disable=wrong-keyword-args
           log_dir=log_dir,
           profiler_options=profiler_options,
-          max_num_hosts=self._profiler_options.max_num_hosts,
+          max_num_hosts=self._profiler_options.max_num_hosts,  # pyrefly: ignore[unexpected-keyword]
       )
     else:
       jax.profiler.start_trace(

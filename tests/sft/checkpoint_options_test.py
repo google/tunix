@@ -39,7 +39,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
 
     with self.assertLogs(level='WARNING') as log:
       opts = checkpoint_options.resolve_checkpointing_defaults(
-          legacy_opts
+          legacy_opts  # pyrefly: ignore[bad-argument-type]
       )
 
     # Verify deprecation warnings were logged
@@ -64,7 +64,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         ),
     )
     opts = checkpoint_options.resolve_checkpointing_defaults(
-        legacy_opts
+        legacy_opts  # pyrefly: ignore[bad-argument-type]
     )
     self.assertIsInstance(
         opts.save_decision_policy,
@@ -92,10 +92,10 @@ class CheckpointOptionsTest(parameterized.TestCase):
 
   def test_resolve_checkpointing_defaults_with_modern_options(self):
     modern_opts = checkpoint_options.TunixCheckpointingOptions(
-        save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+        save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(  # pyrefly: ignore[bad-argument-type]
             50
         ),
-        preservation_policy=ocp.training.preservation_policies.LatestN(10),
+        preservation_policy=ocp.training.preservation_policies.LatestN(10),  # pyrefly: ignore[bad-argument-type]
         enable_async_checkpointing=False,
     )
     opts = checkpoint_options.resolve_checkpointing_defaults(
@@ -111,10 +111,10 @@ class CheckpointOptionsTest(parameterized.TestCase):
 
   def test_create_checkpointing_options(self):
     opts = checkpoint_options.create_checkpointing_options(
-        save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+        save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(  # pyrefly: ignore[bad-argument-type]
             50
         ),
-        preservation_policy=ocp.training.preservation_policies.LatestN(10),
+        preservation_policy=ocp.training.preservation_policies.LatestN(10),  # pyrefly: ignore[bad-argument-type]
         enable_async_checkpointing=False,
     )
     self.assertIsInstance(opts, checkpoint_options.TunixCheckpointingOptions)

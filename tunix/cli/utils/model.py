@@ -70,10 +70,10 @@ def apply_lora_to_model(base_model, mesh, lora_config, rng_seed=0):
   )
 
   if original_remat is not None:
-    lora_model.config.remat_config = original_remat
+    lora_model.config.remat_config = original_remat  # pyrefly: ignore[missing-attribute]
 
   if mesh is not None:
-    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)  # pyrefly: ignore[bad-argument-type]
   return lora_model
 
 
@@ -196,6 +196,9 @@ def create_model(
           'flash_attention_block_size', 1024
       ),
       remat_config=model_config.get('remat_config', 1),
+      dtype=model_config.get('dtype'),
+      load_dtype=model_config.get('load_dtype'),
+      use_sliding_window_kv_cache=model_config.get('use_sliding_window_kv_cache'),
   )
 
   if model_config.get('lora_config'):

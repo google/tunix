@@ -162,7 +162,7 @@ def np_find_first_eos_idx(
   """Numpy version of find_first_eos_idx. Works on CPU arrays."""
   assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
   if isinstance(eos_id, int):
-    eos_id = np.array([eos_id])
+    eos_id = np.array([eos_id])  # pyrefly: ignore[bad-assignment]
   mask = np.isin(ids, eos_id)
   return int(np.argmax(mask)) if mask.any() else len(ids)
 
@@ -334,8 +334,8 @@ def get_logprobs_from_vllm_output(
 
   extracted = []
   for tok_id, tok_logprobs in zip(token_ids, logprobs):
-    if tok_id in tok_logprobs:
-      extracted.append(tok_logprobs[tok_id].logprob)
+    if tok_id in tok_logprobs:  # pyrefly: ignore[not-iterable]
+      extracted.append(tok_logprobs[tok_id].logprob)  # pyrefly: ignore[unsupported-operation]
     else:
       raise ValueError(
           f'The selected token id {tok_id} not in the return log probs list'
@@ -896,14 +896,14 @@ def transfer_state_with_mappings(
     if kwargs.get('reshard_chunk_size', None) is not None:
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
-          spec_flat=sharding_dict,
+          spec_flat=sharding_dict,  # pyrefly: ignore[bad-argument-type]
           reshard_fn=reshard_fn,
           chunk_size=kwargs['reshard_chunk_size'],
           delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
     else:
       if kwargs.get('delete_dst_buffers', False):
-        _delete_target_buffers(sharding_dict, tgt_flat_dict)
+        _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for tgt_key, tgt_param in tgt_flat_list:
@@ -992,7 +992,7 @@ def _unstack_scanned_param(
           return jnp.unstack(src_val)
         else:
            # Fallback for older JAX versions
-          return [src_val[i] for i in range(src_val.shape[0])]
+          return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
       except Exception as e:
         logging.debug(
             "Failed to unstack parameter '%s'. Error: %s. Using original.",
@@ -1041,7 +1041,7 @@ def _get_n_shards(arr: jax.Array | np.ndarray, axis: int) -> int:
   """Returns the number of shards for a given axis of an array."""
   sharding = getattr(arr, 'sharding', None)
   if isinstance(sharding, jax.sharding.NamedSharding):
-    return _partition_size(_spec_at_axis(sharding, axis), sharding.mesh)
+    return _partition_size(_spec_at_axis(sharding, axis), sharding.mesh)  # pyrefly: ignore[bad-argument-type]
   return 1
 
 
@@ -1133,7 +1133,7 @@ def _align_per_axis(
       mesh = tgt_sharding.mesh
       pad_specs = []
       for axis, s, t in mismatches:
-        n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)
+        n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)  # pyrefly: ignore[bad-argument-type]
         if t % n_shards != 0:
           raise ValueError(
               f"Target dimension {t} on axis {axis} for {key_path} is not "
@@ -1512,7 +1512,7 @@ def _reshard_in_chunks(
     jax.block_until_ready(chunk_resharded)
     resharded.update(traverse_util.flatten_dict(chunk_resharded))
 
-    del (
+    del (  # pyrefly: ignore[unsupported-delete]
         chunk_src,
         chunk_dst_shardings,
         chunk_resharded,

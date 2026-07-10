@@ -472,7 +472,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.temperature = temperature
       if self.config.return_logprobs:
         sampling_params.logprobs = 1  # b/428730696
-        sampling_params.prompt_logprobs = 1  # b/428730696
+        sampling_params.prompt_logprobs = 0  # b/428730696
       else:
         sampling_params.logprobs = 0
         sampling_params.prompt_logprobs = 0

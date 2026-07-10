@@ -235,7 +235,7 @@ class Embedder(nnx.Module):
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
-    x = shard(x, self.shd_config.act_btd)
+    x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -279,7 +279,7 @@ class RMSNorm(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim),
+        nnx.initializers.ones_init()(rngs.params(), dim),  # pyrefly: ignore[bad-argument-type]
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
@@ -346,9 +346,9 @@ class Attention(nnx.Module):
     key_proj = self.k_proj(x)
     value_proj = self.v_proj(x)
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)
-    key_proj = shard(key_proj, self.shd_config.act_btnh)
-    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rope(
         query_proj,
@@ -393,7 +393,7 @@ class Attention(nnx.Module):
     qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
-    outputs = shard(outputs, self.shd_config.act_btd)
+    outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -484,7 +484,7 @@ class MLP(nnx.Module):
       x: jaxtyping.Array,
   ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
+    activations = shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
     outputs = self.down_proj(activations)
     return outputs
 
@@ -496,7 +496,7 @@ class MLP(nnx.Module):
     ):
       return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
-      return self.block(x)
+      return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
 
 class DecoderLayer(nnx.Module):
