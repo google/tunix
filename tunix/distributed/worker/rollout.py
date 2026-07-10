@@ -20,8 +20,8 @@ import jax
 import logging
 import time
 
-from tunix.distributed.plugin import jax as jax_plugin
-from tunix.distributed.plugin import k8s
+from tunix.distributed.util import jax as jax_util
+from tunix.distributed.util import k8s
 from tunix.distributed.service import registration_service_pb2
 from tunix.distributed.service import registration_service_pb2_grpc
 
@@ -39,7 +39,7 @@ def main():
 
   # init jax
   if not is_local:
-    jax_plugin.init_pathways()
+    jax_util.init_pathways()
   logging.info(f"[{args.name}] jax devices: {jax.devices()}")
   # TODO: init RolloutService
 
