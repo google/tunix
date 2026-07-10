@@ -281,11 +281,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_forward_fn = None
     self._skip_jit = False
     self._cache_nnx_graph = True
-    # Internal gradient accumulation buffer (caller-driven accumulation).
+    # Internal gradient accumulation buffers (caller-driven accumulation).
+    # `_accum_grads` holds un-normalized gradient sums; `_accum_denom` holds
+    # the summed loss denominators used to normalize at apply time.
     self._accum_grads = None
+    self._accum_denom = None
     self._accum_count = 0
     self._mini_batch_size: int | None = None
-    self._pending_metrics: list[Tuple[StepMetrics, int, bool]] = []
+    # Step records pending collection via `get_metrics`:
+    # (step_metrics, step_id, is_eval, apply_gradients).
+    self._pending_metrics: list[Tuple[StepMetrics, int, bool, bool]] = []
 
     max_step = None
     if self.config.max_steps is not None:
@@ -389,27 +394,35 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     inputs = self.gen_model_input_fn(inputs)
 
     def grad_loss_fn(model, *args, **kwargs):
-      out = self.loss_fn(model, *args, **kwargs)
-      if self._has_aux:
-        loss_metrics, aux = out
-        return loss_metrics.compute(), (loss_metrics, aux)
-      else:
-        loss_metrics = out
-        return loss_metrics.compute(), loss_metrics
+      loss_metrics, aux = self._split_weighted_loss_aux(
+          self.loss_fn(model, *args, **kwargs)
+      )
+      return loss_metrics.compute(), (loss_metrics, aux)
 
     grad_fn = nnx.value_and_grad(
         grad_loss_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
         has_aux=True,
     )
-    (_, out), grads = grad_fn(model, **inputs)
+    (_, (loss, aux)), grads = grad_fn(model, **inputs)
     grad_norm = optax.global_norm(grads)
     optimizer.update(model, grads)
+    return loss, aux, grad_norm
+
+  def _split_weighted_loss_aux(
+      self, out: Any
+  ) -> Tuple[abstract_trainer.WeightedMetrics, Any | None]:
+    """Splits a loss_fn output into (WeightedMetrics, aux).
+
+    Backward compatible: loss functions returning plain scalars are wrapped
+    via `as_weighted_metrics` (denominator 1), preserving legacy equal-weight
+    micro-batch averaging.
+    """
     if self._has_aux:
       loss, aux = out
-      return loss, aux, grad_norm
     else:
-      return out, None, grad_norm
+      loss, aux = out, None
+    return abstract_trainer.as_weighted_metrics(loss), aux
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -435,28 +448,30 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def _grad_step(
       self, model: nnx.Module, inputs: Any
   ) -> Tuple[ArrayLike, Any | None, ArrayLike, Any]:
-    """Computes loss and gradients without applying an optimizer update."""
+    """Computes loss and un-normalized gradient sums (no optimizer update).
+
+    Differentiates the loss `unreduced_sum` rather than the mean: gradients
+    are accumulated across micro-batches and normalized once by the total
+    denominator at apply time, making the update equal to the exact
+    global-batch gradient (token-weighted, matching the logged loss).
+    """
     inputs = self.gen_model_input_fn(inputs)
+
     def grad_loss_fn(model, *args, **kwargs):
-      out = self.loss_fn(model, *args, **kwargs)
-      if self._has_aux:
-        loss_metrics, aux = out
-        return loss_metrics.compute(), (loss_metrics, aux)
-      else:
-        loss_metrics = out
-        return loss_metrics.compute(), loss_metrics
+      loss_metrics, aux = self._split_weighted_loss_aux(
+          self.loss_fn(model, *args, **kwargs)
+      )
+      return loss_metrics.unreduced_sum, (loss_metrics, aux)
 
     grad_fn = nnx.value_and_grad(
         grad_loss_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
         has_aux=True,
     )
-    (_, out), grads = grad_fn(model, **inputs)
-    grad_norm = optax.global_norm(grads)
-    if self._has_aux:
-      loss, aux = out
-    else:
-      loss, aux = out, None
+    (_, (loss, aux)), grads = grad_fn(model, **inputs)
+    # Report the per-micro-batch normalized norm, for parity with the fused
+    # (non-accumulating) path.
+    grad_norm = optax.global_norm(grads) * loss.compute_scale()
     return loss, aux, grad_norm, grads
 
   def _apply_grads_step(
@@ -711,6 +726,33 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
       self.training_hooks.on_train_step_end(self, step, loss)
 
+  def _perf_tags(self) -> dict[str, Any]:
+    """Collects tags for the perf tracer span around a train step."""
+    metadata = self.custom_checkpoint_metadata()
+    global_step = metadata.get("global_step")
+
+    if global_step is not None:
+      # Offset by 1 since global_step is incremented for checkpointing.
+      global_step -= 1
+      if global_step > 0:
+        if self._mini_batch_size is None:
+          self._mini_batch_size = max(1, self._train_steps // global_step)
+        mini_batch = self._train_steps % self._mini_batch_size
+      else:
+        mini_batch = self._train_steps
+    else:
+      mini_batch = None
+      global_step = None
+    micro_batch = self._iter_steps % self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    return {
+        perf_constants.STEP: global_step,
+        perf_constants.ROLE: metadata.get("role"),
+        perf_constants.MICRO_BATCH: micro_batch,
+        perf_constants.MINI_BATCH: mini_batch,
+    }
+
   # --- AbstractTrainer step-level API ---
 
   def init_state(self) -> None:
@@ -752,6 +794,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         inputs, self.config.data_sharding_axis
     )
 
+    self._throttler.wait_for_next()
     tags = self._perf_tags()
     with self._perf_tracer.span(
         "peft_train_step",
@@ -770,30 +813,39 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       else:
         grad_step_fn, apply_grads_fn = self._accum_step_fns()
         loss, aux, grad_norm, grads = grad_step_fn(inputs)
+        # `grads` are un-normalized gradient sums; accumulate them together
+        # with the loss denominators and normalize once at apply time, so the
+        # update equals the exact global-batch (token-weighted) gradient.
         if self._accum_grads is None:
           self._accum_grads = grads
+          self._accum_denom = loss.denominator
         else:
           self._accum_grads = jax.tree.map(jnp.add, self._accum_grads, grads)
+          self._accum_denom = self._accum_denom + loss.denominator
         self._accum_count += 1
         if apply_gradients:
-          count = self._accum_count
-          mean_grads = jax.tree.map(lambda g: g / count, self._accum_grads)
+          total = self._accum_denom
+          safe_total = jnp.where(total == 0, 1.0, total)
+          scale = jnp.where(total == 0, 0.0, 1.0 / safe_total)
+          mean_grads = jax.tree.map(lambda g: g * scale, self._accum_grads)
           apply_grads_fn(mean_grads)
           self._accum_grads = None
+          self._accum_denom = None
           self._accum_count = 0
-          
-      span.device_end([loss])
-      span_v2.async_end([loss])
 
+      span.device_end([loss.unreduced_sum])
+      span_v2.async_end([loss.unreduced_sum])
+
+    self._throttler.add_computation(loss.unreduced_sum)
     self._iter_steps += 1
     step_id = self.train_steps
     if apply_gradients:
       self._train_steps += 1
 
     step_metrics = StepMetrics(loss=loss, grad_norm=grad_norm, aux=aux)
-    if not hasattr(self, "_pending_metrics"):
-      self._pending_metrics = []
-    self._pending_metrics.append((step_metrics, step_id, False, apply_gradients))
+    self._pending_metrics.append(
+        (step_metrics, step_id, False, apply_gradients)
+    )
     return step_metrics
 
   def eval_step(
@@ -812,12 +864,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._skip_jit, self._cache_nnx_graph
     )
     loss, aux = eval_step_fn(inputs)
+    loss = abstract_trainer.as_weighted_metrics(loss)
     loss = jax.lax.stop_gradient(loss)
     step_metrics = StepMetrics(loss=loss, aux=aux)
-    
-    if not hasattr(self, "_pending_metrics"):
-      self._pending_metrics = []
-    self._pending_metrics.append((step_metrics, self.train_steps, True, False))
+    self._pending_metrics.append(
+        (step_metrics, self.train_steps, True, False)
+    )
     return step_metrics
 
   def forward_batch(
@@ -875,16 +927,25 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     custom_metadata = self.custom_checkpoint_metadata()
     if path is None:
       if self.config.checkpoint_root_directory is None:
-        raise ValueError(
-            "No `path` given and `checkpoint_root_directory` is not set."
+        # Checkpointing not configured: no-op so callers (e.g. the loop's
+        # per-update policy save) don't need to special-case this.
+        logging.log_first_n(
+            logging.INFO,
+            "save_checkpoint skipped: no `path` given and"
+            " `checkpoint_root_directory` is not set.",
+            1,
         )
+        return ""
+      # Only pass `force` when set, so policy-driven saves keep the manager's
+      # default save-decision behavior (and its call signature).
+      force_kwargs = {"force": True} if force else {}
       self.checkpoint_manager.save(
           self._train_steps,
           self.model,
           self.optimizer,
           save_only_lora_params=self._lora_enabled,
-          force=force,
           custom_metadata=custom_metadata,
+          **force_kwargs,
       )
       return os.path.join(
           self.config.checkpoint_root_directory, str(self._train_steps)
@@ -930,6 +991,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     self._restored_custom_metadata = custom_metadata
     self._accum_grads = None
+    self._accum_denom = None
     self._accum_count = 0
     return restored_step
 
@@ -969,10 +1031,20 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       skip_jit: bool = False,
       *,
       cache_nnx_graph: bool = True,
+      drain_metrics: bool = True,
   ) -> None:
-    """Training loop. Delegates to `tunix.train.train_loop.TrainLoop`."""
+    """Training loop. Delegates to `tunix.train.train_loop.TrainLoop`.
+
+    Set `drain_metrics=False` when an outer driver (e.g.
+    `train_loop.train_minibatch`) pulls step records via `get_metrics` and
+    owns metrics writing and checkpoint cadence.
+    """
     train_loop_lib.TrainLoop(self).run(
-        train_ds, eval_ds, skip_jit, cache_nnx_graph=cache_nnx_graph
+        train_ds,
+        eval_ds,
+        skip_jit,
+        cache_nnx_graph=cache_nnx_graph,
+        drain_metrics=drain_metrics,
     )
 
   def _save_last_checkpoint(self):
@@ -1028,8 +1100,15 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> ArrayLike:
-  """Default loss function for PEFT training."""
+) -> abstract_trainer.WeightedMetrics:
+  """Default loss function for PEFT training.
+
+  Returns the negative log likelihood (NLL) loss as a `WeightedMetrics`:
+  the un-normalized NLL sum and the valid-token count. `compute()` yields
+  the per-token mean (equivalent to the legacy scalar loss), while gradient
+  accumulation aggregates sums and denominators across micro-batches for
+  exact global-batch (token-weighted) normalization.
+  """
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}
   logits, _ = model(input_tokens, positions, None, attention_mask, **kwargs)
@@ -1045,9 +1124,12 @@ def _default_loss_fn(
   # Don't update on unwanted tokens.
   one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
 
-  # Define the normalization factor.
-  norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
-
-  # Return the negative log likelihood (NLL) loss.
-  # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
-  return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+  # Un-normalized NLL sum and its normalization denominator.
+  # `eps` preserves exact equivalence with the legacy
+  # `sum / (num_tokens + 1e-8)` mean.
+  nll_sum = -jnp.sum(jax.nn.log_softmax(logits) * one_hot)
+  return abstract_trainer.WeightedMetrics(
+      unreduced_sum=nll_sum,
+      denominator=jnp.sum(target_mask),
+      eps=1e-8,
+  )

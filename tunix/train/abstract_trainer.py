@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import flax
 from flax import nnx
 import jax
+import jax.numpy as jnp
 
 
 @flax.struct.dataclass(frozen=True)
@@ -86,6 +87,28 @@ class WeightedMetrics:
   def compute(self) -> jax.Array:
     """Safely computes total / count with optional legacy equivalence bounds."""
     return self.unreduced_sum * self.compute_scale()
+
+
+def as_weighted_metrics(loss: Any) -> WeightedMetrics:
+  """Coerces a loss value into `WeightedMetrics`.
+
+  Backward-compatibility adapter: loss functions returning a plain
+  (already-reduced) scalar are wrapped with denominator 1, so weighted
+  aggregation degenerates to the legacy equal-weight mean across
+  micro-batches.
+
+  Args:
+    loss: A `WeightedMetrics` or a scalar loss array.
+
+  Returns:
+    The loss as `WeightedMetrics`.
+  """
+  if isinstance(loss, WeightedMetrics):
+    return loss
+  return WeightedMetrics(
+      unreduced_sum=jnp.asarray(loss), denominator=jnp.asarray(1.0)
+  )
+
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class StepMetrics:

@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Scratchpad for the loop driver. just concept demonstration. """
-
 """Loop layer driving a step-level trainer.
 
 `TrainLoop` owns loop policy: data iteration, gradient-accumulation call
 patterns, eval cadence, checkpoint cadence, hooks, metrics writing, profiling
 and the progress bar. The trainer (see `tunix.train.abstract_trainer`) owns
 step execution and all model/optimizer state.
+
+Metrics flow pull-based: the trainer records per-step metrics internally and
+the driver drains them via `trainer.get_metrics()` at whatever frequency it
+chooses, then hands them to `process_metrics`. RPC-based orchestrators can
+drain on the worker, move values host-side, and ship them asynchronously.
 
 This is a transitional split extracted from `PeftTrainer.train`: metric
 buffers and loop components (throttler, profiler, progress bar) still live on
@@ -28,15 +31,13 @@ the trainer so that existing subclass overrides (e.g.
 """
 
 from collections.abc import Iterable, Sequence
-import concurrent.futures
 import time
-from typing import Any, List, TYPE_CHECKING
+from typing import Any, List, Tuple, TYPE_CHECKING
 
 from absl import logging
 import jax
 from jax.interpreters import pxla
 import numpy as np
-from tunix.perf.experimental import constants as perf_constants
 from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import progress_bar
 from tunix.train import abstract_trainer
@@ -45,12 +46,27 @@ if TYPE_CHECKING:
   from tunix.sft import peft_trainer
 
 
-_METRICS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+def process_metrics(
+    trainer: abstract_trainer.AbstractTrainer,
+    records: List[Tuple[abstract_trainer.StepMetrics, int, bool, bool]],
+) -> None:
+  """Buffers and writes step metric records drained via `get_metrics`.
 
-def _process_metrics_async(trainer, metrics_data):
-  for i, (step_metrics, step_id, is_eval, apply_gradients) in enumerate(metrics_data):
-    trainer._throttler.add_computation(step_metrics.loss.unreduced_sum)  # pylint: disable=protected-access
-    
+  Train records are buffered per step and written whenever a record marks an
+  applied optimizer update. Eval records are only buffered: the eval driver
+  (e.g. `TrainLoop.run_eval`) decides when an eval run is complete and writes
+  the eval buffer itself, so a drain boundary can never split an eval run.
+
+  NOTE: processing is synchronous. Values inside records are device arrays;
+  host transfer happens at write time. If drains ever move to a background
+  thread (e.g. an RPC worker shipping metrics to an orchestrator), writes
+  must be synchronized with `trainer.close()`.
+
+  Args:
+    trainer: The trainer the records were drained from.
+    records: Records from `trainer.get_metrics()`.
+  """
+  for step_metrics, step_id, is_eval, applied in records:
     if is_eval:
       trainer._buffered_eval_metrics = trainer._buffer_metrics(  # pylint: disable=protected-access
           trainer._buffered_eval_metrics,  # pylint: disable=protected-access
@@ -58,14 +74,6 @@ def _process_metrics_async(trainer, metrics_data):
           step=step_id,
       )
       trainer._post_process_eval_step(step_metrics.aux)  # pylint: disable=protected-access
-      
-      is_last_eval = True
-      if i + 1 < len(metrics_data) and metrics_data[i + 1][2] == True:
-        is_last_eval = False
-        
-      if is_last_eval:
-        trainer._write_metrics(trainer._buffered_eval_metrics)  # pylint: disable=protected-access
-        trainer._buffered_eval_metrics = None  # pylint: disable=protected-access
     else:
       trainer._buffered_train_metrics = trainer._buffer_metrics(  # pylint: disable=protected-access
           trainer._buffered_train_metrics,  # pylint: disable=protected-access
@@ -75,11 +83,36 @@ def _process_metrics_async(trainer, metrics_data):
               "grad_norm": (step_metrics.grad_norm, np.mean)
           },
       )
-      # NB: put this after t._buffer_metrics is important.
+      # NB: put this after _buffer_metrics is important.
       trainer._post_process_train_step(step_metrics.aux)  # pylint: disable=protected-access
-
-      if apply_gradients:
+      if applied:
         trainer._write_train_metrics()  # pylint: disable=protected-access
+
+
+def write_pending_eval_metrics(
+    trainer: abstract_trainer.AbstractTrainer,
+) -> None:
+  """Writes and clears the trainer's buffered eval metrics, if any.
+
+  Call after `process_metrics` once an eval run is known to be complete.
+  """
+  if trainer._buffered_eval_metrics is None:  # pylint: disable=protected-access
+    return
+  # Re-enter EVAL mode: when called by an outer driver after run() returns,
+  # the trainer is back in TRAIN mode, but these are eval records.
+  with trainer._switch_mode(sft_metrics_logger.Mode.EVAL):  # pylint: disable=protected-access
+    trainer._write_metrics(trainer._buffered_eval_metrics)  # pylint: disable=protected-access
+    logging.info(
+        "Train step %d eval loss: %f - eval perplexity: %f",
+        trainer.train_steps,  # pytype: disable=attribute-error
+        trainer.metrics_logger.get_metric(  # pyrefly: ignore[missing-attribute]
+            trainer.metrics_prefix, "loss", "eval"
+        ),
+        trainer.metrics_logger.get_metric(  # pyrefly: ignore[missing-attribute]
+            trainer.metrics_prefix, "perplexity", "eval"
+        ),
+    )
+  trainer._buffered_eval_metrics = None  # pylint: disable=protected-access
 
 
 def train_minibatch(
@@ -87,33 +120,51 @@ def train_minibatch(
     payloads: Sequence[abstract_trainer.TrainerPayload | Any],
     **kwargs,
 ) -> None:
-  """Executes one optimizer update over a mini-batch.
-  !!!Demo purpose!!! Just highlevel idea on the batch driving flow.
+  """Trains over a mini-batch of micro-batches by driving `trainer.train`.
 
-  Iterates over the micro-batches in `payloads` and delegates to
-  `trainer.train` which will run the `TrainLoop` over each micro-batch.
+  Each micro-batch runs through the full `TrainLoop` (profiling, hooks,
+  metrics draining), with the trainer temporarily marked as externally
+  managed so that per-call `close()` and the checkpoint-resume skip logic
+  are bypassed.
+
+  NOTE: the optimizer-update boundary is governed by
+  `config.gradient_accumulation_steps` via the loop's `iter_steps` counter,
+  not by `len(payloads)`. Configure them consistently if this call is meant
+  to be exactly one optimizer update.
 
   Args:
-    trainer: The trainer to step.
-    payloads: The micro-batches for one optimizer update, in order.
+    trainer: The trainer to drive.
+    payloads: The micro-batches, in order.
     **kwargs: Forwarded to `trainer.train`.
+
+  Raises:
+    ValueError: If `payloads` is empty.
   """
   payloads = list(payloads)
   if not payloads:
     raise ValueError("train_minibatch requires at least one payload.")
 
-  for micro_batch in payloads:
-    # We use a type ignore here since AbstractTrainer does not define train(),
-    # but at runtime trainer will be a PeftTrainer or similar.
-    trainer.train(train_ds=[micro_batch], **kwargs)  # type: ignore
+  # Bypass the loop's session teardown (close()) and resume-skip logic;
+  # the caller owns the trainer's lifecycle.
+  was_managed = trainer.is_managed_externally  # pytype: disable=attribute-error
+  trainer.is_managed_externally = True
+  try:
+    for micro_batch in payloads:
+      # We use a type ignore here since AbstractTrainer does not define
+      # train(), but at runtime trainer will be a PeftTrainer or similar.
+      # `drain_metrics=False`: the loop leaves step records pending on the
+      # trainer; this driver owns metrics readiness and writing.
+      trainer.train(train_ds=[micro_batch], drain_metrics=False, **kwargs)  # type: ignore
+  finally:
+    trainer.is_managed_externally = was_managed
 
-  # metrics getting can be in any frequency controlled by caller. No need to be in the boundary of mini_batch.
-  metrics_data = trainer.get_metrics()
-  if metrics_data:
-    # !! Waiting for the metrics ready may live in worker to move metrics to local host
-    # before RPC transfer to orchestrator.
-    _METRICS_EXECUTOR.submit(_process_metrics_async, trainer, metrics_data)
+  # This driver decides when metrics are ready: drain and write here, at
+  # whatever frequency the caller chooses (it does not need to align with
+  # mini-batch boundaries).
+  process_metrics(trainer, trainer.get_metrics())
+  write_pending_eval_metrics(trainer)
 
+  # Checkpoint cadence is delegated to the manager's save-decision policy.
   trainer.save_checkpoint(force=False)
 
 
@@ -122,6 +173,7 @@ class TrainLoop:
 
   def __init__(self, trainer: "peft_trainer.PeftTrainer"):
     self.trainer = trainer
+    self._drain_metrics = True
 
   def run(
       self,
@@ -130,9 +182,24 @@ class TrainLoop:
       skip_jit: bool = False,
       *,
       cache_nnx_graph: bool = True,
+      drain_metrics: bool = True,
   ) -> None:
-    """Runs the training loop."""
+    """Runs the training loop.
+
+    Args:
+      train_ds: The training dataset.
+      eval_ds: Optional eval dataset, run at `eval_every_n_steps` cadence.
+      skip_jit: If True, run the step functions un-jitted.
+      cache_nnx_graph: Whether to cache the nnx graph in the jitted fns.
+      drain_metrics: If True (default), the loop drains
+        `trainer.get_metrics()` after every step, writes metrics itself, and
+        triggers policy-driven checkpoint saves per applied update. Set
+        False when an outer driver (e.g. `train_minibatch`) owns metrics
+        readiness, writing, and checkpoint cadence; pending records are then
+        left on the trainer for the driver to pull.
+    """
     t = self.trainer
+    self._drain_metrics = drain_metrics
     logging.log_first_n(
         logging.INFO,
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
@@ -202,15 +269,21 @@ class TrainLoop:
         ):
           break
 
-        t._throttler.wait_for_next()  # pylint: disable=protected-access
         if t.training_hooks:
           t.training_hooks.on_train_step_start(t)
 
         apply_gradients = ((t.iter_steps + 1) % grad_accum_steps == 0)
 
         t.train_step(train_example, apply_gradients=apply_gradients)
+        if self._drain_metrics:
+          process_metrics(t, t.get_metrics())
 
         if apply_gradients:
+          if self._drain_metrics:
+            # Checkpoint cadence is delegated to the manager's
+            # save-decision policy (checkpointing_options). Deferred to the
+            # outer driver together with metrics when draining is deferred.
+            t.save_checkpoint(force=False)
 
           if (
               eval_ds
@@ -250,7 +323,8 @@ class TrainLoop:
         if t.training_hooks:
           t.training_hooks.on_eval_step_start(t)
         step_metrics = t.eval_step(eval_example)
-        
+
+        # Lazy device-side accumulation; no host sync per step.
         eval_loss += step_metrics.loss.compute()
         eval_steps += 1
 
@@ -260,5 +334,12 @@ class TrainLoop:
         )
         return
 
+      if self._drain_metrics:
+        # The eval driver owns the end-of-run boundary: buffer all drained
+        # records, then write the eval buffer exactly once. When draining is
+        # deferred, the outer driver pulls the records and calls
+        # `write_pending_eval_metrics` itself.
+        process_metrics(t, t.get_metrics())
+        write_pending_eval_metrics(t)
       if t.training_hooks:
         t.training_hooks.on_eval_step_end(t, eval_loss)
