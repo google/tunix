@@ -20,8 +20,7 @@ import jax
 import logging
 import time
 
-from tunix.distributed.util import jax as jax_util
-from tunix.distributed.util import k8s
+from tunix.distributed import util
 from tunix.distributed.service import registration_service_pb2
 from tunix.distributed.service import registration_service_pb2_grpc
 
@@ -39,7 +38,7 @@ def main():
 
   # init jax
   if not is_local:
-    jax_util.init_pathways()
+    util.jax.initialize()
   logging.info(f"[{args.name}] jax devices: {jax.devices()}")
   # TODO: init RolloutService
 
@@ -49,7 +48,7 @@ def main():
   with grpc.insecure_channel(args.registration_service_address) as channel:
     stub = registration_service_pb2_grpc.RegistrationServiceStub(channel)
 
-    hostname = "localhost" if is_local else k8s.get_jobset_hostname()
+    hostname = "localhost" if is_local else util.k8s.get_jobset_hostname()
 
     request_payload = registration_service_pb2.RegisterRolloutWorkerRequest(
       worker_id=args.name,

@@ -15,17 +15,11 @@
 """JAX utils."""
 
 import jax
+import os
 
-def init_pathways():
-  import pathwaysutils
-
-  # TODO: only set config when JAX_PLATFORMS and JAX_BACKEND_TARGET is not set
-  jax.config.update('jax_platforms', 'proxy')
-  jax.config.update('jax_backend_target', 'grpc://127.0.0.1:29000')
-  pathwaysutils.initialize()
-
-  # trigger initialzation
-  jax.devices()
-
-def init_mcjax():
-  jax.distributed.initialize()
+def initialize():
+  if os.environ.get("JAX_PLATFORMS") and os.environ.get("JAX_BACKEND_TARGET"):
+    import pathwaysutils
+    pathwaysutils.initialize()
+  else:
+    jax.distributed.initialize()
