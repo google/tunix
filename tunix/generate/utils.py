@@ -21,6 +21,7 @@ import gc
 from absl import logging
 import math
 import re
+import time
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from flax import nnx
@@ -833,13 +834,24 @@ def transfer_state_with_mappings(
   Returns:
     The target state with the transferred values.
   """
+  profile_timings = kwargs.get('profile_timings')
+  stage_start = time.perf_counter()
   # Get flat target state
   tgt_flat_list = dst_state.flat_state()
+  if profile_timings is not None:
+    profile_timings['target_flat_state'] = time.perf_counter() - stage_start
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
+  dst_buffer_dict = None
 
+  stage_start = time.perf_counter()
   if reshard_fn:
+    if kwargs.get('delete_dst_buffers', False):
+      dst_buffer_dict = {
+          key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
+          for key, tgt_params in tgt_flat_list
+      }
     sharding_dict = {
         key: (
             tgt_params.value.sharding
@@ -848,15 +860,26 @@ def transfer_state_with_mappings(
         )
         for key, tgt_params in tgt_flat_list
     }
+  if profile_timings is not None:
+    profile_timings['sharding_dict'] = time.perf_counter() - stage_start
 
   # Build source-to-target mapping
+  stage_start = time.perf_counter()
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
+  if profile_timings is not None:
+    profile_timings['build_mapping'] = time.perf_counter() - stage_start
 
   # Unroll scanned layers and flatten source state
+  stage_start = time.perf_counter()
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  if profile_timings is not None:
+    profile_timings['unroll_scanned_layers'] = (
+        time.perf_counter() - stage_start
+    )
   transferred_target_keys = set()
 
   # Transfer values with transformations
+  stage_start = time.perf_counter()
   for (flat_src_key, flat_tgt_key), (
       val,
       tgt_param,
@@ -879,33 +902,64 @@ def transfer_state_with_mappings(
     # Assign transformed value
     tgt_param.value = val
     transferred_target_keys.add(flat_tgt_key)
+  if profile_timings is not None:
+    profile_timings['transform_assign_loop'] = (
+        time.perf_counter() - stage_start
+    )
 
   # Target rollout engine might have different implementation and have materialized lm_head
+  stage_start = time.perf_counter()
   _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
+  if profile_timings is not None:
+    profile_timings['sync_tied_lm_head'] = time.perf_counter() - stage_start
 
   # Clean up memory
+  stage_start = time.perf_counter()
   del unscanned_src_to_tgt_flat
   gc.collect()
+  if profile_timings is not None:
+    profile_timings['gc_collect'] = time.perf_counter() - stage_start
 
   # Batch reshard and assign if resharding is configured
   if reshard_fn:
+    stage_start = time.perf_counter()
     tgt_flat_dict = {
         key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
         for key, tgt_params in tgt_flat_list
     }
+    if profile_timings is not None:
+      profile_timings['reshard_source_flat'] = (
+          time.perf_counter() - stage_start
+      )
     if kwargs.get('reshard_chunk_size', None) is not None:
+      stage_start = time.perf_counter()
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
-          spec_flat=sharding_dict,  # pyrefly: ignore[bad-argument-type]
+          spec_flat=(
+              dst_buffer_dict if dst_buffer_dict is not None else sharding_dict
+          ),  # pyrefly: ignore[bad-argument-type]
           reshard_fn=reshard_fn,
           chunk_size=kwargs['reshard_chunk_size'],
           delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
+      dst_buffer_dict = None
+      if profile_timings is not None:
+        profile_timings['reshard_chunks'] = time.perf_counter() - stage_start
     else:
       if kwargs.get('delete_dst_buffers', False):
-        _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
+        stage_start = time.perf_counter()
+        _delete_target_buffers(dst_buffer_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
+        dst_buffer_dict = None
+        if profile_timings is not None:
+          profile_timings['delete_dst_buffers'] = (
+              time.perf_counter() - stage_start
+          )
+      stage_start = time.perf_counter()
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
+      if profile_timings is not None:
+        profile_timings['reshard_dispatch'] = time.perf_counter() - stage_start
 
+    stage_start = time.perf_counter()
     for tgt_key, tgt_param in tgt_flat_list:
       assert (
           tgt_key in resharded_values_flat_dict
@@ -914,8 +968,14 @@ def transfer_state_with_mappings(
         tgt_param.value = resharded_values_flat_dict[tgt_key]
       else:
         tgt_param = resharded_values_flat_dict[tgt_key]
+    if profile_timings is not None:
+      profile_timings['assign_resharded'] = time.perf_counter() - stage_start
 
-  return dst_state.from_flat_path(tgt_flat_list)
+  stage_start = time.perf_counter()
+  result = dst_state.from_flat_path(tgt_flat_list)
+  if profile_timings is not None:
+    profile_timings['from_flat_path'] = time.perf_counter() - stage_start
+  return result
 
 
 def _shapes_are_repeatable(

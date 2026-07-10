@@ -220,6 +220,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         timings["preprocess"] = time.perf_counter() - start
 
         start = time.perf_counter()
+        transfer_timings = {}
         utils.transfer_state_with_mappings(
             src_state=updated_weights,
             dst_state=self.transformer_state,
@@ -240,8 +241,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
                 else self._model_runner.model_config.get_head_size()
             ),
             tp_size=self.args.get("tensor_parallel_size", 1),
+            profile_timings=transfer_timings,
         )
         timings["transfer"] = time.perf_counter() - start
+        timings.update(
+            {
+                f"transfer_{name}": value
+                for name, value in transfer_timings.items()
+            }
+        )
       else:
         timings["preprocess"] = 0.0
         # Direct Weight Sync (e.g. MaxText -> MaxText)
@@ -278,6 +286,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else:
           self._model_runner.state_leaves = self._model_runner.state
       timings["state_leaves"] = time.perf_counter() - start
+
+      start = time.perf_counter()
+      if hasattr(self._model_runner, "state_leaves"):
+        jax.block_until_ready(self._model_runner.state_leaves)
+      else:
+        jax.block_until_ready(jax.tree_util.tree_leaves(self._model_runner.state))
+      timings["post_transfer_block"] = time.perf_counter() - start
 
       start = time.perf_counter()
       if self.llm is not None:
