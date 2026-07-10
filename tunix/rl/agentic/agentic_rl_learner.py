@@ -607,6 +607,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         expected_step=expected_step,
     )
 
+  def _compute_packed_logps(self, example: TrainExample) -> TrainExample:
+    # pack-first hook: algorithms that defer old/ref logp under packing compute
+    # them on the packed buffer here. Base is a no-op.
+    return example
+
   @abc.abstractmethod
   def _process_results(
       self,
@@ -738,7 +743,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._rollout_micro_batch_size = 1
     self._process_in_consumer = False
 
-    if self._compute_logps_micro_batch_size > 1:
+    # pack-first: with packing on, the pack is the logp batch, so logp is
+    # computed on the packed buffer after pack_sequences; do not defer
+    # conversion to the consumer (which would enqueue raw lists pack_sequences
+    # cannot consume).
+    packing_enabled = self._training_config.max_seq_token_per_tpu is not None
+    if self._compute_logps_micro_batch_size > 1 and not packing_enabled:
       if self._compute_logps_micro_batch_size != train_micro_batch_size:
         raise ValueError(
             "compute_logps_micro_batch_size"
@@ -866,6 +876,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # TODO(b/491970038): handle seq packing case differently
         merged_train_micro_batch = jax.tree.map(
             lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+        )
+
+      if is_packed:
+        # pack-first: old/ref logp were deferred (left None) so they can be
+        # computed here on the packed buffer (segment-aware forward), sharing
+        # the same packed representation training uses.
+        merged_train_micro_batch = self._compute_packed_logps(
+            merged_train_micro_batch
+        )
+        # Packing efficiency: segment_ids==0 marks padding + dummy packs (real
+        # segments are numbered from 1), i.e. the fraction of wasted compute.
+        seg = np.asarray(merged_train_micro_batch.segment_ids)
+        self.rl_cluster.buffer_metrics_async(
+            {
+                "packing/dummy_ratio": (float((seg == 0).mean()), np.mean),
+                "packing/seqs_per_pack": (
+                    float(seg.max(axis=-1).mean()),
+                    np.mean,
+                ),
+            },
+            mode=rl_cluster_lib.Mode.TRAIN,
+            step=self.rl_cluster.global_steps,
         )
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
