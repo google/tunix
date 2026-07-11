@@ -237,6 +237,31 @@ class UtilsTest(absltest.TestCase):
     self.assertEqual(item['completion_ids'].shape, (3,))
     self.assertFalse(item['adv_is_per_token'])
 
+  def test_unpad_train_example_none_logps_roundtrip(self):
+    # pack-first groundwork: a token-only TrainExample (no logps) must unpad
+    # cleanly with per-item ref/old logps left as None.
+    example = self._create_mock_train_example(2, 3, pad_len=2)
+    [item] = utils.unpad_train_example(example)
+    self.assertIsNone(item['ref_per_token_logps'])
+    self.assertIsNone(item['old_per_token_logps'])
+
+  def test_pack_sequences_token_only_produces_none_logps(self):
+    # pack-first groundwork: packing TrainExamples that carry no logps must
+    # still pack tokens/segment_ids and leave the packed logps as None, so logp
+    # can be computed on the packed buffer afterwards.
+    example1 = self._create_mock_train_example(2, 3)  # size 5
+    example2 = self._create_mock_train_example(2, 2)  # size 4
+    packed_iterator = utils.pack_sequences(
+        iter([[example1, example2]]), max_token_budget=12
+    )
+    [[pack]] = list(packed_iterator)
+    # Both sequences land in one pack -> two distinct segments.
+    self.assertEqual(pack.segment_ids.shape, (1, 12))
+    self.assertEqual(int(np.max(pack.segment_ids)), 2)
+    # Token-only in -> None logps out.
+    self.assertIsNone(pack.ref_per_token_logps)
+    self.assertIsNone(pack.old_per_token_logps)
+
   def test_pack_sequences_skips_large(self):
     # A sequence larger than budget should be skipped.
     example1 = self._create_mock_train_example(5, 6)  # size 11

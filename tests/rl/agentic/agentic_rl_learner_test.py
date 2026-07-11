@@ -178,8 +178,8 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       train_dataset = [{'prompt': ['p1']}]
       with self.assertRaisesRegex(
           ValueError,
-          r'compute_logps_micro_batch_size \(2\) must be equal to'
-          r' train_micro_batch_size \(1\)',
+          r'full_batch_size=1 must be a multiple of'
+          r' self\._compute_logps_micro_batch_size=2',
       ):
         learner.train(train_dataset)
 
