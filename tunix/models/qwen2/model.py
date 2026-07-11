@@ -62,6 +62,7 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...]
   exp_weight_cdf: Tuple[str | None, ...]
   exp_weight_cfd: Tuple[str | None, ...]
   qkv_bias: Tuple[str | None, ...]
@@ -84,6 +85,7 @@ class ShardingConfig:
         act_btd=('fsdp', sp, None if is_sampling else 'tp'),
         act_btf=('fsdp', sp, 'tp'),
         act_btnh=('fsdp', sp, 'tp', None),
+        score_weight_d1=(fsdp, None),
         exp_weight_cdf=('fsdp', None, 'tp'),
         exp_weight_cfd=('fsdp', 'tp', None),
         qkv_bias=('tp',),
@@ -976,3 +978,34 @@ class Qwen2(BackendMappingMixin, nnx.Module):
             (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
         ),
     }
+
+class QwenWithScoreHead(nnx.Module):
+  """Gemma transformer with a score head."""
+
+  def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
+    """Initializes the transformer with a score head.
+
+    Args:
+      transformer: The transformer backbone.
+      rngs: The random number generator.
+    """
+
+    self.transformer = transformer
+    self.score = nnx.Linear(
+        in_features=transformer.config.embed_dim,
+        out_features=1,
+        use_bias=False,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.normal(),
+            transformer.config.shd_config.score_weight_d1,
+        ),
+        rngs=rngs,
+    )
+
+  def __call__(self, *args, **kwargs):
+    self.transformer(*args, **kwargs, output_hidden_states=True)
+    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
+        'all_hidden_states'
+    ].value[-1]
+    score = self.score(hidden_states)
+    return score

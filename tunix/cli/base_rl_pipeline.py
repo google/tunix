@@ -32,6 +32,7 @@ from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
 from tunix.models.gemma import model as gemma_lib
+from tunix.models.qwen2 import model as qwen_lib
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
@@ -590,11 +591,16 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           params=jax.random.key(critic_model_config.get("rng_seed", 0))
       )
 
-      # TODO: b/531803907 - Support all critic model types, not just Gemma
-      if isinstance(critic_model, gemma_lib.Gemma):
+      model_name = critic_model_config.get('model_name')
+      print(model_name)
+      if hasattr(critic_model, "lm_head"):
+        critic_model = create_critic_model(critic_model, rngs=rngs)
+      elif model_name.startswith("gemma"):
         critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
+      elif model_name.startswith("qwen"):
+        critic_model = qwen_lib.QwenWithScoreHead(critic_model, rngs=rngs)
       else:
-        critic_model = create_critic_model(critic_model, seed=rngs)
+        raise ValueError(f"Unsupported critic model type: {model_name}")
 
     cluster_config = self.create_cluster_config(
         role_to_mesh=role_to_mesh,

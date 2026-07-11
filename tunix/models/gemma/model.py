@@ -1007,7 +1007,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
 class GemmaWithScoreHead(nnx.Module):
   """Gemma transformer with a score head."""
 
-  def __init__(self, transformer: Gemma, rngs: nnx.Rngs):
+  def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
     """Initializes the transformer with a score head.
 
     Args:

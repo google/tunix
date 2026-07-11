@@ -240,9 +240,13 @@ def put_params_on_memory_kind(
 
 
 def create_critic_model(
-    actor_model: nnx.Module, seed: int = 0, lm_head_to_replace: str = "lm_head"
+    actor_model: nnx.Module, seed: int = 0, rngs=None, lm_head_to_replace: str = "lm_head"
 ) -> nnx.Module:
   """Creates a critic model from an actor model."""
+
+  if rngs is None:
+    rngs=nnx.Rngs(seed)
+
   g, state = nnx.split(actor_model)
   # TODO(tsbao): if actor model is a LoRA model, then we can potentially share
   # backbone of base weights with critic model. Do it later as an optimization.
@@ -252,16 +256,21 @@ def create_critic_model(
   hidden_dim = (
       lm_head.shape[0] if hasattr(lm_head, "shape") else lm_head.in_features
   )
-  setattr(
-      critic_model,
-      lm_head_to_replace,
-      nnx.Linear(
+  new_head = nnx.Linear(
           in_features=hidden_dim,
           out_features=1,
           use_bias=False,
-          rngs=nnx.Rngs(seed),
-      ),
+          rngs=rngs,
+      )
+  # If Qwix is active for the model, also assign qwix_path for the new head
+  if hasattr(critic_model, "qwix_path"):
+    new_head.qwix_path = getattr(lm_head, "qwix_path", (lm_head_to_replace,))
+  setattr(
+      critic_model,
+      lm_head_to_replace,
+      new_head
   )
+  
   return critic_model
 
 
