@@ -906,8 +906,15 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> ArrayLike:
-  """Default loss function for PEFT training."""
+    loss_mode: str = "reduced",
+) -> utils.LossOutput | ArrayLike:
+  """Default loss function for PEFT training.
+
+  When loss_mode="reduced" (default) this returns the pre-averaged scalar NLL
+  exactly as origin/main. When loss_mode="unreduced" it returns a
+  utils.LossOutput carrying the unreduced NLL sum and the token denominator so
+  the trainer can defer the division until after autodiff.
+  """
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}
   logits, _ = model(input_tokens, positions, None, attention_mask, **kwargs)
@@ -923,9 +930,19 @@ def _default_loss_fn(
   # Don't update on unwanted tokens.
   one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
 
-  # Define the normalization factor.
-  norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
+  if loss_mode == "reduced":
+    # ==== origin/main scalar path — copied byte-for-byte ====
+    # Define the normalization factor.
+    norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
 
-  # Return the negative log likelihood (NLL) loss.
-  # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
-  return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+    # Return the negative log likelihood (NLL) loss.
+    # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
+    return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+
+  # ==== unreduced path (943 / 6472eef8) — returns LossOutput ====
+  denominator = jnp.sum(target_mask)
+  unreduced_loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot)
+  return utils.LossOutput(
+      primary_loss=utils.WeightedMetric(unreduced_loss, denominator, eps=1e-8),
+      aux_metrics={},
+  )

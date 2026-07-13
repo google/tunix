@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import common
 from tunix.rl import function_registry
+from tunix.sft import utils as sft_utils
 
 
 registry = function_registry.default_registry
@@ -366,6 +367,10 @@ def grpo_loss_fn(
   )
   epsilon_c = getattr(algo_config, "epsilon_c", None)
   loss_aggregation_mode = algo_config.loss_agg_mode
+  # "reduced" (default) reproduces origin/main exactly (scalar loss + aux, and
+  # `return loss, aux`). "unreduced" emits sft_utils.LossOutput carrying
+  # WeightedMetrics so the trainer can defer the division until after autodiff.
+  loss_mode = getattr(algo_config, "loss_mode", "reduced")
 
   completion_ids, completion_mask = (
       train_example.completion_ids,
@@ -402,6 +407,9 @@ def grpo_loss_fn(
   seq_importance_ratio = per_token_logps - old_per_token_logps
   # Record KL divergence before clipping.
   ppo_kl = masked_mean(-seq_importance_ratio, completion_mask)
+  # Unreduced counterparts (only consumed when loss_mode == "unreduced").
+  token_denom = jnp.sum(completion_mask)
+  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio * completion_mask)
 
   seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
 
@@ -432,6 +440,10 @@ def grpo_loss_fn(
   clipped_fraction = masked_mean(
       jnp.greater(pg_loss_2, pg_loss_1), completion_mask
   )
+  # Unreduced counterpart (only consumed when loss_mode == "unreduced").
+  unreduced_clip_frac = jnp.sum(
+      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32) * completion_mask
+  )
 
   # dual-clip ppo loss
   if epsilon_c is not None:
@@ -446,7 +458,10 @@ def grpo_loss_fn(
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
   pg_clipfrac_lower = common.aggregate_loss(
-      unreduced_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+      unreduced_pg_clipfrac_lower,
+      completion_mask,
+      loss_aggregation_mode,
+      loss_mode=loss_mode,
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
@@ -461,10 +476,14 @@ def grpo_loss_fn(
   if sampler_is_weights is not None:
     per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
 
-  loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+  agg_loss = common.aggregate_loss(
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      loss_mode=loss_mode,
   )
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
+  # These are identical in both loss modes.
   is_ratio_mean = masked_mean(is_ratio, completion_mask)
   is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
   is_ratio_min = jnp.min(
@@ -482,12 +501,77 @@ def grpo_loss_fn(
   nonzero_adv_frac = masked_mean(
       (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
   )
+
+  if loss_mode == "reduced":
+    # ==== origin/main path — scalar loss + aux, `return loss, aux` ====
+    loss = agg_loss
+    aux = {
+        "kl": 0.0,
+        "kl_loss": 0.0,
+        "pg_loss": loss,
+        "pg_clipfrac": clipped_fraction,
+        "ppo_kl": ppo_kl,
+        "pg_clipfrac_lower": pg_clipfrac_lower,
+        "is_ratio/mean": is_ratio_mean,
+        "is_ratio/max": is_ratio_max,
+        "is_ratio/min": is_ratio_min,
+        "log_ratio/abs_mean": log_ratio_abs_mean,
+        "pg_loss/unclipped_mean": pg_loss_1_mean,
+        "pg_loss/clipped_mean": pg_loss_2_mean,
+        "advantage/abs_mean": adv_abs_mean,
+        "advantage/max": adv_max,
+        "advantage/min": adv_min,
+        "advantage/nonzero_frac": nonzero_adv_frac,
+    }
+    if sampler_is_weights is not None:
+      sis = sampler_is_weights.astype(jnp.float32)
+      aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
+      aux["sampler_is/weight_min"] = jnp.min(
+          jnp.where(completion_mask > 0, sis, jnp.inf)
+      )
+    else:
+      aux["sampler_is/weight_mean"] = jnp.float32(1.0)
+      aux["sampler_is/weight_min"] = jnp.float32(1.0)
+    # We do not always compute KL divergence (e.g. when beta is 0.0 unless
+    # force_compute_kl is True).
+    if train_example.ref_per_token_logps is not None:
+      kl = common.compute_kl_divergence(
+          per_token_logps,
+          train_example.ref_per_token_logps,
+          algo_config.kl_loss_mode,
+          clamp_value=algo_config.kl_clamp_value,
+      )
+      # Log mean KL.
+      aux["kl"] = jnp.astype(  # pyrefly: ignore[bad-assignment]
+          (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+          jnp.float32,
+      )
+      kl_loss = common.aggregate_loss(
+          kl, completion_mask, loss_aggregation_mode, loss_mode=loss_mode
+      )
+      aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
+      if beta is not None and beta != 0.0:
+        loss = loss + beta * kl_loss
+
+    entropy_loss = common.aggregate_loss(
+        token_entropy, completion_mask, loss_aggregation_mode, loss_mode=loss_mode
+    )
+    aux["entropy"] = entropy_loss
+
+    return loss, aux
+
+  # ==== unreduced path (943 / 6472eef8) — LossOutput of WeightedMetrics ====
+  weighted_loss = agg_loss
   aux = {
-      "kl": 0.0,
-      "kl_loss": 0.0,
-      "pg_loss": loss,
-      "pg_clipfrac": clipped_fraction,
-      "ppo_kl": ppo_kl,
+      "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
+      "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
+      "pg_loss": weighted_loss,
+      "pg_clipfrac": sft_utils.WeightedMetric(
+          unreduced_clip_frac, token_denom, min_denom=1.0
+      ),
+      "ppo_kl": sft_utils.WeightedMetric(
+          unreduced_ppo_kl, token_denom, min_denom=1.0
+      ),
       "pg_clipfrac_lower": pg_clipfrac_lower,
       "is_ratio/mean": is_ratio_mean,
       "is_ratio/max": is_ratio_max,
@@ -518,22 +602,28 @@ def grpo_loss_fn(
         algo_config.kl_loss_mode,
         clamp_value=algo_config.kl_clamp_value,
     )
-    # Log mean KL.
-    aux["kl"] = jnp.astype(  # pyrefly: ignore[bad-assignment]
-        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
-        jnp.float32,
+    unreduced_kl = jnp.astype(jnp.sum(kl * completion_mask), jnp.float32)
+    aux["kl"] = sft_utils.WeightedMetric(
+        unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
+    kl_loss = common.aggregate_loss(
+        kl, completion_mask, loss_aggregation_mode, loss_mode=loss_mode
+    )
     aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
     if beta is not None and beta != 0.0:
-      loss = loss + beta * kl_loss
+      weighted_loss = sft_utils.WeightedMetric(
+          weighted_loss.unreduced_sum + beta * kl_loss.unreduced_sum,
+          weighted_loss.denominator,
+          eps=weighted_loss.eps,
+          min_denom=weighted_loss.min_denom,
+      )
 
   entropy_loss = common.aggregate_loss(
-      token_entropy, completion_mask, loss_aggregation_mode
+      token_entropy, completion_mask, loss_aggregation_mode, loss_mode=loss_mode
   )
   aux["entropy"] = entropy_loss
 
-  return loss, aux
+  return sft_utils.LossOutput(primary_loss=weighted_loss, aux_metrics=aux)
 
 
 @function_registry.register_advantage_estimator("grpo")
