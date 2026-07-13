@@ -803,554 +803,103 @@ def _sync_tied_lm_head_if_needed(
   lm_head_param.value = embed_param.value
 
 
-def transfer_state_with_mappings(
-    src_state,
-    dst_state,
-    key_mappings,
-    key_mapping_hook_fns=None,
-    transpose_keys=None,
-    rollout_engine=None,
-    **kwargs,
-):
-  """Transfer state using mappings, with optional transpose and shard logic.
+def resolve_parallelism_sizes(
+    mesh: jax.sharding.Mesh,
+    tensor_parallel_size: int = -1,
+    data_parallel_size: int = -1,
+    expert_parallel_size: int = 1,
+) -> tuple[int, int, int]:
+  """Resolves tensor, data, and expert parallelism sizes from the mesh.
+
+  Any size passed as -1 is inferred from the total number of mesh devices and
+  the other sizes. Raises ValueError if the mesh size is not divisible by
+  expert_parallel_size.
 
   Args:
-    src_state: The source state to transfer from.
-    dst_state: The destination state to transfer to.
-    key_mappings: A dictionary defining how to map keys from the source state to
-      the target state. The keys of the dictionary are the source keys, and the
-      values are tuples containing the target key and the sharding information.
-    key_mapping_hook_fns: A dictionary mapping keys to hook functions that
-      modify the values before assignment. The hook fn will be called after the
-      transpose operation if transpose were to be applied.
-    transpose_keys: A dictionary defining which keys to transpose and the
-      corresponding axes to transpose.
-    reshard_fn: A function to shard the value.
-    rollout_engine: The name of the rollout engine being used.
-    **kwargs: Additional keyword arguments.
+    mesh: The JAX device mesh.
+    tensor_parallel_size: Desired tensor parallelism degree, or -1 to infer.
+    data_parallel_size: Desired data parallelism degree, or -1 to infer.
+    expert_parallel_size: Desired expert parallelism degree.
 
   Returns:
-    The target state with the transferred values.
+    A tuple of (tensor_parallel_size, data_parallel_size, expert_parallel_size).
   """
-  # Get flat target state
-  tgt_flat_list = dst_state.flat_state()
+  total_mesh_devices = math.prod(mesh.shape.values())
 
-  # Build sharding dictionary if resharding is needed
-  sharding_dict = None
-
-  if reshard_fn:
-    sharding_dict = {
-        key: (
-            tgt_params.value.sharding
-            if hasattr(tgt_params, 'value')
-            else tgt_params.sharding
-        )
-        for key, tgt_params in tgt_flat_list
-    }
-
-  # Build source-to-target mapping
-  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
-
-  # Unroll scanned layers and flatten source state
-  unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
-  transferred_target_keys = set()
-
-  # Transfer values with transformations
-  for (flat_src_key, flat_tgt_key), (
-      val,
-      tgt_param,
-  ) in unscanned_src_to_tgt_flat.items():
-    # Apply transpose if configured
-    val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
-
-    # Apply optional hook function
-    if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
-      val = key_mapping_hook_fns[flat_src_key](val)
-
-    # Align shapes (padding/repeating as needed)
-    val = _align_shape(
-        val, tgt_param.value.shape, flat_src_key, rollout_engine, **kwargs
+  if total_mesh_devices % expert_parallel_size != 0:
+    raise ValueError(
+        f"Total mesh devices ({total_mesh_devices}) must be divisible by"
+        f" expert_parallel_size ({expert_parallel_size})."
     )
 
-    # Cast to target dtype
-    val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
+  if tensor_parallel_size == -1 and data_parallel_size == -1:
+    tensor_parallel_size = total_mesh_devices // expert_parallel_size
+    data_parallel_size = 1
+  elif tensor_parallel_size == -1:
+    tensor_parallel_size = (
+        total_mesh_devices // (data_parallel_size * expert_parallel_size)
+    )
+  elif data_parallel_size == -1:
+    data_parallel_size = (
+        total_mesh_devices // (tensor_parallel_size * expert_parallel_size)
+    )
 
-    # Assign transformed value
-    tgt_param.value = val
-    transferred_target_keys.add(flat_tgt_key)
-
-  # Target rollout engine might have different implementation and have materialized lm_head
-  _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
-
-  # Clean up memory
-  del unscanned_src_to_tgt_flat
-  gc.collect()
-
-
-
-  return dst_state.from_flat_path(tgt_flat_list)
+  return tensor_parallel_size, data_parallel_size, expert_parallel_size
 
 
-def _shapes_are_repeatable(
-    candidate_shape: tuple[int, ...],
-    tgt_shape: tuple[int, ...],
-) -> bool:
-  """Returns True if candidate_shape can be repeated to match tgt_shape."""
-  if len(candidate_shape) != len(tgt_shape):
+def verify_state_closeness(golden_state, state, atol=1e-2):
+  """Check if the golden NNX state is close to the other NNX state.
+
+  Args:
+    golden_state: The golden NNX state.
+    state: The NNX state to compare with the golden state.
+    atol: The absolute tolerance value for comparing weights.
+
+  Returns:
+    True if all weights have the same values within the specified tolerance
+  """
+  golden_state_flatten = {
+      '.'.join(str(key) for key in keys): v
+      for keys, v in golden_state.flat_state()
+  }
+
+  state_flatten = {
+      '.'.join(str(key) for key in keys): v for keys, v in state.flat_state()
+  }
+
+  # Check that keys match
+  if golden_state_flatten.keys() != state_flatten.keys():
+    missing_keys = set(golden_state_flatten.keys()) - set(state_flatten.keys())
+    extra_keys = set(state_flatten.keys()) - set(golden_state_flatten.keys())
+    logging.info('Keys do not match.')
+    logging.info('Missing keys: %s', missing_keys)
+    logging.info('Extra keys: %s', extra_keys)
     return False
 
-  for s, t in zip(candidate_shape, tgt_shape):
-    if s > t or t % s != 0:
-      return False
-  return True
+  # Check that weights match
+  matched = True
+  for key in golden_state_flatten.keys():
 
-
-def _unstack_scanned_param(
-    src_val: jax.Array | np.ndarray,
-    tgt_val: jax.Array | np.ndarray,
-    key_path: str,
-    scan_axis: Optional[int] = None,
-) -> Tuple[jax.Array | np.ndarray, ...]:
-  """Unstacks a scanned parameter by moving the scan axis to 0.
-
-  This helper unstacks a scanned array at the specified scan_axis. When scan_axis
-  is provided, it transposes that axis to position 0 and unstacks it. This is used
-  when transferring weights from a scanned representation (e.g., MaxText) to an
-  unrolled one (e.g., vLLM).
-
-  Args:
-    src_val: The source array (scanned) to slice from.
-    tgt_val: The target array whose shape we want to match.
-    key_path: The dot-separated path to the parameter for debugging.
-    scan_axis: The axis containing the scanned dimension. If None, attempts to
-      auto-detect it for backward compatibility.
-
-  Returns:
-      A tuple of unstacked arrays, or a tuple containing just the original src_val
-      if unstacking fails or is unnecessary.
-  """
-  if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
-    return (src_val,)
-
-  src_shape = src_val.shape
-  tgt_shape = tgt_val.shape
-
-  if src_shape == tgt_shape:
-    return (src_val,)
-
-  if len(src_shape) == len(tgt_shape) + 1:
-    # If scan_axis not provided, try to detect it
-    if scan_axis is None:
-      for i in range(len(src_shape)):
-        candidate = src_shape[:i] + src_shape[i + 1 :]
-        if _shapes_are_repeatable(candidate, tgt_shape):
-          scan_axis = i
-          break
-    
-    if scan_axis is not None:
-      # Transpose the scanned axis to the 0th position
-      if scan_axis != 0:
-        perm = (scan_axis,) + tuple(i for i in range(len(src_shape)) if i != scan_axis)
-        if hasattr(src_val, 'transpose'):
-          src_val = src_val.transpose(perm)
-        elif isinstance(src_val, np.ndarray):
-          src_val = np.transpose(src_val, perm)
-
-      # Unstack along the 0th axis
-      # Handling JAX version differences where unstack might be under jnp
-      try:
-        if hasattr(jax, 'unstack'):
-          return jax.unstack(src_val)
-        elif hasattr(jnp, 'unstack'):
-          return jnp.unstack(src_val)
-        else:
-           # Fallback for older JAX versions
-          return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
-      except Exception as e:
-        logging.debug(
-            "Failed to unstack parameter '%s'. Error: %s. Using original.",
-            key_path, e
-        )
-        return (src_val,)
-    else:
-      logging.warning(
-          "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
-          ' determine scan axis.',
-          key_path, src_shape, tgt_shape,
+    if golden_state_flatten[key].value.shape != state_flatten[key].value.shape:
+      logging.info(
+          'Shape mismatch for key %s: golden %s, loaded %s',
+          key,
+          golden_state_flatten[key].value.shape,
+          state_flatten[key].value.shape,
       )
-
-  return (src_val,)
-
-
-_MOE_MLP_WEIGHTS = frozenset({'wi', 'wi_0', 'wi_1'})
-
-
-def _partition_size(
-    partition: Optional[str | Tuple[str, ...]],
-    mesh: jax.sharding.Mesh,
-) -> int:
-  """Total mesh-axis size used to shard a single tensor axis."""
-  if partition is None:
-    return 1
-  names = (partition,) if isinstance(partition, str) else tuple(partition)
-  size = 1
-  for n in names:
-    size *= mesh.shape[n]
-  return size
-
-
-def _spec_at_axis(
-    sharding: Optional[jax.sharding.Sharding],
-    axis: int,
-) -> Optional[str | Tuple[str, ...]]:
-  """Returns the PartitionSpec entry at the given axis, or None if absent."""
-  if not isinstance(sharding, jax.sharding.NamedSharding):
-    return None
-  spec = sharding.spec
-  return spec[axis] if axis < len(spec) else None
-
-
-def _get_n_shards(arr: jax.Array | np.ndarray, axis: int) -> int:
-  """Returns the number of shards for a given axis of an array."""
-  sharding = getattr(arr, 'sharding', None)
-  if isinstance(sharding, jax.sharding.NamedSharding):
-    return _partition_size(_spec_at_axis(sharding, axis), sharding.mesh)  # pyrefly: ignore[bad-argument-type]
-  return 1
-
-
-@functools.partial(jax.jit, static_argnames=('pad_specs',))
-def _jit_zero_pad_axes(arr, pad_specs):
-  """Shard-aware tail-pad on multiple axes within a single JIT.
-
-  `pad_specs` is a tuple of `(axis, n_shards, per_shard_extra)`; entries
-  with `per_shard_extra == 0` are no-ops. Composing every padded axis
-  inside one trace lets XLA fuse them with the surrounding reshape ops
-  rather than launching each as a separate eager primitive.
-  """
-  out = arr
-  for axis, n_shards, per_shard_extra in pad_specs:
-    if per_shard_extra <= 0:
+      matched = False
       continue
-    src_dim = out.shape[axis]
-    src_chunk_size = src_dim // n_shards
-    split_shape = list(out.shape)
-    split_shape.insert(axis + 1, src_chunk_size)
-    split_shape[axis] = n_shards
-    arr_split = out.reshape(split_shape)
-    pad_width = [(0, 0)] * arr_split.ndim
-    pad_width[axis + 1] = (0, per_shard_extra)
-    arr_padded = jnp.pad(arr_split, pad_width)
-    final_shape = list(out.shape)
-    final_shape[axis] = src_dim + per_shard_extra * n_shards
-    out = arr_padded.reshape(final_shape)
-  return out
 
-
-@functools.partial(jax.jit, static_argnames=('repeats',))
-def _jit_repeat_axes(arr, repeats):
-  """Apply `jnp.repeat` on multiple axes within a single JIT.
-
-  `repeats` is a tuple of `(axis, count)`. One trace covers every
-  repeated axis so XLA can fuse them rather than dispatching per axis.
-  """
-  out = arr
-  for axis, count in repeats:
-    out = jnp.repeat(out, count, axis=axis)
-  return out
-
-
-def _align_per_axis(
-    arr: jax.Array | np.ndarray,
-    tgt_shape: Tuple[int, ...],
-    tgt_sharding: Optional[jax.sharding.Sharding],
-    key_path: str,
-) -> jax.Array | np.ndarray:
-  """Aligns `arr` to `tgt_shape` via either pure-repeat or pure-zero_pad.
-
-  Each tensor needs exactly one transform mode in practice:
-    * MoE linear weights (`wi`, `wi_0`, `wi_1`, `wo`) → `zero_pad` on
-      every mismatched axis (TPU-lane / GMM_v2 alignment).
-    * Anything else (attention QKV/O projections, biases, …) → `repeat`
-      on every mismatched axis (e.g. KV-head expansion).
-  KV-head expansion and MoE-dim padding never co-occur on the same
-  tensor, so we classify by leaf key once and dispatch the whole
-  transform to a single JIT compiled helper. That collapses what used
-  to be N eager primitive launches into one fused XLA program — the hot
-  path here is bulk alignment of scanned MoE weights, where eager
-  dispatch was costing tens of seconds per tensor.
-  """
-  if not hasattr(arr, 'shape'):
-    return arr
-  if arr.shape == tgt_shape:
-    return arr
-  if len(arr.shape) != len(tgt_shape):
-    raise ShapeMismatchError(
-        f"Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}"
-    )
-
-  mismatches = []
-  for axis, (s, t) in enumerate(zip(arr.shape, tgt_shape)):
-    if s == t:
-      continue
-    if t < s:
-      raise ShapeMismatchError(
-          f"Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}"
+    if not jax.numpy.allclose(
+        golden_state_flatten[key].value, state_flatten[key].value, atol=atol
+    ):
+      logging.info('Weights for key %s do not match.', key)
+      logging.info(
+          'Golden state: %s', golden_state_flatten[key].value.ravel()[:10]
       )
-    mismatches.append((axis, s, t))
-  if not mismatches:
-    return arr
-
-  last_key = key_path.split('.')[-1]
-  if last_key in _MOE_MLP_WEIGHTS:
-    if isinstance(tgt_sharding, jax.sharding.NamedSharding):
-      mesh = tgt_sharding.mesh
-      pad_specs = []
-      for axis, s, t in mismatches:
-        n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)  # pyrefly: ignore[bad-argument-type]
-        if t % n_shards != 0:
-          raise ValueError(
-              f"Target dimension {t} on axis {axis} for {key_path} is not "
-              f"divisible by n_shards={n_shards}; the target shape itself "
-              f"is misconfigured for the requested sharding."
-          )
-        if (t - s) % n_shards != 0 or s % n_shards != 0:
-          raise ValueError(
-              f"Cannot interleave pad axis {axis} for {key_path}: src_dim "
-              f"({s}) or extra ({t - s}) is not cleanly divisible by "
-              f"n_shards ({n_shards}). Ensure the source tensor is evenly "
-              f"partitionable."
-          )
-        pad_specs.append((axis, n_shards, (t - s) // n_shards))
-    else:
-      pad_specs = [(axis, 1, t - s) for axis, s, t in mismatches]
-    return _jit_zero_pad_axes(arr, tuple(pad_specs))
-
-  repeats = []
-  for axis, s, t in mismatches:
-    if t % s != 0:
-      raise ShapeMismatchError(
-          f"Cannot align axis {axis} for {key_path}: src={s} -> tgt={t} "
-          f"is not an integer multiple and the key is not a recognized "
-          f"MoE pattern."
-      )
-    repeats.append((axis, t // s))
-  return _jit_repeat_axes(arr, tuple(repeats))
-
-
-def _interleave_moe_weights(
-    wi_0: jax.Array | np.ndarray,
-    wi_1: jax.Array | np.ndarray,
-    tgt_shape: Tuple[int, ...],
-    n_shards: int,
-    axis: Optional[int] = None,
-) -> jax.Array | np.ndarray:
-  """Interleaves wi_0 and wi_1 per-shard into a single tensor."""
-  if axis is None:
-    axis = len(tgt_shape) - 1
-    
-  target_half_dim = tgt_shape[axis] // 2
-
-  def _pad_and_chunk(arr):
-    current_total_size = arr.shape[axis]
-    chunk_size = current_total_size // n_shards
-    target_chunk_size = target_half_dim // n_shards
-
-    # Safely reshape to expose per-shard chunk without assuming the last axis
-    new_shape = list(arr.shape)
-    new_shape[axis] = n_shards
-    new_shape.insert(axis + 1, chunk_size)
-    arr_reshaped = arr.reshape(new_shape)
-
-    pad_amount = target_chunk_size - chunk_size
-    if pad_amount > 0:
-      pad_widths = [(0, 0)] * arr_reshaped.ndim
-      pad_widths[axis + 1] = (0, pad_amount)
-      arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
-    return arr_reshaped
-
-  p_wi_0 = _pad_and_chunk(wi_0)
-  p_wi_1 = _pad_and_chunk(wi_1)
-
-  # Interleave along the chunked dimension
-  combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
-  return combined.reshape(tgt_shape)
-
-
-def _align_to_model_shape(
-    src_val: jax.Array | np.ndarray,
-    tgt_val: jax.Array | np.ndarray,
-    key_path: str,
-) -> jax.Array | np.ndarray:
-  """Aligns src_val to tgt_val's shape via per-axis repeat / zero-pad.
-
-  Thin wrapper around `_align_per_axis` that pulls the target's sharding off
-  the target leaf. The per-axis helper is what actually decides repeat vs
-  zero-pad per axis and chooses between per-shard and global padding.
-  """
-  if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
-    return src_val
-  if src_val.shape == tgt_val.shape:
-    return src_val
-
-  tgt_sharding = getattr(tgt_val, 'sharding', None)
-  return _align_per_axis(src_val, tgt_val.shape, tgt_sharding, key_path)
-
-
-def _bulk_align_and_unstack(
-    arr: jax.Array | np.ndarray,
-    scan_axis: int,
-    per_layer_tgt_val: jax.Array | np.ndarray,
-    key_path: str,
-) -> Tuple[jax.Array | np.ndarray, ...]:
-  """Applies per-axis alignment on a scanned tensor, then unstacks.
-
-  Operates on the FULL scanned tensor (one bulk repeat / zero-pad per axis,
-  performed under JIT so XLA can fuse the pad with surrounding ops), then
-  emits `num_layers` per-layer slices. Replaces the prior pattern of unstack
-  → align-each-layer, which created N intermediate allocations and N small
-  ops.
-
-  The per-layer target's logical axes map to the scanned tensor's axes by
-  inserting the scan axis: `scan_padded_axis = a if a < scan_axis else a + 1`.
-
-  Args:
-    arr: The full scanned source tensor (shape includes `num_layers` at
-      `scan_axis`).
-    scan_axis: Axis at which `num_layers` lives in `arr`.
-    per_layer_tgt_val: A target leaf — its `.shape`, `.sharding`, and dtype
-      drive the alignment policy.
-    key_path: Dot-separated source path for diagnostics.
-
-  Returns:
-    A tuple of `num_layers` per-layer arrays at the per-layer target shape.
-  """
-  per_layer_shape = per_layer_tgt_val.shape
-  scanned_tgt_shape = (
-      per_layer_shape[:scan_axis]
-      + (arr.shape[scan_axis],)
-      + per_layer_shape[scan_axis:]
-  )
-  scanned_tgt_sharding = _scanned_sharding_from_per_layer(
-      getattr(per_layer_tgt_val, 'sharding', None), scan_axis
-  )
-
-  if arr.shape == scanned_tgt_shape:
-    return tuple(jnp.unstack(arr, axis=scan_axis))
-
-  aligned = _align_per_axis(
-      arr, scanned_tgt_shape, scanned_tgt_sharding, key_path
-  )
-  return tuple(jnp.unstack(aligned, axis=scan_axis))
-
-
-def _scanned_sharding_from_per_layer(
-    per_layer_sharding: Optional[jax.sharding.Sharding],
-    scan_axis: int,
-) -> Optional[jax.sharding.NamedSharding]:
-  """Builds a scanned `NamedSharding` from a per-layer one by inserting
-  `PartitionSpec(None)` at `scan_axis`. Returns None if input isn't a
-  NamedSharding."""
-  if not isinstance(per_layer_sharding, jax.sharding.NamedSharding):
-    return None
-  spec = list(per_layer_sharding.spec)
-  spec.insert(scan_axis, None)
-  return jax.sharding.NamedSharding(
-      per_layer_sharding.mesh,
-      jax.sharding.PartitionSpec(*spec),
-      memory_kind=per_layer_sharding.memory_kind,
-  )
-
-
-@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
-def _jit_fuse_and_unstack_moe(
-    wi_0: jax.Array | np.ndarray,
-    wi_1: jax.Array | np.ndarray,
-    scan_axis: int,
-    num_layers: int,
-    n_shards: int,
-    tgt_shape: Tuple[int, ...],
-    scan_padded_axis: int,
-    tgt_padded_axis: int,
-) -> Tuple[jax.Array | np.ndarray, ...]:
-  """Fuses wi_0/wi_1 along the padded axis, then unstacks along scan_axis.
-
-  By combining concat and unstack under jax.jit, XLA fuses both ops and
-  avoids materializing the full concatenated intermediate on device.
-
-  Args:
-    wi_0: First MoE gate weight; per-layer layout matches `tgt_shape`
-      (with the padded dim halved), with `num_layers` inserted at `scan_axis`.
-    wi_1: Second MoE gate weight, same layout as `wi_0`.
-    scan_axis: Axis at which `num_layers` is stacked in `wi_0` / `wi_1`.
-    num_layers: Number of layers (== `wi_0.shape[scan_axis]`).
-    n_shards: Mesh shards along the per-layer fused/padded axis.
-    tgt_shape: Per-layer fused target shape (fused mlp dim on `tgt_padded_axis`).
-    scan_padded_axis: Position of the padded axis in the scanned layout.
-    tgt_padded_axis: Position of the padded axis in the per-layer layout.
-
-  Returns:
-    Tuple of `num_layers` per-layer arrays, each with shape `tgt_shape`.
-  """
-  del num_layers  # Only used to make this a static arg for JIT cache keying.
-  fused_shape = list(wi_0.shape)
-  fused_shape[scan_padded_axis] = tgt_shape[tgt_padded_axis]
-
-  fused = _interleave_moe_weights(
-      wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
-  )
-  return jnp.unstack(fused, axis=scan_axis)
-
-
-def _fuse_moe_weights(
-    src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
-    tgt_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
-) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
-  """Fuses unscanned wi_0/wi_1 into wi for unscanned-fused targets.
-
-  Only catches the case where source and target share the same prefix (e.g.
-  src `('layers', 'wi_0')` + `('layers', 'wi_1')` → tgt `('layers', 'wi')`,
-  or src `('layers_0', 'wi_0')` + `('layers_0', 'wi_1')` →
-  tgt `('layers_0', 'wi')`). The scanned-source / unrolled-target case is
-  handled in `intersect_trees` via `_jit_fuse_and_unstack_moe`.
-
-  Args:
-    src_flat: Flat dict of source key tuples to JAX arrays.
-    tgt_flat: Flat dict of target key tuples to target leaves.
-
-  Returns:
-    A new flat dict with wi_0/wi_1 fused into wi at matching prefixes. Any
-    remaining shape mismatch on non-fused axes is left for the per-target
-    `_align_to_model_shape` call to handle (it composes repeat + zero-pad).
-  """
-  new_src_flat = dict(src_flat)
-  for tgt_key in tgt_flat.keys():
-    if not tgt_key or tgt_key[-1] != 'wi':
-      continue
-    wi_0_key = tgt_key[:-1] + ('wi_0',)
-    wi_1_key = tgt_key[:-1] + ('wi_1',)
-    if wi_0_key not in new_src_flat or wi_1_key not in new_src_flat:
-      continue
-    wi_0 = new_src_flat.pop(wi_0_key)
-    wi_1 = new_src_flat.pop(wi_1_key)
-    tgt_val = tgt_flat[tgt_key]
-    # Pick the fused axis as the last axis where src and tgt differ. For the
-    # canonical wi_0/wi_1 -> wi case this is the last axis (the mlp dim).
-    mismatched_axes = [
-        i for i, (s, t) in enumerate(zip(wi_0.shape, tgt_val.shape)) if s != t
-    ]
-    axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
-    n_shards = _get_n_shards(tgt_val, axis)
-    logging.info(
-        'Fusing MoE %s: wi_0=%s, wi_1=%s -> %s on axis %d',
-        '.'.join(str(k) for k in tgt_key),
-        wi_0.shape, wi_1.shape, tgt_val.shape, axis,
-    )
-    new_src_flat[tgt_key] = _interleave_moe_weights(
-        wi_0, wi_1, tgt_val.shape, n_shards, axis=axis
-    )
-    del wi_0, wi_1  # Free memory immediately after fusion.
-  return new_src_flat
-
+      logging.info('Loaded state: %s', state_flatten[key].value.ravel()[:10])
+      matched = False
+  return matched
 
 def _collect_src_buffer_ids(
     src_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
@@ -1495,344 +1044,3 @@ def _reshard_in_chunks(
     )
   return resharded
 
-
-def transfer_state_directly(
-    src_state: Mapping[str, Any],
-    dst_state: Mapping[str, Any],
-    scan_axis: int = 1,
-) -> Mapping[str, Any]:
-  """Transfers state directly by matching structure, stripping wrappers.
-
-  This handles the logic for syncing weights where no explicit mapping is provided,
-  common in MaxText -> MaxText workflows. This method should work for all MaxText models.
-  It automatically unwraps common containers present in MaxText models like 'base'
-  (MaxText TrainState) and nested 'model' keys (vLLM wrappers). Additionally, it handles
-  multiple mapping types including dicts, nnx.State, and nnx.Dict. Mismatches in keys are
-  logged for debugging and handled by intersecting the source and target trees.
-
-  Args:
-    src_state: The source state to transfer from.
-    dst_state: The destination state to transfer to.
-    reshard_fn: A function to shard the values.
-    scan_axis: The axis along which to unroll scanned layers, if needed.
-    delete_dst_buffers: Whether to delete buffers in the destination state
-      before resharding to save HBM. Buffers that physically alias a source
-      shard are preserved automatically (see `_delete_target_buffers`).
-    reshard_chunk_size: When set, the final reshard is split into sequential
-      groups of this many flat keys instead of one monolithic call. This
-      reduces peak contiguous HBM pressure, which prevents XLA allocator
-      fragmentation on large models. The unit is *number of flat keys per
-      chunk* — per-layer key counts vary by architecture (MQA vs GQA, biases
-      on/off, dense vs MoE, fused vs split MoE gates), so as a rule of thumb
-      start with roughly `10 * num_layers` for a dense transformer and tune
-      downward if you still see fragmentation. When None (default) the
-      original single-call reshard behavior is preserved.
-  """
-  def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
-    if isinstance(obj, dict):
-      return key in obj
-
-    return hasattr(obj, key)
-
-  # Unwrap Source (Remove 'base' wrapper from MaxText)
-  if isinstance(src_state, abc.Mapping) and safe_has_key(
-      src_state, 'base'
-  ):
-    logging.info("Unwrapping 'base' key from source state.")
-    src_state = src_state['base']
-
-  # Unwrap Target (Remove nested 'model' wrappers from vLLM)
-  while isinstance(dst_state, abc.Mapping) and safe_has_key(
-      dst_state, 'model'
-  ):
-    logging.info("Unwrapping nested 'model' key from target state.")
-    dst_state = dst_state['model']
-
-  # Helper: Convert Target Spec to Pure Dict (Strip NNX Params)
-  # JAX needs a spec tree of pure NamedShardings, not Param(NamedSharding).
-  def to_pure_spec(node: Any) -> Any:
-    # Unwrap NNX containers
-    if hasattr(node, 'to_pure_dict'):
-      node = node.to_pure_dict()
-
-    # Recurse into dicts
-    if isinstance(node, abc.Mapping):
-      return {k: to_pure_spec(v) for k, v in node.items()}
-
-    # Unwrap Variables
-    if isinstance(node, nnx.Variable):
-      return to_pure_spec(node[...])
-    if hasattr(node, 'value'):
-      return node.value
-
-    return node
-
-  def intersect_trees(
-      src: Mapping[str, Any],
-      tgt_spec: Mapping[str, Any],
-  ) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
-    """Optimized intersection (Handle KVCache/RNG mismatches and Scanned Layers).
-
-    Uses flat dictionary traversal for efficiency.
-    """
-    # Fast path for non-dict inputs (leaves)
-    if not isinstance(src, abc.Mapping) or not isinstance(tgt_spec, abc.Mapping):
-      return src, tgt_spec
-
-    # Flatten both structures to (path_tuple) -> value
-    # usage of sep='/' is optional, but tuples are faster for manipulation
-    src_flat = traverse_util.flatten_dict(src)
-    tgt_flat = traverse_util.flatten_dict(tgt_spec)
-
-    src_flat = _fuse_moe_weights(src_flat, tgt_flat)
-
-    filtered_src_flat = {}
-    filtered_tgt_flat = {}
-
-    # Cache to store unstacked scanned arrays to avoid repeated work
-    unstacked_cache = {}
-
-    layer_pattern = re.compile(r'^layers_(\d+)$')
-
-    for key_tuple, tgt_val in tgt_flat.items():
-      path_str = '.'.join(str(k) for k in key_tuple)
-      # Try Direct Match
-      if key_tuple in src_flat:
-        src_val = src_flat[key_tuple]
-        src_val = _apply_dtype_cast(src_val, tgt_val.dtype, path_str)
-        src_val = _align_to_model_shape(src_val, tgt_val, path_str)
-        filtered_src_flat[key_tuple] = src_val
-        filtered_tgt_flat[key_tuple] = tgt_val
-        continue
-
-      # Try Scanned Layer Mapping
-      # We look for 'layers_X' in the path and try to map it to 'layers' (MaxText)
-      # or remove it (GPT-OSS / implicit stack).
-
-      # Locate which part of the path is 'layers_X'
-      layer_idx = -1
-      match_index = -1
-
-      for i, part in enumerate(key_tuple):
-        # Optimization: Only check strings that look like layers
-        if isinstance(part, str) and part.startswith('layers_'):
-          m = layer_pattern.match(part)
-          if m:
-            layer_idx = int(m.group(1))
-            match_index = i
-            break
-
-      if match_index != -1:
-        # Check different candidate path formats for scanned layers
-        # Candidate A: Replace 'layers_X' with 'layers' (Standard MaxText)
-        candidate_a = list(key_tuple)
-        candidate_a[match_index] = 'layers'
-
-        # Candidate B: Remove 'layers_X' (Implicit Container / GPT-OSS)
-        candidate_b = list(key_tuple)
-        candidate_b.pop(match_index)
-
-        found_candidate = None
-        for cand in [tuple(candidate_a), tuple(candidate_b)]:
-          if cand in src_flat:
-            found_candidate = cand
-            break
-
-        if found_candidate:
-          # Cache key includes per-layer target shape so distinct unrolled
-          # targets with different padded shapes don't collide on the same
-          # scanned source.
-          cache_key = (found_candidate, tgt_val.shape, 'aligned')
-          if cache_key not in unstacked_cache:
-            src_val = src_flat[found_candidate]
-            candidate_path = '.'.join(str(k) for k in found_candidate)
-            # Cast the bulk tensor once before unstacking.
-            src_val = _apply_dtype_cast(src_val, tgt_val.dtype, candidate_path)
-            scanned_per_layer_shape = (
-                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1:]
-            )
-            if scanned_per_layer_shape == tgt_val.shape:
-              # Pure unstack — no alignment needed.
-              unstacked_cache[cache_key] = _unstack_scanned_param(
-                  src_val, tgt_val, candidate_path, scan_axis=scan_axis
-              )
-            else:
-              # Bulk align (repeat / zero-pad per axis) on the full scanned
-              # tensor, then unstack. Replaces N per-layer alignments with
-              # one bulk op + free unstack.
-              logging.info(
-                  'Bulk-aligning scanned %s: %s -> per-layer %s',
-                  candidate_path, src_val.shape, tgt_val.shape,
-              )
-              unstacked_cache[cache_key] = _bulk_align_and_unstack(
-                  src_val, scan_axis, tgt_val, candidate_path
-              )
-
-          # Extract the layer_idx-th element from the unstacked cache.
-          sliced_val = unstacked_cache[cache_key][layer_idx]
-          sliced_val = _align_to_model_shape(sliced_val, tgt_val, path_str)
-          filtered_src_flat[key_tuple] = sliced_val
-          filtered_tgt_flat[key_tuple] = tgt_val
-          continue
-
-        # MoE fusion case: target has 'layers_X/.../wi' but source has scanned
-        # 'layers/.../wi_0' and 'layers/.../wi_1'. Fuse the full stacked
-        # tensors first, then unstack once via a JIT-compiled helper — avoids
-        # N per-layer jnp.concatenate dispatches and 2N intermediate device
-        # allocations that cause compilation pressure and memory fragmentation.
-        if key_tuple and key_tuple[-1] == 'wi':
-          scanned_prefix = (
-              key_tuple[:match_index] + ('layers',) + key_tuple[match_index + 1:-1]
-          )
-          wi_0_key = scanned_prefix + ('wi_0',)
-          wi_1_key = scanned_prefix + ('wi_1',)
-
-          if wi_0_key in src_flat and wi_1_key in src_flat:
-            fused_scanned_key = scanned_prefix + ('wi_fused',)
-            if fused_scanned_key not in unstacked_cache:
-              scanned_prefix_path = '.'.join(str(k) for k in scanned_prefix)
-              logging.info('Fusing scanned MoE weights for %s', scanned_prefix_path)
-              wi_0_full = _apply_dtype_cast(
-                  src_flat[wi_0_key], tgt_val.dtype, '.'.join(str(k) for k in wi_0_key)
-              )
-              wi_1_full = _apply_dtype_cast(
-                  src_flat[wi_1_key], tgt_val.dtype, '.'.join(str(k) for k in wi_1_key)
-              )
-              num_layers = src_flat[wi_0_key].shape[scan_axis]
-              
-              # Remove scan_axis to compare against the per-layer tgt_val shape
-              wi_0_single_shape = wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1:]
-              mismatched_axes = [
-                  i for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape)) if s != t
-              ]
-              tgt_axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
-              n_shards = _get_n_shards(tgt_val, tgt_axis)
-              
-              # Offset the axis by 1 if it falls after the scan axis in the bulk tensor
-              scan_padded_axis = tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
-
-              unstacked_cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
-                  wi_0_full, wi_1_full, scan_axis, num_layers, n_shards, tgt_val.shape, scan_padded_axis, tgt_axis
-              )
-              del wi_0_full, wi_1_full
-
-            sliced_val = unstacked_cache[fused_scanned_key][layer_idx]
-            sliced_val = _align_to_model_shape(sliced_val, tgt_val, path_str)
-
-            filtered_src_flat[key_tuple] = sliced_val
-            filtered_tgt_flat[key_tuple] = tgt_val
-            continue
-
-    # Unflatten back to nested structure
-    return (
-        traverse_util.unflatten_dict(filtered_src_flat),
-        traverse_util.unflatten_dict(filtered_tgt_flat),
-    )
-
-  # Prepare clean source and target specs
-  full_source_dict = to_pure_spec(src_state)
-  full_target_spec = to_pure_spec(dst_state)
-
-  # Filter both to their intersection / mapping
-  final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
-
-  return final_source
-
-
-def resolve_parallelism_sizes(
-    mesh: jax.sharding.Mesh,
-    tensor_parallel_size: int = -1,
-    data_parallel_size: int = -1,
-    expert_parallel_size: int = 1,
-) -> tuple[int, int, int]:
-  """Resolves tensor, data, and expert parallelism sizes from the mesh.
-
-  Any size passed as -1 is inferred from the total number of mesh devices and
-  the other sizes. Raises ValueError if the mesh size is not divisible by
-  expert_parallel_size.
-
-  Args:
-    mesh: The JAX device mesh.
-    tensor_parallel_size: Desired tensor parallelism degree, or -1 to infer.
-    data_parallel_size: Desired data parallelism degree, or -1 to infer.
-    expert_parallel_size: Desired expert parallelism degree.
-
-  Returns:
-    A tuple of (tensor_parallel_size, data_parallel_size, expert_parallel_size).
-  """
-  total_mesh_devices = math.prod(mesh.shape.values())
-
-  if total_mesh_devices % expert_parallel_size != 0:
-    raise ValueError(
-        f"Total mesh devices ({total_mesh_devices}) must be divisible by"
-        f" expert_parallel_size ({expert_parallel_size})."
-    )
-
-  if tensor_parallel_size == -1 and data_parallel_size == -1:
-    tensor_parallel_size = total_mesh_devices // expert_parallel_size
-    data_parallel_size = 1
-  elif tensor_parallel_size == -1:
-    tensor_parallel_size = (
-        total_mesh_devices // (data_parallel_size * expert_parallel_size)
-    )
-  elif data_parallel_size == -1:
-    data_parallel_size = (
-        total_mesh_devices // (tensor_parallel_size * expert_parallel_size)
-    )
-
-  return tensor_parallel_size, data_parallel_size, expert_parallel_size
-
-
-def verify_state_closeness(golden_state, state, atol=1e-2):
-  """Check if the golden NNX state is close to the other NNX state.
-
-  Args:
-    golden_state: The golden NNX state.
-    state: The NNX state to compare with the golden state.
-    atol: The absolute tolerance value for comparing weights.
-
-  Returns:
-    True if all weights have the same values within the specified tolerance
-  """
-  golden_state_flatten = {
-      '.'.join(str(key) for key in keys): v
-      for keys, v in golden_state.flat_state()
-  }
-
-  state_flatten = {
-      '.'.join(str(key) for key in keys): v for keys, v in state.flat_state()
-  }
-
-  # Check that keys match
-  if golden_state_flatten.keys() != state_flatten.keys():
-    missing_keys = set(golden_state_flatten.keys()) - set(state_flatten.keys())
-    extra_keys = set(state_flatten.keys()) - set(golden_state_flatten.keys())
-    logging.info('Keys do not match.')
-    logging.info('Missing keys: %s', missing_keys)
-    logging.info('Extra keys: %s', extra_keys)
-    return False
-
-  # Check that weights match
-  matched = True
-  for key in golden_state_flatten.keys():
-
-    if golden_state_flatten[key].value.shape != state_flatten[key].value.shape:
-      logging.info(
-          'Shape mismatch for key %s: golden %s, loaded %s',
-          key,
-          golden_state_flatten[key].value.shape,
-          state_flatten[key].value.shape,
-      )
-      matched = False
-      continue
-
-    if not jax.numpy.allclose(
-        golden_state_flatten[key].value, state_flatten[key].value, atol=atol
-    ):
-      logging.info('Weights for key %s do not match.', key)
-      logging.info(
-          'Golden state: %s', golden_state_flatten[key].value.ravel()[:10]
-      )
-      logging.info('Loaded state: %s', state_flatten[key].value.ravel()[:10])
-      matched = False
-  return matched

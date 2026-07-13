@@ -192,17 +192,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # Synchronization point before weight sync
     jax.effects_barrier()
 
-    vllm_state = self.converter.convert(updated_weights)
+    vllm_state = self.converter.convert(
+        updated_weights, target_state=self.transformer_state
+    )
+
+    if isinstance(self.transformer_state, nnx.State):
+      state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
+    else:
+      state_dict = self.transformer_state
+
+    print(f"DEBUG: transformer_state type: {type(state_dict)}")
+    from flax import traverse_util
+    if isinstance(state_dict, dict):
+      print(f"DEBUG: target state keys (first 10): {list(traverse_util.flatten_dict(state_dict).keys())[:10]}", flush=True)
 
     if self.config.reshard_chunk_size is not None:
-      from flax import traverse_util
       src_flat = traverse_util.flatten_dict(vllm_state)
-      
-      # Convert self.transformer_state to a standard dict for flattening
-      if isinstance(self.transformer_state, nnx.State):
-          state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
-      else:
-          state_dict = self.transformer_state
       spec_flat = traverse_util.flatten_dict(state_dict)
 
       resharded_flat = utils._reshard_in_chunks(
@@ -216,10 +221,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       resharded_weights = reshard.reshard_pytree(
           source=vllm_state,
-          target=self.transformer_state,
+          target=state_dict,
       )
 
-    nnx.update(self.transformer_state, resharded_weights)
+    if isinstance(self.transformer_state, nnx.State):
+      nnx.update(self.transformer_state, resharded_weights)
+    else:
+      self._model_runner.state = resharded_weights
 
     if hasattr(self._model_runner, "state_leaves"):
       if isinstance(self._model_runner.state, nnx.State):
