@@ -372,8 +372,10 @@ class UtilsTest(absltest.TestCase):
 
     # Budget of 10. We expect item 1 (5) and item 2 (3) to fit in the first pack (8).
     # Item 3 (7) will go to the second pack (because 8+7 > 10).
+    # first_fit asserts this exact arrival-order layout (KK may reorder/regroup).
     packed_iterator = utils.pack_sequences(
-        item_iterator, max_token_budget=10, pad_id=0
+        item_iterator, max_token_budget=10, pad_id=0,
+        packing_strategy="first_fit",
     )
 
     packed_batches = list(packed_iterator)
@@ -428,6 +430,69 @@ class UtilsTest(absltest.TestCase):
           pack2.segment_positions, expected_positions_2
       )
       np.testing.assert_array_equal(pack2.completion_mask, expected_mask_2)
+
+  def test_karmarkar_karp_balances_partitions(self):
+    # Known answer: [8,7,6,5,4] into 2 groups has minimal spread 2 (14 vs 16),
+    # beating greedy first-fit's spread 4.
+    vals = [8, 7, 6, 5, 4]
+    groups = utils._karmarkar_karp(vals, 2)
+    self.assertEqual(
+        sorted(sum(vals[i] for i in g) for g in groups), [14, 16]
+    )
+    # [8..1] into 4 groups balances perfectly to 9 each (8+1, 7+2, 6+3, 5+4).
+    vals = [8, 7, 6, 5, 4, 3, 2, 1]
+    groups = utils._karmarkar_karp(vals, 4)
+    self.assertEqual(
+        sorted(sum(vals[i] for i in g) for g in groups), [9, 9, 9, 9]
+    )
+
+  def test_karmarkar_karp_partitions_all_indices_once(self):
+    # No sequence dropped or duplicated: every index appears exactly once.
+    vals = [5, 4, 3, 3, 3, 2, 7, 1]
+    groups = utils._karmarkar_karp(vals, 3)
+    flat = sorted(i for g in groups for i in g)
+    self.assertEqual(flat, list(range(len(vals))))
+
+  def test_karmarkar_karp_more_partitions_than_items(self):
+    # k > n: every item placed, extra groups left empty.
+    groups = utils._karmarkar_karp([3, 1], 4)
+    self.assertLen(groups, 4)
+    self.assertEqual(sum(len(g) for g in groups), 2)
+
+  def test_pack_sequences_kk_preserves_all_sequences(self):
+    # KK (default) must place every sequence in exactly one pack (no drop/dup).
+    examples = [self._create_mock_train_example(2, 3) for _ in range(10)]
+    batches = list(
+        utils.pack_sequences(iter([examples]), max_token_budget=20, num_packs=2)
+    )
+    total_segments = 0
+    for [pack] in batches:
+      seg = np.asarray(pack.segment_ids)
+      # segments in a pack row are numbered 1..m, so per-row max == #sequences.
+      total_segments += int(seg.max(axis=-1).sum())
+    self.assertEqual(total_segments, 10)
+
+  def test_pack_sequences_kk_respects_budget(self):
+    # 9 sequences of size 5 into budget 12: a naive 3-per-pack split (15) would
+    # overflow, so the capacity guard must bump k until every pack fits.
+    examples = [self._create_mock_train_example(2, 3) for _ in range(9)]
+    batches = list(
+        utils.pack_sequences(iter([examples]), max_token_budget=12, num_packs=1)
+    )
+    for [pack] in batches:
+      seg = np.asarray(pack.segment_ids)
+      self.assertLessEqual(int((seg != 0).sum()), 12)
+
+  def test_pack_sequences_invalid_strategy_raises(self):
+    example = self._create_mock_train_example(2, 3)
+    with self.assertRaisesRegex(ValueError, r'packing_strategy must be'):
+      list(
+          utils.pack_sequences(
+              iter([[example]]),
+              max_token_budget=10,
+              packing_strategy='bogus',
+          )
+      )
 
 
 if __name__ == '__main__':
