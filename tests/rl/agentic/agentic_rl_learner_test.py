@@ -159,6 +159,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       training_config.compute_logps_micro_batch_size = 2
       training_config.train_micro_batch_size = 1
       training_config.mini_batch_size = None
+      training_config.max_seq_token_per_tpu = None
       rl_cluster.cluster_config.training_config = training_config
       rl_cluster.cluster_config.rollout_config = base_rollout.RolloutConfig(
           max_tokens_to_generate=10, return_logprobs=True
