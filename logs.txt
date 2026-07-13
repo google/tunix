@@ -1,55 +1,69 @@
-[rank0]: Traceback (most recent call last):████████| 32/32 [01:02<00:00,  3.87s/it, est. speed input: 67.58 toks/s, output: 249.25 toks/s] 
-[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main                                                                         
-[rank0]:   File "<frozen runpy>", line 88, in _run_code                                                                                    
-[rank0]:   File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 798, in <module>                   
-[rank0]:     app.run(main)                                                                                                                 
-[rank0]:   File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/absl/app.py", line 367, in run                             
-[rank0]:     _run_main(main, args)                                                                                                         
-[rank0]:   File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main                       
-[rank0]:     sys.exit(main(argv))                                                                                                          
-[rank0]:              ^^^^^^^^^^                                                                                                           
-[rank0]:   File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 794, in main                       
-[rank0]:     rl_train(argv, kwargs)                                                                                                        
-[rank0]:   File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 629, in rl_train                   
-[rank0]:     _rl_train_impl(argv, kwargs)                                                                                                  
-[rank0]:   File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 754, in _rl_train_impl             
-[rank0]:     rl_trainer.train(train_dataset)                                                                                               
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/grpo/grpo_learner.py", line 459, in train                                         
-[rank0]:     super().train(train_ds, eval_ds, skip_jit)                                                                                    
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_learner.py", line 581, in train                                                
-[rank0]:     self._run_global_step(                                                                                                        
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_learner.py", line 665, in _run_global_step                                     
-[rank0]:     self._run_mini_batch_step(                                                                                                    
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_learner.py", line 690, in _run_mini_batch_step                                 
-[rank0]:     self._run_all_micro_batch_steps(                                                                                              
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_learner.py", line 799, in _run_all_micro_batch_steps                           
-[rank0]:     future.result()
-[rank0]:   File "/home/yixuanm_google_com/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.p
-y", line 449, in result                                                                                                                    
-[rank0]:     return self.__get_result()                                                                                                    
-[rank0]:            ^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/home/yixuanm_google_com/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.p
-y", line 401, in __get_result
-[rank0]:     raise self._exception 
-[rank0]:   File "/home/yixuanm_google_com/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.
-py", line 59, in run
-[rank0]:     result = self.fn(*self.args, **self.kwargs)
-[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_learner.py", line 474, in _prepare_data
-[rank0]:     raise e
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_learner.py", line 440, in _prepare_data
-[rank0]:     produced_training_examples = self._process_accumulated_batches(
-[rank0]:                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_learner.py", line 238, in _process_accumulated_batches
-[rank0]:     combined_batch = self._generate_and_compute_advantage(merged, mode)
-[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/grpo/grpo_learner.py", line 271, in _generate_and_compute_advantage
-[rank0]:     ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-[rank0]:                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/rl_cluster.py", line 1020, in get_ref_per_token_logps
-[rank0]:     self.inference_worker.get_ref_per_token_logps(
-[rank0]:   File "/home/yixuanm_google_com/tunix/tunix/rl/inference/inference_worker.py", line 63, in get_ref_per_token_logps
-[rank0]:     return common.compute_per_token_logps(
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]: ValueError: INVALID_ARGUMENT: Invalid buffer passed to Execute() as argument 0 to replica 0: INVALID_ARGUMENT: Buffer has been del
-eted or donated.: while running replica 0 and partition 0 of a replicated computation (other replicas may have failed as well).
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 798, in <module>
+    app.run(main)
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/absl/app.py", line 367, in run
+    _run_main(main, args)
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
+    sys.exit(main(argv))
+             ^^^^^^^^^^
+  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 794, in main
+    rl_train(argv, kwargs)
+  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 629, in rl_train
+    _rl_train_impl(argv, kwargs)
+  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 712, in _rl_train_impl
+    rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
+                                            ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 513, in create_rl_components
+    rl_cluster = rl_cluster_lib.RLCluster(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/tunix/tunix/rl/rl_cluster.py", line 271, in __init__
+    self._init_cluster()
+  File "/home/yixuanm_google_com/tunix/tunix/rl/rl_cluster.py", line 434, in _init_cluster
+    self._rollout = vllm_rollout.VllmRollout(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/tunix/tunix/rl/rollout/vllm_rollout.py", line 43, in __init__
+    self._sampler = vllm_sampler.VllmSampler(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/tunix/tunix/generate/vllm_sampler.py", line 163, in __init__
+    self.llm = LLM(**self.args)
+               ^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 349, in __init__
+    self.llm_engine = LLMEngine.from_engine_args(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 162, in from_engine_args
+    vllm_config = engine_args.create_engine_config(usage_context)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/engine/arg_utils.py", line 2229, in create_engine_config
+    config = VllmConfig(
+             ^^^^^^^^^^^
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/pydantic/_internal/_dataclasses.py", line 121, in __init__
+    s.__pydantic_validator__.validate_python(ArgsKwargs(args, kwargs), self_instance=s)
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/config/vllm.py", line 1335, in __post_init__
+    current_platform.check_and_update_config(self)
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/platforms/tpu_platform.py", line 296, in check_and_update_config
+    from tpu_inference.layers.vllm.backends.flash_attn import \
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/__init__.py", line 14, in <module>
+    from tpu_inference.layers.vllm import backends as backends
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/backends/__init__.py", line 14, in <module>
+    from tpu_inference.layers.vllm.backends import flash_attn as flash_attn
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/backends/flash_attn.py", line 27, in <module>
+    from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/models/vllm/__init__.py", line 15, in <module>
+    from tpu_inference.models.vllm import vllm_model_loader  # noqa F401
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/models/vllm/vllm_model_loader.py", line 29, in <module>
+    from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/quantization/__init__.py", line 24, in <module>
+    from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
+  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/quantization/awq.py", line 32, in <module>
+    from vllm.model_executor.layers.quantization.auto_awq import \
+ModuleNotFoundError: No module named 'vllm.model_executor.layers.quantization.auto_awq'
+Exception ignored in: <function GCSRecordWriter.__del__ at 0x7688e7b1a840>
+Traceback (most recent call last):
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 134, in __del__
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 158, in close
+  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 149, in flush
+  File "/home/yixuanm_google_com/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/copy.py", line 87, in copy
+ImportError: sys.meta_path is None, Python is likely shutting down
