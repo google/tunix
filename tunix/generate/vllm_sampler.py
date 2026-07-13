@@ -201,13 +201,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       start = time.perf_counter()
       if self.llm is not None:
         self.llm.reset_prefix_cache()
-        # Temporarily disabled for profiling: this frees HBM before weight sync,
-        # but currently dominates sync time on TPU via subsequent cache reinit.
-        # self.llm.collective_rpc("delete_kv_cache")
+        self.llm.collective_rpc("delete_kv_cache")  # will free hbm
       elif self._driver is not None:
         self._driver.llm_engine.reset_prefix_cache()
-        # Temporarily disabled for profiling: see note above.
-        # self._driver.llm_engine.collective_rpc("delete_kv_cache")
+        self._driver.llm_engine.collective_rpc("delete_kv_cache")
       timings["cache_delete"] = time.perf_counter() - start
 
       # Synchronization point before weight sync
@@ -299,14 +296,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
       start = time.perf_counter()
       if self.llm is not None:
-        # Temporarily disabled for profiling: test whether existing KV cache
-        # can be retained across weight sync after prefix-cache reset.
-        # self.llm.collective_rpc("reinitialize_kv_cache")
-        pass
+        self.llm.collective_rpc("reinitialize_kv_cache")
       elif self._driver is not None:
-        # Temporarily disabled for profiling: see note above.
-        # self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
-        pass
+        self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
       timings["cache_reinit"] = time.perf_counter() - start
     finally:
       timings["total"] = time.perf_counter() - total_start
