@@ -133,6 +133,17 @@ class MetricsBuffer:
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
+def _compute_legacy_aux(loss_output: utils.LossOutput) -> Dict[str, Any]:
+  """Computes legacy aux metrics from a LossOutput."""
+  legacy_aux = {}
+  for k, v in loss_output.aux_metrics.items():
+    if isinstance(v, utils.WeightedMetric):
+      legacy_aux[k] = v.compute()
+    else:
+      legacy_aux[k] = v
+  return legacy_aux
+
+
 def _calculate_global_batch_size(train_example: Any) -> int:
   """Calculates the global batch size from a training example.
 
@@ -299,7 +310,8 @@ class PeftTrainer:
   def with_loss_fn(
       self,
       loss_fn: Callable[
-          Concatenate[nnx.Module, P], ArrayLike | Tuple[ArrayLike, Any]
+          Concatenate[nnx.Module, P],
+          ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
   ):
@@ -344,6 +356,41 @@ class PeftTrainer:
     """
     inputs = self.gen_model_input_fn(inputs)
 
+    # Dispatch on the loss fn's output type. `nnx.eval_shape` performs an
+    # abstract (zero-FLOP) trace so we can detect a `utils.LossOutput`
+    # (unreduced loss_mode) without a real forward pass; under `nnx.jit` this
+    # runs only at trace time. When the loss fn returns a plain scalar/tuple
+    # (reduced loss_mode = main behavior) we take main's original code path
+    # below byte-for-byte: no diff_fn, no gradient scaling.
+    out_shape = nnx.eval_shape(self.loss_fn, model, **inputs)
+
+    if isinstance(out_shape, utils.LossOutput):
+      # Unreduced path (ported from 6472eef8): differentiate the unreduced
+      # sum, then divide the gradients by the denominator after autodiff.
+      @functools.wraps(self.loss_fn)
+      def diff_fn(model, *args, **kwargs):
+        out = self.loss_fn(model, *args, **kwargs)
+        return out.primary_loss.unreduced_sum, out
+
+      grad_fn = nnx.value_and_grad(
+          diff_fn,
+          argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
+          has_aux=True,
+      )
+      (_, aux), grads = grad_fn(model, **inputs)
+
+      # Scale the unreduced gradients using the metric's scale computation.
+      scale = aux.primary_loss.compute_scale()
+      grads = jax.tree.map(lambda g: g * scale, grads)
+
+      # Compute exactly equivalent legacy loss val.
+      loss_val = aux.primary_loss.compute()
+
+      grad_norm = optax.global_norm(grads)
+      optimizer.update(model, grads)
+      return loss_val, _compute_legacy_aux(aux), grad_norm
+
+    # Reduced path == main (byte-for-byte).
     grad_fn = nnx.value_and_grad(
         self.loss_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
@@ -363,7 +410,9 @@ class PeftTrainer:
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
-    if self._has_aux:
+    if isinstance(out, utils.LossOutput):
+      return out.primary_loss.compute(), _compute_legacy_aux(out)
+    elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
     else:
