@@ -160,11 +160,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   """
 
   def _logps_sequence_micro_batch_size(self) -> int:
-    """Returns the flattened sequence micro-batch size for log-prob passes."""
-    return (
-        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
-        * self.algo_config.num_generations
-    )
+    """Returns the trajectory-counted micro-batch size for log-prob passes."""
+    return self._compute_logps_micro_batch_size
 
   def __init__(
       self,

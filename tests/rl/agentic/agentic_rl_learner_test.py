@@ -21,6 +21,7 @@ from unittest import mock
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
+import jax.numpy as jnp
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
@@ -183,6 +184,32 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       ):
         learner.train(train_dataset)
 
+  def test_train_example_training_units_counts_packed_segments(self):
+    learner = object.__new__(DummyLearner)
+
+    unpacked = agentic_rl_learner.TrainExample(
+        prompt_ids=jnp.ones((2, 1), dtype=jnp.int32),
+        prompt_mask=jnp.ones((2, 1), dtype=jnp.bool_),
+        completion_ids=jnp.ones((2, 3), dtype=jnp.int32),
+        completion_mask=jnp.ones((2, 3), dtype=jnp.bool_),
+        advantages=jnp.ones((2,), dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+    )
+    packed = agentic_rl_learner.TrainExample(
+        prompt_ids=jnp.zeros((1, 0), dtype=jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), dtype=jnp.bool_),
+        completion_ids=jnp.ones((1, 6), dtype=jnp.int32),
+        completion_mask=jnp.ones((1, 6), dtype=jnp.bool_),
+        advantages=jnp.ones((1, 6), dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        segment_ids=jnp.array([[1, 1, 2, 2, 3, 0]], dtype=jnp.int32),
+        segment_positions=jnp.array([[0, 1, 0, 1, 0, 0]], dtype=jnp.int32),
+    )
+
+    self.assertEqual(learner._train_example_training_units(unpacked), 2)
+    self.assertEqual(learner._train_example_training_units(packed), 3)
 
 if __name__ == "__main__":
   absltest.main()

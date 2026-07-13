@@ -23,6 +23,7 @@ import contextlib
 import copy
 import dataclasses
 import itertools
+import math
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
@@ -855,6 +856,79 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         yield batch
         batch = []
 
+  def _training_units_per_full_batch(self, full_batch_size: int) -> int:
+    return full_batch_size * self._num_generations()
+
+  def _consumer_group_batch_size(self, train_micro_batch_size: int) -> int:
+    """Returns how many prompt groups to merge before trajectory chunking.
+
+    Producer outputs whole prompt groups, each with ``num_generations``
+    trajectories. When the requested trajectory-counted micro-batch size does
+    not align to a whole number of groups, we buffer the smallest number of
+    complete groups whose flattened trajectory count can be evenly split into
+    ``train_micro_batch_size`` chunks downstream.
+    """
+    num_generations = self._num_generations()
+    return train_micro_batch_size // math.gcd(
+        train_micro_batch_size, num_generations
+    )
+
+  def _chunk_train_micro_batch(
+      self,
+      merged_train_micro_batch: TrainExample,
+      train_micro_batch_size: int,
+  ) -> list[TrainExample]:
+    """Splits a merged batch into actor micro-steps.
+
+    `train_micro_batch_size` counts flattened trajectories directly, so each
+    chunk contains exactly `train_micro_batch_size` trajectories.
+    """
+    seqs_per_chunk = train_micro_batch_size
+    n_total = merged_train_micro_batch.completion_ids.shape[0]
+    if n_total <= seqs_per_chunk:
+      return [merged_train_micro_batch]
+    return [
+        jax.tree_util.tree_map(
+            lambda x: (
+                x[i : i + seqs_per_chunk]
+                if hasattr(x, "shape") and x.shape and x.shape[0] == n_total
+                else x
+            ),
+            merged_train_micro_batch,
+        )
+        for i in range(0, n_total, seqs_per_chunk)
+    ]
+
+  def _merge_train_examples(
+      self, train_examples: Sequence[TrainExample]
+  ) -> TrainExample:
+    """Merges multiple TrainExamples along their batch dimension."""
+    if not train_examples:
+      raise ValueError("Expected at least one TrainExample to merge.")
+    if len(train_examples) == 1:
+      return train_examples[0]
+    return jax.tree_util.tree_map(
+        lambda *xs: None if xs[0] is None else jnp.concatenate(xs, axis=0),
+        *train_examples,
+        is_leaf=lambda node: node is None,
+    )
+
+  def _train_example_training_units(self, train_example: TrainExample) -> int:
+    """Returns how many trajectories a TrainExample represents."""
+    segment_ids = getattr(train_example, "segment_ids", None)
+    if segment_ids is not None:
+      segment_ids_np = np.asarray(jax.device_get(segment_ids))
+      if segment_ids_np.size == 0:
+        return 0
+      return int(segment_ids_np.max(axis=-1).sum())
+    return int(train_example.completion_ids.shape[0])
+
+  def _train_ds_training_units(self, train_ds: Sequence[TrainExample]) -> int:
+    return sum(
+        self._train_example_training_units(train_example)
+        for train_example in train_ds
+    )
+
   def train(
       self,
       train_dataset: Iterable[TrainingInputT],
@@ -889,8 +963,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     full_batch_size = len(next(iter(first_item.values())))
     self._full_batch_size = full_batch_size
+    full_batch_training_units = self._training_units_per_full_batch(
+        full_batch_size
+    )
     # Initialize batch sizes.
-    mini_batch_size = self._training_config.mini_batch_size or full_batch_size
+    mini_batch_size = (
+        self._training_config.mini_batch_size or full_batch_training_units
+    )
     train_micro_batch_size = (
         self._training_config.train_micro_batch_size or mini_batch_size
     )
@@ -916,13 +995,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         ),
         (mini_batch_size, f"{mini_batch_size=}"),
     ]:
-      rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
+      rl_utils.check_divisibility(
+          v,
+          full_batch_training_units,
+          n,
+          f"{full_batch_training_units=}",
+      )
     grad_acc_steps = self._training_config.get_with_default(
         "gradient_accumulation_steps", 1
     )
 
     logging.info(  # pylint: disable=logging-fstring-interpolation
-        f"Training with {full_batch_size=}, {mini_batch_size=},"
+        f"Training with {full_batch_size=},"
+        f" {full_batch_training_units=} (trajectories), {mini_batch_size=},"
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
         f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
     )
@@ -1007,7 +1092,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue,
-        train_micro_batch_size,
+        self._consumer_group_batch_size(train_micro_batch_size),
         on_skipped_group=_replace_skipped_group,
     )
     if self._training_config.max_seq_token_per_tpu is not None:
@@ -1018,8 +1103,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen, self._training_config.max_seq_token_per_tpu
       )
-    micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
+    training_units_since_last_sync = 0
     did_eval_this_global_step = False
     for train_micro_batch in train_data_gen:
       if (
@@ -1045,18 +1129,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # train_micro_batch = filtered_train_micro_batch
 
       if self._process_in_consumer:
-        # train_micro_batch is a list of lists of trajectories.
-        all_trajectories = [t for group in train_micro_batch for t in group]
-        train_examples = self._batch_to_train_example(
-            batch_results=all_trajectories,
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
-        # GRPO returns a list with a single TrainExample.
-        merged_train_micro_batch = train_examples[0]
+        train_examples = []
+        for group in train_micro_batch:
+          train_examples.extend(
+              self._batch_to_train_example(
+                  batch_results=group,
+                  mode=rl_cluster_lib.Mode.TRAIN,
+              )
+          )
+        merged_train_micro_batch = self._merge_train_examples(train_examples)
       else:
-        merged_train_micro_batch = jax.tree.map(
-            lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
-        )
+        merged_train_micro_batch = self._merge_train_examples(train_micro_batch)
 
       # --- Evaluation Logic ---
       current_eval_dataset = None
@@ -1095,32 +1178,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # --- Training Step ---
       iterations = self._num_iterations() if self._process_in_consumer else 1
 
-      # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
-      # to invoke ``train_step`` multiple times per outer iteration so the
-      # optimizer (which fires every ``gradient_accumulation_steps`` micro-
-      # steps) sees ``mini_batch_size``-shaped gradients while peak HBM is
-      # only ``train_micro_batch_size``-shaped. Slice the merged train
-      # example along its batch axis into chunks sized to one micro-step,
-      # and pass the list to ``update_actor``; ``peft_trainer.train``
-      # iterates the list and calls ``train_step`` once per chunk.
-      seqs_per_chunk = (
-          train_micro_batch_size * self.algo_config.num_generations
+      # Split the merged train batch into actor micro-steps, where
+      # `train_micro_batch_size` is interpreted directly as a trajectory count.
+      chunked_train_micro_batch = self._chunk_train_micro_batch(
+          merged_train_micro_batch, train_micro_batch_size
       )
-      n_total = merged_train_micro_batch.completion_ids.shape[0]
-      if n_total > seqs_per_chunk:
-        chunked_train_micro_batch = [
-            jax.tree_util.tree_map(
-                lambda x: (
-                    x[i : i + seqs_per_chunk]
-                    if hasattr(x, "shape") and x.shape and x.shape[0] == n_total
-                    else x
-                ),
-                merged_train_micro_batch,
-            )
-            for i in range(0, n_total, seqs_per_chunk)
-        ]
-      else:
-        chunked_train_micro_batch = [merged_train_micro_batch]
 
       for i in range(iterations):
         if self._process_in_consumer and i > 0:
@@ -1136,8 +1198,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           )
 
       # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      training_units_since_last_sync += self._train_ds_training_units(
+          chunked_train_micro_batch
+      )
+      if training_units_since_last_sync >= full_batch_training_units:
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
@@ -1258,7 +1322,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.perf_v2.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
-        micro_batches_since_last_sync = 0
+        training_units_since_last_sync = 0
         did_eval_this_global_step = False
         self._global_step_start_time = time.time()
 
