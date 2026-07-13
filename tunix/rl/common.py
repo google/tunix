@@ -714,7 +714,10 @@ def aggregate_loss(
         seq_mask, min=1.0
     )
     unreduced_sum = seq_loss.sum()
-    denominator = per_token_loss.shape[0]
+    # Count non-empty rows so unpacked [N_max, R] padding rows do not inflate the
+    # denominator (matches seq-mean-token-sum). For a fully-populated batch this
+    # equals shape[0], so the non-packed path is unchanged.
+    denominator = (seq_mask > 0).sum()
     min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
@@ -725,7 +728,7 @@ def aggregate_loss(
         norm, min=1e-6
     )
     unreduced_sum = seq_loss.sum()
-    denominator = per_token_loss.shape[0]
+    denominator = (completion_mask.sum(axis=-1) > 0).sum()
     min_denom = 1.0
   elif loss_agg_mode == "seq-mean-token-sum":
     # 1) sum token losses within each sequence
@@ -753,6 +756,71 @@ def aggregate_loss(
       jnp.asarray(denominator, dtype=jnp.float32),
       min_denom=min_denom,
   )
+def make_unpack_indices(
+    segment_ids: jax.Array,
+    segment_positions: jax.Array,
+    n_max: int,
+) -> tuple[jax.Array, jax.Array]:
+  # segment_ids/segment_positions: [P, T]. Local segment id (1-indexed within a
+  # pack, 0 = padding/dummy) and local position within that sequence. Returns
+  # per-token scatter targets (g, pos) into a compact [n_max, R] grid where each
+  # row is one sequence. Padding tokens get an out-of-range row (n_max) so a
+  # mode='drop' scatter discards them.
+  segs_per_pack = segment_ids.max(axis=-1)  # [P] real segment count per pack
+  pack_offset = jnp.concatenate([
+      jnp.zeros((1,), segs_per_pack.dtype),
+      jnp.cumsum(segs_per_pack)[:-1],
+  ])  # [P] global index of each pack's first sequence
+  valid = segment_ids > 0
+  g = pack_offset[:, None] + (segment_ids - 1)  # [P, T] global sequence index
+  g = jnp.where(valid, g, n_max)  # sentinel row -> dropped
+  pos = jnp.where(valid, segment_positions, 0)
+  return g, pos
+
+
+def aggregate_loss_packed(
+    per_token_loss: jax.Array,
+    completion_mask: jax.Array,
+    loss_agg_mode: str,
+    segment_ids: jax.Array | None = None,
+    segment_positions: jax.Array | None = None,
+    n_max: int = 0,
+    r_max: int = 0,
+    **kwargs: Any,
+) -> utils.WeightedMetric:
+  # Sequence-packing-aware aggregate_loss. segment_ids is None (no packing) ->
+  # delegate unchanged. Packed -> unpack the per-token [P, T] tensors to
+  # rectangular [n_max, r_max] (row = sequence, veRL pad_input equivalent) so
+  # every loss_agg_mode reduces per-sequence correctly.
+  if segment_ids is None:
+    return aggregate_loss(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+  # n_max is a static upper bound on the number of sequences in one packed
+  # micro-batch (train_micro_batch_size * num_generations). It must be positive
+  # and >= the real sequence count: make_unpack_indices routes any token whose
+  # global sequence index reaches n_max to an out-of-range row that the
+  # mode='drop' scatter discards, so an undersized n_max silently drops real
+  # sequences. This assert catches the n_max == 0 case (packing enabled but no
+  # train_micro/mini batch size); the dynamic count > n_max case relies on the
+  # producer never emitting more than n_max sequences per micro-batch.
+  assert n_max > 0, (
+      "aggregate_loss_packed requires n_max > 0 on the packed path; got"
+      f" {n_max} (is train_micro_batch_size or mini_batch_size set when"
+      " sequence packing is enabled?)."
+  )
+  g, pos = make_unpack_indices(segment_ids, segment_positions, n_max)
+  x_nr = (
+      jnp.zeros((n_max, r_max), per_token_loss.dtype)
+      .at[g, pos]
+      .set(per_token_loss, mode="drop")
+  )
+  m_nr = (
+      jnp.zeros((n_max, r_max), completion_mask.dtype)
+      .at[g, pos]
+      .set(completion_mask, mode="drop")
+  )
+  return aggregate_loss(x_nr, m_nr, loss_agg_mode, **kwargs)
 
 
 def reduced_loss_agg(
@@ -846,7 +914,6 @@ def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
   total_sum = sum(float(v.unreduced_sum) for v in values)
   total_denom = sum(float(v.denominator) for v in values)
   return total_sum / total_denom if total_denom != 0 else 0.0
-
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   """Computes the entropy of a distribution given its logits.

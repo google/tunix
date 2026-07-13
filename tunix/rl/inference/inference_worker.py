@@ -56,6 +56,8 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
       temperature: float = 1.0,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
   ) -> jax.Array:
     graphdef, state = self._model_states.get("reference")  # pyrefly: ignore[not-iterable]
     if graphdef is None:
@@ -69,6 +71,8 @@ class InferenceWorker:
         eos_id=eos_id,
         stop_gradient=True,
         temperature=temperature,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
     )
 
   def get_values(

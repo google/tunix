@@ -922,5 +922,203 @@ class CommonTest(parameterized.TestCase):
     )
     self.assertEqual(logps_packed.shape, (1, 4))
 
+
+  def test_packed_logps_match_unpacked_per_segment(self):
+    """CL2 gate: packed segment-aware per-token logps == unpacked per-row logps.
+
+    Packs `num_seq` sequences into a single row and checks that
+    `compute_per_token_logps` with `segment_ids` reproduces, token-for-token,
+    the logps computed with each sequence on its own row. This is the core
+    correctness property of pack-first log-probs: the segment-aware forward must
+    not let one packed sequence leak into another. Uses a self-contained
+    segment-aware toy (attention confined to same-segment positions) so the
+    check runs on CPU with no real model. The first token of each packed segment
+    is a cross-segment-boundary prediction (masked out downstream by
+    `completion_mask`), so only positions `t >= 1` within each segment are
+    compared.
+    """
+
+    class _SegAwareToy(nnx.Module):
+      """Tiny model whose attention is confined to same-segment positions."""
+
+      def __init__(self, *, vocab, dim, rngs):
+        self.emb = nnx.Embed(vocab, dim, rngs=rngs)
+        self.attn = nnx.MultiHeadAttention(
+            num_heads=2,
+            in_features=dim,
+            qkv_features=dim,
+            use_bias=False,
+            decode=False,
+            rngs=rngs,
+        )
+        self.head = nnx.Linear(dim, vocab, rngs=rngs)
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        h = self.emb(x)
+        if segment_ids is not None:
+          same_seg = segment_ids[:, :, None] == segment_ids[:, None, :]
+          h = self.attn(h, mask=same_seg[:, None, :, :]) + h
+        else:
+          h = self.attn(h) + h
+        return self.head(h), cache
+
+    model = _SegAwareToy(vocab=16, dim=16, rngs=nnx.Rngs(42))
+    graphdef, state = nnx.split(model)
+    num_seq, seq_len = 3, 4
+    tokens = (
+        np.random.default_rng(7)
+        .integers(1, 16, size=(num_seq, seq_len))
+        .astype(np.int32)
+    )
+
+    def _logps(completion_tokens, segment_ids, segment_positions):
+      return np.asarray(
+          common.compute_per_token_logps(
+              graphdef,
+              state,
+              jnp.zeros((completion_tokens.shape[0], 0), dtype=jnp.int32),
+              jnp.asarray(completion_tokens, jnp.int32),
+              pad_id=0,
+              eos_id=-1,
+              segment_ids=jnp.asarray(segment_ids, jnp.int32),
+              segment_positions=jnp.asarray(segment_positions, jnp.int32),
+          )
+      )
+
+    # Unpacked: [num_seq, seq_len], one segment per row.
+    unpacked = _logps(
+        tokens,
+        np.ones((num_seq, seq_len), np.int32),
+        np.broadcast_to(np.arange(seq_len, dtype=np.int32), (num_seq, seq_len)),
+    )
+
+    # Packed: [1, num_seq * seq_len], one row holding num_seq segments.
+    packed = _logps(
+        tokens.reshape(1, -1),
+        np.concatenate(
+            [np.full(seq_len, i + 1, np.int32) for i in range(num_seq)]
+        )[None, :],
+        np.concatenate(
+            [np.arange(seq_len, dtype=np.int32) for _ in range(num_seq)]
+        )[None, :],
+    ).reshape(num_seq, seq_len)
+
+    np.testing.assert_allclose(
+        packed[:, 1:], unpacked[:, 1:], atol=1e-4, rtol=1e-4
+    )
+class AggregateLossPackedTest(parameterized.TestCase):
+  """Pins that packing-aware aggregate_loss_packed == rectangular aggregate_loss.
+
+  Packed [P=3, T=5]: seq0 (prompt@0 + completion@1,2), seq1 (completion@0),
+  seq2 (completion@0,1), plus a fully-dummy pack row. Unpacking must reproduce
+  the per-sequence [N=3, R=3] rectangle so every loss_agg_mode reduces
+  correctly.
+  """
+
+  _MODES = (
+      "token-mean",
+      "sequence-mean-token-mean",
+      "sequence-mean-token-scale",
+      "seq-mean-token-sum",
+      "sequence-mean-token-sum-norm",
+  )
+
+  def _packed(self):
+    loss = jnp.array(
+        [[9, 2, 4, 6, 0], [8, 10, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.float32
+    )
+    mask = jnp.array(
+        [[0, 1, 1, 1, 0], [1, 1, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.int32
+    )
+    seg = jnp.array(
+        [[1, 1, 1, 2, 0], [1, 1, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.int32
+    )
+    pos = jnp.array(
+        [[0, 1, 2, 0, 0], [0, 1, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.int32
+    )
+    return loss, mask, seg, pos
+
+  def _rectangular(self):
+    # Hand-built [N=3, R=3], independent of make_unpack_indices.
+    loss = jnp.array([[9, 2, 4], [6, 0, 0], [8, 10, 0]], jnp.float32)
+    mask = jnp.array([[0, 1, 1], [1, 0, 0], [1, 1, 0]], jnp.int32)
+    return loss, mask
+
+  @parameterized.parameters(*_MODES)
+  def test_packed_equals_rectangular(self, mode):
+    loss, mask, seg, pos = self._packed()
+    rloss, rmask = self._rectangular()
+    got = common.aggregate_loss_packed(
+        loss,
+        mask,
+        mode,
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=3,
+        r_max=3,
+    ).compute()
+    expected = common.aggregate_loss(rloss, rmask, mode).compute()
+    np.testing.assert_allclose(got, expected, atol=1e-4)
+
+  def test_token_mean_ground_truth(self):
+    # completion losses = [2,4,6,8,10] -> 30/5 = 6.0.
+    loss, mask, seg, pos = self._packed()
+    got = common.aggregate_loss_packed(
+        loss,
+        mask,
+        "token-mean",
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=3,
+        r_max=3,
+    ).compute()
+    np.testing.assert_allclose(got, 6.0, atol=1e-4)
+
+  @parameterized.parameters(
+      "token-mean",
+      "sequence-mean-token-mean",
+      "sequence-mean-token-scale",
+      "seq-mean-token-sum",
+  )
+  def test_empty_padding_row_does_not_pollute(self, mode):
+    # n_max=4 adds an empty row; decision-B (non-empty-row denom) keeps the
+    # result identical to the tight n_max=3.
+    loss, mask, seg, pos = self._packed()
+    tight = common.aggregate_loss_packed(
+        loss,
+        mask,
+        mode,
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=3,
+        r_max=3,
+    ).compute()
+    padded = common.aggregate_loss_packed(
+        loss,
+        mask,
+        mode,
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=4,
+        r_max=3,
+    ).compute()
+    np.testing.assert_allclose(padded, tight, atol=1e-4)
+
+  @parameterized.parameters(*_MODES)
+  def test_none_segments_matches_original(self, mode):
+    rloss, rmask = self._rectangular()
+    got = common.aggregate_loss_packed(rloss, rmask, mode).compute()
+    expected = common.aggregate_loss(rloss, rmask, mode).compute()
+    np.testing.assert_allclose(got, expected, atol=1e-6)
+
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -398,6 +398,12 @@ def grpo_loss_fn(
   )
   epsilon_c = getattr(algo_config, "epsilon_c", None)
   loss_aggregation_mode = algo_config.loss_agg_mode
+  # Sequence-packing: unpack per-token tensors to [n_max, r_max] (row = sequence)
+  # before aggregation so every loss_agg_mode reduces per-sequence. None -> the
+  # non-packed path is unchanged. r_max = T (a sequence fits in one pack row).
+  seg_ids = getattr(train_example, "segment_ids", None)
+  seg_pos = getattr(train_example, "segment_positions", None)
+  unpack_n_max = kwargs.get("unpack_n_max", 0)
 
   completion_ids, completion_mask = (
       train_example.completion_ids,
@@ -478,8 +484,14 @@ def grpo_loss_fn(
   per_token_pg_clipfrac_lower = (
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
-  pg_clipfrac_lower = common.aggregate_loss(
-      per_token_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+  pg_clipfrac_lower = common.aggregate_loss_packed(
+      per_token_pg_clipfrac_lower,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=seg_ids,
+      segment_positions=seg_pos,
+      n_max=unpack_n_max,
+      r_max=per_token_pg_clipfrac_lower.shape[1],
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
@@ -497,8 +509,14 @@ def grpo_loss_fn(
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
   #   reduced   (eager per-sequence mean, pre-CL form) — metric only
-  unreduced_pg_loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+  unreduced_pg_loss = common.aggregate_loss_packed(
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=seg_ids,
+      segment_positions=seg_pos,
+      n_max=unpack_n_max,
+      r_max=per_token_loss.shape[1],
   )
   reduced_pg_loss = common.reduced_loss_agg(
       per_token_loss, completion_mask, loss_aggregation_mode
@@ -569,7 +587,15 @@ def grpo_loss_fn(
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
+    kl_loss = common.aggregate_loss_packed(
+        kl,
+        completion_mask,
+        loss_aggregation_mode,
+        segment_ids=seg_ids,
+        segment_positions=seg_pos,
+        n_max=unpack_n_max,
+        r_max=kl.shape[1],
+    )
     aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
     if beta is not None and beta != 0.0:
       total_loss = sft_utils.WeightedMetric(
@@ -579,8 +605,14 @@ def grpo_loss_fn(
           min_denom=unreduced_pg_loss.min_denom,
       )
 
-  entropy_loss = common.aggregate_loss(
-      token_entropy, completion_mask, loss_aggregation_mode
+  entropy_loss = common.aggregate_loss_packed(
+      token_entropy,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=seg_ids,
+      segment_positions=seg_pos,
+      n_max=unpack_n_max,
+      r_max=token_entropy.shape[1],
   )
   aux["entropy"] = entropy_loss
 

@@ -463,15 +463,17 @@ class PeftTrainer:
     (loss_val, aux), grads = grad_fn(model, **inputs)
 
     if isinstance(aux, utils.LossOutput):
-      # Scale the unreduced gradients using the metric's scale computation
-      scale = aux.primary_loss.compute_scale()
-      grads = jax.tree.map(lambda g: g * scale, grads)
-
-      # Compute exactly equivalent legacy loss val
+      # Compute exactly equivalent legacy loss val for logging.
       loss_val = aux.primary_loss.compute()
 
-    # TODO(b/491970038): update denom for sequence packing.
-    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+      # Accumulate the UNREDUCED gradients (d/dparam of the sum) weighted by the
+      # loss's real denominator, so the optimizer step sees the GLOBAL weighted
+      # mean (Sum grads / Sum denom) across micro-batches rather than a
+      # mean-of-means. The denom is token-count for token-mean and sequence-count
+      # for sequence-mean, so each mode is normalized correctly (b/491970038).
+      grad_accumulator.add(grads, denom=aux.primary_loss.denominator)
+    else:
+      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     def apply_updates(model, optimizer, grad_accumulator):
       acc_grads = grad_accumulator.get()
