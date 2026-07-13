@@ -435,13 +435,13 @@ class UtilsTest(absltest.TestCase):
     # Known answer: [8,7,6,5,4] into 2 groups has minimal spread 2 (14 vs 16),
     # beating greedy first-fit's spread 4.
     vals = [8, 7, 6, 5, 4]
-    groups = utils._karmarkar_karp(vals, 2)
+    groups = utils.karmarkar_karp(vals, 2)
     self.assertEqual(
         sorted(sum(vals[i] for i in g) for g in groups), [14, 16]
     )
     # [8..1] into 4 groups balances perfectly to 9 each (8+1, 7+2, 6+3, 5+4).
     vals = [8, 7, 6, 5, 4, 3, 2, 1]
-    groups = utils._karmarkar_karp(vals, 4)
+    groups = utils.karmarkar_karp(vals, 4)
     self.assertEqual(
         sorted(sum(vals[i] for i in g) for g in groups), [9, 9, 9, 9]
     )
@@ -449,13 +449,13 @@ class UtilsTest(absltest.TestCase):
   def test_karmarkar_karp_partitions_all_indices_once(self):
     # No sequence dropped or duplicated: every index appears exactly once.
     vals = [5, 4, 3, 3, 3, 2, 7, 1]
-    groups = utils._karmarkar_karp(vals, 3)
+    groups = utils.karmarkar_karp(vals, 3)
     flat = sorted(i for g in groups for i in g)
     self.assertEqual(flat, list(range(len(vals))))
 
   def test_karmarkar_karp_more_partitions_than_items(self):
     # k > n: every item placed, extra groups left empty.
-    groups = utils._karmarkar_karp([3, 1], 4)
+    groups = utils.karmarkar_karp([3, 1], 4)
     self.assertLen(groups, 4)
     self.assertEqual(sum(len(g) for g in groups), 2)
 

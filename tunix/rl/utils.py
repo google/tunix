@@ -338,7 +338,7 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   return res
 
 
-def _karmarkar_karp(vals, k):
+def karmarkar_karp(vals, k):
   """Partition indices [0, len(vals)) into k groups with balanced sums.
 
   Karmarkar-Karp largest-differencing heuristic: repeatedly merge the two most
@@ -399,7 +399,7 @@ def _karmarkar_karp(vals, k):
   return pq[0].partitions()
 
 
-def _group_by_version(valid):
+def group_by_version(valid):
   """Group (item, tokens) pairs by policy_version so a pack never mixes versions.
 
   Returns groups in first-seen version order. When no item carries a
@@ -417,7 +417,7 @@ def _group_by_version(valid):
   return [groups[key] for key in order]
 
 
-def _balanced_pack(items_with_tokens, max_token_budget, num_packs):
+def balanced_pack(items_with_tokens, max_token_budget, num_packs):
   """Split (item, tokens) pairs into KK-balanced packs, each <= max_token_budget.
 
   Balances by token count via Karmarkar-Karp. Picks the pack count k as the
@@ -437,7 +437,7 @@ def _balanced_pack(items_with_tokens, max_token_budget, num_packs):
   k = min(k, n)
 
   while True:
-    groups = _karmarkar_karp(workloads, k)
+    groups = karmarkar_karp(workloads, k)
     if k >= n or all(
         sum(tokens[i] for i in g) <= max_token_budget for g in groups
     ):
@@ -663,8 +663,8 @@ def pack_sequences(
         valid.append((item, tokens))
 
       packs = []
-      for group in _group_by_version(valid):
-        packs.extend(_balanced_pack(group, max_token_budget, num_packs))
+      for group in group_by_version(valid):
+        packs.extend(balanced_pack(group, max_token_budget, num_packs))
 
     if not packs:
       continue
