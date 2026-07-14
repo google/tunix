@@ -79,7 +79,12 @@ spec:
                 git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
                 git fetch origin yuxzhang/loss_accum_ablation
                 git reset --hard FETCH_HEAD
-                
+
+                # --- Link cached model from GKE PVC ---
+                echo "Linking cached Qwen3 weights from GKE PVC..."
+                mkdir -p /app/artifacts/qwen3_grpo_gsm8k_vtc
+                ln -sfn /mnt/disks/linchai_data/huggingface/models/Qwen/Qwen3-1.7B /app/artifacts/qwen3_grpo_gsm8k_vtc/models
+
                 # --- Hot Patch tpu-inference (PR #2838) ---
                 echo "Applying python script patch for ROPE bugs in qwen3.py..."
                 cat << 'EOF' > /tmp/patch_qwen3.py
