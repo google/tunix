@@ -161,10 +161,12 @@ arg_parser.add_argument(
     "--loss_mode",
     type=str,
     default="reduced",
-    choices=["reduced", "unreduced"],
+    choices=["reduced", "unreduced", "both"],
     help=(
         "Loss representation. 'reduced' (default) = origin/main pre-averaged"
-        " scalar; 'unreduced' defers the division until after autodiff."
+        " scalar; 'unreduced' defers the division until after autodiff; 'both'"
+        " trains on the reduced path and additionally logs pg_loss_unreduced"
+        " (diagnostic, mean-of-means) so a single run overlays both curves."
     ),
 )
 arg_parser.add_argument(

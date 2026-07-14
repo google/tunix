@@ -1212,8 +1212,11 @@ def _default_loss_fn(
   # Don't update on unwanted tokens.
   one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
 
-  if loss_mode == "reduced":
+  if loss_mode in ("reduced", "both"):
     # ==== origin/main scalar path — copied byte-for-byte ====
+    # "both" trains on this reduced path too (the pg_loss_unreduced diagnostic
+    # lives on the RL grpo_loss_fn path, not SFT); this guards SFT from crashing
+    # if ever constructed with loss_mode="both".
     # Define the normalization factor.
     norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
 

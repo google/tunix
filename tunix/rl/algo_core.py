@@ -371,6 +371,11 @@ def grpo_loss_fn(
   # `return loss, aux`). "unreduced" emits sft_utils.LossOutput carrying
   # WeightedMetrics so the trainer can defer the division until after autodiff.
   loss_mode = getattr(algo_config, "loss_mode", "reduced")
+  # "both" trains on the reduced path (== origin/main) and additionally emits
+  # the unreduced pg-loss ingredients (sum + denom) as stop-gradient diagnostics
+  # so a single run can log both mean-of-means (reduced) and global ratio
+  # (unreduced) pg-loss. The training loss/gradient is byte-for-byte "reduced".
+  effective_loss_mode = "reduced" if loss_mode == "both" else loss_mode
 
   completion_ids, completion_mask = (
       train_example.completion_ids,
@@ -461,7 +466,7 @@ def grpo_loss_fn(
       unreduced_pg_clipfrac_lower,
       completion_mask,
       loss_aggregation_mode,
-      loss_mode=loss_mode,
+      loss_mode=effective_loss_mode,
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
@@ -480,7 +485,7 @@ def grpo_loss_fn(
       per_token_loss,
       completion_mask,
       loss_aggregation_mode,
-      loss_mode=loss_mode,
+      loss_mode=effective_loss_mode,
   )
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
   # These are identical in both loss modes.
@@ -502,7 +507,7 @@ def grpo_loss_fn(
       (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
   )
 
-  if loss_mode == "reduced":
+  if effective_loss_mode == "reduced":
     # ==== origin/main path — scalar loss + aux, `return loss, aux` ====
     loss = agg_loss
     aux = {
@@ -547,16 +552,30 @@ def grpo_loss_fn(
           jnp.float32,
       )
       kl_loss = common.aggregate_loss(
-          kl, completion_mask, loss_aggregation_mode, loss_mode=loss_mode
+          kl, completion_mask, loss_aggregation_mode, loss_mode=effective_loss_mode
       )
       aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
       if beta is not None and beta != 0.0:
         loss = loss + beta * kl_loss
 
     entropy_loss = common.aggregate_loss(
-        token_entropy, completion_mask, loss_aggregation_mode, loss_mode=loss_mode
+        token_entropy, completion_mask, loss_aggregation_mode,
+        loss_mode=effective_loss_mode
     )
     aux["entropy"] = entropy_loss
+
+    if loss_mode == "both":
+      # Diagnostic-only (stop-gradient): the unreduced pg-loss reduced the SAME
+      # way as `pg_loss` (per-micro-batch value, mean-of-means across
+      # micro-batches via np.mean in the learner). The only difference is
+      # divide-inside (reduced `pg_loss`) vs divide-after (`compute()`), so the
+      # two curves must overlap; a gap flags a bug in the unreduced code path.
+      # `pg_loss` itself (mean-of-means) is unchanged == the regression baseline.
+      pg_wm = common.aggregate_loss(
+          per_token_loss, completion_mask, loss_aggregation_mode,
+          loss_mode="unreduced",
+      )
+      aux["pg_loss_unreduced"] = jax.lax.stop_gradient(pg_wm.compute())
 
     return loss, aux
 

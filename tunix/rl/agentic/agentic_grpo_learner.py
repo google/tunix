@@ -262,7 +262,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
+    rl_metrics_to_log = {
         "kl": np.mean,
         "entropy": np.mean,
         "pg_loss": np.mean,
@@ -281,7 +281,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "advantage/nonzero_frac": np.mean,
         "sampler_is/weight_mean": np.mean,
         "sampler_is/weight_min": np.min,
-    })
+    }
+    if getattr(self.algo_config, "loss_mode", "reduced") == "both":
+      # loss_mode="both" emits a diagnostic unreduced pg-loss; log it with the
+      # SAME np.mean aggregation as pg_loss so both are mean-of-means and can be
+      # overlaid apples-to-apples on wandb (they must overlap; a gap = a bug in
+      # the unreduced code path). grpo_loss_fn only adds this key in "both" mode.
+      rl_metrics_to_log["pg_loss_unreduced"] = np.mean
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(rl_metrics_to_log)
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
         if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
