@@ -1,69 +1,84 @@
-Traceback (most recent call last):
-  File "<frozen runpy>", line 198, in _run_module_as_main
-  File "<frozen runpy>", line 88, in _run_code
-  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 798, in <module>
-    app.run(main)
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/absl/app.py", line 367, in run
-    _run_main(main, args)
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
-    sys.exit(main(argv))
-             ^^^^^^^^^^
-  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 794, in main
-    rl_train(argv, kwargs)
-  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 629, in rl_train
-    _rl_train_impl(argv, kwargs)
-  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 712, in _rl_train_impl
-    rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
-                                            ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/maxtext/src/maxtext/trainers/post_train/rl/train_rl.py", line 513, in create_rl_components
-    rl_cluster = rl_cluster_lib.RLCluster(
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/tunix/tunix/rl/rl_cluster.py", line 271, in __init__
-    self._init_cluster()
-  File "/home/yixuanm_google_com/tunix/tunix/rl/rl_cluster.py", line 434, in _init_cluster
-    self._rollout = vllm_rollout.VllmRollout(
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/tunix/tunix/rl/rollout/vllm_rollout.py", line 43, in __init__
-    self._sampler = vllm_sampler.VllmSampler(
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/tunix/tunix/generate/vllm_sampler.py", line 163, in __init__
-    self.llm = LLM(**self.args)
-               ^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 349, in __init__
-    self.llm_engine = LLMEngine.from_engine_args(
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 162, in from_engine_args
-    vllm_config = engine_args.create_engine_config(usage_context)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/engine/arg_utils.py", line 2229, in create_engine_config
-    config = VllmConfig(
-             ^^^^^^^^^^^
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/pydantic/_internal/_dataclasses.py", line 121, in __init__
-    s.__pydantic_validator__.validate_python(ArgsKwargs(args, kwargs), self_instance=s)
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/vllm/config/vllm.py", line 1335, in __post_init__
-    current_platform.check_and_update_config(self)
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/platforms/tpu_platform.py", line 296, in check_and_update_config
-    from tpu_inference.layers.vllm.backends.flash_attn import \
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/__init__.py", line 14, in <module>
-    from tpu_inference.layers.vllm import backends as backends
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/backends/__init__.py", line 14, in <module>
-    from tpu_inference.layers.vllm.backends import flash_attn as flash_attn
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/backends/flash_attn.py", line 27, in <module>
-    from tpu_inference.models.vllm.vllm_model_wrapper_context import \
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/models/vllm/__init__.py", line 15, in <module>
-    from tpu_inference.models.vllm import vllm_model_loader  # noqa F401
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/models/vllm/vllm_model_loader.py", line 29, in <module>
-    from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/quantization/__init__.py", line 24, in <module>
-    from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
-  File "/home/yixuanm_google_com/tpu_inference/tpu_inference/layers/vllm/quantization/awq.py", line 32, in <module>
-    from vllm.model_executor.layers.quantization.auto_awq import \
-ModuleNotFoundError: No module named 'vllm.model_executor.layers.quantization.auto_awq'
-Exception ignored in: <function GCSRecordWriter.__del__ at 0x7688e7b1a840>
-Traceback (most recent call last):
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 134, in __del__
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 158, in close
-  File "/home/yixuanm_google_com/dev-venv/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 149, in flush
-  File "/home/yixuanm_google_com/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/copy.py", line 87, in copy
-ImportError: sys.meta_path is None, Python is likely shutting down
+ERROR 07-14 00:29:25 [tpu_runner.py:1034] KV_CACHE_PROFILE TPUModelRunner.delete_kv_cache start
+INFO 07-14 00:29:25 [kv_cache_manager.py:1089] Deleting kv-cache | num_layers=36 | hbm_before=[(22.62, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25)]Gb
+INFO 07-14 00:29:25 [kv_cache_manager.py:1101] KV cache delete complete | hbm_after=[(12.32, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25)]Gb
+ERROR 07-14 00:29:25 [tpu_runner.py:1036] KV_CACHE_PROFILE TPUModelRunner.delete_kv_cache done | total_s=0.001243
+I0714 00:29:31.042056 135371113367104 reshard.py:232] Reshard finished in 5.02s
+ERROR 07-14 00:29:31 [tpu_runner.py:1043] KV_CACHE_PROFILE TPUModelRunner.reinitialize_kv_cache start
+INFO 07-14 00:29:31 [kv_cache_manager.py:1127] Reinitializing kv-cache | hbm_before=[(12.32, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25), (12.31, 31.25)]Gb
+ERROR 07-14 00:29:33 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000029 | sharding_s=0.000018 | jit_create_s=0.000163 | dispatch_s=2.914888 | total_s=2.915100
+ERROR 07-14 00:29:33 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=0 | layer=layer.0 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.917294
+ERROR 07-14 00:29:37 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000134 | dispatch_s=3.116589 | total_s=3.116769
+ERROR 07-14 00:29:37 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=1 | layer=layer.1 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.118946
+ERROR 07-14 00:29:39 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000136 | dispatch_s=2.859701 | total_s=2.859883
+ERROR 07-14 00:29:39 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=2 | layer=layer.2 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.862157
+ERROR 07-14 00:29:42 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000035 | sharding_s=0.000023 | jit_create_s=0.000155 | dispatch_s=3.010007 | total_s=3.010224
+ERROR 07-14 00:29:42 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=3 | layer=layer.3 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.012368
+ERROR 07-14 00:29:45 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000025 | sharding_s=0.000017 | jit_create_s=0.000145 | dispatch_s=2.857078 | total_s=2.857268
+ERROR 07-14 00:29:45 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=4 | layer=layer.4 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.859428
+ERROR 07-14 00:29:48 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000017 | jit_create_s=0.000142 | dispatch_s=2.782276 | total_s=2.782465
+ERROR 07-14 00:29:48 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=5 | layer=layer.5 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.784685
+ERROR 07-14 00:29:51 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000137 | dispatch_s=3.032966 | total_s=3.033148
+ERROR 07-14 00:29:51 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=6 | layer=layer.6 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.035399
+ERROR 07-14 00:29:54 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000028 | sharding_s=0.000014 | jit_create_s=0.000128 | dispatch_s=3.224512 | total_s=3.224685
+ERROR 07-14 00:29:54 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=7 | layer=layer.7 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.226904
+ERROR 07-14 00:29:57 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000129 | dispatch_s=2.820888 | total_s=2.821061
+ERROR 07-14 00:29:57 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=8 | layer=layer.8 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.823289
+ERROR 07-14 00:30:00 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000028 | sharding_s=0.000015 | jit_create_s=0.000129 | dispatch_s=3.077515 | total_s=3.077691
+ERROR 07-14 00:30:00 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=9 | layer=layer.9 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.079902
+ERROR 07-14 00:30:03 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000131 | dispatch_s=2.961231 | total_s=2.961409
+ERROR 07-14 00:30:03 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=10 | layer=layer.10 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.963619
+ERROR 07-14 00:30:06 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000134 | dispatch_s=3.027327 | total_s=3.027507
+ERROR 07-14 00:30:06 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=11 | layer=layer.11 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.029839
+ERROR 07-14 00:30:10 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000043 | sharding_s=0.000015 | jit_create_s=0.000189 | dispatch_s=4.206108 | total_s=4.206362
+ERROR 07-14 00:30:10 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=12 | layer=layer.12 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=4.208541
+ERROR 07-14 00:30:13 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000151 | dispatch_s=2.977256 | total_s=2.977452
+ERROR 07-14 00:30:13 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=13 | layer=layer.13 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.979677
+ERROR 07-14 00:30:16 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000130 | dispatch_s=2.827007 | total_s=2.827183
+ERROR 07-14 00:30:16 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=14 | layer=layer.14 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.829378
+ERROR 07-14 00:30:19 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000130 | dispatch_s=2.872344 | total_s=2.872520
+ERROR 07-14 00:30:19 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=15 | layer=layer.15 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.874758
+ERROR 07-14 00:30:22 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000028 | sharding_s=0.000015 | jit_create_s=0.000132 | dispatch_s=3.162957 | total_s=3.163134
+ERROR 07-14 00:30:22 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=16 | layer=layer.16 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.165337
+ERROR 07-14 00:30:25 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000130 | dispatch_s=2.988379 | total_s=2.988554
+ERROR 07-14 00:30:25 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=17 | layer=layer.17 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.990746
+ERROR 07-14 00:30:28 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000016 | jit_create_s=0.000131 | dispatch_s=2.942582 | total_s=2.942759
+ERROR 07-14 00:30:28 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=18 | layer=layer.18 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.945038
+ERROR 07-14 00:30:32 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000028 | jit_create_s=0.000147 | dispatch_s=3.311343 | total_s=3.311548
+ERROR 07-14 00:30:32 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=19 | layer=layer.19 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.313784
+ERROR 07-14 00:30:35 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000028 | sharding_s=0.000015 | jit_create_s=0.000149 | dispatch_s=2.917053 | total_s=2.917249
+ERROR 07-14 00:30:35 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=20 | layer=layer.20 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.919453
+ERROR 07-14 00:30:37 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000129 | dispatch_s=2.949487 | total_s=2.949662
+ERROR 07-14 00:30:37 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=21 | layer=layer.21 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.951893
+ERROR 07-14 00:30:40 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000131 | dispatch_s=2.895518 | total_s=2.895695
+ERROR 07-14 00:30:40 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=22 | layer=layer.22 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.897890
+ERROR 07-14 00:30:43 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000134 | dispatch_s=2.848932 | total_s=2.849110
+ERROR 07-14 00:30:43 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=23 | layer=layer.23 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.851349
+ERROR 07-14 00:30:46 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000129 | dispatch_s=2.847854 | total_s=2.848029
+ERROR 07-14 00:30:46 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=24 | layer=layer.24 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.850217
+ERROR 07-14 00:30:49 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000014 | jit_create_s=0.000128 | dispatch_s=3.173439 | total_s=3.173611
+ERROR 07-14 00:30:49 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=25 | layer=layer.25 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.175823
+ERROR 07-14 00:30:52 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000131 | dispatch_s=3.057222 | total_s=3.057400
+ERROR 07-14 00:30:52 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=26 | layer=layer.26 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.059604
+ERROR 07-14 00:30:55 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000128 | dispatch_s=3.071498 | total_s=3.071671
+ERROR 07-14 00:30:55 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=27 | layer=layer.27 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.073864
+ERROR 07-14 00:30:59 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000025 | sharding_s=0.000015 | jit_create_s=0.000127 | dispatch_s=3.200008 | total_s=3.200178
+ERROR 07-14 00:30:59 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=28 | layer=layer.28 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.202417
+ERROR 07-14 00:31:02 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000128 | dispatch_s=3.119333 | total_s=3.119519
+ERROR 07-14 00:31:02 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=29 | layer=layer.29 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.121754
+ERROR 07-14 00:31:05 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000042 | sharding_s=0.000015 | jit_create_s=0.000145 | dispatch_s=3.108132 | total_s=3.108338
+ERROR 07-14 00:31:05 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=30 | layer=layer.30 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.110543
+ERROR 07-14 00:31:08 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000027 | sharding_s=0.000015 | jit_create_s=0.000127 | dispatch_s=2.960703 | total_s=2.960876
+ERROR 07-14 00:31:08 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=31 | layer=layer.31 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.963089
+ERROR 07-14 00:31:11 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000028 | sharding_s=0.000022 | jit_create_s=0.000149 | dispatch_s=2.883590 | total_s=2.883792
+ERROR 07-14 00:31:11 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=32 | layer=layer.32 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=2.885927
+ERROR 07-14 00:31:14 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000039 | sharding_s=0.000015 | jit_create_s=0.000132 | dispatch_s=3.065304 | total_s=3.065494
+ERROR 07-14 00:31:14 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=33 | layer=layer.33 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.067622
+ERROR 07-14 00:31:17 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000015 | jit_create_s=0.000134 | dispatch_s=3.202132 | total_s=3.202310
+ERROR 07-14 00:31:17 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=34 | layer=layer.34 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.204469
+ERROR 07-14 00:31:20 [kv_cache.py:170] KV_CACHE_PROFILE create_kv_caches | layers=1 | shape=(4688, 128, 8, 2, 128) | dtype=bfloat16 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | use_mla=False | shape_s=0.000026 | sharding_s=0.000014 | jit_create_s=0.000127 | dispatch_s=3.061487 | total_s=3.061659
+ERROR 07-14 00:31:20 [kv_cache_manager.py:983] KV_CACHE_PROFILE initialize_kv_cache create_attention | tensor_i=35 | layer=layer.35 | shared_by=1 | num_blocks=4688 | block_size=128 | num_kv_heads=8 | head_size=128 | dtype=torch.bfloat16 | alloc_call_s=3.063785
+INFO 07-14 00:31:20 [kv_cache_manager.py:1024] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=36, kv_cache_config.num_blocks=4695, duplicate_shared_layers=False
+INFO 07-14 00:31:20 [kv_cache_manager.py:1054] Init kv-cache | num_total_layers=36 | num_blocks=[4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688, 4688] | regular_attn_layers=36 | regular_attn_shape=(num_blocks, (128, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 8, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 1, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(22.62, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25), (22.61, 31.25)]Gb
+ERROR 07-14 00:31:20 [kv_cache_manager.py:1055] KV_CACHE_PROFILE initialize_kv_cache summary | maybe_input_batch_s=0.000016 | layer_spec_map_s=0.000016 | layout_setup_s=0.000006 | duplicate_check_s=0.000041 | allocation_loop_s=109.427295 | block_count_s=0.003730 | attention_alloc_s=109.420537 | mamba_alloc_s=0.000000 | index_update_s=0.000096 | shared_map_s=0.000001 | hbm_usage_s=0.000098 | num_tensors=36 | num_total_layers=36 | total_s=109.427617
+ERROR 07-14 00:31:20 [kv_cache_manager.py:1139] KV_CACHE_PROFILE reinitialize_kv_cache summary | hbm_before_s=0.000101 | initialize_s=109.427677 | block_until_ready_s=0.000825 | num_layers=36 | total_s=109.428651
+ERROR 07-14 00:31:20 [tpu_runner.py:1046] KV_CACHE_PROFILE TPUModelRunner.reinitialize_kv_cache done | total_s=109.428832
