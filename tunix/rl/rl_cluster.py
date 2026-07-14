@@ -40,7 +40,6 @@ import numpy as np
 import optax
 from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
-# Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -102,11 +101,10 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     compute_logps_chunk_size: The chunk size used for computing log
       probabilities. Instead of using final logits from model, where size is [B,
       T, V], this will use the last hidden output with size [B, T, D] from model
-      and compute logps in a chunked manner.
-      Good values to pick are like 256, 512, etc. When value is 0, it means this
-      feature is disabled.
-      This also requires model to support `skip_lm_head` in its `__call__`
-      method and have a `compute_final_logits` method.
+      and compute logps in a chunked manner. Good values to pick are like 256,
+      512, etc. When value is 0, it means this feature is disabled. This also
+      requires model to support `skip_lm_head` in its `__call__` method and have
+      a `compute_final_logits` method.
   """
 
   actor_optimizer: optax.GradientTransformation
@@ -414,7 +412,7 @@ class RLCluster:
       )
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
-      from tunix.rl.rollout import vllm_rollout
+      # OSS Placeholder for vllm rollout worker, don't change this line.
 
       if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
@@ -431,6 +429,8 @@ class RLCluster:
         # the rollout mesh. This is important for out-of-tree models in vLLM
         # that are implemented with custom logical axis rules, like is the case
         # for MaxText models.
+        from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
+
         self._rollout = vllm_rollout.VllmRollout(
             self.rollout_actor,
             self.tokenizer,

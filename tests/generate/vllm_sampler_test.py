@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+
 import os
 import tempfile
 import time
@@ -180,7 +181,7 @@ class VllmSamplerTest(absltest.TestCase):
     mock_llm = vl_sampler._driver.llm_engine if server_mode else vl_sampler.llm
     with mock.patch.object(mock_llm, "reset_prefix_cache"), \
         mock.patch.object(mock_llm, "collective_rpc"):
-        vl_sampler.load_checkpoint(state)
+      vl_sampler.load_checkpoint(state)
 
     base_utils.show_hbm_usage("After loading vLLM sampler")
 
@@ -256,7 +257,7 @@ class VllmSamplerTest(absltest.TestCase):
     # Mock the RPC calls to delete and reinitialize kv cache
     with mock.patch.object(vl_sampler._driver.llm_engine, "reset_prefix_cache"), \
         mock.patch.object(vl_sampler._driver.llm_engine, "collective_rpc"):
-        vl_sampler.load_checkpoint(state)
+      vl_sampler.load_checkpoint(state)
 
     base_prompts = [
         "Hello, my name is Tom.",
@@ -404,7 +405,7 @@ class VllmSamplerTest(absltest.TestCase):
     # Mock the RPC calls to delete and reinitialize kv cache
     with mock.patch.object(vl_sampler.llm, "reset_prefix_cache"), \
         mock.patch.object(vl_sampler.llm, "collective_rpc"):
-        vl_sampler.load_checkpoint(state)
+      vl_sampler.load_checkpoint(state)
 
     # Mock the generate method to capture sampling_params
     original_generate = vl_sampler.llm.generate
@@ -489,7 +490,7 @@ class VllmSamplerTest(absltest.TestCase):
     # Mock the RPC calls to delete and reinitialize kv cache
     with mock.patch.object(vl_sampler.llm, "reset_prefix_cache"), \
         mock.patch.object(vl_sampler.llm, "collective_rpc"):
-        vl_sampler.load_checkpoint(state)
+      vl_sampler.load_checkpoint(state)
 
     # Mock the generate method to capture sampling_params
     original_generate = vl_sampler.llm.generate

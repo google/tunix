@@ -176,7 +176,7 @@ class UtilsTest(parameterized.TestCase):
     ]
     expected = [-1.71, -0.37, 0.0]
     self.assertEqual(
-        utils.get_logprobs_from_vllm_output(token_ids, logprobs),
+        utils.get_logprobs_from_vllm_output(token_ids, logprobs),  # pyrefly: ignore[bad-argument-type]
         expected,
     )
 
@@ -184,7 +184,7 @@ class UtilsTest(parameterized.TestCase):
     token_ids = [100, 200]
     logprobs = [{101: Logprob(-0.5)}, {200: Logprob(-1.2)}]
     with self.assertRaises(ValueError):
-      utils.get_logprobs_from_vllm_output(token_ids, logprobs)
+      utils.get_logprobs_from_vllm_output(token_ids, logprobs)  # pyrefly: ignore[bad-argument-type]
 
   @parameterized.named_parameters(
       ("none_logprobs", [], None),
