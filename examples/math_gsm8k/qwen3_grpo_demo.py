@@ -166,6 +166,16 @@ arg_parser.add_argument(
         " scalar; 'unreduced' defers the division until after autodiff."
     ),
 )
+arg_parser.add_argument(
+    "--grad_accum",
+    type=str,
+    default="optax",
+    choices=["optax", "stream"],
+    help=(
+        "Gradient-accumulation mechanism. 'optax' (default) = origin/main's"
+        " optax.MultiSteps; 'stream' = the ported 944 GradientAccumulator."
+    ),
+)
 args, _ = arg_parser.parse_known_args()
 
 
@@ -194,6 +204,8 @@ EPSILON = 0.2
 KL_LOSS_MODE = "mse_kl"
 # Loss representation toggle (loss ablation). Default "reduced" == origin/main.
 LOSS_MODE = args.loss_mode
+# Grad-accumulation toggle (loss ablation). Default "optax" == origin/main.
+GRAD_ACCUM = args.grad_accum
 LEARNING_RATE = 2.0e-7
 WEIGHT_DECAY = 0.01
 ADAM_B1 = 0.9
@@ -735,6 +747,7 @@ def main() -> None:
           mini_batch_size=MINI_BATCH_SIZE,
           train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
+          grad_accum=GRAD_ACCUM,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
               CHECKPOINT_ROOT if ENABLE_CHECKPOINTING else None
