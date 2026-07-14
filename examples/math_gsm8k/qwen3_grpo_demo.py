@@ -75,8 +75,9 @@ import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
 
-# For OSS usage
-# import tensorflow_datasets.text.gsm8k
+# For OSS usage: registers the `gsm8k` tfds builder (else tfds.data_source raises
+# DatasetNotFoundError).
+import tensorflow_datasets.text.gsm8k  # noqa: F401  pylint: disable=unused-import
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -492,6 +493,17 @@ class VTCRawTextParser:
         parts.append(content)
     return "\n".join(parts)
 
+  def update_assistant_end_tokens(self, tokens):
+    """No-op end-token handling for raw text (matches BaseChatTemplateParser).
+
+    The trajectory collect engine calls this on the chat parser to append any
+    assistant-turn end markers and report how many tokens it added (used to
+    build assistant_masks). A raw-text parser appends no markers, so it returns
+    the tokens unchanged with 0 appended — identical to the base parser's
+    default at parser.py:158.
+    """
+    return tokens, 0
+
 
 class VTCGRPOLearner(GRPOLearner):
   """Demo-local learner that normalizes TFDS string payloads to Python str."""
@@ -793,7 +805,9 @@ def main() -> None:
 
   # ====== Training ======
   try:
-    grpo_trainer.train(train_dataset, eval_dataset=eval_dataset)
+    # eval disabled (eval_dataset=None) to match the known-good frozenlake run
+    # and avoid the EVAL_AT_START rollout path.
+    grpo_trainer.train(train_dataset, eval_dataset=None)
   except Exception:
     rl_cluster.close()
     raise
