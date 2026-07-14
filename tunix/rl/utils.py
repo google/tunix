@@ -15,6 +15,7 @@
 """Simple utils used by RL algorithms."""
 
 from itertools import chain  # pylint: disable=g-importing-member
+import operator
 from typing import Any, Iterator, List, Optional
 
 from absl import logging
@@ -27,7 +28,6 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 from tunix.rl import common
-from tunix.sft import utils as sft_utils
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
@@ -193,9 +193,50 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
   return merged
 
 
-# Canonical implementation lives in tunix.sft.utils so the trainer layer can
-# use it without depending on tunix.rl; re-exported here for existing callers.
-put_params_on_memory_kind = sft_utils.put_params_on_memory_kind
+def put_params_on_memory_kind(
+    params: jaxtyping.PyTree,
+    memory_kind: str,
+) -> jaxtyping.PyTree:
+  """Puts params on the given memory kind."""
+  if memory_kind not in ["device", "pinned_host", "unpinned_host"]:
+    raise ValueError(
+        "memory_kind must be one of device, pinned_host, or "
+        f"unpinned_host. Received: {memory_kind}."
+    )
+  if not jax.tree_util.tree_leaves(params):
+    logging.debug(
+        "put_params_on_memory_kind received an empty parameter tree. "
+        "Skipping device transfer."
+    )
+    return params
+  original_shardings = jax.tree.map(lambda x: x.sharding, params)
+  logging.debug("original_shardings: %s", original_shardings)
+  is_on_device = jax.tree_util.tree_reduce(
+      operator.or_,
+      jax.tree.map(lambda x: x.memory_kind == "device", original_shardings),
+  )
+  if (is_on_device and memory_kind == "device") or (
+      not is_on_device and memory_kind == "pinned_host"
+  ):
+    logging.info(
+        "Params are already on the requested memory kind: %s", memory_kind
+    )
+    return params
+
+  def _get_new_sharding(x):
+    if isinstance(x, jax.NamedSharding):
+      return jax.NamedSharding(x.mesh, x.spec, memory_kind=memory_kind)
+    else:
+      return x.with_memory_kind(memory_kind)
+
+  new_shardings = jax.tree.map(_get_new_sharding, original_shardings)
+  params_on_memory_kind = jax.device_put(
+      params,
+      new_shardings,
+  )
+  shardings = jax.tree.map(lambda x: x.sharding, params_on_memory_kind)
+  logging.debug("params_on_memory_kind shardings: %s", shardings)
+  return params_on_memory_kind
 
 
 def create_critic_model(
