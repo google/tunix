@@ -31,6 +31,7 @@ from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
+from tunix.models import naming
 from tunix.models.gemma import model as gemma_lib
 from tunix.models.qwen2 import model as qwen_lib
 from tunix.perf import export as perf_export
@@ -590,17 +591,17 @@ class BasePipeline(abc.ABC, config.HyperParameters):
       rngs = nnx.Rngs(
           params=jax.random.key(critic_model_config.get("rng_seed", 0))
       )
-
+    
       model_name = critic_model_config.get('model_name')
-      print(model_name)
+      config_category = naming.ModelNaming(model_name=model_name)
       if hasattr(critic_model, "lm_head"):
-        critic_model = create_critic_model(critic_model, rngs=rngs)
-      elif model_name.startswith("gemma"):
-        critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
-      elif model_name.startswith("qwen"):
+          critic_model = create_critic_model(critic_model, rngs=rngs)
+      elif config_category in ("qwen2", "qwen3"):
         critic_model = qwen_lib.QwenWithScoreHead(critic_model, rngs=rngs)
+      elif config_category in ("gemma", "gemma3", "gemma4"):
+        critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
       else:
-        raise ValueError(f"Unsupported critic model type: {model_name}")
+        raise ValueError(f"Unsupported critic model category: {config_category}")
 
     cluster_config = self.create_cluster_config(
         role_to_mesh=role_to_mesh,
