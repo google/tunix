@@ -1154,6 +1154,7 @@ class RLCluster:
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
     rollout_update_params_metrics = {}
+    memory_metrics = {}
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
@@ -1198,11 +1199,16 @@ class RLCluster:
         self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
             nnx.state(self.actor_trainer.model), "pinned_host"
         )
+      memory_metrics = {
+          f"memory/weight_sync_{name}": (value, None)
+          for name, value in sft_utils.get_memory_usage_stats_gb().items()
+      }
 
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1
-    if rollout_update_params_metrics:
-      self.buffer_metrics(rollout_update_params_metrics, mode=Mode.TRAIN)
+    sync_metrics = rollout_update_params_metrics | memory_metrics
+    if sync_metrics:
+      self.buffer_metrics(sync_metrics, mode=Mode.TRAIN)
 
   def get_values(
       self,

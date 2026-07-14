@@ -147,6 +147,63 @@ def _jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
   return hbm_used
 
 
+def _process_rss_bytes() -> Optional[int]:
+  """Returns current process resident memory in bytes, if available."""
+  try:
+    with open("/proc/self/status", encoding="utf-8") as f:
+      for line in f:
+        if line.startswith("VmRSS:"):
+          parts = line.split()
+          if len(parts) >= 2:
+            return int(parts[1]) * 1024
+  except OSError:
+    return None
+  return None
+
+
+def _host_available_memory_bytes() -> Optional[int]:
+  """Returns host MemAvailable in bytes, if available."""
+  try:
+    with open("/proc/meminfo", encoding="utf-8") as f:
+      for line in f:
+        if line.startswith("MemAvailable:"):
+          parts = line.split()
+          if len(parts) >= 2:
+            return int(parts[1]) * 1024
+  except OSError:
+    return None
+  return None
+
+
+def get_memory_usage_stats_gb() -> dict[str, float]:
+  """Returns scalar memory usage stats suitable for TensorBoard logging."""
+  metrics = {}
+  gc.collect()
+
+  if google_utils.pathways_available():
+    devices = jax.devices()
+    hbm_stats = _pathways_hbm_usage_gb(devices)
+  else:
+    devices = jax.local_devices()
+    hbm_stats = _jax_hbm_usage_gb(devices)
+
+  hbm_used_gb = [used / (1024**3) for used, _ in hbm_stats]
+  if hbm_used_gb:
+    metrics["hbm_used_avg_gb"] = sum(hbm_used_gb) / len(hbm_used_gb)
+    metrics["hbm_used_min_gb"] = min(hbm_used_gb)
+    metrics["hbm_used_max_gb"] = max(hbm_used_gb)
+
+  rss_bytes = _process_rss_bytes()
+  if rss_bytes is not None:
+    metrics["host_rss_gb"] = rss_bytes / (1024**3)
+
+  available_bytes = _host_available_memory_bytes()
+  if available_bytes is not None:
+    metrics["host_available_gb"] = available_bytes / (1024**3)
+
+  return metrics
+
+
 def show_hbm_usage(title=""):
   """Prints the current HBM usage.
 
