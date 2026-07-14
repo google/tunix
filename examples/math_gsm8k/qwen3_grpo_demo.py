@@ -134,6 +134,7 @@ from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
+from tunix.sft import profiler as profiler_lib
 from tunix.sft import utils as sft_utils
 
 # ====== Argparse ======
@@ -176,6 +177,11 @@ arg_parser.add_argument(
         " optax.MultiSteps; 'stream' = the ported 944 GradientAccumulator."
     ),
 )
+# xprof profiling: pass --profiler_log_dir (local or gs://) to enable. Off by
+# default so normal runs are unaffected.
+arg_parser.add_argument("--profiler_log_dir", type=str, default=None)
+arg_parser.add_argument("--profiler_skip_steps", type=int, default=5)
+arg_parser.add_argument("--profiler_steps", type=int, default=3)
 args, _ = arg_parser.parse_known_args()
 
 
@@ -206,6 +212,17 @@ KL_LOSS_MODE = "mse_kl"
 LOSS_MODE = args.loss_mode
 # Grad-accumulation toggle (loss ablation). Default "optax" == origin/main.
 GRAD_ACCUM = args.grad_accum
+# xprof profiler: only active when --profiler_log_dir is set. Writes a trace for
+# `profiler_steps` steps starting after `profiler_skip_steps` (skip compile warmup).
+PROFILER_OPTIONS = (
+    profiler_lib.ProfilerOptions(
+        log_dir=args.profiler_log_dir,
+        skip_first_n_steps=args.profiler_skip_steps,
+        profiler_steps=args.profiler_steps,
+    )
+    if args.profiler_log_dir
+    else None
+)
 LEARNING_RATE = 2.0e-7
 WEIGHT_DECAY = 0.01
 ADAM_B1 = 0.9
@@ -748,6 +765,7 @@ def main() -> None:
           train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
           grad_accum=GRAD_ACCUM,
+          profiler_options=PROFILER_OPTIONS,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
               CHECKPOINT_ROOT if ENABLE_CHECKPOINTING else None
