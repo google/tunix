@@ -752,7 +752,7 @@ class MLP(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)
+      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
       return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
