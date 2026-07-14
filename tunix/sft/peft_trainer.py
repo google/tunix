@@ -520,6 +520,102 @@ class PeftTrainer:
     else:
       return out, None, grad_norm
 
+  def _train_step_stream(
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer,
+      grad_accumulator: GradientAccumulator,
+      inputs: Any,
+      is_update_step: jax.Array,
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+    """Stream grad-accumulation train step (ported from 944).
+
+    Differentiates the (possibly unreduced) loss, accumulates gradients into
+    `grad_accumulator`, and applies the optimizer update only on update steps
+    via `nnx.cond`. Used when `grad_accum == "stream"`.
+
+    Args:
+      model: The model to train.
+      optimizer: The optimizer to use.
+      grad_accumulator: The gradient accumulator to use.
+      inputs: The training input.
+      is_update_step: Whether to update the model.
+
+    Returns:
+      A tuple containing the loss, auxiliary data (or None if has_aux is False),
+      and the gradient norm.
+    """
+    inputs = self.gen_model_input_fn(inputs)
+
+    @functools.wraps(self.loss_fn)
+    def diff_fn(model, *args, **kwargs):
+      out = self.loss_fn(model, *args, **kwargs)
+      if isinstance(out, utils.LossOutput):
+        return out.primary_loss.unreduced_sum, out
+      elif self._has_aux:
+        return out[0], out[1]
+      else:
+        return out, None
+
+    grad_fn = nnx.value_and_grad(
+        diff_fn,
+        argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
+        has_aux=True,
+    )
+    (loss_val, aux), grads = grad_fn(model, **inputs)
+
+    if isinstance(aux, utils.LossOutput):
+      # Scale the unreduced gradients using the metric's scale computation
+      scale = aux.primary_loss.compute_scale()
+      grads = jax.tree.map(lambda g: g * scale, grads)
+
+      # Compute exactly equivalent legacy loss val
+      loss_val = aux.primary_loss.compute()
+
+    # TODO(b/491970038): update denom for sequence packing.
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+
+    def apply_updates(model, optimizer, grad_accumulator):
+      acc_grads = grad_accumulator.get()
+      # Compute the norm in float32 to 1) match `skip_updates()` return type and
+      # meet the requirement of `nnx.cond` that both branches return the same
+      # dtype, 2) for production-size models the sum-of-squares over bf16 grads
+      # quickly exhausts bf16 and float32 is needed for numerical stability.
+      norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
+      )
+      optimizer.update(model, acc_grads)
+      grad_accumulator.reset()
+      return norm
+
+    def skip_updates(model, optimizer, grad_accumulator):
+      return jnp.array(0.0, dtype=jnp.float32)
+
+    # If the mesh is not empty, then we need to replicate the is_update_step
+    # across all devices to avoid deadlock so that all devices see the same
+    # update step.
+    mesh = pxla.thread_resources.env.physical_mesh
+    if not mesh.empty:
+      is_update_step = jax.lax.with_sharding_constraint(
+          is_update_step, jax.sharding.PartitionSpec()
+      )
+
+    grad_norm = nnx.cond(
+        is_update_step,
+        apply_updates,
+        skip_updates,
+        model,
+        optimizer,
+        grad_accumulator,
+    )
+
+    if isinstance(aux, utils.LossOutput):
+      return loss_val, _compute_legacy_aux(aux), grad_norm
+    elif self._has_aux:
+      return loss_val, aux, grad_norm
+    else:
+      return loss_val, None, grad_norm
+
   def _eval_step(
       self, model: nnx.Module, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
@@ -537,6 +633,8 @@ class PeftTrainer:
       self,
   ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
     """Creates the train step function."""
+    if self.config.grad_accum == "stream":
+      return self._train_step_stream
     return self._train_step
 
   def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
@@ -561,6 +659,22 @@ class PeftTrainer:
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
+    if self.config.grad_accum == "stream":
+      # Stream path (944): shard the accumulator's grads like the model params
+      # and replicate the scalar denominator across all devices.
+      wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+      model_state = nnx.state(self.model, wrt_target)
+      model_pspecs = nnx.get_partition_spec(model_state)
+
+      grads_sharded = jax.lax.with_sharding_constraint(
+          self.grad_accumulator.grads, model_pspecs
+      )
+      self.grad_accumulator.grads = grads_sharded
+
+      self.grad_accumulator.denom[...] = jax.lax.with_sharding_constraint(
+          self.grad_accumulator.denom[...], jax.sharding.PartitionSpec()
+      )
+
   def jit_train_and_eval_step(
       self, skip_jit: bool = False, cache_nnx_graph: bool = False
   ):
@@ -582,9 +696,14 @@ class PeftTrainer:
 
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      self._jitted_train_step_fn = nnx.jit(
-          train_step, donate_argnames=("optimizer",)
-      )
+      if self.config.grad_accum == "stream":
+        self._jitted_train_step_fn = nnx.jit(
+            train_step, donate_argnames=("optimizer", "grad_accumulator")
+        )
+      else:
+        self._jitted_train_step_fn = nnx.jit(
+            train_step, donate_argnames=("optimizer",)
+        )
       self._jitted_eval_step_fn = nnx.jit(eval_step)
 
       def maybe_cache_and_partial(f, *args):
@@ -594,9 +713,17 @@ class PeftTrainer:
         else:
           return functools.partial(f, *args)
 
-      self._jitted_train_step_fn = maybe_cache_and_partial(
-          self._jitted_train_step_fn, self.model, self.optimizer
-      )
+      if self.config.grad_accum == "stream":
+        self._jitted_train_step_fn = maybe_cache_and_partial(
+            self._jitted_train_step_fn,
+            self.model,
+            self.optimizer,
+            self.grad_accumulator,
+        )
+      else:
+        self._jitted_train_step_fn = maybe_cache_and_partial(
+            self._jitted_train_step_fn, self.model, self.optimizer
+        )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
           self._jitted_eval_step_fn, self.model
       )
@@ -860,6 +987,33 @@ class PeftTrainer:
             perf_constants.MINI_BATCH: mini_batch,
         }
 
+        if self.config.grad_accum == "stream":
+          # Stream path (944): a caller may tag the example with an explicit
+          # `is_update_step`; otherwise update every gradient_accumulation_steps
+          # micro-steps. `_iter_steps` is incremented before the step so the
+          # gate sees the post-increment count (matches 944).
+          self._iter_steps += 1
+          is_update_step_val = None
+          if (
+              isinstance(train_example, dict)
+              and "is_update_step" in train_example
+          ):
+            val = train_example["is_update_step"]
+            if val is not None:
+              is_update_step_val = bool(np.asarray(val).item())
+          elif hasattr(train_example, "is_update_step"):
+            val = train_example.is_update_step
+            if val is not None:
+              is_update_step_val = bool(np.asarray(val).item())
+          if is_update_step_val is None:
+            is_update_step_val = (
+                self._iter_steps
+                % self.config.get_with_default(
+                    "gradient_accumulation_steps", 1
+                )
+                == 0
+            )
+
         with self._perf_tracer.span(
             "peft_train_step",
             pxla.thread_resources.env.physical_mesh.devices,
@@ -868,7 +1022,13 @@ class PeftTrainer:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          train_loss, aux, grad_norm = train_step(train_example)
+          if self.config.grad_accum == "stream":
+            train_loss, aux, grad_norm = train_step(
+                train_example,
+                is_update_step=jnp.array(is_update_step_val, dtype=jnp.bool_),
+            )
+          else:
+            train_loss, aux, grad_norm = train_step(train_example)
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 
@@ -881,13 +1041,20 @@ class PeftTrainer:
         )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
-        self._iter_steps += 1
 
-        if (
-            self._iter_steps
-            % self.config.get_with_default("gradient_accumulation_steps", 1)
-            == 0
-        ):
+        # optax path == main: increment here and gate on iter % gas. Stream path
+        # already incremented above and gates on the computed is_update_step.
+        if self.config.grad_accum == "stream":
+          is_update_step_bool = is_update_step_val
+        else:
+          self._iter_steps += 1
+          is_update_step_bool = (
+              self._iter_steps
+              % self.config.get_with_default("gradient_accumulation_steps", 1)
+              == 0
+          )
+
+        if is_update_step_bool:
           self._train_steps += 1
           self._write_train_metrics()
 
