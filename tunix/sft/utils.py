@@ -18,6 +18,7 @@ import collections
 import contextlib
 import functools
 import gc
+import operator
 import time
 from typing import Any, List, Optional, Tuple
 
@@ -74,6 +75,65 @@ def is_lora_enabled(model: nnx.Module) -> bool:
     if isinstance(value, nnx.LoRAParam):
       return True
   return False
+
+
+def put_params_on_memory_kind(
+    params: Any,
+    memory_kind: str,
+) -> Any:
+  """Transfers a pytree of arrays to the given memory kind.
+
+  The sharding layout (mesh and partition spec) is preserved; only the
+  memory kind changes, so arrays moved to host can be moved back to device
+  with their exact previous placement.
+
+  Args:
+    params: A pytree of jax arrays (e.g. an `nnx.State`).
+    memory_kind: One of "device", "pinned_host", or "unpinned_host".
+
+  Returns:
+    The transferred pytree, or `params` unchanged if it is empty or already
+    on the requested memory kind.
+  """
+  if memory_kind not in ["device", "pinned_host", "unpinned_host"]:
+    raise ValueError(
+        "memory_kind must be one of device, pinned_host, or "
+        f"unpinned_host. Received: {memory_kind}."
+    )
+  if not jax.tree_util.tree_leaves(params):
+    logging.debug(
+        "put_params_on_memory_kind received an empty parameter tree. "
+        "Skipping device transfer."
+    )
+    return params
+  original_shardings = jax.tree.map(lambda x: x.sharding, params)
+  logging.debug("original_shardings: %s", original_shardings)
+  is_on_device = jax.tree_util.tree_reduce(
+      operator.or_,
+      jax.tree.map(lambda x: x.memory_kind == "device", original_shardings),
+  )
+  if (is_on_device and memory_kind == "device") or (
+      not is_on_device and memory_kind == "pinned_host"
+  ):
+    logging.info(
+        "Params are already on the requested memory kind: %s", memory_kind
+    )
+    return params
+
+  def _get_new_sharding(x):
+    if isinstance(x, jax.NamedSharding):
+      return jax.NamedSharding(x.mesh, x.spec, memory_kind=memory_kind)
+    else:
+      return x.with_memory_kind(memory_kind)
+
+  new_shardings = jax.tree.map(_get_new_sharding, original_shardings)
+  params_on_memory_kind = jax.device_put(
+      params,
+      new_shardings,
+  )
+  shardings = jax.tree.map(lambda x: x.sharding, params_on_memory_kind)
+  logging.debug("params_on_memory_kind shardings: %s", shardings)
+  return params_on_memory_kind
 
 
 @contextlib.contextmanager

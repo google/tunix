@@ -253,6 +253,73 @@ class AbstractTrainer(abc.ABC):
       The model weights as an nnx.State.
     """
 
+  def update_weights(self, weights: nnx.State, **kwargs) -> None:
+    """Updates model weights in place (counterpart of `get_weights`).
+
+    Orchestrators use this to push externally produced weights into the
+    trainer — e.g. resharded copies from another mesh, an anchor-policy
+    snapshot, or weights broadcast by a colocated trainer — without reaching
+    into the trainer's model. `weights` may be a partial state (e.g.
+    LoRA-only); unmentioned variables are left untouched.
+
+    Optional capability: implementations that don't support it inherit this
+    default, which raises NotImplementedError.
+
+    Args:
+      weights: The weights to merge into the model, as an nnx.State (or a
+        compatible partial state).
+      **kwargs: Implementation-specific options.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_weights."
+    )
+
+  def offload(self, memory_kind: str = "pinned_host", **kwargs) -> None:
+    """Moves trainer state off device to host memory, freeing HBM.
+
+    Covers everything the trainer keeps alive on device between steps: model
+    parameters, optimizer state, and internal step buffers (e.g. accumulated
+    gradients). Sharding layout (mesh and partition specs) is preserved —
+    only the memory kind changes — so `load` restores the exact previous
+    placement and previously compiled step functions remain valid.
+
+    Typical use: colocated RL, where the trainer's HBM is released while the
+    rollout engine generates, then restored via `load` before the next
+    optimizer step. Idempotent. Step methods must not be called while
+    offloaded; call `load` first.
+
+    Optional capability: implementations that don't support it inherit this
+    default, which raises NotImplementedError.
+
+    Args:
+      memory_kind: Destination host memory kind ("pinned_host" or
+        "unpinned_host").
+      **kwargs: Implementation-specific options.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement offload."
+    )
+
+  def load(self, **kwargs) -> None:
+    """Moves offloaded trainer state back to device memory.
+
+    Inverse of `offload`. No-op if the trainer is not offloaded.
+
+    Optional capability: implementations that don't support it inherit this
+    default, which raises NotImplementedError.
+
+    Args:
+      **kwargs: Implementation-specific options.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement load."
+    )
+
+  @property
+  def is_offloaded(self) -> bool:
+    """Whether trainer state currently lives off device (see `offload`)."""
+    return False
+
   @abc.abstractmethod
   def get_metrics(self) -> List[Tuple[StepMetrics, int, bool, bool]]:
     """Returns and clears the recently collected step metrics.

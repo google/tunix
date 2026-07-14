@@ -287,6 +287,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._accum_grads = None
     self._accum_denom = None
     self._accum_count = 0
+    self._offloaded = False
     self._mini_batch_size: int | None = None
     # Step records pending collection via `get_metrics`:
     # (step_metrics, step_id, is_eval, apply_gradients).
@@ -1021,6 +1022,59 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if gather:
       state = jax.device_get(state)
     return state
+
+  def update_weights(self, weights: nnx.State, **kwargs) -> None:
+    """Merges `weights` into the model in place (see `AbstractTrainer`)."""
+    del kwargs
+    nnx.update(self.model, weights)
+
+  def offload(self, memory_kind: str = "pinned_host", **kwargs) -> None:
+    """Moves model, optimizer, and accumulation buffers to host memory."""
+    del kwargs
+    if memory_kind == "device":
+      raise ValueError(
+          "offload target must be a host memory kind; use load() to move"
+          " state back to device."
+      )
+    self._set_memory_kind(memory_kind)
+    self._offloaded = True
+
+  def load(self, **kwargs) -> None:
+    """Moves offloaded trainer state back to device memory."""
+    del kwargs
+    if not self._offloaded:
+      return
+    self._set_memory_kind("device")
+    self._offloaded = False
+
+  @property
+  def is_offloaded(self) -> bool:
+    return self._offloaded
+
+  def _set_memory_kind(self, memory_kind: str) -> None:
+    """Transfers all device-resident trainer state to `memory_kind`.
+
+    Shardings are preserved (only the memory kind changes), so the jitted
+    step functions — including `nnx.cached_partial` caches, which reference
+    the same nnx Variables updated here — stay valid after a round trip.
+    """
+    nnx.update(
+        self.model,
+        utils.put_params_on_memory_kind(nnx.state(self.model), memory_kind),
+    )
+    opt_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    if jax.tree_util.tree_leaves(opt_state):
+      nnx.update(
+          self.optimizer,
+          utils.put_params_on_memory_kind(opt_state, memory_kind),
+      )
+    if self._accum_grads is not None:
+      self._accum_grads = utils.put_params_on_memory_kind(
+          self._accum_grads, memory_kind
+      )
+      self._accum_denom = utils.put_params_on_memory_kind(
+          self._accum_denom, memory_kind
+      )
 
   # --- Loop-level convenience API ---
 

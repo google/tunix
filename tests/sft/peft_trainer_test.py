@@ -652,6 +652,88 @@ class PeftTrainerTest(parameterized.TestCase):
         TEST_LEARNING_RATE,
     )
 
+  def test_update_weights(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    new_weights = jax.tree.map(
+        lambda x: x + 1.0, trainer.get_weights(full_params=True)
+    )
+    trainer.update_weights(new_weights)
+    chex.assert_trees_all_close(
+        trainer.get_weights(full_params=True), new_weights
+    )
+
+  def test_offload_and_load(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    with self.mesh:
+      # Materialize optimizer state and jitted step functions.
+      trainer.train_step(self.train_ds[0])
+
+    # The CPU backend has no host memory kinds, so verify the transfer
+    # plumbing instead of actual placement: every device-resident component
+    # (model, optimizer) is routed through the memory-kind transfer, and the
+    # placement flag flips.
+    with mock.patch.object(
+        peft_trainer.utils,
+        'put_params_on_memory_kind',
+        side_effect=lambda params, memory_kind: params,
+    ) as mock_put:
+      trainer.offload()
+      self.assertTrue(trainer.is_offloaded)
+      self.assertEqual(
+          [c.args[1] for c in mock_put.call_args_list],
+          ['pinned_host'] * 2,  # model state + optimizer state
+      )
+
+      mock_put.reset_mock()
+      trainer.load()
+      self.assertFalse(trainer.is_offloaded)
+      self.assertEqual(
+          [c.args[1] for c in mock_put.call_args_list],
+          ['device'] * 2,
+      )
+
+      # load() when not offloaded is a no-op.
+      mock_put.reset_mock()
+      trainer.load()
+      mock_put.assert_not_called()
+
+    with self.mesh:
+      # The trainer stays usable after an offload/load round trip.
+      trainer.train_step(self.train_ds[1])
+
+  def test_offload_covers_accumulated_gradients(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2, max_steps=100, gradient_accumulation_steps=2
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    with self.mesh:
+      # Leave gradients pending in the accumulation buffers.
+      trainer.train_step(self.train_ds[0], apply_gradients=False)
+
+    with mock.patch.object(
+        peft_trainer.utils,
+        'put_params_on_memory_kind',
+        side_effect=lambda params, memory_kind: params,
+    ) as mock_put:
+      trainer.offload()
+      # model state + optimizer state + accumulated grads + accumulated denom.
+      self.assertEqual(mock_put.call_count, 4)
+
+  def test_offload_rejects_device_target(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    with self.assertRaises(ValueError):
+      trainer.offload(memory_kind='device')
+
 
 if __name__ == '__main__':
   absltest.main()
