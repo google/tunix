@@ -713,6 +713,142 @@ class CommonTest(parameterized.TestCase):
     self.assertEqual(loss.dtype, jnp.float32)
     self.assertAlmostEqual(loss, 1.5, places=5)
 
+  def test_model_call_contains(self):
+    class ModelWithSegIds:
+      def __call__(self, x, segment_ids=None):
+        pass
+
+    class ModelWithoutSegIds:
+      def __call__(self, x):
+        pass
+
+    class WrapperWithKwargs:
+      def __init__(self, transformer):
+        self.transformer = transformer
+
+      def __call__(self, *args, **kwargs):
+        pass
+
+    class ModelWithKwargsOnly:
+      def __call__(self, **kwargs):
+        pass
+
+    # 1. Test raw models
+    self.assertTrue(
+        common.model_call_contains(ModelWithSegIds(), "segment_ids")
+    )
+    self.assertFalse(
+        common.model_call_contains(ModelWithoutSegIds(), "segment_ids")
+    )
+
+    # 2. Test wrapped models (looks at model.transformer)
+    self.assertTrue(
+        common.model_call_contains(
+            WrapperWithKwargs(ModelWithSegIds()), "segment_ids"
+        )
+    )
+    self.assertFalse(
+        common.model_call_contains(
+            WrapperWithKwargs(ModelWithoutSegIds()), "segment_ids"
+        )
+    )
+
+    # 3. Test models with **kwargs
+    self.assertTrue(
+        common.model_call_contains(ModelWithKwargsOnly(), "segment_ids")
+    )
+
+  def test_compute_score_with_wrapped_model_without_segment_ids(self):
+    """Test that segment ids are not passed when a model doesn't accept segment_ids.
+
+    This test reproduces the GemmaWithScoreHead scenario where Gemma doesn't
+    accept segment_ids.
+    """
+
+    class ModelWithoutSegIds(nnx.Module):
+      def __call__(self, x, positions=None, cache=None, attention_mask=None):
+        return jnp.zeros((*x.shape, 1))
+
+    class ScoreHeadWrapper(nnx.Module):
+      def __init__(self, transformer):
+        self.transformer = transformer
+
+      def __call__(self, *args, **kwargs):
+        return self.transformer(*args, **kwargs)
+
+    wrapped_model = ScoreHeadWrapper(ModelWithoutSegIds())
+    prompt_tokens = jnp.array([[1, 2]])
+    completion_tokens = jnp.array([[3, 4]])
+
+    # Verifies score is computed cleanly without raising
+    # TypeError for segment_ids
+    scores = common.compute_score(
+        wrapped_model, prompt_tokens, completion_tokens, pad_id=0, eos_id=-1
+    )
+    self.assertEqual(scores.shape, (1, 4))
+
+  def test_compute_per_token_logps_segment_ids_fallback(self):
+    """Verifies compute_per_token_logps falls back cleanly if model doesn't support segment_ids."""
+
+    class ModelWithoutSegIds(nnx.Module):
+      def __call__(self, x, positions=None, cache=None, attention_mask=None):
+        return jnp.zeros((*x.shape, 10)), cache
+
+    model = ModelWithoutSegIds()
+    graphdef, state = nnx.split(model)
+
+    prompt_tokens = jnp.array([[1, 2]])
+    completion_tokens = jnp.array([[3, 4]])
+
+    # Packed mode on model without segment_ids should fall back
+    # gracefully without TypeError
+    logps_packed = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+        segment_ids=jnp.ones((1, 4), dtype=jnp.int32),
+        segment_positions=jnp.arange(4, dtype=jnp.int32),
+    )
+    self.assertEqual(logps_packed.shape, (1, 4))
+
+  def test_compute_per_token_logps_segment_ids_supported(self):
+    """Verifies compute_per_token_logps passes segment_ids to model when supplied and supported."""
+
+    class ModelWithSegIds(nnx.Module):
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        # Segment_ids should be passed when supplied and supported
+        if segment_ids is None:
+          raise ValueError("segment_ids should be passed when supported.")
+        return jnp.zeros((*x.shape, 10)), cache
+
+    model = ModelWithSegIds()
+    graphdef, state = nnx.split(model)
+
+    prompt_tokens = jnp.array([[1, 2]])
+    completion_tokens = jnp.array([[3, 4]])
+
+    # Verifies segment_ids are passed when supported and supplied
+    logps_packed = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+        segment_ids=jnp.ones((1, 4), dtype=jnp.int32),
+        segment_positions=jnp.arange(4, dtype=jnp.int32),
+    )
+    self.assertEqual(logps_packed.shape, (1, 4))
 
 if __name__ == "__main__":
   absltest.main()
