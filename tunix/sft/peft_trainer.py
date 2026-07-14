@@ -94,6 +94,11 @@ class TrainingConfig:
   # a utils.LossOutput so the division is deferred until after autodiff.
   loss_mode: str = "reduced"
 
+  # Gradient-accumulation mechanism toggle.
+  # "optax" (default) = origin/main's optax.MultiSteps wrapping; "stream" =
+  # the ported 944 GradientAccumulator (manual Sigma-g / Sigma-denom accum).
+  grad_accum: str = "optax"
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -317,14 +322,25 @@ class PeftTrainer:
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
-    if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
-          optimizer, training_config.gradient_accumulation_steps
-      )
-    if self._lora_enabled:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
+    if self.config.grad_accum == "stream":
+      # Stream path (ported from 944): no optax.MultiSteps wrapping; gradients
+      # are accumulated manually via GradientAccumulator and applied on update
+      # steps. The optimizer state floats are promoted to float32 to match the
+      # dtype of the update branch (see _promote_opt_state_floats_to_float32).
+      wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+      _promote_opt_state_floats_to_float32(self.optimizer)
+      self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
     else:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
+      # optax path == main (byte-for-byte).
+      if training_config.gradient_accumulation_steps is not None:
+        optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
+            optimizer, training_config.gradient_accumulation_steps
+        )
+      if self._lora_enabled:
+        self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
+      else:
+        self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
 
     self.loss_fn = functools.partial(
         _default_loss_fn, loss_mode=self.config.loss_mode
