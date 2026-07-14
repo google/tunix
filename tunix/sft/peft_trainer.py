@@ -180,6 +180,98 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+class GradientAccumulator(nnx.Module):
+  """Accumulates gradients over multiple micro-steps.
+
+  Unifies standard (unweighted) micro-batch averaging with sequence packing
+  (weighted, denom-aware) accumulation.
+
+  Averaging behavior (optax.MultiSteps semantics):
+    When `add(grads)` is called without a denom, each micro-step implicitly
+    adds 1.0 to the denominator. `get()` computes `Σ_grads / Σ_1`, which
+    is the exact mean of the micro-step gradients. This is mathematically
+    equivalent to a single optimization step on a batch of size `B =
+    micro_batch_size * grad_acc_steps` when the loss is a mean-reduction
+    (e.g., standard cross-entropy).
+
+  Packing-aware behavior (Sum of Grads / Sum of Sizes):
+    Under sequence packing, each yielded micro-batch contains a varying
+    number of valid target tokens or training examples. The loss is
+    computed as an *unreduced sum* over the packed batch. Callers pass the
+    true size of the pack via `add(grads, denom=size)`. `get()` computes
+    `Σ_grad(sum_loss_i) / Σ_size_i`, recovering the true global mean
+    gradient across all items in the accumulated batch, avoiding the bias
+    introduced by averaging pre-scaled micro-batch gradients of unequal
+    sizes.
+  """
+
+  def __init__(self, model: nnx.Module, wrt: type[nnx.Variable]):
+    state = nnx.state(model, wrt)
+    self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
+
+  def add(self, grads: Any, denom: jax.Array | None = None):
+    def _add(acc_var, g_var):
+      g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
+      acc_var[...] = acc_var[...] + g
+
+    jax.tree_util.tree_map(
+        _add,
+        self.grads,
+        grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+    if denom is None:
+      denom_val = jnp.asarray(1.0, dtype=jnp.float32)
+    else:
+      denom_val = denom.astype(jnp.float32)
+    self.denom[...] = self.denom[...] + denom_val
+
+  def get(self):
+    scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
+
+    return jax.tree_util.tree_map(
+        lambda v: type(v)(v[...] * scale.astype(v[...].dtype)),
+        self.grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+  def reset(self):
+    def _zero_in_place(v):
+      v[...] = jnp.zeros_like(v[...])
+
+    jax.tree_util.tree_map(
+        _zero_in_place,
+        self.grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    self.denom[...] = jnp.zeros_like(self.denom[...])
+
+
+def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
+  """Cast the optimizer state's floating-point leaves to float32 in-place.
+
+  Args:
+    optimizer: The nnx.Optimizer instance whose state will be modified.
+  """
+
+  def _cast(v):
+    if isinstance(v, nnx.Variable):
+      val = v.value
+      if (
+          hasattr(val, "dtype")
+          and jnp.issubdtype(val.dtype, jnp.floating)
+          and val.dtype != jnp.float32
+      ):
+        v.value = val.astype(jnp.float32)
+
+  opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
+  jax.tree_util.tree_map(
+      _cast, opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
+
+
 class PeftTrainer:
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
