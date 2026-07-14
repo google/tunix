@@ -90,6 +90,10 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "sequence-mean-token-mean"
+  # Loss representation toggle read by grpo_loss_fn. "reduced" (default)
+  # reproduces origin/main exactly; "unreduced" emits LossOutput/WeightedMetric
+  # so the division is deferred until after autodiff.
+  loss_mode: str = "reduced"
   loss_algo: (
       str
   ) = (  # grpo or gspo-token # TODO(sizhi): Remove this option once gspo is

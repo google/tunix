@@ -155,6 +155,16 @@ arg_parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
 arg_parser.add_argument(
     "--rollout_vllm_max_num_batched_tokens", type=int, default=None
 )
+arg_parser.add_argument(
+    "--loss_mode",
+    type=str,
+    default="reduced",
+    choices=["reduced", "unreduced"],
+    help=(
+        "Loss representation. 'reduced' (default) = origin/main pre-averaged"
+        " scalar; 'unreduced' defers the division until after autodiff."
+    ),
+)
 args, _ = arg_parser.parse_known_args()
 
 
@@ -181,6 +191,8 @@ EPSILON = 0.2
 # NeMo's reference_policy_kl_type="k2" is exactly 0.5 * (logp-ref_logp)^2,
 # which matches Tunix's "mse_kl" implementation.
 KL_LOSS_MODE = "mse_kl"
+# Loss representation toggle (loss ablation). Default "reduced" == origin/main.
+LOSS_MODE = args.loss_mode
 LEARNING_RATE = 2.0e-7
 WEIGHT_DECAY = 0.01
 ADAM_B1 = 0.9
@@ -737,6 +749,7 @@ def main() -> None:
       max_response_length=MAX_RESPONSE_LENGTH,
       max_concurrency=MAX_CONCURRENCY,
       loss_agg_mode="sequence-mean-token-mean",
+      loss_mode=LOSS_MODE,
   )
 
   rl_cluster = rl_cluster_lib.RLCluster(

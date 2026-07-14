@@ -89,6 +89,11 @@ class TrainingConfig:
   # Sequence packing configuration.
   max_seq_token_per_tpu: int | None = None
 
+  # Loss representation toggle for the default SFT loss fn.
+  # "reduced" (default) = origin/main pre-averaged scalar; "unreduced" emits
+  # a utils.LossOutput so the division is deferred until after autodiff.
+  loss_mode: str = "reduced"
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -229,8 +234,10 @@ class PeftTrainer:
     else:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
 
-    self.loss_fn = _default_loss_fn
-    self.eval_loss_fn = _default_loss_fn
+    self.loss_fn = functools.partial(
+        _default_loss_fn, loss_mode=self.config.loss_mode
+    )
+    self.eval_loss_fn = self.loss_fn
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
