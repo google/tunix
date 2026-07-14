@@ -17,6 +17,7 @@ set -x # Enable xtrace
 
 batch_size=${batch_size:-8}
 num_batches=${num_batches:-3738}
+train_micro_batch_size=${train_micro_batch_size:-8}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
 train_fraction=${train_fraction:-1.0}
@@ -51,6 +52,11 @@ python3 -m tunix.cli.ppo_main \
   rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio \
   rl_training_config.actor_optimizer_config.warmup_steps=$warmup_steps \
   rl_training_config.actor_optimizer_config.decay_steps=$max_steps \
+  rl_training_config.critic_optimizer_config.warmup_ratio=$warmup_ratio \
+  rl_training_config.critic_optimizer_config.warmup_steps=$warmup_steps \
+  rl_training_config.critic_optimizer_config.decay_steps=$max_steps \
+  rl_training_config.mini_batch_size=$batch_size \
+  rl_training_config.train_micro_batch_size=$train_micro_batch_size \
   rl_training_config.max_steps=$max_steps \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/ppo" \
   "$@"

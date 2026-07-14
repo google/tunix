@@ -15,7 +15,10 @@
 
 set -x # Enable xtrace
 
-batch_size=${batch_size:-1}
+batch_size=${batch_size:-8}
+train_micro_batch_size=${train_micro_batch_size:-8}
+max_prompt_length=${max_prompt_length:-2048}
+total_generation_steps=${total_generation_steps:-768}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
@@ -29,10 +32,7 @@ echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
 max_steps_float=$(awk "BEGIN {print $num_batches * $num_train_epochs * $train_fraction}")
-
 max_steps=$(printf "%.0f" "$max_steps_float")
-
-
 warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
 
 echo "Max steps: $max_steps"
@@ -52,6 +52,13 @@ python3 -m tunix.cli.ppo_main \
   rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio \
   rl_training_config.actor_optimizer_config.warmup_steps=$warmup_steps \
   rl_training_config.actor_optimizer_config.decay_steps=$max_steps \
+  rl_training_config.critic_optimizer_config.warmup_ratio=$warmup_ratio \
+  rl_training_config.critic_optimizer_config.warmup_steps=$warmup_steps \
+  rl_training_config.critic_optimizer_config.decay_steps=$max_steps \
+  rl_training_config.mini_batch_size=$batch_size \
+  rl_training_config.train_micro_batch_size=$train_micro_batch_size \
   rl_training_config.max_steps=$max_steps \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/ppo_gemma3_1b" \
-  "$@"
+  rollout_config.total_generation_steps=$total_generation_steps \
+  rollout_config.max_prompt_length=$max_prompt_length \
+    "$@"

@@ -16,7 +16,7 @@
 set -x # Enable xtrace
 
 batch_size=${batch_size:-8}
-train_micro_batch_size=${train_micro_batch_size:-4}
+train_micro_batch_size=${train_micro_batch_size:-8}
 total_generation_steps=${total_generation_steps:-512}
 max_prompt_length=${max_prompt_length:-128}
 num_batches=${num_batches:-3738}
@@ -69,7 +69,6 @@ python3 -m tunix.cli.ppo_main \
   rl_training_config.train_micro_batch_size=$train_micro_batch_size \
   tokenizer_config.tokenizer_path="Qwen/qwen3-1.7b-base" \
   tokenizer_config.tokenizer_type="huggingface" \
-
   model_config.model_download_path="/tmp/models/qwen3-1.7b" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
   rollout_config.total_generation_steps=$total_generation_steps \

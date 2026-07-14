@@ -593,7 +593,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
       )
     
       model_name = critic_model_config.get('model_name')
-      config_category = naming.ModelNaming(model_name=model_name)
+      config_category = naming.ModelNaming(model_name=model_name).model_config_category
       if hasattr(critic_model, "lm_head"):
           critic_model = create_critic_model(critic_model, rngs=rngs)
       elif config_category in ("qwen2", "qwen3"):
