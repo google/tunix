@@ -30,8 +30,7 @@ spec:
             # Launch Sidecars (Proxy + RM)
             initContainers:
             - name: pathways-proxy
-              # image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server@sha256:86fedb263c8221bb878c2d301cb45e7c93f54f62872c5c79b055a267da780f42
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_proxy_server@sha256:6022630f749b1bf85940a92c1b595cc59b643a6ab2d1dae77aeea5033d9fcaf9
               args:
                 - --server_port=29000
                 - --resource_manager_address=localhost:29001
@@ -45,8 +44,7 @@ spec:
                   memory: 500G
               restartPolicy: Always
             - name: pathways-rm
-              # image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server@sha256:db6d3db6090cc41daca3cc81bc70a15be94d33e6c881d8acaf6de5c9194dd9c2
               args:
                 - --server_port=29001
                 - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
@@ -199,9 +197,7 @@ spec:
             restartPolicy: Never
             containers:
             - name: pathways-worker
-              # image:  us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
-              # image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server@sha256:db6d3db6090cc41daca3cc81bc70a15be94d33e6c881d8acaf6de5c9194dd9c2
               args:
                 - --server_port=29000
                 - --resource_manager_address=gsm8k-abl-red-stream-pathways-head-0-0.gsm8k-abl-red-stream:29001
