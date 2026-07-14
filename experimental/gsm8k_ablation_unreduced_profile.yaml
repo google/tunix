@@ -1,0 +1,219 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: gsm8k-abl-unred-prof
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  # -------------------------------------------------------------
+  # 1. PATHWAYS COORDINATOR (CPU HEAD)
+  # -------------------------------------------------------------
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            # Launch Sidecars (Proxy + RM)
+            initContainers:
+            - name: pathways-proxy
+              # image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server@sha256:86fedb263c8221bb878c2d301cb45e7c93f54f62872c5c79b055a267da780f42
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=localhost:29001
+                - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              env:
+                - name: PATHWAYS_HEAD
+                  value: localhost
+              resources:
+                limits:
+                  cpu: '16'
+                  memory: 500G
+              restartPolicy: Always
+            - name: pathways-rm
+              # image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+                - --node_type=resource_manager
+                - --instance_count=1
+                - --instance_type=tpuv5:4x4x4
+              env:
+                - name: HOST_ADDRESS
+                  value: localhost
+                - name: TPU_SKIP_MDS_QUERY
+                  value: 'true'
+              resources:
+                limits:
+                  cpu: '8'
+                  memory: 100G
+              restartPolicy: Always
+            # Main Jax-TPU Coordinator Container
+            containers:
+            - name: jax-tpu
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest
+              imagePullPolicy: Always
+              command:
+              - bash
+              - -c
+              - |
+                echo XPK Start: $(date);
+                echo "Syncing latest code from yuxzhang/loss_accum_ablation..."
+                git config --global --add safe.directory $(pwd)
+                git init
+                git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
+                git fetch origin yuxzhang/loss_accum_ablation
+                git reset --hard FETCH_HEAD
+
+                # --- Link cached model from GKE PVC ---
+                echo "Linking cached Qwen3 weights from GKE PVC..."
+                mkdir -p /app/artifacts/qwen3_grpo_gsm8k_vtc
+                ln -sfn /mnt/disks/linchai_data/huggingface/models/Qwen/Qwen3-1.7B /app/artifacts/qwen3_grpo_gsm8k_vtc/models
+
+                # --- Hot Patch tpu-inference (PR #2838) ---
+                echo "Applying python script patch for ROPE bugs in qwen3.py..."
+                cat << 'EOF' > /tmp/patch_qwen3.py
+                file_path = "/app/vllm_tpu_inference/tpu_inference/tpu_inference/models/jax/qwen3.py"
+                with open(file_path, "r") as f:
+                    code = f.read()
+                
+                injected_functions = """
+                from typing import Any, Dict, Optional
+                
+                def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
+                    if rope_scaling is not None:
+                        rope_scaling = dict(rope_scaling)
+                        if (rope_scaling.get("rope_type", "default") == "default"
+                                and "factor" not in rope_scaling
+                                and "scale_factor" not in rope_scaling
+                                and "mrope_section" not in rope_scaling):
+                            rope_scaling = None
+                        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
+                            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
+                    return rope_scaling
+                
+                def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
+                    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
+                        config, "rope_scaling", None)
+                    return normalize_rope_scaling(rope_scaling)
+                
+                def get_rope_theta(config: Any, default: float = 10000.0) -> float:
+                    rope_parameters = getattr(config, "rope_parameters", None)
+                    if rope_parameters is not None and "rope_theta" in rope_parameters:
+                        return float(rope_parameters["rope_theta"])
+                    return float(getattr(config, "rope_theta", default))
+                
+                """
+                
+                import textwrap
+                code = textwrap.dedent(injected_functions) + code
+                code = code.replace('self.rope_theta = config.rope_parameters["rope_theta"]', 'self.rope_theta = get_rope_theta(config, default=1000000.0)')
+                code = code.replace('self.rope_scaling = getattr(config, "rope_scaling", None)', 'self.rope_scaling = get_rope_scaling(config)')
+                
+                with open(file_path, "w") as f:
+                    f.write(code)
+                EOF
+                sed -i 's/^ \{16\}//' /tmp/patch_qwen3.py
+                python3 /tmp/patch_qwen3.py
+                # ------------------------------------------
+
+                echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
+                sleep 60;
+                echo "GSM8K dataset (tfds) and Qwen3-1.7B (HF) are downloaded inside the script; no separate data step."
+                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_fsdp 16 --mesh_tp 4 --batch_size 64 --mini_batch_size 64 --train_micro_batch_size 16 --compute_logps_micro_batch_size 16 --loss_mode unreduced --profiler_log_dir gs://yuxzhang-tunix-models/xprof/gsm8k_abl_unred_optax --profiler_skip_steps 5 --profiler_steps 3
+              env:
+              - name: PATHWAYS_HEAD
+                value: localhost
+              - name: INJECTED_HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: HF_TOKEN
+                    optional: true
+              - name: INJECTED_WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: WANDB_API_KEY
+                    optional: true
+              - name: HF_HOME
+                value: /mnt/disks/linchai_data/huggingface
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: FLAGS_pathways_enforce_subset_devices_form_subslice
+                value: "False"
+              resources:
+                limits:
+                  cpu: '24'
+                  memory: 300G
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+              - mountPath: /mnt/disks/linchai_data
+                name: linchai-gke-disk-2
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+            - name: linchai-gke-disk-2
+              persistentVolumeClaim:
+                claimName: linchai-cpu-np-pvc-2
+
+  - name: pathways-worker
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        completions: 16
+        parallelism: 16
+        completionMode: Indexed
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: linchai-v5p-128-pw-np-0
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x4
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            containers:
+            - name: pathways-worker
+              # image:  us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
+              # image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=gsm8k-abl-unred-prof-pathways-head-0-0.gsm8k-abl-unred-prof:29001
+                - --node_type=worker
+                - --instance_type=tpuv5:4x4x4
+              env:
+                - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                  value: 'true'
+                - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+                  value: '0.9'
+                - name: ENABLE_PATHWAYS_PERSISTENCE
+                  value: '0'
+              resources:
+                limits:
+                  google.com/tpu: '4'
