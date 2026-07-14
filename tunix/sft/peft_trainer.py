@@ -369,7 +369,7 @@ class PeftTrainer:
     # runs only at trace time. When the loss fn returns a plain scalar/tuple
     # (reduced loss_mode = main behavior) we take main's original code path
     # below byte-for-byte: no diff_fn, no gradient scaling.
-    out_shape = nnx.eval_shape(self.loss_fn, model, **inputs)
+    out_shape = nnx.eval_shape(lambda m: self.loss_fn(m, **inputs), model)
 
     if isinstance(out_shape, utils.LossOutput):
       # Unreduced path (ported from 6472eef8): differentiate the unreduced
