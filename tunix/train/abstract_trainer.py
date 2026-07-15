@@ -74,37 +74,41 @@ class AbstractTrainer(abc.ABC):
     )
 
   def fwd_bwd(self, inputs: Any, **kwargs) -> Any:
-    """Executes one forward/backward micro-step.
+    """Executes one forward/backward micro-step. No weight update.
 
-    Computes the loss and gradients for one micro-batch. How the gradients
-    are handled is implementation-specific (e.g. staged for `update`, or
-    accumulated/applied by an optimizer wrapper fused into this step).
+    Computes the loss and gradients for one micro-batch and returns the
+    gradients to the caller; the caller owns gradient accumulation across
+    micro-steps and passes the (averaged) result to `update`.
 
     Args:
       inputs: A raw training batch.
       **kwargs: Implementation-specific options.
 
     Returns:
-      Implementation-defined step outputs (e.g. loss, aux, grad norm) as
-      device arrays.
+      Implementation-defined step outputs including the gradients (e.g.
+      (loss, aux, grad_norm, grads)) as device arrays.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement fwd_bwd."
     )
 
-  def update(self, **kwargs) -> int:
-    """Finalizes one optimizer update over the preceding `fwd_bwd` calls.
+  def update(self, grads: Any = None, **kwargs) -> int:
+    """Feeds gradients to the optimizer.
 
-    Call once per gradient-accumulation window. Where the model weights are
-    actually applied is implementation-specific: here, or fused into the
-    accumulation-boundary `fwd_bwd` call (e.g. via `optax.MultiSteps`).
-    Advances the train step count either way.
+    Call cadence is implementation-defined: implementations that accumulate
+    internally (e.g. via `optax.MultiSteps`) are called with raw gradients
+    after every `fwd_bwd`, applying the model update at the accumulation
+    boundary; implementations with caller-owned accumulation are called once
+    per window with the averaged gradients. The train step count advances at
+    the update boundary either way.
 
     Args:
+      grads: The gradients to feed. Implementations may allow None when
+        gradients are staged internally.
       **kwargs: Implementation-specific options.
 
     Returns:
-      The new train step count (number of optimizer updates applied).
+      The current train step count (number of optimizer updates applied).
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement update."

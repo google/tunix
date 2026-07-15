@@ -108,10 +108,10 @@ class PeftTrainerTest(parameterized.TestCase):
   def test_compile_once(self):
     class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
 
-      def _train_step(self, model, optimizer, inputs):
+      def _fwd_bwd_step(self, model, inputs):
         global global_counter
         global_counter += 1
-        return super()._train_step(model, optimizer, inputs)
+        return super()._fwd_bwd_step(model, inputs)
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     rngs = nnx.Rngs(0)
@@ -293,12 +293,12 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, None)
 
-    previous_jit_func = trainer._jitted_train_step_fn
+    previous_jit_func = trainer._jitted_fwd_bwd_fn
     self.assertIsNotNone(previous_jit_func)
 
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, None)
-    curr_jit_func = trainer._jitted_train_step_fn
+    curr_jit_func = trainer._jitted_fwd_bwd_fn
     self.assertIsNotNone(curr_jit_func)
     self.assertIsNot(previous_jit_func, curr_jit_func)
 

@@ -44,6 +44,7 @@ from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
+from tunix.train import abstract_trainer
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
@@ -164,8 +165,12 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-class PeftTrainerV2:
+class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
+
+  Implements the step-level `AbstractTrainer` API incrementally: `fwd_bwd`
+  computes gradients without applying them, `update` applies caller-provided
+  (accumulated) gradients, and `train()` drives both.
 
   Attributes:
     model: The model to train.
@@ -209,7 +214,15 @@ class PeftTrainerV2:
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
-
+    # Gradient accumulation is delegated to `optax.MultiSteps`: `update()`
+    # is called with the raw gradients of every `fwd_bwd()` micro-step, and
+    # MultiSteps internally accumulates and applies the model update on
+    # every `gradient_accumulation_steps`-th call. This also keeps partial
+    # accumulation windows inside the (checkpointed) optimizer state.
+    if training_config.gradient_accumulation_steps is not None:
+      optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
+          optimizer, training_config.gradient_accumulation_steps
+      )
     if self._lora_enabled:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
@@ -229,6 +242,8 @@ class PeftTrainerV2:
           self.config.metrics_logging_options,
       )
     self.is_managed_externally = False
+    self.training_hooks = None
+    self.data_hooks = None
     self._perf_tracer = (
         perf_tracer if perf_tracer is not None else perf_trace.NoopTracer()
     )
@@ -258,8 +273,11 @@ class PeftTrainerV2:
         "gradient_accumulation_steps", 1
     )
 
-    self._jitted_train_step_fn = None
+    self._jitted_fwd_bwd_fn = None
+    self._jitted_update_fn = None
     self._jitted_eval_step_fn = None
+    self._skip_jit = False
+    self._cache_nnx_graph = True
     max_step = None
     if self.config.max_steps is not None:
       max_step = self.config.max_steps * self.config.get_with_default(
@@ -276,6 +294,12 @@ class PeftTrainerV2:
 
     self._jit_cache = set()
     self._mini_batch_size = None
+
+  def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
+    self.training_hooks = training_hooks
+
+  def with_data_hooks(self, data_hooks: hooks.DataHooks):
+    self.data_hooks = data_hooks
 
   def clear_jit_cache(self):
     """Clears the JIT cache of the train and eval step functions.
@@ -319,10 +343,10 @@ class PeftTrainerV2:
     self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
     return self
 
-  def fwd_bwd(
+  def _fwd_bwd_step(
       self, model: nnx.Module, inputs: Any
-  ) -> Tuple[ArrayLike, Any | None, Any]:
-    """Computes forward and backward pass, returns gradients."""
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike, Any]:
+    """Computes forward and backward pass; returns loss, aux, norm, grads."""
     inputs = self.gen_model_input_fn(inputs)
 
     grad_fn = nnx.value_and_grad(
@@ -331,19 +355,19 @@ class PeftTrainerV2:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
+    # Per-micro-batch gradient norm, matching the legacy fused train step.
+    grad_norm = optax.global_norm(grads)
     if self._has_aux:
       loss, aux = out
-      return loss, aux, grads
+      return loss, aux, grad_norm, grads
     else:
-      return out, None, grads
+      return out, None, grad_norm, grads
 
-  def update(
+  def _update_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, grads: Any
-  ) -> ArrayLike:
-    """Applies gradients to the model and returns grad_norm."""
-    grad_norm = optax.global_norm(grads)
+  ) -> None:
+    """Applies (already averaged) gradients to the model."""
     optimizer.update(model, grads)
-    return grad_norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -358,12 +382,12 @@ class PeftTrainerV2:
 
   def create_fwd_bwd_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
-    """Creates the train step function."""
-    return self.fwd_bwd
+  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike, Any]]:
+    """Creates the fwd_bwd step function."""
+    return self._fwd_bwd_step
 
-  def create_update_fn(self) -> Callable[..., ArrayLike]:
-    return self.update
+  def create_update_fn(self) -> Callable[..., None]:
+    return self._update_step
 
   def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
     """Creates the eval step function."""
@@ -395,9 +419,13 @@ class PeftTrainerV2:
     update = self.create_update_fn()
     eval_step = self.create_eval_step_fn()
     if skip_jit:
-      return fwd_bwd, update, eval_step
+      return (
+          functools.partial(fwd_bwd, self.model),
+          functools.partial(update, self.model, self.optimizer),
+          functools.partial(eval_step, self.model),
+      )
 
-    if getattr(self, "_jitted_fwd_bwd_fn", None) is None:
+    if self._jitted_fwd_bwd_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
       self._jitted_fwd_bwd_fn = nnx.jit(fwd_bwd)
       self._jitted_update_fn = nnx.jit(update, donate_argnames=("optimizer",))
@@ -565,6 +593,84 @@ class PeftTrainerV2:
       self._pbar.update_metrics(metrics, self._mode, ndigits=3)
       self._pbar.update()
 
+    if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
+      self.training_hooks.on_train_step_end(self, step, loss)
+
+  # --- AbstractTrainer step-level API ---
+
+  def compile(self) -> None:
+    """Builds the step functions and shards optimizer state.
+
+    Idempotent. Constructs the jitted fwd_bwd/update/eval callables and
+    applies optimizer sharding; XLA compilation happens on the first call
+    per input shape. Rebuild by calling `with_loss_fn` (or
+    `clear_jit_cache`) followed by `compile` again.
+    """
+    self.jit_fwd_bwd_update_eval(self._skip_jit, self._cache_nnx_graph)
+
+  def fwd_bwd(
+      self, inputs: Any, **kwargs
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike, Any]:
+    """Executes one forward/backward micro-step. No weight update.
+
+    Returns the gradients to the caller; the caller owns accumulation
+    across micro-steps and passes the averaged result to `update`.
+    `iter_steps` increments every call.
+
+    Args:
+      inputs: A raw training batch.
+      **kwargs: Unused.
+
+    Returns:
+      A tuple of (loss, aux, grad_norm, grads) as device arrays; aux is
+      None when the loss function has no auxiliary output.
+    """
+    del kwargs
+    inputs = self._prepare_inputs(inputs)
+    inputs = sharding_utils.shard_input(
+        inputs, self.config.data_sharding_axis
+    )
+    fwd_bwd_fn, _, _ = self.jit_fwd_bwd_update_eval(
+        self._skip_jit, self._cache_nnx_graph
+    )
+    loss, aux, grad_norm, grads = fwd_bwd_fn(inputs)
+    self._iter_steps += 1
+    return loss, aux, grad_norm, grads
+
+  def update(self, grads: Any = None, **kwargs) -> int:
+    """Feeds micro-step gradients to the optimizer.
+
+    Called with the raw gradients of every `fwd_bwd()` micro-step (call the
+    two in pairs). Gradient accumulation is delegated to `optax.MultiSteps`,
+    which accumulates internally and applies the model update on every
+    `gradient_accumulation_steps`-th call; `train_steps` increments at that
+    same boundary.
+
+    Args:
+      grads: The gradients from the paired `fwd_bwd` call.
+      **kwargs: Unused.
+
+    Returns:
+      The current train step count (number of optimizer updates applied).
+
+    Raises:
+      ValueError: If `grads` is None.
+    """
+    del kwargs
+    if grads is None:
+      raise ValueError("update() requires gradients; pass fwd_bwd's output.")
+    _, update_fn, _ = self.jit_fwd_bwd_update_eval(
+        self._skip_jit, self._cache_nnx_graph
+    )
+    update_fn(grads)
+    grad_accum_steps = self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    if self._iter_steps % grad_accum_steps == 0:
+      self._train_steps += 1
+    return self._train_steps
+
+  # --- Loop-level convenience API ---
 
   def train(
       self,
@@ -574,26 +680,22 @@ class PeftTrainerV2:
       *,
       cache_nnx_graph: bool = True,
   ) -> None:
-    """Training loop."""
+    """Training loop. Drives the step-level `fwd_bwd`/`update` API."""
     logging.log_first_n(
         logging.INFO,
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
         1,
     )
-    fwd_bwd, update, eval_step = self.jit_fwd_bwd_update_eval(
+    self._skip_jit = skip_jit
+    self._cache_nnx_graph = cache_nnx_graph
+    self.compile()
+    # `compile` is idempotent; fetch the (cached) eval step function.
+    _, _, eval_step_fn = self.jit_fwd_bwd_update_eval(
         skip_jit, cache_nnx_graph
     )
-    if not skip_jit:
-      cache_size = fwd_bwd.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
-      logging.log_if(
-          logging.INFO,
-          f"Compiled fwd_bwd size: {cache_size}",
-          condition=cache_size not in self._jit_cache,
-      )
-      self._jit_cache.add(cache_size)
 
     if eval_ds:
-      self._run_eval(eval_ds, eval_step)
+      self._run_eval(eval_ds, eval_step_fn)
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
@@ -604,7 +706,12 @@ class PeftTrainerV2:
           description=self.config.pbar_description,
       )
 
+    if self.training_hooks:
+      self.training_hooks.on_train_start(self)
 
+    grad_accum_steps = self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
     train_iterator = iter(train_ds)
     index = 0
     last_step_completion_time = time.perf_counter()
@@ -612,15 +719,21 @@ class PeftTrainerV2:
       self._prof.maybe_activate(self._iter_steps)
       with jax.profiler.StepTraceAnnotation("train", step_num=self._iter_steps):
         train_example = None
-        try:
-          train_example = next(train_iterator)
-          if not self.is_managed_externally:
-            if index < self._iter_steps:
-              index += 1
-              continue
-          index += 1
-        except StopIteration:
-          pass
+        if self.data_hooks:
+          train_example = self.data_hooks.load_next_train_batch(self)
+        else:
+          try:
+            train_example = next(train_iterator)
+            if not self.is_managed_externally:
+              # TODO(mridulsahu): Add support to restore the iterator state
+              # instead of skipping the already trained examples.
+              if index < self._iter_steps:
+                # Skip the examples that are already trained.
+                index += 1
+                continue
+            index += 1
+          except StopIteration:
+            pass
 
         if train_example is None:
           break
@@ -633,12 +746,9 @@ class PeftTrainerV2:
         ):
           break
 
-        train_example = self._prepare_inputs(train_example)
-        train_example = sharding_utils.shard_input(
-            train_example, self.config.data_sharding_axis
-        )
-
         self._throttler.wait_for_next()
+        if self.training_hooks:
+          self.training_hooks.on_train_step_start(self)
 
         # Collect tags for the span
         metadata = self.custom_checkpoint_metadata()
@@ -656,15 +766,17 @@ class PeftTrainerV2:
         else:
           mini_batch = None
           global_step = None
-        micro_batch = self._iter_steps % self.config.get_with_default(
-            "gradient_accumulation_steps", 1
-        )
+        micro_batch = self._iter_steps % grad_accum_steps
         tags = {
             perf_constants.STEP: global_step,
             perf_constants.ROLE: metadata.get("role"),
             perf_constants.MICRO_BATCH: micro_batch,
             perf_constants.MINI_BATCH: mini_batch,
         }
+
+        # `fwd_bwd`/`update` own the counters; capture the step id this
+        # micro-step's metrics belong to before they advance.
+        step_id = self._train_steps
 
         with self._perf_tracer.span(
             "peft_train_step",
@@ -674,50 +786,25 @@ class PeftTrainerV2:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          loss, aux, grads = fwd_bwd(train_example)
+          # `fwd_bwd` computes gradients without applying them and owns the
+          # `iter_steps` counter; `update` feeds them to the optimizer,
+          # where MultiSteps accumulates and applies at the boundary.
+          loss, aux, grad_norm, grads = self.fwd_bwd(train_example)
+          self.update(grads)
           span.device_end([loss])
           span_v2.async_end([loss])
-        
-        # Accumulate grads without optax multisteps
-        if not hasattr(self, '_accum_grads'):
-           self._accum_grads = grads
-           self._accum_loss = loss
-        else:
-           self._accum_grads = jax.tree_util.tree_map(lambda x, y: x + y, self._accum_grads, grads)
-           self._accum_loss += loss
 
         self._throttler.add_computation(loss)
-
+        self._buffered_train_metrics = self._buffer_metrics(
+            self._buffered_train_metrics,
+            loss=loss,
+            step=step_id,
+            additional_metrics={"grad_norm": (grad_norm, np.mean)},
+        )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
-        self._iter_steps += 1
 
-        if (
-            self._iter_steps
-            % self.config.get_with_default("gradient_accumulation_steps", 1)
-            == 0
-        ):
-          grad_accum_steps = self.config.get_with_default("gradient_accumulation_steps", 1)
-          if grad_accum_steps > 1:
-            # Optax MultiSteps averages grads by default (use_grad_mean=True).
-            mean_grads = jax.tree_util.tree_map(lambda x: x / grad_accum_steps, self._accum_grads)
-          else:
-            mean_grads = self._accum_grads
-            
-          grad_norm = update(mean_grads)
-          train_loss = self._accum_loss / grad_accum_steps
-          
-          self._buffered_train_metrics = self._buffer_metrics(
-              self._buffered_train_metrics,
-              loss=train_loss,
-              step=self._train_steps,
-              additional_metrics={"grad_norm": (grad_norm, np.mean)},
-          )
-          
-          del self._accum_grads
-          del self._accum_loss
-
-          self._train_steps += 1
+        if self._iter_steps % grad_accum_steps == 0:
           self._write_train_metrics()
 
           # Checkpoint frequency is configured by checkpointing_options.
@@ -733,7 +820,7 @@ class PeftTrainerV2:
               eval_ds
               and self._train_steps % self.config.eval_every_n_steps == 0
           ):
-            self._run_eval(eval_ds, eval_step)
+            self._run_eval(eval_ds, eval_step_fn)
 
       self._prof.maybe_deactivate(self._iter_steps)
 
@@ -742,6 +829,8 @@ class PeftTrainerV2:
         "Train loop finished in: %.4f seconds",
         time.perf_counter() - last_step_completion_time,
     )
+    if self.training_hooks:
+      self.training_hooks.on_train_end(self)
     if not self.is_managed_externally:
       self.close()
 
@@ -795,16 +884,21 @@ class PeftTrainerV2:
     with self._switch_mode(sft_metrics_logger.Mode.EVAL):
       eval_loss, eval_steps = 0, 0
       while True:
-        try:
-          eval_example = next(eval_iterator)
-        except StopIteration:
-          eval_example = None
+        if self.data_hooks:
+          eval_example = self.data_hooks.load_next_eval_batch(self)
+        else:
+          try:
+            eval_example = next(eval_iterator)
+          except StopIteration:
+            eval_example = None
         if eval_example is None:
           break
         eval_example = self._prepare_inputs(eval_example)
         eval_example = sharding_utils.shard_input(
             eval_example, self.config.data_sharding_axis
         )
+        if self.training_hooks:
+          self.training_hooks.on_eval_step_start(self)
         loss, aux = eval_step_fn(eval_example)
         loss = jax.lax.stop_gradient(loss)
         self._buffered_eval_metrics = self._buffer_metrics(
@@ -832,6 +926,12 @@ class PeftTrainerV2:
           ),
       )
       self._buffered_eval_metrics = None
+      if self.training_hooks:
+        self.training_hooks.on_eval_step_end(self, eval_loss)
+
+
+# Transitional alias for the in-progress refactor.
+PeftTrainerV2 = PeftTrainer
 
 
 def _default_loss_fn(
