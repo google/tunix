@@ -108,11 +108,13 @@ class Profiler:
           log_dir=log_dir,
           profiler_options=profiler_options,
           max_num_hosts=self._profiler_options.max_num_hosts,  # pyrefly: ignore[unexpected-keyword]
+          create_perfetto_trace=True,
       )
     else:
       jax.profiler.start_trace(
           log_dir=log_dir,
           profiler_options=profiler_options,
+          create_perfetto_trace=True,
       )
 
   def maybe_activate(self, step: int):

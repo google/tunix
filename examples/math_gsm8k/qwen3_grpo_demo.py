@@ -221,6 +221,7 @@ PROFILER_OPTIONS = (
         log_dir=args.profiler_log_dir,
         skip_first_n_steps=args.profiler_skip_steps,
         profiler_steps=args.profiler_steps,
+        max_num_hosts=args.mesh_fsdp or 16,
     )
     if args.profiler_log_dir
     else None
