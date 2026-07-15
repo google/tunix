@@ -108,12 +108,10 @@ class PeftTrainerTest(parameterized.TestCase):
   def test_compile_once(self):
     class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
 
-      # `fwd_bwd` drives the jitted `_grad_step`; the Python body must be
-      # traced exactly once.
-      def _grad_step(self, model, inputs):
+      def _train_step(self, model, optimizer, inputs):
         global global_counter
         global_counter += 1
-        return super()._grad_step(model, inputs)
+        return super()._train_step(model, optimizer, inputs)
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     rngs = nnx.Rngs(0)

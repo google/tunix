@@ -213,9 +213,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
-    # Gradient accumulation is caller-driven: `fwd_bwd()` accumulates
-    # gradients internally and `update()` applies them, instead of wrapping
-    # the optimizer with `optax.MultiSteps`.
+    # Gradient accumulation is delegated to `optax.MultiSteps` for now:
+    # `update()` feeds gradients to the optimizer on every micro-step and
+    # MultiSteps internally accumulates and applies every k-th call.
+    if training_config.gradient_accumulation_steps is not None:
+      optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
+          optimizer, training_config.gradient_accumulation_steps
+      )
     if self._lora_enabled:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
@@ -266,13 +270,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
-    self._jitted_grad_step_fn = None
-    self._jitted_apply_grads_fn = None
     self._skip_jit = False
     self._cache_nnx_graph = True
-    # Internal gradient accumulation buffer (caller-driven accumulation).
-    self._accum_grads = None
-    self._accum_count = 0
     max_step = None
     if self.config.max_steps is not None:
       max_step = self.config.max_steps * self.config.get_with_default(
@@ -305,8 +304,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
-    self._jitted_grad_step_fn = None
-    self._jitted_apply_grads_fn = None
 
   def with_loss_fn(
       self,
@@ -390,51 +387,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
     """Creates the eval step function."""
     return self._eval_step  # pyrefly: ignore[bad-return]
-
-  def _grad_step(
-      self, model: nnx.Module, inputs: Any
-  ) -> Tuple[ArrayLike, Any | None, ArrayLike, Any]:
-    """Computes loss and gradients without applying an optimizer update."""
-    inputs = self.gen_model_input_fn(inputs)
-    grad_fn = nnx.value_and_grad(
-        self.loss_fn,
-        argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
-        has_aux=self._has_aux,
-    )
-    out, grads = grad_fn(model, **inputs)
-    grad_norm = optax.global_norm(grads)
-    if self._has_aux:
-      loss, aux = out
-    else:
-      loss, aux = out, None
-    return loss, aux, grad_norm, grads
-
-  def _apply_grads_step(
-      self, model: nnx.Module, optimizer: nnx.Optimizer, grads: Any
-  ) -> None:
-    """Applies (already averaged) gradients with the optimizer."""
-    optimizer.update(model, grads)
-
-  def _accum_step_fns(self) -> Tuple[Callable[..., Any], Callable[..., Any]]:
-    """Returns (grad_step_fn, apply_grads_fn), jitted and cached."""
-    if self._skip_jit:
-      return (
-          functools.partial(self._grad_step, self.model),
-          functools.partial(
-              self._apply_grads_step, self.model, self.optimizer
-          ),
-      )
-    if self._jitted_grad_step_fn is None:
-      self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      self._jitted_grad_step_fn = functools.partial(
-          nnx.jit(self._grad_step), self.model
-      )
-      self._jitted_apply_grads_fn = functools.partial(
-          nnx.jit(self._apply_grads_step, donate_argnames=("optimizer",)),
-          self.model,
-          self.optimizer,
-      )
-    return self._jitted_grad_step_fn, self._jitted_apply_grads_fn
 
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
     """Optimizer states should be sharded before calling the jit function.
@@ -651,13 +603,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def compile(self) -> None:
     """Builds the step functions and shards optimizer state.
 
-    Idempotent. Constructs the jitted train/eval/gradient step callables and
-    applies optimizer sharding; XLA compilation happens on the first call per
-    input shape. Rebuild by calling `with_loss_fn` (or `clear_jit_cache`)
-    followed by `compile` again.
+    Idempotent. Constructs the jitted train/eval step callables and applies
+    optimizer sharding; XLA compilation happens on the first call per input
+    shape. Rebuild by calling `with_loss_fn` (or `clear_jit_cache`) followed
+    by `compile` again.
     """
     self.jit_train_and_eval_step(self._skip_jit, self._cache_nnx_graph)
-    self._accum_step_fns()
 
   def fwd_bwd(
       self, inputs: Any, **kwargs
@@ -680,42 +631,30 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     inputs = sharding_utils.shard_input(
         inputs, self.config.data_sharding_axis
     )
-    grad_step_fn, _ = self._accum_step_fns()
-    loss, aux, grad_norm, grads = grad_step_fn(inputs)
-    if self._accum_grads is None:
-      self._accum_grads = grads
-    else:
-      self._accum_grads = jax.tree.map(jnp.add, self._accum_grads, grads)
-    self._accum_count += 1
+    train_step_fn, _ = self.jit_train_and_eval_step(
+        self._skip_jit, self._cache_nnx_graph
+    )
+    loss, aux, grad_norm = train_step_fn(inputs)
     self._iter_steps += 1
     return loss, aux, grad_norm
 
   def update(self, **kwargs) -> int:
-    """Applies the accumulated mean gradients as one optimizer update.
+    """Finalizes one optimizer-update boundary.
 
-    Resets the accumulation buffer. `train_steps` increments by one.
+    Gradient accumulation is currently delegated to `optax.MultiSteps`,
+    which is fused into the jitted `fwd_bwd` step: the model weights are
+    actually applied during every `gradient_accumulation_steps`-th
+    `fwd_bwd()` call. `update()` therefore only advances the train step
+    count for now; the weight application moves here once accumulation is
+    pulled out of MultiSteps. Call once per accumulation window.
 
     Args:
       **kwargs: Unused.
 
     Returns:
-      The new train step count.
-
-    Raises:
-      ValueError: If called with no accumulated gradients.
+      The new train step count (number of optimizer updates applied).
     """
     del kwargs
-    if self._accum_count == 0:
-      raise ValueError(
-          "update() called with no accumulated gradients; call fwd_bwd()"
-          " first."
-      )
-    _, apply_grads_fn = self._accum_step_fns()
-    count = self._accum_count
-    mean_grads = jax.tree.map(lambda g: g / count, self._accum_grads)
-    apply_grads_fn(mean_grads)
-    self._accum_grads = None
-    self._accum_count = 0
     self._train_steps += 1
     return self._train_steps
 
@@ -834,7 +773,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             tags=tags,
         ) as span_v2:
           train_loss, aux, grad_norm = self.fwd_bwd(train_example)
-          # One optimizer update per `grad_accum_steps` micro-steps.
+          # MultiSteps (fused into fwd_bwd) applies the weights on the k-th
+          # micro-step; `update()` finalizes the optimizer-step boundary.
           if self._iter_steps % grad_accum_steps == 0:
             self.update()
           span.device_end([train_loss])

@@ -74,11 +74,11 @@ class AbstractTrainer(abc.ABC):
     )
 
   def fwd_bwd(self, inputs: Any, **kwargs) -> Any:
-    """Executes one forward/backward pass and accumulates gradients.
+    """Executes one forward/backward micro-step.
 
-    Does NOT apply an optimizer update; gradients are accumulated internally
-    until `update()` is called. Gradient accumulation is therefore
-    caller-driven: one `update()` per N `fwd_bwd()` calls.
+    Computes the loss and gradients for one micro-batch. How the gradients
+    are handled is implementation-specific (e.g. staged for `update`, or
+    accumulated/applied by an optimizer wrapper fused into this step).
 
     Args:
       inputs: A raw training batch.
@@ -93,10 +93,12 @@ class AbstractTrainer(abc.ABC):
     )
 
   def update(self, **kwargs) -> int:
-    """Applies the accumulated (mean) gradients as one optimizer update.
+    """Finalizes one optimizer update over the preceding `fwd_bwd` calls.
 
-    Resets the accumulation buffer. Must be preceded by at least one
-    `fwd_bwd()` call since the last update.
+    Call once per gradient-accumulation window. Where the model weights are
+    actually applied is implementation-specific: here, or fused into the
+    accumulation-boundary `fwd_bwd` call (e.g. via `optax.MultiSteps`).
+    Advances the train step count either way.
 
     Args:
       **kwargs: Implementation-specific options.
