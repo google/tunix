@@ -137,6 +137,7 @@ class Profiler:
         profile_options.python_tracer_level = (
             self._profiler_options.python_tracer_level
         )
+        profile_options.device_tracer_level = 1
         self._start_trace(
             log_dir=self._output_path, profiler_options=profile_options
         )
