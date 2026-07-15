@@ -695,13 +695,9 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
 
   def test_loss_output_gradient_scaling(self):
-    # Covers the manual gradient scaling in _train_step: for a LossOutput the
-    # gradient is taken w.r.t. the *unreduced* sum and then multiplied by
-    # compute_scale() (= 1 / denominator). Because the denominator is constant
-    # w.r.t. the parameters, this must reproduce differentiating the reduced
-    # loss (sum / denominator) directly. A constant loss cannot exercise this
-    # (its gradient is zero), so we use a parameter-dependent loss and compare
-    # the trained weights against plain reduced-loss references.
+    # Covers the manual gradient scaling in _train_step: grad(unreduced_sum) *
+    # (1/d) must equal grad(sum/d). Uses a parameter-dependent loss because the
+    # original test's constant loss has zero gradient and can't exercise it.
     def param_dependent_sum(model, input_tokens, positions):
       logits, _ = model(input_tokens, positions)
       return jnp.sum(logits)  # depends on the parameters
