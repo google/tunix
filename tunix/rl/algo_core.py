@@ -518,7 +518,14 @@ def grpo_loss_fn(
   aux = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
-      "pg_loss": weighted_loss,
+      "reduced_pg_loss": weighted_loss,
+      # Global (token-weighted) counterpart: log [unreduced_sum, denominator]
+      # per micro-batch so the learner can reduce as sum(S)/sum(d) instead of a
+      # mean-of-per-micro-batch-means. Numerically identical to reduced_pg_loss
+      # while denom is constant; prepared for global denom weighting.
+      "unreduced_pg_loss": jnp.stack(
+          [weighted_loss.unreduced_sum, weighted_loss.denominator]
+      ),
       "pg_clipfrac": sft_utils.WeightedMetric(
           unreduced_clip_frac, token_denom, min_denom=1.0
       ),

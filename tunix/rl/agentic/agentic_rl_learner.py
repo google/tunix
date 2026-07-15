@@ -1007,7 +1007,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             am = trainer_buf.additional_metrics
             for key, label in (
                 ("grad_norm", "grad_norm"),
-                ("pg_loss", "pg_loss"),
+                ("reduced_pg_loss", "reduced_pg_loss"),
                 ("entropy", "entropy"),
                 ("kl", "kl"),
                 ("log_ratio/abs_mean", "log_ratio_abs"),

@@ -144,6 +144,18 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
 
 
+def _global_weighted_mean(vals) -> float:
+  """Global sum(S)/sum(d) reducer for the `unreduced_pg_loss` metric.
+
+  Each element of `vals` is a length-2 `[unreduced_sum, denominator]` vector
+  emitted per micro-batch by `grpo_loss_fn`. Summing numerators and
+  denominators before dividing yields the true token-weighted (global) loss,
+  as opposed to the mean-of-per-micro-batch-means that `np.mean` produces.
+  """
+  arr = np.asarray(vals, dtype=np.float64)
+  return float(arr[:, 0].sum() / max(arr[:, 1].sum(), 1e-6))
+
+
 class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   """An RLLearner that implements the GRPO algorithm in an agentic setting.
 
@@ -261,7 +273,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
-        "pg_loss": np.mean,
+        "reduced_pg_loss": np.mean,
+        "unreduced_pg_loss": _global_weighted_mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
         "kl_loss": np.mean,
