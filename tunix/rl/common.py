@@ -804,6 +804,38 @@ def reduced_loss_agg(
     )
 
 
+def _metric_scalar(value: Any) -> Any:
+  """A WeightedMetric reduced to its scalar via compute(); scalars pass through.
+
+  Metric aux values may be `WeightedMetric` (deferred division) or plain
+  scalars. This normalizes either to a scalar for reduction / logging.
+  """
+  return value.compute() if isinstance(value, utils.WeightedMetric) else value
+
+
+def mean_of_means(values: Iterable[Any]) -> np.ndarray:
+  """Reducer: mean of per-micro-batch values (a WeightedMetric-safe np.mean).
+
+  Each value is reduced to a scalar first (WeightedMetric via compute(), i.e.
+  divided per micro-batch), then averaged. For plain scalars this is exactly
+  np.mean, so it is a safe drop-in replacement.
+  """
+  return np.mean([np.asarray(_metric_scalar(v)) for v in values])
+
+
+def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
+  """Reducer: global sum(S)/sum(d) across per-micro-batch WeightedMetric values.
+
+  Sums numerators and denominators before dividing (token-weighted / global),
+  as opposed to `mean_of_means` which averages per-micro-batch means. Equal to
+  `mean_of_means` when the denominator is constant across micro-batches; they
+  diverge otherwise (e.g. sequence packing).
+  """
+  total_sum = sum(float(v.unreduced_sum) for v in values)
+  total_denom = sum(float(v.denominator) for v in values)
+  return total_sum / total_denom if total_denom != 0 else 0.0
+
+
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   """Computes the entropy of a distribution given its logits.
 

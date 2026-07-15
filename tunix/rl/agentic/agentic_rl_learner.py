@@ -1016,7 +1016,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               if key in am:
                 vals, _ = am[key]
                 if vals:
-                  v = float(np.mean([np.asarray(x) for x in vals]))
+                  v = float(
+                      np.mean([
+                          np.asarray(common._metric_scalar(x)) for x in vals
+                      ])
+                  )
                   extras.append(f"{label}={v:.4f}")
             if extras:
               trainer_str = " " + " ".join(extras)

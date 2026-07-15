@@ -133,17 +133,6 @@ class MetricsBuffer:
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
-def _compute_legacy_aux(loss_output: utils.LossOutput) -> Dict[str, Any]:
-  """Computes legacy aux metrics from a LossOutput."""
-  legacy_aux = {}
-  for k, v in loss_output.aux_metrics.items():
-    if isinstance(v, utils.WeightedMetric):
-      legacy_aux[k] = v.compute()
-    else:
-      legacy_aux[k] = v
-  return legacy_aux
-
-
 def _calculate_global_batch_size(train_example: Any) -> int:
   """Calculates the global batch size from a training example.
 
@@ -385,7 +374,8 @@ class PeftTrainer:
     optimizer.update(model, grads)
 
     if isinstance(aux, utils.LossOutput):
-      return loss_val, _compute_legacy_aux(aux), grad_norm
+      # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
+      return loss_val, aux.aux_metrics, grad_norm
     elif self._has_aux:
       return loss_val, aux, grad_norm
     else:
@@ -397,7 +387,7 @@ class PeftTrainer:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
-      return out.primary_loss.compute(), _compute_legacy_aux(out)
+      return out.primary_loss.compute(), out.aux_metrics
     elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux

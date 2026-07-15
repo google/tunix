@@ -259,24 +259,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
-        "kl": np.mean,
-        "entropy": np.mean,
-        "reduced_pg_loss": np.mean,
-        "unreduced_pg_loss": np.mean,  # placeholder: == reduced today
-        "pg_clipfrac": np.mean,
-        "ppo_kl": np.mean,
-        "kl_loss": np.mean,
-        "is_ratio/mean": np.mean,
+        "kl": common.mean_of_means,
+        "entropy": common.mean_of_means,
+        "reduced_pg_loss": common.mean_of_means,
+        "unreduced_pg_loss": common.global_weighted_mean,
+        "pg_clipfrac": common.mean_of_means,
+        "ppo_kl": common.mean_of_means,
+        "kl_loss": common.mean_of_means,
+        "is_ratio/mean": common.mean_of_means,
         "is_ratio/max": np.max,
         "is_ratio/min": np.min,
-        "log_ratio/abs_mean": np.mean,
-        "pg_loss/unclipped_mean": np.mean,
-        "pg_loss/clipped_mean": np.mean,
-        "advantage/abs_mean": np.mean,
+        "log_ratio/abs_mean": common.mean_of_means,
+        "pg_loss/unclipped_mean": common.mean_of_means,
+        "pg_loss/clipped_mean": common.mean_of_means,
+        "advantage/abs_mean": common.mean_of_means,
         "advantage/max": np.max,
         "advantage/min": np.min,
-        "advantage/nonzero_frac": np.mean,
-        "sampler_is/weight_mean": np.mean,
+        "advantage/nonzero_frac": common.mean_of_means,
+        "sampler_is/weight_mean": common.mean_of_means,
         "sampler_is/weight_min": np.min,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]

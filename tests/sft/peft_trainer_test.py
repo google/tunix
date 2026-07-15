@@ -668,12 +668,13 @@ class PeftTrainerTest(parameterized.TestCase):
     class CustomTrainer(peft_trainer.PeftTrainer):
 
       def _post_process_train_step(self, aux):
-        train_invoke['foo'] += aux['foo']
-        train_invoke['bar'] += aux['bar']
+        # aux values are now raw WeightedMetric (no legacy pre-compute).
+        train_invoke['foo'] += aux['foo'].compute()
+        train_invoke['bar'] += aux['bar'].compute()
 
       def _post_process_eval_step(self, aux):
-        eval_invoke['foo'] += aux['foo']
-        eval_invoke['bar'] += aux['bar']
+        eval_invoke['foo'] += aux['foo'].compute()
+        eval_invoke['bar'] += aux['bar'].compute()
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
