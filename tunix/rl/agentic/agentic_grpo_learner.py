@@ -261,7 +261,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
-        "pg_loss": np.mean,
+        "reduced_pg_loss": np.mean,
+        "unreduced_pg_loss": np.mean,  # placeholder: == reduced today
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
         "kl_loss": np.mean,

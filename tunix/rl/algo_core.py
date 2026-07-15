@@ -494,9 +494,16 @@ def grpo_loss_fn(
   if sampler_is_weights is not None:
     per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
 
-  weighted_loss = common.aggregate_loss(
+  # Two independent aggregations of the same policy loss (equal today):
+  #   unreduced (sum/denom, deferred) — feeds the gradient
+  #   reduced   (eager per-sequence mean, pre-CL form) — metric only
+  unreduced_pg_loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
+  reduced_pg_loss = common.reduced_loss_agg(
+      per_token_loss, completion_mask, loss_aggregation_mode
+  )
+  total_loss = unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
   is_ratio_mean = masked_mean(is_ratio, completion_mask)
   is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
@@ -518,7 +525,10 @@ def grpo_loss_fn(
   aux = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
-      "pg_loss": weighted_loss,
+      "reduced_pg_loss": reduced_pg_loss,
+      # TODO(yuxzhang): equal to reduced_pg_loss today; diverges once sequence
+      # packing lands (reduced -> segment-aware metric; unreduced -> global).
+      "unreduced_pg_loss": unreduced_pg_loss,
       "pg_clipfrac": sft_utils.WeightedMetric(
           unreduced_clip_frac, token_denom, min_denom=1.0
       ),
@@ -562,11 +572,11 @@ def grpo_loss_fn(
     kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
     aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
     if beta is not None and beta != 0.0:
-      weighted_loss = sft_utils.WeightedMetric(
-          weighted_loss.unreduced_sum + beta * kl_loss.unreduced_sum,
-          weighted_loss.denominator,
-          eps=weighted_loss.eps,
-          min_denom=weighted_loss.min_denom,
+      total_loss = sft_utils.WeightedMetric(
+          unreduced_pg_loss.unreduced_sum + beta * kl_loss.unreduced_sum,
+          unreduced_pg_loss.denominator,
+          eps=unreduced_pg_loss.eps,
+          min_denom=unreduced_pg_loss.min_denom,
       )
 
   entropy_loss = common.aggregate_loss(
@@ -574,7 +584,7 @@ def grpo_loss_fn(
   )
   aux["entropy"] = entropy_loss
 
-  return sft_utils.LossOutput(primary_loss=weighted_loss, aux_metrics=aux)
+  return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
 
 
 @function_registry.register_advantage_estimator("grpo")

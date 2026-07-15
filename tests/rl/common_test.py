@@ -574,6 +574,36 @@ class CommonTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-6, atol=1e-6)
 
+  @parameterized.named_parameters(
+      ("token_mean", "token-mean", {}),
+      ("seq_mean_token_mean", "sequence-mean-token-mean", {}),
+      ("seq_mean_token_scale", "sequence-mean-token-scale", {"norm": 5.0}),
+      ("seq_mean_token_sum", "seq-mean-token-sum", {}),
+      ("seq_mean_token_sum_norm", "sequence-mean-token-sum-norm", {"norm": 3.0}),
+  )
+  def test_reduced_equals_unreduced_compute(self, loss_agg_mode, kwargs):
+    # reduced_loss_agg (eager scalar) must equal aggregate_loss(...).compute()
+    # (deferred WeightedMetric) for every mode, including empty rows and
+    # varying lengths. This ties the two independent aggregations together so
+    # they cannot silently diverge.
+    per_token_loss = jnp.array([
+        [0.5, 1.5, 2.5, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],  # empty row -> denom edge cases
+    ])
+    completion_mask = jnp.array([
+        [1.0, 1.0, 1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+    ])
+    reduced = common.reduced_loss_agg(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+    unreduced = _compute_loss(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+    np.testing.assert_allclose(reduced, unreduced, rtol=1e-6, atol=1e-6)
+
   def test_invalid_mode(self):
     with self.assertRaisesRegex(
         ValueError, "Unsupported loss aggregation mode"

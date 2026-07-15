@@ -743,6 +743,67 @@ def aggregate_loss(
   )
 
 
+def reduced_loss_agg(
+    per_token_loss: jax.Array,
+    completion_mask: jax.Array,
+    loss_agg_mode: str,
+    **kwargs: Any,
+) -> jax.Array:
+  """Eager per-sequence loss reduction (the pre-unreduced form).
+
+  Divides immediately and returns a scalar, unlike `aggregate_loss` which
+  defers division into a `WeightedMetric`. Used only as the `reduced_pg_loss`
+  logging metric to guard against regression; it never feeds the gradient.
+  Numerically equal to `aggregate_loss(...).compute()` today (asserted in
+  common_test.py::CommonTest.test_reduced_equals_unreduced_compute).
+
+  TODO(yuxzhang): make segment-aware once sequence packing lands, so it stays
+  a per-sequence metric while `aggregate_loss` / the gradient move to a global
+  token-weighted form.
+
+  Args:
+    per_token_loss: Per token loss. [batch_size, sequence_len]
+    completion_mask: Completion mask. [batch_size, sequence_len]
+    loss_agg_mode: Loss aggregation mode.
+    **kwargs: Mode-specific extras (e.g. `norm`).
+
+  Returns:
+    A scalar reduced loss.
+  """
+  per_token_loss = per_token_loss.astype(jnp.float32)
+
+  if loss_agg_mode == "token-mean":
+    return (per_token_loss * completion_mask).sum() / jnp.clip(
+        completion_mask.sum(), min=1.0
+    )
+  elif loss_agg_mode == "sequence-mean-token-mean":
+    seq_mask = completion_mask.sum(axis=-1)
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        seq_mask, min=1.0
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "sequence-mean-token-scale":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        norm, min=1e-6
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "seq-mean-token-sum":
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
+    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+    return (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+  elif loss_agg_mode == "sequence-mean-token-sum-norm":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
+    return (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+  else:
+    raise ValueError(
+        f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
+        " 'sequence-mean-token-sum-norm'."
+    )
+
+
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   """Computes the entropy of a distribution given its logits.
 
