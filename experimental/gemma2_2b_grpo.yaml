@@ -1,0 +1,213 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: gemma2-2b-grpo
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  # -------------------------------------------------------------
+  # 1. PATHWAYS COORDINATOR (CPU HEAD)
+  # -------------------------------------------------------------
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            # Launch Sidecars (Proxy + RM)
+            initContainers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_proxy_server@sha256:6022630f749b1bf85940a92c1b595cc59b643a6ab2d1dae77aeea5033d9fcaf9
+              args:
+                - --server_port=29000
+                - --resource_manager_address=localhost:29001
+                - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              env:
+                - name: PATHWAYS_HEAD
+                  value: localhost
+              resources:
+                limits:
+                  cpu: '16'
+                  memory: 500G
+              restartPolicy: Always
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server@sha256:db6d3db6090cc41daca3cc81bc70a15be94d33e6c881d8acaf6de5c9194dd9c2
+              args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+                - --node_type=resource_manager
+                - --instance_count=1
+                - --instance_type=tpuv5:4x4x4
+              env:
+                - name: HOST_ADDRESS
+                  value: localhost
+                - name: TPU_SKIP_MDS_QUERY
+                  value: 'true'
+              resources:
+                limits:
+                  cpu: '8'
+                  memory: 100G
+              restartPolicy: Always
+            # Main Jax-TPU Coordinator Container
+            containers:
+            - name: jax-tpu
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest
+              imagePullPolicy: Always
+              command:
+              - bash
+              - -c
+              - |
+                echo XPK Start: $(date);
+                echo "Syncing latest code from yuxzhang/refactor_loss_accum_ablation..."
+                git config --global --add safe.directory $(pwd)
+                git init
+                git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
+                git fetch origin yuxzhang/refactor_loss_accum_ablation
+                git reset --hard FETCH_HEAD
+
+                # [model] gemma-2-2b-it is pulled from HuggingFace
+                # (model_source overridden to "huggingface" below; the config's
+                # model_id google/gemma-2-2b-it is the HF repo). tunix loads it
+                # via its Gemma2 safetensors loader. Requires the HF account
+                # behind HF_TOKEN to have accepted the Gemma license on HF.
+                # ⚠️ VERIFY: needs gemma license accepted for HF_TOKEN's account.
+                # (No qwen3/vLLM ROPE hot-patch here: this run uses the vanilla
+                #  rollout engine, not vLLM.)
+
+                echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
+                sleep 60;
+                echo "GSM8K (tfds) + gemma-2-2b-it are pulled inside grpo_main; no separate data step."
+
+                # [mesh] config gemma2_2b.yaml hard-codes mesh (2,4)=8, but this
+                # v5p 4x4x4 slice exposes 64. Overriding to (16,4)=64. tp is
+                # capped at 4 (num_kv_heads=4), so 64 chips => fsdp=16. gemma-2-2b
+                # param dims all shard cleanly on (16,4) (verified against the
+                # model's get_default_sharding).
+                # [batch] activations shard the batch dim on fsdp (act_btd=
+                # ('fsdp',...)), so every per-step batch must be divisible by
+                # fsdp=16. The config default batch_size=1 is tuned for fsdp=2
+                # and WOULD crash here, so batch_size / mini_batch_size /
+                # train_micro_batch_size are bumped to 16 below (deviates from
+                # run_gemma2_2b.sh defaults, but required by the 64-chip mesh).
+                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 \
+                JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
+                ENABLE_PATHWAYS_PERSISTENCE='1' \
+                HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) \
+                WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) \
+                PYTHONPATH=$PYTHONPATH:. SKIP_JAX_PRECOMPILE=True \
+                FLAGS_pathways_enforce_subset_devices_form_subslice=False \
+                XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+                python3 -X faulthandler -u -m tunix.cli.grpo_main \
+                  tunix/cli/base_config.yaml \
+                  override_config_file=examples/rl/grpo/gsm8k/configs/gemma2_2b.yaml \
+                  model_config.model_source="huggingface" \
+                  model_config.model_download_path="/tmp/models/gemma-2-2b" \
+                  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma2_2b_grpo" \
+                  model_config.mesh.shape="(16,4)" \
+                  actor_model_config.mesh.shape="(16,4)" \
+                  batch_size=16 \
+                  num_batches=3738 \
+                  num_train_epochs=1 \
+                  train_fraction=1.0 \
+                  rl_training_config.actor_optimizer_config.warmup_ratio=0.1 \
+                  rl_training_config.actor_optimizer_config.warmup_steps=2 \
+                  rl_training_config.actor_optimizer_config.decay_steps=20 \
+                  rl_training_config.max_steps=20 \
+                  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo" \
+                  rl_training_config.checkpoint_root_directory="/tmp/ckpts_gemma2_grpo" \
+                  rl_training_config.mini_batch_size=16 \
+                  rl_training_config.train_micro_batch_size=16 \
+                  rollout_config.total_generation_steps=512 \
+                  rollout_config.max_prompt_length=128
+              env:
+              - name: PATHWAYS_HEAD
+                value: localhost
+              - name: INJECTED_HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: HF_TOKEN
+                    optional: true
+              - name: INJECTED_WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: WANDB_API_KEY
+                    optional: true
+              - name: HF_HOME
+                value: /mnt/disks/linchai_data/huggingface
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: FLAGS_pathways_enforce_subset_devices_form_subslice
+                value: "False"
+              resources:
+                limits:
+                  cpu: '24'
+                  memory: 300G
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+              - mountPath: /mnt/disks/linchai_data
+                name: linchai-gke-disk-2
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+            - name: linchai-gke-disk-2
+              persistentVolumeClaim:
+                claimName: linchai-cpu-np-pvc-2
+
+  - name: pathways-worker
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        completions: 16
+        parallelism: 16
+        completionMode: Indexed
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: linchai-v5p-128-pw-np-0
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x4
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server@sha256:db6d3db6090cc41daca3cc81bc70a15be94d33e6c881d8acaf6de5c9194dd9c2
+              args:
+                - --server_port=29000
+                - --resource_manager_address=gemma2-2b-grpo-pathways-head-0-0.gemma2-2b-grpo:29001
+                - --node_type=worker
+                - --instance_type=tpuv5:4x4x4
+              env:
+                - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                  value: 'true'
+                - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+                  value: '0.9'
+                - name: ENABLE_PATHWAYS_PERSISTENCE
+                  value: '0'
+              resources:
+                limits:
+                  google.com/tpu: '4'
