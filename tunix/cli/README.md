@@ -21,7 +21,7 @@ For sft, we provide scripts running on mtnt translation dataset. See available [
 
 For grpo based rl, we provide scripts running grpo on gsm8k math dataset. See available [scripts](../../examples/rl/grpo/gsm8k)
 
-For ppo based rl, we provide scripts running ppo on gsm8k math dataset. See available [scripts](../../examples/rl/grpo/gsm8k)
+For ppo based rl, we provide scripts running ppo on gsm8k math dataset. See available [scripts](../../examples/rl/ppo/gsm8k)
 
 For launching shell scripts from examples, you would navigate to the examples directory and execute a script like this:
 
