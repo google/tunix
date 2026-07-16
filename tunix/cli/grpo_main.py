@@ -184,7 +184,7 @@ def main(argv, **kwargs):
   if pathways_bns:
     base_rl_pipeline.setup_jax_pathways(pathways_bns)
 
-  if os.getenv("JAX_PLATFORMS") == "proxy":
+  if "proxy" in os.getenv("JAX_PLATFORMS", ""):
     base_rl_pipeline.setup_pathways_on_cloud()
 
   pipeline = GrpoPipeline(argv, **kwargs)
