@@ -674,12 +674,13 @@ class PeftTrainerTest(parameterized.TestCase):
     class CustomTrainer(peft_trainer.PeftTrainer):
 
       def _post_process_train_step(self, aux):
-        train_invoke['foo'] += aux['foo']
-        train_invoke['bar'] += aux['bar']
+        # aux values are now raw WeightedMetric (no legacy pre-compute).
+        train_invoke['foo'] += aux['foo'].compute()
+        train_invoke['bar'] += aux['bar'].compute()
 
       def _post_process_eval_step(self, aux):
-        eval_invoke['foo'] += aux['foo']
-        eval_invoke['bar'] += aux['bar']
+        eval_invoke['foo'] += aux['foo'].compute()
+        eval_invoke['bar'] += aux['bar'].compute()
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
@@ -699,6 +700,74 @@ class PeftTrainerTest(parameterized.TestCase):
 
     # Since eval_ds is length 2, it evaluates at step 2.
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
+
+  def test_loss_output_gradient_scaling(self):
+    # Covers the manual gradient scaling in _train_step: grad(unreduced_sum) *
+    # (1/d) must equal grad(sum/d). Uses a parameter-dependent loss because the
+    # original test's constant loss has zero gradient and can't exercise it.
+    def param_dependent_sum(model, input_tokens, positions):
+      logits, _ = model(input_tokens, positions)
+      return jnp.sum(logits)  # depends on the parameters
+
+    def unreduced_loss_fn(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      s = param_dependent_sum(model, input_tokens, positions)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              s, jnp.array(2.0, dtype=jnp.float32)
+          ),
+          aux_metrics={},
+      )
+
+    def make_reduced_loss_fn(denominator):
+      def reduced_loss_fn(
+          model, input_tokens, input_mask, positions, attention_mask,
+          images=None,
+      ):
+        del input_mask, attention_mask, images
+        s = param_dependent_sum(model, input_tokens, positions)
+        return s / jnp.array(denominator, dtype=jnp.float32)
+
+      return reduced_loss_fn
+
+    def train_and_get_params(loss_fn):
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100, max_steps=100
+      )
+      trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+      trainer = trainer.with_gen_model_input_fn(
+          dummy_gen_model_input_fn
+      ).with_loss_fn(loss_fn)
+      init = [
+          jnp.copy(x)
+          for x in jax.tree_util.tree_leaves(nnx.state(model, nnx.Param))
+      ]
+      trainer.train(self.train_ds, self.eval_ds)
+      trained = jax.tree_util.tree_leaves(nnx.state(model, nnx.Param))
+      return init, trained
+
+    def max_abs_diff(a, b):
+      return max(float(jnp.max(jnp.abs(x - y))) for x, y in zip(a, b))
+
+    # A: unreduced loss -> grad(sum) * (1/2). B: reduced ref sum/2. B1: sum/1.
+    init_a, params_a = train_and_get_params(unreduced_loss_fn)
+    _, params_b = train_and_get_params(make_reduced_loss_fn(2.0))
+    _, params_b1 = train_and_get_params(make_reduced_loss_fn(1.0))
+
+    # The scaled path must actually move the weights (non-zero gradient), else
+    # the equivalence below would hold trivially.
+    self.assertGreater(max_abs_diff(params_a, init_a), 1e-8)
+
+    # Correct scaling: grad(sum) * (1/2) == grad(sum / 2).
+    chex.assert_trees_all_close(params_a, params_b, atol=1e-6)
+
+    # Non-trivial scaling: had the 1/denominator factor been dropped, the
+    # update would instead match the sum/1 reference. It does not, which proves
+    # the scale is applied.
+    self.assertGreater(max_abs_diff(params_a, params_b1), 1e-6)
 
   def test_injected_params(self):
 

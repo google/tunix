@@ -744,6 +744,99 @@ def aggregate_loss(
   )
 
 
+def reduced_loss_agg(
+    per_token_loss: jax.Array,
+    completion_mask: jax.Array,
+    loss_agg_mode: str,
+    **kwargs: Any,
+) -> jax.Array:
+  """Eager per-sequence loss reduction (the pre-unreduced form).
+
+  Divides immediately and returns a scalar, unlike `aggregate_loss` which
+  defers division into a `WeightedMetric`. Used only as the `reduced_pg_loss`
+  logging metric to guard against regression; it never feeds the gradient.
+  Numerically equal to `aggregate_loss(...).compute()` today (asserted in
+  common_test.py::CommonTest.test_reduced_equals_unreduced_compute).
+
+  TODO(yuxzhang): make segment-aware once sequence packing lands, so it stays
+  a per-sequence metric while `aggregate_loss` / the gradient move to a global
+  token-weighted form.
+
+  Args:
+    per_token_loss: Per token loss. [batch_size, sequence_len]
+    completion_mask: Completion mask. [batch_size, sequence_len]
+    loss_agg_mode: Loss aggregation mode.
+    **kwargs: Mode-specific extras (e.g. `norm`).
+
+  Returns:
+    A scalar reduced loss.
+  """
+  per_token_loss = per_token_loss.astype(jnp.float32)
+
+  if loss_agg_mode == "token-mean":
+    return (per_token_loss * completion_mask).sum() / jnp.clip(
+        completion_mask.sum(), min=1.0
+    )
+  elif loss_agg_mode == "sequence-mean-token-mean":
+    seq_mask = completion_mask.sum(axis=-1)
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        seq_mask, min=1.0
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "sequence-mean-token-scale":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        norm, min=1e-6
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "seq-mean-token-sum":
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
+    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+    return (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+  elif loss_agg_mode == "sequence-mean-token-sum-norm":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
+    return (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+  else:
+    raise ValueError(
+        f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
+        " 'sequence-mean-token-sum-norm'."
+    )
+
+
+def _metric_scalar(value: Any) -> Any:
+  """A WeightedMetric reduced to its scalar via compute(); scalars pass through.
+
+  Metric aux values may be `WeightedMetric` (deferred division) or plain
+  scalars. This normalizes either to a scalar for reduction / logging.
+  """
+  return value.compute() if isinstance(value, utils.WeightedMetric) else value
+
+
+def mean_of_means(values: Iterable[Any]) -> np.ndarray:
+  """Reducer: mean of per-micro-batch values (a WeightedMetric-safe np.mean).
+
+  Each value is reduced to a scalar first (WeightedMetric via compute(), i.e.
+  divided per micro-batch), then averaged. For plain scalars this is exactly
+  np.mean, so it is a safe drop-in replacement.
+  """
+  return np.mean([np.asarray(_metric_scalar(v)) for v in values])
+
+
+def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
+  """Reducer: global sum(S)/sum(d) across per-micro-batch WeightedMetric values.
+
+  Sums numerators and denominators before dividing (token-weighted / global),
+  as opposed to `mean_of_means` which averages per-micro-batch means. Equal to
+  `mean_of_means` when the denominator is constant across micro-batches; they
+  diverge otherwise (e.g. sequence packing).
+  """
+  total_sum = sum(float(v.unreduced_sum) for v in values)
+  total_denom = sum(float(v.denominator) for v in values)
+  return total_sum / total_denom if total_denom != 0 else 0.0
+
+
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   """Computes the entropy of a distribution given its logits.
 

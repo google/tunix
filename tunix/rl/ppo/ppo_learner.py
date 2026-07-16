@@ -221,21 +221,21 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # ===== Configure the metrics logger =====
     # We just log the metrics returned in `aux`. All other metrics are logged
     # by `RLCluster` itself.
-    actor_rl_metrics_to_log = {"pg_clipfrac": np.mean}
+    actor_rl_metrics_to_log = {"pg_clipfrac": common.mean_of_means}
     if self.algo_config.epsilon_c is not None:
-      actor_rl_metrics_to_log["pg_clipfrac_lower"] = np.mean
+      actor_rl_metrics_to_log["pg_clipfrac_lower"] = common.mean_of_means
     if (
         self.algo_config.entropy_coef is not None
         and self.algo_config.entropy_coef > 0.0
     ):
-      actor_rl_metrics_to_log["loss/entropy"] = np.mean
+      actor_rl_metrics_to_log["loss/entropy"] = common.mean_of_means
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
         actor_rl_metrics_to_log  # pyrefly: ignore[bad-argument-type]
     )
 
     self.rl_cluster.critic_trainer.with_rl_metrics_to_log({
-        "vpred_mean": np.mean,
-        "vf_clipfrac": np.mean,
+        "vpred_mean": common.mean_of_means,
+        "vf_clipfrac": common.mean_of_means,
     })
 
   def _generate_and_compute_advantage(

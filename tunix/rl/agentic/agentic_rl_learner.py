@@ -1027,7 +1027,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             am = trainer_buf.additional_metrics
             for key, label in (
                 ("grad_norm", "grad_norm"),
-                ("pg_loss", "pg_loss"),
+                ("reduced_pg_loss", "reduced_pg_loss"),
                 ("entropy", "entropy"),
                 ("kl", "kl"),
                 ("log_ratio/abs_mean", "log_ratio_abs"),
@@ -1036,7 +1036,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               if key in am:
                 vals, _ = am[key]
                 if vals:
-                  v = float(np.mean([np.asarray(x) for x in vals]))
+                  v = float(
+                      np.mean([
+                          np.asarray(common._metric_scalar(x)) for x in vals
+                      ])
+                  )
                   extras.append(f"{label}={v:.4f}")
             if extras:
               trainer_str = " " + " ".join(extras)
