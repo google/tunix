@@ -113,7 +113,7 @@ spec:
                   model_config.model_source=huggingface \
                   model_config.use_flash_attention=true \
                   model_config.flash_attention_block_size=128 \
-                  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/qwen3-1.7b-base" \
+                  model_config.intermediate_ckpt_dir="None" \
                   model_config.model_download_path="/tmp/models/qwen3-1.7b-base" \
                   model_config.mesh.shape="(16,4)" \
                   model_config.mesh.axis_names="('fsdp','tp')" \
