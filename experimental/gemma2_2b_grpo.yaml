@@ -98,10 +98,12 @@ spec:
                 # model's get_default_sharding).
                 # [batch] activations shard the batch dim on fsdp (act_btd=
                 # ('fsdp',...)), so every per-step batch must be divisible by
-                # fsdp=16. The config default batch_size=1 is tuned for fsdp=2
-                # and WOULD crash here, so batch_size / mini_batch_size /
-                # train_micro_batch_size are bumped to 16 below (deviates from
-                # run_gemma2_2b.sh defaults, but required by the 64-chip mesh).
+                # fsdp=16. Aligned with the agentic qwen3 gsm8k GRPO run:
+                # batch=64, mini=64, micro=16, compute_logps=16, num_generations=8,
+                # beta=0.04, kl_loss_mode=mse_kl (all divisible on the 64-chip
+                # (16,4) mesh: micro/logps 16/16=1, rollout 64*8=512 / 16 = 32).
+                # max_steps=100; checkpoint save_interval bumped high (~off) for
+                # this experiment. Rollout seq kept shorter (768/256) for speed.
                 TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 \
                 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
                 ENABLE_PATHWAYS_PERSISTENCE='1' \
@@ -118,20 +120,26 @@ spec:
                   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma2_2b_grpo" \
                   model_config.mesh.shape="(16,4)" \
                   actor_model_config.mesh.shape="(16,4)" \
-                  batch_size=16 \
+                  batch_size=64 \
                   num_batches=3738 \
                   num_train_epochs=1 \
                   train_fraction=1.0 \
                   rl_training_config.actor_optimizer_config.warmup_ratio=0.1 \
-                  rl_training_config.actor_optimizer_config.warmup_steps=2 \
-                  rl_training_config.actor_optimizer_config.decay_steps=20 \
-                  rl_training_config.max_steps=20 \
+                  rl_training_config.actor_optimizer_config.warmup_steps=10 \
+                  rl_training_config.actor_optimizer_config.decay_steps=100 \
+                  rl_training_config.max_steps=100 \
                   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo" \
                   rl_training_config.checkpoint_root_directory="/tmp/ckpts_gemma2_grpo" \
-                  rl_training_config.mini_batch_size=16 \
+                  rl_training_config.checkpointing_options.save_interval_steps=100000 \
+                  rl_training_config.mini_batch_size=64 \
                   rl_training_config.train_micro_batch_size=16 \
-                  rollout_config.total_generation_steps=512 \
-                  rollout_config.max_prompt_length=128
+                  rl_training_config.compute_logps_micro_batch_size=16 \
+                  grpo_config.num_generations=8 \
+                  grpo_config.beta=0.04 \
+                  grpo_config.kl_loss_mode="mse_kl" \
+                  rollout_config.temperature=1.0 \
+                  rollout_config.total_generation_steps=768 \
+                  rollout_config.max_prompt_length=256
               env:
               - name: PATHWAYS_HEAD
                 value: localhost

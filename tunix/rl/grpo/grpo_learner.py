@@ -198,6 +198,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": common.mean_of_means,
         "pg_clipfrac": common.mean_of_means,
+        # Log both pg-loss reductions (reduced=mean-of-means, unreduced=global
+        # sum(S)/sum(d)), matching the agentic GRPO learner. Equal today
+        # (constant denom); diverge under sequence packing.
+        "reduced_pg_loss": common.mean_of_means,
+        "unreduced_pg_loss": common.global_weighted_mean,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
