@@ -628,9 +628,21 @@ class PeftTrainer:
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
     def _sanitize_pspec(a, p):
-      if isinstance(p, jax.sharding.PartitionSpec) and hasattr(a, 'ndim'):
-        if len(p) > a.ndim:
-          return jax.sharding.PartitionSpec(*p[:a.ndim])
+      if isinstance(p, jax.sharding.PartitionSpec) and hasattr(a, 'ndim') and hasattr(a, 'shape'):
+        spec_tuple = list(p)
+        if len(spec_tuple) > a.ndim:
+          spec_tuple = spec_tuple[:a.ndim]
+        mesh_dict = dict(mesh.shape)
+        sanitized = []
+        for i, axis_spec in enumerate(spec_tuple):
+          if axis_spec and axis_spec in mesh_dict:
+            dim_size = a.shape[i]
+            axis_size = mesh_dict[axis_spec]
+            if dim_size % axis_size != 0:
+              sanitized.append(None)
+              continue
+          sanitized.append(axis_spec)
+        return jax.sharding.PartitionSpec(*sanitized)
       return p
 
     optimizer_pspecs = jax.tree.map(
