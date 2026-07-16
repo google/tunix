@@ -58,6 +58,9 @@ class TrainingConfig:
   eval_every_n_steps: int
   max_steps: int | None = None
   gradient_accumulation_steps: int | None = None
+  # Gradient-accumulation strategy. "stream" (default) = the CL's streaming
+  # GradientAccumulator; "optax" = optax.MultiSteps (main's path), for ablation.
+  grad_accum: str = "stream"
 
   # If set, the checkpoints will be saved to this path. Checkpoints
   # contains the model params and the train data iterator state.
@@ -305,12 +308,21 @@ class PeftTrainer:
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
-    self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    # Promote floating-point leaves to float32 in-place to match the dtype of
-    # the optimizer update function branch (which is float32 due to
-    # `optax.inject_hyperparams`).
-    _promote_opt_state_floats_to_float32(self.optimizer)
-    self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
+    if self.config.grad_accum == "optax":
+      # optax path (aligned with main): wrap in MultiSteps, no promote, no
+      # streaming accumulator.
+      if self.config.gradient_accumulation_steps is not None:
+        optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
+            optimizer, self.config.gradient_accumulation_steps
+        )
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+    else:
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+      # Promote floating-point leaves to float32 in-place to match the dtype of
+      # the optimizer update function branch (which is float32 due to
+      # `optax.inject_hyperparams`).
+      _promote_opt_state_floats_to_float32(self.optimizer)
+      self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -516,6 +528,65 @@ class PeftTrainer:
     else:
       return loss_val, None, grad_norm
 
+  def _train_step_optax(
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer,
+      inputs: Any,
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+    """Train step for the optax.MultiSteps path (grad_accum="optax").
+
+    Shares the loss/gradient front-half with `_train_step` (same unreduced
+    LossOutput handling); differs only in accumulation: a direct
+    `optimizer.update` (MultiSteps accumulates internally), aligned with main.
+
+    Args:
+      model: The model to train.
+      optimizer: The optimizer to use (optax.MultiSteps-wrapped).
+      inputs: The training input.
+
+    Returns:
+      A tuple containing the loss, auxiliary data (or None if has_aux is False),
+      and the gradient norm.
+    """
+    inputs = self.gen_model_input_fn(inputs)
+
+    @functools.wraps(self.loss_fn)
+    def diff_fn(model, *args, **kwargs):
+      out = self.loss_fn(model, *args, **kwargs)
+      if isinstance(out, utils.LossOutput):
+        return out.primary_loss.unreduced_sum, out
+      elif self._has_aux:
+        return out[0], out[1]
+      else:
+        return out, None
+
+    grad_fn = nnx.value_and_grad(
+        diff_fn,
+        argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
+        has_aux=True,
+    )
+    (loss_val, aux), grads = grad_fn(model, **inputs)
+
+    if isinstance(aux, utils.LossOutput):
+      # Scale the unreduced gradients using the metric's scale computation
+      scale = aux.primary_loss.compute_scale()
+      grads = jax.tree.map(lambda g: g * scale, grads)
+
+      # Compute exactly equivalent legacy loss val
+      loss_val = aux.primary_loss.compute()
+
+    grad_norm = optax.global_norm(grads)
+    optimizer.update(model, grads)
+
+    if isinstance(aux, utils.LossOutput):
+      # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
+      return loss_val, aux.aux_metrics, grad_norm
+    elif self._has_aux:
+      return loss_val, aux, grad_norm
+    else:
+      return loss_val, None, grad_norm
+
   def _eval_step(
       self, model: nnx.Module, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
@@ -533,6 +604,8 @@ class PeftTrainer:
       self,
   ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
     """Creates the train step function."""
+    if self.config.grad_accum == "optax":
+      return self._train_step_optax
     return self._train_step
 
   def create_eval_step_fn(
@@ -558,6 +631,10 @@ class PeftTrainer:
         optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
+
+    # optax path uses MultiSteps (no streaming accumulator to shard).
+    if self.config.grad_accum == "optax":
+      return
 
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     model_state = nnx.state(self.model, wrt_target)
@@ -595,9 +672,14 @@ class PeftTrainer:
 
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      self._jitted_train_step_fn = nnx.jit(
-          train_step, donate_argnames=("optimizer", "grad_accumulator")
-      )
+      if self.config.grad_accum == "optax":
+        self._jitted_train_step_fn = nnx.jit(
+            train_step, donate_argnames=("optimizer",)
+        )
+      else:
+        self._jitted_train_step_fn = nnx.jit(
+            train_step, donate_argnames=("optimizer", "grad_accumulator")
+        )
       self._jitted_eval_step_fn = nnx.jit(eval_step)
 
       def maybe_cache_and_partial(f, *args):
@@ -607,12 +689,19 @@ class PeftTrainer:
         else:
           return functools.partial(f, *args)
 
-      self._jitted_train_step_fn = maybe_cache_and_partial(
-          self._jitted_train_step_fn,
-          self.model,
-          self.optimizer,
-          self.grad_accumulator,
-      )
+      if self.config.grad_accum == "optax":
+        self._jitted_train_step_fn = maybe_cache_and_partial(
+            self._jitted_train_step_fn,
+            self.model,
+            self.optimizer,
+        )
+      else:
+        self._jitted_train_step_fn = maybe_cache_and_partial(
+            self._jitted_train_step_fn,
+            self.model,
+            self.optimizer,
+            self.grad_accumulator,
+        )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
           self._jitted_eval_step_fn, self.model
       )
@@ -906,10 +995,14 @@ class PeftTrainer:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          train_loss, aux, grad_norm = train_step(
-              train_example,
-              is_update_step=jnp.array(is_update_step_val, dtype=jnp.bool_),
-          )
+          if self.config.grad_accum == "optax":
+            # optax MultiSteps handles accumulation cadence internally.
+            train_loss, aux, grad_norm = train_step(train_example)
+          else:
+            train_loss, aux, grad_norm = train_step(
+                train_example,
+                is_update_step=jnp.array(is_update_step_val, dtype=jnp.bool_),
+            )
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 

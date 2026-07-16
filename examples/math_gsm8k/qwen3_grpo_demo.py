@@ -75,8 +75,9 @@ import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
 
-# For OSS usage
-# import tensorflow_datasets.text.gsm8k
+# For OSS usage: registers the `gsm8k` tfds builder (else tfds.data_source raises
+# DatasetNotFoundError).
+import tensorflow_datasets.text.gsm8k  # noqa: F401  pylint: disable=unused-import
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -129,6 +130,7 @@ from tunix.models.qwen3 import params as qwen3_params_lib
 from tunix.oss import utils as oss_utils
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
+from tunix.sft import profiler as profiler_lib
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.rl.rollout import base_rollout
@@ -155,6 +157,14 @@ arg_parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
 arg_parser.add_argument(
     "--rollout_vllm_max_num_batched_tokens", type=int, default=None
 )
+# Ablation: gradient-accumulation strategy (stream = CL default, optax = main).
+arg_parser.add_argument(
+    "--grad_accum", type=str, default="stream", choices=["stream", "optax"]
+)
+# Profiler (off by default): set --profiler_log_dir to enable xprof.
+arg_parser.add_argument("--profiler_log_dir", type=str, default=None)
+arg_parser.add_argument("--profiler_skip_steps", type=int, default=5)
+arg_parser.add_argument("--profiler_steps", type=int, default=3)
 args, _ = arg_parser.parse_known_args()
 
 
@@ -162,6 +172,17 @@ args, _ = arg_parser.parse_known_args()
 MODEL_NAME = "Qwen3-1.7B"
 MODEL_ID = f"Qwen/{MODEL_NAME}"
 SEED = 42
+
+GRAD_ACCUM = args.grad_accum
+PROFILER_OPTIONS = (
+    profiler_lib.ProfilerOptions(
+        log_dir=args.profiler_log_dir,
+        skip_first_n_steps=args.profiler_skip_steps,
+        profiler_steps=args.profiler_steps,
+    )
+    if args.profiler_log_dir
+    else None
+)
 
 NUM_PROMPTS_PER_STEP = args.batch_size
 NUM_GENERATIONS = 8
@@ -480,6 +501,17 @@ class VTCRawTextParser:
         parts.append(content)
     return "\n".join(parts)
 
+  def update_assistant_end_tokens(self, tokens):
+    """No-op end-token handling for raw text (matches BaseChatTemplateParser).
+
+    The trajectory collect engine calls this on the chat parser to append any
+    assistant-turn end markers and report how many tokens it added (used to
+    build assistant_masks). A raw-text parser appends no markers, so it returns
+    the tokens unchanged with 0 appended — identical to the base parser's
+    default at parser.py:158.
+    """
+    return tokens, 0
+
 
 class VTCGRPOLearner(GRPOLearner):
   """Demo-local learner that normalizes TFDS string payloads to Python str."""
@@ -711,6 +743,8 @@ def main() -> None:
           mini_batch_size=MINI_BATCH_SIZE,
           train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
+          grad_accum=GRAD_ACCUM,
+          profiler_options=PROFILER_OPTIONS,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
               CHECKPOINT_ROOT if ENABLE_CHECKPOINTING else None
@@ -780,7 +814,9 @@ def main() -> None:
 
   # ====== Training ======
   try:
-    grpo_trainer.train(train_dataset, eval_dataset=eval_dataset)
+    # eval disabled (eval_dataset=None) to match the known-good frozenlake run
+    # and avoid the EVAL_AT_START rollout path.
+    grpo_trainer.train(train_dataset, eval_dataset=None)
   except Exception:
     rl_cluster.close()
     raise
