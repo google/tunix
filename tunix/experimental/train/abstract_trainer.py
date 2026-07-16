@@ -20,6 +20,8 @@ Defines the pure ML algorithmic core of a trainer.
 import abc
 from typing import Any, Callable, List, Optional
 
+from tunix.experimental.metrics import metrics
+
 
 class AbstractTrainer(abc.ABC):
   """The pure ML algorithmic core of a trainer.
@@ -157,7 +159,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def get_metrics(self) -> List[Any]:
+  def get_metrics(self) -> metrics.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_metrics."
