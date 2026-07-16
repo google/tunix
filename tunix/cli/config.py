@@ -472,9 +472,9 @@ class HyperParameters:
     )
     # TODO(b/467448875): Add support for other sources, such as kaggle for other
     # models.
-    supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
-    supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
-    supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
+    supported_sources["gemma"] = ["kaggle", "huggingface", "internal", "maxtext"]
+    supported_sources["gemma2"] = ["kaggle", "huggingface", "internal", "maxtext"]
+    supported_sources["gemma3"] = ["gcs", "huggingface", "internal", "maxtext"]
 
     if model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
       expected_sources = supported_sources["gemma3"]
