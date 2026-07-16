@@ -627,6 +627,16 @@ class PeftTrainer:
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
+    def _sanitize_pspec(a, p):
+      if isinstance(p, jax.sharding.PartitionSpec) and hasattr(a, 'ndim'):
+        if len(p) > a.ndim:
+          return jax.sharding.PartitionSpec(*p[:a.ndim])
+      return p
+
+    optimizer_pspecs = jax.tree.map(
+        _sanitize_pspec, optimizer_state, optimizer_pspecs
+    )
+
     optimizer_sharded_state = jax.lax.with_sharding_constraint(
         optimizer_state, optimizer_pspecs
     )
@@ -639,6 +649,7 @@ class PeftTrainer:
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     model_state = nnx.state(self.model, wrt_target)
     model_pspecs = nnx.get_partition_spec(model_state)
+    model_pspecs = jax.tree.map(_sanitize_pspec, model_state, model_pspecs)
 
     # Partition Gradients similar to the model
     grads_sharded = jax.lax.with_sharding_constraint(
