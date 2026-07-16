@@ -319,36 +319,17 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       ])
       old_per_token_logps = rollout_per_token_logps
 
-    needs_rollout_logps = (
-        self.algo_config.use_rollout_logps
-        and rollout_per_token_logps is None
-        and (
-            self.algo_config.num_iterations > 1
-            or self.algo_config.sampler_is == "token"
-        )
-    )
-    if needs_rollout_logps:
-      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ROLLOUT].devices
-      with self.rl_cluster.perf.span(
-          "old_actor_inference", devices
-      ) as interval, self.rl_cluster.perf_v2.span(
-          perf_constants.OLD_ACTOR_INFERENCE, devices, tags=perf_tags
-      ) as interval_v2:
-        rollout_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=jax_completion_ids,
-            micro_batch_size=compute_logps_micro_batch_size,
-        )
-        interval.device_end([rollout_per_token_logps])
-        interval_v2.async_end([rollout_per_token_logps])
-      old_per_token_logps = rollout_per_token_logps
-
     actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
     needs_trainer_logps = (
         not self.algo_config.use_rollout_logps
-        or self.algo_config.sampler_is == "token"
-        or (rollout_per_token_logps is not None and have_actor_mesh)
+        or (
+            rollout_per_token_logps is not None
+            and (
+                have_actor_mesh
+                or self.algo_config.sampler_is == "token"
+            )
+        )
     )
     if needs_trainer_logps:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
@@ -378,9 +359,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if self.algo_config.num_iterations > 1 and old_per_token_logps is None:
       raise RuntimeError(
           "old_per_token_logps is not available for off-policy RL. Enable "
-          "`return_logprobs` in RolloutConfig, keep rollout logp computation "
-          "available, or set use_rollout_logps=False to recompute on the "
-          "trainer actor."
+          " `return_logprobs` in RolloutConfig."
       )
 
     with self.rl_cluster.perf.span(
