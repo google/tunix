@@ -433,18 +433,18 @@ class AutoModel:
     naming_info = naming.ModelNaming(model_id=model_id)
 
     # Download the model
-    if model_source in (
-        ModelSource.INTERNAL,
-        ModelSource.GCS,
-        ModelSource.KAGGLE,
-    ):
-      if model_path is None:
+    if model_path:
+      model_id_or_path = model_path
+    else:
+      if model_source in (
+          ModelSource.INTERNAL,
+          ModelSource.GCS,
+          ModelSource.KAGGLE,
+      ):
         raise ValueError(
             'model_path is required for model_source: '
             f'{model_source}. Please provide a valid model_path.'
         )
-      model_id_or_path = model_path
-    else:
       model_id_or_path = model_id
     resolved_model_path = download_model(
         model_id_or_path, model_download_path, model_source
@@ -457,18 +457,18 @@ class AutoModel:
         from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
         from maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
       except ImportError:
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
+        from maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
+        from maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
+        from maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
 
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       argv = [
           '',
-          'base.yml',
+          'src/maxtext/configs/base.yml',
           f'model_name={naming_info.model_name}',
       ]
 
-      if model_path is not None:
+      if model_path:
         argv.append(f'load_parameters_path={resolved_model_path}')
 
       # We handle jax distribution outside or it's not needed by default.
@@ -579,7 +579,6 @@ class AutoModel:
         )
       except TypeError:
         load_dtype = load_dtype_str
-
 
       # Apply any model config field overrides passed via kwargs (e.g.
       # use_flash_attention, flash_attention_block_size).

@@ -10,9 +10,9 @@ import logging
 import os
 import signal
 import sys
+
 from absl import logging as absl_logging
 import datasets as datasets_lib
-from datasets import load_dataset
 from flax import nnx
 import grain
 from huggingface_hub import snapshot_download
@@ -26,8 +26,8 @@ from orbax import checkpoint as ocp
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
-from tunix.utils import compat
 from tunix.rl.agentic.agents import agent_types
+from tunix.utils import compat
 import vllm  # pytype: disable=import-error
 
 faulthandler.register(signal.SIGINT, all_threads=True)
@@ -42,9 +42,20 @@ parser = argparse.ArgumentParser(
 
 # General Config
 parser.add_argument("--models_base_dir", type=str, default="models")
+parser.add_argument(
+    "--model_source",
+    type=str,
+    default="huggingface",
+    choices=["huggingface", "maxtext"],
+)
+parser.add_argument("--model_absolute_path", type=str, default=None)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--model_version", type=str, default="Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
+parser.add_argument("--dataset_path", type=str, default=None)
+
+parser.add_argument("--tpu_topology", type=str, default=None)
+
 
 # Data & Training Flow
 parser.add_argument("--batch_size", type=int, default=8)
@@ -345,25 +356,33 @@ except Exception as e:
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
-MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
+MODEL_SOURCE = args.model_source
+MODEL_ABSOLUTE_PATH = args.model_absolute_path
 
-print(f"Looking for local model at: {MODEL_PATH}...")
-
-# Check if directory exists and is not empty
-if not os.path.exists(MODEL_PATH) or not os.listdir(MODEL_PATH):
-  print(f"Model not found locally. Starting download to {MODEL_PATH}...")
-  os.makedirs(MODEL_PATH, exist_ok=True)
-
-  # Assumes "Qwen/" organization prefix for HF download. Adjust if using other models.
-  snapshot_download(  # pyrefly: ignore[no-matching-overload]
-      repo_id=f"Qwen/{MODEL_VERSION}",
-      local_dir=MODEL_PATH,
-      local_dir_use_symlinks=False,
-  )
-  print("Download complete!")
+if MODEL_ABSOLUTE_PATH:
+  MODEL_PATH = MODEL_ABSOLUTE_PATH
+  print(f"Using model from absolute path: {MODEL_PATH}")
 else:
-  print(f"✅ Found existing local model at {MODEL_PATH}")
+  MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
+  MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
+
+  print(f"Looking for local model at: {MODEL_PATH}...")
+
+  # Check if directory exists and is not empty
+  if not os.path.exists(MODEL_PATH) or not os.listdir(MODEL_PATH):
+    print(f"Model not found locally. Starting download to {MODEL_PATH}...")
+    os.makedirs(MODEL_PATH, exist_ok=True)
+
+    # Assumes "Qwen/" organization prefix for HF download. Adjust if using
+    # other models.
+    snapshot_download(  # pyrefly: ignore[no-matching-overload]
+        repo_id=f"Qwen/{MODEL_VERSION}",
+        local_dir=MODEL_PATH,
+        local_dir_use_symlinks=False,
+    )
+    print("Download complete!")
+  else:
+    print(f"✅ Found existing local model at {MODEL_PATH}")
 
 # ====== Data ======
 TRAIN_FRACTION = args.train_fraction
@@ -484,6 +503,8 @@ USE_ROLLOUT_LOGPS = args.use_rollout_logps
 # ==========================================
 import jax
 import jax.numpy as jnp
+from tunix.models.automodel import AutoModel
+from tunix.models.automodel import ModelSource
 from tunix.models.automodel import call_model_config
 
 config = call_model_config(MODEL_VERSION)
@@ -583,9 +604,18 @@ if train_sp is not None:
 # 6. Model Initialization
 # ==========================================
 
-qwen_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
-)
+if MODEL_SOURCE == "maxtext":
+  qwen_reference, _ = AutoModel.from_pretrained(
+      model_id=MODEL_VERSION,
+      mesh=train_mesh,
+      model_source=ModelSource.MAXTEXT,
+      model_path=MODEL_PATH,
+      enable_checkpointing=True,
+  )
+else:
+  qwen_reference = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
+  )
 
 
 def get_lora_model(base_model, model_mesh):
@@ -639,12 +669,17 @@ chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
 # ==========================================
 print("Loading Dataset...")
 
-dataset = load_dataset(
-    "R2E-Gym/R2E-Gym-Subset",
-    split="train",
-    cache_dir=DATASET_CACHE,
-    trust_remote_code=True,
-)
+if args.dataset_path:
+  dataset = datasets_lib.load_from_disk(args.dataset_path)
+  if isinstance(dataset, datasets_lib.DatasetDict):
+    dataset = dataset["train"]
+else:
+  dataset = datasets_lib.load_dataset(
+      "R2E-Gym/R2E-Gym-Subset",
+      split="train",
+      cache_dir=DATASET_CACHE,
+      trust_remote_code=True,
+  )
 
 
 def transform(entry):
