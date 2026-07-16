@@ -347,6 +347,17 @@ def pack_sequences(
     """Flushes the buffer into a list of TrainExamples."""
     nonlocal buffer, current_tokens
     if not buffer:
+      if is_update:
+        # An update boundary (is_update=True) with an empty buffer would yield
+        # nothing, silently dropping the optimizer update for this mini-batch
+        # (its accumulated gradients would leak into the next update). This
+        # usually means an empty or all-skipped input batch arrived at a
+        # mini-batch boundary. Fail loudly instead of corrupting training.
+        raise ValueError(
+            "pack_sequences reached an update boundary (is_update=True) with an "
+            "empty buffer; no packed example would be produced, dropping a "
+            "gradient-accumulation update."
+        )
       return []
 
     # TODO(noghabi): Pad to the next power of 2 instead of user defined

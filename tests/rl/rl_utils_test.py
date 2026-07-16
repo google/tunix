@@ -253,6 +253,46 @@ class UtilsTest(absltest.TestCase):
       np.testing.assert_array_equal(pack2.segment_positions, expected_positions_2)
       np.testing.assert_array_equal(pack2.completion_mask, expected_mask_2)
 
+  def _mock_example(self, prompt_len: int, completion_len: int):
+    return common.TrainExample(
+        prompt_ids=jnp.ones((1, prompt_len), dtype=jnp.int32),
+        prompt_mask=jnp.ones((1, prompt_len), dtype=jnp.int32),
+        completion_ids=jnp.ones((1, completion_len), dtype=jnp.int32) * 2,
+        completion_mask=jnp.ones((1, completion_len), dtype=jnp.int32),
+        advantages=jnp.array([1.5], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        segment_ids=None,
+        segment_positions=None,
+    )
+
+  def test_pack_sequences_raises_on_empty_update_boundary(self):
+    # An update boundary (is_update=True) reached with an empty buffer would
+    # yield nothing and silently drop a gradient-accumulation update; it must
+    # raise instead. An empty input batch at a `target_items_per_update`
+    # boundary triggers exactly this.
+    packed = utils.pack_sequences(
+        iter([[]]),  # one empty item-list -> nothing buffered at the boundary
+        max_token_budget=10,
+        target_items_per_update=1,  # every item-list is an update boundary
+    )
+    with self.assertRaisesRegex(ValueError, 'update boundary'):
+      list(packed)
+
+  def test_pack_sequences_marks_is_update_step_at_boundary(self):
+    # With target_items_per_update=1 each non-empty flush is an update boundary,
+    # so every packed example is marked is_update_step=True (and no raise).
+    packed = list(
+        utils.pack_sequences(
+            iter([[self._mock_example(1, 2)], [self._mock_example(2, 3)]]),
+            max_token_budget=10,
+            target_items_per_update=1,
+        )
+    )
+    self.assertLen(packed, 2)
+    for batch in packed:
+      self.assertTrue(bool(np.asarray(batch[0].is_update_step)))
+
 
 if __name__ == '__main__':
   absltest.main()
