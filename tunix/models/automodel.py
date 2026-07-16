@@ -203,6 +203,14 @@ def create_gemma_model_with_nnx_conversion(
     model, params = create_gemma_model_from_params(params_path, model_name)
 
     if not intermediate_ckpt_dir or intermediate_ckpt_dir == 'None':
+      named_shardings = nnx.get_named_sharding(nnx.state(model), mesh)
+      graph_def, state = nnx.split(model)
+      sharded_state = jax.tree.map(
+          lambda x, s: jax.device_put(x, s),
+          state,
+          named_shardings,
+      )
+      model = nnx.merge(graph_def, sharded_state)
       return model, params
 
     checkpointer = ocp.StandardCheckpointer()
