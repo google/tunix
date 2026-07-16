@@ -898,6 +898,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
       attention_mask: jaxtyping.Array,  # [B, L, L']
       output_hidden_states: bool = False,
       skip_lm_head: bool = False,
+      **kwargs,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Transformer forward pass.
 
