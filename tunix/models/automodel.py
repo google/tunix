@@ -202,6 +202,9 @@ def create_gemma_model_with_nnx_conversion(
 
     model, params = create_gemma_model_from_params(params_path, model_name)
 
+    if not intermediate_ckpt_dir or intermediate_ckpt_dir == 'None':
+      return model, params
+
     checkpointer = ocp.StandardCheckpointer()
     _, state = nnx.split(model)
     checkpointer.save(
@@ -215,7 +218,7 @@ def create_gemma_model_with_nnx_conversion(
         model_name, intermediate_ckpt_dir, rng_seed, mesh
     )
 
-  if os.path.exists(intermediate_ckpt_dir):
+  if intermediate_ckpt_dir and intermediate_ckpt_dir != 'None' and os.path.exists(intermediate_ckpt_dir):
     logging.info(
         'Loading from intermediate_ckpt_dir %s.', intermediate_ckpt_dir
     )
