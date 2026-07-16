@@ -118,7 +118,7 @@ spec:
                   model_config.mesh.shape="(16,4)" \
                   model_config.mesh.axis_names="('fsdp','tp')" \
                   model_config.rng_seed=42 \
-                  model_config.remat_config=3 \
+                  model_config.remat_config="NONE" \
                   actor_model_config.mesh.shape="(16,4)" \
                   actor_model_config.mesh.axis_names="('fsdp','tp')" \
                   reference_model_config.mesh=null \
