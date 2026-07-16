@@ -337,7 +337,11 @@ def pack_sequences(
     pad_id: int = 0,
     target_items_per_update: int | None = None,
 ) -> Iterator[list[common.TrainExample]]:
-  """Packs a stream of TrainExamples into 1D sequences up to a token budget."""
+  """Packs a stream of TrainExamples into 1D sequences up to a token budget.
+
+  TODO(yuxzhang): update boundary uses a fixed grad_acc_steps (mini // micro);
+  packing-native would use dynamic micro-batches + global token norm (b/491970038).
+  """
   buffer = []
   current_tokens = 0
   example_cls = common.TrainExample
@@ -481,6 +485,10 @@ def pack_sequences(
       accumulated_items = 0
 
   if buffer:
+    # Leftover at end-of-stream = stream ended mid-mini-batch; forcing is_update
+    # here would update on a partial mini-batch. Require ending on a boundary.
+    if target_items_per_update and accumulated_items % target_items_per_update != 0:
+      raise ValueError("pack_sequences stream ended mid-mini-batch.")
     yield _flush_buffer(is_update=True)
 
 

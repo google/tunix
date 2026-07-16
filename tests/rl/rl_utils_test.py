@@ -279,6 +279,17 @@ class UtilsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'update boundary'):
       list(packed)
 
+  def test_pack_sequences_raises_on_mid_mini_batch_end(self):
+    # Stream ends mid-mini-batch (1 item-list but target_items_per_update=2) ->
+    # trailing flush would update on a partial mini-batch -> raise.
+    packed = utils.pack_sequences(
+        iter([[self._mock_example(1, 2)]]),
+        max_token_budget=10,
+        target_items_per_update=2,
+    )
+    with self.assertRaisesRegex(ValueError, 'mid-mini-batch'):
+      list(packed)
+
   def test_pack_sequences_marks_is_update_step_at_boundary(self):
     # With target_items_per_update=1 each non-empty flush is an update boundary,
     # so every packed example is marked is_update_step=True (and no raise).
