@@ -104,22 +104,25 @@ spec:
                 # (16,4) mesh: micro/logps 16/16=1, rollout 64*8=512 / 16 = 32).
                 # max_steps=100; checkpoint save_interval bumped high (~off) for
                 # this experiment. Rollout seq kept shorter (768/256) for speed.
-                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 \
-                JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-                ENABLE_PATHWAYS_PERSISTENCE='1' \
-                HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) \
-                WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) \
-                PYTHONPATH=$PYTHONPATH:. SKIP_JAX_PRECOMPILE=True \
-                FLAGS_pathways_enforce_subset_devices_form_subslice=False \
-                XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+                export TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 && \
+                export JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 && \
+                export ENABLE_PATHWAYS_PERSISTENCE='1' && \
+                export HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) && \
+                export WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) && \
+                export KAGGLE_USERNAME=$(echo -n $INJECTED_KAGGLE_USERNAME | xargs) && \
+                export KAGGLE_KEY=$(echo -n $INJECTED_KAGGLE_KEY | xargs) && \
+                export KAGGLE_API_TOKEN=$(echo -n $INJECTED_KAGGLE_KEY | xargs) && \
+                export PYTHONPATH=$PYTHONPATH:. SKIP_JAX_PRECOMPILE=True && \
+                export FLAGS_pathways_enforce_subset_devices_form_subslice=False && \
+                rm -rf /tmp/ckpts_gemma2_grpo /tmp/intermediate_ckpt && \
                 python3 -X faulthandler -u -m tunix.cli.grpo_main \
                   tunix/cli/base_config.yaml \
                   override_config_file=examples/rl/grpo/gsm8k/configs/gemma2_2b.yaml \
-                  model_config.model_source="huggingface" \
+                  model_config.model_source="kaggle" \
                   model_config.model_download_path="/tmp/models/gemma-2-2b" \
-                  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma2_2b_grpo" \
-                  model_config.mesh.shape="(16,4)" \
-                  actor_model_config.mesh.shape="(16,4)" \
+                  model_config.intermediate_ckpt_dir="None" \
+                  model_config.mesh.shape="(32,2)" \
+                  actor_model_config.mesh.shape="(32,2)" \
                   batch_size=64 \
                   num_batches=3738 \
                   num_train_epochs=1 \
@@ -143,6 +146,18 @@ spec:
               env:
               - name: PATHWAYS_HEAD
                 value: localhost
+              - name: INJECTED_KAGGLE_USERNAME
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: KAGGLE_USERNAME
+                    optional: true
+              - name: INJECTED_KAGGLE_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: KAGGLE_KEY
+                    optional: true
               - name: INJECTED_HF_TOKEN
                 valueFrom:
                   secretKeyRef:
