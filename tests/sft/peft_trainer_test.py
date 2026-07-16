@@ -30,6 +30,7 @@ import jax.sharding as shd
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.rl import common
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
@@ -768,6 +769,49 @@ class PeftTrainerTest(parameterized.TestCase):
     # update would instead match the sum/1 reference. It does not, which proves
     # the scale is applied.
     self.assertGreater(max_abs_diff(params_a, params_b1), 1e-6)
+
+  def test_stream_train_step_returns_raw_weighted_metric_aux(self):
+    # Since _compute_legacy_aux was dropped, the (stream) _train_step returns
+    # the raw aux with WeightedMetric preserved, so the metric ops can reduce
+    # sum/denom themselves (mean_of_means / global_weighted_mean) instead of
+    # receiving pre-divided scalars.
+    def loss_fn(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      s = jnp.sum(logits)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(s, jnp.array(2.0, jnp.float32)),
+          aux_metrics={
+              'foo': utils.WeightedMetric(jnp.array(10.0), jnp.array(5.0)),
+              'bar': utils.WeightedMetric(jnp.array(6.0), jnp.array(2.0)),
+          },
+      )
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(loss_fn)
+    acc = peft_trainer.GradientAccumulator(trainer.model, nnx.Param)
+
+    _, aux, _ = trainer._train_step(
+        trainer.model, trainer.optimizer, acc, self.train_ds[0], jnp.array(True)
+    )
+
+    # aux values stay raw WeightedMetric (not pre-divided to scalars).
+    self.assertIsInstance(aux['foo'], utils.WeightedMetric)
+    self.assertIsInstance(aux['bar'], utils.WeightedMetric)
+    # Metric ops reduce the raw WeightedMetric correctly across micro-batches.
+    self.assertAlmostEqual(
+        float(common.mean_of_means([aux['foo'], aux['foo']])), 2.0, places=5
+    )  # mean(10/5, 10/5)
+    self.assertAlmostEqual(
+        float(common.global_weighted_mean([aux['bar'], aux['bar']])), 3.0,
+        places=5,
+    )  # (6+6)/(2+2)
 
   def test_injected_params(self):
 
