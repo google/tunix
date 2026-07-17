@@ -155,6 +155,11 @@ spec:
                 # Remaining diff vs the demo = the learner pipeline itself
                 # (standard GrpoLearner vs agentic GRPOLearner): the A/B under
                 # test. Loss/advantage are the same fn (algo_core.py:365/:590).
+                # [dtype fix 2026-07-18] load_dtype=float32 casts ACTOR params
+                # to fp32 like the demo (qwen3_grpo_demo.py actor dtype=
+                # jnp.float32; ref bf16). Without it the CLI loads the HF bf16
+                # checkpoint as-is and the 2e-7 Adam steps round to zero in
+                # bf16 (ulp~6e-5 at |w|~0.02) => frozen weights, flat reward.
                 export TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 && \
                 export JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 && \
                 export ENABLE_PATHWAYS_PERSISTENCE='1' && \
@@ -169,7 +174,10 @@ spec:
                   model_config.model_id=Qwen/Qwen3-1.7B \
                   model_config.model_source=huggingface \
                   model_config.use_flash_attention=true \
-                  model_config.flash_attention_block_size=128 \
+                  model_config.flash_attention_block_size=256 \
+                  model_config.dtype="bfloat16" \
+                  model_config.load_dtype="float32" \
+                  reference_model_config.load_dtype="bfloat16" \
                   model_config.intermediate_ckpt_dir="None" \
                   model_config.model_download_path="/tmp/models/Qwen3-1.7B" \
                   model_config.mesh.shape="(16,4)" \

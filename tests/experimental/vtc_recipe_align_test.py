@@ -236,6 +236,12 @@ class YamlAlignmentTest(absltest.TestCase):
         'vllm_config.max_num_batched_tokens=147456',
         'vllm_config.kwargs.enable_prefix_caching=false',
         'model_config.model_id=Qwen/Qwen3-1.7B',
+        # dtype fix (P2): demo casts the ACTOR to fp32 (ref stays bf16);
+        # bf16 params swallow 2e-7 Adam steps (ulp ~6e-5 >> lr) => frozen.
+        'model_config.load_dtype="float32"',
+        'reference_model_config.load_dtype="bfloat16"',
+        'model_config.dtype="bfloat16"',
+        'model_config.flash_attention_block_size=256',
     ):
       self.assertIn(needle, self.yaml_text, msg=f'missing override: {needle}')
 
