@@ -661,13 +661,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         algo_config.policy_loss_fn
     )
-    loss, aux = policy_loss_fn(
+    loss_output = policy_loss_fn(
         model=MockModel(rngs=nnx.Rngs(0)),
         train_example=train_example,
         algo_config=algo_config,
         pad_id=0,
         eos_id=2,
     )
+    loss = loss_output.primary_loss.compute()
+    aux = loss_output.aux_metrics
     chex.assert_shape(loss, ())
     self.assertIn("kl", aux)
 
@@ -736,7 +738,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     policy_loss_fn = function_registry.get_policy_loss_fn(config.policy_loss_fn)
 
     model = MockModel(rngs=nnx.Rngs(0))
-    loss, _ = policy_loss_fn(
+    loss_output = policy_loss_fn(
         model=model,
         train_example=train_example,
         algo_config=config,
@@ -765,10 +767,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     expected_loss = float(jnp.mean(per_sequence_loss))
 
+    loss = loss_output.primary_loss.compute()
     np.testing.assert_allclose(loss, expected_loss, rtol=1e-6, atol=1e-6)
 
   def test_process_results_extracts_assistant_text(self):
     class MockTraj:
+
       def __init__(self, index):
         self.traj = {
             "conversation_text": [
@@ -789,6 +793,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     trajectories = [MockTraj(0), MockTraj(1)]
 
     extracted_completions = []
+
     def mock_compute_rewards(prompts, completions, **kwargs):
       extracted_completions.extend(completions)
       return jnp.ones(len(completions), dtype=jnp.float32)
@@ -842,7 +847,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         chat_parser=MockChatParser(),
     )
 
-    with mock.patch.object(learner, "_compute_rewards", side_effect=mock_compute_rewards):
+    with mock.patch.object(
+        learner, "_compute_rewards", side_effect=mock_compute_rewards
+    ):
       with mock.patch.object(
           learner.rl_cluster,
           "get_ref_per_token_logps",

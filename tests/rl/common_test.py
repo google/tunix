@@ -24,6 +24,10 @@ from tunix.tests import test_common as tc
 jax.config.update("jax_threefry_partitionable", False)
 jax.config.update("jax_default_matmul_precision", "highest")
 
+def _compute_loss(*args, **kwargs):
+  out = getattr(common, "aggregate_loss")(*args, **kwargs)
+  return out.compute()
+
 
 class CommonTest(parameterized.TestCase):
 
@@ -565,7 +569,7 @@ class CommonTest(parameterized.TestCase):
   ):
     per_token_loss = jnp.array(per_token_loss_list)
     completion_mask = jnp.array(completion_mask_list)
-    actual_loss = common.aggregate_loss(
+    actual_loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode, **kwargs
     )
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-6, atol=1e-6)
@@ -574,7 +578,7 @@ class CommonTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, "Unsupported loss aggregation mode"
     ):
-      common.aggregate_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
+      _compute_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
 
   @parameterized.named_parameters(
       dict(
@@ -610,7 +614,7 @@ class CommonTest(parameterized.TestCase):
   )
   def test_invalid_norm(self, norm_val, loss_agg_mode):
     with self.assertRaisesRegex(ValueError, "Invalid 'norm' value"):
-      common.aggregate_loss(
+      _compute_loss(
           jnp.ones((2, 2)),
           jnp.ones((2, 2)),
           loss_agg_mode,
@@ -707,7 +711,7 @@ class CommonTest(parameterized.TestCase):
     per_token_loss = jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16)
     completion_mask = jnp.array([1, 1, 0], dtype=jnp.int32)
 
-    loss = common.aggregate_loss(
+    loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode="token-mean"
     )
     self.assertEqual(loss.dtype, jnp.float32)
@@ -849,6 +853,112 @@ class CommonTest(parameterized.TestCase):
         segment_positions=jnp.arange(4, dtype=jnp.int32),
     )
     self.assertEqual(logps_packed.shape, (1, 4))
+
+class AggregateLossPackedTest(parameterized.TestCase):
+  """Pins that packing-aware aggregate_loss_packed == rectangular aggregate_loss.
+
+  Packed [P=3, T=5]: seq0 (prompt@0 + completion@1,2), seq1 (completion@0),
+  seq2 (completion@0,1), plus a fully-dummy pack row. Unpacking must reproduce
+  the per-sequence [N=3, R=3] rectangle so every loss_agg_mode reduces
+  correctly.
+  """
+
+  _MODES = (
+      "token-mean",
+      "sequence-mean-token-mean",
+      "sequence-mean-token-scale",
+      "seq-mean-token-sum",
+      "sequence-mean-token-sum-norm",
+  )
+
+  def _packed(self):
+    loss = jnp.array(
+        [[9, 2, 4, 6, 0], [8, 10, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.float32
+    )
+    mask = jnp.array(
+        [[0, 1, 1, 1, 0], [1, 1, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.int32
+    )
+    seg = jnp.array(
+        [[1, 1, 1, 2, 0], [1, 1, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.int32
+    )
+    pos = jnp.array(
+        [[0, 1, 2, 0, 0], [0, 1, 0, 0, 0], [0, 0, 0, 0, 0]], jnp.int32
+    )
+    return loss, mask, seg, pos
+
+  def _rectangular(self):
+    # Hand-built [N=3, R=3], independent of make_unpack_indices.
+    loss = jnp.array([[9, 2, 4], [6, 0, 0], [8, 10, 0]], jnp.float32)
+    mask = jnp.array([[0, 1, 1], [1, 0, 0], [1, 1, 0]], jnp.int32)
+    return loss, mask
+
+  @parameterized.parameters(*_MODES)
+  def test_packed_equals_rectangular(self, mode):
+    loss, mask, seg, pos = self._packed()
+    rloss, rmask = self._rectangular()
+    got = common.aggregate_loss_packed(
+        loss,
+        mask,
+        mode,
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=3,
+        r_max=3,
+    ).compute()
+    expected = common.aggregate_loss(rloss, rmask, mode).compute()
+    np.testing.assert_allclose(got, expected, atol=1e-4)
+
+  def test_token_mean_ground_truth(self):
+    # completion losses = [2,4,6,8,10] -> 30/5 = 6.0.
+    loss, mask, seg, pos = self._packed()
+    got = common.aggregate_loss_packed(
+        loss,
+        mask,
+        "token-mean",
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=3,
+        r_max=3,
+    ).compute()
+    np.testing.assert_allclose(got, 6.0, atol=1e-4)
+
+  @parameterized.parameters(
+      "token-mean",
+      "sequence-mean-token-mean",
+      "sequence-mean-token-scale",
+      "seq-mean-token-sum",
+  )
+  def test_empty_padding_row_does_not_pollute(self, mode):
+    # n_max=4 adds an empty row; decision-B (non-empty-row denom) keeps the
+    # result identical to the tight n_max=3.
+    loss, mask, seg, pos = self._packed()
+    tight = common.aggregate_loss_packed(
+        loss,
+        mask,
+        mode,
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=3,
+        r_max=3,
+    ).compute()
+    padded = common.aggregate_loss_packed(
+        loss,
+        mask,
+        mode,
+        segment_ids=seg,
+        segment_positions=pos,
+        n_max=4,
+        r_max=3,
+    ).compute()
+    np.testing.assert_allclose(padded, tight, atol=1e-4)
+
+  @parameterized.parameters(*_MODES)
+  def test_none_segments_matches_original(self, mode):
+    rloss, rmask = self._rectangular()
+    got = common.aggregate_loss_packed(rloss, rmask, mode).compute()
+    expected = common.aggregate_loss(rloss, rmask, mode).compute()
+    np.testing.assert_allclose(got, expected, atol=1e-6)
+
 
 if __name__ == "__main__":
   absltest.main()
