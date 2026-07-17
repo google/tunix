@@ -28,7 +28,6 @@ def resolve_self_hostname() -> str:
   pod_index = os.environ["POD_INDEX"]
 
   # Constructing a fully qualified domain name (FQDN)
-  # Format: <pod-hostname>.<headless-service-name>.<namespace>.svc.cluster.local
   fqdn = f"{jobset_name}-{replicated_job}-{job_index}-{pod_index}.{jobset_name}"
   return fqdn
 

@@ -16,8 +16,11 @@
 #   To run a role in local mode:
 #     ./launcher.sh --role=orchestrator --local
 
+# set by --local
 LOCAL_MODE=false
+# set by --role
 ROLE=""
+# set by --image
 TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:latest"
 
 while [[ $# -gt 0 ]]; do

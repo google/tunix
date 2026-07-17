@@ -12,6 +12,7 @@ def main(argv, context: ProcessContext | None) -> None:
 To run it
 
 ```shell
+$ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto
 $ PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --process_main=basics.basic.main
 ```
 
@@ -37,6 +38,7 @@ def main(argv, context: ProcessContext | None) -> None:
 To run it
 
 ```shell
+$ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto
 $ PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --process_main=basics.flag.main --message="hello flag"
 ```
 
@@ -55,6 +57,12 @@ First, we start a `door` process and make it discoverable on port `12345` by set
 Then, we start a `knocker` process and tell it to find `door` at address `door:12345` by setting `--discovery_addrs=door:12345`, and send a message by setting `--say="open the door"`.
 
 To run it
+
+0. Compile proto
+
+    ```shell
+    $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto
+    ```
 
 1. Start door
 
@@ -101,6 +109,13 @@ Note, this example just simulates the data flow, don't try to relate it to actua
 
 To run it
 
+0. Compile proto
+
+    ```shell
+    $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto
+    $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. examples/distributed/rl/service.proto
+    ```
+
 1. Start orchestrator process
 
     ```shell
@@ -118,4 +133,36 @@ To run it
 
     ```shell
     $ PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_main=rl.trainer.main --server_id=trainer --server_port=33333
+    ```
+
+
+## Example 5: Simulate RL workload on K8s
+
+The same as example, but on K8s.
+
+To run it
+
+0. Compile proto
+
+    ```shell
+    $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto
+    $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. examples/distributed/rl/service.proto
+    ```
+
+1. Start orchestrator process
+
+    ```shell
+    $ bash examples/distributed/rl/launcher.sh --role=orchestrator
+    ```
+
+2. Start rollout processes
+
+    ```shell
+    $ bash examples/distributed/rl/launcher.sh --role=rollout
+    ```
+
+3. Start trainer process
+
+    ```shell
+    $ bash examples/distributed/rl/launcher.sh --role=trainer
     ```
