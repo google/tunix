@@ -21,8 +21,28 @@ This module centralizes type aliases and dataclasses used for:
 
 import dataclasses
 
+import numpy as np
 from tunix.rl import common
 from tunix.rl.agentic.agents import agent_types
+
+##### Common DTOs (Data Transfer Objects) #####
+
+
+@dataclasses.dataclass(kw_only=True)
+class ErrorInfo:
+  """Structured description of a failed request, carried in-band on a result.
+
+  Attributes:
+    error_type: Short classifier for the failure (e.g. an exception class name).
+    message: Human-readable failure description.
+    retryable: Whether re-issuing the request could plausibly succeed.
+    traceback: Optional captured traceback, for diagnostics.
+  """
+
+  error_type: str
+  message: str
+  retryable: bool = False
+  traceback: str = ""
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -59,7 +79,79 @@ class RolloutRequest:
   sampling_params: SamplingParams
 
 
-# Generated Trajectory from a rollout
+@dataclasses.dataclass(kw_only=True)
+class TokenSegment:
+  """One contiguous span of the conversation token stream representing a single turn.
+
+  Each segment corresponds to a single turn's response from either the sampler
+  or the environment.
+
+  Attributes:
+    source: Origin of the span, e.g. "sampler" (model-emitted) or "env".
+    tokens: Array of token ids for this span.
+    loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
+    logprobs: Array of per-token log-probabilities under the sampling
+      distribution, or None for spans the model did not emit (e.g. env tokens).
+  """
+
+  source: str
+  tokens: np.ndarray
+  loss_mask: np.ndarray
+  logprobs: np.ndarray | None = None
+
+  def __post_init__(self):
+    if self.loss_mask.shape != self.tokens.shape:
+      raise ValueError(
+          f"loss_mask shape {self.loss_mask.shape} != tokens shape"
+          f" {self.tokens.shape}"
+      )
+    if self.logprobs is not None and self.logprobs.shape != self.tokens.shape:
+      raise ValueError(
+          f"logprobs shape {self.logprobs.shape} != tokens shape"
+          f" {self.tokens.shape}"
+      )
+
+
+@dataclasses.dataclass(kw_only=True)
+class RolloutResult:
+  """Serializable result of a generation request.
+
+  This is the wire-facing counterpart to RolloutRequest (and to the
+  worker-internal Trajectory): it carries only primitives and numpy
+  arrays, so it can cross a process boundary. A failed request is reported as a
+  result with `error` set and a non-success `status`, never as a dropped
+  response.
+
+  Attributes:
+    request_id: Echoes the originating request, for correlation/de-duplication.
+    prompt_id: Echoes the source prompt id.
+    status: Terminal status name (e.g. a rollout trajectory status, or
+      "CANCELLED").
+    prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
+      worker.
+    segments: Ordered conversation turns (segments) from the sampler (model
+      call) and environment; concatenated they form the full generated stream.
+    env_reward: Scalar environment reward for the trajectory.
+    policy_version: Weight version used to generate the trajectory.
+    error: Failure details when the request did not succeed, else None.
+  """
+
+  request_id: str
+  prompt_id: str
+  status: str
+  prompt_tokens: np.ndarray = dataclasses.field(
+      default_factory=lambda: np.zeros(0, dtype=np.int32)
+  )
+  segments: list[TokenSegment] = dataclasses.field(default_factory=list)
+  env_reward: float = 0.0
+  policy_version: int = 0
+  error: ErrorInfo | None = None
+  # TODO(b/532722981): capture rollout metrics, e.g., env time.
+
+
+##### Worker-internal datatypes #####
+
+# Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
 
 
