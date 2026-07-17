@@ -5,14 +5,14 @@ metadata:
   namespace: default
 spec:
   coordinator:
-    replicatedJob: pw-head
+    replicatedJob: proc
   failurePolicy:
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
   replicatedJobs:
-  - name: pw-head
+  - name: proc
     replicas: ${REPLICAS}
     template:
       metadata:
@@ -301,4 +301,4 @@ spec:
   successPolicy:
     operator: All
     targetReplicatedJobs:
-    - pw-head
+    - proc
