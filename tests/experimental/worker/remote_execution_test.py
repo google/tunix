@@ -509,10 +509,15 @@ class SubstrateHardeningTest(absltest.TestCase):
     finally:
       serve_loop = server.serve_loop
       if serve_loop is not None:
-        asyncio.run_coroutine_threadsafe(
-            server.stop_serving(), serve_loop
-        ).result(timeout=5)
-      thread.join(timeout=5)
+        # Fire-and-forget: triggering wait_for_termination unblocks
+        # start_serving, which then closes its own loop. The thread exiting is
+        # the real signal that the blocking serve returned, so we don't await
+        # the stop future (whose result races with that loop closing).
+        asyncio.run_coroutine_threadsafe(server.stop_serving(), serve_loop)
+      thread.join(timeout=10)
+      self.assertFalse(
+          thread.is_alive(), "blocking start_serving did not shut down"
+      )
 
 
 if __name__ == "__main__":

@@ -170,6 +170,80 @@ class UpdateResult:
   grad_norm: float | None = None
 
 
+@dataclasses.dataclass(kw_only=True)
+class LogprobsRequest:
+  """Request to score per-token log-probabilities under a frozen model.
+
+  Attributes:
+    request_id: Unique id for this request; echoed on the result.
+    prompt_tokens: int32 [B, P], LEFT-padded.
+    completion_tokens: int32 [B, C], RIGHT-padded; the result aligns to these
+      completion columns.
+    temperature: Softmax temperature to score under. Mandatory: it must match
+      the temperature the tokens were sampled at, or the log-probs are biased.
+    model_role: Which hosted model to score against (v1: "reference").
+    micro_batch_size: Optional worker-internal micro-batch size; None scores the
+      whole batch in one pass.
+  """
+
+  request_id: str
+  prompt_tokens: np.ndarray
+  completion_tokens: np.ndarray
+  temperature: float
+  model_role: str = "reference"
+  micro_batch_size: int | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class LogprobsResult:
+  """Per-token log-probabilities for a LogprobsRequest.
+
+  Attributes:
+    request_id: Echoes the originating request.
+    per_token_logps: float32 [B, C], aligned to the request's completion columns.
+    model_version: Version of the scoring weights (constant for a frozen model).
+  """
+
+  request_id: str
+  per_token_logps: np.ndarray
+  model_version: int = 0
+
+
+@dataclasses.dataclass(kw_only=True)
+class ScoreRequest:
+  """Request to score scalar rewards/values under a hosted model.
+
+  Attributes:
+    request_id: Unique id for this request; echoed on the result.
+    prompt_tokens: int32 [B, P], LEFT-padded.
+    completion_tokens: int32 [B, C], RIGHT-padded.
+    model_role: Which hosted model to score against (e.g. "reward").
+    micro_batch_size: Optional worker-internal micro-batch size; None scores the
+      whole batch in one pass.
+  """
+
+  request_id: str
+  prompt_tokens: np.ndarray
+  completion_tokens: np.ndarray
+  model_role: str = "reward"
+  micro_batch_size: int | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class ScoreResult:
+  """Scalar scores for a ScoreRequest.
+
+  Attributes:
+    request_id: Echoes the originating request.
+    scores: float32 [B], one scalar per row.
+    model_version: Version of the scoring weights (constant for a frozen model).
+  """
+
+  request_id: str
+  scores: np.ndarray
+  model_version: int = 0
+
+
 def validate_wire_safe(obj: object) -> None:
   """Raise TypeError if a wire payload holds a device array.
 
