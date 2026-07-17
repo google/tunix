@@ -160,6 +160,15 @@ spec:
                 # jnp.float32; ref bf16). Without it the CLI loads the HF bf16
                 # checkpoint as-is and the 2e-7 Adam steps round to zero in
                 # bf16 (ulp~6e-5 at |w|~0.02) => frozen weights, flat reward.
+                # [sampling/sync fix 2026-07-18] top_k=null: base_config's
+                # top_k:50 survives the section merge and truncated the demo's
+                # full-distribution sampling (TRAIN_TOP_K=None) => lower group
+                # diversity. max_inflight_computations=1: the CLI fell back to
+                # the dataclass default 2 (peft_trainer.py:83; replace_keys
+                # drops the base yaml value), overlapping rollout with the
+                # previous update => one-step-stale rollouts with no importance
+                # correction (standard path has ratio==1). demo runs strictly
+                # synchronous (=1).
                 export TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 && \
                 export JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 && \
                 export ENABLE_PATHWAYS_PERSISTENCE='1' && \
@@ -220,10 +229,12 @@ spec:
                   rl_training_config.mini_batch_size=64 \
                   rl_training_config.train_micro_batch_size=16 \
                   rl_training_config.compute_logps_micro_batch_size=16 \
+                  rl_training_config.max_inflight_computations=1 \
                   rollout_config.total_generation_steps=1024 \
                   rollout_config.max_prompt_length=1024 \
                   rollout_config.temperature=1.0 \
                   rollout_config.top_p=1.0 \
+                  rollout_config.top_k=null \
                   rollout_engine="vllm" \
                   vllm_config.hbm_utilization=0.6 \
                   vllm_config.server_mode=true \

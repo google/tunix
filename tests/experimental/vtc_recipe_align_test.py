@@ -242,6 +242,12 @@ class YamlAlignmentTest(absltest.TestCase):
         'reference_model_config.load_dtype="bfloat16"',
         'model_config.dtype="bfloat16"',
         'model_config.flash_attention_block_size=256',
+        # sampling/sync fix (P3): demo samples the full distribution
+        # (TRAIN_TOP_K=None; base_config's top_k:50 otherwise survives the
+        # merge) and runs strictly synchronous (demo max_inflight=1; the CLI
+        # otherwise falls back to the dataclass default 2).
+        'rollout_config.top_k=null',
+        'rl_training_config.max_inflight_computations=1',
     ):
       self.assertIn(needle, self.yaml_text, msg=f'missing override: {needle}')
 
