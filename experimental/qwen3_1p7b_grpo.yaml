@@ -109,12 +109,12 @@ spec:
                 python3 -X faulthandler -u -m tunix.cli.grpo_main \
                   tunix/cli/base_config.yaml \
                   model_config.model_name=qwen3-1.7b-base \
-                  model_config.model_id=Qwen/qwen3-1.7b-base \
+                  model_config.model_id=Qwen/Qwen3-1.7B \
                   model_config.model_source=huggingface \
                   model_config.use_flash_attention=true \
                   model_config.flash_attention_block_size=128 \
                   model_config.intermediate_ckpt_dir="None" \
-                  model_config.model_download_path="/tmp/models/qwen3-1.7b-base" \
+                  model_config.model_download_path="/tmp/models/Qwen3-1.7B" \
                   model_config.mesh.shape="(16,4)" \
                   model_config.mesh.axis_names="('fsdp','tp')" \
                   model_config.rng_seed=42 \
@@ -125,7 +125,7 @@ spec:
                   reference_model_config.same_mesh_as="actor" \
                   rollout_model_config.mesh=null \
                   rollout_model_config.same_mesh_as="actor" \
-                  tokenizer_config.tokenizer_path=Qwen/qwen3-1.7b-base \
+                  tokenizer_config.tokenizer_path=Qwen/Qwen3-1.7B \
                   tokenizer_config.tokenizer_type=huggingface \
                   tokenizer_config.add_bos=false \
                   dataset_name="gsm8k" \
