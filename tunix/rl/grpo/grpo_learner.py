@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, List, Sequence, TypeVar
+from typing import Callable, Iterable, List, Sequence, TypeVar
 
 import flax
 from flax import nnx
@@ -126,6 +126,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       reward_fns: RewardFn | List[RewardFn],
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
+      per_token_logps_fn: Callable[..., jax.Array] | None = None,
   ):
     """Initializes the `GRPOTrainer`.
 
@@ -151,6 +152,18 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
            ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
            ...       # ... }
       data_shuffle_seed: The seed used to shuffle the training data.
+      per_token_logps_fn: Optional pluggable new-policy per-token log-prob
+        function. Defaults to ``common.compute_per_token_logps`` (the standard
+        autoregressive next-token logprob). When the policy is a non-AR model
+        (e.g. a block-diffusion policy whose rollout generates by denoising),
+        the integrator injects the SAME logprob function the rollout uses for
+        its old-policy logps, so both sides of the GRPO importance ratio come
+        from one implementation and the ratio stays unbiased. It must accept
+        the same call signature as ``common.compute_per_token_logps``
+        (``graphdef, state, prompt_tokens=, completion_tokens=, pad_id=,
+        eos_id=, completion_mask=, stop_gradient=, return_logits=,
+        segment_ids=, segment_positions=, temperature=``) and return
+        ``[B, completion_len]``.
     """  # fmt: skip
     super().__init__(
         rl_cluster=rl_cluster,
@@ -164,9 +177,17 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         mode=rl_cluster_lib.Mode.TRAIN
     ).temperature
 
+    self._per_token_logps_fn = per_token_logps_fn
+
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
+
+    # Only forward `per_token_logps_fn` when overridden, so the default AR path
+    # (and any policy loss fn that doesn't accept the kwarg) is untouched.
+    extra_loss_kwargs = {}
+    if self._per_token_logps_fn is not None:
+      extra_loss_kwargs["per_token_logps_fn"] = self._per_token_logps_fn
 
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
@@ -176,6 +197,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         algo_config=self.algo_config,
         pad_id=self.rl_cluster.rollout.pad_id(),
         eos_id=self.rl_cluster.rollout.eos_id(),
+        **extra_loss_kwargs,
     )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
@@ -459,6 +481,7 @@ def grpo_loss_fn(
     algo_config,
     pad_id,
     eos_id,
+    per_token_logps_fn=None,
 ):
   """GRPO loss function.
 
@@ -474,6 +497,13 @@ def grpo_loss_fn(
     algo_config: The algorithm config.
     pad_id: The pad ID from tokenizer.
     eos_id: The eos ID from.
+    per_token_logps_fn: Optional new-policy per-token log-prob function (drop-in
+      for ``common.compute_per_token_logps``). Defaults to the autoregressive
+      ``common.compute_per_token_logps``; when the policy is a block-diffusion
+      model this is the shared block-diffusion logprob so the new-policy logps
+      match the rollout's old-policy logps (unbiased importance ratio). Only
+      the logprob source changes — the clipped surrogate, advantage, KL and
+      optimizer are identical to the AR path.
 
   Returns:
     A tuple containing the loss and an aux dictionary.
@@ -496,7 +526,15 @@ def grpo_loss_fn(
   # TODO(yangmu): trace this part as "actor_inference_and_training".
   # with perf_tracer.span("...", list(completion_ids.devices())):
   graphdef, state = nnx.split(model)
-  per_token_logps = common.compute_per_token_logps(
+  # Default = AR next-token logprob; overridden to the shared block-diffusion
+  # logprob when a diffusion rollout is active (same fn the rollout uses for
+  # its old-policy logps -> unbiased importance ratio). Same call signature.
+  logps_fn = (
+      per_token_logps_fn
+      if per_token_logps_fn is not None
+      else common.compute_per_token_logps
+  )
+  per_token_logps = logps_fn(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
