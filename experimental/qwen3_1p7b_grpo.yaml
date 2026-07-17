@@ -78,11 +78,58 @@ spec:
                 git fetch origin yuxzhang/refactor_loss_accum_ablation
                 git reset --hard FETCH_HEAD
 
-                # [model] qwen3-1.7b-base is pulled from HuggingFace (not gated,
-                # so HF_TOKEN's account needs no license acceptance). No LoRA
-                # (lora_config left empty) => full fine-tuning, matching the
-                # agentic qwen3 demo (USE_LORA=False). Vanilla rollout, no vLLM
-                # ROPE hot-patch.
+                # [model] Qwen/Qwen3-1.7B (post-trained; same weights as the
+                # agentic demo) pulled from HuggingFace. No LoRA (lora_config
+                # left empty) => full fine-tuning, matching the agentic qwen3
+                # demo (USE_LORA=False). vllm rollout => the qwen3 ROPE
+                # hot-patch below is required (same as gsm8k_refactor_*.yaml).
+
+                # --- Hot Patch tpu-inference (PR #2838) ---
+                echo "Applying python script patch for ROPE bugs in qwen3.py..."
+                cat << 'EOF' > /tmp/patch_qwen3.py
+                file_path = "/app/vllm_tpu_inference/tpu_inference/tpu_inference/models/jax/qwen3.py"
+                with open(file_path, "r") as f:
+                    code = f.read()
+
+                injected_functions = """
+                from typing import Any, Dict, Optional
+
+                def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
+                    if rope_scaling is not None:
+                        rope_scaling = dict(rope_scaling)
+                        if (rope_scaling.get("rope_type", "default") == "default"
+                                and "factor" not in rope_scaling
+                                and "scale_factor" not in rope_scaling
+                                and "mrope_section" not in rope_scaling):
+                            rope_scaling = None
+                        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
+                            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
+                    return rope_scaling
+
+                def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
+                    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
+                        config, "rope_scaling", None)
+                    return normalize_rope_scaling(rope_scaling)
+
+                def get_rope_theta(config: Any, default: float = 10000.0) -> float:
+                    rope_parameters = getattr(config, "rope_parameters", None)
+                    if rope_parameters is not None and "rope_theta" in rope_parameters:
+                        return float(rope_parameters["rope_theta"])
+                    return float(getattr(config, "rope_theta", default))
+
+                """
+
+                import textwrap
+                code = textwrap.dedent(injected_functions) + code
+                code = code.replace('self.rope_theta = config.rope_parameters["rope_theta"]', 'self.rope_theta = get_rope_theta(config, default=1000000.0)')
+                code = code.replace('self.rope_scaling = getattr(config, "rope_scaling", None)', 'self.rope_scaling = get_rope_scaling(config)')
+
+                with open(file_path, "w") as f:
+                    f.write(code)
+                EOF
+                sed -i 's/^ \{16\}//' /tmp/patch_qwen3.py
+                python3 /tmp/patch_qwen3.py
+                # ------------------------------------------
 
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
                 sleep 60;
@@ -97,7 +144,17 @@ spec:
                 # lr=2e-7 (adamw, cosine, wd=0.01, b2=0.999, grad_norm=1.0),
                 # num_generations=8, beta=0.04, kl_loss_mode=mse_kl. max_steps=100
                 # (trend); eval + checkpoint effectively off for this experiment.
-                # Rollout seq kept shorter (768/256) for speed (agentic 1024/1024).
+                # [recipe-align 2026-07-17] Recipe now fully matches the agentic
+                # demo (qwen3_grpo_demo.py, the converging gsm8k_refactor_* run):
+                # VTC raw-text prompt via data_module=experimental/vtc_data.py
+                # (apply_chat_template_to_dataset=false -> no ChatML, no Qwen3
+                # <think>), VTC 0/0.1/0.5/1.0 reward (experimental/vtc_reward.py,
+                # replaces the 4-fn summed gsm8k.py), rollout 1024/1024, warmup
+                # 50 / decay 500, train_fraction=1.0, vllm engine (hbm 0.6,
+                # max_num_seqs 512=64*8, max_batched_tokens 512*2304//8).
+                # Remaining diff vs the demo = the learner pipeline itself
+                # (standard GrpoLearner vs agentic GRPOLearner): the A/B under
+                # test. Loss/advantage are the same fn (algo_core.py:365/:590).
                 export TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 && \
                 export JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 && \
                 export ENABLE_PATHWAYS_PERSISTENCE='1' && \
@@ -129,17 +186,19 @@ spec:
                   tokenizer_config.tokenizer_type=huggingface \
                   tokenizer_config.add_bos=false \
                   dataset_name="gsm8k" \
+                  data_module="experimental/vtc_data.py" \
+                  apply_chat_template_to_dataset=false \
                   batch_size=64 \
                   num_test_batches=100 \
                   num_train_epochs=1 \
-                  train_fraction=0.8 \
+                  train_fraction=1.0 \
                   rl_training_config.actor_optimizer_config.opt_type="adamw" \
                   rl_training_config.actor_optimizer_config.peak_value=2e-7 \
                   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
                   rl_training_config.actor_optimizer_config.init_value=0.0 \
                   rl_training_config.actor_optimizer_config.end_value=0.0 \
-                  rl_training_config.actor_optimizer_config.warmup_steps=10 \
-                  rl_training_config.actor_optimizer_config.decay_steps=100 \
+                  rl_training_config.actor_optimizer_config.warmup_steps=50 \
+                  rl_training_config.actor_optimizer_config.decay_steps=500 \
                   rl_training_config.actor_optimizer_config.b1=0.9 \
                   rl_training_config.actor_optimizer_config.b2=0.999 \
                   rl_training_config.actor_optimizer_config.weight_decay=0.01 \
@@ -153,18 +212,27 @@ spec:
                   rl_training_config.mini_batch_size=64 \
                   rl_training_config.train_micro_batch_size=16 \
                   rl_training_config.compute_logps_micro_batch_size=16 \
-                  rollout_config.total_generation_steps=768 \
-                  rollout_config.max_prompt_length=256 \
+                  rollout_config.total_generation_steps=1024 \
+                  rollout_config.max_prompt_length=1024 \
                   rollout_config.temperature=1.0 \
                   rollout_config.top_p=1.0 \
-                  rollout_engine="vanilla" \
+                  rollout_engine="vllm" \
+                  vllm_config.hbm_utilization=0.6 \
+                  vllm_config.server_mode=true \
+                  vllm_config.async_scheduling=false \
+                  vllm_config.max_num_seqs=512 \
+                  vllm_config.max_num_batched_tokens=147456 \
+                  vllm_config.kwargs.kv_cache_metrics=true \
+                  vllm_config.kwargs.disable_log_stats=false \
+                  vllm_config.kwargs.enable_prefix_caching=false \
+                  vllm_config.kwargs.dtype="bfloat16" \
                   offload_to_cpu=false \
                   grpo_config.num_generations=8 \
                   grpo_config.num_iterations=1 \
                   grpo_config.beta=0.04 \
                   grpo_config.epsilon=0.2 \
                   grpo_config.kl_loss_mode="mse_kl" \
-                  reward_functions="['tunix/cli/reward_fn/gsm8k.py']"
+                  reward_functions="['experimental/vtc_reward.py']"
               env:
               - name: PATHWAYS_HEAD
                 value: localhost
