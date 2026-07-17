@@ -65,7 +65,7 @@ jobs:
     - name: Install tunix dependencies
       run: |
         pip install --upgrade pip
-        pip install -e ".[prod,test]" "safetensors<0.8" --force-reinstall
+        pip install -e ".[test]" "safetensors<0.8" --force-reinstall
 
     - name: Verify TPU availability
       run: |
@@ -160,7 +160,7 @@ jobs:
           python3 -m pip install --upgrade pip setuptools wheel
 
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-          python3 -m pip install -e .[dev,test]
+          python3 -m pip install -e .[test]
           # tpu-inference/Numba needs NumPy 2.3 or less.
           python3 -m pip install numpy==2.3.5 --force-reinstall
       - name: Run tunix model tests
@@ -222,8 +222,8 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Reinstall Tunix with prod dependencies
-          python3 -m pip install -e .[prod] --force-reinstall
+          # Reinstall Tunix
+          python3 -m pip install -e . --force-reinstall
           python3 -m pip install --upgrade kagglehub kagglesdk
 
           # Loading tfds requires tensorflow.
