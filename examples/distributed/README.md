@@ -52,9 +52,35 @@ hello flag
 
 This example shows how to write two processes and let them discover each other.
 
-First, we start a `door` process and make it discoverable on port `12345` by setting `--discovery_id=door` and `--discovery_port=12345`.
+First, we start a `door` process and make it discoverable on port `12345` by
 
-Then, we start a `knocker` process and tell it to find `door` at address `door:12345` by setting `--discovery_addrs=door:12345`, and send a message by setting `--say="open the door"`.
+1. setting `--discovery_id=door` and `--discovery_port=12345`.
+2. writing python code to listen on register requests from `knocker` process:
+
+    ```python
+    def main(argv, context: ProcessContext | None) -> None:
+      # ...
+      context.ipc.discovery.on_register(
+          lambda hostname, _, metadata: (
+              logging.info(f"{hostname} knocked and said: {pickle.loads(metadata)}")
+          )
+      )
+      # ...
+    ```
+
+3. using `hostname` (set by the framework) and information in `metadata` (set by the `knocker` process) to collaborate.
+
+Then, we start a `knocker` process and tell it to find `door` at address `door:12345` by
+
+1. setting `--discovery_addrs=door:12345`, and send a message by setting `--say="open the door"`.
+2. writing python code to register itself to `door` process.
+
+    ```python
+    def main(argv, context: ProcessContext | None) -> None:
+      # ...
+      context.ipc.discovery.register(metadata=pickle.dumps(args.say))
+      # ...
+    ```
 
 To run it
 
@@ -140,14 +166,7 @@ To run it
 
 The same as example, but on K8s.
 
-To run it
-
-0. Compile proto
-
-    ```shell
-    $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto
-    $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. examples/distributed/rl/service.proto
-    ```
+To run it with prebuilt Tunix docker image
 
 1. Start orchestrator process
 
