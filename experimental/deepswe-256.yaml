@@ -1,0 +1,273 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: train-deepswe
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  # -------------------------------------------------------------
+  # 1. PATHWAYS COORDINATOR (CPU HEAD)
+  # -------------------------------------------------------------
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            # Launch Sidecars (Proxy + RM)
+            initContainers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=localhost:29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp
+              env:
+                - name: PATHWAYS_HEAD
+                  value: localhost
+              resources:
+                limits:
+                  cpu: '16'
+                  memory: 300G
+              volumeMounts:
+              - mountPath: /root/.config/gcloud
+                name: gcloud-adc
+              restartPolicy: Always
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp
+                - --node_type=resource_manager
+                - --instance_count=1
+                - --instance_type=tpuv5:4x4x8
+              env:
+                - name: HOST_ADDRESS
+                  value: localhost
+                - name: TPU_SKIP_MDS_QUERY
+                  value: 'true'
+              resources:
+                limits:
+                  cpu: '8'
+                  memory: 100G
+              volumeMounts:
+              - mountPath: /root/.config/gcloud
+                name: gcloud-adc
+              restartPolicy: Always
+            # Main Jax-TPU Coordinator Container
+            containers:
+            - name: jax-tpu
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest
+              imagePullPolicy: Always
+              command:
+              - bash
+              - -c
+              - |
+                echo XPK Start: $(date);
+                echo "Syncing latest code ..."
+                git config --global --add safe.directory $(pwd)
+                git init
+                git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
+                git fetch origin deepswe-quality
+                git reset --hard FETCH_HEAD
+                
+                echo "Injecting pathwaysutils proxy hot-patch..."
+                sed -i '1i import pathwaysutils\ntry:\n    pathwaysutils.initialize()\nexcept Exception: pass\n' examples/deepswe/train_deepswe_nb.py || true
+                sed -i '2i import pathwaysutils\ntry:\n    pathwaysutils.initialize()\nexcept Exception: pass\n' examples/deepswe/eval_deepswe.py || true
+                
+                # --- Hot Patch tpu-inference (PR #2838) ---
+                echo "Applying python script patch for ROPE bugs in qwen3.py..."
+                cat << 'EOF' > /tmp/patch_qwen3.py
+                file_path = "/app/vllm_tpu_inference/tpu_inference/tpu_inference/models/jax/qwen3.py"
+                with open(file_path, "r") as f:
+                    code = f.read()
+                
+                injected_functions = """
+                from typing import Any, Dict, Optional
+                
+                def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
+                    if rope_scaling is not None:
+                        rope_scaling = dict(rope_scaling)
+                        if (rope_scaling.get("rope_type", "default") == "default"
+                                and "factor" not in rope_scaling
+                                and "scale_factor" not in rope_scaling
+                                and "mrope_section" not in rope_scaling):
+                            rope_scaling = None
+                        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
+                            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
+                    return rope_scaling
+                
+                def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
+                    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
+                        config, "rope_scaling", None)
+                    return normalize_rope_scaling(rope_scaling)
+                
+                def get_rope_theta(config: Any, default: float = 10000.0) -> float:
+                    rope_parameters = getattr(config, "rope_parameters", None)
+                    if rope_parameters is not None and "rope_theta" in rope_parameters:
+                        return float(rope_parameters["rope_theta"])
+                    return float(getattr(config, "rope_theta", default))
+                
+                """
+                
+                import textwrap
+                code = textwrap.dedent(injected_functions) + code
+                code = code.replace('self.rope_theta = config.rope_parameters["rope_theta"]', 'self.rope_theta = get_rope_theta(config, default=1000000.0)')
+                code = code.replace('self.rope_scaling = getattr(config, "rope_scaling", None)', 'self.rope_scaling = get_rope_scaling(config)')
+                
+                with open(file_path, "w") as f:
+                    f.write(code)
+                EOF
+                sed -i 's/^ \{16\}//' /tmp/patch_qwen3.py
+                python3 /tmp/patch_qwen3.py
+                # ------------------------------------------
+
+                echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
+                sleep 60;
+                echo "Starting R2E-Gym Eval using deepswe script..."
+                
+                export N_SAMPLE=8
+                export TEMPERATURE=0.7
+                export TASKS_LIMIT=0
+                export MAX_CONCURRENT=128
+                export VLLM_HBM_UTILIZATION=0.8
+                export RUN_TAG="qwen3_128_retry_2"
+                export R2E_K8S_NODE_SELECTOR='{"cloud.google.com/gke-nodepool":"deepswe-cpu-pool"}'
+                export TIMEOUT=3600
+                export MODEL_VERSION="Qwen/Qwen3-32B"
+                # Dataset the gold whitelist was generated from. The gold filter
+                # joins on docker_image, so this MUST be the same source dataset
+                # or the join keeps 0 entries. If "kept 0/..." appears in logs,
+                # try R2E-Gym/R2E-Gym-V1 instead.
+                export DATASET_NAME="R2E-Gym/R2E-Gym-Subset"
+                export DATASET_SPLIT="train"
+                # Write results straight to the persistent disk so they survive
+                # the pod being deleted (the final `cp` below copied from the
+                # wrong dir; streaming raw_trajectories are now safe mid-run too).
+                export OUTPUT_DIR="/mnt/disks/linchai_data/deepswe_eval_outputs"
+                export MODEL_BASE_DIR="/mnt/disks/linchai_data/models"
+                # The whitelist must be checked into the git repo at this path
+                export GOLD_JSONL="experimental/good_gold_whitelist.jsonl"
+                
+                # Install missing dependencies for deepswe evaluation
+                echo "Installing missing dependencies (kubernetes, datasets)..."
+                pip3 install kubernetes datasets
+                
+                echo "Cloning and patching R2E-Gym..."
+                git clone https://github.com/R2E-Gym/R2E-Gym.git
+                cd R2E-Gym
+                git apply ../experimental/r2egym.patch
+                sed -i 's/, HfFolder//g' src/r2egym/agenthub/utils/utils.py
+                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 3600,/g' src/r2egym/agenthub/runtime/docker.py
+                sed -i 's/datasets==2.19/datasets/g' pyproject.toml
+                sed -i 's/anthropic\[vertex\]==0.43.0/anthropic[vertex]/g' pyproject.toml
+                pip3 install -e .
+                cd ..
+
+                # python3 -c "import pathwaysutils; pathwaysutils.initialize(); import jax; print(jax.device_count())"
+
+                
+                JAX_TRACEBACK_FILTERING=off TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 TF_CPP_MIN_VLOG_LEVEL=1 JAX_LOG_COMPILES=0 ENABLE_PATHWAYS_PERSISTENCE='1' NUM_SLICES=1 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 SKIP_JAX_PRECOMPILE=True JAX_RANDOM_WEIGHTS=1 VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_LOGGING_LEVEL=INFO NEW_MODEL_DESIGN=1 ROLLOUT_ENGINE=vllm PYTHONUNBUFFERED=1 HF_HUB_DISABLE_PROGRESS_BARS=1 HF_HUB_DOWNLOAD_TIMEOUT=600 HF_HUB_ETAG_TIMEOUT=30 HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) \
+                PYTHONPATH=$PYTHONPATH:. python3 examples/deepswe/train_deepswe_nb.py --max_response_length=32768 --max_turns=50 --max_steps=1000 --train_micro_batch_size=8 --rollout_mesh_tp=8 --rollout_mesh_fsdp=8 --train_mesh_tp=8 --train_mesh_fsdp=8 --rollout_split_fraction=0.5 --vllm_utilization=0.5 --batch_size=8 --mini_batch_size=8 --max_concurrency=64 --rollout_vllm_max_num_seqs=32 --max_num_batched_tokens=8192 \
+                --metrics_logger_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/trajectory-log/run1/" --ckpt_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/checkpoint/run1/" --save_interval_steps=1 --max_to_keep=100 --models_base_dir="$MODEL_BASE_DIR"
+                
+                # Outputs are written directly to persistent disk via OUTPUT_DIR.
+              env:
+              - name: GOOGLE_CLOUD_PROJECT
+                value: cloud-tpu-multipod-dev
+              - name: PATHWAYS_HEAD
+                value: localhost
+              - name: INJECTED_HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: HF_TOKEN
+                    optional: true
+              - name: INJECTED_WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: yuxzhang-secrets
+                    key: WANDB_API_KEY
+                    optional: true
+              - name: HF_HOME
+                value: /mnt/disks/linchai_data/huggingface
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: FLAGS_pathways_enforce_subset_devices_form_subslice
+                value: "False"
+              resources:
+                limits:
+                  cpu: '24'
+                  memory: 300G
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+              - mountPath: /mnt/disks/linchai_data
+                name: haoyugao-gke-disk
+              - mountPath: /root/.config/gcloud
+                name: gcloud-adc
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+            - name: haoyugao-gke-disk
+              persistentVolumeClaim:
+                claimName: haoyugao-cpu-np-pvc
+            - name: gcloud-adc
+              secret:
+                secretName: gcloud-adc-secret
+
+  - name: pathways-worker
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        completions: 32
+        parallelism: 32
+        completionMode: Indexed
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: linchai-v5p-256-pw-np-0
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x8
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=train-deepswe-pathways-head-0-0.train-deepswe:29001
+                - --node_type=worker
+                - --instance_type=tpuv5:4x4x8
+              env:
+                - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                  value: 'true'
+                - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+                  value: '0.9'
+                - name: ENABLE_PATHWAYS_PERSISTENCE
+                  value: '0'
+              resources:
+                limits:
+                  google.com/tpu: '4'
