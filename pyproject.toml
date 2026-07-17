@@ -76,6 +76,10 @@ cli = [
 frozenlake = [
   "gymnasium",
 ]
+experimental = [
+  "cloudpickle",  # serialization envelope for the remote-execution actor protocol
+  "grpcio",  # transport for cross-process worker execution
+]
 
 [project.urls]
 Source = "https://github.com/google/tunix"
