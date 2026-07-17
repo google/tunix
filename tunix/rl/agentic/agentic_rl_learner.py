@@ -453,13 +453,37 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
+    fsdp_size = 1
+    if self.rl_cluster.cluster_config.role_to_mesh:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh.get(
+          rl_cluster_lib.Role.ROLLOUT
+      )
+      if mesh and "fsdp" in mesh.shape:
+        fsdp_size = mesh.shape["fsdp"]
+
+    padded_batch_size = max(fsdp_size, 1)
+    prompts = [chat_lists] * padded_batch_size
+
     result = self.rl_cluster.generate(
-        prompts=chat_lists,  # pyrefly: ignore[bad-argument-type]
+        prompts=prompts,  # pyrefly: ignore[bad-argument-type]
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
     )
+
+    if padded_batch_size > 1:
+      result = base_rollout.RolloutOutput(
+          text=[result.text[0]],
+          logits=[result.logits[0]] if result.logits else result.logits,
+          tokens=[result.tokens[0]],
+          left_padded_prompt_tokens=result.left_padded_prompt_tokens[0:1],
+          logprobs=(
+              [result.logprobs[0]]
+              if result.logprobs
+              else result.logprobs
+          ),
+      )
 
     return result
 

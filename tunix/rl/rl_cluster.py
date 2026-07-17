@@ -24,6 +24,7 @@ import gc
 import itertools
 import operator
 import os
+import threading
 from typing import Any, Callable, Mapping
 
 from absl import logging
@@ -265,6 +266,20 @@ class RLCluster:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
+    self._model_locks = {}
+    self._model_ref_counts = {}
+    for model in [
+        self.train_actor,
+        self.rollout_actor,
+        self.reference,
+        self.critic,
+        self.reward,
+    ]:
+      if model is not None:
+        model_id = id(model)
+        if model_id not in self._model_locks:
+          self._model_locks[model_id] = threading.Lock()
+          self._model_ref_counts[model_id] = 0
 
     self._init_cluster()
     gc.collect()
@@ -339,7 +354,7 @@ class RLCluster:
       )
       if not mesh.empty and model_mesh != mesh:
         logging.warning("Resharding model from %s to %s", model_mesh, mesh)
-        graph, state = nnx.split(model_or_path)
+        state = nnx.state(model_or_path)
         dst_shardings = jax.tree_util.tree_map(
             lambda x: jax.sharding.NamedSharding(
                 mesh,
@@ -354,15 +369,12 @@ class RLCluster:
           tmp_state = jax.tree.map(lambda x: x.astype(data_type), state)
         else:
           tmp_state = state
-        model_or_path = nnx.merge(
-            graph, reshard.reshard_pytree(tmp_state, dst_shardings)
-        )
+        nnx.update(model_or_path, reshard.reshard_pytree(tmp_state, dst_shardings))
         del tmp_state
         gc.collect()
       if is_on_device and self.cluster_config.offload_to_cpu:
-        graph, state = nnx.split(model_or_path)
-        new_params = rl_utils.put_params_on_memory_kind(state, "pinned_host")
-        model_or_path = nnx.merge(graph, new_params)
+        new_params = rl_utils.put_params_on_memory_kind(nnx.variables(model_or_path), "pinned_host")
+        nnx.update(model_or_path, new_params)
       return model_or_path
     else:
       raise NotImplementedError("Loading from path is not supported yet.")
@@ -614,6 +626,28 @@ class RLCluster:
     )
     nnx.update(model, new_variables)
 
+  @contextlib.contextmanager
+  def _use_model(self, model: nnx.Module, role: Role):
+    model_id = id(model)
+    lock = self._model_locks[model_id]
+    with lock:
+      self._model_ref_counts[model_id] += 1
+      is_first = self._model_ref_counts[model_id] == 1
+      if is_first:
+        self._maybe_load_model_from_cpu(model, role)
+        if role == Role.ROLLOUT and self.cluster_config.offload_to_cpu:
+          self.rollout.update_params(nnx.state(model))
+    try:
+      yield
+    finally:
+      with lock:
+        self._model_ref_counts[model_id] -= 1
+        is_last = self._model_ref_counts[model_id] == 0
+        if is_last:
+          self._maybe_offload_model_to_cpu(model, role)
+          if role == Role.ROLLOUT and self.cluster_config.offload_to_cpu:
+            self.rollout.update_params(nnx.state(model))
+
   def _update_models_sharing_weights(
       self,
       params: jaxtyping.PyTree,
@@ -859,17 +893,17 @@ class RLCluster:
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
-      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      with self._perf.span_group("actor_training"):
-        self.actor_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+      with self._use_model(self.actor_trainer.model, Role.ACTOR):
+        with self._perf.span_group("actor_training"):
+          self.actor_trainer.train(train_ds, eval_ds, skip_jit)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
+    if not hasattr(self, "_critic_trainer"):
+      return
     with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
-      self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      with self._perf.span_group("critic_training"):
-        self._critic_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
+      with self._use_model(self.critic_trainer.model, Role.CRITIC):
+        with self._perf.span_group("critic_training"):
+          self._critic_trainer.train(train_ds, eval_ds, skip_jit)
 
   def generate(
       self,
@@ -916,44 +950,37 @@ class RLCluster:
     micro_batch_size = micro_batch_size or len(string_prompts)
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
-      model = self.rollout.model()
-      self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
+      with self._use_model(self.rollout.model(), Role.ROLLOUT):
+        if isinstance(self.cluster_config.rollout_config, dict):
+          rollout_config = self.cluster_config.rollout_config[mode]
+        else:
+          rollout_config = self.cluster_config.rollout_config
 
-      if isinstance(self.cluster_config.rollout_config, dict):
-        rollout_config = self.cluster_config.rollout_config[mode]
-      else:
-        rollout_config = self.cluster_config.rollout_config
+        if max_generation_steps is not None:
+          rollout_config = dataclasses.replace(
+              rollout_config,
+              max_tokens_to_generate=max_generation_steps,
+          )
 
-      if max_generation_steps is not None:
-        rollout_config = dataclasses.replace(
-            rollout_config,
-            max_tokens_to_generate=max_generation_steps,
-        )
+        perf_tags = {
+            perf_constants.ROLE: Role.ROLLOUT.value,
+        }
+        if trace_tags:
+          perf_tags.update(trace_tags)
 
-      perf_tags = {
-          perf_constants.ROLE: Role.ROLLOUT.value,
-      }
-      if trace_tags:
-        perf_tags.update(trace_tags)
-
-      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
-          perf_constants.ROLLOUT,
-          mesh.devices,
-          tags=perf_tags,
-      ) as span_v2:
-        outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(string_prompts), step=micro_batch_size
-            )
-        ]
-        span.device_end([o.tokens for o in outputs])
-        span_v2.async_end([o.tokens for o in outputs])
-      self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
+        with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
+            perf_constants.ROLLOUT,
+            mesh.devices,
+            tags=perf_tags,
+        ) as span_v2:
+          outputs = [
+              self.rollout.generate(string_prompts[s], rollout_config)
+              for s in rl_utils.chunk_slices_by_size(
+                  stop=len(string_prompts), step=micro_batch_size
+              )
+          ]
+          span.device_end([o.tokens for o in outputs])
+          span_v2.async_end([o.tokens for o in outputs])
 
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
@@ -1008,28 +1035,23 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
-      self._maybe_load_model_from_cpu(
-          self.inference_worker.get_model("reference"), Role.REFERENCE
-      )
-      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
-      outs = []
-      for batch_slice in rl_utils.chunk_slices_by_size(
-          stop=batch_size, step=micro_batch_size
-      ):
-        outs.append(
-            self.inference_worker.get_ref_per_token_logps(
-                dest_prompt_tokens[batch_slice],
-                dest_completion_tokens[batch_slice],
-                pad_id,
-                eos_id,
-                temperature=temperature,
-            )
-        )
-      ref_per_token_logps = jnp.concatenate(outs, axis=0)
-      self._maybe_offload_model_to_cpu(
-          self.inference_worker.get_model("reference"), Role.REFERENCE
-      )
-      return ref_per_token_logps
+      with self._use_model(self.inference_worker.get_model("reference"), Role.REFERENCE):
+        temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+        outs = []
+        for batch_slice in rl_utils.chunk_slices_by_size(
+            stop=batch_size, step=micro_batch_size
+        ):
+          outs.append(
+              self.inference_worker.get_ref_per_token_logps(
+                  dest_prompt_tokens[batch_slice],
+                  dest_completion_tokens[batch_slice],
+                  pad_id,
+                  eos_id,
+                  temperature=temperature,
+              )
+          )
+        ref_per_token_logps = jnp.concatenate(outs, axis=0)
+        return ref_per_token_logps
 
   def get_old_per_token_logps(
       self,
@@ -1044,26 +1066,19 @@ class RLCluster:
     micro_batch_size = micro_batch_size or batch_size
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
-      model = self.rollout.model()
-      self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
-      outs = []
-      for batch_slice in rl_utils.chunk_slices_by_size(
-          stop=batch_size, step=micro_batch_size
-      ):
-        outs.append(
-            self.rollout.get_per_token_logps(
-                prompt_tokens[batch_slice],
-                completion_tokens[batch_slice],
-            )
-        )
-      per_token_logps = jnp.concatenate(outs, axis=0)
-      model = self.rollout.model()
-      self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
-      return per_token_logps
+      with self._use_model(self.rollout.model(), Role.ROLLOUT):
+        outs = []
+        for batch_slice in rl_utils.chunk_slices_by_size(
+            stop=batch_size, step=micro_batch_size
+        ):
+          outs.append(
+              self.rollout.get_per_token_logps(
+                  prompt_tokens[batch_slice],
+                  completion_tokens[batch_slice],
+              )
+          )
+        per_token_logps = jnp.concatenate(outs, axis=0)
+        return per_token_logps
 
   def get_actor_per_token_logps(
       self,
@@ -1110,12 +1125,23 @@ class RLCluster:
       # full_batch_size or num_iterations > 1. Only offload the live actor when
       # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
       # was both unnecessary and risked leaving stray weights pinned to host.
-      actor_trainer_state_on_device = self._is_state_on_device(
-          nnx.state(self.actor_trainer.model)
-      )
-      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
-        self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
-        gc.collect()
+      actor_trainer_state_on_device = False
+      model_id = id(self.actor_trainer.model)
+      lock = self._model_locks[model_id]
+      with lock:
+        if self._model_ref_counts[model_id] == 0:
+          actor_trainer_state_on_device = self._is_state_on_device(
+              nnx.state(self.actor_trainer.model)
+          )
+          if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+            self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
+            if hasattr(self, "_rollout") and hasattr(self._rollout, "update_params"):
+              self.rollout.update_params(nnx.state(self.actor_trainer.model))
+            gc.collect()
+        else:
+          logging.warning(
+              "Cannot offload actor trainer model because it is currently in use by rollout."
+          )
       graphdef, _ = nnx.split(self.actor_trainer.model)
       anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
       if anchor_on_device:

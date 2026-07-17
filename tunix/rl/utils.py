@@ -211,17 +211,25 @@ def put_params_on_memory_kind(
     return params
   original_shardings = jax.tree.map(lambda x: x.sharding, params)
   logging.debug("original_shardings: %s", original_shardings)
-  is_on_device = jax.tree_util.tree_reduce(
-      operator.or_,
+  all_on_device = jax.tree_util.tree_reduce(
+      operator.and_,
       jax.tree.map(lambda x: x.memory_kind == "device", original_shardings),
   )
-  if (is_on_device and memory_kind == "device") or (
-      not is_on_device and memory_kind == "pinned_host"
+  all_on_host = jax.tree_util.tree_reduce(
+      operator.and_,
+      jax.tree.map(
+          lambda x: x.memory_kind in ["pinned_host", "unpinned_host"],
+          original_shardings,
+      ),
+  )
+  if (all_on_device and memory_kind == "device") or (
+      all_on_host and memory_kind == "pinned_host"
   ):
     logging.info(
         "Params are already on the requested memory kind: %s", memory_kind
     )
     return params
+
 
   def _get_new_sharding(x):
     if isinstance(x, jax.NamedSharding):
