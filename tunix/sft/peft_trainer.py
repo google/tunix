@@ -133,16 +133,6 @@ class MetricsBuffer:
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
-def _compute_legacy_aux(loss_output: utils.LossOutput) -> Dict[str, Any]:
-  """Computes legacy aux metrics from a LossOutput."""
-  legacy_aux = {}
-  for k, v in loss_output.aux_metrics.items():
-    if isinstance(v, utils.WeightedMetric):
-      legacy_aux[k] = v.compute()
-    else:
-      legacy_aux[k] = v
-  return legacy_aux
-
 
 def _calculate_global_batch_size(train_example: Any) -> int:
   """Calculates the global batch size from a training example.
@@ -175,6 +165,98 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+class GradientAccumulator(nnx.Module):
+  """Accumulates gradients over multiple micro-steps.
+
+  Unifies standard (unweighted) micro-batch averaging with sequence packing
+  (weighted, denom-aware) accumulation.
+
+  Averaging behavior (optax.MultiSteps semantics):
+    When `add(grads)` is called without a denom, each micro-step implicitly
+    adds 1.0 to the denominator. `get()` computes `Σ_grads / Σ_1`, which
+    is the exact mean of the micro-step gradients. This is mathematically
+    equivalent to a single optimization step on a batch of size `B =
+    micro_batch_size * grad_acc_steps` when the loss is a mean-reduction
+    (e.g., standard cross-entropy).
+
+  Packing-aware behavior (Sum of Grads / Sum of Sizes):
+    Under sequence packing, each yielded micro-batch contains a varying
+    number of valid target tokens or training examples. The loss is
+    computed as an *unreduced sum* over the packed batch. Callers pass the
+    true size of the pack via `add(grads, denom=size)`. `get()` computes
+    `Σ_grad(sum_loss_i) / Σ_size_i`, recovering the true global mean
+    gradient across all items in the accumulated batch, avoiding the bias
+    introduced by averaging pre-scaled micro-batch gradients of unequal
+    sizes.
+  """
+
+  def __init__(self, model: nnx.Module, wrt: type[nnx.Variable]):
+    state = nnx.state(model, wrt)
+    self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
+
+  def add(self, grads: Any, denom: jax.Array | None = None):
+    def _add(acc_var, g_var):
+      g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
+      acc_var[...] = acc_var[...] + g
+
+    jax.tree_util.tree_map(
+        _add,
+        self.grads,
+        grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+    if denom is None:
+      denom_val = jnp.asarray(1.0, dtype=jnp.float32)
+    else:
+      denom_val = denom.astype(jnp.float32)
+    self.denom[...] = self.denom[...] + denom_val
+
+  def get(self):
+    scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
+
+    return jax.tree_util.tree_map(
+        lambda v: type(v)(v[...] * scale.astype(v[...].dtype)),
+        self.grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+  def reset(self):
+    def _zero_in_place(v):
+      v[...] = jnp.zeros_like(v[...])
+
+    jax.tree_util.tree_map(
+        _zero_in_place,
+        self.grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    self.denom[...] = jnp.zeros_like(self.denom[...])
+
+
+def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
+  """Cast the optimizer state's floating-point leaves to float32 in-place.
+
+  Args:
+    optimizer: The nnx.Optimizer instance whose state will be modified.
+  """
+
+  def _cast(v):
+    if isinstance(v, nnx.Variable):
+      val = v.value
+      if (
+          hasattr(val, "dtype")
+          and jnp.issubdtype(val.dtype, jnp.floating)
+          and val.dtype != jnp.float32
+      ):
+        v.value = val.astype(jnp.float32)
+
+  opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
+  jax.tree_util.tree_map(
+      _cast, opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
+
+
 class PeftTrainer:
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -185,6 +267,8 @@ class PeftTrainer:
       use `optax.schedules.inject_hyperparams` to inject learning rate as a
       hyperparameter. For example: ``optimizer =
       optax.schedules.inject_hyperparams(optax.sgd)(learning_rate=learning_rate_schedule)``
+    grad_accumulator: The gradient accumulator to use for accumulating gradients
+      over multiple micro-steps.
     loss_fn: The loss function to use.
     eval_loss_fn: The loss function to use for evaluation.
     gen_model_input_fn: The function to generate model input from training
@@ -197,7 +281,7 @@ class PeftTrainer:
     data_hooks: The data hooks to use.
   """
 
-  supports_sequence_packing = False
+  supports_sequence_packing = True
 
   def __init__(
       self,
@@ -220,14 +304,13 @@ class PeftTrainer:
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
-    if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
-          optimizer, training_config.gradient_accumulation_steps
-      )
-    if self._lora_enabled:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
-    else:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+    # Promote floating-point leaves to float32 in-place to match the dtype of
+    # the optimizer update function branch (which is float32 due to
+    # `optax.inject_hyperparams`).
+    _promote_opt_state_floats_to_float32(self.optimizer)
+    self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -341,14 +424,21 @@ class PeftTrainer:
     return self
 
   def _train_step(
-      self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer,
+      grad_accumulator: GradientAccumulator,
+      inputs: Any,
+      is_update_step: jax.Array,
   ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
     """Main body for one train step.
 
     Args:
       model: The model to train.
       optimizer: The optimizer to use.
+      grad_accumulator: The gradient accumulator to use.
       inputs: The training input.
+      is_update_step: Whether to update the model.
 
     Returns:
       A tuple containing the loss, auxiliary data (or None if has_aux is False),
@@ -381,8 +471,42 @@ class PeftTrainer:
       # Compute exactly equivalent legacy loss val
       loss_val = aux.primary_loss.compute()
 
-    grad_norm = optax.global_norm(grads)
-    optimizer.update(model, grads)
+    # TODO(b/491970038): update denom for sequence packing.
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+
+    def apply_updates(model, optimizer, grad_accumulator):
+      acc_grads = grad_accumulator.get()
+      # Compute the norm in float32 to 1) match `skip_updates()` return type and
+      # meet the requirement of `nnx.cond` that both branches return the same
+      # dtype, 2) for production-size models the sum-of-squares over bf16 grads
+      # quickly exhausts bf16 and float32 is needed for numerical stability.
+      norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
+      )
+      optimizer.update(model, acc_grads)
+      grad_accumulator.reset()
+      return norm
+
+    def skip_updates(model, optimizer, grad_accumulator):
+      return jnp.array(0.0, dtype=jnp.float32)
+
+    # If the mesh is not empty, then we need to replicate the is_update_step
+    # across all devices to avoid deadlock so that all devices see the same
+    # update step.
+    mesh = pxla.thread_resources.env.physical_mesh
+    if not mesh.empty:
+      is_update_step = jax.lax.with_sharding_constraint(
+          is_update_step, jax.sharding.PartitionSpec()
+      )
+
+    grad_norm = nnx.cond(
+        is_update_step,
+        apply_updates,
+        skip_updates,
+        model,
+        optimizer,
+        grad_accumulator,
+    )
 
     if isinstance(aux, utils.LossOutput):
       # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
@@ -448,6 +572,21 @@ class PeftTrainer:
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    model_state = nnx.state(self.model, wrt_target)
+    model_pspecs = nnx.get_partition_spec(model_state)
+
+    # Partition Gradients similar to the model
+    grads_sharded = jax.lax.with_sharding_constraint(
+        self.grad_accumulator.grads, model_pspecs
+    )
+    self.grad_accumulator.grads = grads_sharded
+
+    # Denominator is a scalar — replicate across all devices
+    self.grad_accumulator.denom[...] = jax.lax.with_sharding_constraint(
+        self.grad_accumulator.denom[...], jax.sharding.PartitionSpec()
+    )
+
   def jit_train_and_eval_step(
       self, skip_jit: bool = False, cache_nnx_graph: bool = False
   ):
@@ -470,7 +609,7 @@ class PeftTrainer:
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
       self._jitted_train_step_fn = nnx.jit(
-          train_step, donate_argnames=("optimizer",)
+          train_step, donate_argnames=("optimizer", "grad_accumulator")
       )
       self._jitted_eval_step_fn = nnx.jit(eval_step)
 
@@ -482,7 +621,10 @@ class PeftTrainer:
           return functools.partial(f, *args)
 
       self._jitted_train_step_fn = maybe_cache_and_partial(
-          self._jitted_train_step_fn, self.model, self.optimizer
+          self._jitted_train_step_fn,
+          self.model,
+          self.optimizer,
+          self.grad_accumulator,
       )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
           self._jitted_eval_step_fn, self.model
@@ -754,6 +896,28 @@ class PeftTrainer:
             perf_constants.MINI_BATCH: mini_batch,
         }
 
+        self._iter_steps += 1
+
+        is_update_step_val = None
+        if (
+            isinstance(train_example, dict)
+            and "is_update_step" in train_example
+        ):
+          val = train_example["is_update_step"]
+          if val is not None:
+            is_update_step_val = bool(np.asarray(val).item())
+        elif hasattr(train_example, "is_update_step"):
+          val = train_example.is_update_step
+          if val is not None:
+            is_update_step_val = bool(np.asarray(val).item())
+
+        if is_update_step_val is None:
+          is_update_step_val = (
+              self._iter_steps
+              % self.config.get_with_default("gradient_accumulation_steps", 1)
+              == 0
+          )
+
         with self._perf_tracer.span(
             "peft_train_step",
             pxla.thread_resources.env.physical_mesh.devices,
@@ -762,7 +926,10 @@ class PeftTrainer:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          train_loss, aux, grad_norm = train_step(train_example)
+          train_loss, aux, grad_norm = train_step(
+              train_example,
+              is_update_step=jnp.array(is_update_step_val, dtype=jnp.bool_),
+          )
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 
@@ -775,13 +942,8 @@ class PeftTrainer:
         )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
-        self._iter_steps += 1
 
-        if (
-            self._iter_steps
-            % self.config.get_with_default("gradient_accumulation_steps", 1)
-            == 0
-        ):
+        if is_update_step_val:
           self._train_steps += 1
           self._write_train_metrics()
 
