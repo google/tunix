@@ -20,6 +20,13 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 
 
+class TicketNotFound(Exception):
+  """Raised when a rollout ticket is unknown (never issued, or already expired).
+
+  Not retryable: the caller should re-dispatch the work rather than re-poll.
+  """
+
+
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
 
