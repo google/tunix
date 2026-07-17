@@ -134,6 +134,42 @@ class TrajectoryResult:
   error: ErrorInfo | None = None
 
 
+@dataclasses.dataclass(kw_only=True)
+class StepReceipt:
+  """Result of one fwd_bwd (gradient-accumulation) micro-step.
+
+  Attributes:
+    accum_id: Identifies the accumulation group this micro-step belongs to.
+    micro_index: Position of this micro-batch within its accumulation group.
+    applied: Whether an optimizer update was applied. False for fwd_bwd, which
+      only accumulates gradients.
+    micro_loss: The normalized loss for this micro-batch.
+    denominator: The normalization denominator for this micro-batch (e.g. token
+      or sequence count) so the caller can rescale and accumulate correctly.
+  """
+
+  accum_id: str
+  micro_index: int
+  applied: bool = False
+  micro_loss: float = 0.0
+  denominator: float = 0.0
+
+
+@dataclasses.dataclass(kw_only=True)
+class UpdateResult:
+  """Result of applying accumulated gradients as one optimizer update.
+
+  Attributes:
+    step: The optimizer step count after this update.
+    applied: Whether the update was applied (False for a no-op / duplicate).
+    grad_norm: Global gradient norm for the update, when computed.
+  """
+
+  step: int
+  applied: bool = True
+  grad_norm: float | None = None
+
+
 def validate_wire_safe(obj: object) -> None:
   """Raise TypeError if a wire payload holds a device array.
 

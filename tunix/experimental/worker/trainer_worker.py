@@ -14,8 +14,10 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
-from typing import Any, Callable, List
+from typing import Any, Callable
 
+from tunix.experimental.common import datatypes
+from tunix.experimental.metrics import metrics
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
 
@@ -43,7 +45,7 @@ class TrainerWorker(abstract_worker.Worker):
     """Initializes the worker and the underlying trainer."""
     pass
 
-  def compile(self, dummy_data: Any) -> None:
+  def compile(self, dummy_data: datatypes.TrainExample) -> None:
     """Triggers JIT compilation using the provided dummy_data."""
     self._trainer.compile(dummy_data)
 
@@ -63,23 +65,27 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer.with_loss_fn(loss_fn, has_aux)
     return self
 
-  def fwd_bwd(self, payload: Any, **kwargs) -> None:
+  def fwd_bwd(
+      self, payload: datatypes.TrainExample, **kwargs
+  ) -> datatypes.StepReceipt:
     """Executes forward and backward passes."""
-    self._trainer.fwd_bwd(payload, **kwargs)
+    return self._trainer.fwd_bwd(payload, **kwargs)
 
-  def update(self, **kwargs) -> int:
-    """Applies the accumulated (mean) gradients as one optimizer update."""
+  def update(self, **kwargs) -> datatypes.UpdateResult:
+    """Applies the accumulated gradients as one optimizer update."""
     return self._trainer.update(**kwargs)
 
-  def eval_step(self, payload: Any, **kwargs) -> None:
+  def eval_step(
+      self, payload: datatypes.TrainExample, **kwargs
+  ) -> metrics.MetricsBuffer:
     """Executes one evaluation step on the given payload."""
-    self._trainer.eval_step(payload, **kwargs)
+    return self._trainer.eval_step(payload, **kwargs)
 
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
+  def save_checkpoint(self, metadata: dict[str, Any], **kwargs) -> None:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._trainer.save_checkpoint(metadata, **kwargs)
 
-  def restore_checkpoint(self, **kwargs) -> Any:
+  def restore_checkpoint(self, **kwargs) -> dict[str, Any]:
     """Restore state from latest checkpoint and return the metadata pytree."""
     return self._trainer.restore_checkpoint(**kwargs)
 
@@ -87,6 +93,6 @@ class TrainerWorker(abstract_worker.Worker):
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
     self._trainer.prepare_weight_sync(**kwargs)
 
-  def get_metrics(self) -> List[Any]:
+  def get_metrics(self) -> metrics.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""
     return self._trainer.get_metrics()

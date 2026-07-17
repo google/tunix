@@ -57,38 +57,40 @@ class RolloutWorker(abstract_worker.Worker):
       requests: (
           datatypes.TrajectoryRequest | Sequence[datatypes.TrajectoryRequest]
       ),
-      on_complete: Callable[[datatypes.Trajectory], None] | None = None,
-  ) -> datatypes.Trajectory | Sequence[datatypes.Trajectory]:
+      on_complete: (
+          Callable[[datatypes.TrajectoryResult], None] | None
+      ) = None,
+  ) -> datatypes.TrajectoryResult | Sequence[datatypes.TrajectoryResult]:
     """Coroutine method for single or batched generate requests.
 
     Args:
       requests: A single TrajectoryRequest or a sequence of them to process.
       on_complete: An optional callback invoked immediately as each individual
-        Trajectory is successfully generated. This allows the caller to stream
-        results asynchronously without waiting for the entire batch to finish.
+        TrajectoryResult is produced. This allows the caller to stream results
+        asynchronously without waiting for the entire batch to finish.
 
     Returns:
-      A single Trajectory (if a single request was provided) or a sequence of
-      completed Trajectories corresponding to the batch of requests.
+      A single TrajectoryResult (if a single request was provided) or a sequence
+      of TrajectoryResults corresponding to the batch of requests.
     """
     raise NotImplementedError()
 
-  async def pop_next_completed(self) -> datatypes.Trajectory:
-    """Pull-based stream: yields whichever trajectory finishes first out-of-order.
+  async def pop_next_completed(self) -> datatypes.TrajectoryResult:
+    """Pull-based stream: yields whichever result finishes first out-of-order.
 
     This provides an alternative to the `on_complete` callback for consumers
-    who prefer to actively await the next available trajectory from the worker.
+    who prefer to actively await the next available result from the worker.
 
     Returns:
-      The next completed Trajectory.
+      The next completed TrajectoryResult.
     """
     raise NotImplementedError()
 
-  def as_completed_stream(self) -> AsyncIterator[datatypes.Trajectory]:
-    """Async stream yielding completed trajectories or errors strictly out-of-order.
+  def as_completed_stream(self) -> AsyncIterator[datatypes.TrajectoryResult]:
+    """Async stream yielding completed results (or errors) strictly out-of-order.
 
     Yields:
-      Completed Trajectory objects as they finish generation.
+      TrajectoryResult objects as episodes finish generation.
     """
     raise NotImplementedError()
 

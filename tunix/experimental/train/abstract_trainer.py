@@ -18,8 +18,9 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable
 
+from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
 
 
@@ -60,7 +61,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def compile(self, dummy_data: Any) -> None:
+  def compile(self, dummy_data: datatypes.TrainExample) -> None:
     """Triggers JAX compilation. `with_loss_fn` must be called first.
 
     Idempotent; safe to call multiple times. Under JAX jit semantics, XLA
@@ -75,7 +76,9 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: Any, **kwargs) -> None:
+  def fwd_bwd(
+      self, payload: datatypes.TrainExample, **kwargs
+  ) -> datatypes.StepReceipt:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
@@ -85,27 +88,32 @@ class AbstractTrainer(abc.ABC):
     Args:
       payload: A packed micro-batch ready for gradient descent.
       **kwargs: Implementation-specific options.
+    Returns:
+      A StepReceipt for this micro-step (loss, denominator, and its position in
+      the accumulation group).
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement fwd_bwd."
     )
 
   @abc.abstractmethod
-  def update(self, **kwargs) -> int:
-    """Applies the accumulated (mean) gradients as one optimizer update.
+  def update(self, **kwargs) -> datatypes.UpdateResult:
+    """Applies the accumulated gradients as one optimizer update.
 
     Must be preceded by at least one `fwd_bwd()` call since the last update.
     Args:
       **kwargs: Implementation-specific options.
     Returns:
-      The new train step count (number of optimizer updates applied).
+      An UpdateResult (new step count, whether it was applied, and grad norm).
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement update."
     )
 
   @abc.abstractmethod
-  def eval_step(self, payload: Any, **kwargs) -> None:
+  def eval_step(
+      self, payload: datatypes.TrainExample, **kwargs
+  ) -> metrics.MetricsBuffer:
     """Executes one evaluation step on the given payload.
 
     Must not mutate any trainer state, including gradient accumulation
@@ -113,13 +121,15 @@ class AbstractTrainer(abc.ABC):
     Args:
       payload: A packed micro-batch ready for evaluation.
       **kwargs: Implementation-specific options.
+    Returns:
+      A MetricsBuffer of evaluation metrics for this batch.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement eval_step."
     )
 
   @abc.abstractmethod
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
+  def save_checkpoint(self, metadata: dict[str, Any], **kwargs) -> None:
     """Force the trainer to serialize its state (model + optimizer).
 
     Checkpoint cadence/policy is the caller's responsibility.
@@ -132,7 +142,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def restore_checkpoint(self, **kwargs) -> Any:
+  def restore_checkpoint(self, **kwargs) -> dict[str, Any]:
     """Restore state from latest checkpoint and return the metadata pytree.
 
     The metadata is the same as what is used on save_checkpoint.
