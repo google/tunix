@@ -16,6 +16,7 @@
 
 from typing import Any, AsyncIterator, Callable, Sequence
 
+from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 
 
@@ -53,24 +54,60 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def generate(
       self,
-      requests: Any | Sequence[Any],
-      on_complete: Callable[[Any], None] | None = None,
-  ) -> Any | Sequence[Any]:
-    """Coroutine method for single or batched generate requests."""
+      requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
+      on_complete: Callable[[datatypes.Trajectory], None] | None = None,
+  ) -> datatypes.Trajectory | Sequence[datatypes.Trajectory]:
+    """Coroutine method for single or batched generate requests.
+
+    Args:
+      requests: A single TrajectoryRequest or a sequence of them to process.
+      on_complete: An optional callback invoked immediately as each individual
+        Trajectory is successfully generated. This allows the caller to stream
+        results asynchronously without waiting for the entire batch to finish.
+
+    Returns:
+      A single Trajectory (if a single request was provided) or a sequence of
+      completed Trajectories corresponding to the batch of requests.
+    """
     raise NotImplementedError()
 
-  async def pop_next_completed(self) -> Any:
-    """Pull-based stream: yields whichever trajectory finishes first out-of-order."""
+  async def pop_next_completed(self) -> datatypes.Trajectory:
+    """Pull-based stream: yields whichever trajectory finishes first out-of-order.
+
+    This provides an alternative to the `on_complete` callback for consumers
+    who prefer to actively await the next available trajectory from the worker.
+
+    Returns:
+      The next completed Trajectory.
+    """
     raise NotImplementedError()
 
-  def as_completed_stream(self) -> AsyncIterator[Any]:
-    """Async stream yielding completed trajectories or errors strictly out-of-order."""
+  def as_completed_stream(self) -> AsyncIterator[datatypes.Trajectory]:
+    """Async stream yielding completed trajectories or errors strictly out-of-order.
+
+    Yields:
+      Completed Trajectory objects as they finish generation.
+    """
     raise NotImplementedError()
 
   def prepare_weight_sync(self, metadata: Any) -> None:
-    """Synchronous method for prepare_weight_sync."""
+    """Prepares the worker for an upcoming weight synchronization step.
+
+    This is used to fence off state or pause ongoing execution to ensure
+    safe memory updates without race conditions.
+
+    Args:
+      metadata: Any metadata required to prepare the sync (e.g. sync IDs).
+    """
     raise NotImplementedError()
 
   def sync_weights(self, metadata: Any) -> int:
-    """Synchronous method for sync_weights."""
+    """Synchronizes the worker's internal model weights.
+
+    Args:
+      metadata: Metadata locating the weights to sync (e.g. from Raiden).
+
+    Returns:
+      The version identifier (policy version) of the newly synced weights.
+    """
     raise NotImplementedError()
