@@ -13,12 +13,16 @@
 # limitations under the License.
 
 import os
+import atexit
 import tempfile
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import numpy as np
 from tunix.cli.utils import model
+
+atexit.register(lambda: os._exit(0))
+
 
 
 class ModelIntegrationTest(parameterized.TestCase):
