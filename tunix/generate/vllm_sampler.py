@@ -19,7 +19,7 @@ import dataclasses
 import gc
 from itertools import count
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from absl import logging
 from flax import nnx
@@ -65,7 +65,7 @@ class VllmConfig:
   enable_dp_attention: bool = False
   hbm_utilization: float = 0.5
   lora_config: Optional[Dict[str, Any]] = None
-  mesh: jax.sharding.Mesh = None
+  mesh: Optional[jax.sharding.Mesh] = None
   data_parallel_size: int = -1
   tensor_parallel_size: int = -1
   expert_parallel_size: int = 1
@@ -131,7 +131,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     Args:
         tokenizer (Any): A tokenizer compatible with the model.
         config: The vllm related configurations
-        converter: The WeightConverter to convert training weights to vllm weights
     """
 
     # Select vllm TPU backend type, there are jax, torchax and torchxla
@@ -163,6 +162,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       self.llm = LLM(**self.args)
 
+    self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
+    self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
+    self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
+
+    # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
+    # lora.
+    if config.lora_config and config.mapping_config.lora_to_hf_mappings:
+      self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
+
   @property
   def mesh(self) -> jax.sharding.Mesh:
     if hasattr(self._model_runner, "mesh") and isinstance(
@@ -175,6 +183,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           " jax.sharding.Mesh."
       )
 
+  # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
       self,
       updated_weights: jaxtyping.PyTree,
@@ -192,42 +201,91 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # Synchronization point before weight sync
     jax.effects_barrier()
 
-    vllm_state = self.converter.convert(
-        updated_weights, target_state=self.transformer_state
-    )
-
-    if isinstance(self.transformer_state, nnx.State):
-      state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
-    else:
-      state_dict = self.transformer_state
-
-    print(f"DEBUG: transformer_state type: {type(state_dict)}")
-    from flax import traverse_util
-    if isinstance(state_dict, dict):
-      print(f"DEBUG: target state keys (first 10): {list(traverse_util.flatten_dict(state_dict).keys())[:10]}", flush=True)
-
-    if self.config.reshard_chunk_size is not None:
-      src_flat = traverse_util.flatten_dict(vllm_state)
-      spec_flat = traverse_util.flatten_dict(state_dict)
-
-      resharded_flat = utils._reshard_in_chunks(
-          src_flat,
-          spec_flat,
-          reshard.reshard_pytree,
-          self.config.reshard_chunk_size,
-          self.config.delete_dst_buffers,
-      )
-      resharded_weights = traverse_util.unflatten_dict(resharded_flat)
-    else:
-      resharded_weights = reshard.reshard_pytree(
-          source=vllm_state,
-          target=state_dict,
+    if self.converter is not None:
+      from flax import traverse_util
+      import logging
+      from flax import nnx
+      logging.info("Using native WeightConverter specifically for Qwen3 integration.")
+      vllm_state = self.converter.convert(
+          updated_weights, target_state=self.transformer_state
       )
 
-    if isinstance(self.transformer_state, nnx.State):
-      nnx.update(self.transformer_state, resharded_weights)
+      if isinstance(self.transformer_state, nnx.State):
+        state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
+      else:
+        state_dict = self.transformer_state
+
+      if self.config.reshard_chunk_size is not None:
+        src_flat = traverse_util.flatten_dict(vllm_state)
+        spec_flat = traverse_util.flatten_dict(state_dict)
+
+        resharded_flat = utils._reshard_in_chunks(
+            src_flat,
+            spec_flat,
+            reshard.reshard_pytree,
+            self.config.reshard_chunk_size,
+            self.config.delete_dst_buffers,
+        )
+        resharded_weights = traverse_util.unflatten_dict(resharded_flat)
+      else:
+        resharded_weights = reshard.reshard_pytree(
+            source=vllm_state,
+            target=state_dict,
+        )
+
+      if isinstance(self.transformer_state, nnx.State):
+        nnx.update(self.transformer_state, resharded_weights)
+      else:
+        self._model_runner.state = resharded_weights
+    elif self.to_hf_key_mappings:
+      preprocess_fn = self.config.mapping_config.preprocess_src_state
+      if preprocess_fn:
+        updated_weights = preprocess_fn(updated_weights)
+
+      utils.transfer_state_with_mappings(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          key_mappings=self.to_hf_key_mappings,
+          key_mapping_hook_fns=self.to_hf_hook_fns,
+          transpose_keys=self.to_hf_transpose_keys,
+          reshard_fn=reshard.reshard_pytree,
+          delete_dst_buffers=self.config.delete_dst_buffers,
+          reshard_chunk_size=self.config.reshard_chunk_size,
+          num_kv_heads=(
+              None
+              if not self._model_runner
+              else self._model_runner.model_config.get_total_num_kv_heads()
+          ),
+          head_dim=(
+              None
+              if not self._model_runner
+              else self._model_runner.model_config.get_head_size()
+          ),
+          tp_size=self.args.get("tensor_parallel_size", 1),
+      )
     else:
-      self._model_runner.state = resharded_weights
+      # Direct Weight Sync (e.g. MaxText -> MaxText)
+      logging.debug(
+          "No key mappings configuration found. Proceeding with direct"
+          " structural weight synchronization (assuming matching source/target"
+          " structures)."
+      )
+
+      additional_config = self.config.additional_config or {}
+      if "maxtext_config" not in additional_config:
+        raise ValueError(
+            "Direct weight synchronization is currently supported only for "
+            "MaxText models. The required 'maxtext_config' key is missing "
+            "from 'additional_config'."
+        )
+
+      utils.transfer_state_directly(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          reshard_fn=reshard.reshard_pytree,
+          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
+          reshard_chunk_size=self.config.reshard_chunk_size,
+      )
 
     if hasattr(self._model_runner, "state_leaves"):
       if isinstance(self._model_runner.state, nnx.State):
@@ -274,6 +332,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["tensor_parallel_size"] = tp
     args["data_parallel_size"] = dp
 
+    assert config.mesh is not None
     device_indexes = config.mesh.device_ids.flatten().tolist()
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
@@ -324,7 +383,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
-  def tokenize(self, input_string: str) -> jax.Array | list[int]:
+  def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
@@ -332,7 +391,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def detokenize(
       self, input_strings: List[str], request_outputs: List[RequestOutput]
-  ) -> Tuple[List[str], List[float], List[int]]:
+  ) -> Tuple[
+      List[List[str]], List[List[List[float] | None]], List[List[np.ndarray]]
+  ]:
     """Detokenize the vllm outputs."""
     generations = len(request_outputs[0].outputs)
     decoded_outputs = [[] for _ in range(generations)]
@@ -357,7 +418,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             self.tokenizer.decode(single_output.token_ids)
         )
         logprobs = utils.get_logprobs_from_vllm_output(
-            single_output.token_ids, single_output.logprobs
+            list(single_output.token_ids), single_output.logprobs
         )
         out_logprobs[idx].append(logprobs)
         logging.debug(
@@ -404,12 +465,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       input_strings: str | List[str],
       max_generation_steps: int,
-      max_prompt_length: int = None,
+      max_prompt_length: Optional[int] = None,
       temperature: float = 0.0,
-      top_p: float = None,
-      top_k: int = None,
-      beam_size: int = None,
-      seed: int = None,  # vLLM Jax backend doesn't support per request seed.
+      top_p: Optional[float] = None,
+      top_k: Optional[int] = None,
+      beam_size: Optional[int] = None,
+      seed: Optional[
+          int
+      ] = None,  # vLLM Jax backend doesn't support per request seed.
       multi_sampling: int = 1,
       return_logits: bool = True,
       echo: bool = False,
@@ -500,7 +563,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           )
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    prompt_objects = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids]
+    prompt_objects = cast(
+        List[TokensPrompt],
+        [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
+    )
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:

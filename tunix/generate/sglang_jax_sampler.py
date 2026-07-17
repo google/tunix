@@ -148,16 +148,34 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
-    if self.converter is None:
-      raise ValueError("WeightConverter must be provided to SglangJaxSampler")
-
-    sglang_state = self.converter.convert(
-        updated_weights, target_state=self.transformer_state
+    if getattr(self, 'converter', None) is not None:
+      import logging
+      logging.info("Using native WeightConverter specifically for Qwen3 integration.")
+      sglang_state = self.converter.convert(
+          updated_weights, target_state=self.transformer_state
+      )
+      new_state = reshard.reshard_pytree(
+          source=sglang_state, target=self.transformer_state
+      )
+    else:
+      new_state = utils.transfer_state_with_mappings(
+        src_state=updated_weights,
+        dst_state=self.transformer_state,
+        key_mappings=self.to_hf_key_mappings,
+        transpose_keys=self.to_hf_transpose_keys,
+        reshard_fn=reshard.reshard_pytree,
+        rollout_engine="sglang_jax",
+        num_kv_heads=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_total_num_kv_heads()
+        ),
+        head_dim=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.head_dim
+        ),
     )
-    new_state = reshard.reshard_pytree(
-        source=sglang_state, target=self.transformer_state
-    )
-
     new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
     self._model_runner.model_state_leaves = new_model_state_leaves
 
