@@ -14,22 +14,34 @@
 
 // Compile with
 //  $ pip install grpcio grpcio-tools
-//  $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/distributed/service/registration_service.proto
+//  $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. examples/distributed/rl/service.proto
 
 syntax = "proto3";
 
-package tunix.distributed.service;
+package examples.distributed.rl;
 
-message RegisterRolloutWorkerRequest {
-  string worker_id = 1;
-  string rollout_service_address = 2;
+message GenerateRequest {
+  string prompt = 1;
 }
 
-message RegisterRolloutWorkerResponse {
-  string reply = 1;
-  bool success = 2;
+message GenerateResponse {
+  string completion = 1;
 }
 
-service RegistrationService {
-  rpc RegisterRolloutWorker (RegisterRolloutWorkerRequest) returns (RegisterRolloutWorkerResponse);
+service RolloutService {
+  rpc Generate (GenerateRequest) returns (GenerateResponse);
+}
+
+
+message TrainRequest {
+  string prompt = 1;
+  string completion = 2;
+}
+
+message TrainResponse {
+  string weights = 1;
+}
+
+service TrainerService {
+  rpc Train (TrainRequest) returns (TrainResponse);
 }
