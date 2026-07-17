@@ -35,6 +35,7 @@ Security Notes / Trust Boundaries:
 import abc
 import asyncio
 import inspect
+import threading
 import traceback as traceback_lib
 from typing import (
     Any,
@@ -419,6 +420,15 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._channel: Optional[Any] = None
     self._rpc: Optional[Any] = None
     self._default_timeout_s = default_timeout_s
+    # Blocking submit() runs on a persistent background event loop so repeated
+    # calls reuse one channel. gRPC aio channels are bound to the loop that
+    # created them, so they cannot be shared with the caller's async loop nor
+    # survive a per-call asyncio.run() loop.
+    self._sync_loop: Optional[Any] = None
+    self._sync_thread: Optional[threading.Thread] = None
+    self._sync_channel: Optional[Any] = None
+    self._sync_rpc: Optional[Any] = None
+    self._sync_lock = threading.Lock()
 
   def _make_rpc(self, channel: Any) -> Any:
     return channel.unary_unary(
@@ -439,36 +449,51 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Blocking gRPC invocation; safe to call repeatedly.
 
-    Each call runs on its own short-lived event loop with a channel scoped to
-    that loop, so a channel bound to a previous (now-closed) loop is never
-    reused — the failure mode of the earlier cached-channel implementation.
+    Runs on a persistent background event loop owned by this handle, so repeated
+    calls reuse a single channel rather than establishing a new one each time.
+    Cannot be called from within a running event loop (use asubmit()).
     """
     if _running_loop() is not None:
       raise RuntimeError(
           "GrpcRemoteActorHandle.submit() is blocking and cannot be called from "
           "a running event loop; use asubmit() instead."
       )
-    return asyncio.run(self._submit_on_temp_channel(method_name, args, kwargs))
+    loop = self._ensure_sync_loop()
+    future = asyncio.run_coroutine_threadsafe(
+        self._invoke_on_sync_loop(method_name, args, kwargs), loop
+    )
+    return future.result()
 
-  async def _submit_on_temp_channel(
+  def _ensure_sync_loop(self) -> Any:
+    """Lazily starts (once) the background loop used by blocking submit()."""
+    with self._sync_lock:
+      if self._sync_loop is None:
+        self._sync_loop = asyncio.new_event_loop()
+        self._sync_thread = threading.Thread(
+            target=self._sync_loop.run_forever,
+            name=f"grpc-submit-{self._host_port}",
+            daemon=True,
+        )
+        self._sync_thread.start()
+      return self._sync_loop
+
+  async def _invoke_on_sync_loop(
       self,
       method_name: Optional[str],
       args: Sequence[Any],
       kwargs: Dict[str, Any],
   ) -> Any:
     assert _grpc_aio_lib is not None
-    channel = _grpc_aio_lib.insecure_channel(
-        self._host_port, options=_grpc_options()
-    )
-    try:
-      rpc = self._make_rpc(channel)
-      request = ExecutionRequest(method_name, args, kwargs)
-      response: ExecutionResponse = await rpc(
-          request, timeout=self._default_timeout_s
+    if self._sync_rpc is None:
+      self._sync_channel = _grpc_aio_lib.insecure_channel(
+          self._host_port, options=_grpc_options()
       )
-      return response.unwrap()
-    finally:
-      await channel.close()
+      self._sync_rpc = self._make_rpc(self._sync_channel)
+    request = ExecutionRequest(method_name, args, kwargs)
+    response: ExecutionResponse = await self._sync_rpc(
+        request, timeout=self._default_timeout_s
+    )
+    return response.unwrap()
 
   async def asubmit(
       self, method_name: Optional[str] = None, *args, **kwargs
@@ -482,8 +507,32 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     return response.unwrap()
 
   async def close(self) -> None:
-    if self._channel:
+    if self._channel is not None:
       await self._channel.close()
+      self._channel = None
+      self._rpc = None
+    sync_loop = self._sync_loop
+    if sync_loop is not None:
+
+      async def _close_sync_channel() -> None:
+        if self._sync_channel is not None:
+          await self._sync_channel.close()
+
+      try:
+        await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(_close_sync_channel(), sync_loop)
+        )
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+      sync_loop.call_soon_threadsafe(sync_loop.stop)
+      if self._sync_thread is not None:
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._sync_thread.join, 5
+        )
+      self._sync_loop = None
+      self._sync_thread = None
+      self._sync_channel = None
+      self._sync_rpc = None
 
 
 class InProcessActorHandle(ActorHandle):

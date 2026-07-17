@@ -464,17 +464,18 @@ class SubstrateHardeningTest(absltest.TestCase):
     server, loop, thread = _run_server_in_background(
         StubWorkerEngine("sync_worker"), port
     )
+    handle = remote_lib.GrpcRemoteActorHandle(
+        target_address=f"grpc://localhost:{port}"
+    )
     try:
-      handle = remote_lib.GrpcRemoteActorHandle(
-          target_address=f"grpc://localhost:{port}"
-      )
       first = handle.submit("compute_trajectory", "p1", turns=1)
       self.assertIn("sync_worker", first)
-      # The 2nd blocking call previously failed by reusing a channel bound to
-      # the 1st call's now-closed event loop.
+      # The 2nd blocking call reuses the handle's persistent submit loop and its
+      # channel; it must not rebuild the channel or fail on a stale loop.
       second = handle.submit("compute_trajectory", "p2", turns=1)
       self.assertIn("sync_worker", second)
     finally:
+      asyncio.run(handle.close())  # tears down the persistent submit loop
       _shutdown_background_server(server, loop, thread)
 
   def test_grpc_sync_start_serving_actually_serves(self):
