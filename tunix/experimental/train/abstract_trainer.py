@@ -61,6 +61,26 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
+  def with_gen_model_input_fn(
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ) -> "AbstractTrainer":
+    """Sets the last-mile adapter mapping a payload to the loss fn's kwargs.
+
+    This is what lets the trainer accept an arbitrary payload type: `fwd_bwd`
+    and `eval_step` call `gen_model_input_fn(payload)` and splat the result into
+    the loss/eval function. It is the seam that lets one trainer serve SFT, RL,
+    and custom payloads. The adapter is a callable held in-process and is never
+    sent over the wire; a remote worker rebuilds it from serialized config.
+    Args:
+      gen_model_input_fn: Maps a payload to a dict of loss-fn keyword arguments.
+    Returns:
+      self, for chaining.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement with_gen_model_input_fn."
+    )
+
+  @abc.abstractmethod
   def compile(self, shape_config: datatypes.ShapeConfig) -> None:
     """Triggers JAX compilation. `with_loss_fn` must be called first.
 
@@ -78,7 +98,7 @@ class AbstractTrainer(abc.ABC):
 
   @abc.abstractmethod
   def fwd_bwd(
-      self, payload: datatypes.TrainExample, **kwargs
+      self, payload: datatypes.TrainerPayload, **kwargs
   ) -> datatypes.StepReceipt:
     """Executes forward and backward passes.
 
@@ -113,7 +133,7 @@ class AbstractTrainer(abc.ABC):
 
   @abc.abstractmethod
   def eval_step(
-      self, payload: datatypes.TrainExample, **kwargs
+      self, payload: datatypes.TrainerPayload, **kwargs
   ) -> metrics.MetricsBuffer:
     """Executes one evaluation step on the given payload.
 

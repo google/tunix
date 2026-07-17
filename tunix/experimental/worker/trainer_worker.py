@@ -87,8 +87,15 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer.with_loss_fn(loss_fn, has_aux)
     return self
 
+  def with_gen_model_input_fn(
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ) -> "TrainerWorker":
+    """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
+    self._trainer.with_gen_model_input_fn(gen_model_input_fn)
+    return self
+
   def fwd_bwd(
-      self, payload: datatypes.TrainExample, **kwargs
+      self, payload: datatypes.TrainerPayload, **kwargs
   ) -> datatypes.StepReceipt:
     """Executes forward and backward passes."""
     return self._trainer.fwd_bwd(payload, **kwargs)
@@ -98,7 +105,7 @@ class TrainerWorker(abstract_worker.Worker):
     return self._trainer.update(**kwargs)
 
   def eval_step(
-      self, payload: datatypes.TrainExample, **kwargs
+      self, payload: datatypes.TrainerPayload, **kwargs
   ) -> metrics.MetricsBuffer:
     """Executes one evaluation step on the given payload."""
     return self._trainer.eval_step(payload, **kwargs)

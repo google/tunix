@@ -64,9 +64,13 @@ class FakeTrainerWorker(abstract_worker.Worker):
     del loss_fn, has_aux
     return self
 
+  def with_gen_model_input_fn(self, gen_model_input_fn) -> "FakeTrainerWorker":
+    del gen_model_input_fn
+    return self
+
   def fwd_bwd(
       self,
-      payload: datatypes.TrainExample,
+      payload: datatypes.TrainerPayload,
       *,
       accum_id: str,
       micro_index: int,
@@ -117,7 +121,7 @@ class FakeTrainerWorker(abstract_worker.Worker):
       self._updates.pop(accum_id, None)
 
   def eval_step(
-      self, payload: datatypes.TrainExample, **kwargs
+      self, payload: datatypes.TrainerPayload, **kwargs
   ) -> metrics.MetricsBuffer:
     del payload, kwargs
     return metrics.MetricsBuffer(id=f"eval-{self._step}", mode="eval")

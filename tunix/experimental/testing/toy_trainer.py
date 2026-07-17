@@ -16,12 +16,12 @@
 
 A pure-optax linear "policy" over a small token vocabulary: the score of a
 completion token is a learned weight indexed by its id, and the loss is the
-advantage-weighted, completion-masked token-mean of those scores. It implements
-real gradient accumulation (`fwd_bwd` sums caller-scaled grads under an
-`accum_id`; `update` applies the sum), so N micro-batches carrying token-mean
-`loss_scale`s reproduce the full-batch update exactly. No transformer and no I/O
-— just enough to exercise the trainer contract and the orchestrator's dispatch
-schedule.
+advantage-weighted, `loss_mask`-masked token-mean of those scores. It reaches
+the payload's fields through a `gen_model_input_fn` adapter (so it accepts the
+generic `TrainerPayload`), and implements real gradient accumulation (`fwd_bwd`
+sums caller-scaled grads under an `accum_id`; `update` applies the sum), so N
+micro-batches carrying token-mean `loss_scale`s reproduce the full-batch update
+exactly. No transformer and no I/O.
 """
 
 from typing import Any, Callable
@@ -33,7 +33,6 @@ import optax
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
 from tunix.experimental.train import abstract_trainer
-from tunix.rl import common
 
 
 class ToyAbstractTrainer(abstract_trainer.AbstractTrainer):
@@ -45,6 +44,7 @@ class ToyAbstractTrainer(abstract_trainer.AbstractTrainer):
     self._optimizer = optax.sgd(float(config.get("learning_rate", 0.1)))
     self._params = {"w": jnp.zeros((self._vocab_size,), dtype=jnp.float32)}
     self._opt_state = self._optimizer.init(self._params)
+    self._gen_model_input_fn = self._default_gen_model_input_fn
     self._step = 0
     self._accum: dict[str, Any] = {}
     self._receipts: dict[str, dict[int, datatypes.StepReceipt]] = {}
@@ -57,22 +57,36 @@ class ToyAbstractTrainer(abstract_trainer.AbstractTrainer):
     del loss_fn, has_aux
     return self
 
+  def with_gen_model_input_fn(
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ):
+    self._gen_model_input_fn = gen_model_input_fn
+    return self
+
   def compile(self, shape_config: datatypes.ShapeConfig) -> None:
     del shape_config  # Tiny model; XLA compiles lazily on the first step.
 
-  def _loss(self, params, ex: common.TrainExample):
-    scores = params["w"][ex.completion_ids]  # [B, C] gather by token id.
-    advantages = ex.advantages
+  def _default_gen_model_input_fn(
+      self, payload: datatypes.TrainExampleV1
+  ) -> dict[str, Any]:
+    return {
+        "completion_ids": jnp.asarray(payload.completion_ids),
+        "loss_mask": jnp.asarray(payload.loss_mask),
+        "advantages": jnp.asarray(payload.advantages, dtype=jnp.float32),
+    }
+
+  def _loss(self, params, *, completion_ids, loss_mask, advantages):
+    scores = params["w"][completion_ids]  # [B, C] gather by token id.
     if advantages.ndim == 1:
       advantages = advantages[:, None]
-    mask = ex.completion_mask.astype(jnp.float32)
+    mask = loss_mask.astype(jnp.float32)
     mask_sum = jnp.sum(mask)
     loss = jnp.sum(-(advantages * scores) * mask) / jnp.maximum(mask_sum, 1.0)
     return loss, mask_sum
 
   def fwd_bwd(
       self,
-      payload: common.TrainExample,
+      payload: datatypes.TrainerPayload,
       *,
       accum_id: str,
       micro_index: int,
@@ -82,8 +96,9 @@ class ToyAbstractTrainer(abstract_trainer.AbstractTrainer):
     if micro_index in per_accum:
       # Duplicate micro-step: return the existing receipt without re-adding grads.
       return per_accum[micro_index]
+    inputs = self._gen_model_input_fn(payload)
     (loss, mask_sum), grad = jax.value_and_grad(self._loss, has_aux=True)(
-        self._params, payload
+        self._params, **inputs
     )
     scaled = jax.tree.map(lambda g: g * loss_scale, grad)
     if accum_id in self._accum:
@@ -142,10 +157,10 @@ class ToyAbstractTrainer(abstract_trainer.AbstractTrainer):
       self._updates.pop(accum_id, None)
 
   def eval_step(
-      self, payload: common.TrainExample, **kwargs
+      self, payload: datatypes.TrainerPayload, **kwargs
   ) -> metrics.MetricsBuffer:
     del kwargs
-    loss, _ = self._loss(self._params, payload)
+    loss, _ = self._loss(self._params, **self._gen_model_input_fn(payload))
     return metrics.MetricsBuffer(
         id=f"eval-{self._step}",
         scalar_metrics={"loss": float(loss)},

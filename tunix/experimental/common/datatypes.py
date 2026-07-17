@@ -172,6 +172,51 @@ class UpdateResult:
 
 
 @dataclasses.dataclass(kw_only=True)
+class TrainerPayload:
+  """Generic trainer micro-batch payload (numpy wire).
+
+  The base carries only what generic machinery must read to stay
+  algorithm-agnostic: a loss mask (so gradient accumulation can derive a
+  per-micro-batch denominator) and an optional packing layout. Algorithm-
+  specific tensors live on subclasses (e.g. TrainExampleV1 for RL) and are
+  reached by the trainer's gen_model_input_fn, not by the generic loop. Users
+  subclass this to carry their own fields.
+
+  Attributes:
+    loss_mask: int32 [B, T], 1 where the position contributes to the loss.
+    schema_version: DTO schema version (evolution is additive).
+    segment_ids: Optional int32 [B, T] packing segment ids.
+    segment_positions: Optional int32 [B, T] within-segment positions.
+  """
+
+  loss_mask: np.ndarray
+  schema_version: int = 1
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class TrainExampleV1(TrainerPayload):
+  """RL training example: the numpy wire twin of the on-device TrainExample.
+
+  The inherited `loss_mask` is the completion loss mask. Additional RL fields
+  (ref/old per-token logps, per-row policy_version, temperature,
+  sampler_is_weights) are added additively as consumers require them.
+
+  Attributes:
+    prompt_ids: int32 [B, P] left-padded prompt tokens.
+    prompt_mask: int32 [B, P] prompt mask.
+    completion_ids: int32 [B, C] right-padded completion tokens.
+    advantages: float32 [B] or [B, C] advantages.
+  """
+
+  prompt_ids: np.ndarray
+  prompt_mask: np.ndarray
+  completion_ids: np.ndarray
+  advantages: np.ndarray
+
+
+@dataclasses.dataclass(kw_only=True)
 class LogprobsRequest:
   """Request to score per-token log-probabilities under a frozen model.
 

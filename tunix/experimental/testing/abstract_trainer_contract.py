@@ -25,12 +25,10 @@ so the suite stays implementation-agnostic.
 
 import chex
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
-from tunix.rl import common
 
 
 class AbstractTrainerContractSuite:
@@ -48,18 +46,16 @@ class AbstractTrainerContractSuite:
     return trainer
 
   def _example(
-      self, completion_ids, completion_mask, advantages
-  ) -> common.TrainExample:
+      self, completion_ids, loss_mask, advantages
+  ) -> datatypes.TrainExampleV1:
     ids = np.asarray(completion_ids, dtype=np.int32)
     rows = ids.shape[0]
-    return common.TrainExample(
-        prompt_ids=jnp.zeros((rows, 1), jnp.int32),
-        prompt_mask=jnp.ones((rows, 1), jnp.int32),
-        completion_ids=jnp.asarray(ids),
-        completion_mask=jnp.asarray(completion_mask, jnp.int32),
-        advantages=jnp.asarray(advantages, jnp.float32),
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
+    return datatypes.TrainExampleV1(
+        loss_mask=np.asarray(loss_mask, dtype=np.int32),
+        prompt_ids=np.zeros((rows, 1), dtype=np.int32),
+        prompt_mask=np.ones((rows, 1), dtype=np.int32),
+        completion_ids=ids,
+        advantages=np.asarray(advantages, dtype=np.float32),
     )
 
   def _params(self, trainer):
