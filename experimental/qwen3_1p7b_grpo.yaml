@@ -142,8 +142,9 @@ spec:
                 # 64*8=512 / 16 = 32.
                 # Hyperparams aligned with the agentic qwen3 gsm8k run: full FT,
                 # lr=2e-7 (adamw, cosine, wd=0.01, b2=0.999, grad_norm=1.0),
-                # num_generations=8, beta=0.04, kl_loss_mode=mse_kl. max_steps=100
-                # (trend); eval + checkpoint effectively off for this experiment.
+                # num_generations=8, beta=0.04, kl_loss_mode=mse_kl. max_steps=200
+                # (= demo default; 2 epochs so the data lasts 232>200 batches);
+                # eval + checkpoint effectively off for this experiment.
                 # [recipe-align 2026-07-17] Recipe now fully matches the agentic
                 # demo (qwen3_grpo_demo.py, the converging gsm8k_refactor_* run):
                 # VTC raw-text prompt via data_module=experimental/vtc_data.py
@@ -207,7 +208,7 @@ spec:
                   apply_chat_template_to_dataset=false \
                   batch_size=64 \
                   num_test_batches=100 \
-                  num_train_epochs=1 \
+                  num_train_epochs=2 \
                   train_fraction=1.0 \
                   rl_training_config.actor_optimizer_config.opt_type="adamw" \
                   rl_training_config.actor_optimizer_config.peak_value=2e-7 \
@@ -221,7 +222,7 @@ spec:
                   rl_training_config.actor_optimizer_config.weight_decay=0.01 \
                   rl_training_config.actor_optimizer_config.max_grad_norm=1.0 \
                   rl_training_config.eval_every_n_steps=100000 \
-                  rl_training_config.max_steps=100 \
+                  rl_training_config.max_steps=200 \
                   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/qwen3" \
                   rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
                   rl_training_config.checkpoint_root_directory="/tmp/ckpts_qwen3_grpo" \

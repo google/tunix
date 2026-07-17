@@ -248,6 +248,10 @@ class YamlAlignmentTest(absltest.TestCase):
         # otherwise falls back to the dataclass default 2).
         'rollout_config.top_k=null',
         'rl_training_config.max_inflight_computations=1',
+        # run-length fix: demo runs 200 steps (its --max_steps default); one
+        # epoch is only 116 batches (7473/64) so 2 epochs keep data flowing.
+        'rl_training_config.max_steps=200',
+        'num_train_epochs=2',
     ):
       self.assertIn(needle, self.yaml_text, msg=f'missing override: {needle}')
 
