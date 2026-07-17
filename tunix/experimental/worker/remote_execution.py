@@ -35,6 +35,7 @@ Security Notes / Trust Boundaries:
 import abc
 import asyncio
 import inspect
+import traceback as traceback_lib
 from typing import (
     Any,
     AsyncIterator,
@@ -57,6 +58,35 @@ except ImportError:
   _grpc_lib = None
   _grpc_aio_lib = None
   _GRPC_AVAILABLE = False
+
+
+# Default per-call deadline (seconds) applied to remote invocations so a dead or
+# wedged worker surfaces an error instead of hanging the caller indefinitely.
+DEFAULT_TIMEOUT_S = 300.0
+
+# Cap for a single gRPC message. The library default (~4 MiB) is far too small
+# for training-batch payloads; raise it and enable keepalive so idle connections
+# are detected.
+_MAX_MESSAGE_BYTES = 128 * 1024 * 1024
+
+
+def _grpc_options() -> List[Tuple[str, int]]:
+  """Channel/server options lifting the message-size cap and enabling keepalive."""
+  return [
+      ("grpc.max_send_message_length", _MAX_MESSAGE_BYTES),
+      ("grpc.max_receive_message_length", _MAX_MESSAGE_BYTES),
+      ("grpc.keepalive_time_ms", 20000),
+      ("grpc.keepalive_timeout_ms", 10000),
+      ("grpc.keepalive_permit_without_calls", 1),
+  ]
+
+
+def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
+  """Returns the currently running event loop, or None if there is none."""
+  try:
+    return asyncio.get_running_loop()
+  except RuntimeError:
+    return None
 
 
 class ExecutionRequest:
@@ -90,38 +120,52 @@ class ExecutionRequest:
 
 
 class ExecutionResponse:
-  """Universal execution response wrapping serialized result or error."""
+  """Universal execution response wrapping a result or a structured error."""
 
   def __init__(
       self,
       result: Any = None,
       error_message: Optional[str] = None,
       error_type: Optional[str] = None,
+      traceback: Optional[str] = None,
+      retryable: bool = False,
   ):
     self.result = result
     self.error_message = error_message
     self.error_type = error_type
+    self.traceback = traceback
+    self.retryable = retryable
 
   def serialize(self) -> bytes:
-    return cloudpickle.dumps((self.result, self.error_message, self.error_type))
+    return cloudpickle.dumps((
+        self.result,
+        self.error_message,
+        self.error_type,
+        self.traceback,
+        self.retryable,
+    ))
 
   @classmethod
   def deserialize(cls, payload: bytes) -> "ExecutionResponse":
     # SECURITY WARNING: cloudpickle.loads executes arbitrary code during unpickling. Ensure
     # payload authenticity over trusted channels before deserialization, or use custom
     # `pickle.Unpickler` (`find_class`) to whitelist only trusted domain data types.
-    result, err_msg, err_type = cloudpickle.loads(payload)
-    return cls(result=result, error_message=err_msg, error_type=err_type)
-
-
+    result, err_msg, err_type, tb, retryable = cloudpickle.loads(payload)
+    return cls(
+        result=result,
+        error_message=err_msg,
+        error_type=err_type,
+        traceback=tb,
+        retryable=retryable,
+    )
 
   def unwrap(self) -> Any:
-
-    """Returns result or raises RuntimeError if remote invocation failed."""
+    """Returns the result, or raises RuntimeError if the remote call failed."""
     if self.error_message is not None:
-      raise RuntimeError(
-          f"RemoteExecutionError [{self.error_type}]: {self.error_message}"
-      )
+      message = f"RemoteExecutionError [{self.error_type}]: {self.error_message}"
+      if self.traceback:
+        message = f"{message}\nRemote traceback:\n{self.traceback}"
+      raise RuntimeError(message)
     return self.result
 
 
@@ -175,7 +219,9 @@ class RemoteExecutionServer(abc.ABC):
       return ExecutionResponse(result=result)
     except Exception as e:  # pylint: disable=broad-exception-caught
       return ExecutionResponse(
-          error_message=str(e), error_type=type(e).__name__
+          error_message=str(e),
+          error_type=type(e).__name__,
+          traceback=traceback_lib.format_exc(),
       )
 
   async def execute_request(self, request: ExecutionRequest) -> ExecutionResponse:
@@ -205,7 +251,9 @@ class RemoteExecutionServer(abc.ABC):
       return ExecutionResponse(result=result)
     except Exception as e:  # pylint: disable=broad-exception-caught
       return ExecutionResponse(
-          error_message=str(e), error_type=type(e).__name__
+          error_message=str(e),
+          error_type=type(e).__name__,
+          traceback=traceback_lib.format_exc(),
       )
 
 
@@ -222,19 +270,40 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
   def __init__(self, instance: Optional[Any] = None):
     super().__init__(instance)
     self._server: Optional[Any] = None
+    self._serve_loop: Optional[Any] = None
 
   async def _handle_execute(self, request_bytes: bytes, context: Any) -> bytes:
     del context
-    request = ExecutionRequest.deserialize(request_bytes)
-    response = await self.execute_request(request)
-    return response.serialize()
+    try:
+      request = ExecutionRequest.deserialize(request_bytes)
+      response = await self.execute_request(request)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      response = ExecutionResponse(
+          error_message=str(e),
+          error_type=type(e).__name__,
+          traceback=traceback_lib.format_exc(),
+      )
+    try:
+      return response.serialize()
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      # The result itself is not serializable; return a structured error rather
+      # than letting the RPC handler crash with an opaque failure.
+      fallback = ExecutionResponse(
+          error_message=(
+              "failed to serialize result of type "
+              f"{type(response.result).__name__}: {e}"
+          ),
+          error_type="ResultSerializationError",
+          traceback=traceback_lib.format_exc(),
+      )
+      return fallback.serialize()
 
   async def start_serving_async(self, port: int = 50051) -> Any:
     """Starts an asynchronous gRPC server listening on [::]:port."""
     if not _GRPC_AVAILABLE or _grpc_lib is None or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
 
-    self._server = _grpc_aio_lib.server()
+    self._server = _grpc_aio_lib.server(options=_grpc_options())
     handler = _grpc_lib.method_handlers_generic_handler(
         "tunix.ExecutionService",
         {
@@ -253,19 +322,36 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     return self._server
 
 
+  @property
+  def serve_loop(self) -> Optional[Any]:
+    """The event loop running the blocking start_serving(), or None."""
+    return self._serve_loop
+
   def start_serving(self, port: int = 50051) -> None:
-    """Synchronously starts gRPC server using asyncio run/event loop."""
+    """Blocking: starts the gRPC server and serves until it is stopped.
+
+    Runs an event loop for the server's lifetime. The previous implementation
+    returned immediately after start(), so `asyncio.run` closed the loop and
+    tore the server down before it could serve any request. To stop a server
+    started this way, schedule stop_serving() on `serve_loop` from another
+    thread.
+    """
+    if _running_loop() is not None:
+      raise RuntimeError(
+          "GrpcRemoteExecutionServer.start_serving() is blocking and cannot be "
+          "called from a running event loop; await start_serving_async() and "
+          "hold the server task instead."
+      )
+    loop = asyncio.new_event_loop()
+    self._serve_loop = loop
     try:
-      loop = asyncio.get_running_loop()
-      if loop.is_running():
-        raise RuntimeError(
-            "GrpcRemoteExecutionServer.start_serving() cannot be called from a "
-            "running async event loop. Use await start_serving_async() instead."
-        )
-    except RuntimeError as e:
-      if "start_serving() cannot be called" in str(e):
-        raise
-    asyncio.run(self.start_serving_async(port))
+      asyncio.set_event_loop(loop)
+      loop.run_until_complete(self.start_serving_async(port))
+      loop.run_until_complete(self._server.wait_for_termination())
+    finally:
+      self._serve_loop = None
+      asyncio.set_event_loop(None)
+      loop.close()
 
   async def stop_serving(self, grace: float = 0.5) -> None:
 
@@ -320,38 +406,69 @@ class RemoteActorHandle(ActorHandle):
 class GrpcRemoteActorHandle(RemoteActorHandle):
   """ActorHandle connecting to GrpcRemoteExecutionServer over TCP sockets via gRPC."""
 
-  def __init__(self, target_address: str):
+  def __init__(
+      self,
+      target_address: str,
+      *,
+      default_timeout_s: Optional[float] = DEFAULT_TIMEOUT_S,
+  ):
     if not _GRPC_AVAILABLE or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
     self.target_address = target_address
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._rpc: Optional[Any] = None
+    self._default_timeout_s = default_timeout_s
+
+  def _make_rpc(self, channel: Any) -> Any:
+    return channel.unary_unary(
+        "/tunix.ExecutionService/Execute",
+        request_serializer=lambda req: req.serialize(),
+        response_deserializer=lambda b: ExecutionResponse.deserialize(b),
+    )
 
   def _get_rpc(self) -> Any:
     if self._rpc is None:
       assert _grpc_aio_lib is not None
-      self._channel = _grpc_aio_lib.insecure_channel(self._host_port)
-      self._rpc = self._channel.unary_unary(
-          "/tunix.ExecutionService/Execute",
-          request_serializer=lambda req: req.serialize(),
-          response_deserializer=lambda b: ExecutionResponse.deserialize(b),
+      self._channel = _grpc_aio_lib.insecure_channel(
+          self._host_port, options=_grpc_options()
       )
+      self._rpc = self._make_rpc(self._channel)
     return self._rpc
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
-    """Synchronously invokes remote method over gRPC."""
+    """Blocking gRPC invocation; safe to call repeatedly.
+
+    Each call runs on its own short-lived event loop with a channel scoped to
+    that loop, so a channel bound to a previous (now-closed) loop is never
+    reused — the failure mode of the earlier cached-channel implementation.
+    """
+    if _running_loop() is not None:
+      raise RuntimeError(
+          "GrpcRemoteActorHandle.submit() is blocking and cannot be called from "
+          "a running event loop; use asubmit() instead."
+      )
+    return asyncio.run(self._submit_on_temp_channel(method_name, args, kwargs))
+
+  async def _submit_on_temp_channel(
+      self,
+      method_name: Optional[str],
+      args: Sequence[Any],
+      kwargs: Dict[str, Any],
+  ) -> Any:
+    assert _grpc_aio_lib is not None
+    channel = _grpc_aio_lib.insecure_channel(
+        self._host_port, options=_grpc_options()
+    )
     try:
-      loop = asyncio.get_running_loop()
-      if loop.is_running():
-        raise RuntimeError(
-            "GrpcRemoteActorHandle.submit() cannot be called from a running "
-            "async event loop. Use asubmit() instead."
-        )
-    except RuntimeError as e:
-      if "submit() cannot be called" in str(e):
-        raise
-    return asyncio.run(self.asubmit(method_name, *args, **kwargs))
+      rpc = self._make_rpc(channel)
+      request = ExecutionRequest(method_name, args, kwargs)
+      response: ExecutionResponse = await rpc(
+          request, timeout=self._default_timeout_s
+      )
+      return response.unwrap()
+    finally:
+      await channel.close()
 
   async def asubmit(
       self, method_name: Optional[str] = None, *args, **kwargs
@@ -359,7 +476,9 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     """Asynchronously invokes remote method over gRPC."""
     rpc = self._get_rpc()
     request = ExecutionRequest(method_name, args, kwargs)
-    response: ExecutionResponse = await rpc(request)
+    response: ExecutionResponse = await rpc(
+        request, timeout=self._default_timeout_s
+    )
     return response.unwrap()
 
   async def close(self) -> None:
