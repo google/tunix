@@ -68,6 +68,7 @@ class InferenceWorker(abstract_worker.Worker):
       pad_id: int,
       eos_id: int,
       model_version: int = 0,
+      worker_id: str = "inference",
   ):
     """Initializes the worker.
 
@@ -76,24 +77,39 @@ class InferenceWorker(abstract_worker.Worker):
       pad_id: Padding token id used in the request arrays.
       eos_id: End-of-sequence token id.
       model_version: Version tag for the hosted weights; constant while frozen.
+      worker_id: Unique id reported via `info()`.
     """
     self._core = core
     self._pad_id = pad_id
     self._eos_id = eos_id
     self._model_version = model_version
+    self._worker_id = worker_id
     self._is_running = False
 
   def initialize(self) -> None:
     pass
 
-  def compile(self, dummy_data: Any) -> None:
-    del dummy_data
+  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
+    del shape_config
 
   def start(self) -> None:
     self._is_running = True
 
   def stop(self) -> None:
     self._is_running = False
+
+  def health(self) -> datatypes.HealthReport:
+    """Returns a liveness/status snapshot."""
+    return datatypes.HealthReport(
+        state="READY" if self._is_running else "STOPPED",
+        policy_version=self._model_version,
+    )
+
+  def info(self) -> datatypes.WorkerInfo:
+    """Returns the worker's static description."""
+    return datatypes.WorkerInfo(
+        worker_id=self._worker_id, roles=frozenset({"inference"})
+    )
 
   def compute_logprobs(
       self, req: datatypes.LogprobsRequest

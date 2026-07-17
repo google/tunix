@@ -61,15 +61,16 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def compile(self, dummy_data: datatypes.TrainExample) -> None:
+  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
     """Triggers JAX compilation. `with_loss_fn` must be called first.
 
     Idempotent; safe to call multiple times. Under JAX jit semantics, XLA
     compilation itself still happens on the first call per input shape; this
     method constructs the jitted callables and applies optimizer sharding so
-    the first step avoids double compilation. Does NOT restore checkpoints.
+    the first step avoids double compilation. The trainer synthesizes its own
+    warmup dummies from `shape_config`. Does NOT restore checkpoints.
     Args:
-      dummy_data: A dummy batch of data to trigger compilation.
+      shape_config: Batch/sequence shape hints for synthesizing warmup dummies.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement compile."
@@ -157,12 +158,16 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def prepare_weight_sync(self, **kwargs) -> None:
-    """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull.
+  def prepare_weight_sync(
+      self, spec: datatypes.WeightSyncSpec
+  ) -> datatypes.WeightSyncMetadata:
+    """Stages weights for transfer and returns metadata for replicas to pull.
 
     For a Raiden based implementation, trigger the d2h weight transfer here.
     Args:
-      **kwargs: Implementation-specific options.
+      spec: What to stage (version, transport method, param filter).
+    Returns:
+      Metadata locating the staged weights for replicas to fetch.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement prepare_weight_sync."

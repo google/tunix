@@ -122,6 +122,15 @@ class InferenceWorkerTest(absltest.TestCase):
     worker.stop()
     self.assertFalse(worker._is_running)
 
+  def test_info_and_health(self):
+    worker = _worker()
+    info = worker.info()
+    self.assertEqual(info.worker_id, "inference")
+    self.assertIn("inference", info.roles)
+    self.assertEqual(worker.health().state, "STOPPED")
+    worker.start()
+    self.assertEqual(worker.health().state, "READY")
+
   def test_result_dtos_are_wire_safe_and_round_trip(self):
     result = _worker().compute_logprobs(_logprobs_request(batch=2))
 

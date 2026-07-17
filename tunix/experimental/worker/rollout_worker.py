@@ -14,7 +14,7 @@
 
 """Top-level RolloutWorker abstractions."""
 
-from typing import Any, AsyncIterator, Callable, Sequence
+from typing import Sequence
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
@@ -23,7 +23,10 @@ from tunix.experimental.worker import abstract_worker
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
 
-  Encapsulates RolloutManager and executes concurrent episode loops.
+  Encapsulates RolloutManager and executes concurrent episode loops. Completed
+  trajectories are delivered through a ticketed, cursor-read channel
+  (generate -> get_completed -> ack) rather than a return value or a callback,
+  so delivery is idempotent and a dropped/retried poll never loses results.
   """
 
   def __init__(self, worker_id: str, **kwargs):
@@ -37,7 +40,7 @@ class RolloutWorker(abstract_worker.Worker):
   def initialize(self) -> None:
     pass
 
-  def compile(self, dummy_data: Any) -> None:
+  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
     pass
 
   def start(self) -> None:
@@ -46,72 +49,88 @@ class RolloutWorker(abstract_worker.Worker):
   def stop(self) -> None:
     pass
 
-  def pause(self) -> None:
+  def health(self) -> datatypes.HealthReport:
+    """Returns a liveness/status snapshot."""
     raise NotImplementedError()
 
-  def resume(self) -> None:
+  def info(self) -> datatypes.WorkerInfo:
+    """Returns the worker's static description."""
     raise NotImplementedError()
 
   async def generate(
+      self, requests: Sequence[datatypes.TrajectoryRequest]
+  ) -> str:
+    """Enqueues a batch of requests and returns a ticket to read results from.
+
+    Enqueue-only: this returns immediately with a ticket. Completed results are
+    read out-of-order via `get_completed` and acknowledged via `ack`.
+
+    Args:
+      requests: The requests to generate trajectories for.
+
+    Returns:
+      A ticket string identifying this batch's completion stream.
+    """
+    raise NotImplementedError()
+
+  async def get_completed(
       self,
-      requests: (
-          datatypes.TrajectoryRequest | Sequence[datatypes.TrajectoryRequest]
-      ),
-      on_complete: (
-          Callable[[datatypes.TrajectoryResult], None] | None
-      ) = None,
-  ) -> datatypes.TrajectoryResult | Sequence[datatypes.TrajectoryResult]:
-    """Coroutine method for single or batched generate requests.
+      ticket: str,
+      after_seq: int,
+      max_items: int = 16,
+      wait_s: float = 0.0,
+  ) -> datatypes.CompletedPage:
+    """Cursor-read of completed results for a ticket (non-destructive).
+
+    Returns results whose sequence number exceeds `after_seq`; the worker
+    retains results until they are `ack`ed, so a retried read with the same
+    `after_seq` re-reads the same page (idempotent). `wait_s > 0` long-polls up
+    to that many seconds; an empty page with `done=False` is valid.
 
     Args:
-      requests: A single TrajectoryRequest or a sequence of them to process.
-      on_complete: An optional callback invoked immediately as each individual
-        TrajectoryResult is produced. This allows the caller to stream results
-        asynchronously without waiting for the entire batch to finish.
+      ticket: The ticket returned by `generate`.
+      after_seq: Read results whose sequence number exceeds this cursor.
+      max_items: Maximum number of results to return in this page.
+      wait_s: Optional bounded long-poll timeout.
 
     Returns:
-      A single TrajectoryResult (if a single request was provided) or a sequence
-      of TrajectoryResults corresponding to the batch of requests.
+      A CompletedPage of results plus the new cursor and done flag.
     """
     raise NotImplementedError()
 
-  async def pop_next_completed(self) -> datatypes.TrajectoryResult:
-    """Pull-based stream: yields whichever result finishes first out-of-order.
-
-    This provides an alternative to the `on_complete` callback for consumers
-    who prefer to actively await the next available result from the worker.
-
-    Returns:
-      The next completed TrajectoryResult.
-    """
+  async def ack(self, ticket: str, upto_seq: int) -> None:
+    """Acknowledges results up to `upto_seq`, letting the worker GC them."""
     raise NotImplementedError()
 
-  def as_completed_stream(self) -> AsyncIterator[datatypes.TrajectoryResult]:
-    """Async stream yielding completed results (or errors) strictly out-of-order.
-
-    Yields:
-      TrajectoryResult objects as episodes finish generation.
-    """
-    raise NotImplementedError()
-
-  def prepare_weight_sync(self, metadata: Any) -> None:
-    """Prepares the worker for an upcoming weight synchronization step.
-
-    This is used to fence off state or pause ongoing execution to ensure
-    safe memory updates without race conditions.
+  async def cancel(
+      self, ticket: str, request_ids: Sequence[str] | None = None
+  ) -> None:
+    """Cancels a ticket's episodes (or a subset), emitting CANCELLED results.
 
     Args:
-      metadata: Any metadata required to prepare the sync (e.g. sync IDs).
+      ticket: The ticket to cancel.
+      request_ids: Specific requests to cancel; None cancels the whole ticket.
     """
     raise NotImplementedError()
 
-  def sync_weights(self, metadata: Any) -> int:
-    """Synchronizes the worker's internal model weights.
+  def prepare_weight_sync(self, meta: datatypes.WeightSyncMetadata) -> None:
+    """Fences the worker for an upcoming weight sync.
+
+    Stops admitting new episodes and awaits in-flight episode drain so weights
+    can be installed without corrupting trajectories in flight.
 
     Args:
-      metadata: Metadata locating the weights to sync (e.g. from Raiden).
+      meta: Metadata locating the weights to be installed.
+    """
+    raise NotImplementedError()
+
+  def sync_weights(self, meta: datatypes.WeightSyncMetadata) -> int:
+    """Fetches and installs new weights, returning the installed version.
+
+    Args:
+      meta: Metadata locating the weights to sync.
 
     Returns:
-      The version identifier (policy version) of the newly synced weights.
+      The installed weight (policy) version.
     """
     raise NotImplementedError()

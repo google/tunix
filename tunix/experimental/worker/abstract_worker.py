@@ -20,7 +20,8 @@ pipeline (e.g. TrainerWorker is a wrapper around the Trainer).
 """
 
 import abc
-from typing import Any
+
+from tunix.experimental.common import datatypes
 
 
 class Worker(abc.ABC):
@@ -36,8 +37,13 @@ class Worker(abc.ABC):
     pass
 
   @abc.abstractmethod
-  def compile(self, dummy_data: Any) -> None:
-    """Triggers JIT compilation using the provided dummy_data."""
+  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
+    """Triggers JIT compilation.
+
+    Role-specific and worker-driven: the worker synthesizes its own warmup
+    dummies from `shape_config` (plus its tokenizer/geometry), since the
+    orchestrator cannot fabricate engine-private warmup shapes.
+    """
     pass
 
   @abc.abstractmethod
@@ -49,3 +55,23 @@ class Worker(abc.ABC):
   def stop(self) -> None:
     """Gracefully stops the worker."""
     pass
+
+  @abc.abstractmethod
+  def health(self) -> datatypes.HealthReport:
+    """Returns a liveness/status snapshot for the orchestrator health monitor."""
+    pass
+
+  @abc.abstractmethod
+  def info(self) -> datatypes.WorkerInfo:
+    """Returns the worker's static description (roles, capabilities, resources)."""
+    pass
+
+  def pause(self) -> None:
+    """Stops admitting new work (capability-gated; default: unsupported)."""
+    raise NotImplementedError(f"{type(self).__name__} does not support pause().")
+
+  def resume(self) -> None:
+    """Resumes a paused worker (capability-gated; default: unsupported)."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not support resume()."
+    )

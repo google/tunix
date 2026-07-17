@@ -22,6 +22,7 @@ fields are added as concrete consumers require them, rather than up front.
 """
 
 import dataclasses
+from typing import Any
 
 import numpy as np
 
@@ -242,6 +243,111 @@ class ScoreResult:
   request_id: str
   scores: np.ndarray
   model_version: int = 0
+
+
+@dataclasses.dataclass(kw_only=True)
+class ShapeConfig:
+  """Shape hints a worker uses to synthesize its own warmup dummies for compile().
+
+  Attributes:
+    max_prompt_length: Maximum (left-padded) prompt length.
+    max_response_tokens: Maximum completion length.
+    micro_batch_sizes: Micro-batch sizes to warm up (compile) for.
+  """
+
+  max_prompt_length: int
+  max_response_tokens: int
+  micro_batch_sizes: list[int] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(kw_only=True)
+class HealthReport:
+  """Liveness/status snapshot a worker reports to the orchestrator.
+
+  Attributes:
+    state: Coarse worker state, e.g. "READY", "COMPILING", "BUSY", "DRAINING",
+      "SYNCING", "STOPPED".
+    inflight: Number of in-flight units of work.
+    queue_depth: Depth of the worker's internal work queue.
+    policy_version: Installed weight/policy version.
+    last_error: Most recent error string, if any.
+    heartbeat_unix_s: Unix timestamp of this report.
+  """
+
+  state: str
+  inflight: int = 0
+  queue_depth: int = 0
+  policy_version: int = 0
+  last_error: str | None = None
+  heartbeat_unix_s: float = 0.0
+
+
+@dataclasses.dataclass(kw_only=True)
+class WorkerInfo:
+  """Static description of a worker, for registration and scheduling.
+
+  Attributes:
+    worker_id: Unique id of the worker.
+    roles: Logical roles this worker serves (e.g. {"trainer", "inference"}); a
+      fused worker joins every matching group.
+    capabilities: Declared capability flags (e.g. "segment_attention").
+    placement_group: Colocation group id, or None if not colocated.
+    resources: Resource/topology description (e.g. process_count, mesh, hbm_gb).
+  """
+
+  worker_id: str
+  roles: frozenset[str] = frozenset()
+  capabilities: frozenset[str] = frozenset()
+  placement_group: str | None = None
+  resources: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(kw_only=True)
+class WeightSyncSpec:
+  """Orchestrator -> trainer: what to stage for a weight sync.
+
+  Attributes:
+    version: Weight version being staged (assigned by the orchestrator).
+    method: Transport method, e.g. "in_process", "checkpoint", "p2p".
+    param_filter: Which params to stage, "full" or "lora".
+  """
+
+  version: int
+  method: str = "in_process"
+  param_filter: str = "full"
+
+
+@dataclasses.dataclass(kw_only=True)
+class WeightSyncMetadata:
+  """Trainer -> replicas: how to fetch staged weights.
+
+  Attributes:
+    version: Weight version being fetched (echoes the spec).
+    method: Transport method used to stage.
+    locator: How to reach the weights (checkpoint path, (address, uuid), or a
+      live in-process handle). This is the one wire carve-out that may hold a
+      non-serializable handle, and only under the in-process transport.
+  """
+
+  version: int
+  method: str
+  locator: Any = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class CompletedPage:
+  """A page of completed results read from a rollout ticket's cursor channel.
+
+  Attributes:
+    results: The completed TrajectoryResults in this page (sequence-ordered).
+    last_seq: Sequence number of the last result; the caller passes it back as
+      `after_seq` to read the next page.
+    done: Whether the ticket has produced all of its results.
+  """
+
+  results: list[TrajectoryResult] = dataclasses.field(default_factory=list)
+  last_seq: int = 0
+  done: bool = False
 
 
 def validate_wire_safe(obj: object) -> None:

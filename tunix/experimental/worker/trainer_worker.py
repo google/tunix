@@ -31,23 +31,32 @@ class TrainerWorker(abstract_worker.Worker):
   """
 
   def __init__(
-      self, trainer_factory: Callable[[], abstract_trainer.AbstractTrainer]
+      self,
+      trainer_factory: Callable[[], abstract_trainer.AbstractTrainer],
+      *,
+      worker_id: str = "trainer",
   ):
     """Initializes the TrainerWorker.
 
     Args:
       trainer_factory: A callable that returns an instantiated AbstractTrainer.
+        It is invoked in `initialize()`, not here, so constructing the worker
+        stays cheap and free of device/model side effects.
+      worker_id: Unique id reported via `info()`.
     """
-    self._trainer = trainer_factory()
+    self._trainer_factory = trainer_factory
+    self._trainer: abstract_trainer.AbstractTrainer | None = None
+    self._worker_id = worker_id
     self._is_running = False
 
   def initialize(self) -> None:
-    """Initializes the worker and the underlying trainer."""
-    pass
+    """Constructs the underlying trainer (deferred from __init__)."""
+    if self._trainer is None:
+      self._trainer = self._trainer_factory()
 
-  def compile(self, dummy_data: datatypes.TrainExample) -> None:
-    """Triggers JIT compilation using the provided dummy_data."""
-    self._trainer.compile(dummy_data)
+  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
+    """Triggers JIT compilation using the provided shape hints."""
+    self._trainer.compile(shape_config)
 
   def start(self) -> None:
     """Starts the worker's main loop."""
@@ -56,7 +65,20 @@ class TrainerWorker(abstract_worker.Worker):
   def stop(self) -> None:
     """Gracefully stops the worker."""
     self._is_running = False
-    self._trainer.close()
+    if self._trainer is not None:
+      self._trainer.close()
+
+  def health(self) -> datatypes.HealthReport:
+    """Returns a liveness/status snapshot."""
+    return datatypes.HealthReport(
+        state="READY" if self._is_running else "STOPPED"
+    )
+
+  def info(self) -> datatypes.WorkerInfo:
+    """Returns the worker's static description."""
+    return datatypes.WorkerInfo(
+        worker_id=self._worker_id, roles=frozenset({"trainer"})
+    )
 
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
@@ -89,9 +111,11 @@ class TrainerWorker(abstract_worker.Worker):
     """Restore state from latest checkpoint and return the metadata pytree."""
     return self._trainer.restore_checkpoint(**kwargs)
 
-  def prepare_weight_sync(self, **kwargs) -> None:
-    """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
-    self._trainer.prepare_weight_sync(**kwargs)
+  def prepare_weight_sync(
+      self, spec: datatypes.WeightSyncSpec
+  ) -> datatypes.WeightSyncMetadata:
+    """Stages weights for transfer and returns metadata for replicas to pull."""
+    return self._trainer.prepare_weight_sync(spec)
 
   def get_metrics(self) -> metrics.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""
