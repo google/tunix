@@ -23,6 +23,8 @@ fields are added as concrete consumers require them, rather than up front.
 
 import dataclasses
 
+import numpy as np
+
 from tunix.rl import common
 from tunix.rl.agentic.agents import agent_types
 
@@ -61,6 +63,103 @@ class TrajectoryRequest:
   prompt_text: str
   sampling_params: SamplingParams
   max_turns: int = 10
+
+
+@dataclasses.dataclass(kw_only=True)
+class ErrorInfo:
+  """Structured description of a failed request, carried in-band on a result.
+
+  Attributes:
+    error_type: Short classifier for the failure (e.g. an exception class name).
+    message: Human-readable failure description.
+    retryable: Whether re-issuing the request could plausibly succeed.
+    traceback: Optional captured traceback, for diagnostics.
+  """
+
+  error_type: str
+  message: str
+  retryable: bool = False
+  traceback: str = ""
+
+
+@dataclasses.dataclass(kw_only=True)
+class TokenSegment:
+  """One contiguous span of the conversation token stream.
+
+  Attributes:
+    source: Origin of the span, e.g. "assistant" (model-emitted) or "env".
+    tokens: int32 token ids for this span.
+    loss_mask: int32 mask, 1 where the token is model-emitted (trainable).
+    logprobs: float32 per-token log-probabilities under the sampling
+      distribution, or None for spans the model did not emit (e.g. env tokens).
+  """
+
+  source: str
+  tokens: np.ndarray
+  loss_mask: np.ndarray
+  logprobs: np.ndarray | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class TrajectoryResult:
+  """Serializable result of a generation request.
+
+  This is the wire-facing counterpart to TrajectoryRequest (and to the
+  worker-internal Trajectory below): it carries only primitives and numpy
+  arrays, so it can cross a process boundary. A failed request is reported as a
+  result with `error` set and a non-success `status`, never as a dropped
+  response.
+
+  Attributes:
+    request_id: Echoes the originating request, for correlation/de-duplication.
+    prompt_id: Echoes the source prompt id.
+    status: Terminal status name (e.g. a rollout trajectory status, or
+      "CANCELLED").
+    prompt_tokens: int32 prompt token ids, unpadded, as tokenized by the worker.
+    segments: Ordered conversation spans; concatenated they form the stream.
+    env_reward: Scalar environment reward for the trajectory.
+    policy_version: Weight version used to generate the trajectory.
+    error: Failure details when the request did not succeed, else None.
+  """
+
+  request_id: str
+  prompt_id: str
+  status: str
+  prompt_tokens: np.ndarray = dataclasses.field(
+      default_factory=lambda: np.zeros(0, dtype=np.int32)
+  )
+  segments: list[TokenSegment] = dataclasses.field(default_factory=list)
+  env_reward: float = 0.0
+  policy_version: int = 0
+  error: ErrorInfo | None = None
+
+
+def validate_wire_safe(obj: object) -> None:
+  """Raise TypeError if a wire payload holds a device array.
+
+  Wire payloads cross process boundaries via cloudpickle and must carry numpy
+  arrays, not device arrays (e.g. ``jax.Array``): a sharded device array cannot
+  be reconstructed in a process that does not share its source mesh. This walks
+  nested dataclasses, lists/tuples, and dict values, raising on the first
+  array-like value that is not a ``numpy.ndarray``.
+  """
+  stack = [obj]
+  while stack:
+    value = stack.pop()
+    if isinstance(value, np.ndarray):
+      continue
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+      stack.extend(getattr(value, f.name) for f in dataclasses.fields(value))
+    elif isinstance(value, dict):
+      stack.extend(value.values())
+    elif isinstance(value, (list, tuple)):
+      stack.extend(value)
+    elif hasattr(value, "shape") and hasattr(value, "dtype"):
+      raise TypeError(
+          "wire payload contains a non-numpy array of type "
+          f"{type(value).__module__}.{type(value).__qualname__}; convert device"
+          " arrays (e.g. jax.Array) to numpy before serialization"
+      )
 
 
 # Worker-internal episode representation produced during rollout. This is the
