@@ -29,9 +29,9 @@ import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
 import optax
-from orbax import checkpoint as ocp
 from tunix.rl import common
 from tunix.sft import checkpoint_manager
+from tunix.sft import checkpoint_options
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
 from tunix.sft import profiler
@@ -555,13 +555,13 @@ class PeftTrainerTest(parameterized.TestCase):
     mock_checkpoint_manager.latest_step.return_value = (
         expected_save_steps[-1] - 1
     )  # force save at close
-    checkpoint_options = ocp.CheckpointManagerOptions()
+    checkpointing_options = checkpoint_options.create_checkpointing_options()
     config = peft_trainer.TrainingConfig(
         eval_every_n_steps=2,
         max_steps=100,
         gradient_accumulation_steps=grad_accu,
         checkpoint_root_directory='/tmp/checkpoint',
-        checkpointing_options=checkpoint_options,
+        checkpointing_options=checkpointing_options,
     )
     rngs = nnx.Rngs(0)
     model = tc.get_lora_model(
@@ -574,7 +574,7 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer.train(train_ds, eval_ds)
 
     mock_checkpoint_manager_init.assert_called_once_with(
-        root_directory='/tmp/checkpoint', options=checkpoint_options
+        root_directory='/tmp/checkpoint', options=checkpointing_options
     )
     # Assert that the checkpoint manager is called with the correct arguments
     # and does not have any unexpected calls.
