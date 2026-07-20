@@ -98,6 +98,8 @@ parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
 parser.add_argument("--rollout_engine", type=str, default="vllm")
 parser.add_argument("--vllm_utilization", type=float, default=0.4)
+parser.add_argument("--vllm_reshard_chunk_size", type=int, default=None)
+
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -479,6 +481,8 @@ CKPT_DIR = (
 VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 
 VLLM_UTILIZATION = args.vllm_utilization
+VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
+
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -758,6 +762,7 @@ vllm_rollout_dict = {
     "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+    "rollout_vllm_reshard_chunk_size": VLLM_RESHARD_CHUNK_SIZE,
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
