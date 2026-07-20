@@ -203,8 +203,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if self.converter is not None:
       from flax import traverse_util
-      import logging
-      from flax import nnx
       logging.info("Using native WeightConverter specifically for Qwen3 integration.")
       vllm_state = self.converter.convert(
           updated_weights, target_state=self.transformer_state
