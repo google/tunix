@@ -36,8 +36,18 @@ TRACE_DEST="${TRACE_DEST:-gs://yuxzhang-tunix-models/xprof}"
 RUN_TAG="${RUN_TAG:-v5p_refactor}"
 LOG_DIR="${LOG_DIR:-/tmp/grad_accum_logs}"
 ENGINE="${ROLLOUT_ENGINE:-vllm}"        # vllm | vanilla
+# vLLM HBM reservation fraction. The demo default 0.6 reserves ~58GB/chip -
+# fine on 64 chips where the trainer footprint is tiny, but on 4 chips the
+# trainer needs ~13GB/chip and the 0.9 JAX pool overflows during compile
+# (observed OOM). 0.3 (~29GB) still leaves 2x headroom over vLLM's actual
+# ~12GB need at BATCH=16.
+ROLLOUT_HBM="${ROLLOUT_HBM:-0.3}"
 MESH_FSDP="${MESH_FSDP:-4}"
 MESH_TP="${MESH_TP:-1}"
+# Minimum-footprint fallback if OOM persists (accumulation depth stays 4;
+# fsdp=1 lifts the micro>=fsdp divisibility constraint so micro=1 is legal):
+#   MESH_FSDP=1 MESH_TP=4 BATCH=4 MINI=4 MICRO=1 LOGPS=1 \
+#     bash experimental/profile_v5p_grad_accum.sh
 BATCH="${BATCH:-16}"
 MINI="${MINI:-16}"
 MICRO="${MICRO:-4}"
@@ -154,6 +164,7 @@ for v in $VARIANTS; do
     --train_micro_batch_size "$MICRO" \
     --compute_logps_micro_batch_size "$LOGPS" \
     --max_steps "$MAX_STEPS" \
+    --rollout_vllm_hbm_utilization "$ROLLOUT_HBM" \
     --grad_accum "$v" \
     --profiler_log_dir "$trace_dir" \
     --profiler_skip_steps "$SKIP" --profiler_steps "$PSTEPS" \
