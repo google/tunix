@@ -332,6 +332,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     old_logprobs_list: List[np.ndarray] = []
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
+    raw_completion_lengths: List[int] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -380,6 +381,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_masks_list,
         old_logprobs_list,
     ):
+      raw_completion_lengths.append(
+          min(len(completion_tokens), max_response_length)
+      )
       if (
           len(completion_tokens) >= max_response_length
           and completion_mask[-1] != eos_value
@@ -562,6 +566,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # Log completion lengths, rewards and env time.
     agg_completion_mask = completion_mask.sum(axis=-1)
+    raw_completion_lengths_np = np.asarray(
+        raw_completion_lengths, dtype=np.int32
+    )
     metrics_to_log = {
         "generation/completions/mean_length": (
             np.mean(agg_completion_mask),
@@ -573,6 +580,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         ),
         "generation/completions/min_length": (
             np.min(agg_completion_mask),
+            np.min,
+        ),
+        # Raw length mirrors rLLM/VERL response_length: all trajectory response
+        # tokens after the initial prompt, including env/user tokens, clamped to
+        # max_response_length. The existing *_length metrics remain loss-mask
+        # lengths over assistant-generated tokens only.
+        "generation/completions/mean_raw_length": (
+            np.mean(raw_completion_lengths_np),
+            np.mean,
+        ),
+        "generation/completions/max_raw_length": (
+            np.max(raw_completion_lengths_np),
+            np.max,
+        ),
+        "generation/completions/min_raw_length": (
+            np.min(raw_completion_lengths_np),
             np.min,
         ),
         "generation/completions/clip_ratio": (
