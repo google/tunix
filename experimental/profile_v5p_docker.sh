@@ -31,7 +31,7 @@ esac
 PASS_ENV=()
 for var in TRACE_DEST RUN_TAG LOG_DIR ROLLOUT_ENGINE MESH_FSDP MESH_TP \
            BATCH MINI MICRO LOGPS MAX_STEPS PROFILER_SKIP PROFILER_STEPS \
-           HF_TOKEN WANDB_MODE; do
+           HF_TOKEN WANDB_MODE WANDB_API_KEY; do
   if [ -n "${!var:-}" ]; then PASS_ENV+=(-e "$var=${!var}"); fi
 done
 
