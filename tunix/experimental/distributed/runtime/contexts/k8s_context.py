@@ -10,12 +10,13 @@ from typing import Callable
 from tunix.experimental.distributed.runtime import context
 from tunix.experimental.distributed.runtime.discovery import discovery
 
+# this should be consistent with distributed/deployment/yaml_generator.py
 def resolve_discovery_address(discovery_address) -> str:
   discovery_id, discovery_port = discovery_address.split(":")
-  # this should be consistent with distributed/deployment/yaml_generator.py
   hostname = f"{discovery_id}-proc-0-0.{discovery_id}"
   return f"{hostname}:{discovery_port}"
 
+# this should be consistent with distributed/deployment/yamls
 def resolve_self_hostname() -> str:
   required_envs = ["JOBSET_NAME", "REPLICATED_JOB_NAME", "JOB_INDEX", "POD_INDEX"]
   missing_envs = [env for env in required_envs if env not in os.environ]
