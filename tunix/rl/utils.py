@@ -337,6 +337,16 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   return res
 
 
+def compute_pack_size(mesh: jax.sharding.Mesh) -> int:
+  """Packed rows per batch = product of the "fsdp"/"dp" mesh axes (1 if neither)."""
+  if "fsdp" not in mesh.shape and "dp" not in mesh.shape:
+    logging.warning(
+        "Sequence packing: mesh has no 'fsdp'/'dp' axis; pack_size=1. Axes: %s.",
+        dict(mesh.shape),
+    )
+  return mesh.shape.get("fsdp", 1) * mesh.shape.get("dp", 1)
+
+
 def pack_sequences(
     item_iterator: Iterator[Sequence[common.TrainExample]],
     max_token_budget: int,
@@ -413,15 +423,6 @@ def pack_sequences(
     packed_positions = []
 
     per_token_feature_buffers = {k: [] for k in tracked_per_token_keys}
-
-    if has_policy_version:
-      versions = [
-          int(np.asarray(item["policy_version"]).item()) for item in pack_items
-      ]
-      assert all(v == versions[0] for v in versions), (
-          "pack_sequences invariant violation: heterogeneous policy_versions"
-          f" within a single pack: {versions}"
-      )
 
     for i, item in enumerate(pack_items, start=1):
       p_ids = item["prompt_ids"]
@@ -507,15 +508,8 @@ def pack_sequences(
     current_pack_items = []
     current_tokens = 0
 
-    def _version_changed(item: Mapping[str, Any]) -> bool:
-      if not current_pack_items:
-        return False
-      a = current_pack_items[0].get("policy_version")
-      b = item.get("policy_version")
-      if a is None or b is None:
-        return False
-      return int(np.asarray(a).item()) != int(np.asarray(b).item())
-
+    # No policy_version split: its only consumer (the off-policy filter) is
+    # disabled, and when re-enabled it should filter per-trajectory pre-packing.
     for item in all_unpadded_items:
       tokens = len(item["prompt_ids"]) + len(item["completion_ids"])
 
@@ -526,7 +520,7 @@ def pack_sequences(
         )
         continue
 
-      if current_tokens + tokens > max_token_budget or _version_changed(item):
+      if current_tokens + tokens > max_token_budget:
         packs.append(current_pack_items)
         current_pack_items = []
         current_tokens = 0

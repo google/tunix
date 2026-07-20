@@ -810,7 +810,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       ]
       # The packed batch size must be a multiple of the FSDP and DP mesh axis
       # sizes.
-      pack_size = mesh.shape.get("fsdp", 1) * mesh.shape.get("dp", 1)
+      pack_size = rl_utils.compute_pack_size(mesh)
 
       logging.info(
           "Using sequence packing with max_seq_token_per_tpu: %d, "

@@ -82,8 +82,6 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     max_concurrency: Maximum number of concurrent rollout engines.
     off_policy_steps: Number of off-policy steps can be accepted before a policy
       update.
-    degenerate_group_masking: Whether to mask out degenerate groups with all-0
-      advantages. Deprecated. Will remove in the next release.
   """
 
   algo_variant: str = "agentic_grpo"
@@ -106,10 +104,6 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
-  # Deprecated. Will remove in the next release.
-  degenerate_group_masking: bool = (
-      False  # Whether to mask out degenerate groups with all-0 advantages.
-  )
   use_rollout_logps: bool = True
   # Truncated importance-sampling (TIS) correction for the residual mismatch
   # between the rollout sampler and the trainer's recomputed log-probabilities.
@@ -558,20 +552,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     logging.debug("Advantages computed: %s", advantages)
 
-    if self.algo_config.degenerate_group_masking:
-      # Masking runs *before* sequence packing, requiring 1-D per-generation
-      # advantages. If 2-D per-token advantages are ever supplied, `jnp.all`
-      # would incorrectly zero out the entire batch instead of per-segment.
-      assert advantages.ndim == 1, (
-          "degenerate_group_masking expects 1-D advantages "
-          f"(per-generation), got shape {advantages.shape}. "
-          "Sequence-packed (2-D) advantages must be filtered before packing."
-      )
-      if jnp.all(jnp.isclose(advantages, 0.0)):
-        logging.info(
-            "Filtering degenerate group %s with all-0 advantages.", group_id
-        )
-        completion_mask = jnp.zeros_like(completion_mask)
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
     # Log completion lengths, rewards and env time.

@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import os
+from unittest import mock
 from absl.testing import absltest
+from absl.testing import parameterized
 import chex
 import flax
 from flax import nnx
@@ -305,39 +307,6 @@ class UtilsTest(absltest.TestCase):
       # carries the version of pack i. With num_packs=2 we expect length-2.
       self.assertEqual(pack.policy_version.shape, (2,))
 
-  def test_pack_sequences_version_aware_flush(self):
-    """Items with different policy_versions must land in separate packs."""
-
-    @flax.struct.dataclass(frozen=True)
-    class VersionedExample(common.TrainExample):
-      policy_version: jax.Array | None = None
-
-    # Two examples with different policy_versions. Both fit in the budget so
-    # without version-aware flushing they would share a pack.
-    example_v3 = self._create_mock_train_example(
-        2, 3, cls=VersionedExample, policy_version=jnp.array([3])
-    )
-    example_v7 = self._create_mock_train_example(
-        2, 3, cls=VersionedExample, policy_version=jnp.array([7])
-    )
-
-    packed_iterator = utils.pack_sequences(
-        iter([[example_v3, example_v7]]),
-        max_token_budget=20,  # plenty of room for both
-        num_packs=2,
-    )
-    packed_batches = list(packed_iterator)
-    [[pack]] = packed_batches
-
-    with self.subTest(name='packs_are_separated'):
-      # Each example becomes its own pack -> shape (2, ...) after num_packs=2.
-      self.assertEqual(pack.completion_ids.shape[0], 2)
-
-    with self.subTest(name='per_row_policy_version'):
-      self.assertEqual(pack.policy_version.shape, (2,))
-      self.assertEqual(int(pack.policy_version[0]), 3)
-      self.assertEqual(int(pack.policy_version[1]), 7)
-
   def test_pack_sequences(self):
     # 3 sequences with lengths (P+C): (2+3=5), (1+2=3), (3+4=7)
     example1 = self._create_mock_train_example(2, 3)
@@ -454,6 +423,31 @@ class UtilsTest(absltest.TestCase):
     self.assertLen(packed, 2)
     for batch in packed:
       self.assertTrue(bool(np.asarray(batch[0].is_update_step)))
+
+
+class ComputePackSizeTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      ('fsdp_and_tp', {'fsdp': 4, 'tp': 2}, 4),
+      ('dp_and_tp', {'dp': 2, 'tp': 4}, 2),
+      ('fsdp_and_dp', {'fsdp': 4, 'dp': 2}, 8),
+  )
+  def test_product_of_batch_sharding_axes(self, axis_sizes, expected):
+    mesh = mock.Mock(shape=axis_sizes)
+    self.assertEqual(utils.compute_pack_size(mesh), expected)
+
+  def test_no_warning_when_batch_axis_present(self):
+    mesh = mock.Mock(shape={'fsdp': 4, 'tp': 2})
+    with self.assertNoLogs(level='WARNING'):
+      utils.compute_pack_size(mesh)
+
+  def test_warns_and_defaults_to_one_without_batch_axis(self):
+    # No 'fsdp'/'dp' axis (tp-only): pack_size falls back to 1, with a warning.
+    mesh = mock.Mock(shape={'tp': 4})
+    with self.assertLogs(level='WARNING') as logs:
+      self.assertEqual(utils.compute_pack_size(mesh), 1)
+    self.assertIn("no 'fsdp'/'dp' axis", logs.output[0])
+    self.assertIn("'tp': 4", logs.output[0])
 
 
 if __name__ == '__main__':
