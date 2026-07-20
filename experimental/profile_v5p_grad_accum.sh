@@ -52,7 +52,7 @@ BATCH="${BATCH:-16}"
 MINI="${MINI:-16}"
 MICRO="${MICRO:-4}"
 LOGPS="${LOGPS:-4}"
-MAX_STEPS="${MAX_STEPS:-200}"           # full gsm8k run like the GKE ablation;
+MAX_STEPS="${MAX_STEPS:-10}"           # full gsm8k run like the GKE ablation;
                                         # trace still only covers SKIP..SKIP+PSTEPS
 # The profiler counts MICRO-steps (peft_trainer._iter_steps increments per
 # micro-batch), not RL steps. With accumulation depth mini/micro = 4 (true for
@@ -62,7 +62,7 @@ MAX_STEPS="${MAX_STEPS:-200}"           # full gsm8k run like the GKE ablation;
 # first post-flush add + 2 rollout segments. Use SKIP=5 PSTEPS=3 to match
 # the window of the older GKE ablation traces.
 SKIP="${PROFILER_SKIP:-4}"
-PSTEPS="${PROFILER_STEPS:-8}"
+PSTEPS="${PROFILER_STEPS:-4}"
 VARIANTS="${VARIANTS:-optax stream}"
 
 mkdir -p "$LOG_DIR"
