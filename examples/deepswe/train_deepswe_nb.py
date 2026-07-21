@@ -535,6 +535,8 @@ total_devices = len(devices)
 # Each explicitly-provided dim becomes an axis in the mesh; unspecified dims are
 # dropped (not defaulted to 1), so passing only --rollout_mesh_fsdp yields a 1D mesh.
 # If nothing is provided, fall back to the split-fraction heuristic (2D: fsdp+tp).
+tp_axis_name = "tensor" if MODEL_SOURCE == "maxtext" else "tp"
+
 rollout_fsdp = args.rollout_mesh_fsdp
 rollout_tp = args.rollout_mesh_tp
 if rollout_fsdp is not None or rollout_tp is not None:
@@ -542,12 +544,12 @@ if rollout_fsdp is not None or rollout_tp is not None:
   if rollout_fsdp is not None:
     rollout_dims.append(("fsdp", rollout_fsdp))
   if rollout_tp is not None:
-    rollout_dims.append(("tp", rollout_tp))
+    rollout_dims.append((tp_axis_name, rollout_tp))
 else:
   num_rollout_devices = int(total_devices * args.rollout_split_fraction)
   rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
   rollout_fsdp = num_rollout_devices // rollout_tp
-  rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+  rollout_dims = [("fsdp", rollout_fsdp), (tp_axis_name, rollout_tp)]
 num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 
 # 2. Resolve Train Mesh Dimensions
@@ -562,14 +564,14 @@ if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
   train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
   if train_sp is not None:
     train_dims.append(("sp", train_sp))
-  train_dims.append(("tp", train_tp if train_tp is not None else 1))
+  train_dims.append((tp_axis_name, train_tp if train_tp is not None else 1))
 else:
   num_train_devices = total_devices - num_rollout_devices
   train_fsdp = int(
       np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
   )
   train_tp = num_train_devices // train_fsdp
-  train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+  train_dims = [("fsdp", train_fsdp), (tp_axis_name, train_tp)]
 num_train_devices = int(np.prod([d for _, d in train_dims]))
 
 # 3. Sanity Check
