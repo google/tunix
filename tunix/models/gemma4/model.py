@@ -267,6 +267,33 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma4_12b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls(
+        num_layers=48,
+        num_embed=262144,
+        embed_dim=3840,
+        hidden_dim=3840 * 4,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        num_global_kv_heads=1,
+        sliding_window_size=1024,
+        shd_config=sharding_config,
+        k_eq_v_global=True,
+        attention_pattern=GEMMA4_ATTENTION_PATTERN,
+    )
+
+  @classmethod
+  def gemma4_12b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_12b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma4_31b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
