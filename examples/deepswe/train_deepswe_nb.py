@@ -98,6 +98,12 @@ parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
 parser.add_argument("--rollout_engine", type=str, default="vllm")
 parser.add_argument("--vllm_utilization", type=float, default=0.4)
+parser.add_argument(
+    "--vllm_reshard_chunk_size",
+    type=int,
+    default=None,
+    help="Number of flat keys to reshard at a time. None for single-call.",
+)
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -479,6 +485,7 @@ CKPT_DIR = (
 VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 
 VLLM_UTILIZATION = args.vllm_utilization
+VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -751,6 +758,7 @@ sglang_jax_rollout_dict = {
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
     "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
+    "rollout_vllm_reshard_chunk_size": VLLM_RESHARD_CHUNK_SIZE,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
