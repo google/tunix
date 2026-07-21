@@ -1,7 +1,7 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: gsm8k-refactor-stream
+  name: qwen3-1p7b-grpo-optax
   namespace: default
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
@@ -78,62 +78,94 @@ spec:
                 git fetch origin yuxzhang/refactor_loss_accum_ablation
                 git reset --hard FETCH_HEAD
 
-                # --- Link cached model from GKE PVC ---
-                echo "Linking cached Qwen3 weights from GKE PVC..."
-                mkdir -p /app/artifacts/qwen3_grpo_gsm8k_vtc
-                ln -sfn /mnt/disks/linchai_data/huggingface/models/Qwen/Qwen3-1.7B /app/artifacts/qwen3_grpo_gsm8k_vtc/models
-
-                # --- Hot Patch tpu-inference (PR #2838) ---
-                echo "Applying python script patch for ROPE bugs in qwen3.py..."
-                cat << 'EOF' > /tmp/patch_qwen3.py
-                file_path = "/app/vllm_tpu_inference/tpu_inference/tpu_inference/models/jax/qwen3.py"
-                with open(file_path, "r") as f:
-                    code = f.read()
-                
-                injected_functions = """
-                from typing import Any, Dict, Optional
-                
-                def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
-                    if rope_scaling is not None:
-                        rope_scaling = dict(rope_scaling)
-                        if (rope_scaling.get("rope_type", "default") == "default"
-                                and "factor" not in rope_scaling
-                                and "scale_factor" not in rope_scaling
-                                and "mrope_section" not in rope_scaling):
-                            rope_scaling = None
-                        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
-                            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
-                    return rope_scaling
-                
-                def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
-                    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
-                        config, "rope_scaling", None)
-                    return normalize_rope_scaling(rope_scaling)
-                
-                def get_rope_theta(config: Any, default: float = 10000.0) -> float:
-                    rope_parameters = getattr(config, "rope_parameters", None)
-                    if rope_parameters is not None and "rope_theta" in rope_parameters:
-                        return float(rope_parameters["rope_theta"])
-                    return float(getattr(config, "rope_theta", default))
-                
-                """
-                
-                import textwrap
-                code = textwrap.dedent(injected_functions) + code
-                code = code.replace('self.rope_theta = config.rope_parameters["rope_theta"]', 'self.rope_theta = get_rope_theta(config, default=1000000.0)')
-                code = code.replace('self.rope_scaling = getattr(config, "rope_scaling", None)', 'self.rope_scaling = get_rope_scaling(config)')
-                
-                with open(file_path, "w") as f:
-                    f.write(code)
-                EOF
-                sed -i 's/^ \{16\}//' /tmp/patch_qwen3.py
-                python3 /tmp/patch_qwen3.py
-                # ------------------------------------------
+                # [model] qwen3-1.7b-base is pulled from HuggingFace (not gated,
+                # so HF_TOKEN's account needs no license acceptance). No LoRA
+                # (lora_config left empty) => full fine-tuning, matching the
+                # agentic qwen3 demo (USE_LORA=False). Vanilla rollout, no vLLM
+                # ROPE hot-patch.
 
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
                 sleep 60;
-                echo "GSM8K dataset (tfds) and Qwen3-1.7B (HF) are downloaded inside the script; no separate data step."
-                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_fsdp 16 --mesh_tp 4 --batch_size 64 --mini_batch_size 64 --train_micro_batch_size 16 --compute_logps_micro_batch_size 16 --profiler_log_dir gs://yuxzhang-tunix-models/xprof/gsm8k_refactor_stream --profiler_skip_steps 5 --profiler_steps 3
+                echo "GSM8K (tfds) + qwen3-1.7b-base (HF) are pulled inside grpo_main; no separate data step."
+
+                # [mesh] (16,4)=64. qwen3-1.7b shards cleanly: fsdp on embed=2048
+                # (2048/16=128), tp on heads (num_kv_heads=8 => 8/4=2, num_heads
+                # 16 => 4). No small-axis issue (unlike gemma's C=2).
+                # [batch] batch dims divisible by fsdp=16: micro/logps=16, rollout
+                # 64*8=512 / 16 = 32.
+                # Hyperparams aligned with the agentic qwen3 gsm8k run: full FT,
+                # lr=2e-7 (adamw, cosine, wd=0.01, b2=0.999, grad_norm=1.0),
+                # num_generations=8, beta=0.04, kl_loss_mode=mse_kl. max_steps=100
+                # (trend); eval + checkpoint effectively off for this experiment.
+                # Rollout seq kept shorter (768/256) for speed (agentic 1024/1024).
+                export TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 && \
+                export JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 && \
+                export ENABLE_PATHWAYS_PERSISTENCE='1' && \
+                export HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) && \
+                export WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) && \
+                export PYTHONPATH=$PYTHONPATH:. SKIP_JAX_PRECOMPILE=True && \
+                export FLAGS_pathways_enforce_subset_devices_form_subslice=False && \
+                rm -rf /tmp/ckpts_qwen3_grpo_optax /tmp/intermediate_ckpt && \
+                python3 -X faulthandler -u -m tunix.cli.grpo_main \
+                  tunix/cli/base_config.yaml \
+                  model_config.model_name=Qwen3-1.7B \
+                  model_config.model_id=Qwen/Qwen3-1.7B \
+                  model_config.model_source=huggingface \
+                  model_config.use_flash_attention=true \
+                  model_config.flash_attention_block_size=128 \
+                  model_config.intermediate_ckpt_dir="None" \
+                  model_config.model_download_path="/tmp/models/Qwen3-1.7B" \
+                  model_config.mesh.shape="(16,4)" \
+                  model_config.mesh.axis_names="('fsdp','tp')" \
+                  model_config.rng_seed=42 \
+                  model_config.remat_config="NONE" \
+                  actor_model_config.mesh.shape="(16,4)" \
+                  actor_model_config.mesh.axis_names="('fsdp','tp')" \
+                  reference_model_config.mesh=null \
+                  reference_model_config.same_mesh_as="actor" \
+                  rollout_model_config.mesh=null \
+                  rollout_model_config.same_mesh_as="actor" \
+                  tokenizer_config.tokenizer_path=Qwen/Qwen3-1.7B \
+                  tokenizer_config.tokenizer_type=huggingface \
+                  tokenizer_config.add_bos=false \
+                  dataset_name="gsm8k" \
+                  batch_size=64 \
+                  num_test_batches=100 \
+                  num_train_epochs=1 \
+                  train_fraction=1.0 \
+                  rl_training_config.grad_accum="optax" \
+                  rl_training_config.actor_optimizer_config.opt_type="adamw" \
+                  rl_training_config.actor_optimizer_config.peak_value=2e-7 \
+                  rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
+                  rl_training_config.actor_optimizer_config.init_value=0.0 \
+                  rl_training_config.actor_optimizer_config.end_value=0.0 \
+                  rl_training_config.actor_optimizer_config.warmup_steps=10 \
+                  rl_training_config.actor_optimizer_config.decay_steps=100 \
+                  rl_training_config.actor_optimizer_config.b1=0.9 \
+                  rl_training_config.actor_optimizer_config.b2=0.999 \
+                  rl_training_config.actor_optimizer_config.weight_decay=0.01 \
+                  rl_training_config.actor_optimizer_config.max_grad_norm=1.0 \
+                  rl_training_config.eval_every_n_steps=100000 \
+                  rl_training_config.max_steps=100 \
+                  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/qwen3_optax" \
+                  rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
+                  rl_training_config.checkpoint_root_directory="/tmp/ckpts_qwen3_grpo_optax" \
+                  rl_training_config.checkpointing_options.save_interval_steps=100000 \
+                  rl_training_config.mini_batch_size=64 \
+                  rl_training_config.train_micro_batch_size=16 \
+                  rl_training_config.compute_logps_micro_batch_size=16 \
+                  rollout_config.total_generation_steps=768 \
+                  rollout_config.max_prompt_length=256 \
+                  rollout_config.temperature=1.0 \
+                  rollout_config.top_p=1.0 \
+                  rollout_engine="vanilla" \
+                  offload_to_cpu=false \
+                  grpo_config.num_generations=8 \
+                  grpo_config.num_iterations=1 \
+                  grpo_config.beta=0.04 \
+                  grpo_config.epsilon=0.2 \
+                  grpo_config.kl_loss_mode="mse_kl" \
+                  reward_functions="['tunix/cli/reward_fn/gsm8k.py']"
               env:
               - name: PATHWAYS_HEAD
                 value: localhost
@@ -200,7 +232,7 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server@sha256:db6d3db6090cc41daca3cc81bc70a15be94d33e6c881d8acaf6de5c9194dd9c2
               args:
                 - --server_port=29000
-                - --resource_manager_address=gsm8k-refactor-stream-pathways-head-0-0.gsm8k-refactor-stream:29001
+                - --resource_manager_address=qwen3-1p7b-grpo-optax-pathways-head-0-0.qwen3-1p7b-grpo-optax:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x4x4
               env:
