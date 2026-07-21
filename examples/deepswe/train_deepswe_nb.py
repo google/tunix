@@ -456,7 +456,7 @@ STEP_TIMEOUT_SECS = args.step_timeout_secs
 REWARD_TIMEOUT_SECS = args.reward_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
-KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
+KV_CACHE_SIZE = MAX_PROMPT_LENGTH + 128
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -488,9 +488,7 @@ VLLM_UTILIZATION = args.vllm_utilization
 VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
 # Max number of tokens to be processed in parallel by vllm.
-# Divide by 8 for on policy, 1 step off divide by 4
-
-VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
