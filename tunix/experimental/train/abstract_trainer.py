@@ -20,6 +20,7 @@ Defines the pure ML algorithmic core of a trainer.
 import abc
 from typing import Any, Callable, List, Optional
 
+from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
 
 
@@ -60,6 +61,25 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
+  def with_gen_model_input_fn(
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ) -> "AbstractTrainer":
+    """Sets the last-mile adapter mapping a payload to the loss fn's kwargs.
+
+    This adapter enables the trainer to accept arbitrary payloads (SFT, RL,
+    etc.) by transforming them into kwargs for the loss function via
+    `gen_model_input_fn(payload)`.
+    Args:
+      gen_model_input_fn: Maps a payload to a dict of loss-fn keyword arguments.
+
+    Returns:
+      self, for chaining.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement with_gen_model_input_fn."
+    )
+
+  @abc.abstractmethod
   def compile(self, dummy_data: Any) -> None:
     """Triggers JAX compilation. `with_loss_fn` must be called first.
 
@@ -75,7 +95,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: Any, **kwargs) -> None:
+  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
@@ -105,7 +125,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def eval_step(self, payload: Any, **kwargs) -> None:
+  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
     """Executes one evaluation step on the given payload.
 
     Must not mutate any trainer state, including gradient accumulation

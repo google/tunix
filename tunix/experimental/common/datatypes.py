@@ -21,8 +21,8 @@ This module centralizes type aliases and dataclasses used for:
 
 import dataclasses
 
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
-from tunix.rl import common
 from tunix.rl.agentic.agents import agent_types
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -149,11 +149,43 @@ class RolloutResult:
   # TODO(b/532722981): capture rollout metrics, e.g., env time.
 
 
+@dataclasses.dataclass(kw_only=True)
+class TrainerPayload:
+  """Generic trainer payload.
+
+  Attributes:
+    token_ids: [B, T] token IDs. By default, structured as left-padded prompt
+      tokens concatenated with right-padded completion tokens.
+    token_mask: [B, T] token mask to differentiate padding tokens from valid
+      tokens.
+    segment_ids: Optional [B, T] packing segment ids.
+  """
+
+  token_ids: ArrayLike
+  token_mask: ArrayLike
+  segment_ids: ArrayLike | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class RLTrainerPayload(TrainerPayload):
+  """RL training payload.
+
+  Attributes:
+    advantages: [B] or [B, C] advantages.
+    loss_mask: [B, T], 1 where the position contributes to the loss.
+    ref_per_token_logps: Optional [B, C] reference model log-probabilities.
+    old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
+    sampler_is_weights: Optional [B, C] importance sampling weights.
+  """
+
+  advantages: ArrayLike
+  loss_mask: ArrayLike
+  ref_per_token_logps: ArrayLike | None = None
+  old_per_token_logps: ArrayLike | None = None
+  sampler_is_weights: ArrayLike | None = None
+
+
 ##### Worker-internal datatypes #####
 
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
-
-
-# Train example used for policy optimization
-TrainExample = common.TrainExample

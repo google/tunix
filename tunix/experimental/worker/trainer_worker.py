@@ -16,6 +16,7 @@
 
 from typing import Any, Callable, List
 
+from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
 
@@ -63,7 +64,14 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer.with_loss_fn(loss_fn, has_aux)
     return self
 
-  def fwd_bwd(self, payload: Any, **kwargs) -> None:
+  def with_gen_model_input_fn(
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ) -> "TrainerWorker":
+    """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
+    self._trainer.with_gen_model_input_fn(gen_model_input_fn)
+    return self
+
+  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
     """Executes forward and backward passes."""
     self._trainer.fwd_bwd(payload, **kwargs)
 
@@ -71,7 +79,7 @@ class TrainerWorker(abstract_worker.Worker):
     """Applies the accumulated (mean) gradients as one optimizer update."""
     return self._trainer.update(**kwargs)
 
-  def eval_step(self, payload: Any, **kwargs) -> None:
+  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
     """Executes one evaluation step on the given payload."""
     self._trainer.eval_step(payload, **kwargs)
 
