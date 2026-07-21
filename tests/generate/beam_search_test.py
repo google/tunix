@@ -18,15 +18,31 @@ class BeamSearchTest(absltest.TestCase):
   def _check_content_equal_per_beam(
       self, beam_content: jnp.ndarray, original_content: jnp.ndarray
   ) -> None:
+    batch_size = original_content.shape[0]
     self.assertEqual(
-        beam_content.shape[0], original_content.shape[0] * self.beam_size
+        beam_content.shape[0], batch_size * self.beam_size
     )
     if len(original_content.shape) > 1:
       self.assertEqual(beam_content.shape[1:], original_content.shape[1:])
-      for i in range(0, self.batch_size * self.beam_size, self.beam_size):
+    for batch_idx in range(batch_size):
+      for beam_idx in range(self.beam_size):
         self.assertTrue(
-            jnp.allclose(beam_content[i * self.beam_size], original_content[i])
+            jnp.allclose(
+                beam_content[batch_idx * self.beam_size + beam_idx],
+                original_content[batch_idx],
+            )
         )
+
+  def test_check_content_equal_per_beam(self) -> None:
+    original_token_buffer = jnp.array([[1, 2], [3, 4]])
+    beam_token_buffer = jnp.repeat(
+        original_token_buffer, self.beam_size, axis=0
+    )
+    self._check_content_equal_per_beam(beam_token_buffer, original_token_buffer)
+
+    original_done = jnp.array([False, True])
+    beam_done = jnp.repeat(original_done, self.beam_size, axis=0)
+    self._check_content_equal_per_beam(beam_done, original_done)
 
   def test_initialization(self) -> None:
     cache = sampler_lib._init_cache(
