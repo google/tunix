@@ -77,8 +77,10 @@ class FakeRolloutWorker(rollout_worker.RolloutWorker):
     del metadata
 
   def sync_weights(self, metadata) -> int:
-    del metadata
-    self._version += 1
+    # Install and ack the staged version (falling back to a bump if the metadata
+    # carries none, e.g. an opaque handle).
+    version = getattr(metadata, "version", None)
+    self._version = int(version) if version is not None else self._version + 1
     return self._version
 
   def _golden_result(

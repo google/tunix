@@ -36,6 +36,7 @@ from tunix.experimental.orchestrator import dispatch_credits
 from tunix.experimental.orchestrator import group_assembler
 from tunix.experimental.orchestrator import micro_batch_sequencer
 from tunix.experimental.orchestrator import train_batch_queue
+from tunix.experimental.orchestrator import weight_sync_coordinator as wsc
 from tunix.experimental.orchestrator import worker_registry
 
 _UNBOUNDED = 1 << 30
@@ -51,6 +52,9 @@ class StepOutcome:
     num_groups_dropped: Complete groups dropped by the staleness gate.
     num_updates: Optimizer updates applied (one per micro-batch iteration).
     update_results: The trainer's UpdateResult per iteration.
+    policy_version: The weight version after this step's sync (unchanged if no
+      sync happened).
+    num_replicas_synced: Rollout replicas that installed the new version.
   """
 
   step: int
@@ -58,6 +62,8 @@ class StepOutcome:
   num_groups_dropped: int
   num_updates: int
   update_results: list[datatypes.UpdateResult]
+  policy_version: int
+  num_replicas_synced: int
 
 
 class RLLoopDriver:
@@ -76,9 +82,11 @@ class RLLoopDriver:
       dispatch_credit_capacity: int | None = None,
       train_queue_size: int | None = None,
       max_staleness: int | None = None,
+      weight_sync_coordinator: wsc.WeightSyncCoordinator | None = None,
   ):
     self._registry = registry
     self._adapter = adapter
+    self._weight_sync_coordinator = weight_sync_coordinator
     self._tokenizer_info = tokenizer_info
     self._shape_config = shape_config
     self._group_size = group_size
@@ -179,12 +187,22 @@ class RLLoopDriver:
             )
         )
 
+    # 7. Weight sync: mint the next version, stage on the trainer, and install it
+    # across rollout replicas so subsequent dispatch runs at the new version.
+    num_replicas_synced = 0
+    if update_results and self._weight_sync_coordinator is not None:
+      sync_outcome = self._weight_sync_coordinator.sync(self._policy_version + 1)
+      num_replicas_synced = len(sync_outcome.synced)
+      self._policy_version += 1
+
     outcome = StepOutcome(
         step=self._step,
         num_groups_trained=len(micro_batches),
         num_groups_dropped=num_dropped,
         num_updates=len(update_results),
         update_results=update_results,
+        policy_version=self._policy_version,
+        num_replicas_synced=num_replicas_synced,
     )
     self._step += 1
     return outcome

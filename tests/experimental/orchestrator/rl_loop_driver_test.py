@@ -21,6 +21,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import lifecycle
 from tunix.experimental.orchestrator import rl_loop_driver
+from tunix.experimental.orchestrator import weight_sync_coordinator
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.testing import fake_rollout_worker
 from tunix.experimental.testing import fake_trainer_worker
@@ -91,6 +92,28 @@ class RLLoopDriverTest(absltest.TestCase):
     self.assertEqual(first.step, 0)
     self.assertEqual(second.step, 1)
     self.assertEqual(driver.step, 2)
+
+  def test_run_step_syncs_weights_and_advances_policy_version(self):
+    registry = _brought_up_registry(
+        fake_trainer_worker.FakeTrainerWorker(worker_id="t0")
+    )
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(registry)
+    driver = _driver(registry, weight_sync_coordinator=coordinator)
+
+    outcome = asyncio.run(driver.run_step(_ROWS))
+
+    self.assertEqual(outcome.policy_version, 1)
+    self.assertEqual(outcome.num_replicas_synced, 1)  # the single rollout fake
+    self.assertEqual(registry.get("r0").health().policy_version, 1)
+
+  def test_no_sync_without_a_coordinator(self):
+    registry = _brought_up_registry(
+        fake_trainer_worker.FakeTrainerWorker(worker_id="t0")
+    )
+    driver = _driver(registry)
+    outcome = asyncio.run(driver.run_step(_ROWS))
+    self.assertEqual(outcome.policy_version, 0)
+    self.assertEqual(outcome.num_replicas_synced, 0)
 
   def test_drives_a_real_toy_trainer(self):
     registry = _brought_up_registry(
