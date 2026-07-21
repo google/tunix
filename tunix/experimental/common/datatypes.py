@@ -217,21 +217,28 @@ class TrainerPayload:
 class TrainExampleV1(TrainerPayload):
   """RL training example: the numpy wire twin of the on-device TrainExample.
 
-  The inherited `loss_mask` is the completion loss mask. Additional RL fields
-  (ref/old per-token logps, per-row policy_version, temperature,
-  sampler_is_weights) are added additively as consumers require them.
+  The inherited `loss_mask` is the completion loss mask. Further RL fields
+  (temperature, sampler_is_weights) are added additively as consumers require
+  them.
 
   Attributes:
     prompt_ids: int32 [B, P] left-padded prompt tokens.
     prompt_mask: int32 [B, P] prompt mask.
     completion_ids: int32 [B, C] right-padded completion tokens.
     advantages: float32 [B] or [B, C] advantages.
+    old_per_token_logps: float32 [B, C] sampler/old-policy logps, or None.
+    ref_per_token_logps: float32 [B, C] reference-policy logps, or None
+      (injected by the inference stage when beta != 0).
+    policy_version: int32 [B] per-row weight version used at generation.
   """
 
   prompt_ids: np.ndarray
   prompt_mask: np.ndarray
   completion_ids: np.ndarray
   advantages: np.ndarray
+  old_per_token_logps: np.ndarray | None = None
+  ref_per_token_logps: np.ndarray | None = None
+  policy_version: np.ndarray | None = None
 
 
 ##### Inference DTOs #####
@@ -327,6 +334,22 @@ class ShapeConfig:
   max_prompt_length: int
   max_response_tokens: int
   micro_batch_sizes: list[int] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(kw_only=True)
+class TokenizerInfo:
+  """Tokenizer identity a worker reports so scoring/assembly stays consistent.
+
+  Attributes:
+    pad_id: Padding token id.
+    eos_id: End-of-sequence token id.
+    tokenizer_hash: Optional stable hash of the tokenizer; startup validation
+      checks that every worker reports the same one.
+  """
+
+  pad_id: int
+  eos_id: int
+  tokenizer_hash: str | None = None
 
 
 @dataclasses.dataclass(kw_only=True)
