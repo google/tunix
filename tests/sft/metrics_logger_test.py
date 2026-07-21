@@ -1,5 +1,6 @@
 """Metrics logger unittest."""
 
+import collections
 import copy
 import os
 import tempfile
@@ -8,6 +9,9 @@ from unittest import mock
 from absl.testing import absltest
 import jax
 import metrax.logging as metrax_logging
+import numpy as np
+from opentelemetry.sdk import metrics as otel_sdk_metrics
+from opentelemetry.sdk.metrics import export as otel_sdk_export
 from tunix.sft import metrics_logger
 from tunix.utils import env_utils
 
@@ -227,6 +231,128 @@ class MetricLoggerTest(absltest.TestCase):
           id="12345",
           settings=mock_wandb.Settings.return_value,
       )
+
+
+def _gauge_points(metrics_data):
+  """Maps instrument name to a list of (value, attributes) data points."""
+  points = collections.defaultdict(list)
+  if metrics_data is None:
+    return points
+  for resource_metrics in metrics_data.resource_metrics:
+    for scope_metrics in resource_metrics.scope_metrics:
+      for metric in scope_metrics.metrics:
+        for point in metric.data.data_points:
+          points[metric.name].append((point.value, dict(point.attributes)))
+  return points
+
+
+class OpenTelemetryDoubleWriteTest(absltest.TestCase):
+  """Tests the opt-in OpenTelemetry double-write path."""
+
+  def setUp(self):
+    super().setUp()
+    self._temp_dir_obj = tempfile.TemporaryDirectory()
+    self.log_dir = self._temp_dir_obj.name
+    self.backend = mock.Mock(spec=metrax_logging.LoggingBackend)
+    self.enter_context(
+        mock.patch.object(jax.monitoring, "register_scalar_listener")
+    )
+    self.mock_record_scalar = self.enter_context(
+        mock.patch.object(jax.monitoring, "record_scalar")
+    )
+    self.reader = otel_sdk_export.InMemoryMetricReader()
+    self.meter_provider = otel_sdk_metrics.MeterProvider(
+        metric_readers=[self.reader]
+    )
+
+  def _make_logger(self, enable_opentelemetry=True):
+    options = metrics_logger.MetricsLoggerOptions(
+        log_dir=self.log_dir,
+        backend_kwargs={"custom_backend": [lambda: self.backend]},
+        enable_opentelemetry=enable_opentelemetry,
+    )
+    return metrics_logger.MetricsLogger(
+        metrics_logger_options=options,
+        otel_meter_provider=self.meter_provider,
+    )
+
+  def test_disabled_by_default_and_legacy_path_unchanged(self):
+    logger = self._make_logger(enable_opentelemetry=False)
+    logger.log("actor", "loss", 0.5, metrics_logger.Mode.TRAIN, 1)
+
+    self.mock_record_scalar.assert_called_once_with(
+        "actor/train/loss", 0.5, step=1
+    )
+    self.assertEqual(_gauge_points(self.reader.get_metrics_data()), {})
+    self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.5)
+
+  def test_double_write_emits_otel_and_legacy(self):
+    logger = self._make_logger()
+    logger.log("actor", "loss", 0.5, metrics_logger.Mode.TRAIN, 7)
+
+    # Legacy jax.monitoring write is unchanged.
+    self.mock_record_scalar.assert_called_once_with(
+        "actor/train/loss", 0.5, step=7
+    )
+    # OpenTelemetry gauge is additionally emitted.
+    points = _gauge_points(self.reader.get_metrics_data())
+    expected_attributes = {
+        "tunix.training.mode": "train",
+        "tunix.metrics.prefix": "actor",
+    }
+    self.assertEqual(
+        points["tunix.training.loss"], [(0.5, expected_attributes)]
+    )
+    self.assertEqual(points["tunix.training.step"], [(7, expected_attributes)])
+    # Local history is unchanged.
+    self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.5)
+
+  def test_dynamic_metric_names_are_normalized(self):
+    logger = self._make_logger()
+    logger.log("actor", "rewards/score mean", 1.5, "train", 1)
+
+    points = _gauge_points(self.reader.get_metrics_data())
+    self.assertIn("tunix.rewards.score.mean", points)
+
+  def test_non_scalar_values_stay_in_history_only(self):
+    logger = self._make_logger()
+    logger.log("actor", "loss", np.array([0.5, 0.6]), "train", 1)
+
+    points = _gauge_points(self.reader.get_metrics_data())
+    self.assertNotIn("tunix.training.loss", points)
+    self.assertLen(logger.get_metric_history("actor", "loss", "train"), 1)
+
+  def test_repeated_step_emits_step_gauge_once(self):
+    logger = self._make_logger()
+    logger.log("actor", "loss", 0.5, "train", 3)
+    logger.log("actor", "perplexity", 1.6, "train", 3)
+
+    points = _gauge_points(self.reader.get_metrics_data())
+    self.assertLen(points["tunix.training.step"], 1)
+
+  @mock.patch.object(jax, "process_index", return_value=1)
+  def test_no_otel_emission_on_secondary_process(self, mock_process_index):
+    del mock_process_index
+    logger = self._make_logger()
+    logger.log("actor", "loss", 0.5, "train", 1)
+
+    self.assertEqual(_gauge_points(self.reader.get_metrics_data()), {})
+
+  def test_missing_otel_api_raises_when_enabled(self):
+    with mock.patch.object(metrics_logger, "otel_metrics", new=None):
+      with self.assertRaisesRegex(ImportError, "google-tunix\\[otel\\]"):
+        self._make_logger()
+
+  def test_close_leaves_meter_provider_running(self):
+    logger = self._make_logger()
+    logger.log("actor", "loss", 0.5, "train", 1)
+    logger.close()
+
+    self.backend.close.assert_called_once()
+    logger_after_close = self._make_logger()
+    logger_after_close.log("actor", "loss", 0.25, "train", 2)
+    points = _gauge_points(self.reader.get_metrics_data())
+    self.assertIn(0.25, [value for value, _ in points["tunix.training.loss"]])
 
 
 if __name__ == "__main__":
