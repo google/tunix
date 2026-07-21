@@ -82,6 +82,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     max_concurrency: Maximum number of concurrent rollout engines.
     off_policy_steps: Number of off-policy steps can be accepted before a policy
       update.
+    degenerate_group_masking: Whether to mask out degenerate groups with all-0
+      advantages. Deprecated. Will remove in the next release.
   """
 
   algo_variant: str = "agentic_grpo"
@@ -104,6 +106,10 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
+  # Deprecated. Will remove in the next release.
+  degenerate_group_masking: bool = (
+      False  # Whether to mask out degenerate groups with all-0 advantages.
+  )
   use_rollout_logps: bool = True
   # Truncated importance-sampling (TIS) correction for the residual mismatch
   # between the rollout sampler and the trainer's recomputed log-probabilities.
@@ -257,6 +263,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "entropy": common.mean_of_means,
         "reduced_pg_loss": common.mean_of_means,
         "unreduced_pg_loss": common.global_weighted_mean,
+        "dummy_ratio": common.global_weighted_mean,
         "pg_clipfrac": common.mean_of_means,
         "ppo_kl": common.mean_of_means,
         "kl_loss": common.mean_of_means,

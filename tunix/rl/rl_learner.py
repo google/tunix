@@ -104,6 +104,18 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     self._training_config = self.rl_cluster.cluster_config.training_config
 
+    if self._training_config.max_seq_token_per_tpu is not None:
+      # Fail now rather than mid-run: a maximal sequence must fit one packed
+      # row. `max_response_length` lives on the algo config for agentic
+      # learners and on the rollout config elsewhere.
+      rollout_config = self.rl_cluster.cluster_config.rollout_config
+      rl_utils.validate_packing_budget(
+          self._training_config.max_seq_token_per_tpu,
+          rollout_config.max_prompt_length,
+          getattr(algo_config, "max_response_length", None)
+          or rollout_config.max_tokens_to_generate,
+      )
+
     self.rl_cluster.global_steps = (
         self.rl_cluster.actor_trainer.restored_global_step()
     )
@@ -732,11 +744,13 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.max_seq_token_per_tpu,
           pack_size,
       )
+      # Update boundary in sequences (mini-batch semantics): packing is
+      # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
           self._training_config.max_seq_token_per_tpu,
-          target_items_per_update=grad_acc_steps,
-          num_packs=pack_size,
+          sequences_per_update=mini_batch_size * self._num_generations(),
+          pack_size=pack_size,
       )
 
     curr_eval_ds = None
