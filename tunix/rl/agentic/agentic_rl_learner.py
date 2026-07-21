@@ -805,14 +805,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     is_packed = self._training_config.max_seq_token_per_tpu is not None
     if is_packed:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh[
+          rl_cluster_lib.Role.ACTOR
+      ]
+      # The packed batch size must be a multiple of the FSDP and DP mesh axis
+      # sizes.
+      pack_size = rl_utils.compute_pack_size(mesh)
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d",
+          "Using sequence packing with max_seq_token_per_tpu: %d, pack_size: %d",
           self._training_config.max_seq_token_per_tpu,
+          pack_size,
       )
+      # Update boundary in sequences (mini-batch semantics): packing is
+      # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
           self._training_config.max_seq_token_per_tpu,
-          target_items_per_update=grad_acc_steps,
+          sequences_per_update=mini_batch_size * self._num_generations(),
+          pack_size=pack_size,
       )
     update_steps_since_last_sync = 0
     update_steps_per_full_batch = full_batch_size // mini_batch_size
@@ -855,6 +865,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # TODO(b/491970038): handle seq packing case differently
         merged_train_micro_batch = jax.tree.map(
             lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+        )
+
+      if is_packed:
+        # pack-first: old/ref log-probs were deferred (left None) in
+        # `_process_results`; compute them now on the packed buffer via the
+        # segment-aware forward before the example reaches the trainer.
+        merged_train_micro_batch = self._compute_packed_logps(
+            merged_train_micro_batch
         )
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer

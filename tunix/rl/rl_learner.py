@@ -647,6 +647,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       with self.rl_cluster.perf.span_group("mini_batch_step"):
         self._run_mini_batch_step(
             initial_steps,
+            mini_batch_size,
             service_target_batch_size,
             grad_acc_steps,
             train_iterator,
@@ -662,6 +663,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
   def _run_mini_batch_step(
       self,
       initial_steps: int,
+      mini_batch_size: int,
       service_target_batch_size: int,
       grad_acc_steps: int,
       train_iterator: Iterator[TrainingInputT],
@@ -672,6 +674,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     with self.rl_cluster.perf.span_group("micro_batch_steps"):
       self._run_all_micro_batch_steps(
           initial_steps,
+          mini_batch_size,
           service_target_batch_size,
           grad_acc_steps,
           train_iterator,
@@ -682,6 +685,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
   def _run_all_micro_batch_steps(
       self,
       initial_steps: int,
+      mini_batch_size: int,
       service_target_batch_size: int,
       grad_acc_steps: int,
       train_iterator: Iterator[TrainingInputT],
@@ -719,14 +723,24 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_gen = queue_iterator()
     if self._training_config.max_seq_token_per_tpu is not None:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh[
+          rl_cluster_lib.Role.ACTOR
+      ]
+      # The packed batch size must be a multiple of the FSDP and DP mesh axis
+      # sizes.
+      pack_size = rl_utils.compute_pack_size(mesh)
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d",
+          "Using sequence packing with max_seq_token_per_tpu: %d, pack_size: %d",
           self._training_config.max_seq_token_per_tpu,
+          pack_size,
       )
+      # Update boundary in sequences (mini-batch semantics): packing is
+      # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
           self._training_config.max_seq_token_per_tpu,
-          target_items_per_update=grad_acc_steps,
+          sequences_per_update=mini_batch_size * self._num_generations(),
+          pack_size=pack_size,
       )
 
     curr_eval_ds = None
