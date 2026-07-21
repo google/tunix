@@ -34,6 +34,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as metrics_lib
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import dispatch_credits
+from tunix.experimental.orchestrator import durable_cursor as durable_cursor_lib
 from tunix.experimental.orchestrator import group_assembler
 from tunix.experimental.orchestrator import metrics_pump as metrics_pump_lib
 from tunix.experimental.orchestrator import micro_batch_sequencer
@@ -57,6 +58,7 @@ class StepOutcome:
     policy_version: The weight version after this step's sync (unchanged if no
       sync happened).
     num_replicas_synced: Rollout replicas that installed the new version.
+    checkpoint_saved: Whether a checkpoint + durable cursor was written this step.
   """
 
   step: int
@@ -66,6 +68,7 @@ class StepOutcome:
   update_results: list[datatypes.UpdateResult]
   policy_version: int
   num_replicas_synced: int
+  checkpoint_saved: bool
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -104,11 +107,17 @@ class RLLoopDriver:
       max_staleness: int | None = None,
       weight_sync_coordinator: wsc.WeightSyncCoordinator | None = None,
       metrics_pump: metrics_pump_lib.MetricsPump | None = None,
+      trajectory_logger: Any = None,
+      checkpoint_coordinator: (
+          durable_cursor_lib.CheckpointCoordinator | None
+      ) = None,
   ):
     self._registry = registry
     self._adapter = adapter
     self._weight_sync_coordinator = weight_sync_coordinator
     self._metrics_pump = metrics_pump
+    self._trajectory_logger = trajectory_logger
+    self._checkpoint_coordinator = checkpoint_coordinator
     self._tokenizer_info = tokenizer_info
     self._shape_config = shape_config
     self._group_size = group_size
@@ -179,6 +188,8 @@ class RLLoopDriver:
           tokenizer_info=self._tokenizer_info,
           shape_config=self._shape_config,
       )
+      if self._trajectory_logger is not None:
+        self._log_group(group)
       if not self._queue.put(train_example):
         raise RuntimeError("train batch queue is full")
       self._credits.release(terminal_credits)
@@ -223,6 +234,14 @@ class RLLoopDriver:
           trainer.info().worker_id, trainer.get_metrics(), step=self._step
       )
 
+    # 9. Checkpoint + durable cursor on the configured cadence.
+    checkpoint_saved = False
+    if self._checkpoint_coordinator is not None and update_results:
+      cursor = durable_cursor_lib.DurableCursor(
+          global_step=self._step + 1, weight_version=self._policy_version
+      )
+      checkpoint_saved = self._checkpoint_coordinator.maybe_save(cursor)
+
     outcome = StepOutcome(
         step=self._step,
         num_groups_trained=len(micro_batches),
@@ -231,9 +250,23 @@ class RLLoopDriver:
         update_results=update_results,
         policy_version=self._policy_version,
         num_replicas_synced=num_replicas_synced,
+        checkpoint_saved=checkpoint_saved,
     )
     self._step += 1
     return outcome
+
+  def _log_group(self, group: group_assembler.AssembledGroup) -> None:
+    for record, result in group.members:
+      self._trajectory_logger.log_item_async({
+          "group_id": record.group_id,
+          "sample_index": record.sample_index,
+          "request_id": result.request_id,
+          "prompt_id": result.prompt_id,
+          "status": result.status,
+          "env_reward": result.env_reward,
+          "policy_version": result.policy_version,
+          "completion_text": getattr(result, "completion_text", ""),
+      })
 
   async def run_eval(self, rows: list[dict[str, Any]]) -> EvalOutcome:
     """Runs one eval pass over `rows`: generate and score, never train (I11).

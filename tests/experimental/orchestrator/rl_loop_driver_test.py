@@ -15,15 +15,28 @@
 """Integration tests for the RLLoopDriver against the fakes."""
 
 import asyncio
+import pathlib
+import tempfile
 
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import durable_cursor
 from tunix.experimental.orchestrator import lifecycle
 from tunix.experimental.orchestrator import metrics_pump as metrics_pump_lib
 from tunix.experimental.orchestrator import rl_loop_driver
 from tunix.experimental.orchestrator import weight_sync_coordinator
 from tunix.experimental.orchestrator import worker_registry
+
+
+class _RecordingLogger:
+  """Duck-typed trajectory logger that records items."""
+
+  def __init__(self):
+    self.items = []
+
+  def log_item_async(self, item):
+    self.items.append(item)
 from tunix.experimental.testing import fake_rollout_worker
 from tunix.experimental.testing import fake_trainer_worker
 from tunix.experimental.testing import toy_trainer
@@ -142,6 +155,35 @@ class RLLoopDriverTest(absltest.TestCase):
     self.assertTrue(all(m.mode == "eval" for m in outcome.metrics))
     # Eval must not train: the trainer's step is untouched.
     self.assertEqual(registry.get("t0").health().policy_version, 0)
+
+  def test_trajectory_logger_receives_group_items(self):
+    registry = _brought_up_registry(
+        fake_trainer_worker.FakeTrainerWorker(worker_id="t0")
+    )
+    logger = _RecordingLogger()
+    driver = _driver(registry, trajectory_logger=logger)
+
+    asyncio.run(driver.run_step(_ROWS))
+
+    self.assertLen(logger.items, 4)  # 2 groups x 2 samples
+    self.assertTrue(
+        all("group_id" in item and "status" in item for item in logger.items)
+    )
+
+  def test_checkpoint_saved_on_cadence(self):
+    registry = _brought_up_registry(
+        fake_trainer_worker.FakeTrainerWorker(worker_id="t0")
+    )
+    cursor_path = pathlib.Path(tempfile.mkdtemp()) / "cursor.json"
+    coordinator = durable_cursor.CheckpointCoordinator(
+        registry.get("t0"), cursor_path, save_every_n_steps=1
+    )
+    driver = _driver(registry, checkpoint_coordinator=coordinator)
+
+    outcome = asyncio.run(driver.run_step(_ROWS))
+
+    self.assertTrue(outcome.checkpoint_saved)
+    self.assertTrue(cursor_path.exists())
 
   def test_drives_a_real_toy_trainer(self):
     registry = _brought_up_registry(
