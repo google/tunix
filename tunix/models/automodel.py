@@ -25,6 +25,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from orbax import checkpoint as ocp
+from tunix.models import maxtext_parallelism
 from tunix.models import naming
 
 
@@ -396,6 +397,9 @@ class AutoModel:
       model_source: ModelSource = ModelSource.HUGGINGFACE,
       model_path: str | None = None,
       model_download_path: str | None = None,
+      maxtext_pipeline_config: (
+          maxtext_parallelism.MaxTextPipelineConfig | None
+      ) = None,
       **kwargs,
   ) -> tuple[nnx.Module, str | None]:
     """Loads a pretrained model from a given identifier.
@@ -419,6 +423,9 @@ class AutoModel:
         model_download_path: The local directory where the model should be
           downloaded. The corresponding model_source will handle `None` cases
           differently.
+        maxtext_pipeline_config: Optional validated single-slice pipeline and
+          tensor parallelism layout for ``ModelSource.MAXTEXT``. The supplied
+          mesh must match this configuration.
         **kwargs: Additional keyword arguments passed to the underlying model
           creation functions. - For ModelSource.KAGGLE, Gemma models:
           `intermediate_ckpt_dir` , `rng_seed`
@@ -431,6 +438,15 @@ class AutoModel:
     model: nnx.Module = None  # pyrefly: ignore[bad-assignment]
     model_params: Any = None
     naming_info = naming.ModelNaming(model_id=model_id)
+
+    if (
+        maxtext_pipeline_config is not None
+        and model_source != ModelSource.MAXTEXT
+    ):
+      raise ValueError(
+          'maxtext_pipeline_config is only supported with '
+          'model_source=ModelSource.MAXTEXT.'
+      )
 
     # Download the model
     if model_path:
@@ -452,6 +468,21 @@ class AutoModel:
 
     # Case 1: MaxText models
     if model_source == ModelSource.MAXTEXT:
+      if maxtext_pipeline_config is not None:
+        maxtext_pipeline_config.validate_mesh(mesh)
+        pipeline_overrides = maxtext_pipeline_config.as_maxtext_kwargs()
+        conflicting_overrides = {
+            key: {'config': value, 'kwargs': kwargs[key]}
+            for key, value in pipeline_overrides.items()
+            if key in kwargs and kwargs[key] != value
+        }
+        if conflicting_overrides:
+          raise ValueError(
+              'MaxText pipeline overrides conflict with explicit kwargs: '
+              f'{conflicting_overrides}.'
+          )
+        kwargs.update(pipeline_overrides)
+
       try:
         import maxtext.configs.pyconfig as pyconfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
         from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
