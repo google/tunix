@@ -16,6 +16,8 @@
 
 import asyncio
 import socket
+import threading
+import time
 from absl.testing import absltest
 from tunix.experimental.worker import remote_execution as remote_lib
 
@@ -297,6 +299,226 @@ class RemoteExecutionTest(absltest.TestCase):
         await server.stop_serving()
 
     asyncio.run(_run_test())
+
+
+def _free_port() -> int:
+  with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.bind(("localhost", 0))
+    return s.getsockname()[1]
+
+
+def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
+  deadline = time.time() + timeout
+  while time.time() < deadline:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+      s.settimeout(0.2)
+      if s.connect_ex((host, port)) == 0:
+        return True
+    time.sleep(0.05)
+  return False
+
+
+def _run_server_in_background(engine, port):
+  """Starts a gRPC server on its own background event loop.
+
+  Returns (server, loop, thread) so the caller can drive blocking client calls
+  from the main thread while the server runs elsewhere.
+  """
+  server = remote_lib.GrpcRemoteExecutionServer(engine)
+  loop = asyncio.new_event_loop()
+  ready = threading.Event()
+
+  def _runner():
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(server.start_serving_async(port))
+    loop.call_soon(ready.set)
+    loop.run_forever()
+
+  thread = threading.Thread(target=_runner, daemon=True)
+  thread.start()
+  ready.wait(timeout=10)
+  return server, loop, thread
+
+
+def _shutdown_background_server(server, loop, thread) -> None:
+  asyncio.run_coroutine_threadsafe(server.stop_serving(), loop).result(timeout=5)
+  loop.call_soon_threadsafe(loop.stop)
+  thread.join(timeout=5)
+  loop.close()
+
+
+class _EchoEngine:
+
+  def echo(self, blob):
+    return blob
+
+
+class _BoomEngine:
+
+  def explode(self):
+    raise ValueError("kaboom")
+
+
+class _LockReturner:
+
+  def get(self):
+    return threading.Lock()  # not serializable by (cloud)pickle
+
+
+class SubstrateHardeningTest(absltest.TestCase):
+  """Regression tests for the RPC substrate correctness/robustness fixes."""
+
+  def test_execution_response_error_round_trips(self):
+    resp = remote_lib.ExecutionResponse(
+        error_message="boom",
+        error_type="ValueError",
+        traceback="Traceback: ...",
+        retryable=True,
+    )
+
+    restored = remote_lib.ExecutionResponse.deserialize(resp.serialize())
+
+    self.assertEqual(restored.error_type, "ValueError")
+    self.assertEqual(restored.error_message, "boom")
+    self.assertEqual(restored.traceback, "Traceback: ...")
+    self.assertTrue(restored.retryable)
+    with self.assertRaises(RuntimeError):
+      restored.unwrap()
+
+  def test_execute_request_captures_traceback(self):
+    async def _run():
+      server = remote_lib.InProcessRemoteExecutionServer(_BoomEngine())
+      resp = await server.execute_request(
+          remote_lib.ExecutionRequest("explode")
+      )
+      self.assertEqual(resp.error_type, "ValueError")
+      self.assertIn("kaboom", resp.error_message)
+      self.assertIsNotNone(resp.traceback)
+      self.assertIn("explode", resp.traceback)
+
+    asyncio.run(_run())
+
+  def test_handle_execute_returns_error_for_unserializable_result(self):
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
+      request_bytes = remote_lib.ExecutionRequest("get").serialize()
+
+      response_bytes = await server._handle_execute(request_bytes, context=None)
+
+      resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
+      self.assertEqual(resp.error_type, "ResultSerializationError")
+      self.assertIsNotNone(resp.error_message)
+
+    asyncio.run(_run())
+
+  def test_grpc_large_payload_round_trips(self):
+    if not remote_lib._GRPC_AVAILABLE:
+      self.skipTest("grpc library not available in test environment.")
+
+    async def _run():
+      port = _free_port()
+      server = remote_lib.GrpcRemoteExecutionServer(_EchoEngine())
+      await server.start_serving_async(port=port)
+      try:
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}"
+        )
+        # 8 MiB exceeds gRPC's default ~4 MiB message cap.
+        blob = b"x" * (8 * 1024 * 1024)
+        echoed = await handle.asubmit("echo", blob)
+        self.assertEqual(len(echoed), len(blob))
+        await handle.close()
+      finally:
+        await server.stop_serving()
+
+    asyncio.run(_run())
+
+  def test_grpc_asubmit_times_out_on_slow_worker(self):
+    if not remote_lib._GRPC_AVAILABLE:
+      self.skipTest("grpc library not available in test environment.")
+
+    async def _run():
+      port = _free_port()
+      server = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("slow_worker", latency=2.0)
+      )
+      await server.start_serving_async(port=port)
+      try:
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}", default_timeout_s=0.3
+        )
+        with self.assertRaises(Exception) as cm:
+          await handle.asubmit("compute_trajectory", "p", turns=1)
+        self.assertIn("deadline", str(cm.exception).lower())
+        await handle.close()
+      finally:
+        await server.stop_serving()
+
+    asyncio.run(_run())
+
+  def test_grpc_sync_submit_survives_repeated_calls(self):
+    if not remote_lib._GRPC_AVAILABLE:
+      self.skipTest("grpc library not available in test environment.")
+
+    port = _free_port()
+    server, loop, thread = _run_server_in_background(
+        StubWorkerEngine("sync_worker"), port
+    )
+    handle = remote_lib.GrpcRemoteActorHandle(
+        target_address=f"grpc://localhost:{port}"
+    )
+    try:
+      first = handle.submit("compute_trajectory", "p1", turns=1)
+      self.assertIn("sync_worker", first)
+      # The 2nd blocking call reuses the handle's persistent submit loop and its
+      # channel; it must not rebuild the channel or fail on a stale loop.
+      second = handle.submit("compute_trajectory", "p2", turns=1)
+      self.assertIn("sync_worker", second)
+    finally:
+      asyncio.run(handle.close())  # tears down the persistent submit loop
+      _shutdown_background_server(server, loop, thread)
+
+  def test_grpc_sync_start_serving_actually_serves(self):
+    if not remote_lib._GRPC_AVAILABLE:
+      self.skipTest("grpc library not available in test environment.")
+
+    port = _free_port()
+    server = remote_lib.GrpcRemoteExecutionServer(
+        StubWorkerEngine("blocking_worker")
+    )
+    thread = threading.Thread(
+        target=server.start_serving, kwargs={"port": port}, daemon=True
+    )
+    thread.start()
+    try:
+      self.assertTrue(
+          _wait_for_port("localhost", port),
+          "start_serving() never began accepting connections",
+      )
+
+      async def _call():
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}"
+        )
+        try:
+          return await handle.asubmit("compute_trajectory", "p", turns=1)
+        finally:
+          await handle.close()
+
+      result = asyncio.run(_call())
+      self.assertIn("blocking_worker", result)
+    finally:
+      serve_loop = server.serve_loop
+      if serve_loop is not None:
+        # Fire-and-forget: triggering wait_for_termination unblocks
+        # start_serving, which then closes its own loop. The thread exiting is
+        # the real signal that the blocking serve returned, so we don't await
+        # the stop future (whose result races with that loop closing).
+        asyncio.run_coroutine_threadsafe(server.stop_serving(), serve_loop)
+      thread.join(timeout=10)
+      self.assertFalse(
+          thread.is_alive(), "blocking start_serving did not shut down"
+      )
 
 
 if __name__ == "__main__":
