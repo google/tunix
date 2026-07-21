@@ -20,6 +20,7 @@ from absl.testing import absltest
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import lifecycle
+from tunix.experimental.orchestrator import metrics_pump as metrics_pump_lib
 from tunix.experimental.orchestrator import rl_loop_driver
 from tunix.experimental.orchestrator import weight_sync_coordinator
 from tunix.experimental.orchestrator import worker_registry
@@ -114,6 +115,33 @@ class RLLoopDriverTest(absltest.TestCase):
     outcome = asyncio.run(driver.run_step(_ROWS))
     self.assertEqual(outcome.policy_version, 0)
     self.assertEqual(outcome.num_replicas_synced, 0)
+
+  def test_metrics_pump_receives_step_metrics(self):
+    registry = _brought_up_registry(
+        fake_trainer_worker.FakeTrainerWorker(worker_id="t0")
+    )
+    pump = metrics_pump_lib.MetricsPump()
+    driver = _driver(registry, metrics_pump=pump)
+
+    asyncio.run(driver.run_step(_ROWS))
+
+    trainer_records = pump.records_for("t0")
+    self.assertLen(trainer_records, 1)
+    self.assertEqual(trainer_records[0].step, 0)
+    self.assertEqual(trainer_records[0].mode, "train")
+
+  def test_run_eval_scores_without_training(self):
+    registry = _brought_up_registry(
+        fake_trainer_worker.FakeTrainerWorker(worker_id="t0")
+    )
+    driver = _driver(registry)
+
+    outcome = asyncio.run(driver.run_eval(_ROWS))
+
+    self.assertEqual(outcome.num_groups_evaluated, 2)
+    self.assertTrue(all(m.mode == "eval" for m in outcome.metrics))
+    # Eval must not train: the trainer's step is untouched.
+    self.assertEqual(registry.get("t0").health().policy_version, 0)
 
   def test_drives_a_real_toy_trainer(self):
     registry = _brought_up_registry(

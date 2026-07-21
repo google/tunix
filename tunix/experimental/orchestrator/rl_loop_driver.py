@@ -31,9 +31,11 @@ import dataclasses
 from typing import Any
 
 from tunix.experimental.common import datatypes
+from tunix.experimental.metrics import metrics as metrics_lib
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import dispatch_credits
 from tunix.experimental.orchestrator import group_assembler
+from tunix.experimental.orchestrator import metrics_pump as metrics_pump_lib
 from tunix.experimental.orchestrator import micro_batch_sequencer
 from tunix.experimental.orchestrator import train_batch_queue
 from tunix.experimental.orchestrator import weight_sync_coordinator as wsc
@@ -66,6 +68,24 @@ class StepOutcome:
   num_replicas_synced: int
 
 
+@dataclasses.dataclass(kw_only=True)
+class EvalOutcome:
+  """Result of one eval pass.
+
+  Eval reuses the same request/generate/assemble pipeline but never trains and
+  never advances weights (I11).
+
+  Attributes:
+    step: The step the eval ran at.
+    num_groups_evaluated: Complete groups scored this pass.
+    metrics: The trainer's eval MetricsBuffer per group.
+  """
+
+  step: int
+  num_groups_evaluated: int
+  metrics: list[metrics_lib.MetricsBuffer]
+
+
 class RLLoopDriver:
   """Drives one synchronous RL step over the registered workers."""
 
@@ -83,10 +103,12 @@ class RLLoopDriver:
       train_queue_size: int | None = None,
       max_staleness: int | None = None,
       weight_sync_coordinator: wsc.WeightSyncCoordinator | None = None,
+      metrics_pump: metrics_pump_lib.MetricsPump | None = None,
   ):
     self._registry = registry
     self._adapter = adapter
     self._weight_sync_coordinator = weight_sync_coordinator
+    self._metrics_pump = metrics_pump
     self._tokenizer_info = tokenizer_info
     self._shape_config = shape_config
     self._group_size = group_size
@@ -195,6 +217,12 @@ class RLLoopDriver:
       num_replicas_synced = len(sync_outcome.synced)
       self._policy_version += 1
 
+    # 8. Pump the trainer's sealed metrics for this step (dedup by seal id).
+    if self._metrics_pump is not None and update_results:
+      self._metrics_pump.pull(
+          trainer.info().worker_id, trainer.get_metrics(), step=self._step
+      )
+
     outcome = StepOutcome(
         step=self._step,
         num_groups_trained=len(micro_batches),
@@ -206,3 +234,43 @@ class RLLoopDriver:
     )
     self._step += 1
     return outcome
+
+  async def run_eval(self, rows: list[dict[str, Any]]) -> EvalOutcome:
+    """Runs one eval pass over `rows`: generate and score, never train (I11).
+
+    Uses an isolated assembler so eval never touches the training ledger, and
+    calls only `eval_step` (which must not mutate trainer state) -- no `fwd_bwd`,
+    `update`, or weight sync.
+    """
+    rollout = self._single_worker("rollout")
+    trainer = self._single_worker("trainer")
+
+    assembler = group_assembler.GroupAssembler(min_group_size=self._group_size)
+    requests = []
+    for records in self._adapter.make_trajectory_requests(rows, self._step):
+      assembler.open_group(records)
+      requests.extend(record.request for record in records)
+
+    results = await rollout.generate(requests)
+    for result in results:
+      assembler.admit(result)
+
+    eval_metrics: list[metrics_lib.MetricsBuffer] = []
+    for group in assembler.drain_ready():
+      payload = self._adapter.postprocess_group(
+          group,
+          tokenizer_info=self._tokenizer_info,
+          shape_config=self._shape_config,
+      )
+      buffer = trainer.eval_step(payload)
+      eval_metrics.append(buffer)
+      if self._metrics_pump is not None:
+        self._metrics_pump.pull(
+            trainer.info().worker_id, buffer, step=self._step
+        )
+
+    return EvalOutcome(
+        step=self._step,
+        num_groups_evaluated=len(eval_metrics),
+        metrics=eval_metrics,
+    )
