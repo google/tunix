@@ -239,18 +239,16 @@ class UtilsTest(absltest.TestCase):
     self.assertEqual(item['completion_ids'].shape, (3,))
     self.assertFalse(item['adv_is_per_token'])
 
-  def test_pack_sequences_skips_large(self):
-    # A sequence larger than budget should be skipped.
-    example1 = self._create_mock_train_example(5, 6)  # size 11
+  def test_pack_sequences_raises_on_oversized_sequence(self):
+    # A single sequence longer than the budget cannot be packed; it must raise
+    # (rather than silently drop training data).
+    example1 = self._create_mock_train_example(5, 6)  # size 11 > budget 10
     example2 = self._create_mock_train_example(2, 3)  # size 5
-    packed_iterator = utils.pack_sequences(
+    packed = utils.pack_sequences(
         iter([[example1, example2]]), max_token_budget=10
     )
-    packed_batches = list(packed_iterator)
-    self.assertLen(packed_batches, 1)
-    self.assertEqual(packed_batches[0][0].segment_ids.shape, (1, 10))
-    # Check that only example2 was packed (length 5)
-    self.assertEqual(np.max(packed_batches[0][0].segment_ids), 1)
+    with self.assertRaisesRegex(ValueError, 'exceeding max_token_budget'):
+      list(packed)
 
   def test_pack_sequences_with_dummy_padding(self):
 
@@ -270,9 +268,9 @@ class UtilsTest(absltest.TestCase):
         policy_version=jnp.array([1]),
     )
 
-    # num_packs=2 with 1 example generates 1 dummy pack.
+    # pack_size=2 with 1 example generates 1 dummy pack.
     packed_iterator = utils.pack_sequences(
-        iter([[example]]), max_token_budget=10, num_packs=2
+        iter([[example]]), max_token_budget=10, pack_size=2
     )
     packed_batches = list(packed_iterator)
     [[pack]] = packed_batches
@@ -308,70 +306,214 @@ class UtilsTest(absltest.TestCase):
       self.assertEqual(pack.policy_version.shape, (2,))
 
   def test_pack_sequences(self):
-    # 3 sequences with lengths (P+C): (2+3=5), (1+2=3), (3+4=7)
+    # 3 sequences with lengths (P+C): item1 (2+3=5), item2 (1+2=3),
+    # item3 (3+4=7). Budget 10, pack_size=1 -> each bin is its own chunk.
+    # FFD sorts descending [7, 5, 3] into P = ceil(15/10) = 2 bins:
+    #   bin0 (chunk0): item3 (7) then item2 (3) -> exactly fills 10
+    #   bin1 (chunk1): item1 (5), padded; last chunk -> is_update_step=True
     example1 = self._create_mock_train_example(2, 3)
     example2 = self._create_mock_train_example(1, 2)
     example3 = self._create_mock_train_example(3, 4)
-    item_iterator = iter([[example1, example2, example3]])
-
-    # Budget of 10. We expect item 1 (5) and item 2 (3) to fit in the first pack (8).
-    # Item 3 (7) will go to the second pack (because 8+7 > 10).
-    packed_iterator = utils.pack_sequences(
-        item_iterator, max_token_budget=10, pad_id=0
+    packed_batches = list(
+        utils.pack_sequences(
+            iter([[example1, example2, example3]]),
+            max_token_budget=10,
+            pad_id=0,
+        )
     )
+    self.assertLen(packed_batches, 2)
 
-    packed_batches = list(packed_iterator)
+    # chunk 0 = [item3 (seg 1, 3 prompt + 4 completion), item2 (seg 2, 1+2)].
     pack1 = packed_batches[0][0]
-    # Segment IDs should be (5 ones, 3 twos, 2 padding zeros)
-    expected_segments_1 = jnp.array(
-        [[1] * 5 + [2] * 3 + [0] * 2], dtype=jnp.int32
-    )
-    # Positions should be (0..4, 0..2, 0, 0)
-    expected_positions_1 = jnp.array(
-        [[0, 1, 2, 3, 4, 0, 1, 2, 0, 0]], dtype=jnp.int32
-    )
-    # Completion mask should be 0 for prompts, 1 for completions, 0 for padding
-    # Seq 1: 2 prompts (0), 3 completions (1)
-    # Seq 2: 1 prompt (0), 2 completions (1)
-    expected_mask_1 = jnp.array(
-        [[0, 0, 1, 1, 1, 0, 1, 1, 0, 0]], dtype=jnp.int32
-    )
-
-    pack2 = packed_batches[1][0]
-    expected_segments_2 = jnp.array([[1] * 7 + [0] * 3], dtype=jnp.int32)
-    # Positions should be (0..6, 0, 0, 0)
-    expected_positions_2 = jnp.array(
-        [[0, 1, 2, 3, 4, 5, 6, 0, 0, 0]], dtype=jnp.int32
-    )
-    # Completion mask: 3 prompts (0), 4 completions (1), 3 padding (0)
-    expected_mask_2 = jnp.array(
-        [[0, 0, 0, 1, 1, 1, 1, 0, 0, 0]], dtype=jnp.int32
-    )
-
-    with self.subTest(name='pack_counts'):
-      self.assertLen(packed_batches, 2)
-
-    with self.subTest(name='pack1_contents'):
+    with self.subTest(name='chunk0_contents'):
       self.assertEqual(pack1.prompt_ids.shape, (1, 0))  # prompt_ids is empty
-      self.assertEqual(pack1.completion_ids.shape, (1, 10))  # filled + padded
-      self.assertEqual(pack1.segment_ids.shape, (1, 10))
-      self.assertEqual(pack1.segment_positions.shape, (1, 10))
-      np.testing.assert_array_equal(pack1.segment_ids, expected_segments_1)
+      self.assertEqual(pack1.completion_ids.shape, (1, 10))  # filled, no pad
       np.testing.assert_array_equal(
-          pack1.segment_positions, expected_positions_1
+          pack1.segment_ids, jnp.array([[1] * 7 + [2] * 3], dtype=jnp.int32)
       )
-      np.testing.assert_array_equal(pack1.completion_mask, expected_mask_1)
+      np.testing.assert_array_equal(
+          pack1.segment_positions,
+          jnp.array([[0, 1, 2, 3, 4, 5, 6, 0, 1, 2]], dtype=jnp.int32),
+      )
+      np.testing.assert_array_equal(
+          pack1.completion_mask,
+          jnp.array([[0, 0, 0, 1, 1, 1, 1, 0, 1, 1]], dtype=jnp.int32),
+      )
+      self.assertFalse(bool(np.asarray(pack1.is_update_step)[0]))
 
-    with self.subTest(name='pack2_contents'):
-      self.assertEqual(pack2.prompt_ids.shape, (1, 0))
-      self.assertEqual(pack2.completion_ids.shape, (1, 10))
-      self.assertEqual(pack2.segment_ids.shape, (1, 10))
-      self.assertEqual(pack2.segment_positions.shape, (1, 10))
-      np.testing.assert_array_equal(pack2.segment_ids, expected_segments_2)
+    # chunk 1 = [item1 (seg 1, 2 prompt + 3 completion)], padded to budget.
+    pack2 = packed_batches[1][0]
+    with self.subTest(name='chunk1_contents'):
       np.testing.assert_array_equal(
-          pack2.segment_positions, expected_positions_2
+          pack2.segment_ids, jnp.array([[1] * 5 + [0] * 5], dtype=jnp.int32)
       )
-      np.testing.assert_array_equal(pack2.completion_mask, expected_mask_2)
+      np.testing.assert_array_equal(
+          pack2.segment_positions,
+          jnp.array([[0, 1, 2, 3, 4, 0, 0, 0, 0, 0]], dtype=jnp.int32),
+      )
+      np.testing.assert_array_equal(
+          pack2.completion_mask,
+          jnp.array([[0, 0, 1, 1, 1, 0, 0, 0, 0, 0]], dtype=jnp.int32),
+      )
+      self.assertTrue(bool(np.asarray(pack2.is_update_step)[0]))
+
+  def test_pack_sequences_packs_multiple_rows_per_chunk(self):
+    # pack_size=2: one chunk is [2, budget] and FFD distributes sequences
+    # ACROSS the two rows. budget=10, seqs A=6, B=5, C=3 (one mini-batch).
+    # FFD desc [6,5,3]: 6->row0, 5->row0 full so row1, 3->row0 (6+3=9).
+    #   row0 = [A (seg 1), C (seg 2)], row1 = [B (seg 1)].
+    example_a = self._create_mock_train_example(3, 3)  # 6
+    example_b = self._create_mock_train_example(2, 3)  # 5
+    example_c = self._create_mock_train_example(1, 2)  # 3
+    packed = list(
+        utils.pack_sequences(
+            iter([[example_a, example_b, example_c]]),
+            max_token_budget=10,
+            pack_size=2,
+        )
+    )
+    self.assertLen(packed, 1)  # all three fit one [2, 10] chunk
+    pack = packed[0][0]
+    self.assertEqual(pack.completion_ids.shape, (2, 10))
+    with self.subTest(name='row0_two_segments'):
+      np.testing.assert_array_equal(
+          pack.segment_ids[0],
+          jnp.array([1] * 6 + [2] * 3 + [0], dtype=jnp.int32),  # A then C
+      )
+    with self.subTest(name='row1_one_segment'):
+      np.testing.assert_array_equal(
+          pack.segment_ids[1],
+          jnp.array([1] * 5 + [0] * 5, dtype=jnp.int32),  # B, padded
+      )
+    self.assertTrue(bool(np.asarray(pack.is_update_step)[0]))
+
+  def test_pack_sequences_concatenates_per_token_features_across_seqs(self):
+    # Two real sequences in one packed row: per-token features (ref logps) and
+    # the scalar advantage must land on each sequence's COMPLETION tokens only
+    # (0 on prompt tokens and padding), in sequence order.
+    @flax.struct.dataclass(frozen=True)
+    class PPOTrainExample(common.TrainExample):
+      policy_version: jax.Array | None = None
+
+    # A: prompt 2 + completion 3 (ref=2.0); B: prompt 1 + completion 2 (ref=3.0).
+    example_a = self._create_mock_train_example(
+        2, 3, cls=PPOTrainExample, ref_per_token_logps=jnp.full((1, 3), 2.0)
+    )
+    example_b = self._create_mock_train_example(
+        1, 2, cls=PPOTrainExample, ref_per_token_logps=jnp.full((1, 2), 3.0)
+    )
+    packed = list(
+        utils.pack_sequences(
+            iter([[example_a, example_b]]), max_token_budget=10, pack_size=1
+        )
+    )
+    pack = packed[0][0]  # one [1, 10] row: A (5 tok) then B (3 tok), pad 2.
+    with self.subTest(name='ref_logps_on_completion_only'):
+      # A: prompt(2)=0, completion(3)=2.0; B: prompt(1)=0, completion(2)=3.0.
+      np.testing.assert_allclose(
+          pack.ref_per_token_logps[0],
+          jnp.array([0, 0, 2, 2, 2, 0, 3, 3, 0, 0], dtype=jnp.float32),
+      )
+    with self.subTest(name='scalar_advantage_broadcast_over_completion'):
+      # Default mock advantage 1.5, broadcast over completion tokens only.
+      np.testing.assert_allclose(
+          pack.advantages[0],
+          jnp.array(
+              [0, 0, 1.5, 1.5, 1.5, 0, 1.5, 1.5, 0, 0], dtype=jnp.float32
+          ),
+      )
+
+  def test_pack_sequences_is_independent_of_producer_granularity(self):
+    # The mini-batch boundary is defined in SEQUENCES (sequences_per_update),
+    # so how the producer chops the stream is irrelevant: the same 2 sequences
+    # fed as two single-example lists or one two-example list pack identically
+    # into ONE chunk (both fit a budget-10 bin) with is_update_step=True.
+    def run(stream):
+      packed = list(
+          utils.pack_sequences(
+              iter(stream), max_token_budget=10, sequences_per_update=2
+          )
+      )
+      self.assertLen(packed, 1)
+      return packed[0][0]
+
+    fine = run([
+        [self._create_mock_train_example(2, 3)],
+        [self._create_mock_train_example(1, 2)],
+    ])
+    coarse = run([[
+        self._create_mock_train_example(2, 3),
+        self._create_mock_train_example(1, 2),
+    ]])
+    for pack in (fine, coarse):
+      # Two segments in one row: 5-token seq then 3-token seq.
+      np.testing.assert_array_equal(
+          pack.segment_ids, jnp.array([[1] * 5 + [2] * 3 + [0] * 2], jnp.int32)
+      )
+      self.assertTrue(bool(np.asarray(pack.is_update_step)[0]))
+    np.testing.assert_array_equal(fine.completion_ids, coarse.completion_ids)
+
+  def test_pack_sequences_streams_chunks_before_minibatch_end(self):
+    # Streaming: a chunk is emitted as soon as the buffer holds a chunk's worth
+    # of tokens (pack_size*budget = 10), before the mini-batch is complete, so
+    # training can overlap rollout. budget=10, pack_size=1, N=4.
+    #   micro-batch 1: [6,3,5] -> 14 >= 10 tokens buffered -> emit one chunk
+    #     (FFD desc [6,5,3]: 6->bin, 5->6+5>10 leftover, 3->6+3=9 -> chunk [6,3],
+    #      is_update=False), leftover [5] stays buffered.
+    #   micro-batch 2 (final, N reached): [4] -> buffer [5,4] -> chunk [5,4],
+    #     is_update=True.
+    packed = list(
+        utils.pack_sequences(
+            iter([
+                [
+                    self._create_mock_train_example(3, 3),  # 6
+                    self._create_mock_train_example(1, 2),  # 3
+                    self._create_mock_train_example(2, 3),  # 5
+                ],
+                [self._create_mock_train_example(1, 3)],  # 4
+            ]),
+            max_token_budget=10,
+            sequences_per_update=4,
+        )
+    )
+    self.assertLen(packed, 2)
+    with self.subTest(name='mid_chunk_not_update'):
+      # First chunk holds the 6- and 3-token seqs (FFD), no is_update yet.
+      np.testing.assert_array_equal(
+          packed[0][0].segment_ids,
+          jnp.array([[1] * 6 + [2] * 3 + [0]], jnp.int32),
+      )
+      self.assertFalse(bool(np.asarray(packed[0][0].is_update_step)[0]))
+    with self.subTest(name='final_chunk_is_update'):
+      # Second chunk holds the leftover 5-token seq + the 4-token seq.
+      np.testing.assert_array_equal(
+          packed[1][0].segment_ids,
+          jnp.array([[1] * 5 + [2] * 4 + [0]], jnp.int32),
+      )
+      self.assertTrue(bool(np.asarray(packed[1][0].is_update_step)[0]))
+
+  def test_pack_sequences_emptied_buffer_still_marks_last_chunk(self):
+    # If streaming drains the buffer mid-mini-batch, the last chunk must still
+    # come from the final flush with is_update=True (no dropped update). N=3.
+    #   micro-batch 1: [5,5] -> 10 >= 10 -> emit chunk [5,5], buffer now empty,
+    #     is_update=False.
+    #   micro-batch 2 (final): [7] -> chunk [7], is_update=True.
+    packed = list(
+        utils.pack_sequences(
+            iter([
+                [
+                    self._create_mock_train_example(2, 3),  # 5
+                    self._create_mock_train_example(2, 3),  # 5
+                ],
+                [self._create_mock_train_example(3, 4)],  # 7
+            ]),
+            max_token_budget=10,
+            sequences_per_update=3,
+        )
+    )
+    self.assertLen(packed, 2)
+    self.assertFalse(bool(np.asarray(packed[0][0].is_update_step)[0]))
+    self.assertTrue(bool(np.asarray(packed[1][0].is_update_step)[0]))
 
   def _mock_example(self, prompt_len: int, completion_len: int):
     return common.TrainExample(
@@ -387,37 +529,44 @@ class UtilsTest(absltest.TestCase):
     )
 
   def test_pack_sequences_raises_on_empty_update_boundary(self):
-    # An update boundary (is_update=True) reached with an empty buffer would
-    # yield nothing and silently drop a gradient-accumulation update; it must
-    # raise instead. An empty input batch at a `target_items_per_update`
-    # boundary triggers exactly this.
-    packed = utils.pack_sequences(
-        iter([[]]),  # one empty item-list -> nothing buffered at the boundary
-        max_token_budget=10,
-        target_items_per_update=1,  # every item-list is an update boundary
-    )
+    # An update boundary reached with no sequences would yield nothing and
+    # silently drop a gradient update; it must raise instead. With
+    # sequences_per_update=None each input list is its own mini-batch, so an
+    # empty list is an empty update boundary.
+    packed = utils.pack_sequences(iter([[]]), max_token_budget=10)
     with self.assertRaisesRegex(ValueError, 'update boundary'):
       list(packed)
 
   def test_pack_sequences_raises_on_mid_mini_batch_end(self):
-    # Stream ends mid-mini-batch (1 item-list but target_items_per_update=2) ->
+    # Stream ends mid-mini-batch (1 sequence but sequences_per_update=2) ->
     # trailing flush would update on a partial mini-batch -> raise.
     packed = utils.pack_sequences(
         iter([[self._mock_example(1, 2)]]),
         max_token_budget=10,
-        target_items_per_update=2,
+        sequences_per_update=2,
     )
     with self.assertRaisesRegex(ValueError, 'mid-mini-batch'):
       list(packed)
 
+  def test_pack_sequences_raises_on_misaligned_boundary(self):
+    # A mini-batch boundary falling inside an input example (2 sequences arrive
+    # at once but sequences_per_update=1) is a config mismatch -> raise.
+    packed = utils.pack_sequences(
+        iter([[self._mock_example(1, 2), self._mock_example(2, 3)]]),
+        max_token_budget=10,
+        sequences_per_update=1,
+    )
+    with self.assertRaisesRegex(ValueError, 'boundary falls inside'):
+      list(packed)
+
   def test_pack_sequences_marks_is_update_step_at_boundary(self):
-    # With target_items_per_update=1 each non-empty flush is an update boundary,
-    # so every packed example is marked is_update_step=True (and no raise).
+    # sequences_per_update=1: every sequence is its own mini-batch, so every
+    # packed chunk is marked is_update_step=True.
     packed = list(
         utils.pack_sequences(
             iter([[self._mock_example(1, 2)], [self._mock_example(2, 3)]]),
             max_token_budget=10,
-            target_items_per_update=1,
+            sequences_per_update=1,
         )
     )
     self.assertLen(packed, 2)

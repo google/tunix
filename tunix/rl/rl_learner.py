@@ -732,11 +732,13 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.max_seq_token_per_tpu,
           pack_size,
       )
+      # Update boundary in sequences (mini-batch semantics): packing is
+      # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
           self._training_config.max_seq_token_per_tpu,
-          target_items_per_update=grad_acc_steps,
-          num_packs=pack_size,
+          sequences_per_update=mini_batch_size * self._num_generations(),
+          pack_size=pack_size,
       )
 
     curr_eval_ds = None

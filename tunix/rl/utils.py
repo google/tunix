@@ -347,29 +347,73 @@ def compute_pack_size(mesh: jax.sharding.Mesh) -> int:
   return mesh.shape.get("fsdp", 1) * mesh.shape.get("dp", 1)
 
 
+def _ceildiv(a: int, b: int) -> int:
+  return -(-a // b)
+
+
+def _item_tokens(item: Mapping[str, Any]) -> int:
+  return len(item["prompt_ids"]) + len(item["completion_ids"])
+
+
+def _fill_one_chunk(
+    items: Sequence[Mapping[str, Any]], pack_size: int, budget: int
+) -> tuple[list[list[Mapping[str, Any]]], list[Mapping[str, Any]]]:
+  """Fills ONE chunk of `pack_size` fixed-capacity bins, first-fit-decreasing.
+
+  Sorts the items by token length descending and greedily places each into the
+  first bin with room (<= budget). Items that do not fit any of the pack_size
+  bins are returned as `leftover` (in their original order) for a later chunk.
+
+  Returns (bins, leftover): `bins` is exactly `pack_size` lists (some may be
+  empty); `leftover` are the items that did not fit.
+  """
+  bins: list[list[Mapping[str, Any]]] = [[] for _ in range(pack_size)]
+  loads = [0] * pack_size
+  leftover: list[Mapping[str, Any]] = []
+  for item in sorted(items, key=_item_tokens, reverse=True):
+    n = _item_tokens(item)
+    for b in range(pack_size):
+      if loads[b] + n <= budget:
+        bins[b].append(item)
+        loads[b] += n
+        break
+    else:
+      leftover.append(item)
+  return bins, leftover
+
+
 def pack_sequences(
     item_iterator: Iterator[Sequence[common.TrainExample]],
     max_token_budget: int,
     pad_id: int = 0,
-    target_items_per_update: int | None = None,
-    num_packs: int = 1,
+    sequences_per_update: int | None = None,
+    pack_size: int = 1,
 ) -> Iterator[list[common.TrainExample]]:
-  """Packs a stream of TrainExamples into 1D sequences up to a token budget and stacks them into 2D batches of shape [num_packs, max_token_budget].
+  """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
 
-  TODO(yuxzhang): update boundary uses a fixed grad_acc_steps (mini // micro);
-  packing-native would use dynamic micro-batches + global token norm (b/491970038).
+  A chunk is emitted as soon as buffered sequences fill it (so training can
+  overlap rollout); a mini-batch's last chunk has is_update_step=True.
+  Colocated producers enqueue a whole mini-batch at once, so packing sees the
+  full set (~global FFD); under streaming, chunk composition follows arrival
+  order.
 
   Args:
-    item_iterator: Stream of lists of TrainExamples.
-    max_token_budget: The maximum number of tokens in a packed sequence.
-    pad_id: The vocabulary id used for padding.
-    target_items_per_update: Accumulate items over microbatches, and set `is_update_step=True` when reaching threshold.
-    num_packs: Group into chunks of size num_packs. Emits batches of shape [num_packs, sequence_length].
+    item_iterator: Stream of lists of TrainExamples (any granularity).
+    max_token_budget: Max tokens per packed row (= max_seq_token_per_tpu).
+    pad_id: Padding vocabulary id.
+    sequences_per_update: Sequences per mini-batch/update
+      (= mini_batch_size * num_generations); None packs each input list alone.
+    pack_size: Rows per chunk (= fsdp * dp); each chunk is
+      [pack_size, max_token_budget].
 
   Yields:
-    A stream of packed sequences, stacked in chunks of [num_packs, ...].
+    Single-element lists, each one [pack_size, max_token_budget] TrainExample.
+
+  Raises:
+    ValueError: empty mini-batch at an update boundary, a sequence longer than
+      max_token_budget, a mid-mini-batch stream end, or a boundary inside an
+      input example.
   """
-  accumulated_items = 0
 
   def _flush_pack(pack_items, example_cls, first_item) -> common.TrainExample:
     has_policy_version = first_item.get("policy_version") is not None
@@ -490,80 +534,92 @@ def pack_sequences(
 
     return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
 
-  for item_list in item_iterator:
-    accumulated_items += 1
+  chunk_capacity = pack_size * max_token_budget
 
-    all_unpadded_items = []
-    example_cls = common.TrainExample
+  def _emit(chunk):
+    """Merges one chunk (pack_size bins) into a [pack_size, budget] example."""
+    chunk_examples = [
+        _flush_pack(bin_items, example_cls, first_item_for_dummy)
+        for bin_items in chunk
+    ]
+    return jax.tree.map(
+        lambda first_x, *rest_xs: None
+        if first_x is None
+        else jnp.concatenate((first_x, *rest_xs), axis=0),
+        *chunk_examples,
+    )
+
+  def _mark(merged, is_update):
+    return [
+        merged.replace(is_update_step=jnp.array([is_update], dtype=jnp.bool_))
+    ]
+
+  # See the docstring: buffer sequences, emit a chunk once it holds a chunk's
+  # worth of tokens, and mark the mini-batch's last chunk as the update.
+  buffered = []               # unpacked sequences
+  received = 0                # sequences received this mini-batch (incl. emitted)
+  tokens_in_mini = 0          # for the dummy_ratio log
+  chunks_in_mini = 0
+  example_cls = common.TrainExample
+  first_item_for_dummy = None
+
+  def _final_flush():
+    nonlocal buffered, received, tokens_in_mini, chunks_in_mini
+    if not buffered and chunks_in_mini == 0:
+      raise ValueError(
+          "pack_sequences reached an update boundary with an empty mini-batch;"
+          " no packed example would be produced, dropping a gradient update."
+      )
+    while buffered:
+      chunk, buffered = _fill_one_chunk(buffered, pack_size, max_token_budget)
+      chunks_in_mini += 1
+      yield _mark(_emit(chunk), not buffered)  # last chunk (empty leftover).
+    total_cap = chunks_in_mini * chunk_capacity
+    logging.info(
+        "pack_sequences: %d seqs -> %d chunks, dummy_ratio=%.3f",
+        received, chunks_in_mini,
+        1.0 - tokens_in_mini / total_cap if total_cap else 0.0,
+    )
+    received = 0
+    tokens_in_mini = 0
+    chunks_in_mini = 0
+
+  for item_list in item_iterator:
     for example in item_list:
       example_cls = type(example)
-      all_unpadded_items.extend(unpad_train_example(example))
+      for item in unpad_train_example(example):
+        n = _item_tokens(item)
+        if n > max_token_budget:
+          raise ValueError(
+              f"pack_sequences: a single sequence has {n} tokens, exceeding"
+              f" max_token_budget {max_token_budget}; increase the budget."
+          )
+        if first_item_for_dummy is None:
+          first_item_for_dummy = item
+        buffered.append(item)
+        received += 1
+        tokens_in_mini += n
 
-    if not all_unpadded_items:
+    if sequences_per_update is None:
+      yield from _final_flush()
       continue
 
-    first_item, *_ = all_unpadded_items
-
-    packs = []
-    current_pack_items = []
-    current_tokens = 0
-
-    # No policy_version split: its only consumer (the off-policy filter) is
-    # disabled, and when re-enabled it should filter per-trajectory pre-packing.
-    for item in all_unpadded_items:
-      tokens = len(item["prompt_ids"]) + len(item["completion_ids"])
-
-      if tokens > max_token_budget:
-        logging.warning(
-            "Skipping single sequence with length %d exceeding budget %d",
-            tokens, max_token_budget,
-        )
-        continue
-
-      if current_tokens + tokens > max_token_budget:
-        packs.append(current_pack_items)
-        current_pack_items = []
-        current_tokens = 0
-
-      current_pack_items.append(item)
-      current_tokens += tokens
-
-    if current_pack_items:
-      packs.append(current_pack_items)
-
-    if not packs:
-      continue
-
-    while len(packs) % num_packs != 0:
-      packs.append([])
-
-    chunks = [packs[i : i + num_packs] for i in range(0, len(packs), num_packs)]
-
-    for chunk_idx, chunk in enumerate(chunks):
-      chunk_examples = []
-      for p in chunk:
-        chunk_examples.append(_flush_pack(p, example_cls, first_item))
-
-      merged_example = jax.tree.map(
-          lambda first_x, *rest_xs: None
-          if first_x is None
-          else jnp.concatenate((first_x, *rest_xs), axis=0),
-          *chunk_examples,
+    if received > sequences_per_update:
+      raise ValueError(
+          "pack_sequences: mini-batch boundary falls inside an input example"
+          f" (received {received} sequences, expected {sequences_per_update}"
+          " per update)."
       )
+    if received == sequences_per_update:
+      yield from _final_flush()
+    else:
+      # Not the boundary yet: emit whole chunks eagerly, keep the remainder.
+      while sum(_item_tokens(it) for it in buffered) >= chunk_capacity:
+        chunk, buffered = _fill_one_chunk(buffered, pack_size, max_token_budget)
+        chunks_in_mini += 1
+        yield _mark(_emit(chunk), False)
 
-      is_update = False
-      if target_items_per_update and accumulated_items >= target_items_per_update:
-        if chunk_idx == len(chunks) - 1:
-          is_update = True
-          accumulated_items = 0
-
-      merged_example = merged_example.replace(
-          is_update_step=jnp.array([is_update], dtype=jnp.bool_)
-      )
-
-      yield [merged_example]
-
-  if target_items_per_update and accumulated_items % target_items_per_update != 0:
+  if buffered or received:
     raise ValueError("pack_sequences stream ended mid-mini-batch.")
 
 
