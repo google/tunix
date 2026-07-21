@@ -49,6 +49,8 @@ from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
+from tunix.experimental.common import datatypes as exp_datatypes
+from tunix.experimental.orchestrator import train_example_assembler
 from tunix.utils import trajectory_logger
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
@@ -368,18 +370,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    padded_prompt_ids = []
-    padded_completion_ids = []
-    padded_completion_masks = []
-    padded_old_logprobs = []
-
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
-    for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
-        prompt_tokens_list,
-        completion_tokens_list,
-        completion_masks_list,
-        old_logprobs_list,
+    for completion_tokens, completion_mask in zip(
+        completion_tokens_list, completion_masks_list
     ):
       raw_completion_lengths.append(
           min(len(completion_tokens), max_response_length)
@@ -389,41 +383,42 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           and completion_mask[-1] != eos_value
       ):
         clipped_completion_count += 1
-      padded_prompt, padded_completion, _ = (
-          agentic_utils.pad_prompt_and_completion(
-              prompt_tokens,  # pyrefly: ignore[bad-argument-type]
-              completion_tokens,  # pyrefly: ignore[bad-argument-type]
-              rollout_config.max_prompt_length,
-              max_response_length,
-              pad_value,
-          )
-      )
-      padded_prompt_ids.append(padded_prompt)
-      padded_completion_ids.append(padded_completion[:max_response_length])
-      padded_completion_masks.append(
-          agentic_utils.right_pad(completion_mask, max_response_length, 0)[
-              :max_response_length
-          ]
-      )
-      if self.algo_config.use_rollout_logps:
-        if old_logprobs is not None:
-          padded_old_logprobs.append(
-              agentic_utils.right_pad(
-                  old_logprobs,
-                  length=max_response_length,
-                  pad=0.0,
-                  dtype=old_logprobs.dtype,
-              )[:max_response_length]
-          )
-        else:
-          padded_old_logprobs.append(
-              np.zeros(max_response_length, dtype=np.float32)
-          )
 
-    prompt_ids = jnp.asarray(padded_prompt_ids)
+    # Shared pad/mask core: identical padding to the loop it replaces, kept in
+    # one place so the orchestrator and this learner cannot drift.
+    samples = [
+        train_example_assembler.SampleTokens(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            completion_mask=completion_mask,
+            policy_version=policy_version,
+            old_logprobs=old_logprobs,
+        )
+        for prompt_tokens, completion_tokens, completion_mask, policy_version, old_logprobs in zip(
+            prompt_tokens_list,
+            completion_tokens_list,
+            completion_masks_list,
+            policy_versions_list,
+            old_logprobs_list,
+        )
+    ]
+    padded = train_example_assembler.pad_samples(
+        samples,
+        tokenizer_info=exp_datatypes.TokenizerInfo(
+            pad_id=pad_value, eos_id=eos_value
+        ),
+        shape_config=exp_datatypes.ShapeConfig(
+            max_prompt_length=rollout_config.max_prompt_length,
+            max_response_tokens=max_response_length,
+        ),
+        use_rollout_logps=self.algo_config.use_rollout_logps,
+    )
+    padded_old_logprobs = padded.old_per_token_logps
+
+    prompt_ids = jnp.asarray(padded.prompt_ids)
     prompt_mask = prompt_ids != pad_value
-    completion_ids = jnp.asarray(padded_completion_ids)
-    completion_mask = jnp.asarray(padded_completion_masks)
+    completion_ids = jnp.asarray(padded.completion_ids)
+    completion_mask = jnp.asarray(padded.completion_mask)
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
@@ -443,7 +438,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
     rollout_per_token_logps = None
     trainer_per_token_logps = None
-    if self.algo_config.use_rollout_logps and padded_old_logprobs:
+    if self.algo_config.use_rollout_logps and padded_old_logprobs is not None:
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
       old_per_token_logps = rollout_per_token_logps
       # The diagnostic pass (and the sampler-IS ``token`` path, which needs the

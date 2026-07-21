@@ -135,12 +135,36 @@ class TrainExampleAssemblerTest(absltest.TestCase):
           example.completion_ids[i], exp_completion[: _SHAPE.max_response_tokens]
       )
 
+  def test_pad_samples_returns_padded_batch(self):
+    batch = tea.pad_samples(
+        _samples(),
+        tokenizer_info=_TOKENIZER,
+        shape_config=_SHAPE,
+        use_rollout_logps=True,
+    )
+    np.testing.assert_array_equal(
+        batch.prompt_ids, [[0, 0, 7, 8], [0, 0, 0, 9]]
+    )
+    np.testing.assert_array_equal(
+        batch.completion_mask, [[1, 1, 1, 0, 0], [1, 1, 0, 0, 0]]
+    )
+    self.assertEqual(batch.completion_ids.shape, (2, 5))
+    self.assertEqual(batch.old_per_token_logps.shape, (2, 5))
+
+  def test_pad_samples_omits_old_logps_without_rollout(self):
+    batch = tea.pad_samples(
+        _samples(), tokenizer_info=_TOKENIZER, shape_config=_SHAPE
+    )
+    self.assertIsNone(batch.old_per_token_logps)
+
   def test_empty_samples_raises(self):
     with self.assertRaises(ValueError):
       tea.trajectories_to_train_example(
           [], advantages=np.array([]),
           tokenizer_info=_TOKENIZER, shape_config=_SHAPE,
       )
+    with self.assertRaises(ValueError):
+      tea.pad_samples([], tokenizer_info=_TOKENIZER, shape_config=_SHAPE)
 
 
 if __name__ == "__main__":
