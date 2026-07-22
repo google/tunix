@@ -8,6 +8,10 @@ metadata:
 spec:
   failurePolicy:
     maxRestarts: 0
+  # Issue #7 (DNS race): start the head first; workers only start once the head
+  # job is ready, so they never dial an unresolvable head DNS and insta-fail.
+  startupPolicy:
+    startupPolicyOrder: InOrder
   replicatedJobs:
   # -------------------------------------------------------------
   # 1. PATHWAYS COORDINATOR (CPU HEAD)
@@ -30,7 +34,7 @@ spec:
             # Launch Sidecars (Proxy + RM)
             initContainers:
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_proxy_server@sha256:6022630f749b1bf85940a92c1b595cc59b643a6ab2d1dae77aeea5033d9fcaf9
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
               args:
                 - --server_port=29000
                 - --resource_manager_address=localhost:29001
@@ -44,13 +48,13 @@ spec:
                   memory: 300G
               restartPolicy: Always
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server@sha256:db6d3db6090cc41daca3cc81bc70a15be94d33e6c881d8acaf6de5c9194dd9c2
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
                 - --server_port=29001
                 - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
                 - --node_type=resource_manager
                 - --instance_count=1
-                - --instance_type=tpuv5:4x4x8
+                - --instance_type=tpuv5:4x4x4
               env:
                 - name: HOST_ADDRESS
                   value: localhost
@@ -82,9 +86,8 @@ spec:
                 git fetch origin yuxzhang/refactor_loss_accum_ablation
                 git reset --hard FETCH_HEAD
 
-                # --- Link cached model from GKE PVC ---
-                echo "Linking cached Qwen3 weights from GKE PVC..."
-                mkdir -p /app/artifacts/qwen3_grpo_gsm8k_vtc
+                # Model comes from HF download (demo auto-downloads when
+                # MODEL_DOWNLOAD_DIR is empty); no PVC on this cluster.
 
                 # --- Hot Patch tpu-inference (PR #2838) ---
                 echo "Applying python script patch for ROPE bugs in qwen3.py..."
@@ -132,35 +135,17 @@ spec:
                 sed -i 's/^ \{16\}//' /tmp/patch_qwen3.py
                 python3 /tmp/patch_qwen3.py
 
-                echo "Applying python script patch for OOM bugs in safetensors_loader.py..."
-                cat << 'EOF' > /tmp/patch_safetensors.py
-                import os
-                file_path = "/app/tunix/models/safetensors_loader.py"
-                with open(file_path, "r") as f:
-                    code = f.read()
-                code = code.replace("current_arr = jnp.array(v)", "current_arr = np.array(v)")
-                code = code.replace("if dtype and current_arr.dtype != dtype:", "tgt_dtype = to_np_dtype(dtype) if dtype else None\n          if tgt_dtype and current_arr.dtype != tgt_dtype:")
-                code = code.replace("current_arr = current_arr.astype(dtype)", "current_arr = current_arr.astype(tgt_dtype)")
-                with open(file_path, "w") as f:
-                    f.write(code)
-                EOF
-                sed -i 's/^ \{16\}//' /tmp/patch_safetensors.py
-                python3 /tmp/patch_safetensors.py
                 # ------------------------------------------
 
                 echo "Waiting 60s for TPU worker hosts to pull images and initialize...";
                 sleep 60;
                 echo "GSM8K dataset (tfds) and Qwen3-1.7B (HF) are downloaded inside the script; no separate data step."
                 echo "Running training script..."
-                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_fsdp 32 --mesh_tp 4 --batch_size 128 --mini_batch_size 128 --train_micro_batch_size 32 --compute_logps_micro_batch_size 32 --max_seq_token_per_tpu 2048 --profiler_log_dir gs://yuxzhang-tunix-models/xprof/gsm8k_refactor_stream_pack --profiler_skip_steps 5 --profiler_steps 3
+                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_fsdp 16 --mesh_tp 4 --batch_size 64 --mini_batch_size 64 --train_micro_batch_size 16 --compute_logps_micro_batch_size 16 --max_seq_token_per_tpu 2048 --profiler_log_dir gs://yuxzhang-tunix-models/xprof/gsm8k_refactor_stream_pack --profiler_skip_steps 5 --profiler_steps 3
                 exit $?
               env:
               - name: PATHWAYS_HEAD
                 value: localhost
-              - name: IFRT_PROXY_GRPC_MAX_ONGOING_HOST_BUFFER_STORES
-                value: "32"
-              - name: IFRT_PROXY_GRPC_MAX_ONGOING_HOST_BUFFER_LOOKUPS
-                value: "32"
               - name: INJECTED_HF_TOKEN
                 valueFrom:
                   secretKeyRef:
@@ -194,9 +179,12 @@ spec:
     replicas: 1
     template:
       spec:
-        backoffLimit: 0
-        completions: 32
-        parallelism: 32
+        # Fallback for issue #7 if the cluster's jobset CRD predates
+        # startupPolicy (unknown fields are silently pruned): let workers
+        # crashloop-retry instead of failing the whole JobSet on first dial.
+        backoffLimit: 10
+        completions: 16
+        parallelism: 16
         completionMode: Indexed
         template:
           metadata:
@@ -205,18 +193,18 @@ spec:
           spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
-              cloud.google.com/gke-tpu-topology: 4x4x8
+              cloud.google.com/gke-tpu-topology: 4x4x4
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server@sha256:db6d3db6090cc41daca3cc81bc70a15be94d33e6c881d8acaf6de5c9194dd9c2
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
                 - --server_port=29000
                 - --resource_manager_address=gsm8k-refactor-stream-pack-pathways-head-0-0.gsm8k-refactor-stream-pack:29001
                 - --node_type=worker
-                - --instance_type=tpuv5:4x4x8
+                - --instance_type=tpuv5:4x4x4
               env:
                 - name: XLA_PYTHON_CLIENT_PREALLOCATE
                   value: 'true'
