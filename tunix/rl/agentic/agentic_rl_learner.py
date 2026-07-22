@@ -607,6 +607,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         expected_step=expected_step,
     )
 
+  def _compute_packed_logps(self, example: TrainExample) -> TrainExample:
+    # pack-first hook: algorithms that defer old/ref logp under packing compute
+    # them on the packed buffer here. Base is a no-op.
+    return example
+
   @abc.abstractmethod
   def _process_results(
       self,
@@ -878,6 +883,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
+
+      if is_packed:
+        # pack-first: old/ref log-probs were deferred (left None) in
+        # `_process_results`; compute them now on the packed buffer via the
+        # segment-aware forward before the example reaches the trainer.
+        merged_train_micro_batch = self._compute_packed_logps(
+            merged_train_micro_batch
+        )
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the
