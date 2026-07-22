@@ -23,7 +23,8 @@ spec:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
             nodeSelector:
-              cloud.google.com/gke-nodepool: cpu-np
+              # Using dedicated deepswe-cpu-pool for the massive pathways head
+              cloud.google.com/gke-nodepool: deepswe-cpu-pool
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
@@ -53,7 +54,7 @@ spec:
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp
                 - --node_type=resource_manager
                 - --instance_count=1
-                - --instance_type=tpuv5:4x4x8
+                - --instance_type=tpuv5:4x8x8
               env:
                 - name: HOST_ADDRESS
                   value: localhost
@@ -181,7 +182,7 @@ spec:
 
                 
                 JAX_TRACEBACK_FILTERING=off TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 TF_CPP_MIN_VLOG_LEVEL=1 JAX_LOG_COMPILES=0 ENABLE_PATHWAYS_PERSISTENCE='1' NUM_SLICES=1 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 SKIP_JAX_PRECOMPILE=True JAX_RANDOM_WEIGHTS=1 VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_LOGGING_LEVEL=INFO NEW_MODEL_DESIGN=1 ROLLOUT_ENGINE=vllm PYTHONUNBUFFERED=1 HF_HUB_DISABLE_PROGRESS_BARS=1 HF_HUB_DOWNLOAD_TIMEOUT=600 HF_HUB_ETAG_TIMEOUT=30 HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) \
-                PYTHONPATH=$PYTHONPATH:. python3 examples/deepswe/train_deepswe_nb.py --max_response_length=32768 --max_turns=50 --max_steps=1000 --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 --rollout_micro_batch_size=8 --rollout_mesh_tp=8 --rollout_mesh_fsdp=8 --train_mesh_tp=8 --train_mesh_fsdp=8 --rollout_split_fraction=0.5 --vllm_utilization=0.5 --batch_size=8 --mini_batch_size=8 --max_concurrency=64 --rollout_vllm_max_num_seqs=32 --max_num_batched_tokens=8192 \
+                PYTHONPATH=$PYTHONPATH:. python3 examples/deepswe/train_deepswe_nb.py --max_response_length=32768 --max_turns=50 --max_steps=1000 --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 --rollout_micro_batch_size=8 --rollout_mesh_tp=8 --rollout_mesh_fsdp=8 --train_mesh_tp=8 --train_mesh_fsdp=8 --rollout_split_fraction=0.5 --vllm_utilization=0.8 --batch_size=64 --mini_batch_size=64 --max_concurrency=128 --rollout_vllm_max_num_seqs=128 --max_num_batched_tokens=8192 \
                 --metrics_logger_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/trajectory-log/run1/" --ckpt_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/checkpoint/run1/" --save_interval_steps=1 --max_to_keep=100 --models_base_dir="$MODEL_BASE_DIR"
                 
                 # Outputs are written directly to persistent disk via OUTPUT_DIR.
@@ -238,8 +239,8 @@ spec:
     template:
       spec:
         backoffLimit: 0
-        completions: 32
-        parallelism: 32
+        completions: 64
+        parallelism: 64
         completionMode: Indexed
         template:
           metadata:
@@ -247,9 +248,9 @@ spec:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
             nodeSelector:
-              cloud.google.com/gke-nodepool: linchai-v5p-256-pw-np-0
+              cloud.google.com/gke-nodepool: mlperf-v5p-256-np-0
               cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
-              cloud.google.com/gke-tpu-topology: 4x4x8
+              cloud.google.com/gke-tpu-topology: 4x8x8
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
@@ -260,7 +261,7 @@ spec:
                 - --server_port=29000
                 - --resource_manager_address=train-deepswe-pathways-head-0-0.train-deepswe:29001
                 - --node_type=worker
-                - --instance_type=tpuv5:4x4x8
+                - --instance_type=tpuv5:4x8x8
               env:
                 - name: XLA_PYTHON_CLIENT_PREALLOCATE
                   value: 'true'
@@ -271,3 +272,10 @@ spec:
               resources:
                 limits:
                   google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /root/.config/gcloud
+                name: gcloud-adc
+            volumes:
+            - name: gcloud-adc
+              secret:
+                secretName: gcloud-adc-secret
