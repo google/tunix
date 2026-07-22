@@ -55,39 +55,42 @@ class RolloutWorker(abstract_worker.Worker):
   async def generate(
       self,
       requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
-      on_complete: Callable[[datatypes.Trajectory], None] | None = None,
-  ) -> datatypes.Trajectory | Sequence[datatypes.Trajectory]:
+      on_complete: Callable[[datatypes.RolloutResult], None] | None = None,
+  ) -> datatypes.RolloutResult | Sequence[datatypes.RolloutResult]:
     """Coroutine method for single or batched generate requests.
 
     Args:
-      requests: A single TrajectoryRequest or a sequence of them to process.
+      requests: A single RolloutRequest or a sequence of them to process.
       on_complete: An optional callback invoked immediately as each individual
-        Trajectory is successfully generated. This allows the caller to stream
-        results asynchronously without waiting for the entire batch to finish.
+        RolloutResult is successfully generated. This allows the caller to
+        stream results asynchronously without waiting for the entire batch to
+        finish.
 
     Returns:
-      A single Trajectory (if a single request was provided) or a sequence of
-      completed Trajectories corresponding to the batch of requests.
+      A single RolloutResult (if a single request was provided) or a sequence of
+      completed RolloutResults corresponding to the batch of requests.
     """
     raise NotImplementedError()
 
-  async def pop_next_completed(self) -> datatypes.Trajectory:
+  async def pop_next_completed(self) -> datatypes.RolloutResult:
     """Pull-based stream: yields whichever trajectory finishes first out-of-order.
 
     This provides an alternative to the `on_complete` callback for consumers
     who prefer to actively await the next available trajectory from the worker.
 
     Returns:
-      The next completed Trajectory.
+      The next completed RolloutResult.
     """
     raise NotImplementedError()
 
-  def as_completed_stream(self) -> AsyncIterator[datatypes.Trajectory]:
+  def as_completed_stream(self) -> AsyncIterator[datatypes.RolloutResult]:
     """Async stream yielding completed trajectories or errors strictly out-of-order.
 
     Yields:
-      Completed Trajectory objects as they finish generation.
+      Completed RolloutResult objects as they finish generation.
     """
+    # Convert `datatypes.Trajectory` to a `RolloutResult` using
+    # `datatypes.RolloutResult.from_trajectory()` before yielding
     raise NotImplementedError()
 
   def prepare_weight_sync(self, metadata: Any) -> None:

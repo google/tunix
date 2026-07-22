@@ -25,6 +25,14 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl.agentic.agents import agent_types
 
+##### Worker-internal datatypes #####
+
+# Worker-internal episode representation produced during rollout.
+Trajectory = agent_types.Trajectory
+Step = agent_types.Step
+TrajectoryStatus = agent_types.TrajectoryStatus
+
+
 ##### Common DTOs (Data Transfer Objects) #####
 
 
@@ -67,14 +75,11 @@ class RolloutRequest:
   Attributes:
     request_id: Unique identifier for this request, echoed back on the
       corresponding result so callers can correlate and de-duplicate responses.
-    prompt_id: Identifier of the source prompt (e.g. a dataset row). Provenance
-      only; not unique across requests that reuse the same prompt.
     prompt_text: The prompt to generate from.
     sampling_params: Sampling configuration for the generation.
   """
 
   request_id: str
-  prompt_id: str
   prompt_text: str
   sampling_params: SamplingParams
 
@@ -83,11 +88,11 @@ class RolloutRequest:
 class TokenSegment:
   """One contiguous span of the conversation token stream representing a single turn.
 
-  Each segment corresponds to a single turn's response from either the sampler
+  Each segment corresponds to a single turn's response from either the assistant
   or the environment.
 
   Attributes:
-    source: Origin of the span, e.g. "sampler" (model-emitted) or "env".
+    source: Origin of the span, e.g. "assistant" (model-emitted) or "env".
     tokens: Array of token ids for this span.
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
     logprobs: Array of per-token log-probabilities under the sampling
@@ -124,12 +129,11 @@ class RolloutResult:
 
   Attributes:
     request_id: Echoes the originating request, for correlation/de-duplication.
-    prompt_id: Echoes the source prompt id.
     status: Terminal status name (e.g. a rollout trajectory status, or
       "CANCELLED").
     prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
       worker.
-    segments: Ordered conversation turns (segments) from the sampler (model
+    segments: Ordered conversation turns (segments) from the assistant (model
       call) and environment; concatenated they form the full generated stream.
     env_reward: Scalar environment reward for the trajectory.
     policy_version: Weight version used to generate the trajectory.
@@ -137,7 +141,6 @@ class RolloutResult:
   """
 
   request_id: str
-  prompt_id: str
   status: str
   prompt_tokens: np.ndarray = dataclasses.field(
       default_factory=lambda: np.zeros(0, dtype=np.int32)
@@ -147,6 +150,57 @@ class RolloutResult:
   policy_version: int = 0
   error: ErrorInfo | None = None
   # TODO(b/532722981): capture rollout metrics, e.g., env time.
+
+  @classmethod
+  def from_trajectory(
+      cls,
+      request_id: str,
+      traj: Trajectory,
+      prompt_tokens: np.ndarray,
+      policy_version: int,
+  ) -> "RolloutResult":
+    """Constructs a wire-safe RolloutResult from an internal Trajectory.
+
+    Extracts only the required arrays (tokens, masks, logprobs) from the
+    semantic steps, discarding string metadata and unpicklable objects.
+
+    Args:
+      request_id: The ID of the original rollout request.
+      traj: The internal trajectory to convert.
+      prompt_tokens: Array of prompt token ids.
+      policy_version: Weight version used to generate the trajectory.
+
+    Returns:
+      A wire-safe RolloutResult.
+    """
+    segments = []
+    for step in traj.steps:
+      if step.assistant_tokens is not None:
+        segments.append(
+            TokenSegment(
+                source="assistant",
+                tokens=step.assistant_tokens,
+                loss_mask=step.assistant_masks,
+                logprobs=step.logprobs,
+            )
+        )
+      if step.env_tokens is not None:
+        segments.append(
+            TokenSegment(
+                source="env",
+                tokens=step.env_tokens,
+                loss_mask=step.env_masks,
+                logprobs=None,
+            )
+        )
+    return cls(
+        request_id=request_id,
+        status=traj.status.name,
+        prompt_tokens=prompt_tokens,
+        segments=segments,
+        env_reward=traj.reward,
+        policy_version=policy_version,
+    )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -183,9 +237,3 @@ class RLTrainerPayload(TrainerPayload):
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
-
-
-##### Worker-internal datatypes #####
-
-# Worker-internal episode representation produced during rollout.
-Trajectory = agent_types.Trajectory

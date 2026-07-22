@@ -10,7 +10,6 @@ from tunix.experimental.common import rpc_utils
 def _sample_result() -> datatypes.RolloutResult:
   return datatypes.RolloutResult(
       request_id="req-1",
-      prompt_id="prompt-1",
       status="SUCCEEDED",
       prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
       segments=[
