@@ -35,6 +35,7 @@ from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import profiler
 from tunix.sft import peft_trainer
+from tunix.sft import utils as sft_utils
 from tunix.tests import test_common as tc
 from tunix.utils import compat
 
@@ -602,6 +603,148 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
     self.assertEqual(eval_invoke, {'foo': 1, 'bar': 16})
+
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_explicit_save_checkpoint(self, mock_checkpoint_manager_init):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.save.return_value = True
+    mock_cm.maybe_restore.return_value = (0, {})
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    custom_metadata = {'global_step': 42, 'role': 'actor'}
+    trainer.save_checkpoint(
+        metadata=custom_metadata, step=10, force=True
+    )
+
+    mock_cm.save.assert_called_once_with(
+        10,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=False,
+        custom_metadata=custom_metadata,
+        force=True,
+    )
+
+  def test_loss_output_aux_retention(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> sft_utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              'foo': sft_utils.WeightedMetric(
+                  jnp.array(10.0, dtype=jnp.float32),
+                  jnp.array(5.0, dtype=jnp.float32),
+              ),
+              'bar': sft_utils.WeightedMetric(
+                  jnp.array(6.0, dtype=jnp.float32),
+                  jnp.array(2.0, dtype=jnp.float32),
+              ),
+          },
+      )
+
+    train_invoke = {'foo': 0.0, 'bar': 0.0}
+    eval_invoke = {'foo': 0.0, 'bar': 0.0}
+    test_case = self
+
+    class CustomTrainer(peft_trainer_v2.PeftTrainer):
+
+      def _post_process_train_step(self, aux):
+        test_case.assertIsInstance(aux['foo'], sft_utils.WeightedMetric)
+        test_case.assertIsInstance(aux['bar'], sft_utils.WeightedMetric)
+        train_invoke['foo'] += aux['foo'].compute()
+        train_invoke['bar'] += aux['bar'].compute()
+        if self._buffered_train_metrics is not None:
+          self._buffered_train_metrics.additional_metrics['foo'] = (
+              [aux['foo']],
+              lambda xs: xs[-1],
+          )
+
+      def _post_process_eval_step(self, aux):
+        test_case.assertIsInstance(aux['foo'], sft_utils.WeightedMetric)
+        test_case.assertIsInstance(aux['bar'], sft_utils.WeightedMetric)
+        eval_invoke['foo'] += aux['foo'].compute()
+        eval_invoke['bar'] += aux['bar'].compute()
+        if self._buffered_eval_metrics is not None:
+          self._buffered_eval_metrics.additional_metrics['foo'] = (
+              [aux['foo']],
+              lambda xs: xs[-1],
+          )
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    trainer = CustomTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(train_invoke, {'foo': 4.0, 'bar': 6.0})
+    self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
+    metrics = trainer.get_metrics()
+    self.assertIn('foo', metrics.weighted_metrics)
+    self.assertIsInstance(
+        metrics.weighted_metrics['foo'], sft_utils.WeightedMetric
+    )
+
+  def test_empty_eval_dataset(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer._run_eval([])
+    self.assertIsNone(trainer._buffered_eval_metrics)
+
+  def test_get_metrics(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=10)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    # Before any steps, get_metrics returns empty buffer with id=-1
+    self.assertEqual(trainer.get_metrics().id, -1)
+
+    # Run evaluation inside eval_context to buffer and write eval metrics immediately
+    eval_example = next(iter(self.eval_ds))
+    with trainer.eval_context():
+      trainer.eval_step(eval_example)
+
+    metrics = trainer.get_metrics()
+    self.assertEqual(metrics.id, 0)
+    self.assertEqual(metrics.mode, 'eval')
+    self.assertIn('loss', metrics.scalar_metrics)
+    self.assertGreater(metrics.scalar_metrics['loss'], 0)
+
+    # After calling get_metrics, the buffer should be cleared
+    self.assertEqual(trainer.get_metrics().id, -1)
+
+    # Also check training metrics during train loop
+    trainer.train(self.train_ds)
+    train_metrics = trainer.get_metrics()
+    self.assertNotEqual(train_metrics.id, -1)
+    self.assertEqual(train_metrics.mode, 'train')
+    self.assertIn('loss', train_metrics.scalar_metrics)
+    self.assertIn('grad_norm', train_metrics.scalar_metrics)
+    self.assertGreater(train_metrics.scalar_metrics['loss'], 0)
 
   def test_injected_params(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)

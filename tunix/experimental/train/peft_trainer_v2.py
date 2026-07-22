@@ -32,6 +32,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
@@ -46,8 +47,9 @@ from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.sft import utils
+from typing_extensions import override
 
-_ModelInputT = Dict[str, ArrayLike]
+_ModelInputT = dict[str, Any]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
@@ -133,17 +135,6 @@ class MetricsBuffer:
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
     return np.mean(np.array([np.array(x) for x in self.losses]))
-
-
-def _compute_legacy_aux(loss_output: utils.LossOutput) -> Dict[str, Any]:
-  """Computes legacy aux metrics from a LossOutput."""
-  legacy_aux = {}
-  for k, v in loss_output.aux_metrics.items():
-    if isinstance(v, utils.WeightedMetric):
-      legacy_aux[k] = v.compute()
-    else:
-      legacy_aux[k] = v
-  return legacy_aux
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -383,6 +374,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._buffered_train_metrics: MetricsBuffer | None = None
     self._prev_buffered_train_metrics: MetricsBuffer | None = None
     self._buffered_eval_metrics: MetricsBuffer | None = None
+    # TODO(b/532722958): mitigation for current metrics logging implementations.
+    # Buffered_train[eval]_metrics will be None after metrics are logged. For
+    # get_metrics to retrieve metrics from trainer, we need to write metrics to
+    # a buffer. We should delete this once the metrics logging implementations
+    # are updated according to the new design.
+    self._written_metrics: exp_metrics.MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -404,6 +401,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
 
+  @override
   def with_loss_fn(
       self,
       loss_fn: Callable[
@@ -411,16 +409,17 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
-  ):
+  ) -> "PeftTrainer":
     self.clear_jit_cache()
     self.loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
     self.eval_loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
     self._has_aux = has_aux
     return self
 
+  @override
   def with_gen_model_input_fn(
-      self, gen_model_input_fn: Callable[[Any], _ModelInputT]
-  ):
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ) -> "PeftTrainer":
     """Generates model input from training input.
 
     NB: output of this function will be passed to the loss function, so the args
@@ -485,7 +484,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     if isinstance(aux, utils.LossOutput):
-      return loss_val, _compute_legacy_aux(aux)
+      return loss_val, aux.aux_metrics
     elif self._has_aux:
       return loss_val, aux
     else:
@@ -524,7 +523,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
-      return out.primary_loss.compute(), _compute_legacy_aux(out)
+      return out.primary_loss.compute(), out.aux_metrics
     elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
@@ -761,16 +760,30 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         return [_to_np_array(x) for x in v]
       return v
 
+    loss = metrics_buffer.loss
+    additional_metrics = {
+        k: op(_to_np_array(v))
+        for k, (v, op) in metrics_buffer.additional_metrics.items()
+    }
     self._log_metrics(
-        loss=metrics_buffer.loss,
+        loss=loss,
         step=metrics_buffer.step,
-        additional_metrics={
-            k: op(_to_np_array(v))
-            for k, (
-                v,
-                op,
-            ) in metrics_buffer.additional_metrics.items()
-        },
+        additional_metrics=additional_metrics,
+    )
+    weighted_metrics = {}
+    scalar_metrics = {"loss": loss}
+    for k, val in additional_metrics.items():
+      if isinstance(
+          val, (utils.WeightedMetric, exp_metrics.WeightedMetric)
+      ):
+        weighted_metrics[k] = val
+      else:
+        scalar_metrics[k] = val
+    self._written_metrics = exp_metrics.MetricsBuffer(
+        id=metrics_buffer.step,
+        weighted_metrics=weighted_metrics,
+        scalar_metrics=scalar_metrics,
+        mode=self._mode.value,
     )
 
   @contextlib.contextmanager
@@ -800,9 +813,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
       self.training_hooks.on_train_step_end(self, step, loss)
 
-  def fwd_bwd(self, payload: Any, **kwargs) -> None:
+  @override
+  def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
+    payload = self._prepare_inputs(payload)
+    payload = sharding_utils.shard_input(
+        payload, self.config.data_sharding_axis
+    )
     train_loss, aux = fwd_bwd_step(payload)
     self._buffered_train_metrics = self._buffer_metrics(
         self._buffered_train_metrics,
@@ -811,6 +829,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     self._post_process_train_step(aux)
 
+  @override
   def update(self, **kwargs) -> int:
     """Applies the accumulated gradients."""
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step()
@@ -828,23 +847,94 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._train_steps += 1
     self._write_train_metrics()
     return self._train_steps
+
+  @override
   def compile(self, dummy_data: Any) -> None:
     pass
 
-  def eval_step(self, payload: Any, **kwargs) -> None:
-    pass
+  @override
+  def eval_step(
+      self, payload: datatypes.TrainerPayload | Any, **kwargs
+  ) -> None:
+    """Executes one eval micro-batch step.
 
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
-    pass
+    Prepares inputs, runs the (cached) jitted eval step function, buffers
+    eval metrics, and calls _post_process_eval_step.  Callers should bracket
+    a sequence of eval_step calls with eval_context() so that the metrics
+    mode is set to EVAL and buffered metrics are written on exit.
+    """
+    _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step()
+    payload = self._prepare_inputs(payload)
+    payload = sharding_utils.shard_input(
+        payload, self.config.data_sharding_axis
+    )
+    loss, aux = eval_step_fn(payload)
+    loss = jax.lax.stop_gradient(loss)
+    self._buffered_eval_metrics = self._buffer_metrics(
+        self._buffered_eval_metrics,
+        loss=loss,
+        step=self._train_steps,
+    )
+    self._post_process_eval_step(aux)
 
+  @contextlib.contextmanager
+  def eval_context(self):
+    """Context manager for bracketing eval sessions.
+
+    Switches metrics mode to EVAL and writes buffered eval metrics on exit.
+    Usage:
+
+        with trainer.eval_context():
+            for micro_batch in eval_ds:
+                trainer.eval_step(micro_batch)
+    """
+    logging.info("Running evaluation on train step %d.", self._train_steps)
+    with self._switch_mode(sft_metrics_logger.Mode.EVAL):
+      try:
+        yield
+      finally:
+        if self._buffered_eval_metrics is not None:
+          self._write_metrics(self._buffered_eval_metrics)
+          self._buffered_eval_metrics = None
+
+  @override
+  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+    """
+    Saves a checkpoint of the trainer state (model + optimizer).
+    Vanilla implementation of save_checkpoint on a train_steps.
+    Sub-batch checkpointing will be added later once it is supported in the
+    checkpoint manager.
+    """
+    step = kwargs.pop("step", self._train_steps)
+    if metadata is None:
+      metadata = self.custom_checkpoint_metadata()
+    save_only_lora_params = kwargs.pop(
+        "save_only_lora_params", self._lora_enabled
+    )
+    self.checkpoint_manager.save(
+        step,
+        self.model,
+        self.optimizer,
+        save_only_lora_params=save_only_lora_params,
+        custom_metadata=metadata,
+        **kwargs,
+    )
+
+  @override
   def restore_checkpoint(self, **kwargs) -> Any:
     return {}
 
+  @override
   def prepare_weight_sync(self, **kwargs) -> None:
     pass
 
+  @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:
-    return exp_metrics.MetricsBuffer(id=-1)
+    if self._written_metrics is None:
+      return exp_metrics.MetricsBuffer(id=-1)
+    ret = self._written_metrics
+    self._written_metrics = None
+    return ret
 
   def train(
       self,
@@ -860,7 +950,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
         1,
     )
-    fwd_bwd_step, _, eval_step = (
+    fwd_bwd_step, _, _ = (
         self.jit_fwd_bwd_update_and_eval_step(skip_jit, cache_nnx_graph)
     )
     if not skip_jit:
@@ -873,7 +963,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self._jit_cache.add(cache_size)
 
     if eval_ds:
-      self._run_eval(eval_ds, eval_step)
+      self._run_eval(eval_ds)
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
@@ -920,11 +1010,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             and self._train_steps >= self.config.max_steps
         ):
           break
-
-        train_example = self._prepare_inputs(train_example)
-        train_example = sharding_utils.shard_input(
-            train_example, self.config.data_sharding_axis
-        )
 
         self._throttler.wait_for_next()
         if self.training_hooks:
@@ -996,23 +1081,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           span_v2.async_end([train_loss])
 
         self._throttler.add_computation(train_loss)
-
         if is_update_step_val:
-
-          # Checkpoint frequency is configured by checkpointing_options.
-          self.checkpoint_manager.save(
-              self._train_steps,
-              self.model,
-              self.optimizer,
-              save_only_lora_params=self._lora_enabled,
-              custom_metadata=self.custom_checkpoint_metadata(),
-          )
-
+          self.save_checkpoint()
           if (
               eval_ds
               and self._train_steps % self.config.eval_every_n_steps == 0
           ):
-            self._run_eval(eval_ds, eval_step)
+            self._run_eval(eval_ds)
 
       self._prof.maybe_deactivate(self._iter_steps)
 
@@ -1068,12 +1143,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def _run_eval(
       self,
       eval_ds: Iterable[Any],
-      eval_step_fn: Callable[..., Any],
   ) -> None:
     """Runs evaluation loop."""
-    logging.info("Running evaluation on train step %d.", self._train_steps)
     eval_iterator = iter(eval_ds)
-    with self._switch_mode(sft_metrics_logger.Mode.EVAL):
+    with self.eval_context():
       eval_loss, eval_steps = 0, 0
       while True:
         if self.data_hooks:
@@ -1085,39 +1158,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             eval_example = None
         if eval_example is None:
           break
-        eval_example = self._prepare_inputs(eval_example)
-        eval_example = sharding_utils.shard_input(
-            eval_example, self.config.data_sharding_axis
-        )
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
-        loss, aux = eval_step_fn(eval_example)
-        loss = jax.lax.stop_gradient(loss)
-        self._buffered_eval_metrics = self._buffer_metrics(
-            self._buffered_eval_metrics,
-            loss=loss,
-            step=self._train_steps,
-        )
-        self._post_process_eval_step(aux)
-        eval_loss += loss
+        self.eval_step(eval_example)
+        assert self._buffered_eval_metrics is not None
+        eval_loss += self._buffered_eval_metrics.losses[-1]
         eval_steps += 1
 
       if eval_steps == 0:
         logging.warning(
             "No eval examples found. Skipping eval metrics logging."
         )
+        # Clear so eval_context doesn't attempt to write empty metrics.
+        self._buffered_eval_metrics = None
         return
 
-      self._write_metrics(self._buffered_eval_metrics)  # pyrefly: ignore[bad-argument-type]
       logging.info(
-          "Train step %d eval loss: %f - eval perplexity: %f",
+          "Train step %d eval loss: %f",
           self._train_steps,
-          self.metrics_logger.get_metric(self.metrics_prefix, "loss", "eval"),  # pyrefly: ignore[missing-attribute]
-          self.metrics_logger.get_metric(  # pyrefly: ignore[missing-attribute]
-              self.metrics_prefix, "perplexity", "eval"
-          ),
+          eval_loss / eval_steps,
       )
-      self._buffered_eval_metrics = None
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
 
