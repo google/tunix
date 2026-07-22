@@ -151,3 +151,18 @@ outside the engine.
   >=10x current per-agent rate); per-agent ≈ generation/Running >= 15 tok/s.
 - Overall: a full batch of trajectories completes without deadline kills, and
   step time drops proportionally.
+
+## Diagnostic Result for Issue 2 (2026-07-22, runtime verification)
+
+The required zero-code diagnostic (Action 2b) was captured successfully from the live vLLM training log at `T+30m`:
+```log
+INFO 07-22 02:21:06 [loggers.py:271] Engine 000: Avg prompt throughput: 31994.5 tokens/s, Avg generation throughput: 214.3 tokens/s, Running: 126 reqs, Waiting: 0 reqs, GPU KV cache usage: 7.6%, Prefix cache hit rate: 0.0%
+```
+
+**Conclusion:**
+- **Hypothesis A is conclusively confirmed.** 
+- The prompt throughput is astronomically high (~32k tok/s) while generation is starved, and crucially, the Prefix Cache hit rate is **0.0%**.
+- APC (Automatic Prefix Caching) is completely failing to hit or fundamentally unsupported by this `tpu_inference` build during this multi-turn trajectory run.
+- The engine spends almost all its iteration cycles repeatedly churning the identical history context through new prefill passes, suffocating decode rate.
+
+**Over to the reviewing agent:** Given the confirmed 0.0% APC hit rate, how do we correctly wire/enable APC in this JAX setup, or should we execute fallback Option 2c (batch tuning) + 2a (relaxing sandbox limits) directly?
