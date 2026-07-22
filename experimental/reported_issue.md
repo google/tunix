@@ -266,3 +266,14 @@ INFO:root:[SWEEnv group=14 pair=4] env.step start step=21 function=execute_bash
 INFO 07-22 18:41:30 [loggers.py:271] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 9.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs
 ```
 **Conclusion**: This definitively confirms the system is correctly running but stalled waiting for the CPU sandboxes to time out broken agent execution loops. The rollout phase will naturally conclude once these last environments hit their 50-turn cap or 3-hour limit, transitioning safely into the PPO update.
+
+## 7. Orbax Checkpoint ALREADY_EXISTS Crash (At PPO Saving Phase)
+**Severity**: Fatal Crash
+**Observation**: The system successfully completed the 3-hour rollout period and successfully advanced to the PPO training update phase. However, exactly at the point of saving the optimizer state to GCS, the Trainer completely crashed with:
+`jax.errors.JaxRuntimeError: ALREADY_EXISTS: While opening TensorStore: Error opening "zarr" driver: Error writing gs://yuxzhang-tunix-models/haoyu-deepswe/checkpoint/qwen3_128_apc_1/actor/7/optimizer_state/.../.zarray`
+**Root Cause**: 
+The K8s job was launched using a hardcoded or recycled `RUN_TAG="qwen3_128_apc_1"`. The GCS directory `haoyu-deepswe/checkpoint/qwen3_128_apc_1/actor/7` **already existed** in your bucket (likely from a previous interrupted run that reached step 7). 
+When Orbax `CheckpointManager` attempts to perform a standard serialization dump into a directory that already contains previous TensorStore `.zarray` data without being explicitly instructed to overwrite or load, it proactively aborts with an `ALREADY_EXISTS` exception to prevent dataset corruption.
+**Required Fix for Next Launch**:
+1. **Rotate the RUN_TAG**: Ensure your launch shell scripts strictly inject a unique `RUN_TAG` (e.g. `qwen3_128_apc_2` or append a `$(date +%s)` timestamp) so it writes to a virgin GCS subdirectory.
+2. **Clear the Bucket**: If you intentionally meant to overwrite `qwen3_128_apc_1`, you must manually `gsutil rm -rf gs://yuxzhang-tunix-models/haoyu-deepswe/checkpoint/qwen3_128_apc_1/` before kicking off `kubectl apply`.
