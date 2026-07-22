@@ -38,3 +38,116 @@ At line 763 onwards, `RLTrainingConfig` has its arguments hardcoded to `None`:
 - Increase `activeDeadlineSeconds` patch in `relaunch_deepswe_256_mlperf.sh` to `10800` (3 hours) to align with Python `episode_timeout_secs`.
 - Decrease `MAX_CONCURRENCY` to `64` to increase average tokens/sec/instance (speed up each agent's individual trajectory response times).
 - Fix the `RLTrainingConfig` instantiation.
+
+---
+
+# Solution Analysis & Fix Plan (2026-07-22, engineer review)
+
+Both issues re-verified against the code at this branch (8f6bf366). Issue 1 is
+a confirmed 2-line bug plus a config trap. Issue 2's arithmetic is right, but
+the throughput number itself is ~10-40x below the hardware roofline, which
+points at a deeper root cause than concurrency; a zero-code diagnostic below
+decides between the two candidate causes. Exact fixes + verification gates
+follow so the executing agent can act directly.
+
+## Issue 1 fix — checkpoint wiring (CONFIRMED bug, 2 lines + 1 launch flag)
+
+**Verified**: `examples/deepswe/train_deepswe_nb.py` reads `--ckpt_dir` into
+`CKPT_DIR` (:462, default `/tmp/cp/deepswe_ckpt/01` from :106) and builds
+`checkpointing_options = ocp.CheckpointManagerOptions(...)` (:672), but the
+`RLTrainingConfig` hardcodes both to None (:772-773).
+
+**Fix 1a — code** (train_deepswe_nb.py:772-773):
+
+```python
+# BEFORE
+        checkpoint_root_directory=None,
+        checkpointing_options=None,
+# AFTER
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
+```
+
+**Fix 1b — launch config** (`experimental/deepswe-256-mlperf.yaml`, the
+train_deepswe_nb.py command line, :185): the default `--ckpt_dir=/tmp/cp/...`
+is POD-LOCAL disk — a preemption kills the checkpoint together with the pod,
+making resumption pointless. Add an explicit GCS path:
+
+```
+--ckpt_dir=gs://yuxzhang-tunix-models/deepswe_ckpt/${RUN_TAG or date}
+```
+
+**Gates**:
+- After `SAVE_INTERVAL_STEPS`, `gsutil ls <ckpt_dir>` shows orbax step dirs.
+- Kill + relaunch the jobset: training resumes from the saved step (check
+  `iter_steps`/`global_steps` in logs continue rather than reset to 0).
+- NOTE for the agent: verify the tunix trainer auto-restores from
+  `checkpoint_root_directory` when it is non-empty (peft_trainer /
+  CheckpointManager restore path). If restore is NOT automatic, wire it and
+  report — saving alone does not give resumption.
+
+## Issue 2 analysis — why 214 tok/s is 10-40x too low (mesh roofline math)
+
+**Config confirmed** (train_deepswe_nb.py:724-725): rollout = 64 chips as
+**8 data-parallel vLLM engines x tp=8** (`data_parallel_size = fsdp = 8`),
+`max_num_seqs=128` and `max_num_batched_tokens=8192` are PER-ENGINE.
+`enable_prefix_caching=True` is passed (:731). The "214 tokens/s, 126 reqs"
+line is vLLM's standard logger: **generation throughput counts DECODE tokens
+only**; prefill is reported separately as "Avg prompt throughput".
+
+**Roofline** (v5p: ~2.77 TB/s HBM/chip, ~459 bf16 TFLOP/s/chip):
+- Qwen3-32B bf16 weights = 64 GB; tp=8 -> 8 GB/chip. A decode iteration is
+  memory-bound: weights read ≈ 8/2770 ≈ 3 ms; KV read (GQA ≈ 256 KB/token/seq,
+  ~6k ctx ≈ 1.5 GB/seq x ~16 seqs/engine) ≈ +1 ms; with overhead call it
+  10-20 ms/iteration.
+- Per engine: ~16 running seqs x 1 token / 15 ms ≈ 1000 tok/s -> **~8000
+  tok/s aggregate expected**. Even with a pessimistic 50 ms/iteration of
+  pathways-proxy overhead: ~2500 tok/s.
+- **Observed 214 tok/s. Back-solve: 214 / 8 engines / 16 seqs ≈ 600 ms per
+  iteration.** Decode physically cannot be that slow — each iteration is
+  being consumed by something else.
+
+**Hypothesis A (primary): prefill starvation — APC not actually effective.**
+Multi-turn agentic resubmits the full growing context every turn. If
+tpu_inference silently ignores/doesn't support `enable_prefix_caching`, every
+turn re-prefills ~6k tokens. One 8192-token chunked-prefill iteration for 32B
+tp=8 ≈ 2*32e9*8192 / (8*459e12) ≈ 143 ms compute + overhead ≈ 200-300 ms —
+the same order as the back-solved 600 ms. Engine iterations become almost all
+prefill; decode (the reported "generation throughput") starves at ~214.
+
+**Hypothesis B (secondary): fixed per-iteration overhead** (pathways-proxy
+RPC / host sampling round-trip ~hundreds of ms). Comparable gsm8k runs on the
+same proxy architecture can serve as a reference iteration rate.
+
+**Decisive diagnostic (ZERO code change, do this first)**: read the SAME
+vLLM log lines already collected:
+- "Avg prompt throughput" is thousands of tok/s  ->  **A confirmed** (engine
+  is busy prefilling).
+- "Avg prompt throughput" ≈ 0                    ->  **B** (iterations are
+  slow without doing prefill work).
+Also grep engine startup logs for whether prefix caching was actually
+enabled/supported by the tpu_inference backend.
+
+**GKE side note**: sandboxes are k8s pods pinned to the SAME
+`deepswe-cpu-pool` as the pathways head (`R2E_K8S_NODE_SELECTOR`, yaml :149).
+At the reported snapshot Running≈126 means agents were in-engine (not waiting
+on env), so env execution is NOT the current bottleneck — but monitor pool
+CPU saturation (`kubectl top nodes`) since env steps add per-turn latency
+outside the engine.
+
+## Issue 2 fixes (ordered)
+
+| # | Action | When |
+|---|---|---|
+| 2a | `activeDeadlineSeconds` 3600 -> 10800 in the sed at yaml :175 (align with `episode_timeout_secs=10800`): `sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 10800,/g' ...` | unconditional, now |
+| 2b | Run the decisive diagnostic above (prompt-throughput line) | now, zero-code |
+| 2c | If A: confirm/enable APC in tpu_inference; raise `--max_num_batched_tokens` 8192 -> 16384 (or 32768; HBM util 0.8 has headroom) so prefill drains faster and decode starves less | after 2b |
+| 2d | If B: xprof the rollout engine step; find the fixed ~600 ms; compare against a gsm8k run's iteration rate on the same proxy architecture | after 2b |
+| 2e | `MAX_CONCURRENCY` 128 -> 64: halves prefill pressure / per-iteration batch either way, and (with 2a) lets single trajectories finish within the sandbox deadline. Note: aggregate throughput stays roughly the same if compute-bound — this buys per-trajectory completion, not faster training | optional, after 2c/2d |
+
+**Gates**:
+- 2a: no sandbox killed at 3600 s; trajectories exceed ~6k tokens / reach more turns.
+- 2c/2d: "Avg generation throughput" rises to >=1000 tok/s aggregate (target:
+  >=10x current per-agent rate); per-agent ≈ generation/Running >= 15 tok/s.
+- Overall: a full batch of trajectories completes without deadline kills, and
+  step time drops proportionally.
