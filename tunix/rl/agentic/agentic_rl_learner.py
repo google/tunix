@@ -879,6 +879,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
 
+      if is_packed:
+        # pack-first: old/ref log-probs were deferred (left None) in
+        # `_process_results`; compute them now on the packed buffer via the
+        # segment-aware forward before the example reaches the trainer.
+        merged_train_micro_batch = self._compute_packed_logps(
+            merged_train_micro_batch
+        )
+
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the
       # optimizer (which fires every ``gradient_accumulation_steps`` micro-
