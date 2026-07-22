@@ -79,7 +79,7 @@ class ShardingConfig:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True)
 class ModelConfig:
   """Configuration for the Llama3 model."""
 
@@ -95,6 +95,7 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   weight_tying: bool = False  # Llama3.2 features
   remat_config: RematConfig = RematConfig.NONE
+
 
   @classmethod
   def llama3p2_1b(cls):
@@ -234,7 +235,7 @@ class Embedder(nnx.Module):
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
-    x = shard(x, self.shd_config.act_btd)
+    x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -278,7 +279,7 @@ class RMSNorm(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim),
+        nnx.initializers.ones_init()(rngs.params(), dim),  # pyrefly: ignore[bad-argument-type]
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
@@ -345,9 +346,9 @@ class Attention(nnx.Module):
     key_proj = self.k_proj(x)
     value_proj = self.v_proj(x)
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)
-    key_proj = shard(key_proj, self.shd_config.act_btnh)
-    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rope(
         query_proj,
@@ -392,7 +393,7 @@ class Attention(nnx.Module):
     qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
-    outputs = shard(outputs, self.shd_config.act_btd)
+    outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -419,7 +420,7 @@ class Attention(nnx.Module):
     ):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self, x, segment_pos, cache, attn_mask
       )
     else:
@@ -483,7 +484,7 @@ class MLP(nnx.Module):
       x: jaxtyping.Array,
   ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
+    activations = shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
     outputs = self.down_proj(activations)
     return outputs
 
@@ -493,9 +494,9 @@ class MLP(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__)(self, x)
+      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
-      return self.block(x)
+      return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
 
 class DecoderLayer(nnx.Module):
@@ -560,7 +561,7 @@ class DecoderLayer(nnx.Module):
         self.config.remat_config == RematConfig.DECODER
         or self.config.remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self, x, segment_pos, cache, attn_mask
       )
     else:
@@ -625,6 +626,7 @@ class Llama3(BackendMappingMixin, nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
+      skip_lm_head: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Llama3 model.
 
@@ -633,6 +635,7 @@ class Llama3(BackendMappingMixin, nnx.Module):
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
+      skip_lm_head: whether to skip the final lm head.
 
     Returns:
       predicted_logits, new_cache
@@ -657,12 +660,22 @@ class Llama3(BackendMappingMixin, nnx.Module):
 
     x = self.final_norm(x)
 
+    if skip_lm_head:
+      return x, new_cache
+
+    logits = self.compute_final_logits(x)
+    return logits, new_cache  # pytype: disable=bad-return-type
+
+  def compute_final_logits(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
+    """Computes the final logits from the model output."""
     if self.config.weight_tying:
       logits = self.embedder.decode(x)
     else:
       logits = self.lm_head(x)
-
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return jnp.astype(logits, jnp.float32)
 
   @property
   def num_embed(self) -> int:

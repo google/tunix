@@ -185,9 +185,9 @@ class VisionAttention(nnx.Module):
     k = self.key_proj(x)
     v = self.value_proj(x)
     if self.shd_config:
-      q = sharding_utils.shard(q, self.shd_config.act_btd)
-      k = sharding_utils.shard(k, self.shd_config.act_btd)
-      v = sharding_utils.shard(v, self.shd_config.act_btd)
+      q = sharding_utils.shard(q, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      k = sharding_utils.shard(k, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      v = sharding_utils.shard(v, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     q = q.reshape(desired_shape)
     k = k.reshape(desired_shape)
@@ -195,7 +195,7 @@ class VisionAttention(nnx.Module):
 
     logits = jnp.einsum("BTNH,BSNH->BNTS", q, k)
     if self.shd_config:
-      logits = sharding_utils.shard(logits, self.shd_config.act_bnts)
+      logits = sharding_utils.shard(logits, self.shd_config.act_bnts)  # pyrefly: ignore[bad-argument-type]
 
     logits = logits / jnp.sqrt(self.head_dim).astype(logits.dtype)
 
@@ -206,12 +206,12 @@ class VisionAttention(nnx.Module):
         batch_size, seq_length, self.hidden_dim
     )
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)
+      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     # 5. Final Output Projection
     out = self.out_proj(out)
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)
+      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return out
 
 
@@ -280,19 +280,19 @@ class MlpBlock(nnx.Module):
     Returns:
       The output tensor.
     """
-    x = self.fc1(x)
+    x = self.fc1(x)  # pyrefly: ignore[bad-argument-type]
     x = nnx.gelu(x, approximate=True)
 
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)
+      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     x = self.dropout(x, deterministic=deterministic)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)
+      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     x = self.fc2(x)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)
+      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
 
@@ -558,7 +558,7 @@ class ViTModel(nnx.Module):
     # Patch extraction
     x = self.embedding(image)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_bhwd)
+      x = sharding_utils.shard(x, self.shd_config.act_bhwd)  # pyrefly: ignore[bad-argument-type]
 
     n, h, w, c = x.shape
     x = jnp.reshape(x, [n, h * w, c])

@@ -54,6 +54,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_tokenizer = mock.Mock()
     self.mock_tokenizer.encode.return_value = [1, 2, 3]
     self.mock_chat_parser = mock.Mock()
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens: (tokens, 0)
+    )
 
     self.trajectory = agent_types.Trajectory()
     self.mock_agent.trajectory = self.trajectory
@@ -104,7 +107,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           text=[text],
           logits=[jnp.zeros_like(tokens)],
           tokens=[tokens],
-          left_padded_prompt_tokens=np.array([1]),
+          left_padded_prompt_tokens=np.array([101]),
           logprobs=[np.ones_like(tokens)],
       )
 
@@ -296,13 +299,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ),  # 1.0 + 2.0 + 0.5 (final reward from final_reward_fn)
         'env_time': {
             'reset_latency': 0.0,
-            'reset_cpu_time': 0.0,
             'step_latency': 0.0,
-            'step_cpu_time': 0.0,
         },
         'reward_time': {
             'reward_latency': 0.0,
-            'reward_cpu_time': 0.0,
         },
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1]),
         'policy_version': None,

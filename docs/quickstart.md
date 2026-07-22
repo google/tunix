@@ -142,8 +142,9 @@ pip install --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-publish
 ```
 
 Or install from source:
-```sh
-bash scripts/install_tunix_vllm_requirements.sh
+
+```
+bash scripts/install_tunix_vllm_requirement.sh
 ```
 
 **SGLang-Jax**
@@ -467,6 +468,6 @@ Now that you've completed the quick start, you can explore other training
 techniques and models. In particular, the following would be worth exploring:
 
 -   [SFT and PEFT](https://github.com/google/tunix/blob/main/examples/qlora_gemma.ipynb)
--   [Agentic RL](https://github.com/google/tunix/blob/main/examples/agentic/gemma_grpo_demo_nb.py)
+-   [Agentic RL](https://github.com/google/tunix/blob/main/examples/math_gsm8k/gemma_grpo_demo_nb.py)
 
 A complete list is given [here](examples.md).

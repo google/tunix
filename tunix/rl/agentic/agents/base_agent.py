@@ -218,7 +218,7 @@ class ConversationAgentBase(LLMBaseAgent):
 
     # Let subclass / default handler convert observation into messages.
     if observation is not None:
-      self._observation_to_messages(observation, reward, done, info)
+      self._observation_to_messages(observation, reward, done, info)  # pyrefly: ignore[bad-argument-type]
 
   def reset(self) -> None:
     """Reset trajectory, cache, and conversation history."""

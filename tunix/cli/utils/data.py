@@ -7,6 +7,7 @@ import os
 from typing import Any, Callable, Optional, Protocol, Union
 
 from tunix.generate import tokenizer_adapter
+from tunix.utils import token_sanitization
 
 Tokenizer = tokenizer_adapter.Tokenizer
 TokenizerAdapter = tokenizer_adapter.TokenizerAdapter
@@ -119,7 +120,7 @@ def get_dataset_from_module(
   if os.path.exists(specifier) and specifier.endswith(".py"):
     module_name = os.path.splitext(os.path.basename(specifier))[0]
     spec = importlib.util.spec_from_file_location(module_name, specifier)
-    module = importlib.util.module_from_spec(spec)
+    module = importlib.util.module_from_spec(spec)  # pyrefly: ignore[bad-argument-type]
 
     if spec is None:
       raise ImportError(f"Failed to create spec for {specifier}")
@@ -199,7 +200,12 @@ def post_init_dataset(
     source_prompt_key = prompt_key
 
     def normalize_prompt_key(x):
-      return {**x, "prompts": x[source_prompt_key]}
+      return {
+          **x,
+          "prompts": token_sanitization.sanitize_control_tokens(
+              x[source_prompt_key]
+          ),
+      }
 
     dataset = dataset.map(normalize_prompt_key)
     prompt_key = "prompts"

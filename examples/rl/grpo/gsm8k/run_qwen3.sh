@@ -42,7 +42,7 @@ python3 -m tunix.cli.grpo_main \
   model_config.model_id=Qwen/${model_name} \
   model_config.model_source=huggingface \
   model_config.use_flash_attention=true \
-  model_config.flash_attention_block_size=256 \
+  model_config.flash_attention_block_size=128 \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}" \
   model_config.model_download_path="/tmp/models/${model_name}" \
   model_config.mesh.shape="(2,4)" \

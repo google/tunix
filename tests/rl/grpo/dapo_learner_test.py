@@ -67,8 +67,8 @@ class DAPOlearnerTest(parameterized.TestCase):
   def test_diff_loss(self):
     dapo_config = dapo_lib.DAPOConfig()
     grpo_config = grpo_lib.GRPOConfig()
-    dapo_config.temperature = 1.0
-    grpo_config.temperature = 1.0
+    dapo_config.temperature = 1.0  # pyrefly: ignore[missing-attribute]
+    grpo_config.temperature = 1.0  # pyrefly: ignore[missing-attribute]
 
     dapo_loss_fn_impl = fr.default_registry.get(
         "policy_loss_fn", dapo_config.policy_loss_fn
@@ -90,22 +90,27 @@ class DAPOlearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
 
-    # Call DAPO loss function (DAPO sets ref_per_token_logps to None as it doesn't fetch it)
+    # Call DAPO loss function (DAPO sets ref_per_token_logps to None as it
+    # doesn't fetch it).
     dapo_train_example = self.create_train_example()
     dapo_train_example.ref_per_token_logps = None
-    dapo_loss, dapo_aux = dapo_loss_fn_impl(
+    dapo_loss_output = dapo_loss_fn_impl(
         model, dapo_train_example, dapo_config, pad_id, eos_id
     )
+    dapo_loss = dapo_loss_output.primary_loss.compute()
+    dapo_aux = dapo_loss_output.aux_metrics
 
     # Call GRPO loss function
-    grpo_loss, grpo_aux = grpo_loss_fn_impl(
+    grpo_loss_output = grpo_loss_fn_impl(
         model, train_example, grpo_config, pad_id, eos_id
     )
+    grpo_loss = grpo_loss_output.primary_loss.compute()
+    grpo_aux = grpo_loss_output.aux_metrics
 
     # Assert that the loss values are different
     self.assertNotEqual(
-        dapo_loss.item(),
-        grpo_loss.item(),
+        dapo_loss,
+        grpo_loss,
         msg=(
             "DAPO and GRPO loss values should be different for the same input"
             " due to different loss aggregation logics."
@@ -114,7 +119,9 @@ class DAPOlearnerTest(parameterized.TestCase):
 
     self.assertIn("kl", dapo_aux)
     self.assertIn("kl", grpo_aux)
-    self.assertEqual(dapo_aux["kl"], 0.0)  # DAPO does not have KL term.
+    self.assertEqual(
+        dapo_aux["kl"].compute(), 0.0
+    )  # DAPO does not have KL term.
 
 
 class TestDAPOConfigPostInit(parameterized.TestCase):

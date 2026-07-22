@@ -26,24 +26,24 @@ class TrainingHooks(ABC):
   """Hooks to be used for training."""
 
   @abstractmethod
-  def on_train_start(self, train_ctx: "PeftTrainer.PeftTrainer"):
+  def on_train_start(self, train_ctx: "PeftTrainer.PeftTrainer"):  # pyrefly: ignore[missing-attribute]
     """Called at the beginning of training."""
     pass
 
   @abstractmethod
-  def on_train_end(self, train_ctx: "PeftTrainer.PeftTrainer"):
+  def on_train_end(self, train_ctx: "PeftTrainer.PeftTrainer"):  # pyrefly: ignore[missing-attribute]
     """Called at the end of training."""
     pass
 
   @abstractmethod
-  def on_train_step_start(self, train_ctx: "PeftTrainer.PeftTrainer"):
+  def on_train_step_start(self, train_ctx: "PeftTrainer.PeftTrainer"):  # pyrefly: ignore[missing-attribute]
     """Called at the beginning of a training step."""
     pass
 
   @abstractmethod
   def on_train_step_end(
       self,
-      train_ctx: "PeftTrainer.PeftTrainer",
+      train_ctx: "PeftTrainer.PeftTrainer",  # pyrefly: ignore[missing-attribute]
       train_step: int,
       train_loss: float,
   ):
@@ -51,13 +51,13 @@ class TrainingHooks(ABC):
     pass
 
   @abstractmethod
-  def on_eval_step_start(self, train_ctx: "PeftTrainer.PeftTrainer"):
+  def on_eval_step_start(self, train_ctx: "PeftTrainer.PeftTrainer"):  # pyrefly: ignore[missing-attribute]
     """Called at the beginning of an evaluation step."""
     pass
 
   @abstractmethod
   def on_eval_step_end(
-      self, train_ctx: "PeftTrainer.PeftTrainer", eval_loss: float
+      self, train_ctx: "PeftTrainer.PeftTrainer", eval_loss: float  # pyrefly: ignore[missing-attribute]
   ):
     """Called at the end of an evaluation step."""
     pass
@@ -67,11 +67,11 @@ class DataHooks(ABC):
   """Hooks to wire in external data loader and processing logic."""
 
   @abstractmethod
-  def load_next_train_batch(self, train_ctx: "PeftTrainer.PeftTrainer") -> Any:
+  def load_next_train_batch(self, train_ctx: "PeftTrainer.PeftTrainer") -> Any:  # pyrefly: ignore[missing-attribute]
     """Loads the next batch of data for training."""
     raise NotImplementedError()
 
   @abstractmethod
-  def load_next_eval_batch(self, train_ctx: "PeftTrainer.PeftTrainer") -> Any:
+  def load_next_eval_batch(self, train_ctx: "PeftTrainer.PeftTrainer") -> Any:  # pyrefly: ignore[missing-attribute]
     """Loads the next batch of data for evaluation."""
     raise NotImplementedError()

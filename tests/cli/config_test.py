@@ -27,6 +27,7 @@ from tunix.cli import config
 from tunix.sft import peft_trainer
 from tunix.tests import test_common as tc
 from tunix.utils import env_utils
+from tunix.utils import mesh as mesh_lib
 
 
 class ConfigTest(parameterized.TestCase):
@@ -262,7 +263,7 @@ class ConfigTest(parameterized.TestCase):
     self.assertIsNotNone(lr_schedule)
     self.assertTrue(callable(lr_schedule), "lr_schedule should be callable")
 
-  # --- Tests for create_mesh ---
+    # --- Tests for mesh config parsing and mesh creation ---
   @parameterized.named_parameters(
       dict(
           testcase_name="valid_1d",
@@ -311,40 +312,93 @@ class ConfigTest(parameterized.TestCase):
   ):
     mock_device_count_fn.return_value = mock_num_devices
     hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
-    mesh = hp.create_mesh("model_config")
+    axis_shapes, axis_names = hp.parse_mesh_config("model_config")
+    expected_mesh = object()
+
+    with mock.patch.object(
+        jax, "make_mesh", return_value=expected_mesh
+    ) as make_mesh_mock:
+      mesh = mesh_lib.create_mesh(axis_shapes, axis_names)
+
+    make_mesh_mock.assert_called_once_with(
+        expected[0],
+        expected[1],
+        axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
+    )
+    self.assertIs(mesh, expected_mesh)
+
+  def test_create_mesh_with_assigned_devices(self):
+    raw_keys = {
+        "model_config": {
+            "mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}
+        }
+    }
+    hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
+    axis_shapes, axis_names = hp.parse_mesh_config("model_config")
+    assigned_devices = ["d0", "d1", "d2", "d3"]
+
+    class FakeMesh:
+
+      def __init__(self, devices, axis_names, axis_types=None):
+        self.devices = devices
+        self.axis_names = axis_names
+        self.axis_types = axis_types
+
+    with mock.patch.object(jax.sharding, "Mesh", side_effect=FakeMesh):
+      mesh = mesh_lib.create_mesh(
+          axis_shapes,
+          axis_names,
+          devices=assigned_devices,
+      )
+
+    self.assertEqual(mesh.devices.shape, (2, 2))
+    self.assertSequenceEqual(mesh.devices.flatten().tolist(), assigned_devices)
+    self.assertEqual(mesh.axis_names, ("x", "y"))
+
+  def test_parse_mesh_allocation_policy_defaults_to_compact(self):
+    raw_keys = {
+        "model_config": {
+            "mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}
+        }
+    }
+    hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
+
     self.assertEqual(
-        mesh,
-        jax.make_mesh(
-            expected[0],
-            expected[1],
-            axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
-        ),
+        hp._parse_mesh_allocation_policy("model_config"),
+        mesh_lib.normalize_allocation_policy(None),
     )
 
-    def test_create_mesh_with_assigned_devices(self):
-      raw_keys = {
-          "model_config": {
-              "mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}
-          }
-      }
-      hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
-      assigned_devices = ["d0", "d1", "d2", "d3"]
+  def test_parse_mesh_allocation_policy_validates_explicit_value(self):
+    raw_keys = {
+        "model_config": {
+            "mesh": {
+                "shape": "(2, 2)",
+                "axis_names": "('x', 'y')",
+                "allocation_policy": "performance",
+            }
+        }
+    }
+    hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
 
-      class FakeMesh:
+    self.assertEqual(
+        hp._parse_mesh_allocation_policy("model_config"),
+        "PERFORMANCE",
+    )
 
-        def __init__(self, devices, axis_names, axis_types=None):
-          self.devices = devices
-          self.axis_names = axis_names
-          self.axis_types = axis_types
+  def test_parse_mesh_allocation_policy_rejects_invalid_value(self):
+    raw_keys = {
+        "model_config": {
+            "mesh": {
+                "shape": "(2, 2)",
+                "axis_names": "('x', 'y')",
+                "allocation_policy": "fastest",
+            }
+        }
+    }
+    hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
 
-      with mock.patch.object(jax.sharding, "Mesh", side_effect=FakeMesh):
-        mesh = hp.create_mesh("model_config", devices=assigned_devices)
-
-      self.assertEqual(mesh.devices.shape, (2, 2))
-      self.assertSequenceEqual(
-          mesh.devices.flatten().tolist(), assigned_devices
-      )
-      self.assertEqual(mesh.axis_names, ("x", "y"))
+    with self.assertRaisesRegex(ValueError, "allocation_policy must be one of"):
+      hp._parse_mesh_allocation_policy("model_config")
 
   @parameterized.named_parameters(
       dict(
@@ -428,7 +482,8 @@ class ConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, error_regex):
       nested_dict = self.convert_nested_dict_to_list(raw_keys)
       hp = self.initialize_config(nested_dict)
-      hp.create_mesh("model_config")
+      axis_shapes, axis_names = hp.parse_mesh_config("model_config")
+      mesh_lib.create_mesh(axis_shapes, axis_names)
 
   @parameterized.named_parameters(
       dict(
@@ -538,7 +593,8 @@ class ConfigTest(parameterized.TestCase):
         hp.config["actor_model_config"]["model_name"], "gemma-2-2b-it"
     )
 
-    # Scenario 2: Override actor, reference and rollout model name to different value, it should keep override
+    # Scenario 2: Override actor, reference and rollout model name to different
+    # value, it should keep override
     hp2 = self.initialize_config([
         "actor_model_config.model_name=gemma-2-2b-it",
         "actor_model_config.model_source=kaggle",
@@ -558,7 +614,8 @@ class ConfigTest(parameterized.TestCase):
         hp2.config["rollout_model_config"]["model_name"], "gemma-3-1b-it"
     )
 
-    # Scenario 3: Override actor_model_config and reference_model_config have higher priority than model_config, it should keep override
+    # Scenario 3: Override actor_model_config and reference_model_config have
+    # higher priority than model_config, it should keep override
     hp3 = self.initialize_config([
         "model_config.model_name=gemma-3-12b",
         "model_config.model_source=gcs",
@@ -631,7 +688,7 @@ class ConfigTest(parameterized.TestCase):
       overrides = [o.format(log_dir=log_dir) for o in overrides]
       argv = [main_command, "base_config.yaml"] + overrides
       if expected_error:
-        with self.assertRaisesRegex(expected_error, error_regex):
+        with self.assertRaisesRegex(expected_error, error_regex):  # pyrefly: ignore[bad-argument-type]
           config.initialize(argv)
       else:
         config.initialize(argv)

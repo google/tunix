@@ -10,9 +10,9 @@ import logging
 import os
 import signal
 import sys
+
 from absl import logging as absl_logging
 import datasets as datasets_lib
-from datasets import load_dataset
 from flax import nnx
 import grain
 from huggingface_hub import snapshot_download
@@ -26,8 +26,8 @@ from orbax import checkpoint as ocp
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
-from tunix.utils import compat
 from tunix.rl.agentic.agents import agent_types
+from tunix.utils import compat
 import vllm  # pytype: disable=import-error
 
 faulthandler.register(signal.SIGINT, all_threads=True)
@@ -42,9 +42,20 @@ parser = argparse.ArgumentParser(
 
 # General Config
 parser.add_argument("--models_base_dir", type=str, default="models")
+parser.add_argument(
+    "--model_source",
+    type=str,
+    default="huggingface",
+    choices=["huggingface", "maxtext"],
+)
+parser.add_argument("--model_absolute_path", type=str, default=None)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--model_version", type=str, default="Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
+parser.add_argument("--dataset_path", type=str, default=None)
+
+parser.add_argument("--tpu_topology", type=str, default=None)
+
 
 # Data & Training Flow
 parser.add_argument("--batch_size", type=int, default=8)
@@ -87,6 +98,12 @@ parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
 parser.add_argument("--rollout_engine", type=str, default="vllm")
 parser.add_argument("--vllm_utilization", type=float, default=0.4)
+parser.add_argument(
+    "--vllm_reshard_chunk_size",
+    type=int,
+    default=None,
+    help="Number of flat keys to reshard at a time. None for single-call.",
+)
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -115,6 +132,9 @@ parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 # DeepSWE Agentic Specifics
 parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
+parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
+parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
+parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--max_concurrency", type=int, default=200)
 
 parser.add_argument(
@@ -192,16 +212,6 @@ parser.add_argument(
     help=(
         "Whether to use rollout-cached logprobs as old policy logps. "
         "Default is False to recompute old logps on the actor side. "
-    ),
-)
-
-parser.add_argument(
-    "--degenerate_group_masking",
-    type=bool,
-    default=False,
-    help=(
-        "Whether to mask out groups whose advantages are all zero. "
-        "Default is False to align with rLLM DeepSWE."
     ),
 )
 
@@ -287,7 +297,7 @@ try:
 except ImportError as e:
   print(f"❌ Still missing a module: {e}")
 
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":  # pyrefly: ignore[unbound-name]
   pathwaysutils.initialize()
 
 
@@ -352,25 +362,33 @@ except Exception as e:
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
-MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
+MODEL_SOURCE = args.model_source
+MODEL_ABSOLUTE_PATH = args.model_absolute_path
 
-print(f"Looking for local model at: {MODEL_PATH}...")
-
-# Check if directory exists and is not empty
-if not os.path.exists(MODEL_PATH) or not os.listdir(MODEL_PATH):
-  print(f"Model not found locally. Starting download to {MODEL_PATH}...")
-  os.makedirs(MODEL_PATH, exist_ok=True)
-
-  # Assumes "Qwen/" organization prefix for HF download. Adjust if using other models.
-  snapshot_download(
-      repo_id=f"Qwen/{MODEL_VERSION}",
-      local_dir=MODEL_PATH,
-      local_dir_use_symlinks=False,
-  )
-  print("Download complete!")
+if MODEL_ABSOLUTE_PATH:
+  MODEL_PATH = MODEL_ABSOLUTE_PATH
+  print(f"Using model from absolute path: {MODEL_PATH}")
 else:
-  print(f"✅ Found existing local model at {MODEL_PATH}")
+  MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
+  MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
+
+  print(f"Looking for local model at: {MODEL_PATH}...")
+
+  # Check if directory exists and is not empty
+  if not os.path.exists(MODEL_PATH) or not os.listdir(MODEL_PATH):
+    print(f"Model not found locally. Starting download to {MODEL_PATH}...")
+    os.makedirs(MODEL_PATH, exist_ok=True)
+
+    # Assumes "Qwen/" organization prefix for HF download. Adjust if using
+    # other models.
+    snapshot_download(  # pyrefly: ignore[no-matching-overload]
+        repo_id=f"Qwen/{MODEL_VERSION}",
+        local_dir=MODEL_PATH,
+        local_dir_use_symlinks=False,
+    )
+    print("Download complete!")
+  else:
+    print(f"✅ Found existing local model at {MODEL_PATH}")
 
 # ====== Data ======
 TRAIN_FRACTION = args.train_fraction
@@ -433,9 +451,12 @@ MAX_STEPS = args.max_steps
 # Max turns in mult-agent interaction (set to 1 for single-turn)
 MAX_TURNS = args.max_turns
 PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
+EPISODE_TIMEOUT_SECS = args.episode_timeout_secs
+STEP_TIMEOUT_SECS = args.step_timeout_secs
+REWARD_TIMEOUT_SECS = args.reward_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
-KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
+KV_CACHE_SIZE = MAX_PROMPT_LENGTH + 128
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -453,17 +474,21 @@ DO_MEM_PROFILING = args.do_mem_profiling
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = args.rollout_engine
-CKPT_DIR = args.ckpt_dir
+CKPT_DIR = (
+    args.ckpt_dir
+    if args.ckpt_dir and args.ckpt_dir.lower() not in ("none", "null")
+    else None
+)
+
 
 # Max number of sequences to be processed in parallel by vllm.
 VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 
 VLLM_UTILIZATION = args.vllm_utilization
+VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
 # Max number of tokens to be processed in parallel by vllm.
-# Divide by 8 for on policy, 1 step off divide by 4
-
-VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
@@ -475,7 +500,6 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 USE_ROLLOUT_LOGPS = args.use_rollout_logps
-DEGENERATE_GROUP_MASKING = args.degenerate_group_masking
 
 
 # %%
@@ -484,6 +508,8 @@ DEGENERATE_GROUP_MASKING = args.degenerate_group_masking
 # ==========================================
 import jax
 import jax.numpy as jnp
+from tunix.models.automodel import AutoModel
+from tunix.models.automodel import ModelSource
 from tunix.models.automodel import call_model_config
 
 config = call_model_config(MODEL_VERSION)
@@ -583,9 +609,18 @@ if train_sp is not None:
 # 6. Model Initialization
 # ==========================================
 
-qwen_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
-)
+if MODEL_SOURCE == "maxtext":
+  qwen_reference, _ = AutoModel.from_pretrained(
+      model_id=MODEL_VERSION,
+      mesh=train_mesh,
+      model_source=ModelSource.MAXTEXT,
+      model_path=MODEL_PATH,
+      enable_checkpointing=True,
+  )
+else:
+  qwen_reference = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
+  )
 
 
 def get_lora_model(base_model, model_mesh):
@@ -639,12 +674,17 @@ chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
 # ==========================================
 print("Loading Dataset...")
 
-dataset = load_dataset(
-    "R2E-Gym/R2E-Gym-Subset",
-    split="train",
-    cache_dir=DATASET_CACHE,
-    trust_remote_code=True,
-)
+if args.dataset_path:
+  dataset = datasets_lib.load_from_disk(args.dataset_path)
+  if isinstance(dataset, datasets_lib.DatasetDict):
+    dataset = dataset["train"]
+else:
+  dataset = datasets_lib.load_dataset(
+      "R2E-Gym/R2E-Gym-Subset",
+      split="train",
+      cache_dir=DATASET_CACHE,
+      trust_remote_code=True,
+  )
 
 
 def transform(entry):
@@ -656,19 +696,23 @@ def transform(entry):
 
 dataset = dataset.map(
     transform,
-    keep_in_memory=True,
+    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
 )
 
 # %%
 # ==========================================
 # 9. Optimizer & Checkpointing
 # ==========================================
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
-)
+if CKPT_DIR:
+  checkpointing_options = ocp.CheckpointManagerOptions(
+      save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+  )
+else:
+  checkpointing_options = None
+
 
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir=args.metrics_logger_dir, flush_every_n_steps=2
+    log_dir=args.metric_logger_dir, flush_every_n_steps=2
 )
 
 optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
@@ -712,6 +756,7 @@ sglang_jax_rollout_dict = {
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
     "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
+    "rollout_vllm_reshard_chunk_size": VLLM_RESHARD_CHUNK_SIZE,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
@@ -763,8 +808,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
-        checkpoint_root_directory=None,
-        checkpointing_options=None,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
         # optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
@@ -794,13 +839,12 @@ config_kwargs = {
     "max_concurrency": MAX_CONCURRENCY,
     "epsilon_high": EPSILON_HIGH,
     "off_policy_steps": OFF_POLICY_STEPS,
-    "episode_timeout": PER_TURN_TIMEOUT_SECS * MAX_TURNS,
+    "episode_timeout": EPISODE_TIMEOUT_SECS,
     "overlong_filter": OVERLONG_FILTER,
     "filter_statuses": FILTER_STATUSES,
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
-    "degenerate_group_masking": DEGENERATE_GROUP_MASKING,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
@@ -812,7 +856,11 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     agent_class=SWEAgent,
     agent_kwargs={},
     env_class=SWEEnv,
-    env_kwargs={"max_steps": MAX_TURNS},
+    env_kwargs={
+        "max_steps": MAX_TURNS,
+        "step_timeout": STEP_TIMEOUT_SECS,
+        "reward_timeout": REWARD_TIMEOUT_SECS,
+    },
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
@@ -824,7 +872,8 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 # ==========================================
 
 dataset = dataset.shuffle(seed=SEED)
-grain_dataset = grain.MapDataset.source(dataset)
+grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
+
 
 def mixed_type_batch_fn(elements):
   """elements: A list of dicts."""
@@ -879,7 +928,6 @@ try:
       "filter_statuses": (
           [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
       ),
-      "degenerate_group_masking": DEGENERATE_GROUP_MASKING,
       # Mesh topology
       "num_devices": len(devices),
       "rollout_mesh_fsdp": rollout_fsdp,
@@ -887,6 +935,9 @@ try:
       "train_mesh_fsdp": train_fsdp,
       "train_mesh_sp": train_sp,
       "train_mesh_tp": train_tp,
+      "checkpoint_root_directory": CKPT_DIR,
+      "save_interval_steps": SAVE_INTERVAL_STEPS,
+      "max_to_keep": MAX_TO_KEEP,
   }
   wandb.init(
       project="tunix", name=run_name, config=wandb_config, settings=settings

@@ -102,6 +102,60 @@ class _FakeLLMEngine:
 
 class VllmDriverAsyncTest(absltest.TestCase):
 
+  def test_requests_are_staged_until_loop_starts(self):
+    engine = _FakeLLMEngine(["req-0", "req-1"])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    self.assertEmpty(engine._pending)
+    self.assertFalse(future_0.done())
+    self.assertFalse(future_1.done())
+
+    driver.start()
+
+    self.assertEqual(future_0.result(timeout=5.0).request_id, "req-0")
+    self.assertEqual(future_1.result(timeout=5.0).request_id, "req-1")
+
+  def test_submission_threshold_delays_queue_drain(self):
+    engine = _FakeLLMEngine(["req-0", "req-1"])
+    driver = VLLMInProcessDriver(
+        llm_engine=engine,
+        submission_threshold=2,
+        poll_interval_s=0.001,
+        auto_start=True,
+    )
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    time.sleep(0.01)
+    self.assertEmpty(engine._pending)
+    self.assertFalse(future_0.done())
+
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    self.assertEqual(future_0.result(timeout=5.0).request_id, "req-0")
+    self.assertEqual(future_1.result(timeout=5.0).request_id, "req-1")
+
   def test_out_of_order_completions_preserved(self):
     request_ids = [f"req-{i}" for i in range(10)]
     completion_order = [
@@ -155,6 +209,101 @@ class VllmDriverAsyncTest(absltest.TestCase):
 
     # Wait for the log thread to call into the engine's do_log_stats.
     self.assertTrue(engine.log_called.wait(timeout=1.0))
+
+  def test_submission_timeout_flushes_partial_batch(self):
+    # Threshold of 2 but only 1 request arrives: the flush timeout must still
+    # submit it instead of letting it hang in the queue forever.
+    engine = _FakeLLMEngine(["req-0"])
+    timeout_s = 0.05
+    driver = VLLMInProcessDriver(
+        llm_engine=engine,
+        submission_threshold=2,
+        submission_timeout_s=timeout_s,
+        poll_interval_s=0.001,
+        auto_start=True,
+    )
+    self.addCleanup(driver.shutdown)
+
+    start = time.perf_counter()
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    result = future_0.result(timeout=5.0)
+    elapsed = time.perf_counter() - start
+    self.assertEqual(result.request_id, "req-0")
+    # It flushed because of the timeout (threshold of 2 was never reached), so
+    # the request could not have completed before the timeout elapsed.
+    self.assertGreaterEqual(elapsed, timeout_s * 0.8)
+
+  def test_submission_timeout_disabled_holds_partial_batch(self):
+    # timeout == 0 disables the flush: below-threshold requests stay queued
+    # (identical to the pre-existing behavior).
+    engine = _FakeLLMEngine(["req-0"])
+    driver = VLLMInProcessDriver(
+        llm_engine=engine,
+        submission_threshold=2,
+        submission_timeout_s=0.0,
+        poll_interval_s=0.001,
+        auto_start=True,
+    )
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    time.sleep(0.05)
+    self.assertEmpty(engine._pending)
+    self.assertFalse(future_0.done())
+
+  def test_submission_timeout_counts_from_first_request(self):
+    # The clock starts at the FIRST request of the window. With threshold=3
+    # never reached, the partial batch must flush ~timeout after req-0, even
+    # though req-1 arrives later (well after req-0 but before the deadline).
+    engine = _FakeLLMEngine(["req-0", "req-1"])
+    timeout_s = 0.1
+    driver = VLLMInProcessDriver(
+        llm_engine=engine,
+        submission_threshold=3,
+        submission_timeout_s=timeout_s,
+        poll_interval_s=0.001,
+        auto_start=True,
+    )
+    self.addCleanup(driver.shutdown)
+
+    start = time.perf_counter()
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    time.sleep(timeout_s * 0.6)
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    self.assertEqual(future_0.result(timeout=5.0).request_id, "req-0")
+    self.assertEqual(future_1.result(timeout=5.0).request_id, "req-1")
+    elapsed = time.perf_counter() - start
+    # If the clock had (incorrectly) restarted at req-1, the flush would land at
+    # ~0.6*timeout + timeout; assert it fired well before that.
+    self.assertLess(elapsed, timeout_s * 1.5)
+
+  def test_negative_submission_timeout_raises(self):
+    engine = _FakeLLMEngine([])
+    with self.assertRaises(ValueError):
+      VLLMInProcessDriver(
+          llm_engine=engine,
+          submission_timeout_s=-1.0,
+          auto_start=False,
+      )
 
 
 if __name__ == "__main__":

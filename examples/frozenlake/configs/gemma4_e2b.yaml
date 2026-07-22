@@ -1,0 +1,148 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+model_config:
+  model_name: "gemma-4-e2b"
+  model_id: "google/gemma-4-E2B-it"
+  model_source: "huggingface"
+  model_path: ""
+  mesh:
+    shape: "(8,1)"
+    axis_names: "('fsdp','tp')"
+  remat_config: "DECODER"
+  use_flash_attention: True
+  flash_attention_block_size: 256
+  use_sliding_window_kv_cache: False
+  dtype: "bfloat16"
+  rng_seed: 42
+actor_model_config:
+  load_dtype: "float32"
+  mesh:
+    shape: "(8,1)"
+    axis_names: "('fsdp','tp')"
+reference_model_config:
+  mesh: null
+  same_mesh_as: "actor"
+rollout_model_config:
+  mesh: null
+  same_mesh_as: "actor"
+tokenizer_config:
+  tokenizer_type: "huggingface"
+  tokenizer_path: "google/gemma-4-E2B-it"
+  add_bos: True
+
+# Agentic GRPO configuration
+training_mode: "agentic_grpo"
+agent_class_path: "examples.frozenlake.agent.FrozenLakeAgent"
+agent_kwargs:
+  use_multistep_prompt: True
+env_class_path: "examples.frozenlake.env.FrozenLakeEnv"
+env_kwargs:
+  max_steps: 8
+
+
+data_module: "examples.frozenlake.data"
+data_config:
+  split: "train"
+  shuffle: True
+  seed: 42
+  data_dir: "/tmp/data/frozenlake"
+
+chat_parser_config:
+  type: "gemma4"
+  enable_thinking: False
+
+batch_size: 64
+num_batches: 5
+num_test_batches: 2
+num_train_epochs: 1
+
+rl_training_config:
+  mini_batch_size: 64
+  train_micro_batch_size: 2
+  actor_optimizer_config:
+    opt_type: "adamw"
+    peak_value: 1e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: 0
+    decay_steps: 9
+    b1: 0.9
+    b2: 0.95
+    weight_decay: 0.0
+    max_grad_norm: 100.0
+  eval_every_n_steps: 10
+  max_steps: 5
+  metrics_logging_options:
+    log_dir: "/tmp/logging"
+    flush_every_n_steps: 1
+  checkpointing_options:
+    save_interval_steps: 50
+    max_to_keep: 4
+  profiler_options: {}
+  compute_logps_chunk_size: 2048
+
+rollout_config:
+  total_generation_steps: 2048
+  max_prompt_length: 2048
+  temperature: 0.7
+  top_p: 1.0
+  top_k: 0
+  return_logprobs: True
+  rollout_vllm_init_with_random_weights: True
+  rollout_vllm_sampling_kwargs:
+    skip_special_tokens: False
+  
+rollout_engine: "vllm"
+
+vllm_config:
+  model_version: "google/gemma-4-E2B-it"
+  hbm_utilization: 0.2
+  tpu_backend_type: "jax"
+  server_mode: True
+  async_scheduling: False
+  max_num_seqs: 32
+  max_num_batched_tokens: 8192
+  data_parallel_size: 1
+  tensor_parallel_size: 8
+  kwargs:
+    kv_cache_metrics: True
+    disable_log_stats: False
+    enable_prefix_caching: False
+    dtype: "bfloat16"
+    hf_overrides:
+      final_logit_softcapping: 30.0
+      text_config:
+        final_logit_softcapping: 30.0
+      architectures: ["Gemma4ForCausalLM"]
+
+offload_to_cpu: False
+
+reward_functions: []
+
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.003
+  epsilon_high: 0.005
+  loss_algo: "gspo-token"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "low_var_kl"
+  advantage_estimator: "rloo"
+  sampler_is: "token"
+  sampler_is_threshold: 2.0
+  max_concurrency: 512

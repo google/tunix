@@ -60,7 +60,7 @@ class MetricsLoggerOptions:
         "custom_backend" in self.backend_kwargs
         and self.backend_kwargs["custom_backend"]
     ):
-      return [factory() for factory in self.backend_kwargs["custom_backend"]]
+      return [factory() for factory in self.backend_kwargs["custom_backend"]]  # pyrefly: ignore[not-callable]
 
     # Case 2: Defaults.
     active_backends = []
@@ -79,7 +79,7 @@ class MetricsLoggerOptions:
           TensorboardBackend(
               log_dir=self.log_dir,
               flush_every_n_steps=self.flush_every_n_steps,
-              **tb_kwargs,
+              **tb_kwargs,  # pyrefly: ignore[bad-unpacking]
           )
       )
       try:
@@ -88,7 +88,7 @@ class MetricsLoggerOptions:
             WandbBackend(
                 project=self.project_name,
                 name=self.run_name,
-                **wandb_kwargs,
+                **wandb_kwargs,  # pyrefly: ignore[bad-unpacking]
             )
         )
       except ImportError:
@@ -146,7 +146,7 @@ class MetricsLogger:
     mode_metrics[metric_name].append(scalar_value)
 
     jax.monitoring.record_scalar(
-        f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step
+        f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step  # pyrefly: ignore[bad-argument-type]
     )
 
   def metric_exists(

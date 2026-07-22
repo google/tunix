@@ -60,8 +60,8 @@ class SWEEnv(BaseTaskEnv):
       entry: dict,
       group_id: int | None = None,
       pair_index: int | None = None,
-      step_timeout: int = 90,
-      reward_timeout: int = 300,
+      step_timeout: int = 30 * 60,
+      reward_timeout: int = 30 * 60,
       backend: str = "kubernetes",
       delete_image: bool = False,
       verbose: bool = False,
@@ -153,7 +153,7 @@ class SWEEnv(BaseTaskEnv):
       os.system(f"docker rmi {docker_image}")
 
   @staticmethod
-  def from_dict(extra_info: dict | str) -> "SWEEnv":
+  def from_dict(extra_info: dict | str) -> "SWEEnv":  # pyrefly: ignore[bad-override]
     """Create an environment instance from JSON configuration.
 
     Args:

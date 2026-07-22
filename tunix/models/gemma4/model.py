@@ -18,7 +18,7 @@ import dataclasses
 import enum
 from functools import partial
 import itertools
-from typing import Tuple
+from typing import Any, Tuple
 import flax
 from flax import nnx
 import jax
@@ -30,12 +30,47 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
+import numpy as np
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models.gemma4 import audio
 from tunix.models.gemma4 import moe
+from tunix.models.gemma4 import vision
 from tunix.utils import compat
 from tunix.utils import env_utils
 from tunix.utils.sharding_utils import shard
 
+IMAGE_SOFT_TOKEN_PLACEHOLDER = -2
+AUDIO_SOFT_TOKEN_PLACEHOLDER = -4
+
+
+@dataclasses.dataclass(frozen=True)
+class PreprocessedVisionInput:
+  patches: Any
+  positions_xy: Any
+  soft_token_counts: tuple[int, ...] | tuple[tuple[int, ...], ...]
+
+
+jax.tree_util.register_dataclass(
+    PreprocessedVisionInput,
+    data_fields=['patches', 'positions_xy'],
+    meta_fields=['soft_token_counts'],
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class PreprocessedAudioInput:
+  """PyTree container for audio input.
+
+  Attributes:
+      audios: waveforms with shape (batch_size, num_clips, samples)
+      sequence_lengths: shape (batch_size, num_clips)
+  """
+
+  audios: jax.Array
+  sequence_lengths: jax.Array
+
+
+jax.tree_util.register_dataclass(PreprocessedAudioInput)
 
 env_utils.setup_sharding_environment()
 
@@ -67,6 +102,7 @@ class ShardingConfig:
   act_btnh: Tuple[str | None, ...]
   vision_proj: Tuple[str | None, ...]
   vision_soft_emb_norm_weight: Tuple[str | None, ...]
+  audio_proj: Tuple[str | None, ...]
   # MoE sharding
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
@@ -75,6 +111,7 @@ class ShardingConfig:
   per_layer_input_gate: Tuple[str | None, ...]
   per_layer_projection: Tuple[str | None, ...]
   per_layer_input_embedding: Tuple[str | None, ...]
+  vision_shd: vision.VisionShardingConfig | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -94,12 +131,16 @@ class ShardingConfig:
         act_btnh=('fsdp', None, 'tp', None),
         vision_proj=(fsdp, 'tp'),
         vision_soft_emb_norm_weight=('tp',),
+        audio_proj=(fsdp, 'tp'),  # TODO check if good!
         exp_weight_edf=(fsdp, None, None, 'tp'),
         exp_weight_efd=(fsdp, 'tp', None),
-        per_layer_model_projection=(fsdp, None, 'tp'),
+        per_layer_model_projection=(fsdp, 'tp'),
         per_layer_input_gate=(fsdp, 'tp'),
         per_layer_projection=('tp', fsdp),
-        per_layer_input_embedding=('tp', None, fsdp),
+        per_layer_input_embedding=('tp', fsdp),
+        vision_shd=vision.VisionShardingConfig.get_default_sharding(
+            is_sampling
+        ),
     )
 
 
@@ -137,7 +178,7 @@ class ModelConfig:
   dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
-  use_sliding_window_kv_cache: bool = True
+  use_sliding_window_kv_cache: bool = False
 
   # MoE config
   enable_moe: bool = False
@@ -146,8 +187,15 @@ class ModelConfig:
   expert_dim: int | None = None
   moe_dense_hidden_dim: int | None = None
 
+  # Vision config
+  vision_encoder: vision.VisionEncoderConfig | None = None
+  use_bidirectional_attention: str | None = None
+
+  # Audio config
+  audio_encoder: audio.ConformerConfig | None = None
+
   def __post_init__(self):
-    # TODO: support flash attention with sliding window KV cache
+    # TODO(tunix-dev): support flash attention with sliding window KV cache
     if self.use_sliding_window_kv_cache and self.use_flash_attention:
       raise ValueError(
           'Flash attention and sliding window KV cache are mutually exclusive.'
@@ -178,7 +226,16 @@ class ModelConfig:
             AttentionType.LOCAL_SLIDING,
             AttentionType.GLOBAL,
         ),
+        vision_encoder=vision.VisionEncoderConfig(use_clipped_linears=True),
+        audio_encoder=audio.ConformerConfig(),
     )
+
+  @classmethod
+  def gemma4_e2b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_e2b(sharding_config=sharding_config)
 
   @classmethod
   def gemma4_e4b(
@@ -205,7 +262,36 @@ class ModelConfig:
             AttentionType.LOCAL_SLIDING,
             AttentionType.GLOBAL,
         ),
+        vision_encoder=vision.VisionEncoderConfig(use_clipped_linears=True),
+        audio_encoder=audio.ConformerConfig(),
     )
+
+  @classmethod
+  def gemma4_12b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls(
+        num_layers=48,
+        num_embed=262144,
+        embed_dim=3840,
+        hidden_dim=3840 * 4,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        num_global_kv_heads=1,
+        sliding_window_size=1024,
+        shd_config=sharding_config,
+        k_eq_v_global=True,
+        attention_pattern=GEMMA4_ATTENTION_PATTERN,
+    )
+
+  @classmethod
+  def gemma4_12b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_12b(sharding_config=sharding_config)
 
   @classmethod
   def gemma4_31b(
@@ -232,6 +318,15 @@ class ModelConfig:
             AttentionType.LOCAL_SLIDING,
             AttentionType.GLOBAL,
         ),
+        vision_encoder=vision.VisionEncoderConfig(
+            d_model=1152,
+            num_layers=27,
+            num_heads=16,
+            ffw_hidden=4304,
+            use_clipped_linears=False,
+            standardize_embeddings=True,
+        ),
+        use_bidirectional_attention='vision',
     )
 
   @classmethod
@@ -265,6 +360,16 @@ class ModelConfig:
             AttentionType.LOCAL_SLIDING,
             AttentionType.GLOBAL,
         ),
+        vision_encoder=vision.VisionEncoderConfig(
+            d_model=1152,
+            num_layers=27,
+            num_heads=16,
+            ffw_hidden=4304,
+            output_length=280,
+            use_clipped_linears=False,
+            standardize_embeddings=True,
+        ),
+        use_bidirectional_attention='vision',
     )
 
 
@@ -290,8 +395,11 @@ class Embedder(nnx.Module):
 
     if config.per_layer_input_dim > 0:
       self.per_layer_model_projection = Einsum(
-          einsum_str='BTD,DNP->BTNP',
-          shape=(self.embed_dim, config.num_layers, config.per_layer_input_dim),
+          einsum_str='BTD,DX->BTX',
+          shape=(
+              self.embed_dim,
+              config.num_layers * config.per_layer_input_dim,
+          ),
           sharding=config.shd_config.per_layer_model_projection,
           w_scale=(float(self.embed_dim) ** -0.5),
           rngs=rngs,
@@ -309,27 +417,90 @@ class Embedder(nnx.Module):
       self.per_layer_input_embedding = nnx.Param(
           nnx.initializers.normal(dtype=self.param_dtype)(
               rngs.params(),
-              (self.vocab_size, config.num_layers, config.per_layer_input_dim),
+              (self.vocab_size, config.num_layers * config.per_layer_input_dim),
           ),
           sharding=config.shd_config.per_layer_input_embedding,
+      )
+
+    if config.vision_encoder is not None:
+      self.mm_input_projection = Einsum(
+          einsum_str='...tm,md->...td',
+          shape=(config.vision_encoder.d_model, self.embed_dim),
+          sharding=config.shd_config.vision_proj,
+          rngs=rngs,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+      )
+      self.mm_pre_projection_norm = RMSNorm(
+          config.vision_encoder.d_model,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+          with_scale=False,
+      )
+
+    if config.audio_encoder is not None:
+      self.audio_input_projection = Einsum(
+          einsum_str='...tm,md->...td',
+          shape=(config.audio_encoder.lm_model_dims, self.embed_dim),
+          rngs=rngs,
+          sharding=config.shd_config.audio_proj,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+      )
+      self.audio_soft_embedding_norm = RMSNorm(
+          self.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+          with_scale=False,
       )
 
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
     x = jnp.astype(x, self.config.dtype)
-    x = shard(x, self.config.shd_config.act_btd)
+    x = shard(x, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    return x
+
+  def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    x = self.mm_pre_projection_norm(x)  # pyrefly: ignore[bad-argument-type]
+    x = self.mm_input_projection(x)
+    return x
+
+  def encode_audio(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    # projection and then norm is consistent with upstream gemma4.
+    x = self.audio_input_projection(x)
+    x = self.audio_soft_embedding_norm(x)
     return x
 
   def encode_per_layer_input(
       self, x: jaxtyping.ArrayLike, t: jaxtyping.ArrayLike
   ) -> jaxtyping.Array:
     t = jnp.where(
-        jnp.logical_and(t >= 0, t < self.vocab_size), t, jnp.zeros_like(t)
+        jnp.logical_and(t >= 0, t < self.vocab_size), t, jnp.zeros_like(t)  # pyrefly: ignore[unsupported-operation]
     )
     x = self.per_layer_model_projection(x)
+    x = jnp.reshape(
+        x,
+        (
+            *x.shape[:-1],
+            self.config.num_layers,
+            self.config.per_layer_input_dim,
+        ),
+    )
     x = self.per_layer_projection_norm(x)
     y = self.per_layer_input_embedding.value[t]
+    y = jnp.reshape(
+        y,
+        (
+            *y.shape[:-1],
+            self.config.num_layers,
+            self.config.per_layer_input_dim,
+        ),
+    )
     y *= jnp.sqrt(self.config.per_layer_input_dim).astype(y.dtype)
     return (x + y) * jax.lax.rsqrt(2.0).astype(x.dtype)
 
@@ -337,6 +508,78 @@ class Embedder(nnx.Module):
     x = jnp.astype(x, self.config.dtype)
     w = jnp.astype(self.input_embedding.value, self.config.dtype)
     return jnp.dot(x, w.T)
+
+
+def _make_dummy_images(
+    vision_encoder: Any,
+):
+  """Make dummy patches/positions for initializing the vision encoder."""
+  max_patches = vision_encoder.max_patches
+  patch_dim = vision_encoder.patch_size**2 * 3
+  dummy_patches = jnp.zeros((1, max_patches, patch_dim), dtype=jnp.float32)
+  dummy_positions = jnp.full((1, max_patches, 2), -1, dtype=jnp.int32)
+  return dummy_patches, dummy_positions
+
+
+def _make_block_mask_indices(
+    bidirectional_mask: jaxtyping.ArrayLike,  # (B, L)
+) -> jaxtyping.ArrayLike:
+  padded_mask = jnp.pad(bidirectional_mask, [(0, 0), (1, 0)], constant_values=0)
+  boundary = padded_mask[..., 1:] > padded_mask[..., :-1]
+  numbered_boundary = jnp.cumsum(boundary, axis=-1)
+  return bidirectional_mask * numbered_boundary
+
+
+def _add_bidirectional_mask(
+    attn_mask: jaxtyping.ArrayLike,  # (B, L, L)/(B, L, KV_L) or (B, H, L, L)/(B, H, L, KV_L)
+    bidirectional_mask: jaxtyping.ArrayLike,  # (B, L)
+) -> jaxtyping.ArrayLike:
+  q_block_indices = _make_block_mask_indices(bidirectional_mask)
+  kv_block_indices = q_block_indices
+
+  attn_shape = jnp.shape(attn_mask)
+  kv_shape = jnp.shape(kv_block_indices)
+
+  attn_kv_len = attn_shape[-1]
+  if attn_kv_len != kv_shape[-1]:
+    if attn_kv_len > kv_shape[-1]:
+      pad_len = attn_kv_len - kv_shape[-1]
+      kv_block_indices = jnp.pad(kv_block_indices, [(0, 0), (0, pad_len)])
+    else:
+      kv_block_indices = kv_block_indices[..., -attn_kv_len:]  # pyrefly: ignore[bad-index]
+
+  bidir_cond = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (  # pyrefly: ignore[bad-index]
+      q_block_indices[..., None] > 0  # pyrefly: ignore[bad-index]
+  )
+
+  if len(attn_shape) == 4:
+    bidir_cond = jnp.expand_dims(bidir_cond, axis=1)
+
+  attn_mask = attn_mask | bidir_cond
+  return attn_mask
+
+
+def _merge_flat_embeddings_inner(
+    text_embeddings: jaxtyping.Array,  # (L, D)
+    multimodal_embeddings: jaxtyping.Array,  # (T, D)
+    mask: jaxtyping.Array,  # (L)
+) -> jaxtyping.Array:
+  target_pos = jnp.nonzero(mask, size=multimodal_embeddings.shape[0])
+  first_pos = text_embeddings[0]
+  merged = text_embeddings.at[target_pos, :].set(multimodal_embeddings)
+  merged = merged.at[0].set(first_pos)
+  return merged
+
+
+def merge_flat_embeddings(
+    *,
+    text_embeddings: jaxtyping.Array,  # (B, L, D)
+    multimodal_embeddings: jaxtyping.Array,  # (B, T, D)
+    mask: jaxtyping.Array,  # (B, L)
+) -> jaxtyping.Array:
+  return jax.vmap(_merge_flat_embeddings_inner, in_axes=(0, 0, 0))(
+      text_embeddings, multimodal_embeddings, mask
+  )
 
 
 class Einsum(nnx.Module):
@@ -431,19 +674,23 @@ class RMSNorm(nnx.Module):
       sharding: ShardingConfig = ShardingConfig.get_default_sharding(),
       dtype: jnp.dtype,
       param_dtype: jnp.dtype,
+      with_scale: bool = True,
   ):
-    self.scale = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim).astype(param_dtype),
-        sharding=sharding.rms_norm_weight,
-    )
+    self.with_scale = with_scale
+    if with_scale:
+      self.scale = nnx.Param(
+          nnx.initializers.ones_init()(rngs.params(), dim).astype(param_dtype),  # pyrefly: ignore[bad-argument-type]
+          sharding=sharding.rms_norm_weight,
+      )
     self.dtype = dtype
 
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
     x = jnp.astype(x, jnp.float32)
     var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
     normed_inputs = x * jax.lax.rsqrt(var + 1e-06).astype(x.dtype)
-    scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
-    normed_inputs = normed_inputs * scale
+    if self.with_scale:
+      scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+      normed_inputs = normed_inputs * scale
     return normed_inputs.astype(self.dtype)
 
 
@@ -612,6 +859,11 @@ class Attention(nnx.Module):
           param_dtype=config.param_dtype,
       )
     else:
+      if self.num_kv_heads == 1:
+        kv_sharding = (None, None, 'fsdp', None)
+      else:
+        kv_sharding = config.shd_config.kv_weight_cndh
+
       self.kv_einsum = Einsum(
           einsum_str='BSD,CKDH->CBSKH',
           shape=(
@@ -621,9 +873,7 @@ class Attention(nnx.Module):
               self.head_dim,
           ),
           rngs=rngs,
-          sharding=(None, None, 'fsdp', None)
-          if self.num_kv_heads == 1
-          else config.shd_config.kv_weight_cndh,
+          sharding=kv_sharding,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
@@ -649,6 +899,7 @@ class Attention(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
       kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
@@ -657,7 +908,7 @@ class Attention(nnx.Module):
     x = x.astype(self.config.dtype)
     seq_len = x.shape[1]
     query_proj = self.q_einsum(x)
-    query_proj = shard(query_proj, self.config.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
     query_proj = self._query_norm(query_proj)
     query_proj = apply_rope(
         query_proj,
@@ -678,8 +929,8 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
-      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
+      key_proj = shard(key_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+      value_proj = shard(value_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -742,7 +993,7 @@ class Attention(nnx.Module):
           'k': key_proj,
       }
 
-    b, t, qh, d = query_proj.shape
+    b, _, qh, _ = query_proj.shape
     _, _, kh, _ = key_proj.shape
 
     if self.config.use_flash_attention and seq_len > 1:
@@ -754,7 +1005,7 @@ class Attention(nnx.Module):
       if self.attn_type == AttentionType.LOCAL_SLIDING:
         mask = mask_lib.LocalMask(
             (seq_len, seq_len),
-            window_size=(self.config.sliding_window_size - 1, 0),
+            window_size=(self.config.sliding_window_size - 1, 0),  # pyrefly: ignore[unsupported-operation]
             offset=0,
         )
       else:
@@ -773,6 +1024,13 @@ class Attention(nnx.Module):
       )
 
       shd_b, shd_t, shd_n, shd_h = self.config.shd_config.act_btnh
+      if (
+          mesh is not None
+          and shd_b is not None
+          and shd_b in mesh.shape
+          and b % mesh.shape[shd_b] != 0
+      ):
+        shd_b = None
       head_shards = (
           mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
       )
@@ -788,25 +1046,81 @@ class Attention(nnx.Module):
       )
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      unsharded_seq = P(shd_b, shd_n, None, shd_h)
+      shd_n_kv = (
+          shd_n
+          if mesh is not None
+          and shd_n is not None
+          and shd_n in mesh.shape
+          and kh % mesh.shape[shd_n] == 0
+          else None
+      )
+      unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
       kernel_spec = splash_attn_kernel.manual_sharding_spec(
           shd.NamedSharding(mesh, P(shd_n, shd_t))
       )
 
-      @partial(
-          shard_map,
-          mesh=mesh,
-          in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
-          out_specs=shd_spec,
-          check_rep=False,
-      )
-      def sharded_splash_attn(kernel, q_block, k_block, v_block):
-        return jax.vmap(kernel)(q_block, k_block, v_block)
+      if segment_ids is not None:
+        seg_spec = P(shd_b, shd_t)
+        unsharded_seg_spec = P(shd_b, None)
 
-      qkv = sharded_splash_attn(
-          splash_attn_kernel, query_proj, key_proj, value_proj
-      )
+        @partial(
+            shard_map,
+            mesh=mesh,
+            in_specs=(
+                kernel_spec,
+                shd_spec,
+                unsharded_seq_kv,
+                unsharded_seq_kv,
+                seg_spec,
+                unsharded_seg_spec,
+            ),
+            out_specs=shd_spec,
+            check_rep=False,
+        )
+        def sharded_splash_attn(
+            kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
+        ):
+          seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
+          return jax.vmap(kernel)(
+              q_block, k_block, v_block, segment_ids=seg_ids
+          )
+
+        qkv: jaxtyping.Array = sharded_splash_attn(
+            splash_attn_kernel,
+            query_proj,
+            key_proj,
+            value_proj,
+            segment_ids,
+            segment_ids,
+        )
+      else:
+
+        @partial(
+            shard_map,
+            mesh=mesh,
+            in_specs=(
+                kernel_spec,
+                shd_spec,
+                unsharded_seq_kv,
+                unsharded_seq_kv,
+            ),
+            out_specs=shd_spec,
+            check_rep=False,
+        )
+        def sharded_splash_attn(kernel, q_block, k_block, v_block):
+          return jax.vmap(kernel)(q_block, k_block, v_block)
+
+        qkv: jaxtyping.Array = sharded_splash_attn(
+            splash_attn_kernel,
+            query_proj,
+            key_proj,
+            value_proj,
+        )
       encoded = qkv.transpose(0, 2, 1, 3)
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
+
     else:
       if self.use_gqa:
         b, t, kg, h = query_proj.shape
@@ -859,14 +1173,14 @@ class Attention(nnx.Module):
           # for decoding without sliding window cache
           sliding_mask = create_sliding_window_mask(
               attn_mask,
-              sliding_window_size=self.config.sliding_window_size,
+              sliding_window_size=self.config.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
           )
           attn_mask = sliding_mask * attn_mask
         else:  # for prefill
           all_ones = jnp.ones_like(attn_mask)
           sliding_mask = jnp.triu(
-              all_ones, -1 * self.config.sliding_window_size + 1
-          ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)
+              all_ones, -1 * self.config.sliding_window_size + 1  # pyrefly: ignore[unsupported-operation]
+          ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)  # pyrefly: ignore[unsupported-operation]
           attn_mask = sliding_mask * attn_mask
 
       attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
@@ -885,14 +1199,22 @@ class Attention(nnx.Module):
         encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = shard(attn_output, self.config.shd_config.act_btd)
+    attn_output = shard(attn_output, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return new_cache, attn_output, (key_proj, value_proj)
 
   @property
   def use_gqa(self):
     return self.num_kv_heads != self.config.num_heads and self.num_kv_heads > 1
 
-  def __call__(self, x, segment_pos, cache, attn_mask, kv_shared_cache=None):
+  def __call__(
+      self,
+      x,
+      segment_pos,
+      cache,
+      attn_mask,
+      kv_shared_cache=None,
+      segment_ids=None,
+  ):
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
         remat_config == RematConfig.BLOCK
@@ -902,11 +1224,16 @@ class Attention(nnx.Module):
       # as the first argument. graph_updates=False prevents TraceContextError
       # when mutating params across jax transformation trace levels.
       return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, kv_shared_cache
+          self, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
       )
     else:
       return self.block(
-          x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          kv_shared_cache=kv_shared_cache,
+          segment_ids=segment_ids,
       )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
@@ -918,27 +1245,23 @@ class Attention(nnx.Module):
     ):
       cache_len = min(max_seq_len, self.config.sliding_window_size)
 
-    return {
-        'k': jnp.zeros(
-            (
-                batch_size,
-                cache_len,
-                self.num_kv_heads,
-                self.head_dim,
-            ),
-            dtype,
-        ),
-        'v': jnp.zeros(
-            (
-                batch_size,
-                cache_len,
-                self.num_kv_heads,
-                self.head_dim,
-            ),
-            dtype,
-        ),
-        'end_index': jnp.zeros((batch_size,), jnp.int32),
-    }
+    cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
+    k = shard(
+        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
+        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
+        eager=True,
+    )
+    v = shard(
+        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
+        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
+        eager=True,
+    )
+    end_index = shard(
+        np.zeros((batch_size,), np.int32),  # pyrefly: ignore[bad-argument-type]
+        self.config.shd_config.act_btnh[:1],  # pyrefly: ignore[bad-argument-type]
+        eager=True,
+    )
+    return {'k': k, 'v': v, 'end_index': end_index}
 
 
 class FeedForward(nnx.Module):
@@ -1118,10 +1441,16 @@ class DecoderLayer(nnx.Module):
       attn_mask,
       per_layer_input=None,
       kv_shared_cache=None,
+      segment_ids=None,
   ):
     norm = self.pre_attention_norm(x)
     cache, attn, kv = self.attn(
-        norm, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
+        norm,
+        segment_pos,
+        cache,
+        attn_mask,
+        kv_shared_cache=kv_shared_cache,
+        segment_ids=segment_ids,
     )
     attn = self.post_attention_norm(attn)
     attn += x
@@ -1131,7 +1460,7 @@ class DecoderLayer(nnx.Module):
     if self.config.enable_moe:
       ffw = self.dense_post_ffw_norm(ffw)
       moe_norm_ffw = self.moe_pre_ffw_norm(attn)
-      moe_out = self.moe(moe_norm_ffw)
+      moe_out = self.moe(moe_norm_ffw, router_input=attn)
       moe_out = self.moe_post_ffw_norm(moe_out)
       ffw += moe_out
     ffw = self.post_ffw_norm(ffw)
@@ -1157,6 +1486,7 @@ class DecoderLayer(nnx.Module):
       attn_mask,
       per_layer_input=None,
       kv_shared_cache=None,
+      segment_ids=None,
   ):
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
@@ -1171,10 +1501,17 @@ class DecoderLayer(nnx.Module):
           attn_mask,
           per_layer_input,
           kv_shared_cache,
+          segment_ids,
       )
     else:
       return self.block(
-          x, segment_pos, cache, attn_mask, per_layer_input, kv_shared_cache
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          per_layer_input,
+          kv_shared_cache,
+          segment_ids=segment_ids,
       )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
@@ -1184,9 +1521,30 @@ class DecoderLayer(nnx.Module):
 class Gemma4(BackendMappingMixin, nnx.Module):
   """Gemma4 model."""
 
-  def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
+  def __init__(
+      self, config: ModelConfig, *, rngs: nnx.Rngs, text_only: bool = True
+  ):
+    self.text_only = text_only
+    if text_only:
+      config = dataclasses.replace(
+          config, vision_encoder=None, audio_encoder=None
+      )
     self.config = config
     self.embedder = Embedder(config, rngs=rngs)
+
+    if config.vision_encoder is not None:
+      self.vision_encoder = vision.VisionEncoder(
+          rngs=rngs,
+          config=config.vision_encoder,
+          param_dtype=config.param_dtype,
+          shd_config=config.shd_config.vision_shd,
+      )
+
+    if config.audio_encoder is not None:
+      self.audio_encoder = audio.AudioTokenizer(
+          rngs=rngs,
+          config=config.audio_encoder,
+      )
 
     pattern = (
         config.attention_pattern
@@ -1240,14 +1598,50 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       positions=None,
       cache=None,
       attention_mask=None,
-      decode_only_last_token=False,
+      segment_ids=None,
+      decode_only_last_token: bool = False,
+      images: PreprocessedVisionInput | None = None,
+      audios: PreprocessedAudioInput | None = None,
+      skip_lm_head: bool = False,
   ):
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
       positions = jnp.tile(jnp.arange(T)[None, :], (B, 1))
 
+    return_cache = cache is not None
     new_cache = {}
+    is_prefill = tokens.shape[1] > 1
+
     x = self.embedder.encode(tokens)
+    if self.config.vision_encoder is not None and images is not None:
+      soft_embeddings = self._encode_vision(images)
+      mask = tokens == IMAGE_SOFT_TOKEN_PLACEHOLDER
+      x = merge_flat_embeddings(
+          text_embeddings=x,
+          multimodal_embeddings=soft_embeddings,
+          mask=mask,
+      )
+
+    if self.config.audio_encoder is not None and audios is not None:
+      soft_embeddings = self._encode_audio(audios)
+      mask = tokens == AUDIO_SOFT_TOKEN_PLACEHOLDER
+      x = merge_flat_embeddings(
+          text_embeddings=x,
+          multimodal_embeddings=soft_embeddings,
+          mask=mask,
+      )
+
+    sliding_attention_mask = None
+    if (
+        is_prefill
+        and self.config.use_bidirectional_attention == 'vision'
+        and images is not None
+        and attention_mask is not None
+    ):
+      bidirectional_mask = tokens == IMAGE_SOFT_TOKEN_PLACEHOLDER
+      sliding_attention_mask = _add_bidirectional_mask(
+          attention_mask, bidirectional_mask
+      )
 
     per_layer_inputs = None
     if self.config.per_layer_input_dim > 0:
@@ -1256,7 +1650,6 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     # Stores the raw KV projections for the current forward pass. Used for
     # KV cache sharing during prefill.
     transient_kvs = {}
-    is_prefill = tokens.shape[1] > 1
 
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
@@ -1279,15 +1672,23 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         layer_cache = cache[layer_name] if cache else None
         kv_shared_cache = None
 
+      layer_attn_mask = attention_mask
+      if (
+          sliding_attention_mask is not None
+          and layer.attn.attn_type == AttentionType.LOCAL_SLIDING
+      ):
+        layer_attn_mask = sliding_attention_mask
+
       layer_cache, x, layers_kvs = layer(
           x,
           positions,
           layer_cache,
-          attention_mask,
+          layer_attn_mask,
           per_layer_input=per_layer_inputs[:, :, i, :]
           if per_layer_inputs is not None
           else None,
           kv_shared_cache=kv_shared_cache,
+          segment_ids=segment_ids,
       )
       if is_prefill and i in self.shared_layer_origins:
         transient_kvs[layer_name] = layers_kvs
@@ -1295,18 +1696,135 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         new_cache[layer_name] = layer_cache
 
     x = self.final_norm(x)
+    if skip_lm_head:
+      return x, (new_cache if return_cache else None)
+
     if decode_only_last_token:
       # Only compute logits for the last token. This can significantly reduce
       # memory requirements during prefill (when sampling), since we only need
       # the logits for the last token to sample from.
       x = x[:, -1:, :]
-    logits = self.embedder.decode(x).astype(jnp.float32)
 
+    logits = self.compute_final_logits(x)
+
+    return logits, (new_cache if return_cache else None)  # pytype: disable=container-type-mismatch
+
+  def _encode_vision(self, vision_input: PreprocessedVisionInput):
+    """Encode images into the same space as the text embeddings."""
+    assert self.vision_encoder is not None
+
+    batch_size = vision_input.patches.shape[0]
+
+    if len(vision_input.soft_token_counts) > 0 and isinstance(
+        vision_input.soft_token_counts[0], int
+    ):
+      soft_token_counts = (vision_input.soft_token_counts,)
+    else:
+      soft_token_counts = vision_input.soft_token_counts
+
+    max_n_images = max((len(counts) for counts in soft_token_counts), default=0)  # pyrefly: ignore[bad-argument-type]
+    if max_n_images == 0:
+      return jnp.zeros((batch_size, 0, self.config.embed_dim))
+
+    patches = vision_input.patches
+    positions_xy = vision_input.positions_xy
+    max_patches = patches.shape[1] // max_n_images
+
+    patches = jnp.reshape(
+        patches, (batch_size * max_n_images, max_patches, patches.shape[2])
+    )
+    positions_xy = jnp.reshape(
+        positions_xy,
+        (batch_size * max_n_images, max_patches, positions_xy.shape[2]),
+    )
+
+    encoder_outputs = self.vision_encoder(patches, positions_xy)
+
+    embeddings, mask = encoder_outputs[0]
+
+    batch_tokens = []
+    max_tokens_per_batch = 0
+    for b in range(batch_size):
+      per_image_tokens = []
+      counts = soft_token_counts[b] if b < len(soft_token_counts) else ()
+      for i in range(len(counts)):  # pyrefly: ignore[bad-argument-type]
+        idx = b * max_n_images + i
+        expected_count = counts[i]  # pyrefly: ignore[bad-index]
+        if mask is not None:
+          valid_indices = jnp.nonzero(mask[idx], size=expected_count)[0]  # pyrefly: ignore[bad-argument-type]
+          real_tokens = embeddings[idx][valid_indices]
+        else:
+          real_tokens = embeddings[idx][:expected_count]
+        per_image_tokens.append(real_tokens)
+
+      if per_image_tokens:
+        b_tokens = jnp.concatenate(per_image_tokens, axis=0)
+      else:
+        b_tokens = jnp.zeros((0, embeddings.shape[-1]))
+      batch_tokens.append(b_tokens)
+      max_tokens_per_batch = max(max_tokens_per_batch, b_tokens.shape[0])
+
+    padded_batch_tokens = []
+    for b_tokens in batch_tokens:
+      pad_len = max_tokens_per_batch - b_tokens.shape[0]
+      if pad_len > 0:
+        b_tokens = jnp.pad(b_tokens, ((0, pad_len), (0, 0)))
+      padded_batch_tokens.append(b_tokens)
+
+    all_tokens = jnp.stack(padded_batch_tokens, axis=0)
+    all_tokens = self.embedder.encode_vision(all_tokens[:, None, :, :])
+    all_tokens = all_tokens[:, 0, :, :]
+    return all_tokens
+
+  def _encode_audio(self, audio_input: PreprocessedAudioInput):
+    """Encode audio.
+
+    Args:
+      audio_input: The audio input.
+
+    Returns:
+      Padded audio embeddings as a tensor of shape, with padding
+      at the end of the sequences. (batch_size, max_tokens)
+    """
+    batch_size, num_clips = audio_input.audios.shape[:2]
+
+    # Encode audio clips.
+    clips = audio_input.audios.reshape(batch_size * num_clips, -1)
+    clip_lengths = audio_input.sequence_lengths.reshape(batch_size * num_clips)
+    embeddings, pad_mask = self.audio_encoder(clips, clip_lengths)
+
+    flat_embeddings = embeddings.reshape(batch_size, -1, embeddings.shape[-1])
+    flat_pad_mask = pad_mask.reshape(batch_size, -1)  # True => Pad.
+
+    # Handle padding in the embeddings.
+    # To avoid JIT recompilation, we want to keep the output shape consistent
+    # across invocations with differring values of audio_input.sequence_lengths
+    # (of course, as long as audio_input.audios is padded to the same shape).
+    # Thus, we don't simply truncate each clip's embeddings as that would create
+    # variable length output. We keep the length of embeddings the same, but
+    # move valid (non-padding) embeddings to the beginning of sequence
+    # (i.e. pack valid embeddings into one contiguous sequence).
+    max_tokens = flat_pad_mask.shape[-1]
+    indices = jnp.arange(max_tokens)
+    indices = jnp.where(flat_pad_mask, max_tokens, indices)
+    sorted_indices = jnp.argsort(indices, axis=-1)
+    packed_embeddings = jnp.take_along_axis(
+        flat_embeddings, sorted_indices[..., None], axis=1
+    )
+
+    result = self.embedder.encode_audio(packed_embeddings)
+    return result
+
+  def compute_final_logits(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
+    """Computes the final logits from the model output."""
+    logits = self.embedder.decode(x).astype(jnp.float32)
     if self.config.final_logit_softcap is not None:
       logits /= self.config.final_logit_softcap
       logits = jnp.tanh(logits) * self.config.final_logit_softcap
-
-    return logits, (None if cache is None else new_cache)
+    return logits
 
   def init_cache(self, batch_size, max_seq_len, dtype):
     cache = {}
@@ -1315,3 +1833,26 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         continue  # Skip shared layers.
       cache[f'layer_{i}'] = layer.init_cache(batch_size, max_seq_len, dtype)
     return cache
+
+  def get_model_input(self):
+    """Returns a dummy model input for the transformer.
+
+    This dummy input has a batch size compatible with FSDP sharding on a
+    2-device axis.
+    """
+    dummy_batch_size = 2
+    dummy_seq_len = 2
+    return {
+        'tokens': jnp.ones((dummy_batch_size, dummy_seq_len), dtype=jnp.int32),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
+
+  @property
+  def num_embed(self) -> int:
+    return self.config.num_embed

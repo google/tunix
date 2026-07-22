@@ -25,6 +25,45 @@ from tunix.models.gemma4 import model as model_lib
 
 class ModelTest(absltest.TestCase):
 
+  def test_gemma4_12b_config(self):
+    config = model_lib.ModelConfig.gemma4_12b()
+
+    self.assertEqual(config.num_layers, 48)
+    self.assertEqual(config.num_embed, 262144)
+    self.assertEqual(config.embed_dim, 3840)
+    self.assertEqual(config.hidden_dim, 15360)
+    self.assertEqual(config.num_heads, 16)
+    self.assertEqual(config.head_dim, 256)
+    self.assertEqual(config.num_kv_heads, 8)
+    self.assertEqual(config.num_global_kv_heads, 1)
+    self.assertEqual(config.global_key_size, 512)
+    self.assertEqual(config.sliding_window_size, 1024)
+    self.assertTrue(config.k_eq_v_global)
+    self.assertEqual(config.per_layer_input_dim, 0)
+    self.assertEqual(
+        config.attention_pattern,
+        (
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.GLOBAL,
+        ),
+    )
+
+  def test_gemma4_12b_it_config_matches_base(self):
+    config = model_lib.ModelConfig.gemma4_12b()
+    it_config = model_lib.ModelConfig.gemma4_12b_it()
+
+    self.assertEqual(it_config.num_layers, config.num_layers)
+    self.assertEqual(it_config.embed_dim, config.embed_dim)
+    self.assertEqual(it_config.hidden_dim, config.hidden_dim)
+    self.assertEqual(it_config.num_heads, config.num_heads)
+    self.assertEqual(it_config.num_kv_heads, config.num_kv_heads)
+    self.assertEqual(it_config.num_global_kv_heads, config.num_global_kv_heads)
+    self.assertEqual(it_config.attention_pattern, config.attention_pattern)
+
   def test_forward_pass_dense(self):
     config = model_lib.ModelConfig.gemma4_e2b()
     config.num_layers = 1
@@ -80,6 +119,33 @@ class ModelTest(absltest.TestCase):
     logits, _ = model(tokens, positions=positions, attention_mask=attn_mask)
 
     self.assertEqual(logits.shape, (2, 32, config.num_embed))
+
+  def test_forward_pass_gemma4_12b(self):
+    config = model_lib.ModelConfig.gemma4_12b()
+    config.num_layers = 6
+    config.num_embed = 128
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 2
+    config.num_global_kv_heads = 1
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs)
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (1, 8), 0, config.num_embed
+    )
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+    logits, _ = model(tokens, positions=positions, attention_mask=attn_mask)
+
+    self.assertEqual(logits.shape, (1, 8, config.num_embed))
 
   def test_remat_block(self):
     config = model_lib.ModelConfig.gemma4_e2b()
@@ -194,6 +260,306 @@ class ModelTest(absltest.TestCase):
     compiled_decode = jax.jit(decode_fn)
     _, logits = compiled_decode(state)
     self.assertEqual(logits.shape, (2, 32, config.num_embed))
+
+  def test_forward_pass_vision(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.vision_encoder = model_lib.vision.VisionEncoderConfig(
+        d_model=64,
+        num_layers=1,
+        num_heads=2,
+        ffw_hidden=128,
+        patch_size=4,
+        output_length=5,
+        use_clipped_linears=True,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
+    )
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+
+    soft_token_counts = (5,)
+    max_patches = config.vision_encoder.max_patches
+    patch_dim = config.vision_encoder.patch_size**2 * 3
+    patches = jnp.zeros((1, max_patches, patch_dim), dtype=jnp.float32)
+    positions_xy = jnp.full((1, max_patches, 2), -1, dtype=jnp.int32)
+
+    images = model_lib.PreprocessedVisionInput(
+        patches=patches,
+        positions_xy=positions_xy,
+        soft_token_counts=soft_token_counts,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        images=images,
+    )
+    self.assertEqual(logits.shape, (1, 32, config.num_embed))
+
+  def test_forward_pass_vision_bidirectional(self):
+    config = model_lib.ModelConfig.gemma4_26b_a4b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.num_experts = 4
+    config.num_experts_per_tok = 2
+    config.expert_dim = 128
+    config.vision_encoder = model_lib.vision.VisionEncoderConfig(
+        d_model=64,
+        num_layers=1,
+        num_heads=2,
+        ffw_hidden=128,
+        patch_size=4,
+        output_length=5,
+        use_clipped_linears=True,
+    )
+    config.use_bidirectional_attention = "vision"
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
+    )
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+
+    soft_token_counts = (5,)
+    max_patches = config.vision_encoder.max_patches
+    patch_dim = config.vision_encoder.patch_size**2 * 3
+    patches = jnp.zeros((1, max_patches, patch_dim), dtype=jnp.float32)
+    positions_xy = jnp.full((1, max_patches, 2), -1, dtype=jnp.int32)
+
+    images = model_lib.PreprocessedVisionInput(
+        patches=patches,
+        positions_xy=positions_xy,
+        soft_token_counts=soft_token_counts,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        images=images,
+    )
+    self.assertEqual(logits.shape, (1, 32, config.num_embed))
+
+  def test_forward_pass_vision_batch(self):
+    config = model_lib.ModelConfig.gemma4_26b_a4b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.num_experts = 4
+    config.num_experts_per_tok = 2
+    config.expert_dim = 128
+    config.vision_encoder = model_lib.vision.VisionEncoderConfig(
+        d_model=64,
+        num_layers=1,
+        num_heads=2,
+        ffw_hidden=128,
+        patch_size=4,
+        output_length=5,
+        use_clipped_linears=True,
+    )
+    config.use_bidirectional_attention = "vision"
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    batch_size = 2
+    seq_len = 32
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.num_embed
+    )
+    # Image placeholders: token shape represents visual soft tokens within sequences.
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:8].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 20:25].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    # Test batched vision inputs
+    soft_token_counts = ((5,), (3, 5))
+    max_n_images = 2
+    max_patches = config.vision_encoder.max_patches
+    patch_dim = config.vision_encoder.patch_size**2 * 3
+
+    # Dimensions for patches: (batch, max_n_images * max_patches, patch_dim)
+    patches = jnp.zeros(
+        (batch_size, max_n_images * max_patches, patch_dim), dtype=jnp.float32
+    )
+    positions_xy = jnp.full(
+        (batch_size, max_n_images * max_patches, 2), -1, dtype=jnp.int32
+    )
+
+    images = model_lib.PreprocessedVisionInput(
+        patches=patches,
+        positions_xy=positions_xy,
+        soft_token_counts=soft_token_counts,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        images=images,
+    )
+    self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
+
+  def test_forward_pass_audio(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=256,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    key = jax.random.key(0)
+
+    batch_size = 1
+    num_clips = 1
+    num_samples = 16000
+    key, audio_key = jax.random.split(key)
+    audio = jax.random.normal(audio_key, (batch_size, num_clips, num_samples))
+    audio_seq_len = jnp.array([[num_samples]])
+    audios = model_lib.PreprocessedAudioInput(
+        audios=audio,
+        sequence_lengths=audio_seq_len,
+    )
+
+    seq_len = 32  # total num of tokens
+    _, token_key = jax.random.split(key)
+    tokens = jax.random.randint(
+        token_key, (batch_size, seq_len), 0, config.num_embed
+    )
+    # 16000 audio samples => 25 soft tokens
+    tokens = tokens.at[0, 5:30].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(jnp.arange(seq_len)[None, :], (batch_size, 1))
+    attn_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
+    )
+    self.assertEqual(logits.shape, (batch_size, 32, config.num_embed))
+
+  def test_forward_pass_audio_heterogeneous(self):
+    """Test batch with varying number of clips and audio sequence_lengths."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=256,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    key = jax.random.key(0)
+
+    batch_size = 2
+    max_clips = 2
+    num_samples = 16000  # Max samples per clip
+
+    # Batch 0: 1 valid clip (16000), 1 padding clip (0)
+    # Batch 1: 1 valid clip (16000), 1 valid clip (8000)
+    sequence_lengths = jnp.array([[16000, 0], [16000, 8000]])
+
+    key, audio_key = jax.random.split(key)
+    audio = jax.random.normal(audio_key, (batch_size, max_clips, num_samples))
+
+    # Total soft tokens:
+    # 16000 samples => 25 soft tokens
+    # 8000 samples => 12 soft tokens
+    # Batch 0: 25 + 0 = 25 valid soft tokens
+    # Batch 1: 25 + 12 = 37 valid soft tokens
+
+    seq_len = 64  # Total text sequence length
+    _, token_key = jax.random.split(key)
+    tokens = jax.random.randint(
+        token_key, (batch_size, seq_len), 0, config.num_embed
+    )
+
+    # Inject placeholders
+    tokens = tokens.at[0, 5:30].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:42].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(jnp.arange(seq_len)[None, :], (batch_size, 1))
+    attn_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    audios = model_lib.PreprocessedAudioInput(
+        audios=audio,
+        sequence_lengths=sequence_lengths,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
+    )
+    self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
 
 
 if __name__ == "__main__":

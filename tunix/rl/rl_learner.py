@@ -394,7 +394,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         ):
           # Fetch one training micro-batch
           example = next(iterator)
-          cur_batch_size = len(example["prompts"])
+          cur_batch_size = len(example["prompts"])  # pyrefly: ignore[bad-argument-type]
 
         # Buffer the fetched micro-batch. We accumulate micro-batches and track
         # their sizes and the total number of samples. This allows us to form a
@@ -527,7 +527,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     """Main entry point for the training loop."""
     full_batch_iterator = iter(train_ds)
     first_item = next(full_batch_iterator)
-    full_batch_size = len(first_item["prompts"])
+    full_batch_size = len(first_item["prompts"])  # pyrefly: ignore[bad-argument-type]
     full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -622,7 +622,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         )
 
         if (
-            self.rl_cluster.actor_trainer.train_steps
+            self.rl_cluster.actor_trainer.train_steps  # pyrefly: ignore[unsupported-operation]
             >= self.rl_cluster.cluster_config.training_config.max_steps
         ):
           break
@@ -724,7 +724,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.max_seq_token_per_tpu,
       )
       train_data_gen = rl_utils.pack_sequences(
-          train_data_gen, self._training_config.max_seq_token_per_tpu
+          train_data_gen,
+          self._training_config.max_seq_token_per_tpu,
+          target_items_per_update=grad_acc_steps,
       )
 
     curr_eval_ds = None

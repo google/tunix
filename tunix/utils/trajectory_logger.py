@@ -101,10 +101,10 @@ def log_item(
   else:
     raise ValueError(f'Item {item} is not a dataclass, dictionary or list.')
 
-  log_path = epath.Path(log_path)
-  log_path.mkdir(parents=True, exist_ok=True)
+  log_path = epath.Path(log_path)  # pyrefly: ignore[bad-assignment]
+  log_path.mkdir(parents=True, exist_ok=True)  # pyrefly: ignore[missing-attribute]
 
-  assert log_path.is_dir(), f'log_path `{log_path}` must be a directory.'
+  assert log_path.is_dir(), f'log_path `{log_path}` must be a directory.'  # pyrefly: ignore[missing-attribute]
 
   if isinstance(item, list):
     item_name = _get_item_name(item[0])
@@ -113,7 +113,7 @@ def log_item(
 
   file_stem = item_name if item_name else 'trajectory_log'
   filename = f'{file_stem}_{suffix}.csv' if suffix else f'{file_stem}.csv'
-  file_path = log_path / filename
+  file_path = log_path / filename  # pyrefly: ignore[unsupported-operation]
   logging.log_first_n(logging.INFO, f'Logging item to {file_path}', 1)
   write_header = not file_path.exists()
 
@@ -197,9 +197,9 @@ class AsyncTrajectoryLogger:
     # Register signal handlers for robust termination
     if threading.current_thread() is threading.main_thread():
       try:
-        signal.signal(signal.SIGINT, self._handle_signal)
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGHUP, self._handle_signal)
+        signal.signal(signal.SIGINT, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
+        signal.signal(signal.SIGTERM, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
+        signal.signal(signal.SIGHUP, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
       except ValueError:
         logging.warning('Failed to register signal handlers.')
 

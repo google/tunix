@@ -24,10 +24,22 @@ import jax.sharding as shd
 
 # TODO(abheesht17): Use this function for all models and unify with the fn in
 # sft/sharding_utils.py.
-def shard(x: jnp.ndarray, s: Tuple[str, ...]):
+def shard(x: jnp.ndarray, s: Tuple[str, ...], eager: bool = False):
+  """Shards a JAX array.
+
+  Args:
+    x: The JAX array to shard.
+    s: The sharding spec.
+    eager: If True, sharding is done eagerly via jax.device_put. Otherwise,
+      sharding is done lazily via jax.lax.with_sharding_constraint.
+
+  Returns:
+    The sharded JAX array.
+  """
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
-    return x
-  return jax.lax.with_sharding_constraint(
-      x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
-  )
+    return jnp.asarray(x)
+  sharding = shd.NamedSharding(mesh, shd.PartitionSpec(*s))
+  if eager:
+    return jax.device_put(x, sharding)
+  return jax.lax.with_sharding_constraint(x, sharding)

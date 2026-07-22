@@ -99,7 +99,7 @@ class MappingConfig:
       return mapping_obj
 
     if mapping_obj is None:
-      return cls.from_model(model, backend)
+      return cls.from_model(model, backend)  # pyrefly: ignore[bad-argument-type]
 
     keys = (
         'to_hf_mappings',

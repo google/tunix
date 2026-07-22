@@ -43,7 +43,7 @@ def get_dataset(
 ) -> grain.MapDataset:
   """Loads the dataset, from CNS in g3 or downloading in OSS."""
   if ENV == 'g3':
-    with gfile.Open(path, 'rb') as f:
+    with gfile.Open(path, 'rb') as f:  # pyrefly: ignore[missing-attribute]
       data = json.loads(f.read())
   else:  # oss
     if path.startswith('gs://'):

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import dataclasses
+import inspect
 from typing import Any, Optional
 import warnings
 
@@ -35,7 +36,8 @@ from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
-from tunix.processors import image_processor as image_processor_lib
+from tunix.processors import audio_processor
+from tunix.processors import image_processor
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -132,7 +134,7 @@ def sample_top_p(
     return next_token, logp_sampled
 
   k = next_token_logits.shape[-1] if _no_topk else top_k
-  logits_sorted, indices = jax.lax.top_k(next_token_logits, k=k)
+  logits_sorted, indices = jax.lax.top_k(next_token_logits, k=k)  # pyrefly: ignore[bad-argument-type]
 
   probs_sorted = jax.nn.softmax(logits_sorted, axis=-1)
   cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
@@ -189,12 +191,13 @@ def _init_cache(
   """
 
   shape = (batch_size, cache_size, num_kv_heads, head_dim)
-  k = jnp.zeros(shape, dtype=dtype)
-  v = jnp.zeros(shape, dtype=dtype)
-  end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
   # Jax array is immutable, so updates to each layer creates new arrays.
   return {
-      f'layer_{i}': {'k': k, 'v': v, 'end_index': end_index}
+      f'layer_{i}': {
+          'k': jnp.zeros(shape, dtype=dtype),
+          'v': jnp.zeros(shape, dtype=dtype),
+          'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
+      }
       for i in range(n_layers)
   }
 
@@ -207,7 +210,7 @@ class Sampler(base_sampler.BaseSampler):
       transformer: nnx.Module,
       tokenizer: Any,
       cache_config: CacheConfig,
-      image_processor: image_processor_lib.ImageProcessor | None = None,
+      image_processor: image_processor.ImageProcessor | None = None,
   ):
     """Initializes the sampler.
 
@@ -222,17 +225,34 @@ class Sampler(base_sampler.BaseSampler):
       self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.cache_config = cache_config
     self.image_processor = image_processor
-    self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)
+    self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)  # pyrefly: ignore[bad-assignment]
     self._transformer_state: list[statelib.State] = nnx.variables(transformer)
     self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
-    # we separate out state and graph def so that the state can be passed as an
+    # We separate out state and graph def so that the state can be passed as an
     # argument to _decode_fn, resulting in it not being treated as a static
-    # arg. This greatly reduces the size of the HLO and reduces compile time
-    self._compiled_decode_fn = jax.jit(self._decode_fn)
-    self._compiled_prefill_fn = jax.jit(self._prefill_fn)
+    # arg. This greatly reduces the size of the HLO and reduces compile time.
+    #
+    # We donate the sampling_state (argnum 1) containing the KV cache arrays.
+    # JAX arrays are immutable, so updating the cache at each decoding step
+    # would normally force JAX to allocate a new memory buffer and copy old
+    # contents. Since the KV cache memory footprint scales with batch size and
+    # prompt+decoding length (reaching gigabytes), this continuous reallocation
+    # and copying triggers massive memory overhead and OOMs. Donating the input
+    # state allows the XLA compiler to reuse the memory buffer in-place,
+    # completely avoiding allocation/copy overhead.
+    self._compiled_decode_fn = jax.jit(self._decode_fn, donate_argnums=(1,))
+    self._compiled_prefill_fn = jax.jit(
+        self._prefill_fn,
+        donate_argnums=(1,),
+        static_argnames=('echo',),
+    )
+    self._supports_decode_only_last_token = (
+        'decode_only_last_token'
+        in inspect.signature(transformer.__call__).parameters
+    )
 
   def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
     """Returns the transformer graphdef and state."""
@@ -240,7 +260,7 @@ class Sampler(base_sampler.BaseSampler):
 
   @property
   def transformer(self) -> nnx.Module:
-    return nnx.merge(
+    return nnx.merge(  # pyrefly: ignore[no-matching-overload]
         self._transformer_graphdef, self._flattened_transformer_state
     )
 
@@ -401,7 +421,7 @@ class Sampler(base_sampler.BaseSampler):
 
     if include_logits:
       logits_buffer = jnp.zeros(
-          (batch_size, total_sampling_steps, self.transformer.num_embed),
+          (batch_size, total_sampling_steps, self.transformer.num_embed),  # pyrefly: ignore[missing-attribute]
           dtype=jnp.float32,
       )
     else:
@@ -418,16 +438,16 @@ class Sampler(base_sampler.BaseSampler):
     sampling_mode = [None]
 
     if beam_size is not None:
-      utils.check_sampling_mode_conflict(sampling_mode, 'beam_search')
+      utils.check_sampling_mode_conflict(sampling_mode, 'beam_search')  # pyrefly: ignore[bad-argument-type]
       sampling_parameters['beam_size'] = beam_size
 
     if top_p is not None:
-      utils.check_sampling_mode_conflict(sampling_mode, 'top_p')
+      utils.check_sampling_mode_conflict(sampling_mode, 'top_p')  # pyrefly: ignore[bad-argument-type]
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
 
     if sampling_mode[0] is None:
-      sampling_mode[0] = 'greedy'
+      sampling_mode[0] = 'greedy'  # pyrefly: ignore[unsupported-operation]
 
     logging.debug('Using sampling mode: %s', sampling_mode[0])
 
@@ -484,7 +504,7 @@ class Sampler(base_sampler.BaseSampler):
           token_buffer=token_buffer,
           cache=cache,
           logits_buffer=logits_buffer,
-          state=beam_search_state,
+          state=beam_search_state,  # pyrefly: ignore[bad-argument-type]
           pad_token_id=eos[0],
           decoding_step=decoding_step,
           logprobs_buffer=logprobs_buffer,
@@ -506,7 +526,7 @@ class Sampler(base_sampler.BaseSampler):
             key,
             sampler_state.temperature,
             sampler_state.sampling_parameters['top_p'],
-            sampler_state.sampling_parameters['top_k'],
+            sampler_state.sampling_parameters['top_k'],  # pyrefly: ignore[bad-argument-type]
             return_logprobs=(logprobs_buffer is not None),
         )
       else:
@@ -543,6 +563,8 @@ class Sampler(base_sampler.BaseSampler):
       params: statelib.State,
       sampler_state: _SamplingState,
       images: jnp.ndarray | None = None,
+      audios: Any = None,
+      echo: bool = True,
   ) -> _SamplingState:
     """Performs prefill."""
     batch_size = sampler_state.token_buffer.shape[0]
@@ -579,8 +601,15 @@ class Sampler(base_sampler.BaseSampler):
           input_mask, self.cache_config.cache_size
       )
 
-    transformer = nnx.merge(self._transformer_graphdef, params)
-    kwargs = {} if images is None else {'images': images}
+    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
+    kwargs = {}
+    if images is not None:
+      kwargs['images'] = images
+    if audios is not None:
+      kwargs['audios'] = audios
+    decode_only_last_token = self._supports_decode_only_last_token and not echo
+    if decode_only_last_token:
+      kwargs['decode_only_last_token'] = True
     logits, cache = transformer(
         tokens,
         step_positions,
@@ -593,10 +622,13 @@ class Sampler(base_sampler.BaseSampler):
     positions = sampler_state.positions
     beam_search_sampling_state = None
     if sampler_state.logits_buffer is not None:
+      start_idx = (
+          sampler_state.num_input_tokens if decode_only_last_token else 1
+      )
       logits_buffer = jax.lax.dynamic_update_slice(
           sampler_state.logits_buffer,
           logits.astype(sampler_state.logits_buffer.dtype),
-          (0, 1, 0),
+          (0, start_idx, 0),
       )
     else:
       logits_buffer = sampler_state.logits_buffer
@@ -659,7 +691,7 @@ class Sampler(base_sampler.BaseSampler):
 
     def cond_fn(sampler_state: _SamplingState):
       return (
-          sampler_state.decoding_step < sampler_state.total_sampling_steps
+          sampler_state.decoding_step < sampler_state.total_sampling_steps - 1
       ) & jnp.any(jnp.logical_not(sampler_state.done))
 
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
@@ -682,7 +714,7 @@ class Sampler(base_sampler.BaseSampler):
         decoding_step, self.cache_config.cache_size, input_mask
     )
 
-    transformer = nnx.merge(self._transformer_graphdef, params)
+    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
     logits, cache = transformer(
         last_token,
         positions=step_positions,
@@ -733,6 +765,11 @@ class Sampler(base_sampler.BaseSampler):
           | jnp.ndarray
           | None
       ) = None,
+      audios: (
+          np.ndarray | list[np.ndarray | list[np.ndarray] | None] | None
+      ) = None,
+      max_audio_length: int | None = None,
+      max_audio_clips: int | None = None,
   ) -> base_sampler.SamplerOutput:
     """Samples a completion of the input string.
 
@@ -764,6 +801,18 @@ class Sampler(base_sampler.BaseSampler):
       images: input images to process. Can be a string/array, list of
         strings/arrays, or list of list of strings/arrays depending on whether
         there is one, multiple, or varying number of images per batch.
+      audios: Raw audio waveforms. Can be a single array (batch_size=1), list of
+        arrays (multiple samples in a batch, each sample with one clip), or a
+        list of list of arrays (multiple clips for multiple samples in a batch).
+        A mix of these is also allowed. E.g. `[a1, [a2, a3], []]` would mean the
+        first sample has 1 audio clip (a1), the second sample has 2 audio clips
+        (a2 and a3), and the third sample has 0 audio clips.
+      max_audio_length: Maximum length of audio waveforms. If specified, audio
+        input to the model will be padded upto this length. Specify to avoid
+        recompilation on different audio lengths across calls.
+      max_audio_clips: Maximum number of audio clips in a sample. If specified,
+        audio input to the model will be padded upto this count. Specify to
+        avoid recompilation on different number of clips across calls.
 
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
@@ -777,10 +826,37 @@ class Sampler(base_sampler.BaseSampler):
 
     tokens = [self.tokenize(x) for x in input_strings]
 
-    processed_images = images
-    if images is not None and self.image_processor is not None:
-      processed_images = self.image_processor(images)
+    is_gemma4 = self.transformer.__class__.__name__ == 'Gemma4'
+
+    processed_images = None
+    if is_gemma4 and images is not None:
+      assert hasattr(self.transformer, 'vision_encoder')
+      assert self.transformer.vision_encoder is not None
+      processed_images, tokens = image_processor.process_gemma4_inputs(
+          images,
+          tokens,  # pyrefly: ignore[bad-argument-type]
+          self.transformer.vision_encoder,
+          self.tokenizer.pad_id(),
+      )
+
+    elif images is not None and self.image_processor is not None:
+      processed_images = self.image_processor(images)  # pyrefly: ignore[bad-argument-type]
       processed_images = jnp.array(processed_images)
+
+    processed_audios = None
+    if audios is not None:
+      if is_gemma4:
+        assert hasattr(self.transformer, 'audio_encoder')
+        assert self.transformer.audio_encoder is not None
+        processed_audios, tokens = audio_processor.process_gemma4_inputs(
+            audios=audios,  # pyrefly: ignore[bad-argument-type]
+            tokens=tokens,  # pyrefly: ignore[bad-argument-type]
+            audio_encoder=self.transformer.audio_encoder,
+            max_audio_length=max_audio_length,
+            max_audio_clips=max_audio_clips,
+        )
+      else:
+        raise NotImplementedError('Audio support only implemented for Gemma4.')
 
     max_tokens_length = max(len(x) for x in tokens)
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
@@ -788,7 +864,7 @@ class Sampler(base_sampler.BaseSampler):
 
     all_input_ids = np.array([
         utils.pad_to_length(
-            x,
+            x,  # pyrefly: ignore[bad-argument-type]
             target_length=max_prompt_length,
             pad_value=self.tokenizer.pad_id(),
             left=True,
@@ -804,9 +880,9 @@ class Sampler(base_sampler.BaseSampler):
       )
 
     if seed is None:
-      seed = jax.random.PRNGKey(0)
+      seed = jax.random.PRNGKey(0)  # pyrefly: ignore[bad-assignment]
     elif isinstance(seed, int):
-      seed = jax.random.PRNGKey(seed)
+      seed = jax.random.PRNGKey(seed)  # pyrefly: ignore[bad-assignment]
     sampling_state = self.init_sample_state(
         jnp.array(all_input_ids),
         include_logits=return_logits,
@@ -815,14 +891,16 @@ class Sampler(base_sampler.BaseSampler):
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
-        seed=seed,
+        seed=seed,  # pyrefly: ignore[bad-argument-type]
         beam_size=beam_size,
         include_logprobs=return_logprobs,
     )
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state,
         sampling_state,
-        processed_images,
+        images=processed_images,
+        audios=processed_audios,
+        echo=echo,
     )
 
     sampling_state = self._compiled_decode_fn(
@@ -864,27 +942,27 @@ class Sampler(base_sampler.BaseSampler):
           self.tokenizer.decode(tokens[:length].tolist())
           for tokens, length in zip(out_tokens, lengths)
       ]
+      out_logprobs = []
       if return_logprobs:
-        out_logprobs = []
+        token_buffers = jax.device_get(token_buffers)
+        final_logprobs_buffer = jax.device_get(final_logprobs_buffer)
         for i in range(len(token_buffers)):
           start_idx = (
-              utils.find_first_non_pad_idx(
+              utils.np_find_first_non_pad_idx(
                   token_buffers[i], self.tokenizer.pad_id()
               )
               if echo
               else max_prompt_length
           )
           end_idx = (
-              utils.find_first_eos_idx(
+              utils.np_find_first_eos_idx(
                   token_buffers[i][max_prompt_length:], self.eos_ids
               )
               + max_prompt_length
           )
           length = end_idx - start_idx
           # Slice logprobs and pad to max_len
-          sliced_logprobs = jax.device_get(
-              final_logprobs_buffer[i][start_idx:end_idx]
-          )
+          sliced_logprobs = final_logprobs_buffer[i][start_idx:end_idx]
           padded_logprobs = np.pad(
               sliced_logprobs,
               (0, max_len - length),
@@ -897,28 +975,33 @@ class Sampler(base_sampler.BaseSampler):
       out_tokens = []
       out_logits = []
       out_logprobs = []
+      token_buffers = jax.device_get(token_buffers)
+      if return_logprobs:
+        final_logprobs_buffer = jax.device_get(final_logprobs_buffer)
+      if return_logits:
+        logits_buffers = jax.device_get(logits_buffers)
       for i in range(len(token_buffers)):
         token_buffer = token_buffers[i]
         start_idx = (
-            utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
+            utils.np_find_first_non_pad_idx(
+                token_buffer, self.tokenizer.pad_id()
+            )
             if echo
             else max_prompt_length
         )
         end_idx = (
-            utils.find_first_eos_idx(
+            utils.np_find_first_eos_idx(
                 token_buffer[max_prompt_length:], self.eos_ids
             )
             + max_prompt_length
         )
-        out_tokens.append(jax.device_get(token_buffer[start_idx:end_idx]))
+        out_tokens.append(token_buffer[start_idx:end_idx])
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
         if return_logprobs:
           # Extract logprobs for the generated tokens
           out_logprobs.append(
-              jax.device_get(
-                  final_logprobs_buffer[i][start_idx:end_idx]
-              ).tolist()
+              final_logprobs_buffer[i][start_idx:end_idx].tolist()
           )
 
       decoded_outputs = [

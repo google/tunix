@@ -29,6 +29,15 @@ class AlgorithmConfig:
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   reward_manager: str = "sequence-level"
+  # Optional symmetric clamp applied to per-token KL inside
+  # `common.compute_kl_divergence`. `None` (default) disables the clamp and
+  # preserves prior behavior bit-for-bit. Set to a positive float (e.g.
+  # `10000.0`) to bound rare outliers — useful when the trained policy
+  # briefly drifts far from the reference and the `low_var_kl` estimator's
+  # `exp(diff)` term saturates bf16 / overflows fp32 and poisons the loss
+  # for the rest of the step.
+  kl_clamp_value: float | None = None
+
 
   def __post_init__(self):
     valid_algo_variants = [

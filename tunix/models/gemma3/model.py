@@ -33,7 +33,6 @@ from tunix.utils import compat
 from tunix.utils import env_utils
 from tunix.utils import sharding_utils
 
-
 env_utils.setup_sharding_environment()
 
 
@@ -337,7 +336,7 @@ class Embedder(nnx.Module):
           vision_proj_dim,
           rngs=rngs,
           param_dtype=param_dtype,
-          sharding=shd_config.vision_soft_emb_norm_weight,
+          sharding=shd_config.vision_soft_emb_norm_weight,  # pyrefly: ignore[bad-argument-type]
       )
       self.mm_input_projection = Einsum(
           einsum_str='...TM,MD->...TD',
@@ -352,7 +351,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
-    x = sharding_utils.shard(x, self.shd_config.act_btd)
+    x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -361,7 +360,7 @@ class Embedder(nnx.Module):
 
   @jax.named_scope('embedder_encode_vision')
   def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    x = self.mm_soft_embedding_norm(x)
+    x = self.mm_soft_embedding_norm(x)  # pyrefly: ignore[bad-argument-type]
     x = self.mm_input_projection(x)
     return x
 
@@ -577,9 +576,9 @@ class Attention(nnx.Module):
       query_proj = self.q_einsum(x)
       key_proj, value_proj = self.kv_einsum(x)
 
-    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)
-    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)
-    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)
+    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = self._query_norm(query_proj)
     key_proj = self._key_norm(key_proj)
@@ -631,13 +630,13 @@ class Attention(nnx.Module):
       if segment_pos.shape[1] == 1:  # for decoding
         sliding_mask = create_sliding_window_mask(
             attn_mask,
-            sliding_window_size=self.sliding_window_size,
+            sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
         )
       else:  # for prefill
         all_ones = jnp.ones_like(attn_mask)
         sliding_mask = jnp.triu(
-            all_ones, -1 * self.sliding_window_size + 1
-        ) * jnp.tril(all_ones, self.sliding_window_size - 1)
+            all_ones, -1 * self.sliding_window_size + 1  # pyrefly: ignore[unsupported-operation]
+        ) * jnp.tril(all_ones, self.sliding_window_size - 1)  # pyrefly: ignore[unsupported-operation]
       attn_mask = sliding_mask * attn_mask
 
     padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
@@ -658,7 +657,7 @@ class Attention(nnx.Module):
       encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
+    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -685,7 +684,7 @@ class Attention(nnx.Module):
     ):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self, x, segment_pos, cache, attn_mask
       )
     else:
@@ -785,7 +784,7 @@ class FeedForward(nnx.Module):
     ff1 = self.up_proj(x)
     activations = gate_value * ff1
     activations = sharding_utils.shard(
-        activations, self.config.shd_config.act_btf
+        activations, self.config.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
     )
     outputs = self.down_proj(activations)
     return outputs
@@ -793,9 +792,9 @@ class FeedForward(nnx.Module):
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block.__func__)(self, x)
+      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
-      return self.block(x)
+      return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
 
 class DecoderLayer(nnx.Module):
@@ -812,7 +811,7 @@ class DecoderLayer(nnx.Module):
     self.pre_attention_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
     self.attn = Attention(
@@ -837,13 +836,13 @@ class DecoderLayer(nnx.Module):
     self.post_attention_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
     self.pre_ffw_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
     self.mlp = FeedForward(
@@ -853,7 +852,7 @@ class DecoderLayer(nnx.Module):
     self.post_ffw_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
 
@@ -890,7 +889,7 @@ class DecoderLayer(nnx.Module):
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.config.remat_config == RematConfig.DECODER:
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self, x, segment_pos, cache, attn_mask
       )
     else:
@@ -909,7 +908,7 @@ class RMSNorm(nnx.Module):
       param_dtype: jnp.dtype = jnp.bfloat16,
   ):
     self.scale = nnx.Param(
-        nnx.initializers.zeros_init()(rngs.params(), dim).astype(param_dtype),
+        nnx.initializers.zeros_init()(rngs.params(), dim).astype(param_dtype),  # pyrefly: ignore[bad-argument-type]
         sharding=sharding,
     )
 
@@ -966,7 +965,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
-        sharding=config.shd_config.rms_norm_weight,
+        sharding=config.shd_config.rms_norm_weight,  # pyrefly: ignore[bad-argument-type]
         param_dtype=config.param_dtype,
     )
 
@@ -977,6 +976,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       cache: Cache | None = None,  # (sequence length L')
       attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
       output_hidden_states: bool = False,
+      skip_lm_head: bool = False,
       *,
       images: jaxtyping.Array | None = None,  # [B, H, W, C] or [B, N, H, W, C]
   ) -> tuple[jaxtyping.Array, Cache | None]:
@@ -991,6 +991,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
+      skip_lm_head: whether to skip the final lm head.
       images: Input images. If None, the model will not process images.
 
     Returns:
@@ -1011,9 +1012,9 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       with jax.named_scope(layer_name):
         layer_cache, x = layer(
             x,
-            positions,
+            positions,  # pyrefly: ignore[bad-argument-type]
             layer_cache,
-            attention_mask,
+            attention_mask,  # pyrefly: ignore[bad-argument-type]
         )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
@@ -1021,9 +1022,20 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
-    logits = self.embedder.decode(x)
 
+    if skip_lm_head:
+      return x, new_cache
+
+    logits = self.compute_final_logits(x)
     return logits, new_cache  # pytype: disable=bad-return-type
+
+  def compute_final_logits(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
+    """Computes the final logits from the model output."""
+    logits = self.embedder.decode(x).astype(jnp.float32)
+    return logits
 
   def _encode_and_get_inputs(
       self,
@@ -1137,8 +1149,9 @@ class Gemma3(BackendMappingMixin, nnx.Module):
   ):
     """Returns the positions and attention mask for the transformer."""
     token_placeholder_id = (
-        None if self.config.vision_config is None else
-        self.config.vision_config.soft_token_placeholder
+        None
+        if self.config.vision_config is None
+        else self.config.vision_config.soft_token_placeholder
     )
     return utils.get_attention_mask(
         tokens,

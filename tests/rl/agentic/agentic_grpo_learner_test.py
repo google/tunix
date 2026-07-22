@@ -96,14 +96,27 @@ def _mock_generate(
 ) -> base_rollout.RolloutOutput:
   del apply_chat_template, mode, micro_batch_size, trace_tags
   assert tokenizer is not None
+  if isinstance(prompts, str):
+    prompts = [prompts]
   batch_size = len(prompts)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
   tokens = [tokenizer.encode(text_i) for text_i in text]
   logprobs = [-np.random.rand(len(tokens[i])) for i in range(batch_size)]
+  prompt_tokens = []
+  for p in prompts:
+    if isinstance(p, str):
+      prompt_tokens.append(tokenizer.encode(p))
+    else:
+      prompt_tokens.append(tokenizer.encode(" ".join(m["content"] for m in p)))
+  max_p_len = max(len(pt) for pt in prompt_tokens)
+  padded_prompts = np.array([
+      np.pad(pt, (max(0, max_p_len - len(pt)), 0), constant_values=0)
+      for pt in prompt_tokens
+  ], dtype=np.int32)
   return base_rollout.RolloutOutput(
       text=text,
       tokens=tokens,
-      left_padded_prompt_tokens=np.ones((batch_size, 8), dtype=np.int32),
+      left_padded_prompt_tokens=padded_prompts,
       logits=None,
       logprobs=logprobs if output_logprobs else None,
   )
@@ -198,6 +211,9 @@ class MockChatParser:
   @property
   def assistant_token(self):
     return "Assistant: "
+
+  def update_assistant_end_tokens(self, tokens):
+    return tokens, 0
 
 
 class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
@@ -306,7 +322,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       results.append(item)
 
     prompt_ids = [r.prompt_ids[0] for r in results]
-    self.assertEqual(prompt_ids, [0, 0, 0, 0, 1, 1, 1, 1])
+    self.assertEqual(prompt_ids, [0, 0, 1, 1])
 
   def test_grpo_config_validation(self):
     with self.assertRaisesRegex(
@@ -505,9 +521,97 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       _, kwargs = mock_get_ref.call_args_list[0]
       self.assertEqual(kwargs["prompt_tokens"].shape[0], 4)
 
-      # For each batch of 4 trajectories, it does 2 iterations.
-      # So update_actor should be called 2 * 2 = 4 times!
-      self.assertEqual(mock_update_actor.call_count, 4)
+      # The full batch has 2 microbatches.
+      # First iteration parallelized: 2 calls (1 per microbatch).
+      # Remaining 1 iteration: 1 call (passing the full batch of 2 microbatches).
+      # Total: 3 calls.
+      self.assertEqual(mock_update_actor.call_count, 3)
+
+  def test_compute_logps_chunk_size(self):
+    vocab = test_common.MockVocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=100,
+            max_steps=1,
+            mini_batch_size=2,
+            train_micro_batch_size=2,
+            compute_logps_micro_batch_size=2,
+            compute_logps_chunk_size=4,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        loss_algo="grpo",
+        max_response_length=10,
+    )
+    grpo_learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
+        chat_parser=MockChatParser(),
+    )
+
+    train_ds = _dummy_dataset(
+        MySource(data=["1", "2"], repeat=1), batch_size=2
+    )
+
+    with (
+        mock.patch.object(
+            rl_common,
+            "compute_per_token_logps",
+            wraps=rl_common.compute_per_token_logps,
+        ) as mock_compute_logps,
+        mock.patch.object(
+            rl_cluster,
+            "generate",
+            side_effect=self._mock_generate,
+        ),
+    ):
+      grpo_learner.train(train_ds)
+
+      # Ensure compute_per_token_logps was called.
+      self.assertGreater(mock_compute_logps.call_count, 0)
+
+      # Verify that at least one call passed chunk_size=4.
+      chunk_sizes = [
+          call.kwargs.get("chunk_size")
+          for call in mock_compute_logps.call_args_list
+      ]
+      self.assertIn(4, chunk_sizes)
 
   @parameterized.parameters("grpo", "gspo-token")
   def test_grpo_loss_fn(self, loss_algo):
@@ -557,21 +661,19 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         algo_config.policy_loss_fn
     )
-    loss, aux = policy_loss_fn(
+    loss_output = policy_loss_fn(
         model=MockModel(rngs=nnx.Rngs(0)),
         train_example=train_example,
         algo_config=algo_config,
         pad_id=0,
         eos_id=2,
     )
+    loss = loss_output.primary_loss.compute()
+    aux = loss_output.aux_metrics
     chex.assert_shape(loss, ())
     self.assertIn("kl", aux)
 
-  @parameterized.named_parameters(
-      dict(testcase_name="unmasked", apply_masking=False),
-      dict(testcase_name="masked", apply_masking=True),
-  )
-  def test_grpo_loss_fn_respects_mask(self, apply_masking):
+  def test_grpo_loss_fn_respects_mask(self):
     seq_len = 8
     prompt_ids = jnp.asarray(
         [
@@ -585,8 +687,6 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     completion_ids = jnp.ones((4, seq_len), dtype=jnp.int32)
     completion_mask = jnp.ones((4, seq_len), dtype=jnp.bool_)
     # Two prompts with two generations each.
-    # Prompt 1 has a non-degenerate advantage group; prompt 2 is degenerate
-    # (which would be filtered in _process_results with degenerate_group_masking=True).
     advantages = jnp.asarray([-1.0, 1.0, 0.0, 0.0], dtype=jnp.float32)
     ref_per_token_logps = jnp.asarray(
         [
@@ -616,18 +716,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             None,
         )
 
-    if apply_masking:
-      # Masked example (simulating what _process_results would do)
-      final_completion_mask = completion_mask.at[2:].set(0)
-    else:
-      # Unmasked example
-      final_completion_mask = completion_mask
-
     train_example = agentic_grpo_learner.TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_ids > -1,
         completion_ids=completion_ids,
-        completion_mask=final_completion_mask,
+        completion_mask=completion_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         old_per_token_logps=None,
@@ -645,7 +738,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     policy_loss_fn = function_registry.get_policy_loss_fn(config.policy_loss_fn)
 
     model = MockModel(rngs=nnx.Rngs(0))
-    loss, _ = policy_loss_fn(
+    loss_output = policy_loss_fn(
         model=model,
         train_example=train_example,
         algo_config=config,
@@ -672,15 +765,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     per_sequence_loss = -advantages + config.beta * per_token_kl[:, 0]
 
-    if apply_masking:
-      expected_loss = float(jnp.mean(per_sequence_loss[:2]))
-    else:
-      expected_loss = float(jnp.mean(per_sequence_loss))
+    expected_loss = float(jnp.mean(per_sequence_loss))
 
+    loss = loss_output.primary_loss.compute()
     np.testing.assert_allclose(loss, expected_loss, rtol=1e-6, atol=1e-6)
 
   def test_process_results_extracts_assistant_text(self):
     class MockTraj:
+
       def __init__(self, index):
         self.traj = {
             "conversation_text": [
@@ -701,6 +793,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     trajectories = [MockTraj(0), MockTraj(1)]
 
     extracted_completions = []
+
     def mock_compute_rewards(prompts, completions, **kwargs):
       extracted_completions.extend(completions)
       return jnp.ones(len(completions), dtype=jnp.float32)
@@ -754,7 +847,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         chat_parser=MockChatParser(),
     )
 
-    with mock.patch.object(learner, "_compute_rewards", side_effect=mock_compute_rewards):
+    with mock.patch.object(
+        learner, "_compute_rewards", side_effect=mock_compute_rewards
+    ):
       with mock.patch.object(
           learner.rl_cluster,
           "get_ref_per_token_logps",
@@ -765,11 +860,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
 
-  @parameterized.named_parameters(
-      dict(testcase_name="masking_disabled", masking=False),
-      dict(testcase_name="masking_enabled", masking=True),
-  )
-  def test_process_results_masks_zero_advantage_group(self, masking):
+  def test_process_results_zero_advantage_group(self):
     class MockTraj:
 
       def __init__(
@@ -844,7 +935,6 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         epsilon=0.2,
         num_generations=2,
         loss_algo="grpo",
-        degenerate_group_masking=masking,
         max_response_length=10,
     )
 
@@ -864,16 +954,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       [res_group1] = learner._process_results(group1)
       [res_group2] = learner._process_results(group2)
 
-      # Group 1 should always be intact as it's non-degenerate
       self.assertTrue(jnp.any(res_group1.completion_mask > 0))
-
-      # Group 2 should be masked based on the 'masking' parameter
-      if masking:
-        # Masking enabled: degenerate group should be masked out
-        self.assertFalse(jnp.any(res_group2.completion_mask > 0))
-      else:
-        # Masking disabled: degenerate group should remain intact
-        self.assertTrue(jnp.any(res_group2.completion_mask > 0))
+      self.assertTrue(jnp.any(res_group2.completion_mask > 0))
 
       # Test group with missing assistant message
       group3 = [
@@ -881,10 +963,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           MockTraj(5, "group3", 0.0),
       ]
       [res_group3] = learner._process_results(group3)
-      if masking:
-        self.assertFalse(jnp.any(res_group3.completion_mask > 0))
-      else:
-        self.assertTrue(jnp.any(res_group3.completion_mask > 0))
+
+      self.assertTrue(jnp.any(res_group3.completion_mask > 0))
 
       # Test group with partially missing old_logprobs
       group4 = [
@@ -1601,6 +1681,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         "generation/completions/mean_length",
         "generation/completions/max_length",
         "generation/completions/min_length",
+        "generation/completions/mean_raw_length",
+        "generation/completions/max_raw_length",
+        "generation/completions/min_raw_length",
         "generation/completions/clip_ratio",
         "perf/global_step_time",
         "global/test_metric",

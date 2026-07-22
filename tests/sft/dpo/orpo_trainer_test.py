@@ -155,13 +155,15 @@ class ORPOTrainerTest(parameterized.TestCase):
         "odds_ratio",
     ]:
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           orpo_trainer._train_steps,
       )
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history("", metric_name, "eval"),
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
+              "", metric_name, "eval"
+          ),
           3,
       )
 
@@ -219,7 +221,7 @@ class ORPOTrainerTest(parameterized.TestCase):
         "rewards/accuracy",
     ]:
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           orpo_trainer._train_steps,
@@ -231,7 +233,7 @@ class ORPOTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     # Use negative log probs (as they should be in reality)
     per_token_logps = -np.abs(np.random.rand(8, 4))
-    completion_mask = np.ones((8, 4))
+    completion_mask = jnp.ones((8, 4))
     token_logps = (per_token_logps * completion_mask).sum(axis=-1)
 
     batch_size = token_logps.shape[0]
@@ -251,15 +253,18 @@ class ORPOTrainerTest(parameterized.TestCase):
     with mock.patch.object(
         orpo_lib,
         "compute_logps",
-        return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps)),
+        return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps), None),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      loss_output = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
           lambda_orpo=0.1,
           label_smoothing=0,
       )
+      loss = loss_output.primary_loss.compute()
+      aux = loss_output.aux_metrics
+
       # Loss should be a scalar and finite
       self.assertEqual(loss.shape, ())
       self.assertTrue(jnp.isfinite(loss))
@@ -274,8 +279,180 @@ class ORPOTrainerTest(parameterized.TestCase):
       self.assertIn("odds_ratio", aux)
 
       # Check that accuracy is between 0 and 1
-      self.assertGreaterEqual(aux["rewards/accuracy"], 0.0)
-      self.assertLessEqual(aux["rewards/accuracy"], 1.0)
+      self.assertGreaterEqual(aux["rewards/accuracy"].compute(), 0.0)
+      self.assertLessEqual(aux["rewards/accuracy"].compute(), 1.0)
+
+  def test_compute_logps_with_prompt_loss(self):
+    """Test compute_logps directly to ensure correct slicing when enable_prompt_loss_orpo=True."""
+    tokenizer = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=tokenizer.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    # 2 prompts (one is left-padded with 0), 2 chosen completions, 2 rejected completions
+    # Prompt 1: [1, 2, 3, 4]
+    # Prompt 2: [0, 1, 2, 3] (left-padded)
+    # Completions (length 3):
+    # Chosen 1: [10, 11, 0]
+    # Chosen 2: [12, 13, 14]
+    # Rejected 1: [20, 21, 0]
+    # Rejected 2: [15, 0, 0]
+    input_ids = jnp.array([
+        [1, 2, 3, 4, 10, 11, 0],  # Prompt + Chosen
+        [0, 1, 2, 3, 12, 13, 14],  # Prompt (left-padded) + Chosen
+        [1, 2, 3, 4, 20, 21, 0],  # Prompt + Rejected
+        [0, 1, 2, 3, 15, 0, 0],  # Prompt (left-padded) + Rejected
+    ])
+
+    completion_mask = jnp.array([
+        [1, 1, 0],
+        [1, 1, 1],
+        [1, 1, 0],
+        [1, 0, 0],
+    ])
+
+    full_mask = (input_ids != 0).astype(jnp.int32)
+    positions = orpo_lib.common.build_positions_from_mask(full_mask)
+    attention_mask = orpo_lib.common.make_causal_attn_mask(full_mask)
+
+    chosen_logps, rejected_logps, prompt_chosen_logps = orpo_lib.compute_logps(
+        model,
+        input_ids,
+        positions,
+        attention_mask,
+        logits_to_keep=3,
+        completion_mask=completion_mask,
+        enable_prompt_loss_orpo=True,
+        full_mask=full_mask,
+    )
+
+    # Verify shapes
+    self.assertEqual(chosen_logps.shape, (2,))
+    self.assertEqual(rejected_logps.shape, (2,))
+    self.assertEqual(prompt_chosen_logps.shape, (2,))
+
+    # Let's also verify that they are finite
+    self.assertTrue(jnp.all(jnp.isfinite(chosen_logps)))
+    self.assertTrue(jnp.all(jnp.isfinite(rejected_logps)))
+    self.assertTrue(jnp.all(jnp.isfinite(prompt_chosen_logps)))
+
+    # Verify that prompt_chosen_logps (prompt + completion) is mathematically distinct
+    # and strictly less than chosen_logps (completion only) due to summing negative prompt log-probabilities.
+    self.assertFalse(jnp.allclose(chosen_logps, prompt_chosen_logps))
+    self.assertTrue(jnp.all(prompt_chosen_logps < chosen_logps))
+
+  def test_orpo_loss_fn_with_prompt_loss(self):
+    """Test ORPO loss function directly with enable_prompt_loss_orpo=True."""
+    np.random.seed(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    # Use negative log probs
+    per_token_logps = -np.abs(np.random.rand(8, 4))
+    completion_mask = jnp.ones((8, 4))
+    token_logps = (per_token_logps * completion_mask).sum(axis=-1)
+
+    batch_size = token_logps.shape[0]
+    chosen_logps = token_logps[: batch_size // 2]
+    rejected_logps = token_logps[batch_size // 2 :]
+    prompt_chosen_logps = chosen_logps * 1.5
+
+    train_example = orpo_lib.TrainExample(
+        input_ids=jnp.arange(0, 32).reshape(8, 4),
+        positions=jnp.ones((8, 4)),
+        attention_mask=jnp.ones((8, 4, 4)),
+        ref_chosen_logps=None,
+        ref_rejected_logps=None,
+        completion_mask=completion_mask,
+        logits_to_keep=4,
+        full_mask=jnp.ones((8, 8)),
+    )
+
+    with mock.patch.object(
+        orpo_lib,
+        "compute_logps",
+        return_value=(
+            jnp.array(chosen_logps),
+            jnp.array(rejected_logps),
+            jnp.array(prompt_chosen_logps),
+        ),
+    ):
+      out = orpo_lib.dpo_loss_fn(
+          model,
+          train_example,
+          algorithm="orpo",
+          lambda_orpo=0.1,
+          label_smoothing=0,
+          enable_prompt_loss_orpo=True,
+      )
+      loss = out.primary_loss.compute()
+      aux = {k: v.compute() for k, v in out.aux_metrics.items()}
+
+      # Assert against mathematically-verified golden values
+      self.assertEqual(loss.shape, ())
+      self.assertTrue(jnp.isfinite(loss))
+      np.testing.assert_allclose(loss, 3.494651, atol=1e-4)
+      self.assertIn("sft_loss", aux)
+      np.testing.assert_allclose(aux["sft_loss"], 3.423784, atol=1e-4)
+      np.testing.assert_allclose(aux["or_loss"], 0.708663, atol=1e-4)
+
+  def test_orpo_loss_fn_with_average_log_prob(self):
+    """Test ORPO loss function directly with average_log_prob_orpo=True."""
+    np.random.seed(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    # Use negative log probs
+    per_token_logps = -np.abs(np.random.rand(8, 4))
+    # Let's make completion masks have different lengths to truly test division
+    completion_mask = jnp.array([
+        [1, 1, 0, 0],
+        [1, 1, 1, 0],
+        [1, 1, 1, 1],
+        [1, 0, 0, 0],
+        [1, 1, 0, 0],
+        [1, 1, 1, 0],
+        [1, 1, 1, 1],
+        [1, 0, 0, 0],
+    ])
+    token_logps = (per_token_logps * completion_mask).sum(axis=-1)
+
+    batch_size = token_logps.shape[0]
+    chosen_logps = token_logps[: batch_size // 2]
+    rejected_logps = token_logps[batch_size // 2 :]
+
+    train_example = orpo_lib.TrainExample(
+        input_ids=jnp.arange(0, 32).reshape(8, 4),
+        positions=jnp.ones((8, 4)),
+        attention_mask=jnp.ones((8, 4, 4)),
+        ref_chosen_logps=None,
+        ref_rejected_logps=None,
+        completion_mask=completion_mask,
+        logits_to_keep=4,
+    )
+
+    with mock.patch.object(
+        orpo_lib,
+        "compute_logps",
+        return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps), None),
+    ):
+      out = orpo_lib.dpo_loss_fn(
+          model,
+          train_example,
+          algorithm="orpo",
+          lambda_orpo=0.1,
+          label_smoothing=0,
+          average_log_prob_orpo=True,
+      )
+      loss = out.primary_loss.compute()
+      aux = {k: v.compute() for k, v in out.aux_metrics.items()}
+
+      # Assert against mathematically-verified golden values
+      self.assertEqual(loss.shape, ())
+      self.assertTrue(jnp.isfinite(loss))
+      np.testing.assert_allclose(loss, 0.671129, atol=1e-4)
+      self.assertIn("sft_loss", aux)
+      np.testing.assert_allclose(aux["sft_loss"], 0.592339, atol=1e-4)
+      np.testing.assert_allclose(aux["or_loss"], 0.787900, atol=1e-4)
+
+
 
   def test_orpo_prepare_inputs_for_strings(self):
     tokenizer = tc.MockVocab()

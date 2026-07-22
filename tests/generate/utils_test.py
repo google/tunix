@@ -176,7 +176,7 @@ class UtilsTest(parameterized.TestCase):
     ]
     expected = [-1.71, -0.37, 0.0]
     self.assertEqual(
-        utils.get_logprobs_from_vllm_output(token_ids, logprobs),
+        utils.get_logprobs_from_vllm_output(token_ids, logprobs),  # pyrefly: ignore[bad-argument-type]
         expected,
     )
 
@@ -184,7 +184,7 @@ class UtilsTest(parameterized.TestCase):
     token_ids = [100, 200]
     logprobs = [{101: Logprob(-0.5)}, {200: Logprob(-1.2)}]
     with self.assertRaises(ValueError):
-      utils.get_logprobs_from_vllm_output(token_ids, logprobs)
+      utils.get_logprobs_from_vllm_output(token_ids, logprobs)  # pyrefly: ignore[bad-argument-type]
 
   @parameterized.named_parameters(
       ("none_logprobs", [], None),
@@ -469,8 +469,17 @@ class UtilsTest(parameterized.TestCase):
 
     # Mock source state (Tunix style)
     src_params = {
+        "layers.0.attn.q_einsum.w": MockParam(
+            jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8)
+        ),
         "layers.0.attn.kv_einsum.w": MockParam(
             jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
+        ),
+        "layers.0.mlp.gate_proj.kernel": MockParam(
+            jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
+        ),
+        "layers.0.mlp.up_proj.kernel": MockParam(
+            jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
         ),
         "layers.0.moe.gating_einsum": MockParam(
             jnp.arange(4 * 2 * 8 * 16, dtype=jnp.float32).reshape(4, 2, 8, 16)
@@ -483,11 +492,11 @@ class UtilsTest(parameterized.TestCase):
 
     # Mock destination state (vLLM Jax backend style)
     dst_params = {
-        "model.layers.0.self_attn.k_proj.weight": MockParam(
-            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        "model.layers.0.self_attn.qkv_proj.weight": MockParam(
+            jnp.zeros((16, 64), dtype=jnp.float32)
         ),
-        "model.layers.0.self_attn.v_proj.weight": MockParam(
-            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        "model.layers.0.mlp.gate_up_proj.weight": MockParam(
+            jnp.zeros((16, 64), dtype=jnp.float32)
         ),
         "model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
             jnp.zeros((4, 2, 8, 16), dtype=jnp.float32)
@@ -513,23 +522,31 @@ class UtilsTest(parameterized.TestCase):
     )
 
     # Assertions
-    src_val = jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
-    k_val_src = src_val[0]
-    v_val_src = src_val[1]
+    q_val = jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8)
+    kv_val = jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
+    k_val = kv_val[0]
+    v_val = kv_val[1]
 
-    expected_k = jnp.transpose(k_val_src, (1, 0, 2))
-    expected_v = jnp.transpose(v_val_src, (1, 0, 2))
+    q_val_t = jnp.reshape(jnp.transpose(q_val, (1, 0, 2)), (16, -1))
+    k_val_t = jnp.reshape(jnp.transpose(k_val, (1, 0, 2)), (16, -1))
+    v_val_t = jnp.reshape(jnp.transpose(v_val, (1, 0, 2)), (16, -1))
+
+    expected_qkv = jnp.concatenate([q_val_t, k_val_t, v_val_t], axis=-1)
+
+    gate_val = jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
+    up_val = jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
+    expected_gate_up = jnp.concatenate([gate_val, up_val], axis=-1)
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.k_proj.weight"],
-            expected_k,
+            new_tgt_state.params["model.layers.0.self_attn.qkv_proj.weight"],
+            expected_qkv,
         )
     )
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.v_proj.weight"],
-            expected_v,
+            new_tgt_state.params["model.layers.0.mlp.gate_up_proj.weight"],
+            expected_gate_up,
         )
     )
 

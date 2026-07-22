@@ -29,13 +29,13 @@ from typing import Any, Dict, Iterator, Sequence
 from absl import logging
 import dotenv
 import jax
-import numpy as np
 import omegaconf
 import optax
 import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
+from tunix.utils import mesh as mesh_lib
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
@@ -77,10 +77,19 @@ def _normalize_cli_override(schema_value: Any, override_value: Any) -> Any:
   OmegaConf.from_cli interprets CLI values like key="" as None. For string
   fields we want to preserve the user's intent and treat that as an empty
   string, including for nested dictionary overrides.
+
+  Args:
+    schema_value: Pre-existing schema value for reference.
+    override_value: Proposed override value.
+
+  Returns:
+    The normalized override value.
   """
   if override_value is None and isinstance(schema_value, str):
     return ""
-  if isinstance(schema_value, (collections.abc.Mapping, omegaconf.DictConfig)) and isinstance(
+  if isinstance(
+      schema_value, (collections.abc.Mapping, omegaconf.DictConfig)
+  ) and isinstance(
       override_value, (collections.abc.Mapping, omegaconf.DictConfig)
   ):
     normalized = {}
@@ -96,6 +105,12 @@ def _can_override_nullable_schema(override_value: Any) -> bool:
   Nullable schema fields do not provide enough type information to route
   through `_yaml_types_to_parser`. In that case, preserve the CLI-parsed value
   directly, or the raw string from the environment.
+
+  Args:
+    override_value: Proposed override value.
+
+  Returns:
+    True if the override value is compatible.
   """
   return isinstance(
       override_value,
@@ -169,6 +184,8 @@ class HyperParameters:
   a command-line argument or override file.
   """
 
+  config: collections.OrderedDict[str, Any]
+
   def __init__(self, argv: list[str], **kwargs):
     # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
 
@@ -186,7 +203,7 @@ class HyperParameters:
       base_config_file = pathlib.Path(__file__).parent / argv[1]
     else:
       base_config_file = argv[1]
-    raw_data_from_yaml = self._load_config_from_yaml(base_config_file)
+    raw_data_from_yaml = self._load_config_from_yaml(base_config_file)  # pyrefly: ignore[bad-argument-type]
     self._validate_env_variable(raw_data_from_yaml)
     base_model_config = raw_data_from_yaml.get("model_config", {})
 
@@ -249,6 +266,12 @@ class HyperParameters:
 
     This narrows nested config sections that may otherwise be inferred as broad
     unions of scalars and mappings by static type checkers.
+
+    Args:
+      key: Key of config section.
+
+    Returns:
+      The mapped dictionary config section.
     """
     value = self.config.get(key)
     if value is None:
@@ -258,10 +281,19 @@ class HyperParameters:
           f"Expected config section {key!r} to be a mapping, got"
           f" {type(value).__name__}."
       )
+    if isinstance(value, omegaconf.DictConfig):
+      return omegaconf.OmegaConf.to_container(value, resolve=True)
     return dict(value)
 
   def _mutable_config_mapping(self, key: str) -> MutableMapping[str, Any]:
-    """Returns a mutable config section for in-place updates."""
+    """Returns a mutable config section for in-place updates.
+
+    Args:
+      key: Key of config section.
+
+    Returns:
+      The mutable mapping of the config section.
+    """
     value = self.config.get(key)
     if value is None:
       section: dict[str, Any] = {}
@@ -275,7 +307,15 @@ class HyperParameters:
     return value
 
   def _config_string(self, key: str, default: str = "") -> str:
-    """Returns a string config value with validation."""
+    """Returns a string config value with validation.
+
+    Args:
+      key: Key of config value.
+      default: Default fallback value if not set.
+
+    Returns:
+      The string config value.
+    """
     value = self.config.get(key, default)
     if value is None:
       return default
@@ -287,7 +327,15 @@ class HyperParameters:
     return value
 
   def _config_bool(self, key: str, default: bool = False) -> bool:
-    """Returns a boolean config value with validation."""
+    """Returns a boolean config value with validation.
+
+    Args:
+      key: Key of config value.
+      default: Default fallback value if not set.
+
+    Returns:
+      The boolean config value.
+    """
     value = self.config.get(key, default)
     if value is None:
       return default
@@ -353,7 +401,10 @@ class HyperParameters:
           f" {valid_tokenizer_type} is supported"
       )
     if tokenizer_type == "huggingface":
-      if "HF_TOKEN" not in os.environ:
+      # Only require HF_TOKEN when loading from HuggingFace Hub (not a local
+      # or CNS path).
+      is_local_path = tokenizer_path.startswith(("/", "gs://"))
+      if not is_local_path and "HF_TOKEN" not in os.environ:
         raise ValueError("Missing `HF_TOKEN` to access hf tokenizer")
       if not tokenizer_path:
         raise ValueError("tokenizer_path must be specified.")
@@ -423,41 +474,31 @@ class HyperParameters:
     supported_sources = collections.defaultdict(
         lambda: ["huggingface", "internal", "maxtext"]
     )
-    # TODO(b/467448875): Add support for other sources, such as kaggle for other
+    # TODO: b/467448875 - Add support for other sources, such as kaggle for other
     # models.
     supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
+    # TODO: support gcs, internal and maxtext for gemma4.
+    supported_sources["gemma4"] = ["kaggle", "huggingface"]
 
-    if model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
-      expected_sources = supported_sources["gemma3"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
-    elif model_name.startswith("gemma2") or model_name.startswith("gemma-2"):
-      expected_sources = supported_sources["gemma2"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
+    if model_name.startswith(("gemma4", "gemma-4")):
+      model_family = "gemma4"
+    elif model_name.startswith(("gemma3", "gemma-3")):
+      model_family = "gemma3"
+    elif model_name.startswith(("gemma2", "gemma-2")):
+      model_family = "gemma2"
     elif model_name.startswith("gemma"):
-      expected_sources = supported_sources["gemma"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
+      model_family = "gemma"
     else:
-      # Default case for other models
-      expected_sources = supported_sources["other"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
+      model_family = "other"
+
+    expected_sources = supported_sources[model_family]
+    if model_source not in expected_sources:
+      raise ValueError(
+          f"Model '{model_name}' must use source(s) {expected_sources}, but"
+          f" got '{model_source}'."
+      )
 
   def _get_nested_config(self, keys: Sequence[str]) -> Any:
     """Helper to retrieve a value from a nested dictionary."""
@@ -602,7 +643,7 @@ class HyperParameters:
 
     # Handle learning rate, potentially creating a schedule
     learning_rate_val = self._create_learning_rate(
-        optimizer_config, config_path_info
+        optimizer_config, config_path_info  # pyrefly: ignore[bad-argument-type]
     )
     if learning_rate_val is None and (
         "learning_rate" in inspect.signature(opt_func).parameters
@@ -617,7 +658,7 @@ class HyperParameters:
       )
 
     opt_kwargs = self._extract_kwargs(
-        opt_func, optimizer_config, config_path_info, learning_rate_val
+        opt_func, optimizer_config, config_path_info, learning_rate_val  # pyrefly: ignore[bad-argument-type]
     )
     # Wrap the optimizer function with inject_hyperparams so that
     # the learning rate can be tracked and logged during training.
@@ -633,8 +674,23 @@ class HyperParameters:
           f"Check if the arguments match the signature of optax.{opt_type}: {e}"
       ) from e
 
-  def _parse_mesh_config(self, model_key: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
-    """Validate and parse mesh configuration for a model key."""
+  def parse_mesh_config(
+      self, model_key: str
+  ) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Validates and parses the mesh shape and axis names for one model.
+
+    Args:
+      model_key: Config section name such as ``model_config`` or
+        ``actor_model_config``.
+
+    Returns:
+      A tuple ``(axis_shapes, axis_names)`` ready to pass to
+      ``tunix.utils.mesh.create_mesh``.
+
+    Raises:
+      ValueError: If the mesh config is missing, malformed, or internally
+        inconsistent.
+    """
     mesh_config = self.config[model_key].get("mesh")
     if not mesh_config:
 
@@ -693,49 +749,41 @@ class HyperParameters:
       )
     return tuple(axis_shapes), tuple(axis_names)
 
-  def create_mesh(self, model_key: str, devices: Sequence[Any] | None = None):
-    """Validate and extract mesh configuration from a dictionary.
+  def _parse_mesh_allocation_policy(self, model_key: str) -> str:
+    """Validates and returns the mesh allocation policy for one model.
 
-    Expects raw_keys to contain a 'mesh' key, which is a dictionary with 'shape'
-    and 'axis_names' keys.
+    Mesh allocation policy controls how Tunix chooses device subsets when a
+    mesh must be carved out of a larger device pool.
+
+    Supported values are:
+
+    * ``COMPACT``: prefer the smallest remaining region that can satisfy the
+      request.
+    * ``PERFORMANCE``: prefer the most cubical supported extracted shape.
+
+    When ``mesh.allocation_policy`` is omitted, this defaults to ``COMPACT``.
 
     Args:
-      model_key: A model key that contain raw mesh configuration. For example,
-        in rl, there are actor_model, critic_model and reference_model, each of
-        them could have different mesh configuration.
-      devices: Optional explicit device subset to use for the mesh. When
-        provided, the mesh shape must exactly match the number of assigned
-        devices.
+      model_key: Config section name such as ``model_config`` or
+        ``actor_model_config``.
 
     Returns:
-      A tuple containing (axis_shapes, axis_names), both as tuples.
+      The normalized allocation policy string.
 
     Raises:
-      ValueError: If the mesh configuration is missing, malformed, or invalid.
+      ValueError: If the mesh config is missing or the policy value is not
+        supported.
     """
-
-    axis_shapes, axis_names = self._parse_mesh_config(model_key)
-    num_devices = len(devices) if devices is not None else jax.device_count()
-    if np.prod(axis_shapes) > num_devices:
+    mesh_config = self.config[model_key].get("mesh")
+    if not mesh_config:
+      raise ValueError("Missing 'mesh' configuration in raw_keys.")
+    if not isinstance(mesh_config, collections.abc.Mapping):
       raise ValueError(
-          f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
-          f"but found {num_devices}."
+          "The 'mesh' configuration must be a dictionary-like object, got"
+          f" {type(mesh_config)}."
       )
-    if devices is not None:
-      if np.prod(axis_shapes) != num_devices:
-        raise ValueError(
-            f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
-            f"but was assigned {num_devices}."
-        )
-      return jax.sharding.Mesh(
-          np.array(list(devices)).reshape(axis_shapes),
-          axis_names,
-          axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
-      )
-    return jax.make_mesh(
-        axis_shapes,
-        axis_names,
-        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
+    return mesh_lib.normalize_allocation_policy(
+        mesh_config.get("allocation_policy")
     )
 
   def obtain_training_config_dict(self, key):
@@ -803,7 +851,7 @@ class HyperParameters:
       raw_keys: collections.OrderedDict[str, Any],
       raw_data_from_yaml: dict[str, Any],
       overrides: list[str],
-      **kwargs,
+      **_kwargs,
   ):
     """Update the configuration from command line."""
 
@@ -816,7 +864,7 @@ class HyperParameters:
     updated_keys = []
 
     # Check for conflicts and unknown keys.
-    for k in raw_data_from_cmd_line:
+    for k in raw_data_from_cmd_line:  # pyrefly: ignore[not-iterable]
       if not k:
         continue
       if k not in raw_data_from_yaml:
@@ -828,7 +876,7 @@ class HyperParameters:
     for k in raw_data_from_yaml:
 
       # Error out if same key defined in cmd line and environment
-      if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
+      if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:  # pyrefly: ignore[not-iterable]
         raise ValueError(
             f"You are passing overrides by both CLI and ENV for `{k}`. This"
             " isn't allowed."
@@ -837,7 +885,7 @@ class HyperParameters:
       # Take value from base config yaml if key is not specified in command line
       # or environment.
       if (
-          k not in raw_data_from_cmd_line
+          k not in raw_data_from_cmd_line  # pyrefly: ignore[not-iterable]
           and yaml_key_to_env_key(k) not in os.environ
       ):
         # take the config value from the YAML file.
@@ -848,12 +896,14 @@ class HyperParameters:
       updated_keys.append(k)
 
       # take updated value from command line or enviornment
-      if k in raw_data_from_cmd_line:
-        new_proposal = raw_data_from_cmd_line[k]
+      if k in raw_data_from_cmd_line:  # pyrefly: ignore[not-iterable]
+        new_proposal = raw_data_from_cmd_line[k]  # pyrefly: ignore[bad-index, unsupported-operation]
       else:
         new_proposal = os.environ.get(yaml_key_to_env_key(k))
 
-      new_proposal = _normalize_cli_override(raw_data_from_yaml[k], new_proposal)
+      new_proposal = _normalize_cli_override(
+          raw_data_from_yaml[k], new_proposal
+      )
 
       if raw_data_from_yaml[k] is None:
         if new_proposal is None:
@@ -935,7 +985,7 @@ class HyperParameters:
         ):
           # Both are dictionaries, so recurse.
           # The recursive call uses the same self.replace_keys instance.
-          output[key] = self.update_dict(output_val, source_val)
+          output[key] = self.update_dict(output_val, source_val)  # pyrefly: ignore[bad-argument-type]
         else:
           # Otherwise (not both dictionaries), the source value overwrites.
           output[key] = copy.deepcopy(source_val)
@@ -991,7 +1041,7 @@ class HyperParameters:
         try:
           module = importlib.import_module(reward_fn_path)
           module_name = module.__name__
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-except
           logging.warning(
               "'%s' import failed: %s", reward_fn_path, e, exc_info=True
           )
@@ -1026,23 +1076,28 @@ class HyperParameters:
       loaded_module = module
       if self.config["verl_compatible"]:
 
-        def reward_fn(prompts, completions, reward_model, **kwargs):
+        def reward_fn(
+            prompts, completions, reward_model, *, lm=loaded_module, **kwargs
+        ):
           del prompts, kwargs
           ground_truths = reward_model["ground_truth"]
           return [
-              loaded_module.compute_score(c, gt)
+              lm.compute_score(c, gt)
               for c, gt in zip(completions, ground_truths)
           ]
 
         reward_fns.append(reward_fn)
 
       else:
-        # Get all defined functions in the file as reward functions
+        # Get all defined functions in the file as reward functions.
+        # We explicitly ignore functions whose names start with an underscore
+        # (_), ensuring private helper functions are never mistaken for
+        # reward functions.
         defined_functions = []
-        for _, member in inspect.getmembers(module):
-          if inspect.isfunction(member):
+        for name, member in inspect.getmembers(module):
+          if inspect.isfunction(member) and not name.startswith("_"):
             # Check if the function was defined in this module
-            if member.__module__ == module_name:
+            if member.__module__ == module_name:  # pyrefly: ignore[unbound-name]
               defined_functions.append(member)
         reward_fns.extend(defined_functions)
     return reward_fns

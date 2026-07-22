@@ -26,17 +26,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+
 # TODO(abheesht): We should move TokenizerAdapter outside `generate`.
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common
 from tunix.sft import peft_trainer
+from tunix.sft import utils as sft_utils
 from typing_extensions import override
 
-
 RawImageType = (
-    str
-    | np.ndarray
-    | list[str | np.ndarray | list[str | np.ndarray] | None]
+    str | np.ndarray | list[str | np.ndarray | list[str | np.ndarray] | None]
 )
 
 
@@ -100,11 +99,29 @@ class TrainExample:
   completion_mask: jax.Array
   logits_to_keep: int = flax.struct.field(pytree_node=False)
   images: jax.Array | None = None
+  full_mask: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class DPOTrainingConfig(peft_trainer.TrainingConfig):
-  """DPO/ORPO Training Config."""
+  """DPO/ORPO Training Config.
+
+  Attributes:
+    algorithm: "dpo" or "orpo".
+    beta: 𝛽 for KL penalty (DPO only).
+    lambda_orpo: Weight for preference loss (ORPO only).
+    label_smoothing: Label smoothing factor.
+    enable_prompt_loss_orpo: Whether to compute NLL/SFT loss over the full sequence
+      (prompt + completion) instead of response/completion only. Supported only
+      with ORPO (silently ignored for DPO). (ORPO paper Eq. 2 defines SFT loss
+      over prompt + completion, matching the official implementation by the
+      authors in xfactlab/orpo and Hugging Face TRL which default to computing
+      SFT loss over prompt + completion).
+    average_log_prob_orpo: Whether to use length-averaged log probabilities for SFT
+      and Odds Ratio losses. Supported only with ORPO (silently ignored for DPO).
+      (ORPO paper Eq. 3 uses length-averaged log probabilities, matching HF TRL
+      implementation).
+  """
 
   algorithm: str = "dpo"  # "dpo" or "orpo"
   beta: float = (
@@ -112,13 +129,15 @@ class DPOTrainingConfig(peft_trainer.TrainingConfig):
   )
   lambda_orpo: float = 0.1  # Weight for preference loss (ORPO only)
   label_smoothing: float = 0.0
+  enable_prompt_loss_orpo: bool = True
+  average_log_prob_orpo: bool = True
 
   # Should be specified only if your input has strings instead of tokenized IDs.
   max_prompt_length: int | None = None
   max_response_length: int | None = None
 
 
-@nnx.jit(static_argnums=(4,))
+@nnx.jit(static_argnums=(4, 7))
 def compute_logps(
     model,
     input_ids,
@@ -127,22 +146,49 @@ def compute_logps(
     logits_to_keep,
     completion_mask,
     images=None,
+    enable_prompt_loss_orpo: bool = False,
+    full_mask: jax.Array | None = None,
 ):
   """Computes the log probabilities for chosen and rejected tokens."""
-  token_logps = common.get_per_token_logps(
-      model,
-      input_tokens=input_ids,
-      positions=positions,
-      attn_mask=attention_mask,
-      logits_to_keep=logits_to_keep,
-      images=images,
-  )
-  token_logps = (token_logps * completion_mask).sum(axis=-1)
+  if enable_prompt_loss_orpo:
+    token_logps = common.get_per_token_logps(
+        model,
+        input_tokens=input_ids,
+        positions=positions,
+        attn_mask=attention_mask,
+        logits_to_keep=input_ids.shape[1] - 1,
+        images=images,
+    )
+    # Extract log probs for completion only
+    completion_len = completion_mask.shape[-1]
+    completion_logps = token_logps[:, -completion_len:]
+    completion_logps = (completion_logps * completion_mask).sum(axis=-1)
 
-  batch_size = token_logps.shape[0]
-  chosen_logps = token_logps[: batch_size // 2]
-  rejected_logps = token_logps[batch_size // 2 :]
-  return chosen_logps, rejected_logps
+    # Extract log probs for prompt + completion (excluding first token)
+    full_sequence_mask = full_mask[:, 1:]  # pyrefly: ignore[unsupported-operation]
+    full_logps = (token_logps * full_sequence_mask).sum(axis=-1)
+
+    batch_size = token_logps.shape[0]
+    chosen_logps = completion_logps[: batch_size // 2]
+    rejected_logps = completion_logps[batch_size // 2 :]
+    # logp for the prompt + completion.
+    prompt_chosen_logps = full_logps[: batch_size // 2]
+    return chosen_logps, rejected_logps, prompt_chosen_logps
+  else:
+    token_logps = common.get_per_token_logps(
+        model,
+        input_tokens=input_ids,
+        positions=positions,
+        attn_mask=attention_mask,
+        logits_to_keep=logits_to_keep,
+        images=images,
+    )
+    token_logps = (token_logps * completion_mask).sum(axis=-1)
+
+    batch_size = token_logps.shape[0]
+    chosen_logps = token_logps[: batch_size // 2]
+    rejected_logps = token_logps[batch_size // 2 :]
+    return chosen_logps, rejected_logps, None
 
 
 class DPOTrainer(peft_trainer.PeftTrainer):
@@ -210,11 +256,15 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
     if self.algorithm == "orpo":
       self.with_gen_model_input_fn(
-          lambda x: {
+          lambda x: {  # pyrefly: ignore[bad-argument-type]
               "train_example": x,
               "algorithm": "orpo",
               "lambda_orpo": self.dpo_config.lambda_orpo,
               "label_smoothing": self.dpo_config.label_smoothing,
+              "enable_prompt_loss_orpo": (
+                  self.dpo_config.enable_prompt_loss_orpo
+              ),
+              "average_log_prob_orpo": self.dpo_config.average_log_prob_orpo,
           }
       )
       self.gen_model_input_fn = lambda x: {
@@ -222,14 +272,18 @@ class DPOTrainer(peft_trainer.PeftTrainer):
           "algorithm": "orpo",
           "lambda_orpo": self.dpo_config.lambda_orpo,
           "label_smoothing": self.dpo_config.label_smoothing,
+          "enable_prompt_loss_orpo": self.dpo_config.enable_prompt_loss_orpo,
+          "average_log_prob_orpo": self.dpo_config.average_log_prob_orpo,
       }
     else:
       self.with_gen_model_input_fn(
-          lambda x: {
+          lambda x: {  # pyrefly: ignore[bad-argument-type]
               "train_example": x,
               "algorithm": "dpo",
               "beta": self.dpo_config.beta,
               "label_smoothing": self.dpo_config.label_smoothing,
+              "enable_prompt_loss_orpo": False,
+              "average_log_prob_orpo": False,
           }
       )
       self.gen_model_input_fn = lambda x: {
@@ -237,6 +291,8 @@ class DPOTrainer(peft_trainer.PeftTrainer):
           "algorithm": "dpo",
           "beta": self.dpo_config.beta,
           "label_smoothing": self.dpo_config.label_smoothing,
+          "enable_prompt_loss_orpo": False,
+          "average_log_prob_orpo": False,
       }
 
     self._has_aux = True
@@ -285,7 +341,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         )
 
       training_input = process_dpo_record(
-          record={
+          record={  # pyrefly: ignore[bad-argument-type]
               "prompts": training_input.prompts,
               "images": training_input.images,
               "chosen_responses": training_input.chosen_responses,
@@ -318,11 +374,11 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     # Duplicate images as well (for multimodal inputs only).
     images = training_input.images
     if images is not None:
-        images = jnp.concatenate([images, images], axis=0)
+      images = jnp.concatenate([images, images], axis=0)
 
     if hasattr(self.model, "get_attention_mask"):
       attention_mask = self.model.get_attention_mask(
-        input_ids, inputs_mask=mask
+          input_ids, inputs_mask=mask
       )
     else:
       attention_mask = common.make_causal_attn_mask(mask)
@@ -334,7 +390,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     ref_chosen_logps = None
     ref_rejected_logps = None
     if self._ref_model_exists:
-      ref_chosen_logps, ref_rejected_logps = compute_logps(
+      ref_chosen_logps, ref_rejected_logps, _ = compute_logps(
           self.ref_model,
           input_ids,
           positions,
@@ -352,6 +408,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         completion_mask=completion_mask,
         logits_to_keep=logits_to_keep,
         images=images,
+        full_mask=mask,
     )
 
   @override
@@ -390,7 +447,9 @@ def dpo_loss_fn(
     beta: float = 0.1,
     lambda_orpo: float = 0.1,
     label_smoothing: float = 0.0,
-) -> tuple[jax.Array, dict[str, jax.Array]]:
+    enable_prompt_loss_orpo: bool = False,
+    average_log_prob_orpo: bool = False,
+) -> sft_utils.LossOutput:
   """DPO/ORPO loss function.
 
   Args:
@@ -400,11 +459,14 @@ def dpo_loss_fn(
     beta: Weight for KL penalty (DPO only).
     lambda_orpo: Weight for preference loss (ORPO only).
     label_smoothing: Label smoothing factor.
+    enable_prompt_loss_orpo: Whether to compute NLL loss over prompt + completion.
+    average_log_prob_orpo: Whether to use length-averaged log probabilities.
 
   Returns:
     A tuple of (loss, auxiliary_metrics_dict).
   """
-  chosen_logps, rejected_logps = compute_logps(
+  # prompt_chosen_logps is logp for the prompt + completion (when enable_prompt_loss_orpo=True)
+  chosen_logps, rejected_logps, prompt_chosen_logps = compute_logps(
       model,
       train_example.input_ids,
       train_example.positions,
@@ -412,27 +474,46 @@ def dpo_loss_fn(
       train_example.logits_to_keep,
       train_example.completion_mask,
       images=train_example.images,
+      enable_prompt_loss_orpo=enable_prompt_loss_orpo,
+      full_mask=train_example.full_mask,
   )
 
   if algorithm == "orpo":
     # ORPO loss = L_SFT + λ * L_OR
     # Paper: https://arxiv.org/abs/2403.07691
 
-    # L_SFT: Supervised fine-tuning loss on chosen responses
-    # Normalize by sequence length as per Equation 2 in paper
     batch_size = train_example.completion_mask.shape[0] // 2
-    chosen_mask = train_example.completion_mask[:batch_size]
-    chosen_lengths = chosen_mask.sum(axis=-1)
-    chosen_lengths = jnp.maximum(chosen_lengths, 1.0)  # Avoid division by zero
+
+    if average_log_prob_orpo:
+      chosen_mask = train_example.completion_mask[:batch_size]
+      chosen_lengths = jnp.maximum(chosen_mask.sum(axis=-1), 1.0)
+
+      rejected_mask = train_example.completion_mask[batch_size:]
+      rejected_lengths = jnp.maximum(rejected_mask.sum(axis=-1), 1.0)
+
+      chosen_logps = chosen_logps / chosen_lengths
+      rejected_logps = rejected_logps / rejected_lengths
 
     # L_SFT = -(1/|y_w|) * Σ log P (Paper Equation 2)
-    sft_loss = -chosen_logps / chosen_lengths
+    # SFT log probs (can include prompt)
+    if enable_prompt_loss_orpo:
+      if average_log_prob_orpo:
+        chosen_full_mask = train_example.full_mask[:batch_size, 1:]  # pyrefly: ignore[unsupported-operation]
+        chosen_sft_lengths = jnp.maximum(chosen_full_mask.sum(axis=-1), 1.0)
+        sft_loss = -prompt_chosen_logps / chosen_sft_lengths
+      else:
+        sft_loss = -prompt_chosen_logps
+    else:
+      sft_loss = -chosen_logps
+    # Clip to prevent log1p(-exp(0)) -> log1p(-1) -> log(0) -> -inf/NaN
+    # when average log probabilities are extremely close to 0.0.
+    eps = 1e-7
+    chosen_logps = jnp.minimum(chosen_logps, -eps)
+    rejected_logps = jnp.minimum(rejected_logps, -eps)
 
     # L_OR: Odds ratio preference loss
     # Following HuggingFace TRL implementation exactly (Eqs. 4 and 7 from paper)
-    # Note: log1p(-exp(x)) requires x < 0 to avoid NaN. This works when log probs
-    # are averaged per token, but may produce NaN for summed log probs if sequences
-    # are long. TRL uses summed log probs and relies on them being negative.
+    # Using length-averaged log probabilities.
     log_odds = (chosen_logps - rejected_logps) - (
         jnp.log1p(-jnp.exp(chosen_logps)) - jnp.log1p(-jnp.exp(rejected_logps))
     )
@@ -453,19 +534,47 @@ def dpo_loss_fn(
     # Compute odds ratio for logging
     odds_ratio = jnp.exp(log_odds)
 
+    denominator = jnp.array(batch_size, dtype=jnp.float32)
     aux = {
-        "rewards/chosen": chosen_rewards.mean(),
-        "rewards/rejected": rejected_rewards.mean(),
-        "rewards/margin": (chosen_rewards - rejected_rewards).mean(),
-        "rewards/accuracy": (chosen_rewards > rejected_rewards).mean(),
-        "log_probs/chosen": chosen_logps.mean(),
-        "log_probs/rejected": rejected_logps.mean(),
-        "odds_ratio": odds_ratio.mean(),
-        "sft_loss": sft_loss.mean(),
-        "or_loss": or_loss.mean(),
+        "rewards/chosen": sft_utils.WeightedMetric(
+            chosen_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/rejected": sft_utils.WeightedMetric(
+            rejected_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/margin": sft_utils.WeightedMetric(
+            (chosen_rewards - rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "rewards/accuracy": sft_utils.WeightedMetric(
+            (chosen_rewards > rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "log_probs/chosen": sft_utils.WeightedMetric(
+            chosen_logps.sum(), denominator, min_denom=1.0
+        ),
+        "log_probs/rejected": sft_utils.WeightedMetric(
+            rejected_logps.sum(), denominator, min_denom=1.0
+        ),
+        "odds_ratio": sft_utils.WeightedMetric(
+            odds_ratio.sum(), denominator, min_denom=1.0
+        ),
+        "sft_loss": sft_utils.WeightedMetric(
+            sft_loss.sum(), denominator, min_denom=1.0
+        ),
+        "or_loss": sft_utils.WeightedMetric(
+            or_loss.sum(), denominator, min_denom=1.0
+        ),
     }
 
-    return total_loss.mean(), aux
+    return sft_utils.LossOutput(
+        primary_loss=sft_utils.WeightedMetric(
+            total_loss.sum(), denominator, min_denom=1.0
+        ),
+        aux_metrics=aux,
+    )
   else:
     # DPO loss
     chosen_log_ratio = chosen_logps
@@ -484,16 +593,39 @@ def dpo_loss_fn(
     chosen_rewards = beta * chosen_log_ratio
     rejected_rewards = beta * rejected_log_ratio
 
+    batch_size = train_example.completion_mask.shape[0] // 2
+    denominator = jnp.array(batch_size, dtype=jnp.float32)
     aux = {
-        "rewards/chosen": chosen_rewards.mean(),
-        "rewards/rejected": rejected_rewards.mean(),
-        "rewards/margin": (chosen_rewards - rejected_rewards).mean(),
-        "rewards/accuracy": (chosen_rewards > rejected_rewards).mean(),
-        "log_probs/chosen": chosen_logps.mean(),
-        "log_probs/rejected": rejected_logps.mean(),
+        "rewards/chosen": sft_utils.WeightedMetric(
+            chosen_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/rejected": sft_utils.WeightedMetric(
+            rejected_rewards.sum(), denominator, min_denom=1.0
+        ),
+        "rewards/margin": sft_utils.WeightedMetric(
+            (chosen_rewards - rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "rewards/accuracy": sft_utils.WeightedMetric(
+            (chosen_rewards > rejected_rewards).sum(),
+            denominator,
+            min_denom=1.0,
+        ),
+        "log_probs/chosen": sft_utils.WeightedMetric(
+            chosen_logps.sum(), denominator, min_denom=1.0
+        ),
+        "log_probs/rejected": sft_utils.WeightedMetric(
+            rejected_logps.sum(), denominator, min_denom=1.0
+        ),
     }
 
-    return losses.mean(), aux
+    return sft_utils.LossOutput(
+        primary_loss=sft_utils.WeightedMetric(
+            losses.sum(), denominator, min_denom=1.0
+        ),
+        aux_metrics=aux,
+    )
 
 
 def _generate_ids_and_masks(
@@ -524,7 +656,7 @@ def _tokenize(input_string: str, tokenizer: Any) -> jax.Array:
   input_ids = tokenizer.encode(input_string)
   bos_tok = [tokenizer.bos_id()] if tokenizer.bos_id() else []
   input_ids = jnp.array(
-    tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
+      tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
   )
   return input_ids
 
@@ -545,16 +677,18 @@ def _preprocess_dict(
       for field in tokenized_input_fields
       if field != "images"
   ):
-    return TrainingInput(**{
+    return TrainingInput(**{  # pyrefly: ignore[bad-argument-type]
         field: training_input.get(field, None)
         for field in tokenized_input_fields
     })
   elif all(
-    field in training_input for field in data_input_fields if field != "images"
+      field in training_input
+      for field in data_input_fields
+      if field != "images"
   ):
-    return DataInput(
-        **{field: training_input.get(field, None) for field in data_input_fields}
-    )
+    return DataInput(**{  # pyrefly: ignore[bad-argument-type]
+        field: training_input.get(field, None) for field in data_input_fields
+    })
   else:
     raise ValueError(
         "Training input must contain either tokenized fields "
@@ -583,9 +717,9 @@ def process_dpo_record(
   Args:
       record: A dictionary, containing "prompts", "images", "chosen_responses",
         "rejected_responses" as keys. For text fields, the values can be a
-        single string, or a list of strings. For `"images"`, the fields can be
-        a path (str), a NumPy array, list of paths, list of arrays, list of
-        lists of paths/arrays, or just None.
+        single string, or a list of strings. For `"images"`, the fields can be a
+        path (str), a NumPy array, list of paths, list of arrays, list of lists
+        of paths/arrays, or just None.
       tokenizer: The tokenizer or processor to use for converting text into
         token IDs.
       max_prompt_length: The maximum length for the tokenized prompts. Any
@@ -613,16 +747,16 @@ def process_dpo_record(
 
   # Only prompt is left padded, others are right padded.
   prompt_ids, prompt_mask = _generate_ids_and_masks(
-      prompts,
+      prompts,  # pyrefly: ignore[bad-argument-type]
       tokenizer,
       max_prompt_length,
       left_pad=True,
   )
   chosen_ids, chosen_mask = _generate_ids_and_masks(
-      chosen_responses, tokenizer, max_response_length, left_pad=False
+      chosen_responses, tokenizer, max_response_length, left_pad=False  # pyrefly: ignore[bad-argument-type]
   )
   rejected_ids, rejected_mask = _generate_ids_and_masks(
-      rejected_responses, tokenizer, max_response_length, left_pad=False
+      rejected_responses, tokenizer, max_response_length, left_pad=False  # pyrefly: ignore[bad-argument-type]
   )
   if images is not None:
     if image_processor is None:
@@ -641,7 +775,7 @@ def process_dpo_record(
     chosen_mask = jnp.squeeze(chosen_mask, axis=0)
     rejected_mask = jnp.squeeze(rejected_mask, axis=0)
     if images is not None:
-      images = jnp.squeeze(images, axis=0)
+      images = jnp.squeeze(images, axis=0)  # pyrefly: ignore[bad-argument-type]
 
   return TrainingInput(
       prompt_ids=prompt_ids,
@@ -650,7 +784,7 @@ def process_dpo_record(
       chosen_mask=chosen_mask,
       rejected_ids=rejected_ids,
       rejected_mask=rejected_mask,
-      images=images,
+      images=images,  # pyrefly: ignore[bad-argument-type]
   )
 
 

@@ -13,7 +13,8 @@
 # limitations under the License.
 """Common RL helper classes and functions."""
 
-from functools import partial  # pylint: disable=g-importing-member
+import functools
+import inspect
 from typing import Any, Iterable
 
 import flax
@@ -78,8 +79,8 @@ class RepeatIterable(Iterable[Any]):
 
     # Slice the rollout batch into mini-batches.
     for i in range(num_mini_batches):
-      start = i * self._mini_batch_size
-      end = start + self._mini_batch_size
+      start = i * self._mini_batch_size  # pyrefly: ignore[unsupported-operation]
+      end = start + self._mini_batch_size  # pyrefly: ignore[unsupported-operation]
       batch_indices = shuffled_indices[start:end]
 
       mini_batch = jtu.tree_map(
@@ -105,6 +106,7 @@ class TrainExample:
   old_per_token_logps: jax.Array | None
   segment_ids: jax.Array | None = None
   segment_positions: jax.Array | None = None
+  is_update_step: jax.Array | None = None
   # Truncated importance-sampling correction weights for off-policy
   # correction between the rollout sampler and the trainer. Per-token,
   # detached, multiplied into the policy-gradient loss BEFORE aggregation
@@ -117,6 +119,7 @@ def compute_kl_divergence(
     per_token_logps: jax.Array,
     ref_per_token_logps: jax.Array,
     method: str = "low_var_kl",
+    clamp_value: float | None = None,
 ) -> jax.Array:
   """Compute per token KL divergence between trained and reference policy.
 
@@ -132,6 +135,12 @@ def compute_kl_divergence(
     per_token_logps: Per token log probabilities from the trained policy.
     ref_per_token_logps: Per token log probabilities from the reference policy.
     method: KL penalty method. Defaults to "low_var_kl".
+    clamp_value: Optional symmetric clamp applied to the returned KL, i.e.
+      `clip(kl, -clamp_value, +clamp_value)`. `None` (default) disables the
+      clamp and preserves prior behavior. Set to a positive float (e.g.
+      `10000.0`) to bound rare outliers — useful when the trained policy briefly
+      drifts far from the reference and the `low_var_kl` estimator's `exp(diff)`
+      term can overflow fp32 / saturate bf16.
 
   Returns:
     KL divergence.
@@ -141,17 +150,21 @@ def compute_kl_divergence(
     ref_per_token_logps = ref_per_token_logps.astype(jnp.float32)
 
   if method == "kl":
-    return per_token_logps - ref_per_token_logps
+    kl = per_token_logps - ref_per_token_logps
   elif method == "mse_kl":
-    return 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
+    kl = 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
   elif method == "low_var_kl":
-    kl = ref_per_token_logps - per_token_logps
-    return jnp.exp(kl) - (kl) - 1
+    diff = ref_per_token_logps - per_token_logps
+    kl = jnp.exp(diff) - diff - 1
   else:
     raise ValueError(
         "`method` must be one of 'kl', 'mse_kl', 'low_var_kl'. Received:"
         f" {method}"
     )
+
+  if clamp_value is not None:
+    kl = jnp.clip(kl, -clamp_value, clamp_value)
+  return kl
 
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
@@ -200,13 +213,12 @@ def get_per_token_logps(
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@partial(jax.jit, static_argnames=("pad_id", "eos_id"))
+@functools.partial(jax.jit, static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
-    completion_mask: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
 ):
@@ -242,21 +254,10 @@ def process_ids(
     return prompt_completion_ids, segment_positions, attn_mask, None
 
   prompt_mask = prompt_tokens != pad_id
-
-  # Attention/RoPE-position mask MUST include every real token in the sequence.
-  # The caller-provided `completion_mask` (in multi-turn agentic learners) is
-  # the assistant-vs-env loss mask, with 0s on env tokens — using that for
-  # attention causes env-observation tokens to be masked out of context AND
-  # positions don't advance through them, so the trainer's logits for the
-  # first assistant token of turn k+1 are computed without seeing the env
-  # observation that triggered turn k+1, producing 30-50 nat sampler-trainer
-  # diffs at every turn boundary. Ignore the passed-in completion_mask for
-  # attention purposes; loss aggregation is the caller's responsibility.
-  del completion_mask
-  attn_completion_mask = completion_tokens != pad_id
+  completion_mask = completion_tokens != pad_id
 
   prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, attn_completion_mask], axis=-1
+      [prompt_mask, completion_mask], axis=-1
   )
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
@@ -273,14 +274,36 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask, input_seg_ids
 
 
-@partial(
+@functools.cache
+def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
+  """Determines if a class' call function contains a target argument and caches the result."""
+
+  try:
+    sig = inspect.signature(target_cls.__call__)
+    return (target_arg in sig.parameters) or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+  except Exception:
+    return False
+
+
+def model_call_contains(model, target_arg: str) -> bool:
+  """Determines if a model's call function contains a target argument"""
+
+  target_obj = model.transformer if hasattr(model, "transformer") else model
+
+  return _call_contains_by_type(type(target_obj), target_arg)
+
+
+@functools.partial(
     jax.jit,
     static_argnames=(
         "pad_id",
         "eos_id",
         "stop_gradient",
-        "return_logits",
+        "return_entropy",
         "temperature",
+        "chunk_size",
     ),
 )
 def compute_per_token_logps(
@@ -291,12 +314,12 @@ def compute_per_token_logps(
     pad_id: int,
     eos_id: int,
     images: jax.Array | None = None,
-    completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
-    return_logits: bool = False,
+    return_entropy: bool = False,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
     temperature: float = 1.0,
+    chunk_size: int = 0,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -313,12 +336,13 @@ def compute_per_token_logps(
     pad_id: pad token identifier.
     eos_id: end of sequence identifier.
     images: optional images array.
-    completion_mask: optional completion mask array.
     stop_gradient: whether to stop gradient.
-    return_logits: whether to return logits.
+    return_entropy: whether to return per token entropy.
     segment_ids: optional 1D sequential document identifiers used for packing.
     segment_positions: optional 1D local position indices used for packing.
     temperature: temperature used for rollout.
+    chunk_size: If not 0, computes the log probabilities in sequence chunks of
+      this size.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -327,16 +351,16 @@ def compute_per_token_logps(
       probs for the full packed sequence padded out (since prompts and
       completions of multiple sequences are concatenated), with shape `[B,
       FullSeqLen]`.
-    logits: optional output tensor associated directly when tracking
-    derivatives.
+    entropy: optional per-token entropy jax.Array of shape matches per_token_logps,
+      returned if return_entropy is True.
   """
   model = nnx.merge(graphdef, state)
+
   input_tokens, calculated_positions, attn_mask, input_seg_ids = process_ids(
       prompt_tokens,
       completion_tokens,
       pad_id,
       eos_id,
-      completion_mask,
       segment_ids,
       segment_positions,
   )
@@ -346,21 +370,24 @@ def compute_per_token_logps(
       "cache": None,
       "attention_mask": attn_mask,
   }
+  if chunk_size > 0:
+    sig = inspect.signature(model.__call__)
+    if "skip_lm_head" not in sig.parameters:
+      raise ValueError("Model __call__ must accept skip_lm_head.")
+    if not hasattr(model, "compute_final_logits") or not callable(
+        getattr(model, "compute_final_logits")
+    ):
+      raise ValueError(
+          "Model must contain a function called compute_final_logits."
+      )
+    model_kwargs["skip_lm_head"] = True
+
   # Pass through any segment ids so the model's attention kernel can respect
   # them only if the model signature accepts it: caller-provided packing ids take
   # precedence; otherwise we pass the per-position non-pad mask derived in
   # ``process_ids`` so flash-attention variants that lack a separate
   # padding-mask input still skip pad positions.
-  import inspect  # pylint: disable=g-import-not-at-top
-  try:
-    sig = inspect.signature(model.__call__)
-    has_segment_ids = ("segment_ids" in sig.parameters) or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-  except Exception:
-    has_segment_ids = False
-
-  if has_segment_ids:
+  if model_call_contains(model, "segment_ids"):
     if segment_ids is not None:
       model_kwargs["segment_ids"] = segment_ids
     elif input_seg_ids is not None:
@@ -368,7 +395,7 @@ def compute_per_token_logps(
   if images is not None:
     model_kwargs["images"] = images
 
-  logits, _ = model(input_tokens, **model_kwargs)
+  outputs, _ = model(input_tokens, **model_kwargs)
 
   if segment_ids is not None:
     # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
@@ -378,29 +405,151 @@ def compute_per_token_logps(
   else:
     logits_to_keep = completion_tokens.shape[1]
 
-  logits = logits[:, -logits_to_keep - 1 : -1, :]
-  if temperature != 0.0 and temperature != 1.0:
-    logits /= temperature
-
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
-  per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
 
-  if segment_ids is not None:
-    # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
-    # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
-    per_token_logps = jnp.pad(
-        per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+  if chunk_size > 0:
+    hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
+    out = compute_chunked_logps(
+        model,
+        hidden_state,
+        input_tokens_to_keep,
+        temperature,
+        chunk_size,
+        return_entropy,
     )
-    if return_logits:
+    if return_entropy:
+      per_token_logps, per_token_entropy = out
+    else:
+      per_token_logps = out
+
+    if segment_ids is not None:
+      per_token_logps = jnp.pad(
+          per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+      )
+      if return_entropy:
+        per_token_entropy = jnp.pad(
+            per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0  # pyrefly: ignore[unbound-name]
+        )
+
+    if stop_gradient:
+      per_token_logps = jax.lax.stop_gradient(per_token_logps)
+      if return_entropy:
+        per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
+
+    if return_entropy:
+      return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
+    return per_token_logps
+  else:
+    logits = outputs[:, -logits_to_keep - 1 : -1, :]
+    if temperature != 0.0 and temperature != 1.0:
+      logits /= temperature
+
+    per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
+
+    if segment_ids is not None:
+      # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
+      # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
+      per_token_logps = jnp.pad(
+          per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+      )
       logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
 
-  if stop_gradient:
-    per_token_logps = jax.lax.stop_gradient(per_token_logps)
-    logits = jax.lax.stop_gradient(logits)
+    if stop_gradient:
+      per_token_logps = jax.lax.stop_gradient(per_token_logps)
+      logits = jax.lax.stop_gradient(logits)
 
-  if return_logits:
-    return per_token_logps, logits
+    if return_entropy:
+      entropy = compute_entropy_from_logits(logits)
+      return per_token_logps, entropy
+    return per_token_logps
+
+
+def compute_chunked_logps(
+    model,
+    hidden_states,
+    target_ids,
+    temperature,
+    chunk_size,
+    return_entropy,
+):
+  """Computes per-token log probabilities in sequence chunks to save VRAM.
+
+  Args:
+      model: The actor model (needs to expose `lm_head`)
+      hidden_states: [Batch, SeqLen, HiddenDim]
+      target_ids:    [Batch, SeqLen]
+      chunk_size:    Number of tokens to process at a time per sequence.
+
+  Returns:
+     per_token_logps: [Batch, SeqLen]
+  """
+  batch_size, seq_len, hidden_dim = hidden_states.shape
+
+  # 1. Pad the sequence dimension if it's not perfectly divisible by chunk_size
+  pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
+  if pad_len > 0:
+    # Pad sequence dimension (axis 1)
+    hidden_states = jnp.pad(hidden_states, ((0, 0), (0, pad_len), (0, 0)))
+    target_ids = jnp.pad(target_ids, ((0, 0), (0, pad_len)))
+
+  padded_seq_len = seq_len + pad_len
+  num_chunks = padded_seq_len // chunk_size
+
+  # 2. Reshape into chunks: [Batch, NumChunks, ChunkSize, ...]
+  hs_reshaped = hidden_states.reshape(
+      batch_size, num_chunks, chunk_size, hidden_dim
+  )
+  ids_reshaped = target_ids.reshape(batch_size, num_chunks, chunk_size)
+
+  # 3. Swap B, T axes to make it time-major for jax.lax.scan
+  hs_scannable = jnp.swapaxes(hs_reshaped, 0, 1)
+  ids_scannable = jnp.swapaxes(ids_reshaped, 0, 1)
+
+  @nnx.remat
+  def logp_step(carry, xs):
+    hs_chunk, ids_chunk = xs
+
+    # Project to vocabulary for just this chunk
+    # Peak memory: [Batch, ChunkSize, VocabSize]
+    logits_chunk = model.compute_final_logits(hs_chunk).astype(jnp.float32)
+
+    if temperature != 0.0 and temperature != 1.0:
+      logits_chunk /= temperature
+
+    logps_chunk = selective_log_softmax(logits_chunk, ids_chunk)
+
+    if return_entropy:
+      entropy_chunk = compute_entropy_from_logits(logits_chunk)
+      return None, (logps_chunk, entropy_chunk)
+    else:
+      return None, logps_chunk
+
+  # 4. Scan over the NumChunks dimension
+  _, scanned_out = jax.lax.scan(
+      logp_step, init=None, xs=(hs_scannable, ids_scannable)
+  )
+
+  if return_entropy:
+    logps_chunked, entropy_chunked = scanned_out
+    # 5. Swap back to batch-major and flatten the sequence dimension
+    logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
+    entropy_reshaped = jnp.swapaxes(entropy_chunked, 0, 1)
+    # 6. Slice off any padding we added initially.
+    per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)[
+        :, :seq_len
+    ]
+    per_token_entropy = entropy_reshaped.reshape(batch_size, padded_seq_len)[
+        :, :seq_len
+    ]
+    return per_token_logps, per_token_entropy
   else:
+    logps_chunked = scanned_out
+    # 5. Swap back to batch-major and flatten the sequence dimension
+    logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
+    # 6. Slice off any padding we added initially.
+    per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)[
+        :, :seq_len
+    ]
     return per_token_logps
 
 
@@ -411,7 +560,6 @@ def compute_score(
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
-    completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
@@ -427,17 +575,17 @@ def compute_score(
       completion_tokens,
       pad_id,
       eos_id,
-      completion_mask,
       segment_ids,
       segment_positions,
   )
 
+  has_segment_ids = model_call_contains(model, "segment_ids")
   model_kwargs = {"positions": calculated_positions, "cache": None}
-  if segment_ids is not None:
+  if has_segment_ids and segment_ids is not None:
     model_kwargs["segment_ids"] = segment_ids
   else:
     model_kwargs["attention_mask"] = attn_mask
-    if input_seg_ids is not None:
+    if has_segment_ids and input_seg_ids is not None:
       model_kwargs["segment_ids"] = input_seg_ids
 
   out = model(prompt_completion_ids, **model_kwargs)
@@ -540,7 +688,7 @@ def aggregate_loss(
     completion_mask: jax.Array,
     loss_agg_mode: str,
     **kwargs: Any,
-) -> jax.Array:
+) -> utils.WeightedMetric:
   """Aggregate loss based on the loss aggregation mode.
 
   Args:
@@ -553,21 +701,21 @@ def aggregate_loss(
   """
 
   per_token_loss = per_token_loss.astype(jnp.float32)
-  seq_mask = completion_mask.sum(axis=-1)
-  non_zero_rows = jnp.clip((seq_mask > 0).sum(), min=1)
 
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
     # in the batch
-    loss = (per_token_loss * completion_mask).sum() / (
-        jnp.clip(completion_mask.sum(), min=1)
-    )
+    unreduced_sum = (per_token_loss * completion_mask).sum()
+    denominator = completion_mask.sum()
+    min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-mean":
     seq_mask = completion_mask.sum(axis=-1)  # per-sequence token count
     seq_loss = ((per_token_loss * completion_mask).sum(axis=-1)) / jnp.clip(
-        seq_mask, min=1
+        seq_mask, min=1.0
     )
-    loss = seq_loss.sum() / non_zero_rows
+    unreduced_sum = seq_loss.sum()
+    denominator = per_token_loss.shape[0]
+    min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
@@ -576,21 +724,23 @@ def aggregate_loss(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    loss = seq_loss.sum() / non_zero_rows
+    unreduced_sum = seq_loss.sum()
+    denominator = per_token_loss.shape[0]
+    min_denom = 1.0
   elif loss_agg_mode == "seq-mean-token-sum":
     # 1) sum token losses within each sequence
     # 2) average only across sequences that have at least one valid token
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
     seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
-    loss = (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+    unreduced_sum = (seq_loss * seq_mask).sum()
+    denominator = seq_mask.sum()
+    min_denom = 1e-6
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
-    # Get custom normalization factor from kwargs, default to number of
-    # non-empty rows.
-    norm = _check_get_norm(kwargs, non_zero_rows)
-
-    # Sum the per-sequence sums and normalize
-    # TODO(sizhi): Experiment with loss in precision if loss is fp16.
-    loss = (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+    # Get custom normalization factor from kwargs, default to batch size.
+    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
+    unreduced_sum = (per_token_loss * completion_mask).sum()
+    denominator = norm
+    min_denom = 1e-6
   else:
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
@@ -598,12 +748,124 @@ def aggregate_loss(
         " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
         " 'sequence-mean-token-sum-norm'."
     )
-  return loss
+  return utils.WeightedMetric(
+      jnp.asarray(unreduced_sum, dtype=jnp.float32),
+      jnp.asarray(denominator, dtype=jnp.float32),
+      min_denom=min_denom,
+  )
+
+
+def reduced_loss_agg(
+    per_token_loss: jax.Array,
+    completion_mask: jax.Array,
+    loss_agg_mode: str,
+    **kwargs: Any,
+) -> jax.Array:
+  """Eager per-sequence loss reduction (the pre-unreduced form).
+
+  Divides immediately and returns a scalar, unlike `aggregate_loss` which
+  defers division into a `WeightedMetric`. Used only as the `reduced_pg_loss`
+  logging metric to guard against regression; it never feeds the gradient.
+  Numerically equal to `aggregate_loss(...).compute()` today (asserted in
+  common_test.py::CommonTest.test_reduced_equals_unreduced_compute).
+
+  TODO(yuxzhang): make segment-aware once sequence packing lands, so it stays
+  a per-sequence metric while `aggregate_loss` / the gradient move to a global
+  token-weighted form.
+
+  Args:
+    per_token_loss: Per token loss. [batch_size, sequence_len]
+    completion_mask: Completion mask. [batch_size, sequence_len]
+    loss_agg_mode: Loss aggregation mode.
+    **kwargs: Mode-specific extras (e.g. `norm`).
+
+  Returns:
+    A scalar reduced loss.
+  """
+  per_token_loss = per_token_loss.astype(jnp.float32)
+
+  if loss_agg_mode == "token-mean":
+    return (per_token_loss * completion_mask).sum() / jnp.clip(
+        completion_mask.sum(), min=1.0
+    )
+  elif loss_agg_mode == "sequence-mean-token-mean":
+    seq_mask = completion_mask.sum(axis=-1)
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        seq_mask, min=1.0
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "sequence-mean-token-scale":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        norm, min=1e-6
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "seq-mean-token-sum":
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
+    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+    return (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+  elif loss_agg_mode == "sequence-mean-token-sum-norm":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
+    return (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+  else:
+    raise ValueError(
+        f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
+        " 'sequence-mean-token-sum-norm'."
+    )
+
+
+def _metric_scalar(value: Any) -> Any:
+  """A WeightedMetric reduced to its scalar via compute(); scalars pass through.
+
+  Metric aux values may be `WeightedMetric` (deferred division) or plain
+  scalars. This normalizes either to a scalar for reduction / logging.
+  """
+  return value.compute() if isinstance(value, utils.WeightedMetric) else value
+
+
+def mean_of_means(values: Iterable[Any]) -> np.ndarray:
+  """Reducer: mean of per-micro-batch values (a WeightedMetric-safe np.mean).
+
+  Each value is reduced to a scalar first (WeightedMetric via compute(), i.e.
+  divided per micro-batch), then averaged. For plain scalars this is exactly
+  np.mean, so it is a safe drop-in replacement.
+  """
+  return np.mean([np.asarray(_metric_scalar(v)) for v in values])
+
+
+def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
+  """Reducer: global sum(S)/sum(d) across per-micro-batch WeightedMetric values.
+
+  Sums numerators and denominators before dividing (token-weighted / global),
+  as opposed to `mean_of_means` which averages per-micro-batch means. Equal to
+  `mean_of_means` when the denominator is constant across micro-batches; they
+  diverge otherwise (e.g. sequence packing).
+  """
+  total_sum = sum(float(v.unreduced_sum) for v in values)
+  total_denom = sum(float(v.denominator) for v in values)
+  return total_sum / total_denom if total_denom != 0 else 0.0
+
+
+def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
+  """Computes the entropy of a distribution given its logits.
+
+  Args:
+    logits: Logits as returned by the model. Of shape `[batch_size, seq_len,
+      emb_dim]`.
+
+  Returns:
+    A JAX array of shape `[batch_size, seq_len]`, containing the entropy values.
+  """
+  log_probs = jax.nn.log_softmax(logits, axis=-1)
+  probs = jax.nn.softmax(log_probs)
+  return -jnp.sum(probs * log_probs, axis=-1)
 
 
 def _check_get_norm(
-    arguments: dict[str, Any], default: float | int | jax.Array
-) -> float | jax.Array:
+  arguments: dict[str, Any], default: float | int
+) -> float:
   """Get custom normalization factor from kwargs with a default value.
 
   Args:
@@ -616,16 +878,9 @@ def _check_get_norm(
   Raises:
       ValueError: If the 'norm' key is present but has an invalid value or type.
   """
-  norm = arguments.get("norm", default)
-  if isinstance(norm, (int, float, jax.Array, np.ndarray)):
-    if isinstance(norm, (int, float)):
-      if norm <= 0:
-        raise ValueError(
-            f"Invalid 'norm' value: {norm}. Must be a positive number."
-        )
-    return norm
-
-  raise ValueError(
-      f"Invalid 'norm' value: {norm}. Must be a positive number (int, float,"
-      " or jax.Array)."
-  )
+  norm = arguments.get("norm", float(default))
+  if not isinstance(norm, (int, float)) or norm <= 0:
+    raise ValueError(
+        f"Invalid 'norm' value: {norm}. Must be a positive number."
+    )
+  return norm  # pyrefly: ignore[bad-return]

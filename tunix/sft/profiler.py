@@ -15,6 +15,7 @@
 """Profiler class for Tunix trainers."""
 
 import dataclasses
+import inspect
 import threading
 
 from absl import logging
@@ -23,6 +24,7 @@ import jax
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
+  """Options for configuring the JAX profiler."""
   # Directory to write the profile to.
   log_dir: str
   # Number of steps to skip before profiling.
@@ -35,6 +37,9 @@ class ProfilerOptions:
   host_tracer_level: int = 2  # set to 2 to capture HBM profiles.
   # https://github.com/jax-ml/jax/blob/0b1b909dd66a113ee0d7e54e55d0efef480e2a8a/docs/profiling.md?plain=1#L300
   python_tracer_level: int = 1
+  # Maximum number of hosts to profile. Only supported for Pathways workloads
+  # using pathwaysutils.
+  max_num_hosts: int | None = None
 
 
 class Profiler:
@@ -71,6 +76,45 @@ class Profiler:
       )
     self._started_by_this_instance = False
 
+  def _check_if_max_num_hosts_supported(self) -> bool:
+    """Returns True if max_num_hosts is set and supported by JAX start_trace."""
+    if self._profiler_options.max_num_hosts is None:
+      return False
+    try:
+      sig = inspect.signature(jax.profiler.start_trace)
+      if "max_num_hosts" in sig.parameters:
+        return True
+      logging.warning(
+          "max_num_hosts is specified in ProfilerOptions but "
+          "jax.profiler.start_trace does not accept it. This is "
+          "only supported for Pathways workloads using pathwaysutils."
+      )
+    except (ValueError, TypeError) as e:
+      logging.warning(
+          "Failed to inspect signature of jax.profiler.start_trace: %s. "
+          "Not passing max_num_hosts.",
+          e,
+      )
+    return False
+
+  def _start_trace(
+      self,
+      log_dir: str,
+      profiler_options: jax.profiler.ProfileOptions | None = None,
+  ) -> None:
+    """Starts JAX trace, conditionally passing max_num_hosts if supported."""
+    if self._check_if_max_num_hosts_supported():
+      jax.profiler.start_trace(  # pytype: disable=wrong-keyword-args
+          log_dir=log_dir,
+          profiler_options=profiler_options,
+          max_num_hosts=self._profiler_options.max_num_hosts,  # pyrefly: ignore[unexpected-keyword]
+      )
+    else:
+      jax.profiler.start_trace(
+          log_dir=log_dir,
+          profiler_options=profiler_options,
+      )
+
   def maybe_activate(self, step: int):
     """Start the profiler."""
     if self._do_not_profile or step != self._first_profile_step:
@@ -91,11 +135,11 @@ class Profiler:
         profile_options.python_tracer_level = (
             self._profiler_options.python_tracer_level
         )
-        jax.profiler.start_trace(
+        self._start_trace(
             log_dir=self._output_path, profiler_options=profile_options
         )
       else:
-        jax.profiler.start_trace(log_dir=self._output_path)
+        self._start_trace(log_dir=self._output_path)
       Profiler._is_active = True
       self._started_by_this_instance = True
 

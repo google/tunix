@@ -17,6 +17,7 @@
 from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 
 from tunix.rl.agentic.parser.chat_template_parser import parser
 
@@ -195,6 +196,134 @@ class GemmaChatTemplateParserTest(absltest.TestCase):
       # that might bypass the preprocessing in parse().
       self.parser._parse_message(message)
 
+
+class Gemma4ChatTemplateParserTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mock_tokenizer = mock.Mock()
+    self.mock_tokenizer.bos_token = '<bos>'
+    self.mock_tokenizer.eos_token = '<eos>'
+
+  def test_parse_with_enable_thinking_true(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'user', 'content': 'Hello'}]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>system\n<|think|><turn|>\n'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_false(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=False
+    )
+    messages = [{'role': 'user', 'content': 'Hello'}]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos>'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_system_prompt_and_thinking_true(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [
+        {'role': 'system', 'content': 'System instruction'},
+        {'role': 'user', 'content': 'Hello'},
+    ]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>system\n<|think|>System instruction<turn|>\n'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_system_prompt_and_thinking_false(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=False
+    )
+    messages = [
+        {'role': 'system', 'content': 'System instruction'},
+        {'role': 'user', 'content': 'Hello'},
+    ]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>system\nSystem instruction<turn|>\n'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_tool_message(self):
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    messages = [{'role': 'tool', 'content': 'Tool result'}]
+    result = p.parse(messages)
+    expected = '<|tool_response>Tool result<tool_response|>'
+    self.assertEqual(result, expected)
+
+  def test_parse_with_trailing_turn_in_content_gets_sanitized(self):
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    messages = [{'role': 'assistant', 'content': 'Action: Right.<turn|>'}]
+    # The input "<turn|>" is a control token and should be stripped before formatting.
+    result = p.parse(messages)
+    expected = '<|turn>model\nAction: Right.<turn|>\n'
+    self.assertEqual(result, expected)
+
+  def test_parse_assistant_in_history_has_thought_block(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=False
+    )
+    messages = [
+        {'role': 'user', 'content': 'Hello'},
+        {'role': 'assistant', 'content': 'Action: Right.'},
+    ]
+    # In history (messages), assistant turn should get
+    # `<|channel>thought\n<channel|>`.
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>user\nHello<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>Action: Right.<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_assistant_keeps_private_thought_channel(self):
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    content = (
+        '<|channel>thought\nThinking and reasoning...<channel|>Action: Right.'
+    )
+    messages = [{'role': 'assistant', 'content': content}]
+    result = p.parse(messages)
+    expected = f'<|turn>model\n{content}<turn|>\n'
+    self.assertEqual(result, expected)
+
+  def test_update_assistant_end_tokens(self):
+    self.mock_tokenizer.encode.return_value = [99]
+    self.mock_tokenizer.bos_id = None
+    self.mock_tokenizer.eos_id = None
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    tokens = np.array([1, 2, 3], dtype=np.int32)
+    updated_tokens, n_append = p.update_assistant_end_tokens(tokens)
+    np.testing.assert_array_equal(
+        updated_tokens, np.array([1, 2, 3, 99], dtype=np.int32)
+    )
+    self.assertEqual(n_append, 1)
+
+  def test_base_parser_update_assistant_end_tokens_default(self):
+    p = parser.DefaultChatTemplateParser(self.mock_tokenizer)
+    tokens = np.array([1, 2, 3], dtype=np.int32)
+    updated_tokens, n_append = p.update_assistant_end_tokens(tokens)
+    np.testing.assert_array_equal(updated_tokens, tokens)
+    self.assertEqual(n_append, 0)
 
 if __name__ == '__main__':
   absltest.main()

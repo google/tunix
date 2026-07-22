@@ -45,7 +45,7 @@ class SamplerOutput:
   # Left padded prompt tokens.
   padded_prompt_tokens: np.ndarray
 
-  logprobs: Optional[list[float]]
+  logprobs: Optional[list[list[float]]]
 
 
 class BaseSampler(ABC):

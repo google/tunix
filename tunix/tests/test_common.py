@@ -123,7 +123,7 @@ class VisionConfig:
   double_new_line_token: int = 25
 
 
-@dataclasses.dataclass(kw_only=True, frozen=True)
+@dataclasses.dataclass(kw_only=True)
 class ModelConfig:
   """Model config for testing."""
 
@@ -132,6 +132,7 @@ class ModelConfig:
   head_dim: int = 16
   vocab_size: int = 256
   vision_config: VisionConfig | None = None
+  remat_config: int | None = None
 
 
 class ToyTransformer(nnx.Module):
@@ -163,6 +164,7 @@ class ToyTransformer(nnx.Module):
       output_hidden_states=False,
       images=None,
       segment_ids: jax.Array | None = None,
+      skip_lm_head: bool = False,
   ):
     tokens = x
     x = self.emb(tokens)
@@ -193,7 +195,17 @@ class ToyTransformer(nnx.Module):
           'all_hidden_states',
           x,
       )
-    return self.lm_head(x), cache
+    if skip_lm_head:
+      return x, cache
+    logits = self.compute_final_logits(x)
+    return logits, cache
+
+  def compute_final_logits(
+      self,
+      x,
+  ):
+    """Computes the final logits from the model output."""
+    return self.lm_head(x)
 
   @property
   def num_embed(self) -> int:
@@ -242,8 +254,8 @@ def get_lora_model(
       model, lora_provider, **dummy_model_input
   )
   if mesh is not None:
-    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
-  return lora_model
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)  # pyrefly: ignore[bad-argument-type]
+  return lora_model  # pyrefly: ignore[bad-return]
 
 
 class MockVocab(spm.SentencePieceProcessor):
@@ -275,8 +287,9 @@ class MockVocab(spm.SentencePieceProcessor):
   }
 
   def __init__(
-      self, mapping_text_to_id: dict[str, int] | None = None,
-      is_multimodal=False
+      self,
+      mapping_text_to_id: dict[str, int] | None = None,
+      is_multimodal=False,
   ):
     super().__init__()
     self._start_id = 3
@@ -329,7 +342,7 @@ class ToyTransformerWithScoreHead(nnx.Module):
 
     self.transformer = transformer
     self.score = nnx.Linear(
-        in_features=transformer.head_dim,
+        in_features=transformer.head_dim,  # pyrefly: ignore[missing-attribute]
         out_features=1,
         use_bias=False,
         rngs=rngs,

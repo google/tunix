@@ -44,6 +44,12 @@ class VllmRollout(base_rollout.BaseRollout):
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
             server_mode=rollout_config.rollout_vllm_server_mode,
+            server_mode_submission_threshold=(
+              rollout_config.rollout_vllm_server_mode_submission_threshold
+            ),
+            server_mode_submission_timeout_s=(
+              rollout_config.rollout_vllm_server_mode_submission_timeout_s
+            ),
             mapping_config=mapping_config,
             return_logprobs=rollout_config.return_logprobs,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
@@ -117,12 +123,11 @@ class VllmRollout(base_rollout.BaseRollout):
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
-    # b/428730696, we cannot return self.output.logprobs yet
-    # May need to validate if there will be any difference from recalculation
-    return self.output.logprobs
+    if self.output.logprobs is None:
+      return jax.numpy.empty((0,))
+    return jax.numpy.array(self.output.logprobs)
 
   def update_params(
       self,

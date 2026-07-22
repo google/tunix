@@ -73,13 +73,13 @@ class ShardingConfig:
     fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        emb_dv=(fsdp, 'tp'),
-        q_weight_dnh=(fsdp, 'tp', None),
-        kv_weight_dnh=(fsdp, 'tp', None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
+        emb_vd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_dv=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        q_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
         rms_norm_weight=('tp',),
         act_btd=('fsdp', sp, None if is_sampling else 'tp'),
         act_btf=('fsdp', sp, 'tp'),
@@ -300,7 +300,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x = jnp.astype(x, self.dtype)
-    x = shard(x, self.shd_config.act_btd)
+    x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -485,9 +485,9 @@ class Attention(nnx.Module):
     )
     value_proj = jnp.reshape(value_proj, (b, s, k, h))
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)
-    key_proj = shard(key_proj, self.shd_config.act_btnh)
-    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rotary_embedding(
         query_proj,
@@ -641,7 +641,7 @@ class Attention(nnx.Module):
       qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
-    outputs = shard(outputs, self.shd_config.act_btd)
+    outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -670,7 +670,7 @@ class Attention(nnx.Module):
     ):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self, x, cache, attn_mask, sin, cos, segment_ids
       )
     else:
@@ -740,7 +740,7 @@ class MLP(nnx.Module):
       x: jaxtyping.Array,
   ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
+    activations = shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
     outputs = self.down_proj(activations)
     return outputs
 
@@ -750,9 +750,9 @@ class MLP(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__)(self, x)
+      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
-      return self.block(x)
+      return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
 
 class DecoderLayer(nnx.Module):
@@ -826,7 +826,7 @@ class DecoderLayer(nnx.Module):
         self.config.remat_config == RematConfig.DECODER
         or self.config.remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self,
           x,
           cache,
@@ -894,6 +894,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
       output_hidden_states: bool = False,
       segment_ids: jaxtyping.Array | None = None,  # [B, L]
+      skip_lm_head: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Qwen2 model.
 
@@ -903,6 +904,8 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
+      segment_ids: segment ids for each token in the input sequence.
+      skip_lm_head: whether to skip the final lm head.
 
     Returns:
       predicted_logits, new_cache
@@ -923,7 +926,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       layer_cache, x = layer(
           x,
           layer_cache,
-          attention_mask,
+          attention_mask,  # pyrefly: ignore[bad-argument-type]
           sin,
           cos,
           segment_ids=segment_ids,
@@ -932,15 +935,26 @@ class Qwen2(BackendMappingMixin, nnx.Module):
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
+
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
-    # Qwen2.5 0.5B-3B uses tied embedding, sharing weights for input and output.
+
+    if skip_lm_head:
+      return x, new_cache
+
+    logits = self.compute_final_logits(x)
+    return logits, new_cache  # pytype: disable=bad-return-type
+
+  def compute_final_logits(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
+    """Computes the final logits from the model output."""
     if self.config.use_tied_embedding:
       logits = self.embedder.decode(x)
     else:
       logits = self.lm_head(x)
-
-    return jnp.astype(logits, jnp.float32), new_cache  # pytype: disable=bad-return-type
+    return jnp.astype(logits, jnp.float32)
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.

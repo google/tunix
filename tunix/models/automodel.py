@@ -95,13 +95,13 @@ def call_model_config(model_name: str) -> Any:
   model_lib_module = get_model_module(model_name, ModelModule.MODEL)
   target_obj = model_lib_module.ModelConfig
 
-  if not hasattr(target_obj, config_id):
+  if not hasattr(target_obj, config_id):  # pyrefly: ignore[bad-argument-type]
     raise AttributeError(
         f"Error: Function '{config_id}' not found on the target object "
         f"for model '{model_name}'. Target object type: {type(target_obj)}"
     )
 
-  method_to_call = getattr(target_obj, config_id)
+  method_to_call = getattr(target_obj, config_id)  # pyrefly: ignore[bad-argument-type]
 
   if not callable(method_to_call):
     raise TypeError(
@@ -198,7 +198,7 @@ def create_gemma_model_with_nnx_conversion(
       else:  # gemma
         dir_name = version_dashed
 
-    params_path = os.path.join(ckpt_path, dir_name)
+    params_path = os.path.join(ckpt_path, dir_name)  # pyrefly: ignore[no-matching-overload]
 
     model, params = create_gemma_model_from_params(params_path, model_name)
 
@@ -258,14 +258,15 @@ def create_gemma_model_from_params(
 # Currently, gemma2 uses _create_gemma_model_from_params while gemma3 uses
 # _create_gemma3_model_from_checkpoint.
 def create_gemma3_model_from_checkpoint(
-    ckpt_path: str, model_name: str, mesh: jax.sharding.Mesh
+    ckpt_path: str, model_name: str, mesh: jax.sharding.Mesh, **kwargs
 ) -> tuple[nnx.Module, Any]:
-  """Creates a Gemma3 model from a checkpoint.
+  """Creates a Gemma3/Gemma4 model from a checkpoint.
 
   Args:
       ckpt_path: The path to the checkpoint.
       model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama-3.2-3b").
       mesh: Mesh object for device layout.
+      **kwargs: Additional keyword arguments to override on model_params.
 
   Returns:
       A tuple containing:
@@ -273,6 +274,12 @@ def create_gemma3_model_from_checkpoint(
           - model_params: The model parameters.
   """
   model_params = call_model_config(model_name)
+  valid_kwargs = {
+      k: v
+      for k, v in kwargs.items()
+      if hasattr(model_params, k) and v is not None
+  }
+  model_params = dataclasses.replace(model_params, **valid_kwargs)
   params_lib = get_model_module(model_name, ModelModule.PARAMS)
   model = params_lib.create_model_from_checkpoint(ckpt_path, model_params, mesh)
   return model, model_params
@@ -303,11 +310,11 @@ def download_model(
   if model_source == ModelSource.KAGGLE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)
+    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
   elif model_source == ModelSource.HUGGINGFACE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
+    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
   elif model_source in (ModelSource.GCS, ModelSource.MAXTEXT):
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
@@ -421,23 +428,23 @@ class AutoModel:
         The path where the model was downloaded to.
     """
     # TODO(b/477915179): Allow model_id to be config_id or a Kaggle_id
-    model: nnx.Module = None
+    model: nnx.Module = None  # pyrefly: ignore[bad-assignment]
     model_params: Any = None
     naming_info = naming.ModelNaming(model_id=model_id)
 
     # Download the model
-    if model_source in (
-        ModelSource.INTERNAL,
-        ModelSource.GCS,
-        ModelSource.KAGGLE,
-    ):
-      if model_path is None:
+    if model_path:
+      model_id_or_path = model_path
+    else:
+      if model_source in (
+          ModelSource.INTERNAL,
+          ModelSource.GCS,
+          ModelSource.KAGGLE,
+      ):
         raise ValueError(
             'model_path is required for model_source: '
             f'{model_source}. Please provide a valid model_path.'
         )
-      model_id_or_path = model_path
-    else:
       model_id_or_path = model_id
     resolved_model_path = download_model(
         model_id_or_path, model_download_path, model_source
@@ -450,18 +457,18 @@ class AutoModel:
         from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
         from maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
       except ImportError:
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
+        from maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
+        from maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
+        from maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
 
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       argv = [
           '',
-          'base.yml',
+          'src/maxtext/configs/base.yml',
           f'model_name={naming_info.model_name}',
       ]
 
-      if model_path is not None:
+      if model_path:
         argv.append(f'load_parameters_path={resolved_model_path}')
 
       # We handle jax distribution outside or it's not needed by default.
@@ -492,13 +499,32 @@ class AutoModel:
       if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         model, model_params = create_gemma3_model_from_checkpoint(
             ckpt_path=resolved_model_path,
-            model_name=naming_info.model_name,
+            model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
             mesh=mesh,
+            **kwargs,
         )
       else:
         raise NotImplementedError(
             'Gemma 3 models are only supported from GCS or INTERNAL.'
             f' Specified model source: {model_source}'
+        )
+    # Gemma 4: Orbax loading for GCS/INTERNAL sources.
+    # Other sources (e.g., HuggingFace) fall through to the common
+    # SafeTensors path, which resolves to gemma4/params_safetensors.py.
+    elif naming_info.model_family == 'gemma4':
+      if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
+        # Name is legacy — dynamically resolves to gemma4 via ModelNaming.
+        model, model_params = create_gemma3_model_from_checkpoint(
+            ckpt_path=resolved_model_path,
+            model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
+            mesh=mesh,
+            **kwargs,
+        )
+      else:
+        logging.info(
+            'Gemma 4 source %s is not GCS/INTERNAL, falling through to'
+            ' SafeTensors loader.',
+            model_source,
         )
     # For other native Tunix models with special handling cases for Gemma2 models
     elif naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2'):
@@ -513,16 +539,16 @@ class AutoModel:
         intermediate_ckpt_dir = kwargs.get('intermediate_ckpt_dir')
         rng_seed = kwargs.get('rng_seed', 0)
         model, model_params = create_gemma_model_with_nnx_conversion(
-            model_name=naming_info.model_name,
+            model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
             ckpt_path=resolved_model_path,
-            intermediate_ckpt_dir=intermediate_ckpt_dir,
+            intermediate_ckpt_dir=intermediate_ckpt_dir,  # pyrefly: ignore[bad-argument-type]
             rng_seed=rng_seed,
             mesh=mesh,
             model_path=model_path,
         )
       elif model_source == ModelSource.INTERNAL:
         model, model_params = create_gemma_model_from_params(
-            params_path=resolved_model_path, model_name=naming_info.model_name
+            params_path=resolved_model_path, model_name=naming_info.model_name  # pyrefly: ignore[bad-argument-type]
         )
       else:
         raise NotImplementedError(
@@ -540,23 +566,58 @@ class AutoModel:
     # Common path for all other native Tunix models -- create model from safe tensors
     if not model_params:
       # pick corresponding config based on model version
-      model_params = call_model_config(naming_info.model_name)
+      model_params = call_model_config(naming_info.model_name)  # pyrefly: ignore[bad-argument-type]
+
+      # Get load_dtype explicitly from kwargs
+      load_dtype_str = kwargs.get('load_dtype')
+      try:
+        load_dtype = getattr(jnp, load_dtype_str)
+      except AttributeError:
+        raise ValueError(
+            f"Invalid load_dtype: {load_dtype_str}. Must be a valid"
+            " jax.numpy type."
+        )
+      except TypeError:
+        load_dtype = load_dtype_str
 
       # Apply any model config field overrides passed via kwargs (e.g.
       # use_flash_attention, flash_attention_block_size).
       if dataclasses.is_dataclass(model_params):
         valid_fields = {f.name for f in dataclasses.fields(model_params)}
-        overrides = {k: v for k, v in kwargs.items() if k in valid_fields}
+        overrides = {k: v for k, v in kwargs.items() if k in valid_fields and v is not None}
+        if 'remat_config' in overrides and isinstance(overrides['remat_config'], str):
+          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)
+          if hasattr(model_module, 'RematConfig'):
+            remat_cfg_str = overrides['remat_config']
+            try:
+              overrides['remat_config'] = getattr(model_module.RematConfig, remat_cfg_str)
+            except AttributeError:
+              raise ValueError(
+                  f"Invalid remat_config: {remat_cfg_str}. Must be a valid"
+                  " RematConfig type."
+              )
+        if 'dtype' in overrides:
+          dtype_str = overrides['dtype']
+          try:
+            overrides['dtype'] = getattr(jnp, dtype_str)
+          except AttributeError:
+            raise ValueError(
+                f"Invalid dtype: {dtype_str}. Must be a valid jax.numpy type."
+            )
+          except TypeError:
+            pass
+
         if overrides:
           logging.info('Applying model config overrides: %s', overrides)
           model_params = dataclasses.replace(model_params, **overrides)
 
       with mesh:
         model = create_model_from_safe_tensors(
-            naming_info.model_name,
+            naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
             resolved_model_path,
             model_params,
             mesh,
+            dtype=load_dtype,
         )
 
     return model, resolved_model_path

@@ -51,7 +51,6 @@ from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.utils import trajectory_logger
 
-
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
 MetricFn = agentic_rl_learner.MetricFn
@@ -74,8 +73,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
     kl_loss_mode: Method for computing the KL loss.
-    force_compute_kl: Whether to force compute KL divergence for logging
-      even when it would normally be skipped (e.g., when beta is 0.0).
+    force_compute_kl: Whether to force compute KL divergence for logging even
+      when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
     loss_algo: "grpo" or "gspo-token".
@@ -84,7 +83,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     off_policy_steps: Number of off-policy steps can be accepted before a policy
       update.
     degenerate_group_masking: Whether to mask out degenerate groups with all-0
-      advantages.
+      advantages. Deprecated. Will remove in the next release.
   """
 
   algo_variant: str = "agentic_grpo"
@@ -107,8 +106,9 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
+  # Deprecated. Will remove in the next release.
   degenerate_group_masking: bool = (
-      True  # Whether to mask out degenerate groups with all-0 advantages.
+      False  # Whether to mask out degenerate groups with all-0 advantages.
   )
   use_rollout_logps: bool = True
   # Truncated importance-sampling (TIS) correction for the residual mismatch
@@ -231,7 +231,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
-    self.algo_config.temperature = self.rl_cluster.get_rollout_config(
+    self.algo_config.temperature = self.rl_cluster.get_rollout_config(  # pyrefly: ignore[missing-attribute]
         mode=rl_cluster_lib.Mode.TRAIN
     ).temperature
 
@@ -245,6 +245,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         algo_config=self.algo_config,
         pad_id=self.rl_cluster.rollout.pad_id(),
         eos_id=self.rl_cluster.rollout.eos_id(),
+        compute_logps_chunk_size=self.rl_cluster.cluster_config.training_config.compute_logps_chunk_size,
     )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
@@ -252,35 +253,35 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {
+        lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
             "algo_config": self.algo_config,
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
-        "kl": np.mean,
-        "entropy": np.mean,
-        "pg_loss": np.mean,
-        "pg_clipfrac": np.mean,
-        "ppo_kl": np.mean,
-        "kl_loss": np.mean,
-        "is_ratio/mean": np.mean,
+        "kl": common.mean_of_means,
+        "entropy": common.mean_of_means,
+        "reduced_pg_loss": common.mean_of_means,
+        "unreduced_pg_loss": common.global_weighted_mean,
+        "pg_clipfrac": common.mean_of_means,
+        "ppo_kl": common.mean_of_means,
+        "kl_loss": common.mean_of_means,
+        "is_ratio/mean": common.mean_of_means,
         "is_ratio/max": np.max,
         "is_ratio/min": np.min,
-        "log_ratio/abs_mean": np.mean,
-        "pg_loss/unclipped_mean": np.mean,
-        "pg_loss/clipped_mean": np.mean,
-        "advantage/abs_mean": np.mean,
+        "log_ratio/abs_mean": common.mean_of_means,
+        "pg_loss/unclipped_mean": common.mean_of_means,
+        "pg_loss/clipped_mean": common.mean_of_means,
+        "advantage/abs_mean": common.mean_of_means,
         "advantage/max": np.max,
         "advantage/min": np.min,
-        "advantage/nonzero_frac": np.mean,
-        "sampler_is/weight_mean": np.mean,
+        "advantage/nonzero_frac": common.mean_of_means,
+        "sampler_is/weight_mean": common.mean_of_means,
         "sampler_is/weight_min": np.min,
     })
-    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
+    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
-        if self.algo_config.force_compute_kl
-        or self.algo_config.beta != 0.0
+        if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
     ])
 
@@ -331,6 +332,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     old_logprobs_list: List[np.ndarray] = []
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
+    raw_completion_lengths: List[int] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -374,8 +376,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
     for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
-        prompt_tokens_list, completion_tokens_list, completion_masks_list, old_logprobs_list
+        prompt_tokens_list,
+        completion_tokens_list,
+        completion_masks_list,
+        old_logprobs_list,
     ):
+      raw_completion_lengths.append(
+          min(len(completion_tokens), max_response_length)
+      )
       if (
           len(completion_tokens) >= max_response_length
           and completion_mask[-1] != eos_value
@@ -383,8 +391,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         clipped_completion_count += 1
       padded_prompt, padded_completion, _ = (
           agentic_utils.pad_prompt_and_completion(
-              prompt_tokens,
-              completion_tokens,
+              prompt_tokens,  # pyrefly: ignore[bad-argument-type]
+              completion_tokens,  # pyrefly: ignore[bad-argument-type]
               rollout_config.max_prompt_length,
               max_response_length,
               pad_value,
@@ -445,25 +453,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           have_actor_mesh or self.algo_config.sampler_is == "token"
       )
       if need_trainer_logps:
-        # NOTE: pass a NON-PADDING mask (1 for both assistant AND env tokens)
-        # for attention/position construction inside compute_per_token_logps,
-        # not the assistant-vs-env mask. process_ids uses ``completion_mask``
-        # to build the causal attention pattern AND to drive
-        # ``build_positions_from_mask``. If we pass the asst-vs-env mask, env
-        # tokens get masked OUT of attention AND positions don't advance
-        # through them — so when predicting the first assistant token of turn
-        # k+1, the trainer's model has no memory of the env observation that
-        # triggered turn k+1. That makes the trainer's logp at multi-turn
-        # boundaries diverge from the rollout sampler's (which always sees the
-        # full conversation in attention) by 30-50 nat.
-        attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
         trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-            completion_mask=attn_completion_mask,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -478,24 +473,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     elif self.algo_config.use_rollout_logps:
       old_per_token_logps = None
     else:
-      # NOTE: pass a NON-PADDING mask (1 for both assistant AND env tokens) for
-      # attention/position construction inside compute_per_token_logps, not the
-      # assistant-vs-env mask. process_ids uses `completion_mask` to build the
-      # causal attention pattern AND to drive `build_positions_from_mask`. If
-      # we pass the asst-vs-env mask, env tokens get masked OUT of attention
-      # AND positions don't advance through them — so when predicting the
-      # first assistant token of turn k+1, the trainer's model has no memory
-      # of the env observation that triggered turn k+1. That makes the
-      # trainer's logp at multi-turn boundaries diverge from vllm's (which
-      # always sees the full conversation in attention) by 30-50 nat.
-      attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
       trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-          completion_mask=attn_completion_mask,
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -530,7 +513,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-            completion_mask=completion_mask,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
@@ -539,7 +521,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # Rewards & advantages
     # Prepare arguments for reward computation by forwarding all training inputs
     # except for prompts, which is passed explicitly.
-    original_inputs_list = [item.traj["original_input"] for item in trajectories]
+    original_inputs_list = [
+        item.traj["original_input"] for item in trajectories
+    ]
     original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
 
     prompt_token_len = len(prompt_tokens_list[0])
@@ -550,7 +534,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "generation/prompts/min_length": (prompt_token_len, np.min),
         },
         mode=mode,
-        step=expected_step,
+        step=expected_step,  # pyrefly: ignore[bad-argument-type]
     )
 
     reward_kwargs = {
@@ -578,17 +562,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     logging.debug("Advantages computed: %s", advantages)
 
-    if self.algo_config.degenerate_group_masking:
-      if jnp.all(jnp.isclose(advantages, 0.0)):
-        logging.info(
-            "Filtering degenerate group %s with all-0 advantages.", group_id
-        )
-        completion_mask = jnp.zeros_like(completion_mask)
-
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
     # Log completion lengths, rewards and env time.
     agg_completion_mask = completion_mask.sum(axis=-1)
+    raw_completion_lengths_np = np.asarray(
+        raw_completion_lengths, dtype=np.int32
+    )
     metrics_to_log = {
         "generation/completions/mean_length": (
             np.mean(agg_completion_mask),
@@ -600,6 +580,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         ),
         "generation/completions/min_length": (
             np.min(agg_completion_mask),
+            np.min,
+        ),
+        # Raw length mirrors rLLM/VERL response_length: all trajectory response
+        # tokens after the initial prompt, including env/user tokens, clamped to
+        # max_response_length. The existing *_length metrics remain loss-mask
+        # lengths over assistant-generated tokens only.
+        "generation/completions/mean_raw_length": (
+            np.mean(raw_completion_lengths_np),
+            np.mean,
+        ),
+        "generation/completions/max_raw_length": (
+            np.max(raw_completion_lengths_np),
+            np.max,
+        ),
+        "generation/completions/min_raw_length": (
+            np.min(raw_completion_lengths_np),
             np.min,
         ),
         "generation/completions/clip_ratio": (
@@ -667,7 +663,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       logging.info(
           "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
           " pearson=%.5f",
-          diff_mean, diff_max, prob_diff_mean, prob_diff_max, pearson,
+          diff_mean,
+          diff_max,
+          prob_diff_mean,
+          prob_diff_max,
+          pearson,
       )
     # Truncated importance-sampling (TIS) correction weights.
     # Compute per-token TIS weights from the trainer-vs-sampler log-ratio,
@@ -711,7 +711,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       logging.info(
           "sampler_is: weight_mean=%.4f weight_max=%.4f frac_clipped=%.4f"
           " (threshold=%.2f)",
-          is_mean, is_max, frac_clipped,
+          is_mean,
+          is_max,
+          frac_clipped,
           self.algo_config.sampler_is_threshold,
       )
 
@@ -729,9 +731,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"{prefix}/{sub_key}/min": (np.min(vals), np.min),
         })
         self.rl_cluster.buffer_metrics_async(
-            metrics_to_log,
+            metrics_to_log,  # pyrefly: ignore[bad-argument-type]
             mode=mode,
-            step=expected_step,
+            step=expected_step,  # pyrefly: ignore[bad-argument-type]
         )
 
     for metric_fn in self.metric_fns:
@@ -747,7 +749,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           },
       )
       self.rl_cluster.buffer_metrics_async(
-          user_defined_metric, mode=mode, step=expected_step
+          user_defined_metric, mode=mode, step=expected_step  # pyrefly: ignore[bad-argument-type]
       )
 
     combined_batch = TrainExample(

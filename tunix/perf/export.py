@@ -47,7 +47,7 @@ class _GrpoExtractSpansFn(Protocol):
   ) -> tuple[
       bool, list[SpanGroup], list[Span], list[Span], list[SpanGroup], list[Span]
   ]:
-    return (False, None, None, None, None, None)
+    return (False, None, None, None, None, None)  # pyrefly: ignore[bad-return]
 
 
 class PerfMetricsExport:

@@ -228,6 +228,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.tokenizer = rl_cluster.tokenizer
     self.policy_version = self.rl_cluster.global_steps
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
+    self._background_tasks: Set[asyncio.Task] = set()
     self._full_batch_size = 0
     self._process_in_consumer: bool = False
 
@@ -287,6 +288,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "True for AgenticRLLearner if using vLLM engine. Please set this "
             "before initializing RLCluster."
         )
+
   def _compute_rewards(
       self,
       prompts: List[str],
@@ -420,7 +422,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     assert "pair_index" not in self.env_kwargs
     env = self.env_class(
         single_example,
-        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
+        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
     )
 
     return agent, env
@@ -453,7 +455,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
     result = self.rl_cluster.generate(
-        prompts=chat_lists,
+        prompts=chat_lists,  # pyrefly: ignore[bad-argument-type]
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
@@ -507,7 +509,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # with mini-batch.
       group_id = self.rl_cluster.global_steps * self._full_batch_size
       if is_async_iterator:
-        async for single_example in prompt_iterator:
+        async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -524,7 +526,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             yield agent, env
           group_id += 1
       else:
-        for single_example in prompt_iterator:
+        for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
                   None,
@@ -575,7 +577,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             await producer_task
 
         cancellation_task = asyncio.create_task(await_cancellation())
-        del cancellation_task
+        self._background_tasks.add(cancellation_task)
+        cancellation_task.add_done_callback(self._background_tasks.discard)
 
   def _batch_to_train_example(
       self,
@@ -665,9 +668,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 batch_results=batch,
                 mode=rl_cluster_lib.Mode.TRAIN,
             )
-            for _ in range(self._num_iterations()):
-              for train_example in train_examples:
-                train_data_queue.put(train_example)
+            for train_example in train_examples:
+              train_data_queue.put(train_example)
         except Exception as e:
           if not isinstance(e, RuntimeError):
             logging.exception(
@@ -724,7 +726,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    full_batch_size = len(next(iter(first_item.values())))
+    full_batch_size = len(next(iter(first_item.values())))  # pyrefly: ignore[bad-argument-type]
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -801,17 +803,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
     )
-    if self._training_config.max_seq_token_per_tpu is not None:
+    is_packed = self._training_config.max_seq_token_per_tpu is not None
+    if is_packed:
       logging.info(
           "Using sequence packing with max_seq_token_per_tpu: %d",
           self._training_config.max_seq_token_per_tpu,
       )
       train_data_gen = rl_utils.pack_sequences(
-          train_data_gen, self._training_config.max_seq_token_per_tpu
+          train_data_gen,
+          self._training_config.max_seq_token_per_tpu,
+          target_items_per_update=grad_acc_steps,
       )
-    micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
+    update_steps_since_last_sync = 0
+    update_steps_per_full_batch = full_batch_size // mini_batch_size
+    unpacked_micro_step_counter = 0
     did_eval_this_global_step = False
+    full_batch_chunks = []
     for train_micro_batch in train_data_gen:
       if (
           self._training_config.max_steps
@@ -845,46 +852,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # GRPO returns a list with a single TrainExample.
         merged_train_micro_batch = train_examples[0]
       else:
+        # TODO(b/491970038): handle seq packing case differently
         merged_train_micro_batch = jax.tree.map(
             lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
         )
-
-      # --- Evaluation Logic ---
-      current_eval_dataset = None
-      current_train_step = self.rl_cluster.actor_trainer.train_steps
-      if (
-          all_eval_prompts
-          and current_train_step % training_config.eval_every_n_steps == 0
-          and current_train_step != self._last_eval_train_step
-      ):
-        self._last_eval_train_step = current_train_step
-        self._eval_iter_steps = 0
-        eval_orchestrator = self._build_orchestrator()
-
-        async def _eval_runner_async(current_eval_orchestrator):
-          eval_examples = []
-          async for batch in self._orchestrator_producer(
-              current_eval_orchestrator,
-              all_eval_prompts,
-              num_generations=self._num_generations(),
-          ):
-            eval_example = self._batch_to_train_example(
-                batch,
-                rl_cluster_lib.Mode.EVAL,
-            )
-            eval_examples.extend(eval_example)
-          return eval_examples
-
-        eval_future = asyncio.run_coroutine_threadsafe(
-            _eval_runner_async(eval_orchestrator), self.loop
-        )
-        eval_examples = eval_future.result()
-        self._eval_iter_steps += 1
-        current_eval_dataset = eval_examples
-        did_eval_this_global_step = True
-
-      # --- Training Step ---
-      iterations = self._num_iterations() if self._process_in_consumer else 1
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the
@@ -913,22 +884,92 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       else:
         chunked_train_micro_batch = [merged_train_micro_batch]
 
-      for i in range(iterations):
-        if self._process_in_consumer and i > 0:
-          # TODO(b/483779605) Sub-step checkpointing.
-          self._iter_steps += 1
+      full_batch_chunks.extend(chunked_train_micro_batch)
 
-        self.rl_cluster.update_actor(
+      # --- Evaluation Logic on FIRST microbatch ---
+      current_eval_dataset = None
+      if update_steps_since_last_sync == 0:
+        current_train_step = self.rl_cluster.actor_trainer.train_steps
+        if (
+            all_eval_prompts
+            and current_train_step % training_config.eval_every_n_steps == 0
+            and current_train_step != self._last_eval_train_step
+        ):
+          self._last_eval_train_step = current_train_step
+          self._eval_iter_steps = 0
+          eval_orchestrator = self._build_orchestrator()
+
+          async def _eval_runner_async(current_eval_orchestrator):
+            eval_examples = []
+            async for batch in self._orchestrator_producer(
+                current_eval_orchestrator,
+                all_eval_prompts,
+                num_generations=self._num_generations(),
+            ):
+              eval_example = self._batch_to_train_example(
+                  batch,
+                  rl_cluster_lib.Mode.EVAL,
+              )
+              eval_examples.extend(eval_example)
+            return eval_examples
+
+          eval_future = asyncio.run_coroutine_threadsafe(
+              _eval_runner_async(eval_orchestrator), self.loop
+          )
+          eval_examples = eval_future.result()
+          self._eval_iter_steps += 1
+          current_eval_dataset = eval_examples
+          did_eval_this_global_step = True
+
+      # --- First iteration Training Step (Parallelized with Rollout) ---
+      # Note: Suppose one full batch has m minibatches, each minibatch has n
+      # microbatches, and #iterations=K, we will:
+      #   1. Train on the m * n microbatches once as we get them from rollout.
+      #   2. When we get the full batch, repeat K-1 times on the entire batch.
+      self.rl_cluster.update_actor(
+          chunked_train_micro_batch, current_eval_dataset, skip_jit
+      )
+      if hasattr(self.rl_cluster, "critic_trainer"):
+        self.rl_cluster.update_critic(
             chunked_train_micro_batch, current_eval_dataset, skip_jit
         )
-        if hasattr(self.rl_cluster, "critic_trainer"):
-          self.rl_cluster.update_critic(
-              chunked_train_micro_batch, current_eval_dataset, skip_jit
-          )
 
       # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      if is_packed:
+        # `merged_train_micro_batch.is_update_step` is a 0-d jax scalar set
+        # by `pack_sequences`; pull the host-side value before deciding.
+        is_update = bool(
+            np.asarray(merged_train_micro_batch.is_update_step).item()
+        )
+      else:
+        # Mirror `peft_trainer._train_step`'s derivation:
+        # `is_update_step` flips True every `grad_acc_steps` micro-batches.
+        unpacked_micro_step_counter += 1
+        is_update = unpacked_micro_step_counter % grad_acc_steps == 0
+        
+      if is_update:
+        update_steps_since_last_sync += 1
+        
+      if update_steps_since_last_sync == update_steps_per_full_batch:
+        # --- Remaining Iterations Training Step ---
+        iterations = self._num_iterations()
+
+        for i in range(1, iterations):
+          # TODO(b/483779605) Sub-step checkpointing.
+          self._iter_steps += len(full_batch_chunks)
+
+          # TODO(yixuanm): Eval during iteration too. Skipping for now as we 
+          # will refactor the learner soon.
+          self.rl_cluster.update_actor(
+              full_batch_chunks, None, skip_jit
+          )
+          if hasattr(self.rl_cluster, "critic_trainer"):
+            self.rl_cluster.update_critic(
+                full_batch_chunks, None, skip_jit
+            )
+        full_batch_chunks.clear()
+
+
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
@@ -986,7 +1027,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             am = trainer_buf.additional_metrics
             for key, label in (
                 ("grad_norm", "grad_norm"),
-                ("pg_loss", "pg_loss"),
+                ("reduced_pg_loss", "reduced_pg_loss"),
                 ("entropy", "entropy"),
                 ("kl", "kl"),
                 ("log_ratio/abs_mean", "log_ratio_abs"),
@@ -995,7 +1036,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               if key in am:
                 vals, _ = am[key]
                 if vals:
-                  v = float(np.mean([np.asarray(x) for x in vals]))
+                  v = float(
+                      np.mean([
+                          np.asarray(common._metric_scalar(x)) for x in vals
+                      ])
+                  )
                   extras.append(f"{label}={v:.4f}")
             if extras:
               trainer_str = " " + " ".join(extras)
@@ -1014,6 +1059,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             trainer_str,
             eval_str,
         )
+        did_eval_this_global_step = False
         self.rl_cluster.buffer_metrics_async(
             {"perf/global_step_time": (global_step_time, np.mean)},
             mode=rl_cluster_lib.Mode.TRAIN,
@@ -1069,7 +1115,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.perf_v2.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
-        micro_batches_since_last_sync = 0
+        update_steps_since_last_sync = 0
         did_eval_this_global_step = False
         self._global_step_start_time = time.time()
 
@@ -1136,7 +1182,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           len(train_micro_batch),
           self.policy_version,
           str([
-              train_example.policy_version[0]
+              train_example.policy_version[0]  # pyrefly: ignore[unsupported-operation]
               for train_example in train_micro_batch
           ]),
           self.algo_config.off_policy_steps,

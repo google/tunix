@@ -28,7 +28,7 @@ from tunix.rl import reshard
 _DEFAULT_TOKENIZER_PATH = 'meta-llama/Llama-3.1-8B'
 
 
-def apply_lora_to_model(base_model, mesh, lora_config):
+def apply_lora_to_model(base_model, mesh, lora_config, rng_seed=0):
   """Apply Lora to the base model if given lora config."""
   logging.info('lora_config %r', lora_config)
   # Basic keyword arguments for LoraProvider
@@ -57,17 +57,81 @@ def apply_lora_to_model(base_model, mesh, lora_config):
     raise
 
   model_input = base_model.get_model_input()
+
+  # Disable remat during dummy forward pass for LoRA initialization
+  original_remat = None
+  if hasattr(base_model, 'config'):
+    original_remat = getattr(base_model.config, 'remat_config', None)
+    if original_remat is not None:
+      base_model.config.remat_config = 1  # RematConfig.NONE
+
   lora_model = qwix.apply_lora_to_model(
-      base_model, lora_provider, **model_input
+      base_model, lora_provider, rngs=nnx.Rngs(rng_seed), **model_input
   )
+
+  if original_remat is not None:
+    lora_model.config.remat_config = original_remat  # pyrefly: ignore[missing-attribute]
+
   if mesh is not None:
-    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)  # pyrefly: ignore[bad-argument-type]
   return lora_model
 
 
-def create_tokenizer(tokenizer_config, tokenizer_path: str | None):
+def resolve_tokenizer_path(
+    model_config: dict[str, Any],
+    tokenizer_path: str,
+) -> str:
+  """Resolves the tokenizer path dynamically based on model config."""
+  model_source_str = model_config.get('model_source')
+  if not model_source_str:
+    return tokenizer_path
+
+  model_family = naming.ModelNaming(
+      model_name=model_config['model_name']
+  ).model_family
+
+  if model_family == 'gemma3' and model_source_str == 'gcs':
+    if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
+      return 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
+  elif (
+      model_family in ('gemma', 'gemma1p1', 'gemma2')
+      and model_source_str == 'kaggle'
+  ):
+    model_source = automodel.ModelSource(model_source_str)
+    model_path = model_config.get('model_path')
+    if not model_path:
+      raise ValueError('model_path is required for kaggle source')
+    resolved_model_path = automodel.download_model(
+        model_path, model_config.get('model_download_path'), model_source
+    )
+    if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
+      return os.path.join(resolved_model_path, 'tokenizer.model')
+
+  return tokenizer_path
+
+
+def create_tokenizer(
+    tokenizer_config: dict[str, Any],
+    tokenizer_path: str | None,
+    model_config: dict[str, Any] | None = None,
+):
+  """Creates a tokenizer from the given configuration.
+
+  Args:
+      tokenizer_config: Configuration dictionary for the tokenizer.
+      tokenizer_path: Optional path to the tokenizer.
+      model_config: Optional model configuration dictionary used to resolve
+        paths.
+
+  Returns:
+      A configured Tokenizer object.
+  """
   if not tokenizer_path:
     tokenizer_path = tokenizer_config['tokenizer_path']
+
+  if model_config is not None:
+    tokenizer_path = resolve_tokenizer_path(model_config, tokenizer_path)
+
   tokenizer_type, add_bos, add_eos = (
       tokenizer_config['tokenizer_type'],
       tokenizer_config['add_bos'],
@@ -107,6 +171,7 @@ def create_model(
           - tokenizer_path: The determined path to the tokenizer model.
   """
   tokenizer_path: str = tokenizer_config['tokenizer_path']
+  tokenizer_path = resolve_tokenizer_path(model_config, tokenizer_path)
   model_source_str = model_config['model_source']
 
   # Create Model
@@ -118,7 +183,7 @@ def create_model(
         f'Available sources: {[s.value for s in automodel.ModelSource]}'
     ) from exc
 
-  model, model_path = automodel.AutoModel.from_pretrained(
+  model, _ = automodel.AutoModel.from_pretrained(
       model_id=model_config['model_id'],
       mesh=mesh,
       model_source=model_source,
@@ -131,27 +196,17 @@ def create_model(
           'flash_attention_block_size', 1024
       ),
       remat_config=model_config.get('remat_config', 1),
+      dtype=model_config.get('dtype'),
+      load_dtype=model_config.get('load_dtype'),
+      use_sliding_window_kv_cache=model_config.get('use_sliding_window_kv_cache'),
   )
-
-  # Handle Tokenizer Path overrides
-  model_family = naming.ModelNaming(
-      model_name=model_config['model_name']
-  ).model_family
-  if model_family == 'gemma3' and model_source_str == 'gcs':
-    # Use the provided tokenizer path, unless it is the default from base_config
-    if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
-      tokenizer_path = 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
-  elif (
-      model_family in ('gemma', 'gemma1p1', 'gemma2')
-      and model_source_str == 'kaggle'
-  ):
-    # Use the provided tokenizer path, unless it is the default from base_config
-    if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
-      tokenizer_path = os.path.join(model_path, 'tokenizer.model')
 
   if model_config.get('lora_config'):
     # Apply Lora to model if given lora config
-    model = apply_lora_to_model(model, mesh, model_config['lora_config'])
+    model = apply_lora_to_model(
+        model, mesh, model_config['lora_config'],
+        rng_seed=model_config.get('rng_seed', 0)
+    )
   else:
     logging.info('Training with Full Weight')
 

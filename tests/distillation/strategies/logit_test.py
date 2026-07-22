@@ -156,7 +156,7 @@ class LogitStrategyTest(parameterized.TestCase):
     )
 
     # The losses should be different because the distribution is truncated
-    self.assertNotAlmostEqual(loss_full, loss_k, places=4)
+    self.assertNotAlmostEqual(loss_full, loss_k, places=4)  # pyrefly: ignore[no-matching-overload]
 
   @parameterized.named_parameters(
       ("alpha_one", 1.0),

@@ -70,6 +70,7 @@ rollout_config:
   temperature: 0.9
   top_p: 1.0
   top_k: 50
+  eos_tokens: [1, 106]
 rollout_engine: "vanilla"
 offload_to_cpu: False
 grpo_config:

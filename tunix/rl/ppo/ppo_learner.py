@@ -159,7 +159,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     super().__init__(
         rl_cluster=rl_cluster,
         algo_config=ppo_config,
-        reward_fns=reward_fns,
+        reward_fns=reward_fns,  # pyrefly: ignore[bad-argument-type]
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,
     )
@@ -188,13 +188,19 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     policy_loss_fn = registry.get(
         "policy_loss_fn", self.algo_config.policy_loss_fn
     )
-    self.rl_cluster.actor_trainer.with_loss_fn(policy_loss_fn, has_aux=True)
+    loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
+        model,
+        train_example,
+        algo_config,
+        pad_id=self.rl_cluster.rollout.pad_id(),
+        eos_id=self.rl_cluster.rollout.eos_id(),
+        compute_logps_chunk_size=self.rl_cluster.cluster_config.training_config.compute_logps_chunk_size,
+    )
+    self.rl_cluster.actor_trainer.with_loss_fn(loss_fn, has_aux=True)
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {
+        lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
             "algo_config": self.algo_config,
-            "pad_id": self.rl_cluster.rollout.pad_id(),
-            "eos_id": self.rl_cluster.rollout.eos_id(),
         }
     )
 
@@ -215,21 +221,21 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # ===== Configure the metrics logger =====
     # We just log the metrics returned in `aux`. All other metrics are logged
     # by `RLCluster` itself.
-    actor_rl_metrics_to_log = {"pg_clipfrac": np.mean}
+    actor_rl_metrics_to_log = {"pg_clipfrac": common.mean_of_means}
     if self.algo_config.epsilon_c is not None:
-      actor_rl_metrics_to_log["pg_clipfrac_lower"] = np.mean
+      actor_rl_metrics_to_log["pg_clipfrac_lower"] = common.mean_of_means
     if (
         self.algo_config.entropy_coef is not None
         and self.algo_config.entropy_coef > 0.0
     ):
-      actor_rl_metrics_to_log["loss/entropy"] = np.mean
+      actor_rl_metrics_to_log["loss/entropy"] = common.mean_of_means
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
-        actor_rl_metrics_to_log
+        actor_rl_metrics_to_log  # pyrefly: ignore[bad-argument-type]
     )
 
     self.rl_cluster.critic_trainer.with_rl_metrics_to_log({
-        "vpred_mean": np.mean,
-        "vf_clipfrac": np.mean,
+        "vpred_mean": common.mean_of_means,
+        "vf_clipfrac": common.mean_of_means,
     })
 
   def _generate_and_compute_advantage(
@@ -260,7 +266,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # Generate. We use `model`, i.e., the policy model for generating the
     # "experiences".
     rollout_output = self.rl_cluster.generate(
-        prompts=training_input["prompts"],
+        prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
         micro_batch_size=self._rollout_micro_batch_size,
     )
     padded_completion_ids = np.array([
@@ -337,10 +343,10 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
       last_token_scores = jax.device_get(jax_last_token_scores)
     else:
       last_token_scores = self._compute_rewards(
-          prompts=training_input["prompts"],
+          prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
           completions=rollout_output.text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},
+          **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
       )
       jax_last_token_scores = jax.device_put(last_token_scores)
 
@@ -359,8 +365,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
       # rewards or computed in the loss function.
       kl = common.compute_kl_divergence(
           old_per_token_logps,
-          ref_per_token_logps,
+          ref_per_token_logps,  # pyrefly: ignore[bad-argument-type]
           method=self.algo_config.kl_method,
+          clamp_value=self.algo_config.kl_clamp_value,
       )
       kl = kl * jax_completion_mask
       rewards = rewards - self.algo_config.beta * kl
@@ -401,7 +408,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     if self.algo_config.beta != 0.0:
       # Average of the per-sequence mean KL
       per_sequence_mean_kl = ppo_helpers.masked_mean(
-          kl, jax_completion_mask, axis=-1  # pylint: disable=undefined-variable
+          kl, jax_completion_mask, axis=-1  # pylint: disable=undefined-variable  # pyrefly: ignore[unbound-name]
       )
       self.rl_cluster.buffer_metrics(
           {
@@ -509,7 +516,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
-    batch_size = len(example["prompts"]) // self._num_generations()
+    batch_size = len(example["prompts"]) // self._num_generations()  # pyrefly: ignore[bad-argument-type]
     row_offset = steps * batch_size
     row_offsets = np.arange(row_offset, row_offset + batch_size)
     return row_offsets.astype(str).tolist()

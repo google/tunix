@@ -40,7 +40,6 @@ import numpy as np
 import optax
 from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
-# Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -99,6 +98,13 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     rollout_micro_batch_size: The micro-batch size used for model rollouts.
     compute_logps_micro_batch_size: The micro-batch size used for computing log
       probabilities (e.g. for reference and old policy models).
+    compute_logps_chunk_size: The chunk size used for computing log
+      probabilities. Instead of using final logits from model, where size is [B,
+      T, V], this will use the last hidden output with size [B, T, D] from model
+      and compute logps in a chunked manner. Good values to pick are like 256,
+      512, etc. When value is 0, it means this feature is disabled. This also
+      requires model to support `skip_lm_head` in its `__call__` method and have
+      a `compute_final_logits` method.
   """
 
   actor_optimizer: optax.GradientTransformation
@@ -107,6 +113,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   train_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
+  compute_logps_chunk_size: int = 0
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
@@ -405,7 +412,7 @@ class RLCluster:
       )
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
-      from tunix.rl.rollout import vllm_rollout
+      # OSS Placeholder for vllm rollout worker, don't change this line.
 
       if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
@@ -422,6 +429,8 @@ class RLCluster:
         # the rollout mesh. This is important for out-of-tree models in vLLM
         # that are implemented with custom logical axis rules, like is the case
         # for MaxText models.
+        from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
+
         self._rollout = vllm_rollout.VllmRollout(
             self.rollout_actor,
             self.tokenizer,
@@ -465,7 +474,7 @@ class RLCluster:
     ) or (
         isinstance(self.cluster_config.rollout_engine, functools.partial)
         and issubclass(
-            self.cluster_config.rollout_engine.func,
+            self.cluster_config.rollout_engine.func,  # pyrefly: ignore[bad-argument-type]
             base_rollout.BaseRollout,
         )
     ):
@@ -540,14 +549,14 @@ class RLCluster:
       critic_config = copy.deepcopy(self.cluster_config.training_config)
       critic_config.metrics_prefix = "critic"
       critic_config.pbar_description = "Critic Training"
-      if critic_config.checkpoint_root_directory is not None:
+      if critic_config.checkpoint_root_directory:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
         )
       with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
         self._critic_trainer = rl_trainer.Trainer(
             model=self.critic,
-            optimizer=self.cluster_config.training_config.critic_optimizer,
+            optimizer=self.cluster_config.training_config.critic_optimizer,  # pyrefly: ignore[bad-argument-type]
             training_config=critic_config,
             custom_checkpoint_metadata_fn=lambda: {
                 "global_step": self.global_steps + 1,
@@ -564,7 +573,7 @@ class RLCluster:
     actor_config = copy.deepcopy(self.cluster_config.training_config)
     actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
-    if actor_config.checkpoint_root_directory is not None:
+    if actor_config.checkpoint_root_directory:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
@@ -712,9 +721,9 @@ class RLCluster:
 
       if agg_value.dtype.kind in {"U", "S"}:
         logging.info(
-            "Skipping logging metric %s (dtype: %s)",
+            "Rollout string metric %s: %s",
             metric_name,
-            agg_value.dtype,
+            agg_value,
         )
         continue
 
@@ -723,7 +732,7 @@ class RLCluster:
         if agg_value.size > 0 and isinstance(
             agg_value.ravel()[0], (str, np.str_)
         ):
-          logging.info("Skipping logging object metric %s", metric_name)
+          logging.info("Rollout string metric %s: %s", metric_name, agg_value)
           continue
 
       # Apply aggregation and Log
@@ -739,7 +748,7 @@ class RLCluster:
       self._rl_metrics_logger.log(
           prefix,
           metric_name,
-          agg_value,
+          agg_value,  # pyrefly: ignore[bad-argument-type]
           metrics_buffer.mode,
           metrics_buffer.global_steps,
       )
@@ -945,13 +954,14 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        gc.collect()
 
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
     logprobs = None
     if outputs[0].logprobs is not None:
       logprobs = list(
-          itertools.chain.from_iterable(out.logprobs for out in outputs)
+          itertools.chain.from_iterable(out.logprobs for out in outputs)  # pyrefly: ignore[bad-argument-type]
       )
 
     logits = None
@@ -979,7 +989,6 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
       micro_batch_size: int | None = None,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     batch_size = prompt_tokens.shape[0]
@@ -1000,13 +1009,6 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
-      if completion_mask is not None:
-        dest_completion_mask = sharding_utils.shard_input(
-            completion_mask,
-            self.cluster_config.training_config.data_sharding_axis,
-        )
-      else:
-        dest_completion_mask = None
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -1021,9 +1023,6 @@ class RLCluster:
                 dest_completion_tokens[batch_slice],
                 pad_id,
                 eos_id,
-                completion_mask=None
-                if dest_completion_mask is None
-                else dest_completion_mask[batch_slice],
                 temperature=temperature,
             )
         )
@@ -1038,7 +1037,6 @@ class RLCluster:
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
       micro_batch_size: int | None = None,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the current policy model."""
     batch_size = prompt_tokens.shape[0]
@@ -1059,9 +1057,6 @@ class RLCluster:
             self.rollout.get_per_token_logps(
                 prompt_tokens[batch_slice],
                 completion_tokens[batch_slice],
-                completion_mask=None
-                if completion_mask is None
-                else completion_mask[batch_slice],
             )
         )
       per_token_logps = jnp.concatenate(outs, axis=0)
@@ -1069,6 +1064,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        gc.collect()
       return per_token_logps
 
   def get_actor_per_token_logps(
@@ -1078,12 +1074,12 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
       micro_batch_size: int | None = None,
-      completion_mask: jax.Array | None = None,
       temperature: float | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
-    Mirrors `get_ref_per_token_logps` — must pass through the rollout temperature
+    Mirrors `get_ref_per_token_logps` — must pass through the rollout
+    temperature
     so the actor's recomputed logps match the temperature scaling used at
     sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
     yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
@@ -1110,13 +1106,6 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
-      if completion_mask is not None:
-        dest_completion_mask = sharding_utils.shard_input(
-            completion_mask,
-            self.cluster_config.training_config.data_sharding_axis,
-        )
-      else:
-        dest_completion_mask = None
 
       # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
       # reference the same policy vllm sampled with even when mini_batch_size <
@@ -1129,19 +1118,14 @@ class RLCluster:
       if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
         self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
         gc.collect()
-      graphdef, actor_state = nnx.split(self.actor_trainer.model)
-      actor_pspecs = nnx.get_partition_spec(actor_state)
-      actor_model_sharding = jax.tree.map(
-          lambda x: jax.sharding.NamedSharding(
-              mesh,
-              x if x is not None else jax.sharding.PartitionSpec(),
-              memory_kind=self._default_memory_kind,
-          ),
-          actor_pspecs,
-      )
-      state = reshard.reshard_pytree(
-          self._anchor_policy_state, actor_model_sharding
-      )
+      graphdef, _ = nnx.split(self.actor_trainer.model)
+      anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
+      if anchor_on_device:
+        anchor_policy_state = self._anchor_policy_state
+      else:
+        anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
+        )
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
@@ -1149,21 +1133,19 @@ class RLCluster:
         outs.append(
             common.compute_per_token_logps(
                 graphdef,
-                state,
+                anchor_policy_state,
                 prompt_tokens=dest_prompt_tokens[batch_slice],
                 completion_tokens=dest_completion_tokens[batch_slice],
                 pad_id=pad_id,
                 eos_id=eos_id,
-                completion_mask=None
-                if dest_completion_mask is None
-                else dest_completion_mask[batch_slice],
                 stop_gradient=True,
-                return_logits=False,
                 temperature=temperature,
+                chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)
-      del state
+      if not anchor_on_device:
+        del anchor_policy_state
       gc.collect()
       if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
         self._put_model_on_memory_kind(
@@ -1187,6 +1169,7 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
+      gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
           nnx.state(self.actor_trainer.model), "pinned_host"
@@ -1201,7 +1184,6 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       return self.inference_worker.get_values(
@@ -1209,7 +1191,6 @@ class RLCluster:
           completion_tokens,
           pad_id,
           eos_id,
-          completion_mask=completion_mask,
       )
 
   def get_rewards(

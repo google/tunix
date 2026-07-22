@@ -142,6 +142,21 @@ class AlgorithmConfigTest(parameterized.TestCase):
     self.assertIn("advantage_estimator: gae", full_log_output)
     self.assertIn("policy_loss_fn: ppo", full_log_output)
 
+  def test_kl_clamp_value_default_is_none(self):
+    """Default `kl_clamp_value` is None (no clamp, prior behavior)."""
+    config = algorithm_config.AlgorithmConfig()
+    self.assertIsNone(config.kl_clamp_value)
+
+  @parameterized.named_parameters(
+      ("ten_thousand", 10000.0),
+      ("one", 1.0),
+      ("explicit_none", None),
+  )
+  def test_kl_clamp_value_round_trips(self, value):
+    """`kl_clamp_value` is stored as-set on the config."""
+    config = algorithm_config.AlgorithmConfig(kl_clamp_value=value)
+    self.assertEqual(config.kl_clamp_value, value)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -30,7 +30,7 @@ echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
-max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
+max_steps_float=$(awk "BEGIN {print $num_batches * $num_train_epochs * $train_fraction}")
 max_steps=$(printf "%.0f" "$max_steps_float")
 warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
 
@@ -99,4 +99,3 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.epsilon=0.2 \
   reward_functions="['tunix/cli/reward_fn/simple_math.py']" \
   "$@"
-

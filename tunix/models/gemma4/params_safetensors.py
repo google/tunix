@@ -49,11 +49,11 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
       ),
       r"(?:model\.language_model\.)?embed_tokens_per_layer\.weight": (
           "embedder.per_layer_input_embedding.value",
-          (None, (cfg.num_embed, cfg.num_layers, cfg.per_layer_input_dim)),
+          (None, (cfg.num_embed, cfg.num_layers * cfg.per_layer_input_dim)),
       ),
       r"(?:model\.language_model\.)?per_layer_model_projection\.weight": (
           "embedder.per_layer_model_projection.w",
-          ((1, 0), (cfg.embed_dim, cfg.num_layers, cfg.per_layer_input_dim)),
+          ((1, 0), (cfg.embed_dim, cfg.num_layers * cfg.per_layer_input_dim)),
       ),
       r"(?:model\.language_model\.)?per_layer_projection_norm\.weight": (
           "embedder.per_layer_projection_norm.scale",
@@ -246,6 +246,350 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
       ),
   }
 
+  if cfg.vision_encoder is not None:
+    mapping.update({
+        r"model\.embed_vision\.embedding_projection\.weight": (
+            "embedder.mm_input_projection.w",
+            ((1, 0), None),
+        ),
+        # Vision Tower / Encoder Entry
+        r"(?:model\.)?vision_tower\.patch_embedder\.position_embedding_table": (
+            "vision_encoder.entry.pos_emb",
+            ((1, 0, 2), None),
+        ),
+        r"(?:model\.)?vision_tower\.patch_embedder\.input_proj\.weight": (
+            "vision_encoder.entry.input_projection.w",
+            ((1, 0), None),
+        ),
+        # Vision Tower / Encoder Block Norms
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.input_layernorm\.weight": (
+            r"vision_encoder.layers.\1.pre_attention_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
+            r"vision_encoder.layers.\1.post_attention_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
+            r"vision_encoder.layers.\1.pre_ffw_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.post_feedforward_layernorm\.weight": (
+            r"vision_encoder.layers.\1.post_ffw_norm.scale",
+            None,
+        ),
+        # Query/Key norm scale
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
+            r"vision_encoder.layers.\1.attn.query_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (
+            r"vision_encoder.layers.\1.attn.key_norm.scale",
+            None,
+        ),
+        # Vision Attention Projections (temporaries)
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.q",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.k",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.v",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.attn.o",
+            None,
+        ),
+        # Vision Attention Clipped Parameters
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.input_min": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.input_max": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.output_min": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.output_max": (
+            r"vision_encoder.layers.\1.attn.q_einsum.clip_output_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.input_min": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.input_max": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.output_min": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.output_max": (
+            r"vision_encoder.layers.\1.attn.kv_einsum.clip_output_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.input_min": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.input_max": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.output_min": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.self_attn\.o_proj\.output_max": (
+            r"vision_encoder.layers.\1.attn.attn_vec_einsum.clip_output_max",
+            None,
+        ),
+        # Vision MLP Gate/Up (temporaries)
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.mlp.gate",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.up_proj\.linear\.weight": (
+            r"tmp.vision_layers.\1.mlp.up",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.linear\.weight": (
+            r"vision_encoder.layers.\1.mlp.linear.w",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
+            r"tmp.vision_layers.\1.mlp.gate",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
+            r"tmp.vision_layers.\1.mlp.up",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
+            r"vision_encoder.layers.\1.mlp.linear.w",
+            ((1, 0), None),
+        ),
+        # Vision MLP Clipped Parameters
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.input_min": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.input_max": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.output_min": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.gate_proj\.output_max": (
+            r"vision_encoder.layers.\1.mlp.gating_einsum.clip_output_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.input_min": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_input_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.input_max": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_input_max",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.output_min": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_output_min",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.encoder\.layers\.([0-9]+)\.mlp\.down_proj\.output_max": (
+            r"vision_encoder.layers.\1.mlp.linear.clip_output_max",
+            None,
+        ),
+        # Vision exit / standardize
+        r"(?:model\.)?vision_tower\.std_scale": (
+            "vision_encoder.standardize.scale.value",
+            None,
+        ),
+        r"(?:model\.)?vision_tower\.std_bias": (
+            "vision_encoder.standardize.bias.value",
+            None,
+        ),
+    })
+
+  if cfg.audio_encoder is not None:
+    mapping.update({  # pyrefly: ignore[no-matching-overload]
+        # Audio Embedder
+        r"(?:model\.)?embed_audio\.embedding_projection\.weight": (
+            "embedder.audio_input_projection.w",
+            ((1, 0), None),
+        ),
+        # Audio Encoder
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer0\.conv\.weight": (
+            "audio_encoder.feature.subsampling_0.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer0\.norm\.weight": (
+            "audio_encoder.feature.norm_0.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer1\.conv\.weight": (
+            "audio_encoder.feature.subsampling_1.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.layer1\.norm\.weight": (
+            "audio_encoder.feature.norm_1.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.subsample_conv_projection\.input_proj_linear\.weight": (
+            "tmp.audio_encoder.feature.input_proj",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.output_proj\.weight": (
+            "audio_encoder.output_projection.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.output_proj\.bias": (
+            "audio_encoder.output_projection.bias",
+            None,
+        ),
+        # Conformer Layers
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.pre_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.pre_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_1\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer1.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_2\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer2.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.post_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.post_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.pre_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.pre_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_1\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer1.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_2\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer2.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.post_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.post_layer_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.norm_pre_attn\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.pre_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.q_proj\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.query.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.k_proj\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.key.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.v_proj\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.value.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.per_dim_scale": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.per_dim_scale.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.post\.linear\.weight": (
+            r"tmp.audio_encoder.conformer_layers.\1.trans_atten.post",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.relative_k_proj\.weight": (
+            r"tmp.audio_encoder.conformer_layers.\1.trans_atten.self_atten.relative_position_embedding.pos_proj",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.norm_post_attn\.weight": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.post_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.pre_layer_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.ln.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_start\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_start.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.depthwise_conv1d\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.depthwise_conv1d.kernel",
+            ((2, 1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.conv_norm\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.conv_norm.scale",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_end\.linear\.weight": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_end.kernel",
+            ((1, 0), None),
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.norm_out\.weight": (
+            r"audio_encoder.conformer_layers.\1.final_ln.scale",
+            None,
+        ),
+        # Clip buffers for ClippedEinsum in Audio
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_1\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer1.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward1\.ffw_layer_2\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_start.ffn_layer2.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_1\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer1.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.feed_forward2\.ffw_layer_2\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.fflayer_end.ffn_layer2.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.post\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.post.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.q_proj\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.query.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.k_proj\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.key.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.self_attn\.v_proj\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.trans_atten.self_atten.value.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_start\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_start.clip_\2.value",
+            None,
+        ),
+        r"(?:model\.)?audio_tower\.layers\.([0-9]+)\.lconv1d\.linear_end\.(input_min|input_max|output_min|output_max)": (
+            r"audio_encoder.conformer_layers.\1.lconv.linear_end.clip_\2.value",
+            None,
+        ),
+    })
+
   return mapping
 
 
@@ -255,7 +599,22 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
   k_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.k$")
   v_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.v$")
 
+  vq_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.q$")
+  vk_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.k$")
+  vv_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.v$")
+  vo_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.attn\.o$")
+  vgate_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.mlp\.gate$")
+  vup_pat = re.compile(r"tmp\.vision_layers\.([0-9]+)\.mlp\.up$")
+
+  audio_post_pat = re.compile(
+      r"tmp\.audio_encoder\.conformer_layers\.([0-9]+)\.trans_atten\.post$"
+  )
+  audio_pos_proj_pat = re.compile(
+      r"tmp\.audio_encoder\.conformer_layers\.([0-9]+)\.trans_atten\.self_atten\.relative_position_embedding\.pos_proj$"
+  )
+
   pending: dict[str, dict[str, jnp.ndarray]] = {}
+  pending_vision: dict[str, dict[str, jnp.ndarray]] = {}
 
   def _to_ndh(q: jnp.ndarray, head_dim: int) -> jnp.ndarray:
     if q.shape == (cfg.num_heads, cfg.embed_dim, head_dim):
@@ -276,7 +635,8 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
         x = jnp.reshape(x, (cfg.embed_dim, num_kv_heads, head_dim))
         return jnp.transpose(x, (1, 0, 2))
       raise ValueError(
-          f"Unexpected 2D kv shape: {x.shape}, expected dims to contain {num_kv_heads * head_dim} and {cfg.embed_dim}"
+          f"Unexpected 2D kv shape: {x.shape}, expected dims to contain"
+          f" {num_kv_heads * head_dim} and {cfg.embed_dim}"
       )
 
     # 3D shape handling
@@ -289,7 +649,8 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
       x = jnp.transpose(x, (h_axis, f_axis, k_axis))
       return x[:num_kv_heads]
     raise ValueError(
-        f"Unexpected kv shape: {x.shape}, expected dims to contain {cfg.embed_dim} and {head_dim}"
+        f"Unexpected kv shape: {x.shape}, expected dims to contain"
+        f" {cfg.embed_dim} and {head_dim}"
     )
 
   def preprocess(tensors: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
@@ -297,12 +658,43 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
 
     for key in list(out):
       m = q_pat.fullmatch(key) or k_pat.fullmatch(key) or v_pat.fullmatch(key)
-      if not m:
+      if m:
+        layer_id = m.group(1)
+        arr = out.pop(key)
+        slot = (
+            "q" if key.endswith(".q") else ("k" if key.endswith(".k") else "v")
+        )
+        pending.setdefault(layer_id, {})[slot] = arr
         continue
-      layer_id = m.group(1)
-      arr = out.pop(key)
-      slot = "q" if key.endswith(".q") else ("k" if key.endswith(".k") else "v")
-      pending.setdefault(layer_id, {})[slot] = arr
+
+      m_v = (
+          vq_pat.fullmatch(key)
+          or vk_pat.fullmatch(key)
+          or vv_pat.fullmatch(key)
+          or vo_pat.fullmatch(key)
+      )
+      if m_v:
+        layer_id = m_v.group(1)
+        arr = out.pop(key)
+        slot = (
+            "q"
+            if key.endswith(".q")
+            else (
+                "k"
+                if key.endswith(".k")
+                else ("v" if key.endswith(".v") else "o")
+            )
+        )
+        pending_vision.setdefault(layer_id, {})[slot] = arr
+        continue
+
+      m_vg = vgate_pat.fullmatch(key) or vup_pat.fullmatch(key)
+      if m_vg:
+        layer_id = m_vg.group(1)
+        arr = out.pop(key)
+        slot = "gate" if key.endswith(".gate") else "up"
+        pending_vision.setdefault(layer_id, {})[slot] = arr
+        continue
 
     # Resolve attention type for each layer using the pattern
     pattern = (
@@ -351,6 +743,100 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
         slots.pop("k", None)
         slots.pop("v", None)
 
+    if cfg.vision_encoder is not None:
+      for layer_id_str, slots in list(pending_vision.items()):
+        q = slots.get("q")
+        k = slots.get("k")
+        v = slots.get("v")
+        o = slots.get("o")
+        gate = slots.get("gate")
+        up = slots.get("up")
+
+        v_num_heads = cfg.vision_encoder.num_heads
+        v_d_model = cfg.vision_encoder.d_model
+        v_head_dim = v_d_model // v_num_heads
+
+        if q is not None:
+          q_reshaped = jnp.reshape(q, (v_num_heads, v_head_dim, v_d_model))
+          q_final = jnp.transpose(q_reshaped, (0, 2, 1))
+          out[f"vision_encoder.layers.{layer_id_str}.attn.q_einsum.w"] = q_final
+          slots.pop("q", None)
+
+        if k is not None and v is not None:
+          k_reshaped = jnp.reshape(k, (v_num_heads, v_head_dim, v_d_model))
+          k_final = jnp.transpose(k_reshaped, (0, 2, 1))
+          v_reshaped = jnp.reshape(v, (v_num_heads, v_head_dim, v_d_model))
+          v_final = jnp.transpose(v_reshaped, (0, 2, 1))
+          out[f"vision_encoder.layers.{layer_id_str}.attn.kv_einsum.w"] = (
+              jnp.stack([k_final, v_final], axis=0)
+          )
+          slots.pop("k", None)
+          slots.pop("v", None)
+
+        if o is not None:
+          o_reshaped = jnp.reshape(o, (v_d_model, v_num_heads, v_head_dim))
+          o_final = jnp.transpose(o_reshaped, (1, 2, 0))
+          out[
+              f"vision_encoder.layers.{layer_id_str}.attn.attn_vec_einsum.w"
+          ] = o_final
+          slots.pop("o", None)
+
+        if gate is not None and up is not None:
+          out[f"vision_encoder.layers.{layer_id_str}.mlp.gating_einsum.w"] = (
+              jnp.stack([gate, up], axis=0)
+          )
+          slots.pop("gate", None)
+          slots.pop("up", None)
+
+    if cfg.audio_encoder is not None:
+      atten_num_heads = cfg.audio_encoder.atten_num_heads
+
+      # Process audio input proj
+      if "tmp.audio_encoder.feature.input_proj" in out:
+        arr = out.pop("tmp.audio_encoder.feature.input_proj")
+        # HF shape: (out_features, 1024)
+        # 1024 = 32_freq * 32_channels
+        out_features = arr.shape[0]
+        arr_reshaped = jnp.reshape(arr, (out_features, 32, 32))
+        arr_final = jnp.transpose(arr_reshaped, (1, 2, 0))
+        out["audio_encoder.feature.input_proj.kernel"] = arr_final
+
+      # Process per-layer audio params
+      for key in list(out):
+        m_post = audio_post_pat.fullmatch(key)
+        if m_post:
+          layer_id = m_post.group(1)
+          arr = out.pop(key)
+          # HF shape: (model_dims, num_heads * units_per_head)
+          # Tunix expects: (num_heads, units_per_head, model_dims)
+          model_dims = arr.shape[0]
+          units_per_head = model_dims // atten_num_heads
+          arr_reshaped = jnp.reshape(
+              arr, (model_dims, atten_num_heads, units_per_head)
+          )
+          arr_final = jnp.transpose(arr_reshaped, (1, 2, 0))
+          out[
+              f"audio_encoder.conformer_layers.{layer_id}.trans_atten.post.kernel"
+          ] = arr_final
+          continue
+
+        m_pos = audio_pos_proj_pat.fullmatch(key)
+        if m_pos:
+          layer_id = m_pos.group(1)
+          arr = out.pop(key)
+          # HF shape: (num_heads * units_per_head, model_dims)
+          # Tunix expects: (model_dims, num_heads, units_per_head)
+          model_dims = arr.shape[1]
+          units_per_head = model_dims // atten_num_heads
+          arr_reshaped = jnp.reshape(
+              arr, (atten_num_heads, units_per_head, model_dims)
+          )
+          arr_final = jnp.transpose(arr_reshaped, (2, 0, 1))
+          out[
+              f"audio_encoder.conformer_layers.{layer_id}.trans_atten.self_atten.relative_position_embedding.pos_proj.kernel"
+          ] = arr_final
+          continue
+
     return out
 
   return preprocess
@@ -362,6 +848,7 @@ def create_model_from_safe_tensors(
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
     mode: str = "auto",
+    text_only: bool = True,
 ):
   return safetensors_loader.load_and_create_model(
       file_dir=file_dir,
@@ -372,4 +859,5 @@ def create_model_from_safe_tensors(
       preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
       mode=mode,
+      model_class_kwargs={"text_only": text_only},
   )
