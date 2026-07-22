@@ -263,6 +263,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "entropy": common.mean_of_means,
         "reduced_pg_loss": common.mean_of_means,
         "unreduced_pg_loss": common.global_weighted_mean,
+        "dummy_ratio": common.global_weighted_mean,
         "pg_clipfrac": common.mean_of_means,
         "ppo_kl": common.mean_of_means,
         "kl_loss": common.mean_of_means,

@@ -547,6 +547,20 @@ def grpo_loss_fn(
       "advantage/min": adv_min,
       "advantage/nonzero_frac": nonzero_adv_frac,
   }
+  # Sequence-packing efficiency: fraction of this micro-batch's packed buffer
+  # that is padding (segment id 0). High => sparse packing => wasted compute.
+  # As a WeightedMetric(pad_positions, total_positions) it reduces across
+  # micro-batches (global_weighted_mean) to the true overall padding fraction.
+  # 0 when not packing.
+  segment_ids = getattr(train_example, "segment_ids", None)
+  if segment_ids is not None:
+    dummy_num = jnp.sum(segment_ids == 0).astype(jnp.float32)
+    dummy_den = jnp.float32(segment_ids.size)
+  else:
+    dummy_num, dummy_den = jnp.float32(0.0), jnp.float32(1.0)
+  aux["dummy_ratio"] = sft_utils.WeightedMetric(
+      dummy_num, dummy_den, min_denom=1.0
+  )
   if sampler_is_weights is not None:
     sis = sampler_is_weights.astype(jnp.float32)
     aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
