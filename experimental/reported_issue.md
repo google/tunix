@@ -277,3 +277,19 @@ When Orbax `CheckpointManager` attempts to perform a standard serialization dump
 **Required Fix for Next Launch**:
 1. **Rotate the RUN_TAG**: Ensure your launch shell scripts strictly inject a unique `RUN_TAG` (e.g. `qwen3_128_apc_2` or append a `$(date +%s)` timestamp) so it writes to a virgin GCS subdirectory.
 2. **Clear the Bucket**: If you intentionally meant to overwrite `qwen3_128_apc_1`, you must manually `gsutil rm -rf gs://yuxzhang-tunix-models/haoyu-deepswe/checkpoint/qwen3_128_apc_1/` before kicking off `kubectl apply`.
+
+## 8. Critical Log-Prob Divergence (APC State Corruption)
+**Severity**: P0 / Training Destructive 
+**Observation**: During the PPO Update phase, the `sampler-trainer` validation layer reports astronomically high differences in log-probabilities (`logp_diff`) between what the Rollout Engine (vLLM with APC enabled) sampled and what the Trainer Engine computed for the exact same tokens.
+**Verification Log**:
+```log
+WARNING:absl:sampler-trainer top_diff group=18 rank=1 seq=3 tok=114 token_id=79067 token='/down' rollout_logp=-0.199203 trainer_logp=-10.004436 diff=9.805234 rollout_prob=0.819384 trainer_prob=4.5199e-05 
+WARNING:absl:sampler-trainer top_diff group=18 rank=2 seq=3 tok=118 token_id=44317 token='cookies' rollout_logp=0.000000 trainer_logp=-2.240339 diff=2.240339 rollout_prob=1 trainer_prob=0.106422
+WARNING:absl:sampler-trainer top_diff group=9 rank=1 seq=4 tok=222 token_id=91953 token='=view' rollout_logp=-1.730303 trainer_logp=-1.236036 diff=0.494267 rollout_prob=0.177231 trainer_prob=0.290534
+```
+**Root Cause Analysis**:
+A maximum log_prob diff of ~9.8 corresponds to the token generation probability plummeting from **81.9%** (during Rollout) to **0.004%** (during PPO Train evaluation). Because PPO calculates proximal loss (KL penalty) directly on the ratio of `trainer_logp / rollout_logp`, a mismatch this large will completely explode the gradients and destroy the model weights immediately on the first backward pass.
+The discrepancy is strongly correlated with **Automatic Prefix Caching (APC)** being turned ON. When the Rollout engine aggressively caches the prefix states across multi-turn trajectories, positional embeddings (RoPE IDs) or attention chunking boundaries may become misaligned. The Trainer, doing a full forward pass without the APC KV-cache splicing, computes the *true* autoregressive probability.
+**Proposed Mitigation**:
+- The APC logic in the inference backend seems fundamentally broken for mathematically-strict RL training loops where strict replication of generation logits is required.
+- We must immediately disable APC (`--enable_prefix_caching=False`) in the rollout config, or thoroughly investigate the RoPE alignment when prefix chunks are injected.
