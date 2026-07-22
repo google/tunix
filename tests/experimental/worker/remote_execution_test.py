@@ -15,9 +15,12 @@
 """Unit tests for universal Actor Model (`remote_execution.py`)."""
 
 import asyncio
+import contextlib
 import socket
 import threading
+import time
 from absl.testing import absltest
+import portpicker
 from tunix.experimental.worker import remote_execution as remote_lib
 
 
@@ -37,13 +40,14 @@ class StubWorkerEngine:
     self.call_count += 1
     if self.is_paused:
       raise RuntimeError(f"Worker [{self.worker_id}] is currently paused.")
-    return f"[{self.worker_id}] Trajectory for prompt {prompt_id} ({turns} turns)"
+    return (
+        f"[{self.worker_id}] Trajectory for prompt {prompt_id} ({turns} turns)"
+    )
 
   async def __call__(
       self, prompt_id: str = "default_prompt", turns: int = 3
   ) -> str:
     return await self.compute_trajectory(prompt_id, turns)
-
 
   def pause(self) -> None:
     self.is_paused = True
@@ -52,20 +56,83 @@ class StubWorkerEngine:
     self.is_paused = False
 
   def get_status(self) -> str:
-    return f"worker_id={self.worker_id}, count={self.call_count}, paused={self.is_paused}"
+    return (
+        f"worker_id={self.worker_id}, count={self.call_count},"
+        f" paused={self.is_paused}"
+    )
 
   def kv_cache_aware(self, prompt: str = "test") -> str:
     return f"[{self.worker_id}] KV-cache aware routing for {prompt}"
 
 
+def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
+  """Polls a TCP socket until it is open and accepting connections.
 
+  This prevents race conditions when starting a server in a background thread,
+  ensuring the client doesn't attempt to connect before the server is fully
+  bound.
+  """
+  deadline = time.time() + timeout
+  while time.time() < deadline:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+      s.settimeout(0.2)
+      if s.connect_ex((host, port)) == 0:
+        return True
+    time.sleep(0.05)
+  return False
+
+
+@contextlib.contextmanager
+def background_server(engine, port):
+  """Starts a gRPC server on an isolated background event loop and thread.
+
+  Because `GrpcRemoteActorHandle.submit()` throws a RuntimeError if called
+  from within an active asyncio event loop, tests verifying synchronous
+  `submit()`
+  must be completely synchronous in the main thread. This context manager runs
+  the mocked gRPC server in the background so the main thread remains clean.
+
+  Yields:
+    (server, loop) so the caller can drive blocking client calls
+    from the main thread while the server runs asynchronously elsewhere.
+  """
+  server = remote_lib.GrpcRemoteExecutionServer(engine)
+  loop = asyncio.new_event_loop()
+  ready = threading.Event()
+
+  def _runner():
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(server.start_serving_async(port))
+    loop.call_soon(ready.set)
+    loop.run_forever()
+
+  thread = threading.Thread(target=_runner, daemon=True)
+  thread.start()
+  ready.wait(timeout=10)
+  try:
+    yield server, loop
+  finally:
+    asyncio.run_coroutine_threadsafe(server.stop_serving(), loop).result(
+        timeout=5
+    )
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=5)
+    loop.close()
+
+
+class _LockReturner:
+
+  def get(self):
+    return threading.Lock()  # not serializable by (cloud)pickle
 
 
 class RemoteExecutionTest(absltest.TestCase):
   """Tests verifying ActorHandle and ActorPool dynamic routing."""
 
   def test_execution_request_serialization(self):
-    req = remote_lib.ExecutionRequest("compute_trajectory", args=("prompt_1",), kwargs={"turns": 5})
+    req = remote_lib.ExecutionRequest(
+        "compute_trajectory", args=("prompt_1",), kwargs={"turns": 5}
+    )
     payload = req.serialize()
     restored = remote_lib.ExecutionRequest.deserialize(payload)
     self.assertEqual(restored.method_name, "compute_trajectory")
@@ -80,7 +147,9 @@ class RemoteExecutionTest(absltest.TestCase):
 
       # Test async execution via asubmit
       res = await handle.asubmit("compute_trajectory", "prompt_a", turns=2)
-      self.assertEqual(res, "[actor_01] Trajectory for prompt prompt_a (2 turns)")
+      self.assertEqual(
+          res, "[actor_01] Trajectory for prompt prompt_a (2 turns)"
+      )
 
       # Test sync execution via submit
       status = await handle.asubmit("get_status")
@@ -119,8 +188,12 @@ class RemoteExecutionTest(absltest.TestCase):
 
       # worker_B (latency 0.01) should finish before worker_A (latency 0.04)
       self.assertLen(results, 2)
-      self.assertIn("[worker_B] Trajectory for prompt req_fast_on_B", results[0])
-      self.assertIn("[worker_A] Trajectory for prompt req_slow_on_A", results[1])
+      self.assertIn(
+          "[worker_B] Trajectory for prompt req_fast_on_B", results[0]
+      )
+      self.assertIn(
+          "[worker_A] Trajectory for prompt req_slow_on_A", results[1]
+      )
 
     asyncio.run(_run_test())
 
@@ -137,7 +210,8 @@ class RemoteExecutionTest(absltest.TestCase):
 
       pool = remote_lib.RoutingActorPool([handle_0, handle_1])
 
-      # Verify sticky routing: identical route_keys consistently route to the same worker without method_name
+      # Verify sticky routing: identical route_keys consistently route to the
+      # same worker without method_name
       res_a1 = await pool.asubmit(
           route_key="prompt_sticky_X",
       )
@@ -148,13 +222,12 @@ class RemoteExecutionTest(absltest.TestCase):
           route_key="prompt_sticky_X",
       )
 
-
       worker_prefix = res_a1.split("]")[0] + "]"
       self.assertTrue(res_a2.startswith(worker_prefix))
       self.assertTrue(res_a3.startswith(worker_prefix))
 
       # Verify custom router callable switching strategies per method_name
-      def custom_router(actors, method_name, _args, kwargs):
+      def custom_router(actors, method_name, unused_args, kwargs):
         if method_name == "compute_trajectory":
           route_key = kwargs.get("route_key")
           return (
@@ -178,11 +251,11 @@ class RemoteExecutionTest(absltest.TestCase):
       res_kv = await smart_pool.asubmit("kv_cache_aware", "prompt_v2")
       self.assertIn("[worker_1] KV-cache aware routing for prompt_v2", res_kv)
 
-
-      # Verify router object providing a method matching `method_name` (`self.router."method_name"()`)
+      # Verify router object providing a method matching `method_name`
+      # (`self.router."method_name"()`)
       class MethodSpecificRouter:
 
-        def kv_cache_aware(self, actors, _args, _kwargs):
+        def kv_cache_aware(self, actors, unused_args, unused_kwargs):
           return actors[1]
 
       method_pool = remote_lib.RoutingActorPool(
@@ -191,18 +264,17 @@ class RemoteExecutionTest(absltest.TestCase):
       res_method = await method_pool.asubmit("kv_cache_aware", "any_prompt")
       self.assertIn("[worker_1]", res_method)
 
-
     asyncio.run(_run_test())
-
-
-
 
   def test_ray_style_remote_decorators(self):
     """Verifies @remote, @grpc, and @stubby decorators turning classes/funcs into actors."""
+
     @remote_lib.remote(transport="inprocess")
     class DecoratedWorker:
+
       def __init__(self, name: str):
         self.name = name
+
       def greet(self, msg: str) -> str:
         return f"Hello {msg} from {self.name}"
 
@@ -230,7 +302,9 @@ class RemoteExecutionTest(absltest.TestCase):
     # Verify class actor factory (inprocess)
     actor_handle = DecoratedWorker.remote("WorkerX")
     self.assertIsInstance(actor_handle, remote_lib.InProcessActorHandle)
-    self.assertEqual(actor_handle.submit("greet", "World"), "Hello World from WorkerX")
+    self.assertEqual(
+        actor_handle.submit("greet", "World"), "Hello World from WorkerX"
+    )
 
     # Verify standalone function task (inprocess)
     self.assertEqual(standalone_task.remote(5), 50)
@@ -257,21 +331,17 @@ class RemoteExecutionTest(absltest.TestCase):
     # Verify late address binding (dynamic pod allocation at runtime)
     late_handle = DynamicWorker.remote(address="grpc://allocated-pod:50051")
     self.assertIsInstance(late_handle, remote_lib.GrpcRemoteActorHandle)
-    self.assertEqual(
-        late_handle.target_address, "grpc://allocated-pod:50051"
-    )
+    self.assertEqual(late_handle.target_address, "grpc://allocated-pod:50051")
 
     # Verify standalone function with non-inprocess transport raises NotImplementedError
     with self.assertRaises(NotImplementedError):
+
       @remote_lib.remote("grpc://fake-pod:50051")
       def remote_grpc_func(x: int) -> int:
         return x * 2
 
-
   def test_real_grpc_tcp_execution(self):
     """Verifies GrpcRemoteExecutionServer and GrpcRemoteActorHandle over physical TCP sockets."""
-    if not remote_lib._GRPC_AVAILABLE:
-      self.skipTest("grpc library not available in test environment.")
 
     async def _run_test():
       with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -299,54 +369,142 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
-  def test_real_grpc_tcp_sync_submit_execution(self):
-    """Verifies multiple synchronous submit() calls without event loop errors."""
-    if not remote_lib._GRPC_AVAILABLE:
-      self.skipTest("grpc library not available in test environment.")
+  def test_execution_response_error_round_trips(self):
+    resp = remote_lib.ExecutionResponse(
+        error_message="worker 1 is paused!",
+        error_type="ValueError",
+        traceback="Traceback: ...",
+        retryable=True,
+    )
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-      s.bind(("localhost", 0))
-      port = s.getsockname()[1]
+    restored = remote_lib.ExecutionResponse.deserialize(resp.serialize())
 
-    engine = StubWorkerEngine("grpc_worker_02", latency=0.01)
-    server = remote_lib.GrpcRemoteExecutionServer(engine)
+    self.assertEqual(restored.error_type, "ValueError")
+    self.assertEqual(restored.error_message, "worker 1 is paused!")
+    self.assertEqual(restored.traceback, "Traceback: ...")
+    self.assertTrue(restored.retryable)
+    with self.assertRaises(RuntimeError):
+      restored.unwrap()
 
-    server_loop = asyncio.new_event_loop()
-    server_started = threading.Event()
+  def test_execute_request_captures_traceback(self):
+    async def _run():
+      engine = StubWorkerEngine("worker_1")
+      engine.pause()
+      server = remote_lib.InProcessRemoteExecutionServer(engine)
+      resp = await server.execute_request(
+          remote_lib.ExecutionRequest("compute_trajectory")
+      )
+      self.assertEqual(resp.error_type, "RuntimeError")
+      self.assertIn("currently paused", resp.error_message)
+      self.assertIsNotNone(resp.traceback)
+      self.assertIn("compute_trajectory", resp.traceback)
 
-    def _server_thread():
-      asyncio.set_event_loop(server_loop)
-      server_loop.run_until_complete(server.start_serving_async(port=port))
-      server_started.set()
-      server_loop.run_forever()
+    asyncio.run(_run())
 
-    t = threading.Thread(target=_server_thread, daemon=True)
-    t.start()
-    server_started.wait(timeout=5.0)
+  def test_handle_execute_returns_error_for_unserializable_result(self):
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
+      request_bytes = remote_lib.ExecutionRequest("get").serialize()
 
+      response_bytes = await server._handle_execute(request_bytes, context=None)
+
+      resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
+      self.assertEqual(resp.error_type, "ResultSerializationError")
+      self.assertIsNotNone(resp.error_message)
+
+    asyncio.run(_run())
+
+  def test_grpc_large_payload_round_trips(self):
+    async def _run():
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("worker_1")
+      )
+      await server.start_serving_async(port=port)
+      try:
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}"
+        )
+        # 8 MiB exceeds gRPC's default ~4 MiB message cap.
+        blob = "x" * (8 * 1024 * 1024)
+        echoed = await handle.asubmit("kv_cache_aware", blob)
+        self.assertTrue(echoed.endswith(blob))
+        self.assertGreater(len(echoed), len(blob))
+        await handle.close()
+      finally:
+        await server.stop_serving()
+
+    asyncio.run(_run())
+
+  def test_grpc_asubmit_times_out_on_slow_worker(self):
+    async def _run():
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("slow_worker", latency=2.0)
+      )
+      await server.start_serving_async(port=port)
+      try:
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}", default_timeout_s=0.3
+        )
+        with self.assertRaises(Exception) as cm:
+          await handle.asubmit("compute_trajectory", "p", turns=1)
+        self.assertIn("deadline", str(cm.exception).lower())
+        await handle.close()
+      finally:
+        await server.stop_serving()
+
+    asyncio.run(_run())
+
+  def test_grpc_sync_submit_survives_repeated_calls(self):
+    port = portpicker.pick_unused_port()
+    with background_server(StubWorkerEngine("sync_worker"), port):
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}"
+      )
+      try:
+        first = handle.submit("compute_trajectory", "p1", turns=1)
+        self.assertIn("sync_worker", first)
+        # The 2nd blocking call reuses the handle's persistent submit loop and its
+        # channel; it must not rebuild the channel or fail on a stale loop.
+        second = handle.submit("compute_trajectory", "p2", turns=1)
+        self.assertIn("sync_worker", second)
+      finally:
+        asyncio.run(handle.close())  # tears down the persistent submit loop
+
+  def test_grpc_sync_start_serving_actually_serves(self):
+    port = portpicker.pick_unused_port()
+    server = remote_lib.GrpcRemoteExecutionServer(
+        StubWorkerEngine("blocking_worker")
+    )
+    thread = threading.Thread(
+        target=server.start_serving, kwargs={"port": port}, daemon=True
+    )
+    thread.start()
     try:
-      handle = remote_lib.ActorHandle.from_address(f"grpc://localhost:{port}")
-      self.assertIsInstance(handle, remote_lib.GrpcRemoteActorHandle)
-
-      res1 = handle.submit("compute_trajectory", "prompt_sync_1", turns=2)
-      self.assertEqual(
-          res1, "[grpc_worker_02] Trajectory for prompt prompt_sync_1 (2 turns)"
+      self.assertTrue(
+          _wait_for_port("localhost", port),
+          "start_serving() never began accepting connections",
       )
 
-      res2 = handle.submit("compute_trajectory", "prompt_sync_2", turns=3)
-      self.assertEqual(
-          res2, "[grpc_worker_02] Trajectory for prompt prompt_sync_2 (3 turns)"
-      )
+      async def _call():
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}"
+        )
+        try:
+          return await handle.asubmit("compute_trajectory", "p", turns=1)
+        finally:
+          await handle.close()
 
-      status = handle.submit("get_status")
-      self.assertIn("count=2", status)
-      handle.close_sync()
+      result = asyncio.run(_call())
+      self.assertIn("blocking_worker", result)
     finally:
-      asyncio.run_coroutine_threadsafe(
-          server.stop_serving(), server_loop
-      ).result(timeout=5.0)
-      server_loop.call_soon_threadsafe(server_loop.stop)
-      t.join(timeout=5.0)
+      serve_loop = server.serve_loop
+      if serve_loop is not None:
+        asyncio.run_coroutine_threadsafe(
+            server.stop_serving(), serve_loop
+        ).result(timeout=5)
+      thread.join(timeout=5)
 
 
 if __name__ == "__main__":
