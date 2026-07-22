@@ -227,3 +227,23 @@ However, the Sequence Packing feature (`is_packed = True`) wraps `train_data_gen
 
 **Status:**
 Identified root cause. Pending fix to upstream the `_batch_to_train_example` conversion into an intermediate generator wrapper that runs immediately prior to `pack_sequences`.
+
+**Precise trigger (verified, agentic_rl_learner.py):**
+Two independent switches; the crash is only in the cell where both are True:
+- `is_packed` <= `max_seq_token_per_tpu is not None` (:806)
+- `_process_in_consumer` <= `compute_logps_micro_batch_size > 1` (:748)
+
+The packing yaml sets `--max_seq_token_per_tpu 4096` AND
+`--compute_logps_micro_batch_size 32`, so it always lands in the crashing cell.
+The Phase-4 packing port only exercised `_process_in_consumer=False`.
+
+**Fix (implemented):**
+Move the `Trajectory -> TrainExample` conversion into a generator that runs
+BEFORE `pack_sequences`, so `pack_sequences` (and `unpad_train_example`) always
+receive `TrainExample`s. Pack-first is preserved: `_batch_to_train_example ->
+_process_results` leaves old/ref logps None under packing, and
+`_compute_packed_logps` fills them after packing. The consumer loop body then
+handles all four (`_process_in_consumer` x `is_packed`) combinations uniformly
+via `jax.tree.map(concat, *train_micro_batch)` (each item is now always a
+`Sequence[TrainExample]`; GRPO yields a single-element list, so this equals the
+old `train_examples[0]`).
