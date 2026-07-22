@@ -26,6 +26,8 @@ spec:
             labels:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: deepswe-cpu-pool
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
@@ -43,7 +45,7 @@ spec:
               resources:
                 limits:
                   cpu: '16'
-                  memory: 300G
+                  memory: 150G
               restartPolicy: Always
             - name: pathways-rm
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
@@ -71,7 +73,7 @@ spec:
               resources:
                 limits:
                   cpu: '24'
-                  memory: 300G
+                  memory: 200G
               command:
               - bash
               - -c
@@ -139,7 +141,7 @@ spec:
                 sleep 60;
                 echo "GSM8K dataset (tfds) and Qwen3-1.7B (HF) are downloaded inside the script; no separate data step."
                 echo "Running training script..."
-                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False XLA_PYTHON_CLIENT_PREALLOCATE=TRUE XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_fsdp 32 --mesh_tp 4 --batch_size 128 --mini_batch_size 128 --train_micro_batch_size 32 --compute_logps_micro_batch_size 32 --max_seq_token_per_tpu 4096 --profiler_log_dir gs://yuxzhang-tunix-models/xprof/gsm8k_refactor_stream_pack --profiler_skip_steps 5 --profiler_steps 3
+                TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) PYTHONPATH=$PYTHONPATH:. ROLLOUT_ENGINE=vllm SKIP_JAX_PRECOMPILE=True FLAGS_pathways_enforce_subset_devices_form_subslice=False python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_fsdp 32 --mesh_tp 4 --batch_size 128 --mini_batch_size 128 --train_micro_batch_size 32 --compute_logps_micro_batch_size 32 --max_seq_token_per_tpu 4096 --profiler_log_dir gs://yuxzhang-tunix-models/xprof/gsm8k_refactor_stream_pack --profiler_skip_steps 5 --profiler_steps 3
                 exit $?
               env:
               - name: PATHWAYS_HEAD

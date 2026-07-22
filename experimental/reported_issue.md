@@ -247,3 +247,19 @@ handles all four (`_process_in_consumer` x `is_packed`) combinations uniformly
 via `jax.tree.map(concat, *train_micro_batch)` (each item is now always a
 `Sequence[TrainExample]`; GRPO yields a single-element list, so this equals the
 old `train_examples[0]`).
+
+## 12. FSDP Shard_map Indivisible Batch Size (Micro Batch Size < FSDP Mesh Size)
+**Severity:** High
+
+**Symptom:**
+During hardware scale-up from 64 to 128 TPU chips, the Qwen3 Attention block crashes in the forward pass with:
+`ValueError: shard_map applied to the function 'sharded_splash_attn' was given argument arrays with axis sizes that are not evenly divisible by the corresponding mesh axis sizes`.
+`maps array axis 0 (of size 16) to mesh axis 'fsdp' (of size 32), but 32 does not evenly divide 16.`
+
+**Root Cause:**
+Scaling from 64 to 128 TPUs doubled the FSDP mesh dimension from `16` to `32`.
+However, the `--train_micro_batch_size` and `--compute_logps_micro_batch_size` hyper-parameters were hardcoded to `16` in the YAML config. 
+JAX's `shard_map` requires the sharded tensor dimensions (e.g., the batch axis with size 16) to be evenly divisible by the FSDP mesh size (32). You cannot evenly distribute 16 sequence items across 32 devices (each device would hold 0.5 sequences), which triggers an indivisibility fault.
+
+**Resolution:**
+Synced the micro batch size scale to match the new hardware topology. Updated `--train_micro_batch_size 32` and `--compute_logps_micro_batch_size 32` within `gsm8k_refactor_stream_pack.yaml` to ensure $32 / 32 = 1$ sequence per device.
