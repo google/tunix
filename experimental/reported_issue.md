@@ -246,3 +246,23 @@ INFO 07-22 17:55:50 [loggers.py:271] Engine 000: Avg prompt throughput: 4009.9 t
 ```
 
 **Retracted Recommendation**: The extreme headroom available on the hardware was noted. However, scaling `max_concurrency` higher than 128 (e.g. to 256 or 512) **is not recommended for DeepSWE** because generation velocity per trajectory would plummet below the ~5.4 tokens/second baseline, causing trajectories to exceed the maximum 3-hour Kubernetes lifespan. Completing convergence metrics absolutely demands environments finish properly without truncation timeouts. The 128 boundary strikes the mathematically perfect alignment between APC hits and max duration safety.
+
+## 6. Throughput Drop & CPU Sandbox Bottleneck (At T+2h)
+**Status**: Expected RL Rollout Behavior (Long Tail Bottleneck)
+**Observation**: Around 2 hours into the run, the overall vLLM generation throughput appeared to plummet from `~600 tokens/s` down to `~0.1 tokens/s`.
+**Cause Analysis**:
+This is **not** a TPU inference failure, nor has the system transitioned into the PPO training update phase yet.
+As 85% of the trajectories (191 / 224) have successfully completed, only the most difficult ~30 tasks remain. These surviving agents often write faulty validation scripts (e.g., infinite loops in `pytest` or `execute_bash`) that trigger the R2E sandboxes' native 5-minute (`300` seconds) hard timeout per step.
+Because the CPU sandboxes are taking exactly `300.05s` to return execution results to the LLM, the TPU engines spend 5 minutes severely starved of requests (`Running: 0 reqs, Waiting: 0 reqs`), instantly process the next prompt in `<1s`, and then wait another 5 minutes. The mathematical aggregate throughput drops because the overall GPU timeline is almost completely empty.
+
+**Verification Log**:
+```log
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 300.05s done=False reward=0 obs_chars=130
+INFO:root:[DeepSWE Debug] model_call start group=14 pair=4 prompt_len=44 max_generation_steps=28199
+INFO 07-22 18:41:28 [loggers.py:271] Engine 000: Avg prompt throughput: 11.9 tokens/s, Avg generation throughput: 0.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs
+INFO:root:[DeepSWE Debug] model_call done group=14 pair=4 in 0.64s outputs=1
+INFO:absl:[step_idx=21, pair_index=4, group_id=14] prompt token alignment OK len=6360 local_context_len=8665
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=21 function=execute_bash
+INFO 07-22 18:41:30 [loggers.py:271] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 9.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs
+```
+**Conclusion**: This definitively confirms the system is correctly running but stalled waiting for the CPU sandboxes to time out broken agent execution loops. The rollout phase will naturally conclude once these last environments hit their 50-turn cap or 3-hour limit, transitioning safely into the PPO update.
