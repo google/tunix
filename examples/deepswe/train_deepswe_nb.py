@@ -728,7 +728,7 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": True,
+        "enable_prefix_caching": False,
     },
 }
 
