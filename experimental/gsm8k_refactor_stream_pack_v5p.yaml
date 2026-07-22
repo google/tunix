@@ -4,7 +4,7 @@ metadata:
   name: gsm8k-refactor-stream-pack-v5p
   namespace: default
   labels:
-    kueue.x-k8s.io/queue-name: multislice-queue
+    kueue.x-k8s.io/queue-name: cluster-queue
 spec:
   failurePolicy:
     maxRestarts: 0
@@ -24,7 +24,7 @@ spec:
         template:
           metadata:
             labels:
-              kueue.x-k8s.io/queue-name: multislice-queue
+              kueue.x-k8s.io/queue-name: cluster-queue
           spec:
             nodeSelector:
               cloud.google.com/gke-nodepool: cpu-np
