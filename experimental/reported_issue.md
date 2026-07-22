@@ -77,6 +77,24 @@ env:
     value: "32"
 ```
 
+## 7. JobSet Failure via Worker DNS Timeout and Zero-容错 (backoffLimit: 0)
+**Symptom:**
+Shortly after JobSet creation, the entire JobSet transitions to `Failed` almost instantly. The Head pod never gets a chance to become `Ready=True`. K8s Events show:
+`Warning  BackoffLimitExceeded  job-controller  Job has reached the specified backoff limit`
+
+The Worker Pod crashes instantly with GCP logs:
+`Client RPC done with error status: UNAVAILABLE: errors resolving gsm8k-refactor-stream-pack-pathways-head-0-0.gsm8k-refactor-stream-pack:29001: [field:hostname lookup error:Ipv6 Lookup Error:DNS Request Failed: NOT_FOUND,Ipv4 Lookup Error:DNS Request Failed: NOT_FOUND]`
+
+**Root Cause:**
+This is a K8s provisioning race condition caused by asymmetric node warmth:
+1. The Head Pod schedules on `deepswe-cpu-pool` (a massive CPU node). Because this pool scales down to 0, K8s takes ~4 minutes to spin up the VM and another ~5 minutes to pull the 20GB `tunix_base_image:latest`. During this 9-minute window, the Head Pod is not ready and its network DNS is not resolvable.
+2. The Worker Pods are scheduled on TPU partitions that boot fast. 
+3. Upon booting, the Workers immediately try to establish a gRPC connection to the Head's Resource Manager at `...-head-0-0:29001`. Because the Head's DNS isn't up, they throw `NOT_FOUND` and exit.
+4. The YAML sets `backoffLimit: 0` for the Worker Job (allowing ZERO retries). Because the worker crashed, the Worker Job instantly triggers a BackoffLimitExceeded and declares total failure, causing the complete deletion of the JobSet before the Head ever finished its 9-minute image pull.
+
+**Resolution:**
+Increase the `backoffLimit` in the Worker template from `0` to a high number (e.g., `100`), allowing the lightweight Worker pods to naturally crashloop and backoff. They will continually try to restart until the Head pod completes its 9-minute cold-start sequence and K8s wires the DNS.
+
 ---
 
 # Review & Solution Analysis (2026-07-22, engineer review)
