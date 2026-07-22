@@ -205,3 +205,25 @@ The `pathways-rm` sidecar was initialized with `--gcs_scratch_location=gs://clou
 
 **Status:**
 Fixed. Edited the `--gcs_scratch_location` configuration parameter on both pathways sidecars in `gsm8k_refactor_stream_pack.yaml` to utilize a private accessible bucket: `gs://yuxzhang-tunix-models/tmp/gsm8k`.
+
+## 11. Sequence Packing Type Mismatch (AttributeError: 'list' object has no attribute 'prompt_ids')
+**Severity:** High
+
+**Symptom:**
+During the actual JAX GRPO training loop (`grpo_trainer.train()`), the pipeline violently crashes with:
+```text
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 832, in train
+    for train_micro_batch in train_data_gen:
+  File "/app/tunix/rl/utils.py", line 282, in unpad_train_example
+    batch_size = example.prompt_ids.shape[0]
+AttributeError: 'list' object has no attribute 'prompt_ids'
+```
+
+**Root Cause:**
+A structural bug in `agentic_rl_learner.py`. When `compute_logps_micro_batch_size > 1`, the learner sets `self._process_in_consumer = True`. 
+Under this mode, the raw `train_data_gen` queue yields raw Python `list`s of `Trajectory` elements. The conversion of these raw Trajectories into array-based `TrainExample` instances (using `_batch_to_train_example`) historically happens *inside* the consumer's `for train_micro_batch in train_data_gen:` loop body.
+
+However, the Sequence Packing feature (`is_packed = True`) wraps `train_data_gen` with `rl_utils.pack_sequences()` exactly *before* the consumer loop starts. Because `pack_sequences` executes before the inside-loop conversion, it receives raw `list`s (instead of `TrainExample` objects) and naturally crashes upon calling `.prompt_ids`. 
+
+**Status:**
+Identified root cause. Pending fix to upstream the `_batch_to_train_example` conversion into an intermediate generator wrapper that runs immediately prior to `pack_sequences`.
