@@ -166,3 +166,43 @@ INFO 07-22 02:21:06 [loggers.py:271] Engine 000: Avg prompt throughput: 31994.5 
 - The engine spends almost all its iteration cycles repeatedly churning the identical history context through new prefill passes, suffocating decode rate.
 
 **Over to the reviewing agent:** Given the confirmed 0.0% APC hit rate, how do we correctly wire/enable APC in this JAX setup, or should we execute fallback Option 2c (batch tuning) + 2a (relaxing sandbox limits) directly?
+
+---
+
+## 3. Current Run State & Workarounds (Reverted Baseline 2026-07-22)
+
+To forcefully keep the deepswe pipeline running and collect actionable trajectory data despite the 0.0% APC starvation issue and initialization crashes, we have deployed the following "Reverted Baseline" in our latest cluster launch:
+
+**1. Scaled Down Concurrency (Relieving APC Starvation)**
+To ensure each episode receives enough decoding throughput to finish before the physical sandbox dies, we halved the concurrent agents:
+- `MAX_CONCURRENT=64`
+- `--max_concurrency=64`
+- `--rollout_vllm_max_num_seqs=64`
+
+**2. Relaxed Sandbox Timeout Limits (Fix 2a)**
+We extended the hard death-limit of the Kubernetes Pods from 1 hour to 3 hours, officially aligning it with the Python default:
+- `activeDeadlineSeconds` patched to `10800` via sed.
+- `TIMEOUT=10800` exported.
+
+**3. Fixed Cold Pool Initialization Race Condition (Node Cache Issue)**
+Since the CPU head pod now runs on an autoscaled cold node (`deepswe-cpu-pool`), fetching its 20GB docker image takes exactly 5-6 minutes. Since the TPU workers sit on warm slices and boot instantly, they were suffering DNS timeouts and aggressively self-immolating, causing K8s to garbage-collect the whole JobSet.
+- **Fix:** Increased `backoffLimit` under `pathways-worker` from `0` to `100`. The workers now passively wait up to 100 restarts for the Head to compile without deleting the fleet.
+
+**4. Isolated Checkpoint & Log Routing**
+To prevent new retries from corrupting our previous crash logs, the hardcoded `run1` directories were replaced with dynamic Bash expansion:
+- `ckpt_dir` is now `gs://.../.../checkpoint/${RUN_TAG}/`
+- Current `RUN_TAG` is explicitly tracked as `"qwen3_64_retry_3"`.
+- We temporarily bypassed fixing the "None" parameter in internal code (Issue 1) to prioritize getting this diagnostic run off the ground. 
+
+*(This baseline configuration successfully mitigates the immediate crash symptoms and affords us the maximum runway to investigate the underlying JAX 0% Prefix Cache logic when we return to this file).*
+
+---
+
+## 4. DeepSWE Training Data Source Alignment
+**Severity**: Medium
+**Symptom**: The current training or evaluation pipeline might be blindly iterating over standard or noisy R2E-Gym datasets rather than the vetted gold subset.
+**Observation**: The actual verified, high-quality trajectory data that we uniquely want to use for DeepSWE is situated inside `task_report_good_qwen3_128_retry_20260713_090141.jsonl`.
+**Action Required (For Delegated Team Member)**:
+- Modify the data ingestion script (e.g., `train_deepswe.py` or the whitelist parser).
+- Guarantee that the pipeline **strictly filters its training set** using ONLY the instances defined within `task_report_good_qwen3_128_retry_20260713_090141.jsonl`.
+- *Status*: Acknowledged and logged for delegation (2026-07-22). No code changes have been implemented yet per instructions.

@@ -143,11 +143,11 @@ spec:
                 export N_SAMPLE=8
                 export TEMPERATURE=0.7
                 export TASKS_LIMIT=0
-                export MAX_CONCURRENT=128
+                export MAX_CONCURRENT=64
                 export VLLM_HBM_UTILIZATION=0.8
-                export RUN_TAG="qwen3_128_retry_2"
+                export RUN_TAG="qwen3_64_retry_3"
                 export R2E_K8S_NODE_SELECTOR='{"cloud.google.com/gke-nodepool":"deepswe-cpu-pool"}'
-                export TIMEOUT=3600
+                export TIMEOUT=10800
                 export MODEL_VERSION="Qwen/Qwen3-32B"
                 # Dataset the gold whitelist was generated from. The gold filter
                 # joins on docker_image, so this MUST be the same source dataset
@@ -172,7 +172,7 @@ spec:
                 cd R2E-Gym
                 git apply ../experimental/r2egym.patch
                 sed -i 's/, HfFolder//g' src/r2egym/agenthub/utils/utils.py
-                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 3600,/g' src/r2egym/agenthub/runtime/docker.py
+                sed -i 's/"restartPolicy": "Never",/"restartPolicy": "Never", "activeDeadlineSeconds": 10800,/g' src/r2egym/agenthub/runtime/docker.py
                 sed -i 's/datasets==2.19/datasets/g' pyproject.toml
                 sed -i 's/anthropic\[vertex\]==0.43.0/anthropic[vertex]/g' pyproject.toml
                 pip3 install -e .
@@ -182,8 +182,8 @@ spec:
 
                 
                 JAX_TRACEBACK_FILTERING=off TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 TF_CPP_MIN_VLOG_LEVEL=1 JAX_LOG_COMPILES=0 ENABLE_PATHWAYS_PERSISTENCE='1' NUM_SLICES=1 JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 SKIP_JAX_PRECOMPILE=True JAX_RANDOM_WEIGHTS=1 VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_LOGGING_LEVEL=INFO NEW_MODEL_DESIGN=1 ROLLOUT_ENGINE=vllm PYTHONUNBUFFERED=1 HF_HUB_DISABLE_PROGRESS_BARS=1 HF_HUB_DOWNLOAD_TIMEOUT=600 HF_HUB_ETAG_TIMEOUT=30 HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) WANDB_API_KEY=$(echo -n $INJECTED_WANDB_API_KEY | xargs) \
-                PYTHONPATH=$PYTHONPATH:. python3 examples/deepswe/train_deepswe_nb.py --max_response_length=32768 --max_turns=50 --max_steps=1000 --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 --rollout_micro_batch_size=8 --rollout_mesh_tp=8 --rollout_mesh_fsdp=8 --train_mesh_tp=8 --train_mesh_fsdp=8 --rollout_split_fraction=0.5 --vllm_utilization=0.8 --batch_size=64 --mini_batch_size=64 --max_concurrency=128 --rollout_vllm_max_num_seqs=128 --max_num_batched_tokens=8192 \
-                --metrics_logger_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/trajectory-log/run1/" --ckpt_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/checkpoint/run1/" --save_interval_steps=1 --max_to_keep=100 --models_base_dir="$MODEL_BASE_DIR"
+                PYTHONPATH=$PYTHONPATH:. python3 examples/deepswe/train_deepswe_nb.py --max_response_length=32768 --max_turns=50 --max_steps=1000 --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 --rollout_micro_batch_size=8 --rollout_mesh_tp=8 --rollout_mesh_fsdp=8 --train_mesh_tp=8 --train_mesh_fsdp=8 --rollout_split_fraction=0.5 --vllm_utilization=0.8 --batch_size=64 --mini_batch_size=64 --max_concurrency=64 --rollout_vllm_max_num_seqs=64 --max_num_batched_tokens=8192 \
+                --metrics_logger_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/trajectory-log/${RUN_TAG}/" --ckpt_dir="gs://yuxzhang-tunix-models/haoyu-deepswe/checkpoint/${RUN_TAG}/" --save_interval_steps=1 --max_to_keep=100 --models_base_dir="$MODEL_BASE_DIR"
                 
                 # Outputs are written directly to persistent disk via OUTPUT_DIR.
               env:
@@ -238,7 +238,7 @@ spec:
     replicas: 1
     template:
       spec:
-        backoffLimit: 0
+        backoffLimit: 100
         completions: 64
         parallelism: 64
         completionMode: Indexed
