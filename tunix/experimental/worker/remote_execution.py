@@ -23,7 +23,7 @@ Security Notes / Trust Boundaries:
   and responses (`ExecutionRequest`, `ExecutionResponse`). Because `cloudpickle.loads()`
   executes arbitrary Python code via `__reduce__` gadgets during unpickling, this protocol
   must NEVER be exposed to unauthenticated or untrusted network traffic.
-  For production deployment across trust boundaries (e.g. multi-tenant Borg jobs or external
+  For production deployment across trust boundaries (e.g. multi-tenant cluster jobs or external
   networks), ensure payloads are authenticated and encrypted via ALTS / mTLS channels (`secure_channel`
   / `secure_server_credentials`) or signed via shared HMAC-SHA256 signatures before unpickling.
   Where dynamic function shipping is not required, use a custom
