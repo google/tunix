@@ -119,6 +119,15 @@ parser.add_argument(
 parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
 parser.add_argument("--max_to_keep", type=int, default=4)
 parser.add_argument("--save_interval_steps", type=int, default=500)
+parser.add_argument(
+    "--gold_whitelist",
+    type=str,
+    default="",
+    help=(
+        "Optional path to a gold-trajectory jsonl. When set, the training set"
+        " is filtered to rows whose docker_image appears in the whitelist."
+    ),
+)
 
 # Microbatch Sizes
 parser.add_argument("--train_micro_batch_size", type=int, default=1)
@@ -509,6 +518,7 @@ OPTIMIZER_OFFLOAD = args.optimizer_offload
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = args.save_interval_steps
 MAX_TO_KEEP = args.max_to_keep
+GOLD_WHITELIST_PATH = args.gold_whitelist
 DO_MEM_PROFILING = args.do_mem_profiling
 
 # ====== Rollout ======
@@ -737,6 +747,23 @@ dataset = dataset.map(
     keep_in_memory=True,
 )
 
+# Restrict training to the vetted gold instances when a whitelist is provided.
+# The whitelist jsonl is joined on docker_image (see experimental gold report).
+if GOLD_WHITELIST_PATH:
+  with open(GOLD_WHITELIST_PATH) as f:
+    gold_images = {
+        json.loads(line)["docker_image"] for line in f if line.strip()
+    }
+  n_before = len(dataset)
+  dataset = dataset.filter(
+      lambda entry: entry.get("docker_image") in gold_images,
+      keep_in_memory=True,
+  )
+  print(
+      f"[gold filter] {n_before} -> {len(dataset)} rows"
+      f" (whitelist {len(gold_images)} docker_images)"
+  )
+
 # %%
 # ==========================================
 # 9. Optimizer & Checkpointing
@@ -839,7 +866,7 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": False,
+        "enable_prefix_caching": True,
     },
 }
 
