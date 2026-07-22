@@ -17,7 +17,7 @@ def _sample_result() -> datatypes.RolloutResult:
               source="assistant",
               tokens=np.array([20, 21], dtype=np.int32),
               loss_mask=np.array([1, 1], dtype=np.int32),
-              logprobs=np.array([-0.5, -1.5], dtype=np.float32),
+              logps=np.array([-0.5, -1.5], dtype=np.float32),
           ),
           datatypes.TokenSegment(
               source="env",

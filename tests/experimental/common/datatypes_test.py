@@ -30,7 +30,7 @@ def _sample_result() -> datatypes.RolloutResult:
               source="assistant",
               tokens=np.array([20, 21], dtype=np.int32),
               loss_mask=np.array([1, 1], dtype=np.int32),
-              logprobs=np.array([-0.5, -1.5], dtype=np.float32),
+              logps=np.array([-0.5, -1.5], dtype=np.float32),
           ),
           datatypes.TokenSegment(
               source="env",
@@ -66,9 +66,9 @@ class WireSerializationTest(absltest.TestCase):
         restored.segments[0].loss_mask, original.segments[0].loss_mask
     )
     np.testing.assert_allclose(
-        restored.segments[0].logprobs, original.segments[0].logprobs
+        restored.segments[0].logps, original.segments[0].logps
     )
-    self.assertIsNone(restored.segments[1].logprobs)
+    self.assertIsNone(restored.segments[1].logps)
 
   def test_error_result_round_trips(self):
     result = datatypes.RolloutResult(
@@ -101,13 +101,13 @@ class WireSerializationTest(absltest.TestCase):
       )
 
     with self.assertRaisesRegex(
-        ValueError, "logprobs shape .* != tokens shape"
+        ValueError, "logps shape .* != tokens shape"
     ):
       datatypes.TokenSegment(
           source="assistant",
           tokens=np.array([1, 2]),
           loss_mask=np.array([1, 1]),
-          logprobs=np.array([0.5]),
+          logps=np.array([0.5]),
       )
 
   def test_from_trajectory(self):
@@ -148,13 +148,13 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(result.segments[0].source, "assistant")
     np.testing.assert_array_equal(result.segments[0].tokens, [20, 21])
     np.testing.assert_array_equal(result.segments[0].loss_mask, [1, 1])
-    np.testing.assert_allclose(result.segments[0].logprobs, [-0.5, -1.5])
+    np.testing.assert_allclose(result.segments[0].logps, [-0.5, -1.5])
 
     # Env segment
     self.assertEqual(result.segments[1].source, "env")
     np.testing.assert_array_equal(result.segments[1].tokens, [30])
     np.testing.assert_array_equal(result.segments[1].loss_mask, [0])
-    self.assertIsNone(result.segments[1].logprobs)
+    self.assertIsNone(result.segments[1].logps)
 
 
 if __name__ == "__main__":

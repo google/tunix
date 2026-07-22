@@ -95,14 +95,14 @@ class TokenSegment:
     source: Origin of the span, e.g. "assistant" (model-emitted) or "env".
     tokens: Array of token ids for this span.
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
-    logprobs: Array of per-token log-probabilities under the sampling
+    logps: Array of per-token log-probabilities under the sampling
       distribution, or None for spans the model did not emit (e.g. env tokens).
   """
 
   source: str
   tokens: np.ndarray
   loss_mask: np.ndarray
-  logprobs: np.ndarray | None = None
+  logps: np.ndarray | None = None
 
   def __post_init__(self):
     if self.loss_mask.shape != self.tokens.shape:
@@ -110,9 +110,9 @@ class TokenSegment:
           f"loss_mask shape {self.loss_mask.shape} != tokens shape"
           f" {self.tokens.shape}"
       )
-    if self.logprobs is not None and self.logprobs.shape != self.tokens.shape:
+    if self.logps is not None and self.logps.shape != self.tokens.shape:
       raise ValueError(
-          f"logprobs shape {self.logprobs.shape} != tokens shape"
+          f"logps shape {self.logps.shape} != tokens shape"
           f" {self.tokens.shape}"
       )
 
@@ -181,7 +181,7 @@ class RolloutResult:
                 source="assistant",
                 tokens=step.assistant_tokens,
                 loss_mask=step.assistant_masks,
-                logprobs=step.logprobs,
+                logps=step.logprobs,
             )
         )
       if step.env_tokens is not None:
@@ -190,7 +190,7 @@ class RolloutResult:
                 source="env",
                 tokens=step.env_tokens,
                 loss_mask=step.env_masks,
-                logprobs=None,
+                logps=None,
             )
         )
     return cls(
