@@ -16,6 +16,7 @@
 
 import asyncio
 import socket
+import threading
 from absl.testing import absltest
 from tunix.experimental.worker import remote_execution as remote_lib
 
@@ -297,6 +298,55 @@ class RemoteExecutionTest(absltest.TestCase):
         await server.stop_serving()
 
     asyncio.run(_run_test())
+
+  def test_real_grpc_tcp_sync_submit_execution(self):
+    """Verifies multiple synchronous submit() calls without event loop errors."""
+    if not remote_lib._GRPC_AVAILABLE:
+      self.skipTest("grpc library not available in test environment.")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+      s.bind(("localhost", 0))
+      port = s.getsockname()[1]
+
+    engine = StubWorkerEngine("grpc_worker_02", latency=0.01)
+    server = remote_lib.GrpcRemoteExecutionServer(engine)
+
+    server_loop = asyncio.new_event_loop()
+    server_started = threading.Event()
+
+    def _server_thread():
+      asyncio.set_event_loop(server_loop)
+      server_loop.run_until_complete(server.start_serving_async(port=port))
+      server_started.set()
+      server_loop.run_forever()
+
+    t = threading.Thread(target=_server_thread, daemon=True)
+    t.start()
+    server_started.wait(timeout=5.0)
+
+    try:
+      handle = remote_lib.ActorHandle.from_address(f"grpc://localhost:{port}")
+      self.assertIsInstance(handle, remote_lib.GrpcRemoteActorHandle)
+
+      res1 = handle.submit("compute_trajectory", "prompt_sync_1", turns=2)
+      self.assertEqual(
+          res1, "[grpc_worker_02] Trajectory for prompt prompt_sync_1 (2 turns)"
+      )
+
+      res2 = handle.submit("compute_trajectory", "prompt_sync_2", turns=3)
+      self.assertEqual(
+          res2, "[grpc_worker_02] Trajectory for prompt prompt_sync_2 (3 turns)"
+      )
+
+      status = handle.submit("get_status")
+      self.assertIn("count=2", status)
+      handle.close_sync()
+    finally:
+      asyncio.run_coroutine_threadsafe(
+          server.stop_serving(), server_loop
+      ).result(timeout=5.0)
+      server_loop.call_soon_threadsafe(server_loop.stop)
+      t.join(timeout=5.0)
 
 
 if __name__ == "__main__":

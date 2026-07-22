@@ -321,12 +321,14 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   """ActorHandle connecting to GrpcRemoteExecutionServer over TCP sockets via gRPC."""
 
   def __init__(self, target_address: str):
-    if not _GRPC_AVAILABLE or _grpc_aio_lib is None:
+    if not _GRPC_AVAILABLE or _grpc_lib is None or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
     self.target_address = target_address
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._rpc: Optional[Any] = None
+    self._sync_channel: Optional[Any] = None
+    self._sync_rpc: Optional[Any] = None
 
   def _get_rpc(self) -> Any:
     if self._rpc is None:
@@ -338,6 +340,17 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           response_deserializer=lambda b: ExecutionResponse.deserialize(b),
       )
     return self._rpc
+
+  def _get_sync_rpc(self) -> Any:
+    if self._sync_rpc is None:
+      assert _grpc_lib is not None
+      self._sync_channel = _grpc_lib.insecure_channel(self._host_port)
+      self._sync_rpc = self._sync_channel.unary_unary(
+          "/tunix.ExecutionService/Execute",
+          request_serializer=lambda req: req.serialize(),
+          response_deserializer=lambda b: ExecutionResponse.deserialize(b),
+      )
+    return self._sync_rpc
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Synchronously invokes remote method over gRPC."""
@@ -351,7 +364,10 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     except RuntimeError as e:
       if "submit() cannot be called" in str(e):
         raise
-    return asyncio.run(self.asubmit(method_name, *args, **kwargs))
+    rpc = self._get_sync_rpc()
+    request = ExecutionRequest(method_name, args, kwargs)
+    response: ExecutionResponse = rpc(request)
+    return response.unwrap()
 
   async def asubmit(
       self, method_name: Optional[str] = None, *args, **kwargs
@@ -362,9 +378,22 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     response: ExecutionResponse = await rpc(request)
     return response.unwrap()
 
+  def close_sync(self) -> None:
+    """Synchronously closes underlying gRPC channels."""
+    if self._sync_channel:
+      self._sync_channel.close()
+      self._sync_channel = None
+      self._sync_rpc = None
+
   async def close(self) -> None:
     if self._channel:
       await self._channel.close()
+      self._channel = None
+      self._rpc = None
+    if self._sync_channel:
+      self._sync_channel.close()
+      self._sync_channel = None
+      self._sync_rpc = None
 
 
 class InProcessActorHandle(ActorHandle):
