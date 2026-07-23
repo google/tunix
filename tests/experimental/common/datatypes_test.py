@@ -43,7 +43,60 @@ def _sample_result() -> datatypes.RolloutResult:
   )
 
 
+def _sample_dto() -> datatypes.SamplingResult:
+  return datatypes.SamplingResult(
+      request_id="sample-req-1",
+      text="Hello from Tunix sampler!",
+      token_ids=np.array([101, 102, 103], dtype=np.int32),
+      logprobs=np.array([-0.1, -0.2, -0.05], dtype=np.float32),
+      finish_reason="stop",
+  )
+
+
+def _sampling_request_dto() -> datatypes.SamplingRequest:
+  return datatypes.SamplingRequest(
+      prompt="Solve 2+2",
+      request_id="req-sample-42",
+      sampling_params=datatypes.SamplingParams(max_tokens=64, temperature=0.7),
+  )
+
+
+def _weight_sync_request_dto() -> datatypes.WeightSyncRequest:
+  return datatypes.WeightSyncRequest(
+      controller_id="raiden-ctrl-0",
+      policy_version=14,
+      source_metadata={"mesh": "2x4"},
+      extra_config={"timeout": 30.0},
+  )
+
+
 class WireSerializationTest(absltest.TestCase):
+
+  def test_weight_sync_request_round_trips_through_cloudpickle(self):
+    original = _weight_sync_request_dto()
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.controller_id, original.controller_id)
+    self.assertEqual(restored.policy_version, original.policy_version)
+    self.assertEqual(restored.source_metadata, original.source_metadata)
+    self.assertEqual(restored.extra_config, original.extra_config)
+
+  def test_sampling_request_round_trips_through_cloudpickle(self):
+    original = _sampling_request_dto()
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, original.request_id)
+    self.assertEqual(restored.prompt, original.prompt)
+    self.assertIsNotNone(restored.sampling_params)
+    self.assertEqual(
+        restored.sampling_params.max_tokens, original.sampling_params.max_tokens
+    )
+    self.assertEqual(
+        restored.sampling_params.temperature,
+        original.sampling_params.temperature,
+    )
 
   def test_trajectory_result_round_trips_through_cloudpickle(self):
     original = _sample_result()
@@ -88,7 +141,6 @@ class WireSerializationTest(absltest.TestCase):
     self.assertTrue(restored.error.retryable)
     self.assertEqual(restored.prompt_tokens.size, 0)
     self.assertEmpty(restored.segments)
-
 
   def test_token_segment_enforces_shapes(self):
     with self.assertRaisesRegex(
@@ -155,6 +207,27 @@ class WireSerializationTest(absltest.TestCase):
     np.testing.assert_array_equal(result.segments[1].tokens, [30])
     np.testing.assert_array_equal(result.segments[1].loss_mask, [0])
     self.assertIsNone(result.segments[1].logps)
+
+  def test_sampling_result_round_trips_through_cloudpickle(self):
+    original = _sample_dto()
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, original.request_id)
+    self.assertEqual(restored.text, original.text)
+    self.assertEqual(restored.finish_reason, original.finish_reason)
+    self.assertIsNone(restored.error)
+    np.testing.assert_array_equal(restored.token_ids, original.token_ids)
+    np.testing.assert_allclose(restored.logprobs, original.logprobs)
+
+  def test_sampling_result_enforces_shapes(self):
+    with self.assertRaisesRegex(
+        ValueError, "logprobs shape .* != token_ids shape"
+    ):
+      datatypes.SamplingResult(
+          token_ids=np.array([1, 2, 3]),
+          logprobs=np.array([-0.1, -0.2]),
+      )
 
 
 if __name__ == "__main__":
