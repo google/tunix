@@ -46,7 +46,13 @@ def run_vllm_server(
     s.bind(("localhost", 0))
     vllm_port = s.getsockname()[1]
 
-  cmd = ["vllm", "serve", model_name, f"--port={vllm_port}", "--disable-uvicorn-access-log"]
+  cmd = [
+      "vllm",
+      "serve",
+      model_name,
+      f"--port={vllm_port}",
+      "--disable-uvicorn-access-log",
+  ]
 
   logging.info("Starting vLLM OpenAI server subprocess: %s", " ".join(cmd))
 

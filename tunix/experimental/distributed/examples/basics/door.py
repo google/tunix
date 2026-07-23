@@ -6,6 +6,7 @@ import time
 
 from tunix.experimental.distributed.runtime.context import ProcessContext
 
+
 def main(argv, context: ProcessContext | None) -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--message", type=str, default="this is door!", help="")
@@ -14,9 +15,14 @@ def main(argv, context: ProcessContext | None) -> None:
   logging.info(args.message)
 
   knock_future = futures.Future()
-  context.ipc.discovery.on_register(callback=lambda hostname, _, metadata: (
-    logging.info(f"{hostname} knocked and said: {pickle.loads(metadata)}"),
-    knock_future.set_result(True)
-    ))
+  assert context is not None
+  context.ipc.discovery.on_register(
+      callback=lambda hostname, _, metadata: (
+          logging.info(
+              f"{hostname} knocked and said: {pickle.loads(metadata)}"
+          ),
+          knock_future.set_result(True),
+      )
+  )
 
   knock_future.result()

@@ -61,9 +61,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Calculate repo root path (three directories up from examples/distributed/vllm_rollout).
+# Calculate repo root path (four directories up from experimental/distributed/examples/vllm_rollout)
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-REPO_ROOT="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
+REPO_ROOT="$(dirname "$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")")"
 
 # Configures kubectl to connect to the required GKE cluster and namespace.
 enter_kube_context() {
@@ -84,17 +84,25 @@ enter_kube_context() {
 launch_orchestrator() {
   if [[ "$LOCAL_MODE" == "true" ]]; then
     cd "$REPO_ROOT"
-    PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_id=orchestrator --discovery_port=12345 --process_main=vllm_rollout.orchestrator.main
+    python -m tunix.experimental.distributed.runtime.main \
+      --discovery_id=orchestrator \
+      --discovery_port=12345 \
+      --process_main=tunix.experimental.distributed.examples.vllm_rollout.orchestrator.main
   else
-    cd "$REPO_ROOT/tunix/experimental/distributed/deployment"
+    cd "$REPO_ROOT"
     kubectl delete jobset orchestrator
-    python yaml_generator.py \
-      yamls/jobset.cpu.yaml \
+    python tunix/experimental/distributed/deployment/yaml_generator.py \
+      tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
       --jobset_name=orchestrator \
       --cpu_machine=n2-standard-64 \
       --worker_container_image="$TUNIX_IMAGE" \
       --worker_container_port=12345 \
-      --worker_startup_command="PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_id=orchestrator --discovery_port=12345 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor --process_main=vllm_rollout.orchestrator.main --min_rollout_workers=2" \
+      --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
+        --discovery_id=orchestrator \
+        --discovery_port=12345 \
+        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+        --process_main=tunix.experimental.distributed.examples.vllm_rollout.orchestrator.main \
+        --parallelism=256" \
       | kubectl apply -f -
   fi
 }
@@ -103,34 +111,48 @@ launch_orchestrator() {
 launch_rollout() {
   if [[ "$LOCAL_MODE" == "true" ]]; then
     cd "$REPO_ROOT"
-    PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_main=vllm_rollout.rollout.main --worker_id=rollout-0 --service_port=11111
+    python -m tunix.experimental.distributed.runtime.main \
+      --discovery_addrs=orchestrator:12345 \
+      --process_main=tunix.experimental.distributed.examples.vllm_rollout.rollout.main \
+      --worker_id=rollout-0 \
+      --service_port=11111
   else
-    cd "$REPO_ROOT/tunix/experimental/distributed/deployment"
+    cd "$REPO_ROOT"
     if [[ "$WORKER_ID" == "all" ]]; then
       for ((i=0; i<=3; i++)); do
         kubectl delete jobset rollout-$i
-        python yaml_generator.py \
-          yamls/jobset.pathways.yaml \
+        python tunix/experimental/distributed/deployment/yaml_generator.py \
+          tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
           --jobset_name=rollout-$i \
           --tpu_slice=tpuv5e:4x4 \
           --pathways_server_image=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/unsanitized_server:latest \
           --pathways_proxy_server_image=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/unsanitized_proxy_server:latest \
           --worker_container_image="$TUNIX_IMAGE" \
           --worker_container_port=$((10000+i)) \
-          --worker_startup_command="PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor --process_main=vllm_rollout.rollout.main --worker_id=rollout-$i --service_port=$((10000+i))" \
+          --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
+            --discovery_addrs=orchestrator:12345 \
+            --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+            --process_main=tunix.experimental.distributed.examples.vllm_rollout.rollout.main \
+            --worker_id=rollout-$i \
+            --service_port=$((10000+i))" \
           | kubectl apply -f -
       done
     else
       kubectl delete jobset "rollout-${WORKER_ID}"
-      python yaml_generator.py \
-        yamls/jobset.pathways.yaml \
+      python tunix/experimental/distributed/deployment/yaml_generator.py \
+        tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
         --jobset_name="rollout-${WORKER_ID}" \
         --tpu_slice=tpuv5e:4x4 \
         --pathways_server_image=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/unsanitized_server:latest \
         --pathways_proxy_server_image=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/unsanitized_proxy_server:latest \
         --worker_container_image="$TUNIX_IMAGE" \
         --worker_container_port=11111 \
-        --worker_startup_command="PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor --process_main=vllm_rollout.rollout.main --worker_id=rollout-${WORKER_ID} --service_port=11111" \
+        --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
+          --discovery_addrs=orchestrator:12345 \
+          --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+          --process_main=tunix.experimental.distributed.examples.vllm_rollout.rollout.main \
+          --worker_id=rollout-${WORKER_ID} \
+          --service_port=11111" \
         | kubectl apply -f -
     fi
   fi

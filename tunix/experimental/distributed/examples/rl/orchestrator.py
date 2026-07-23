@@ -1,18 +1,19 @@
 import argparse
 from concurrent import futures
-import grpc
 import logging
 import pickle
 import queue
 import random
 import time
 
+import grpc
+from tunix.experimental.distributed.examples.rl import service_pb2 as pb2
+from tunix.experimental.distributed.examples.rl import service_pb2_grpc as pb2_grpc
 from tunix.experimental.distributed.runtime.context import ProcessContext
 
-from examples.distributed.rl import service_pb2 as pb2
-from examples.distributed.rl import service_pb2_grpc as pb2_grpc
 
 class RolloutClient:
+
   def __init__(self, service_addr: str) -> None:
     self._service_addr = service_addr
 
@@ -26,9 +27,13 @@ class RolloutClient:
         response = stub.Generate(request)
         return response.completion
       except grpc.RpcError as e:
-        raise RuntimeError(f"generate failed: {e.code()} - {e.details()}")
+        raise RuntimeError(
+            f"generate failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
+        )
+
 
 class TrainerClient:
+
   def __init__(self, service_addr: str) -> None:
     self._service_addr = service_addr
 
@@ -42,11 +47,16 @@ class TrainerClient:
         response = stub.Train(request)
         return response.weights
       except grpc.RpcError as e:
-        raise RuntimeError(f"train failed: {e.code()} - {e.details()}")
+        raise RuntimeError(
+            f"train failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
+        )
+
 
 def main(argv, context: ProcessContext | None) -> None:
   parser = argparse.ArgumentParser()
-  parser.add_argument("--message", type=str, default="this is orchestrator!", help="")
+  parser.add_argument(
+      "--message", type=str, default="this is orchestrator!", help=""
+  )
   parser.add_argument("--max_train_step", type=int, default=100, help="")
   args = parser.parse_args(argv)
 
@@ -56,14 +66,18 @@ def main(argv, context: ProcessContext | None) -> None:
   rollout_client_futures = queue.Queue()
   trainer_client_future = futures.Future()
 
-  def accept_worker(hostname: str, discovery_port: int, metadata: bytes) -> None:
+  def accept_worker(
+      hostname: str, discovery_port: int, metadata: bytes
+  ) -> None:
     md = pickle.loads(metadata)
 
     service_type = md["service_type"]
     server_address = f"{hostname}:{md["server_port"]}"
     server_id = md["server_id"]
 
-    logging.info(f"discovered {service_type} service {server_id} at {server_address}")
+    logging.info(
+        f"discovered {service_type} service {server_id} at {server_address}"
+    )
 
     match service_type:
       case "rollout":
@@ -75,13 +89,16 @@ def main(argv, context: ProcessContext | None) -> None:
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
+  assert context is not None
   context.ipc.discovery.on_register(accept_worker)
 
   def pick_rollout_client():
     # wait at least two rollout clients
     while rollout_client_futures.qsize() < 2:
       time.sleep(1)
-    server_id, rollout_client_future = random.choice(list(rollout_client_futures.queue))
+    server_id, rollout_client_future = random.choice(
+        list(rollout_client_futures.queue)
+    )
     return server_id, rollout_client_future.result()
 
   trainer_client = trainer_client_future.result()

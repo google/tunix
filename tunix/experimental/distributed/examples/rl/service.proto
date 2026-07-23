@@ -14,7 +14,8 @@
 
 // Compile with
 //  $ pip install grpcio grpcio-tools
-//  $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. examples/distributed/rl/service.proto
+//  $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=.
+//  experimental/distributed/examples/rl/service.proto
 
 syntax = "proto3";
 
@@ -29,9 +30,8 @@ message GenerateResponse {
 }
 
 service RolloutService {
-  rpc Generate (GenerateRequest) returns (GenerateResponse);
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
 }
-
 
 message TrainRequest {
   string prompt = 1;
@@ -43,5 +43,5 @@ message TrainResponse {
 }
 
 service TrainerService {
-  rpc Train (TrainRequest) returns (TrainResponse);
+  rpc Train(TrainRequest) returns (TrainResponse);
 }
