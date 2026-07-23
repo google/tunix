@@ -402,3 +402,40 @@ self.grad_accumulator.denom[...] = jax.device_put(
 )
 ```
 This simple optimization reduced the initialization/tracing penalty from ~7 minutes down to 3.5 minutes on a standard setup. Note: other trace regressions (like the +61s A1 NNX state delta) still require the flamegraph analysis from Issue 15.
+
+## 17. ACTION REQUEST: verify the grad-accum compile-time fix (commit 519b947a)
+**Type:** Runnable task for the cluster-side agent (single-host TPU v5p VM, same setup as issues 14/15).
+**Prereq:** commit `519b947a` is pushed to `yuxzhang/refactor_loss_accum_ablation` (the docker wrapper fetches the branch tip). MODEL_PATH `/mnt/workspace/models/google/gemma-4-e2b-it` present (same as issue 14).
+
+**Purpose:** We root-caused the stream vs optax compile-time regression (stream 301.6s vs optax 122.5s wall on v5p; tracing 131s vs 6.3s) to two independent problems and landed one combined fix. This run verifies the fix and gives a clean before/after.
+- **Fix 1 (tracing, ~125s / 70%):** `GradientAccumulator.add`/`reset` assigned per leaf via `v[...] = ...`. That indexed `Variable.__setitem__` fast path compares `.sharding`; on tracers, reading `Tracer.sharding` triggers a super-linear partial-eval provenance scan (`_origin_msg → find_progenitors → get_eqns`), ~97% of trace samples in the two flamegraphs (§15). Fix switches to `set_value(x)` (no index → plain assignment, no sharding check). Numerically identical.
+- **Fix 2 (XLA ~30s + depth-1):** at `gradient_accumulation_steps in (None, 1)` the accumulator is a mathematical no-op and the `nnx.cond` predicate is statically True, so `_train_step` now updates directly from `grads` (the optax path), skipping the accumulator and the XLA Conditional. Unlike the earlier A1 bypass, the accumulator is NOT touched at all (no reset-to-zeros → no SPMD re-shard → expected single compile, not the A1 double-compile).
+- **Fix 3 (setup):** ported `_shard_optimizer` to place state via `jax.device_put` instead of eager `jax.lax.with_sharding_constraint` (Lin Chai §16 / Tianshu Bao CL 952815066). Negligible on E2B (0.3% in the flamegraph), matters on large models — included for upstream alignment, not expected to move the E2B numbers.
+
+**Run A — fix verification (the main event):**
+```bash
+bash experimental/compile_repro_v5p_docker.sh stream
+```
+Also run the numerical unit test inside the same image (needs flax, CPU-only):
+```bash
+python3 -m pytest tests/sft/peft_trainer_test.py -k GradientAccumulator -q
+```
+
+**Run B — optax control flamegraph (for the before/control/after triple):**
+Same py-spy docker block as §15 but pinned to `062572ad` with `--grad_accum optax`, 10Hz, local dir:
+```bash
+PIN=062572ad OUT=flame_optax PROFILE_DIR=/mnt/workspace/grad_accum_profiles
+# ... (issue 15's py-spy docker run, git reset --hard $PIN, py-spy record --rate 10 -- python3 experimental/compile_repro_sft.py --grad_accum optax)
+```
+
+**Run C (optional) — xprof capture:** `PROFILE_XPROF=/mnt/workspace/xprof_out MAX_STEPS=1` env on `compile_repro_sft.py`, no warmup. Default host_tracer captures the XLA compile TraceMe (compile-block timing — the view py-spy cannot give). To also capture Python tracing set the python tracer level per the installed jax version (keep MAX_STEPS=1 to avoid the 2GB overflow).
+
+**Report back (this is the P3.2 gate):**
+For the stream fix run, the three `jit(_train_step)` lines + compile count:
+- `Finished tracing _train_step for jit in <X> sec`  — expect **~6s** (was 131s) if Fix 1 worked.
+- `Finished XLA compilation of jit(_train_step) in <Y> sec`, and **how many times it appears** — expect **ONE** compile (~110s) if Fix 2 worked; TWO compiles = double-compile regression (report it, we add an output sharding constraint).
+- `[[COMPILE_REPRO]] ... train_wall_s=` — expect ~122s (optax level); if ~20s higher that is the deferred fp32 residual.
+- pytest result (pass/fail) for the numerical equivalence.
+- Commit the optax flamegraph (`flame_optax.svg` + `.log`) back to the branch.
+
+**Success criteria:** stream tracing ≈ optax (~6s), single compile, wall ≈ optax, numerical test green. If tracing did not drop, Fix 1 did not take (check the installed flax `set_value` no-index branch). If it double-compiled, Fix 2 needs the sharding pin.
