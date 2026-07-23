@@ -108,6 +108,7 @@ def main():
   config = model.ModelConfig.gemma4_e2b()
   config.vision_encoder.output_length = 70
   config.use_flash_attention = True
+  config.flash_attention_block_size = 256
   config.remat_config = model.RematConfig.BLOCK
   m = params_safetensors.create_model_from_safe_tensors(
       args.model_path, config, mesh, dtype=jnp.bfloat16, text_only=True
