@@ -43,7 +43,7 @@ def prepare_process(
   Args:
     argv: Command-line arguments.
   """
-  parser = argparse.ArgumentParser(description="process main", allow_abbrev=False)
+  parser = argparse.ArgumentParser(description="process main", allow_abbrev=False, add_help=False)
 
   parser.add_argument("--process_main", type=str, default="", help="Fully qualified name of the target main function to execute.")
   parser.add_argument("--discovery_id", type=str, default="", help="Id to identify the process. Id and port form a discovery address.")
@@ -56,7 +56,7 @@ def prepare_process(
   return (process_main, process_argv, context_args)
 
 def main(argv):
-  parser = argparse.ArgumentParser(description="distributed main", allow_abbrev=False)
+  parser = argparse.ArgumentParser(description="distributed main", allow_abbrev=False, add_help=False)
 
   parser.add_argument("--process_executor", type=str, default="tunix.experimental.distributed.runtime.executor.LocalExecutor", help="")
 
