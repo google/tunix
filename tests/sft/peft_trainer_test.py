@@ -20,6 +20,7 @@ import os
 import tempfile
 from typing import Any, Tuple
 from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -46,6 +47,7 @@ os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 # Set Precision to highest for numeric stability across different hardware.
 jax.config.update('jax_default_matmul_precision', 'highest')
+
 
 def create_sharded_model(model_ctor, rngs, mesh):
   @nnx.jit(static_argnums=(0,))
@@ -702,10 +704,107 @@ class PeftTrainerTest(parameterized.TestCase):
     # Since eval_ds is length 2, it evaluates at step 2.
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
 
+  def test_loss_output_metrics_support_plain_scalars(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        images: jax.Array | None = None,
+    ) -> utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask, images
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              'weighted': utils.WeightedMetric(
+                  jnp.array(10.0, dtype=jnp.float32),
+                  jnp.array(5.0, dtype=jnp.float32),
+              ),
+              'plain': jnp.array(4.0, dtype=jnp.float32),
+          },
+      )
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'weighted', 'train'), 2.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'plain', 'train'), 4.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'weighted', 'eval'), 2.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'plain', 'eval'), 4.0
+    )
+
+  def test_metrics_buffer_rejects_mixed_metric_kinds(self):
+    weighted = utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0), weighted],
+    )
+    with self.assertRaisesRegex(TypeError, 'must not mix'):
+      _ = buffer.loss
+
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    buffer = trainer._buffer_metrics(
+        None,
+        loss=jnp.array(1.0),
+        step=0,
+        additional_metrics={'metric': (jnp.array(1.0), np.mean)},
+    )
+    with self.assertRaisesRegex(TypeError, "additional metric 'metric'"):
+      trainer._buffer_metrics(
+          buffer,
+          loss=jnp.array(1.0),
+          step=0,
+          additional_metrics={
+              'metric': (weighted, peft_trainer._weighted_metric_mean),
+          },
+      )
+
+  def test_weighted_metric_mean_preserves_denominator_bounds(self):
+    metrics = [
+        utils.WeightedMetric(
+            jnp.array(3.0), jnp.array(0.0), eps=1.0, min_denom=2.0
+        ),
+        utils.WeightedMetric(
+            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=2.0
+        ),
+    ]
+    self.assertEqual(peft_trainer._weighted_metric_mean(metrics), 2.0)
+
+    inconsistent = [
+        metrics[0],
+        utils.WeightedMetric(
+            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=3.0
+        ),
+    ]
+    with self.assertRaisesRegex(ValueError, 'consistent denominator bounds'):
+      peft_trainer._weighted_metric_mean(inconsistent)
+
   def test_loss_output_gradient_scaling(self):
-    # Covers the manual gradient scaling in _train_step: grad(unreduced_sum) *
-    # (1/d) must equal grad(sum/d). Uses a parameter-dependent loss because the
-    # original test's constant loss has zero gradient and can't exercise it.
+    # Covers denominator-aware accumulation in _train_step: grad(sum) / d must
+    # equal grad(sum / d). Uses a parameter-dependent loss because the original
+    # test's constant loss has zero gradient and can't exercise it.
     def param_dependent_sum(model, input_tokens, positions):
       logits, _ = model(input_tokens, positions)
       return jnp.sum(logits)  # depends on the parameters
@@ -724,7 +823,11 @@ class PeftTrainerTest(parameterized.TestCase):
 
     def make_reduced_loss_fn(denominator):
       def reduced_loss_fn(
-          model, input_tokens, input_mask, positions, attention_mask,
+          model,
+          input_tokens,
+          input_mask,
+          positions,
+          attention_mask,
           images=None,
       ):
         del input_mask, attention_mask, images
@@ -770,6 +873,145 @@ class PeftTrainerTest(parameterized.TestCase):
     # the scale is applied.
     self.assertGreater(max_abs_diff(params_a, params_b1), 1e-6)
 
+  def test_loss_output_accumulates_variable_denominators_globally(self):
+    inputs = jnp.array(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, -1.0]],
+        dtype=jnp.float32,
+    )
+    targets = jnp.array([[0.5], [-0.5], [1.0], [-1.0]], dtype=jnp.float32)
+    weights = jnp.array([0.0, 0.0, 0.2, 0.3], dtype=jnp.float32)
+
+    def weighted_loss_sum(model, x, y, example_weights):
+      per_example = jnp.sum(jnp.square(model(x) - y), axis=-1)
+      return jnp.sum(per_example * example_weights)
+
+    def unreduced_loss_fn(model, x, y, example_weights):
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              weighted_loss_sum(model, x, y, example_weights),
+              jnp.sum(example_weights),
+          ),
+          aux_metrics={},
+      )
+
+    def reduced_loss_fn(model, x, y, example_weights):
+      return weighted_loss_sum(model, x, y, example_weights) / jnp.sum(
+          example_weights
+      )
+
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=2,
+    )
+
+    accumulated_model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    accumulated_trainer = peft_trainer.PeftTrainer(
+        accumulated_model, optax.sgd(0.1), config
+    ).with_loss_fn(unreduced_loss_fn)
+    accumulated_grads = peft_trainer.GradientAccumulator(
+        accumulated_model, nnx.Param
+    )
+    accumulated_train_step = accumulated_trainer.create_train_step_fn()
+
+    for index, is_update_step in enumerate((False, True)):
+      batch_slice = slice(index * 2, (index + 1) * 2)
+      accumulated_train_step(
+          accumulated_model,
+          accumulated_trainer.optimizer,
+          accumulated_grads,
+          {
+              'x': inputs[batch_slice],
+              'y': targets[batch_slice],
+              'example_weights': weights[batch_slice],
+          },
+          jnp.asarray(is_update_step),
+      )
+
+    reference_model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    reference_trainer = peft_trainer.PeftTrainer(
+        reference_model, optax.sgd(0.1), config
+    ).with_loss_fn(reduced_loss_fn)
+    reference_grads = peft_trainer.GradientAccumulator(
+        reference_model, nnx.Param
+    )
+    reference_trainer.create_train_step_fn()(
+        reference_model,
+        reference_trainer.optimizer,
+        reference_grads,
+        {
+            'x': inputs,
+            'y': targets,
+            'example_weights': weights,
+        },
+        jnp.asarray(True),
+    )
+
+    chex.assert_trees_all_close(
+        nnx.state(accumulated_model, nnx.Param),
+        nnx.state(reference_model, nnx.Param),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+  def test_loss_output_metrics_use_global_denominator(self):
+    inputs = jnp.array(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, -1.0]],
+        dtype=jnp.float32,
+    )
+    targets = jnp.array([[0.5], [-0.5], [1.0], [-1.0]], dtype=jnp.float32)
+    weights = jnp.array([0.1, 0.0, 0.2, 0.3], dtype=jnp.float32)
+
+    def weighted_loss_sum(model, x, y, example_weights):
+      per_example = jnp.sum(jnp.square(model(x) - y), axis=-1)
+      return jnp.sum(per_example * example_weights)
+
+    def loss_fn(model, x, y, example_weights):
+      metric = utils.WeightedMetric(
+          weighted_loss_sum(model, x, y, example_weights),
+          jnp.sum(example_weights),
+      )
+      return utils.LossOutput(
+          primary_loss=metric,
+          aux_metrics={'weighted_mse': metric},
+      )
+
+    reference_model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    expected = weighted_loss_sum(
+        reference_model, inputs, targets, weights
+    ) / jnp.sum(weights)
+    model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(0.1),
+        peft_trainer.TrainingConfig(
+            eval_every_n_steps=100,
+            max_steps=1,
+            gradient_accumulation_steps=2,
+        ),
+    ).with_loss_fn(loss_fn)
+    train_batches = [
+        {
+            'x': inputs[start : start + 2],
+            'y': targets[start : start + 2],
+            'example_weights': weights[start : start + 2],
+        }
+        for start in (0, 2)
+    ]
+
+    trainer.train(train_batches)
+
+    np.testing.assert_allclose(
+        trainer.metrics_logger.get_metric('', 'loss', 'train'),
+        expected,
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        trainer.metrics_logger.get_metric('', 'weighted_mse', 'train'),
+        expected,
+        rtol=1e-6,
+    )
+
   def test_stream_train_step_returns_raw_weighted_metric_aux(self):
     # Since _compute_legacy_aux was dropped, the (stream) _train_step returns
     # the raw aux with WeightedMetric preserved, so the metric ops can reduce
@@ -801,15 +1043,24 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.model, trainer.optimizer, acc, self.train_ds[0], jnp.array(True)
     )
 
+    self.assertIsInstance(aux, utils.LossOutput)
+    aux_metrics = aux.aux_metrics
     # aux values stay raw WeightedMetric (not pre-divided to scalars).
-    self.assertIsInstance(aux['foo'], utils.WeightedMetric)
-    self.assertIsInstance(aux['bar'], utils.WeightedMetric)
+    self.assertIsInstance(aux_metrics['foo'], utils.WeightedMetric)
+    self.assertIsInstance(aux_metrics['bar'], utils.WeightedMetric)
     # Metric ops reduce the raw WeightedMetric correctly across micro-batches.
     self.assertAlmostEqual(
-        float(common.mean_of_means([aux['foo'], aux['foo']])), 2.0, places=5
+        float(common.mean_of_means([aux_metrics['foo'], aux_metrics['foo']])),
+        2.0,
+        places=5,
     )  # mean(10/5, 10/5)
     self.assertAlmostEqual(
-        float(common.global_weighted_mean([aux['bar'], aux['bar']])), 3.0,
+        float(
+            common.global_weighted_mean(
+                [aux_metrics['bar'], aux_metrics['bar']]
+            )
+        ),
+        3.0,
         places=5,
     )  # (6+6)/(2+2)
 
@@ -891,6 +1142,7 @@ class GradientAccumulatorTest(parameterized.TestCase):
       dict(testcase_name='equal_denoms', denoms=(4.0, 4.0, 4.0, 4.0)),
       dict(testcase_name='varying_denoms', denoms=(1.0, 7.0, 3.0, 5.0)),
       dict(testcase_name='extreme_variance', denoms=(1.0, 1.0, 100.0, 1.0)),
+      dict(testcase_name='fractional_denoms', denoms=(0.05, 0.1, 0.2, 0.25)),
   )
   def test_explicit_denom_matches_single_step_baseline(self, denoms):
     """Passing explicit denom matches the equivalent single-step batch.
@@ -1308,43 +1560,85 @@ class GradientAccumulatorTest(parameterized.TestCase):
     for d in float_dtypes:
       self.assertEqual(d, jnp.bfloat16)
 
-  def test_peft_trainer_promotes_bf16_opt_state_floats_to_float32(self):
-    """`PeftTrainer.__init__` casts float opt_state leaves to float32.
-
-    `optax.adam` / `optax.adamw` promote their floating-point moments
-    (`mu`, `nu`) to float32 inside `update` whenever the learning rate is
-    a float32 tracer (as produced by `optax.inject_hyperparams`). This test
-    verifies that the trainer casts these to float32 in-place during init.
-    """
+  @parameterized.product(
+      optimizer_kind=('direct', 'injected'),
+      gradient_accumulation_steps=(1, 2),
+  )
+  def test_peft_trainer_preserves_bf16_optimizer_state_dtypes_under_jit(
+      self, optimizer_kind, gradient_accumulation_steps
+  ):
+    """Jitted update/skip branches preserve each optimizer's state contract."""
     rngs = nnx.Rngs(0)
-    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
-    bf16_state = jax.tree.map(
-        lambda x: x.astype(jnp.bfloat16)
-        if jnp.issubdtype(x.dtype, jnp.floating)
-        else x,
-        nnx.state(model, nnx.Param),
+    model = nnx.Linear(
+        in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
     )
-    nnx.update(model, bf16_state)
-
-    tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
-        learning_rate=1e-3
+    if optimizer_kind == 'direct':
+      tx = optax.adamw(
+          lambda _: jnp.asarray(0.1, dtype=jnp.float32),
+          mu_dtype=jnp.bfloat16,
+      )
+    else:
+      tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+          learning_rate=0.1
+      )
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=gradient_accumulation_steps,
     )
-    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
     trainer = peft_trainer.PeftTrainer(model, tx, config)
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
 
-    opt_state_dtypes = jax.tree_util.tree_leaves(
-        jax.tree_util.tree_map(
-            lambda v: v[...].dtype,
-            nnx.state(trainer.optimizer, nnx.optimizer.OptState),
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
+    def opt_state_dtypes():
+      return jax.tree_util.tree_map(
+          lambda v: v[...].dtype,
+          nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+
+    initial_opt_state_dtypes = opt_state_dtypes()
+    initial_params = jax.tree_util.tree_map(
+        lambda v: jnp.copy(v[...]),
+        nnx.state(model, nnx.Param),
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    train_step, _ = trainer.jit_train_and_eval_step()
+    inputs = {
+        'x': jnp.ones((2, 4), dtype=jnp.bfloat16),
+        'y': jnp.ones((2, 2), dtype=jnp.bfloat16),
+    }
+
+    for micro_step in range(gradient_accumulation_steps):
+      is_update_step = micro_step == gradient_accumulation_steps - 1
+      _, _, grad_norm = train_step(
+          inputs, is_update_step=jnp.asarray(is_update_step)
+      )
+      self.assertEqual(grad_norm.dtype, jnp.float32)
+      if not is_update_step:
+        for before, after in zip(
+            jax.tree_util.tree_leaves(initial_params),
+            jax.tree_util.tree_leaves(
+                nnx.state(model, nnx.Param),
+                is_leaf=lambda x: isinstance(x, nnx.Variable),
+            ),
+        ):
+          np.testing.assert_array_equal(before, after[...])
+
+    self.assertEqual(opt_state_dtypes(), initial_opt_state_dtypes)
+    updated_params = nnx.state(model, nnx.Param)
+    self.assertTrue(
+        any(
+            not np.array_equal(before, after[...])
+            for before, after in zip(
+                jax.tree_util.tree_leaves(initial_params),
+                jax.tree_util.tree_leaves(
+                    updated_params,
+                    is_leaf=lambda x: isinstance(x, nnx.Variable),
+                ),
+            )
         )
     )
-    float_dtypes = [
-        d for d in opt_state_dtypes if jnp.issubdtype(d, jnp.floating)
-    ]
-    self.assertNotEmpty(float_dtypes)
-    for d in float_dtypes:
-      self.assertEqual(d, jnp.float32)
+    self.assertEqual(float(trainer.grad_accumulator.denom[...]), 0.0)
 
 
 if __name__ == '__main__':

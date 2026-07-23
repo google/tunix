@@ -229,4 +229,4 @@ class LossOutput:
   """
 
   primary_loss: WeightedMetric
-  aux_metrics: Dict[str, WeightedMetric]
+  aux_metrics: Dict[str, WeightedMetric | jax.Array]
