@@ -15,11 +15,14 @@
 """Algorithm core implementations for RL and Agentic RL learners."""
 
 import functools
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.diffusion import types as diffusion_types
 from tunix.rl import common
+from tunix.rl import diffusion as diffusion_lib
 from tunix.rl import function_registry
 from tunix.sft import utils as sft_utils
 
@@ -199,7 +202,6 @@ def ppo_policy_loss_fn(
     per_token_logps, token_entropy = outputs
   else:
     per_token_logps = outputs
-
 
   advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
@@ -404,22 +406,50 @@ def grpo_loss_fn(
       train_example.completion_mask,
   )
 
-  # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
-  graphdef, state = nnx.split(model)
-  per_token_logps, token_entropy = common.compute_per_token_logps(
-      graphdef,
-      state,
-      prompt_tokens=train_example.prompt_ids,
-      completion_tokens=completion_ids,
-      pad_id=pad_id,
-      eos_id=eos_id,
-      stop_gradient=False,
-      return_entropy=True,
-      segment_ids=getattr(train_example, "segment_ids", None),
-      segment_positions=getattr(train_example, "segment_positions", None),
-      temperature=algo_config.temperature,
-      chunk_size=kwargs.get("compute_logps_chunk_size", 0),
-  )
+  diffusion_logits_fn = kwargs.get("diffusion_logits_fn")
+  diffusion_batch = getattr(train_example, "diffusion_batch", None)
+  if diffusion_logits_fn is None:
+    if isinstance(diffusion_batch, diffusion_types.DiffusionTokenBatch):
+      raise ValueError(
+          "diffusion_batch requires a diffusion_logits_fn; refusing to score "
+          "a diffusion rollout autoregressively"
+      )
+    # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
+    graphdef, state = nnx.split(model)
+    per_token_logps, token_entropy = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=train_example.prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        stop_gradient=False,
+        return_entropy=True,
+        segment_ids=getattr(train_example, "segment_ids", None),
+        segment_positions=getattr(train_example, "segment_positions", None),
+        temperature=algo_config.temperature,
+        chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+    )
+  else:
+    if not isinstance(diffusion_batch, diffusion_types.DiffusionTokenBatch):
+      raise ValueError(
+          "diffusion_logits_fn requires TrainExample.diffusion_batch"
+      )
+    if (
+        getattr(train_example, "segment_ids", None) is not None
+        or getattr(train_example, "segment_positions", None) is not None
+    ):
+      raise ValueError("diffusion GRPO does not support sequence packing")
+    per_token_logps, token_entropy = (
+        diffusion_lib.compute_diffusion_per_token_logps(
+            model,
+            diffusion_batch,
+            diffusion_logits_fn,
+            temperature=algo_config.temperature,
+            stop_gradient=False,
+            return_entropy=True,
+        )
+    )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
@@ -503,13 +533,13 @@ def grpo_loss_fn(
   reduced_pg_loss = common.reduced_loss_agg(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
-  total_loss = unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
+  total_loss = (
+      unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
+  )
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
   is_ratio_mean = masked_mean(is_ratio, completion_mask)
   is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
-  is_ratio_min = jnp.min(
-      jnp.where(completion_mask > 0, is_ratio, jnp.inf)
-  )
+  is_ratio_min = jnp.min(jnp.where(completion_mask > 0, is_ratio, jnp.inf))
   log_ratio_abs_mean = masked_mean(
       jnp.abs(seq_importance_ratio), completion_mask
   )

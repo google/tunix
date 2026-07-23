@@ -22,6 +22,7 @@ import enum
 import functools
 import gc
 import itertools
+import math
 import operator
 import os
 from typing import Any, Callable, Mapping
@@ -38,6 +39,7 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.diffusion import interfaces as diffusion_interfaces
 from tunix.diffusion import types as diffusion_types
 from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
@@ -46,6 +48,7 @@ from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import common
+from tunix.rl import diffusion as diffusion_lib
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -100,6 +103,8 @@ def _merge_diffusion_batches(
     )
 
   def concatenate(*arrays):
+    if all(isinstance(array, np.ndarray) for array in arrays):
+      return np.concatenate(arrays, axis=0)
     return jnp.concatenate([jnp.asarray(array) for array in arrays], axis=0)
 
   return diffusion_types.DiffusionTokenBatch.create(
@@ -114,6 +119,84 @@ def _merge_diffusion_batches(
           *(batch.loss_weights for batch in diffusion_batches)
       ),
   )
+
+
+def _is_custom_rollout_engine(rollout_engine: Any) -> bool:
+  """Returns whether a rollout class consumes the supplied model directly."""
+
+  return (
+      isinstance(rollout_engine, type)
+      and issubclass(rollout_engine, base_rollout.BaseRollout)
+  ) or (
+      isinstance(rollout_engine, functools.partial)
+      and isinstance(rollout_engine.func, type)
+      and issubclass(rollout_engine.func, base_rollout.BaseRollout)
+  )
+
+
+def _slice_diffusion_batch(
+    batch: diffusion_types.DiffusionTokenBatch, batch_slice: slice
+) -> diffusion_types.DiffusionTokenBatch:
+  """Slices every prepared diffusion input along its batch dimension."""
+
+  return jax.tree.map(lambda value: value[batch_slice], batch)
+
+
+@nnx.jit(static_argnames=("logits_fn", "temperature"))
+def _compute_detached_diffusion_logps(
+    model: nnx.Module,
+    batch: diffusion_types.DiffusionTokenBatch,
+    logits_fn: diffusion_interfaces.DiffusionLogitsFn,
+    temperature: float,
+) -> jax.Array:
+  """Compiles detached policy scoring for reference and anchor roles."""
+
+  return diffusion_lib.compute_diffusion_per_token_logps(
+      model,
+      batch,
+      logits_fn,
+      temperature=temperature,
+      stop_gradient=True,
+  )
+
+
+def _place_pytree_on_mesh(
+    pytree: Any,
+    mesh: Mesh,
+    data_sharding_axis: tuple[str, ...],
+) -> Any:
+  """Places every array leaf on one role mesh, including cross-mesh arrays."""
+
+  if mesh.empty:
+    return pytree
+  has_non_addressable_array = any(
+      isinstance(leaf, jax.Array) and not leaf.is_fully_addressable
+      for leaf in jax.tree.leaves(pytree)
+  )
+  if not has_non_addressable_array:
+    return sharding_utils.shard_input(pytree, data_sharding_axis)
+
+  pspec = jax.sharding.PartitionSpec(*data_sharding_axis)
+  dst_shardings = jax.tree.map(
+      lambda value: sharding_utils.get_sharding(value, mesh, pspec), pytree
+  )
+
+  def place_leaf(value, dst_sharding):
+    if isinstance(value, jax.Array) and not value.is_fully_addressable:
+      return reshard.reshard_pytree(value, dst_sharding)
+    return jax.device_put(value, dst_sharding)
+
+  return jax.tree.map(place_leaf, pytree, dst_shardings)
+
+
+def _shard_diffusion_batch(
+    batch: diffusion_types.DiffusionTokenBatch,
+    mesh: Mesh,
+    data_sharding_axis: tuple[str, ...],
+) -> diffusion_types.DiffusionTokenBatch:
+  """Places every prepared leaf on the requested role mesh."""
+
+  return _place_pytree_on_mesh(batch, mesh, data_sharding_axis)
 
 
 class Mode(enum.Enum):
@@ -169,9 +252,44 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
   compute_logps_chunk_size: int = 0
+  checkpoint_metadata: Mapping[str, Any] = dataclasses.field(
+      default_factory=dict
+  )
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
+    if not isinstance(self.checkpoint_metadata, Mapping):
+      raise TypeError("checkpoint_metadata must be a mapping")
+    self.checkpoint_metadata = dict(self.checkpoint_metadata)
+    reserved_keys = {"global_step", "role"}.intersection(
+        self.checkpoint_metadata
+    )
+    if reserved_keys:
+      raise ValueError(
+          "checkpoint_metadata cannot override reserved keys: "
+          f"{sorted(reserved_keys)}"
+      )
+
+    def validate_metadata_value(name: str, value: Any) -> None:
+      if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(
+            f"checkpoint_metadata[{name!r}] must be a finite JSON value"
+        )
+      if value is None or isinstance(value, (str, bool, int, float)):
+        return
+      if isinstance(value, tuple):
+        for index, item in enumerate(value):
+          validate_metadata_value(f"{name}[{index}]", item)
+        return
+      raise TypeError(
+          f"checkpoint_metadata[{name!r}] must be a JSON scalar or tuple"
+      )
+
+    for key, value in self.checkpoint_metadata.items():
+      if not isinstance(key, str):
+        raise TypeError("checkpoint_metadata keys must be strings")
+      validate_metadata_value(key, value)
+
     for name in [
         "mini_batch_size",
         "train_micro_batch_size",
@@ -263,7 +381,7 @@ class RLCluster:
     self._anchor_policy_state = None
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
-    self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
+    self.train_actor = self._load_model(actor, Role.ACTOR)
 
     if self.cluster_config.rollout_config is None:
       raise ValueError("`cluster_config.rollout_config` cannot be None.")
@@ -277,7 +395,9 @@ class RLCluster:
 
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
-    elif self.cluster_config.rollout_engine == "vanilla":
+    elif self.cluster_config.rollout_engine == "vanilla" or (
+        _is_custom_rollout_engine(self.cluster_config.rollout_engine)
+    ):
       rollout_data_type = (
           self.cluster_config.rollout_config[Mode.TRAIN].data_type
           if isinstance(self.cluster_config.rollout_config, dict)
@@ -285,7 +405,7 @@ class RLCluster:
       )
       self.rollout_actor = self._load_model(
           actor,
-          self.r2m[Role.ROLLOUT],
+          Role.ROLLOUT,
           rollout_data_type,
       )
     else:
@@ -293,7 +413,7 @@ class RLCluster:
       self.rollout_actor = self.train_actor
 
     if reference:
-      self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
+      self.reference = self._load_model(reference, Role.REFERENCE)
       if Role.REFERENCE in self._backbone_sharing_map[Role.ACTOR]:
         if not rl_utils.is_sharing_backbone(self.reference, self.train_actor):
           logging.warning(
@@ -303,15 +423,11 @@ class RLCluster:
           )
     else:
       self.reference = None
-    self.critic = (
-        self._load_model(critic, self.r2m[Role.CRITIC]) if critic else None
-    )
+    self.critic = self._load_model(critic, Role.CRITIC) if critic else None
     if Role.CRITIC in self._backbone_sharing_map[Role.ACTOR]:
       critic_state = nnx.state(self.train_actor, filterlib.Not(nnx.LoRAParam))
       nnx.update(self.critic, critic_state)
-    self.reward = (
-        self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
-    )
+    self.reward = self._load_model(reward, Role.REWARD) if reward else None
 
     self.tokenizer = tokenizer_adapter.TokenizerAdapter(tokenizer)
     self._rl_metrics_logger = metrics_logger.MetricsLogger(
@@ -364,7 +480,7 @@ class RLCluster:
   def _load_model(
       self,
       model_or_path: ModelOrPath,
-      mesh: Mesh,
+      role: Role,
       data_type: jnp.dtype | None = None,
   ) -> nnx.Module:
     """Loads model with given mesh to the given memory_kind.
@@ -374,12 +490,13 @@ class RLCluster:
 
     Args:
       model_or_path: either a nnx.Module or a path to a model.
-      mesh: the mesh to load the model on.
+      role: the role whose mesh and logical axis rules should be used.
       data_type: optional data type to cast the model parameters to.
 
     Returns:
       The model loaded on the given mesh.
     """
+    mesh = self.r2m[role]
     if isinstance(model_or_path, nnx.Module):
       model_mesh = rl_utils.get_pytree_mesh_info(nnx.state(model_or_path))
       original_shardings = jax.tree_util.tree_map(
@@ -395,6 +512,17 @@ class RLCluster:
       if not mesh.empty and model_mesh != mesh:
         logging.warning("Resharding model from %s to %s", model_mesh, mesh)
         graph, state = nnx.split(model_or_path)
+        logical_axis_rules = (
+            self.cluster_config.role_to_logical_axis_rule or {}
+        ).get(role)
+        physical_specs = nnx.get_partition_spec(state)
+        if logical_axis_rules is not None:
+          physical_specs = jax.tree_util.tree_map(
+              lambda spec: nn_partitioning.logical_to_mesh_axes(
+                  spec, logical_axis_rules
+              ),
+              physical_specs,
+          )
         dst_shardings = jax.tree_util.tree_map(
             lambda x: jax.sharding.NamedSharding(
                 mesh,
@@ -403,7 +531,7 @@ class RLCluster:
                 if is_on_device
                 else "pinned_host",
             ),
-            nnx.get_partition_spec(state),
+            physical_specs,
         )
         if data_type and data_type != jax.tree.leaves(state)[0].dtype:
           tmp_state = jax.tree.map(lambda x: x.astype(data_type), state)
@@ -521,18 +649,7 @@ class RLCluster:
           mesh=self.r2m[Role.ROLLOUT],
           rollout_config=loaded_sglang_jax_config,
       )
-    elif (
-        isinstance(self.cluster_config.rollout_engine, type)
-        and issubclass(
-            self.cluster_config.rollout_engine, base_rollout.BaseRollout
-        )
-    ) or (
-        isinstance(self.cluster_config.rollout_engine, functools.partial)
-        and issubclass(
-            self.cluster_config.rollout_engine.func,  # pyrefly: ignore[bad-argument-type]
-            base_rollout.BaseRollout,
-        )
-    ):
+    elif _is_custom_rollout_engine(self.cluster_config.rollout_engine):
       if isinstance(self.cluster_config.rollout_config, dict):
         loaded_config = self.cluster_config.rollout_config[Mode.TRAIN]
       else:
@@ -614,6 +731,7 @@ class RLCluster:
             optimizer=self.cluster_config.training_config.critic_optimizer,  # pyrefly: ignore[bad-argument-type]
             training_config=critic_config,
             custom_checkpoint_metadata_fn=lambda: {
+                **self.cluster_config.training_config.checkpoint_metadata,
                 "global_step": self.global_steps + 1,
                 "role": Role.CRITIC.value,
             },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
@@ -638,6 +756,7 @@ class RLCluster:
           optimizer=self.cluster_config.training_config.actor_optimizer,
           training_config=actor_config,
           custom_checkpoint_metadata_fn=lambda: {
+              **self.cluster_config.training_config.checkpoint_metadata,
               "global_step": self.global_steps + 1,
               "role": Role.ACTOR.value,
           },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
@@ -648,9 +767,7 @@ class RLCluster:
     del self.rollout_actor
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
-    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-        nnx.state(self.actor_trainer.model), "pinned_host"
-    )
+    self.snapshot_anchor_policy()
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
@@ -987,6 +1104,12 @@ class RLCluster:
             max_tokens_to_generate=max_generation_steps,
         )
 
+      set_generation_context = getattr(
+          self.rollout, "set_generation_context", None
+      )
+      if set_generation_context is not None:
+        set_generation_context(global_step=self.global_steps, mode=mode)
+
       perf_tags = {
           perf_constants.ROLE: Role.ROLLOUT.value,
       }
@@ -1016,7 +1139,9 @@ class RLCluster:
     logprobs = None
     if outputs[0].logprobs is not None:
       logprobs = list(
-          itertools.chain.from_iterable(out.logprobs for out in outputs)  # pyrefly: ignore[bad-argument-type]
+          itertools.chain.from_iterable(
+              out.logprobs for out in outputs
+          )  # pyrefly: ignore[bad-argument-type]
       )
 
     logits = None
@@ -1086,6 +1211,50 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
+      return ref_per_token_logps
+
+  def get_ref_diffusion_per_token_logps(
+      self,
+      batch: diffusion_types.DiffusionTokenBatch,
+      logits_fn: diffusion_interfaces.DiffusionLogitsFn,
+      micro_batch_size: int | None = None,
+      temperature: float | None = None,
+  ) -> jax.Array:
+    """Scores a prepared batch with the detached reference policy."""
+
+    batch = batch.validate()
+    batch_size = batch.target_ids.shape[0]
+    if batch_size == 0:
+      raise ValueError(
+          "Cannot get reference diffusion log probabilities from an empty"
+          " batch."
+      )
+    micro_batch_size = micro_batch_size or batch_size
+    if temperature is None:
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
+      dest_batch = _shard_diffusion_batch(
+          batch,
+          self.r2m[Role.REFERENCE],
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      model = self.inference_worker.get_model("reference")
+      self._maybe_load_model_from_cpu(model, Role.REFERENCE)
+      outs = []
+      for batch_slice in rl_utils.chunk_slices_by_size(
+          stop=batch_size, step=micro_batch_size
+      ):
+        outs.append(
+            _compute_detached_diffusion_logps(
+                model,
+                _slice_diffusion_batch(dest_batch, batch_slice),
+                logits_fn,
+                temperature=temperature,
+            )
+        )
+      ref_per_token_logps = jnp.concatenate(outs, axis=0)
+      self._maybe_offload_model_to_cpu(model, Role.REFERENCE)
       return ref_per_token_logps
 
   def get_old_per_token_logps(
@@ -1209,7 +1378,93 @@ class RLCluster:
         )
       return actor_per_token_logps
 
-  def sync_weights(self):
+  def get_anchor_diffusion_per_token_logps(
+      self,
+      batch: diffusion_types.DiffusionTokenBatch,
+      logits_fn: diffusion_interfaces.DiffusionLogitsFn,
+      micro_batch_size: int | None = None,
+      temperature: float | None = None,
+  ) -> jax.Array:
+    """Scores a prepared batch with the start-of-step actor snapshot."""
+
+    batch = batch.validate()
+    batch_size = batch.target_ids.shape[0]
+    if batch_size == 0:
+      raise ValueError(
+          "Cannot get anchor diffusion log probabilities from an empty batch."
+      )
+    if self._anchor_policy_state is None:
+      raise ValueError(
+          "Anchor policy state is not initialized. Please run `sync_weights`"
+          " first."
+      )
+    micro_batch_size = micro_batch_size or batch_size
+    if temperature is None:
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      dest_batch = _shard_diffusion_batch(
+          batch,
+          self.r2m[Role.ACTOR],
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      actor_state_on_device = self._is_state_on_device(
+          nnx.state(self.actor_trainer.model)
+      )
+      if actor_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
+        gc.collect()
+
+      graphdef, _ = nnx.split(self.actor_trainer.model)
+      anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
+      if anchor_on_device:
+        anchor_policy_state = self._anchor_policy_state
+      else:
+        anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
+        )
+      anchor_model = nnx.merge(graphdef, anchor_policy_state)
+      outs = []
+      for batch_slice in rl_utils.chunk_slices_by_size(
+          stop=batch_size, step=micro_batch_size
+      ):
+        outs.append(
+            _compute_detached_diffusion_logps(
+                anchor_model,
+                _slice_diffusion_batch(dest_batch, batch_slice),
+                logits_fn,
+                temperature=temperature,
+            )
+        )
+      anchor_per_token_logps = jnp.concatenate(outs, axis=0)
+      del anchor_model
+      if not anchor_on_device:
+        del anchor_policy_state
+      gc.collect()
+      if actor_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(
+            self.actor_trainer.model, self._default_memory_kind
+        )
+      return anchor_per_token_logps
+
+  def snapshot_anchor_policy(self) -> None:
+    """Snapshots the current actor for old-policy scoring within one step."""
+
+    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+        nnx.state(self.actor_trainer.model), "pinned_host"
+    )
+
+  def place_pytree_on_role(self, pytree: Any, role: Role) -> Any:
+    """Places a complete input pytree on exactly one role mesh."""
+
+    with self._get_mesh_and_logical_axis_rules_cm(role):
+      return _place_pytree_on_mesh(
+          pytree,
+          self.r2m[role],
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+
+  def sync_weights(self, *, increment_global_steps: bool = True):
     """Syncs the weights of between the sampler model and trainer model."""
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
@@ -1227,12 +1482,11 @@ class RLCluster:
       self.rollout.update_params(src_filtered_params, filter_types)
       gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
-      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-          nnx.state(self.actor_trainer.model), "pinned_host"
-      )
+      self.snapshot_anchor_policy()
 
-    # sync weights marks the end of a full batch, so increment the global steps.
-    self.global_steps += 1
+    if increment_global_steps:
+      # A regular sync marks the end of a full batch.
+      self.global_steps += 1
 
   def get_values(
       self,

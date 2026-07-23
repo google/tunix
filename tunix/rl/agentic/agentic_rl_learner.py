@@ -15,8 +15,8 @@
 """Base class for Agentic RL Learners."""
 
 from __future__ import annotations
+
 import abc
-import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
@@ -25,7 +25,8 @@ import dataclasses
 import itertools
 import queue
 import threading
-from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
+import time
+from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Optional, Sequence, Set, Type, TypeVar
 
 from absl import logging
 import flax
@@ -33,13 +34,12 @@ import jax
 from jax import typing
 import jax.numpy as jnp
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
-from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.rollout import base_rollout
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import base_agent
@@ -50,6 +50,7 @@ from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward  # pylint: disable=unused-import
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
+from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
@@ -422,7 +423,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     assert "pair_index" not in self.env_kwargs
     env = self.env_class(
         single_example,
-        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
+        **{
+            "group_id": group_id,
+            "pair_index": pair_index,
+            **self.env_kwargs,
+        },  # pyrefly: ignore[bad-argument-type]
     )
 
     return agent, env
@@ -461,6 +466,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
     )
+    if result.diffusion_batch is not None:
+      raise ValueError(
+          "prepared diffusion rollouts are not supported by agentic RL; use "
+          "the standard GRPO family with a diffusion_logits_fn"
+      )
 
     return result
 
@@ -509,7 +519,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # with mini-batch.
       group_id = self.rl_cluster.global_steps * self._full_batch_size
       if is_async_iterator:
-        async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+        async for (
+            single_example
+        ) in prompt_iterator:  # pyrefly: ignore[not-iterable]
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -726,7 +738,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    full_batch_size = len(next(iter(first_item.values())))  # pyrefly: ignore[bad-argument-type]
+    full_batch_size = len(
+        next(iter(first_item.values()))
+    )  # pyrefly: ignore[bad-argument-type]
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -865,9 +879,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # example along its batch axis into chunks sized to one micro-step,
       # and pass the list to ``update_actor``; ``peft_trainer.train``
       # iterates the list and calls ``train_step`` once per chunk.
-      seqs_per_chunk = (
-          train_micro_batch_size * self.algo_config.num_generations
-      )
+      seqs_per_chunk = train_micro_batch_size * self.algo_config.num_generations
       n_total = merged_train_micro_batch.completion_ids.shape[0]
       if n_total > seqs_per_chunk:
         chunked_train_micro_batch = [
@@ -946,10 +958,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # `is_update_step` flips True every `grad_acc_steps` micro-batches.
         unpacked_micro_step_counter += 1
         is_update = unpacked_micro_step_counter % grad_acc_steps == 0
-        
+
       if is_update:
         update_steps_since_last_sync += 1
-        
+
       if update_steps_since_last_sync == update_steps_per_full_batch:
         # --- Remaining Iterations Training Step ---
         iterations = self._num_iterations()
@@ -958,17 +970,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           # TODO(b/483779605) Sub-step checkpointing.
           self._iter_steps += len(full_batch_chunks)
 
-          # TODO(yixuanm): Eval during iteration too. Skipping for now as we 
+          # TODO(yixuanm): Eval during iteration too. Skipping for now as we
           # will refactor the learner soon.
-          self.rl_cluster.update_actor(
-              full_batch_chunks, None, skip_jit
-          )
+          self.rl_cluster.update_actor(full_batch_chunks, None, skip_jit)
           if hasattr(self.rl_cluster, "critic_trainer"):
-            self.rl_cluster.update_critic(
-                full_batch_chunks, None, skip_jit
-            )
+            self.rl_cluster.update_critic(full_batch_chunks, None, skip_jit)
         full_batch_chunks.clear()
-
 
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
@@ -980,7 +987,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # step). Mirrors the per-iter view a wandb dashboard would show
         # without depending on the async metric logger pipeline.
         with self._rewards_window_lock:
-          train_rewards = np.asarray(self._train_rewards_window, dtype=np.float32)
+          train_rewards = np.asarray(
+              self._train_rewards_window, dtype=np.float32
+          )
           eval_rewards = np.asarray(self._eval_rewards_window, dtype=np.float32)
           self._train_rewards_window.clear()
           if did_eval_this_global_step:
@@ -1016,10 +1025,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trainer_str = ""
         try:
           actor_trainer = self.rl_cluster.actor_trainer
-          trainer_buf = (
-              getattr(actor_trainer, "_prev_buffered_train_metrics", None)
-              or getattr(actor_trainer, "_buffered_train_metrics", None)
-          )
+          trainer_buf = getattr(
+              actor_trainer, "_prev_buffered_train_metrics", None
+          ) or getattr(actor_trainer, "_buffered_train_metrics", None)
           if trainer_buf is not None:
             extras = []
             if trainer_buf.losses:
@@ -1037,9 +1045,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 vals, _ = am[key]
                 if vals:
                   v = float(
-                      np.mean([
-                          np.asarray(common._metric_scalar(x)) for x in vals
-                      ])
+                      np.mean(
+                          [np.asarray(common._metric_scalar(x)) for x in vals]
+                      )
                   )
                   extras.append(f"{label}={v:.4f}")
             if extras:
@@ -1182,7 +1190,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           len(train_micro_batch),
           self.policy_version,
           str([
-              train_example.policy_version[0]  # pyrefly: ignore[unsupported-operation]
+              train_example.policy_version[
+                  0
+              ]  # pyrefly: ignore[unsupported-operation]
               for train_example in train_micro_batch
           ]),
           self.algo_config.off_policy_steps,

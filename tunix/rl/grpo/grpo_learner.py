@@ -24,9 +24,11 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.rl import algo_core  # pylint: disable=unused-import
+from tunix.diffusion import interfaces as diffusion_interfaces
+from tunix.diffusion import types as diffusion_types
 from tunix.generate import utils
 from tunix.perf.experimental import constants as perf_constants
+from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
@@ -40,7 +42,102 @@ MetricFn = rl_learner.MetricFn
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
-  pass
+  diffusion_batch: diffusion_types.DiffusionTokenBatch | None = None
+
+
+def _assert_prepared_array_matches(
+    name: str,
+    actual: jax.Array | np.ndarray,
+    expected: np.ndarray,
+    comparison_mask: np.ndarray | None = None,
+) -> None:
+  """Checks a possibly distributed prepared array against host rollout data."""
+
+  if tuple(actual.shape) != tuple(expected.shape):
+    raise ValueError(
+        f"diffusion_batch {name} shape {tuple(actual.shape)} does not match "
+        f"GRPO shape {tuple(expected.shape)}"
+    )
+  if isinstance(actual, jax.Array) and not actual.is_fully_addressable:
+    local_values = [
+        (shard.index, np.asarray(shard.data))
+        for shard in actual.addressable_shards
+    ]
+  else:
+    local_values = [(Ellipsis, np.asarray(actual))]
+  for index, local_actual in local_values:
+    local_expected = expected[index]
+    local_mask = None if comparison_mask is None else comparison_mask[index]
+    if local_mask is not None:
+      local_actual = local_actual[local_mask]
+      local_expected = local_expected[local_mask]
+    if not np.array_equal(local_actual, local_expected):
+      raise ValueError(
+          f"diffusion_batch {name} must exactly match the GRPO rollout"
+      )
+
+
+def _validate_diffusion_rollout_batch(
+    batch: diffusion_types.DiffusionTokenBatch,
+    visible_completion_ids: list[np.ndarray],
+) -> diffusion_types.DiffusionTokenBatch:
+  """Validates that visible completions are prefixes of the full trace."""
+
+  batch = batch.validate()
+  batch_size, trace_length = batch.target_ids.shape
+  if batch_size != len(visible_completion_ids):
+    raise ValueError(
+        "diffusion_batch batch size must match the number of rollout "
+        "completions"
+    )
+  visible_ids = np.zeros((batch_size, trace_length), dtype=np.int64)
+  visible_mask = np.zeros((batch_size, trace_length), dtype=bool)
+  for index, completion_ids in enumerate(visible_completion_ids):
+    completion_ids = np.asarray(completion_ids)
+    if completion_ids.ndim != 1 or completion_ids.shape[0] > trace_length:
+      raise ValueError(
+          "each visible diffusion completion must be one-dimensional and no "
+          "longer than the prepared trace"
+      )
+    visible_ids[index, : completion_ids.shape[0]] = completion_ids
+    visible_mask[index, : completion_ids.shape[0]] = True
+  _assert_prepared_array_matches(
+      "target_ids",
+      batch.target_ids,
+      visible_ids,
+      comparison_mask=visible_mask,
+  )
+  _assert_prepared_array_matches(
+      "active loss_weights",
+      batch.loss_weights != 0,
+      np.ones_like(visible_mask),
+      comparison_mask=visible_mask,
+  )
+  return batch
+
+
+def _stack_rollout_logps(
+    rollout_logps: list[np.ndarray], batch_size: int, trace_length: int
+) -> jax.Array:
+  """Stacks exact full-trace sampler action logps for parity diagnostics."""
+
+  if len(rollout_logps) != batch_size:
+    raise ValueError(
+        "diffusion rollout logprobs must contain one array per completion"
+    )
+  stacked_logps = []
+  for index, logps in enumerate(rollout_logps):
+    logps = np.asarray(logps, dtype=np.float32)
+    if logps.ndim != 1 or logps.shape[0] != trace_length:
+      raise ValueError(
+          "diffusion rollout logprobs must cover the full prepared trace; "
+          f"row {index} has shape {logps.shape} and trace length "
+          f"{trace_length}"
+      )
+    if not np.all(np.isfinite(logps)):
+      raise ValueError("diffusion rollout logprobs must be finite")
+    stacked_logps.append(logps)
+  return jnp.asarray(np.stack(stacked_logps))
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -132,6 +229,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       reward_fns: RewardFn | List[RewardFn],
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
+      diffusion_logits_fn: diffusion_interfaces.DiffusionLogitsFn | None = None,
   ):
     """Initializes the `GRPOTrainer`.
 
@@ -157,6 +255,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
            ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
            ...       # ... }
       data_shuffle_seed: The seed used to shuffle the training data.
+      diffusion_logits_fn: Optional target-aligned scorer for prepared diffusion
+        rollouts. When provided, every rollout must return a matching
+        ``diffusion_batch`` and all live, reference, and old-policy scores use
+        this scorer.
     """  # fmt: skip
     super().__init__(
         rl_cluster=rl_cluster,
@@ -169,6 +271,18 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     self.algo_config.temperature = self.rl_cluster.get_rollout_config(  # pyrefly: ignore[missing-attribute]
         mode=rl_cluster_lib.Mode.TRAIN
     ).temperature
+    self.diffusion_logits_fn = diffusion_logits_fn
+    if self.diffusion_logits_fn is not None:
+      if self.algo_config.policy_loss_fn != "grpo":
+        raise ValueError(
+            "diffusion policy scoring is supported only by the GRPO policy "
+            "loss, not PPO"
+        )
+      if (
+          self.rl_cluster.cluster_config.training_config.max_seq_token_per_tpu
+          is not None
+      ):
+        raise ValueError("diffusion GRPO does not support sequence packing")
 
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
@@ -183,6 +297,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         pad_id=self.rl_cluster.rollout.pad_id(),
         eos_id=self.rl_cluster.rollout.eos_id(),
         compute_logps_chunk_size=self.rl_cluster.cluster_config.training_config.compute_logps_chunk_size,
+        diffusion_logits_fn=self.diffusion_logits_fn,
     )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
@@ -224,7 +339,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type]
+    training_input["prompts"] = list(
+        training_input["prompts"]
+    )  # pyrefly: ignore[bad-argument-type]
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
 
@@ -233,34 +350,64 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         perf_constants.STEP: self.rl_cluster.global_steps,
     }
 
+    if (
+        self.diffusion_logits_fn is not None
+        and self.algo_config.num_iterations > 1
+        and not self.should_sync_weights
+    ):
+      self.rl_cluster.snapshot_anchor_policy()
+
     rollout_output = self.rl_cluster.generate(
         prompts=training_input["prompts"],
         mode=mode,
         micro_batch_size=(
-            self._rollout_micro_batch_size * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
+            self._rollout_micro_batch_size
+            * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
         ),
         trace_tags=perf_tags,
     )
-    padded_completion_ids = np.array([
-        utils.pad_to_length(
-            completion_ids,
-            target_length=rollout_config.max_tokens_to_generate,
-            pad_value=pad_value,
-            left=False,
-        )
-        for completion_ids in rollout_output.tokens
-    ])
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
-
-    # Assemble masks
     prompt_mask = prompt_ids != pad_value
-    completion_mask = np.not_equal(padded_completion_ids, pad_value)
+    diffusion_batch = rollout_output.diffusion_batch
+    if self.diffusion_logits_fn is None:
+      if diffusion_batch is not None:
+        raise ValueError(
+            "rollout returned diffusion_batch without a diffusion_logits_fn; "
+            "refusing autoregressive fallback"
+        )
+      padded_completion_ids = np.array([
+          utils.pad_to_length(
+              completion_ids,
+              target_length=rollout_config.max_tokens_to_generate,
+              pad_value=pad_value,
+              left=False,
+          )
+          for completion_ids in rollout_output.tokens
+      ])
+      completion_mask = np.not_equal(padded_completion_ids, pad_value)
+      jax_completion_ids = jnp.array(padded_completion_ids)
+      jax_completion_mask = jnp.array(completion_mask)
+      visible_completion_lengths = completion_mask.sum(axis=-1)
+    else:
+      if diffusion_batch is None:
+        raise ValueError(
+            "diffusion_logits_fn requires every rollout to return "
+            "diffusion_batch"
+        )
+      diffusion_batch = _validate_diffusion_rollout_batch(
+          diffusion_batch,
+          rollout_output.tokens,
+      )
+      jax_completion_ids = jnp.asarray(diffusion_batch.target_ids)
+      jax_completion_mask = jnp.asarray(diffusion_batch.loss_weights)
+      visible_completion_lengths = np.asarray(
+          [len(tokens) for tokens in rollout_output.tokens], dtype=np.int32
+      )
 
-    # Convert completion_ids and completion_mask to jax arrays
-    jax_completion_ids = jnp.array(padded_completion_ids)
-    jax_completion_mask = jnp.array(completion_mask)
-
-    if self.algo_config.beta != 0.0:
+    needs_reference = self.algo_config.beta != 0.0
+    if self.diffusion_logits_fn is not None and self.algo_config.beta is None:
+      needs_reference = False
+    if needs_reference:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
       # TODO(yangmu): use function decorator to trace this part, same below.
       with self.rl_cluster.perf.span(
@@ -268,16 +415,27 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       ) as interval, self.rl_cluster.perf_v2.span(
           perf_constants.REFERENCE_INFERENCE, devices, tags=perf_tags
       ) as interval_v2:
-        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=jax_completion_ids,
-            pad_id=pad_value,
-            eos_id=eos_value,
-            micro_batch_size=(
-                self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
-                * self.algo_config.num_generations
-            ),
+        compute_logps_micro_batch_size = (
+            self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
+            * self.algo_config.num_generations
         )
+        if self.diffusion_logits_fn is None:
+          ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+              prompt_tokens=prompt_ids,
+              completion_tokens=jax_completion_ids,
+              pad_id=pad_value,
+              eos_id=eos_value,
+              micro_batch_size=compute_logps_micro_batch_size,
+          )
+        else:
+          ref_per_token_logps = (
+              self.rl_cluster.get_ref_diffusion_per_token_logps(
+                  batch=diffusion_batch,
+                  logits_fn=self.diffusion_logits_fn,
+                  micro_batch_size=compute_logps_micro_batch_size,
+                  temperature=self.algo_config.temperature,
+              )
+          )
         interval.device_end([ref_per_token_logps])
         interval_v2.async_end([ref_per_token_logps])
     else:
@@ -289,18 +447,42 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       ) as interval, self.rl_cluster.perf_v2.span(
           perf_constants.OLD_ACTOR_INFERENCE, devices, tags=perf_tags
       ) as interval_v2:
-        old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=jax_completion_ids,
-            micro_batch_size=(
-                self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
-                * self.algo_config.num_generations
-            ),
+        compute_logps_micro_batch_size = (
+            self._compute_logps_micro_batch_size  # pyrefly: ignore[unsupported-operation]
+            * self.algo_config.num_generations
         )
+        if self.diffusion_logits_fn is None:
+          old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+              prompt_tokens=prompt_ids,
+              completion_tokens=jax_completion_ids,
+              micro_batch_size=compute_logps_micro_batch_size,
+          )
+        else:
+          old_per_token_logps = (
+              self.rl_cluster.get_anchor_diffusion_per_token_logps(
+                  batch=diffusion_batch,
+                  logits_fn=self.diffusion_logits_fn,
+                  micro_batch_size=compute_logps_micro_batch_size,
+                  temperature=self.algo_config.temperature,
+              )
+          )
         interval.device_end([old_per_token_logps])
         interval_v2.async_end([old_per_token_logps])
     else:
       old_per_token_logps = None
+
+    if (
+        self.diffusion_logits_fn is not None
+        and old_per_token_logps is not None
+        and rollout_output.logprobs is not None
+    ):
+      rollout_logps = _stack_rollout_logps(
+          rollout_output.logprobs,
+          jax_completion_ids.shape[0],
+          jax_completion_ids.shape[1],
+      )
+    else:
+      rollout_logps = None
 
     with self.rl_cluster.perf.span(
         "advantage_computation"
@@ -312,7 +494,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           prompts=training_input["prompts"],
           completions=rollout_output.text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
+          **{
+              k: v for k, v in training_input.items() if k != "prompts"
+          },  # pyrefly: ignore[bad-argument-type]
       )
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
@@ -332,7 +516,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     )
 
     # Log completion lengths.
-    agg_completion_mask = completion_mask.sum(axis=-1)
+    agg_completion_mask = visible_completion_lengths
     self.rl_cluster.buffer_metrics(
         {
             "completions/mean_length": (
@@ -362,7 +546,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       )
       self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
 
-    return TrainExample(
+    train_example = TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
         completion_ids=jax_completion_ids,
@@ -370,7 +554,38 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ref_per_token_logps=ref_per_token_logps,
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
+        diffusion_batch=diffusion_batch,
     )
+    if self.diffusion_logits_fn is not None:
+      train_example, rollout_logps = self.rl_cluster.place_pytree_on_role(
+          (train_example, rollout_logps), rl_cluster_lib.Role.ACTOR
+      )
+      if rollout_logps is not None:
+        parity_error = jnp.abs(
+            rollout_logps - train_example.old_per_token_logps
+        )
+        active_count = jnp.maximum(jnp.sum(train_example.completion_mask), 1)
+        self.rl_cluster.buffer_metrics(
+            {
+                "diffusion/rollout_anchor_logp_abs_mean": (
+                    jnp.sum(parity_error * train_example.completion_mask)
+                    / active_count,
+                    np.mean,
+                ),
+                "diffusion/rollout_anchor_logp_abs_max": (
+                    jnp.max(
+                        jnp.where(
+                            train_example.completion_mask,
+                            parity_error,
+                            0.0,
+                        )
+                    ),
+                    np.max,
+                ),
+            },
+            mode=mode,
+        )
+    return train_example
 
   def _compute_trajectory_ids(
       self, example: TrainingInputT, steps: int
@@ -388,7 +603,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
-    batch_size = len(example["prompts"]) // self.algo_config.num_generations  # pyrefly: ignore[bad-argument-type]
+    batch_size = (
+        len(example["prompts"]) // self.algo_config.num_generations
+    )  # pyrefly: ignore[bad-argument-type]
     row_offset = steps * batch_size
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),

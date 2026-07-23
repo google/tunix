@@ -19,11 +19,11 @@ from typing import Any, Callable, Optional
 from flax import nnx
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
-from tunix.sft import peft_trainer
-from typing_extensions import override
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import tracer as perf_tracer_lib
+from tunix.sft import peft_trainer
 from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-import
+from typing_extensions import override
 
 
 class Trainer(peft_trainer.PeftTrainer):
@@ -49,9 +49,37 @@ class Trainer(peft_trainer.PeftTrainer):
         perf_tracer,
         perf_tracer_v2,
     )
+    self._validate_restored_checkpoint_metadata(
+        getattr(training_config, "checkpoint_metadata", {})
+    )
     self.rl_metrics_to_log = {}  # Metric name -> key in aux.
     self.tqdm_metrics_to_display = []
     self.custom_checkpoint_metadata_fn = custom_checkpoint_metadata_fn
+
+  def _validate_restored_checkpoint_metadata(
+      self, expected_metadata: dict[str, Any]
+  ) -> None:
+    """Fails closed when a resumed RL objective differs from its checkpoint."""
+
+    if self._train_steps <= 0 or not expected_metadata:
+      return
+
+    def canonicalize(value: Any) -> Any:
+      if isinstance(value, (tuple, list)):
+        return tuple(canonicalize(item) for item in value)
+      return value
+
+    for key, expected_value in expected_metadata.items():
+      if key not in self._restored_custom_metadata:
+        raise ValueError(
+            f"restored checkpoint is missing required metadata key {key!r}"
+        )
+      restored_value = self._restored_custom_metadata[key]
+      if canonicalize(restored_value) != canonicalize(expected_value):
+        raise ValueError(
+            f"restored checkpoint metadata mismatch for {key!r}: expected "
+            f"{expected_value!r}, received {restored_value!r}"
+        )
 
   def with_rl_metrics_to_log(
       self,

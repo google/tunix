@@ -15,6 +15,8 @@
 
 import dataclasses
 from typing import Any, Dict, List, Optional, Sequence
+
+from tunix.diffusion import interfaces as diffusion_interfaces
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
 from tunix.rl.grpo import grpo_learner as grpo_learner_lib
@@ -140,6 +142,7 @@ class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
       reward_fns: RewardFn | List[RewardFn],
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
+      diffusion_logits_fn: diffusion_interfaces.DiffusionLogitsFn | None = None,
   ):
     """Initializes the `DAPOLearner`."""
     reward_fns = (
@@ -153,4 +156,5 @@ class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
         reward_fns=reward_fns,
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,
+        diffusion_logits_fn=diffusion_logits_fn,
     )

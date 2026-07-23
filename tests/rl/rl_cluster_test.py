@@ -14,7 +14,6 @@
 
 import functools
 import os
-import os
 import unittest
 from unittest import mock
 
@@ -133,6 +132,71 @@ class RlClusterTest(parameterized.TestCase):
         nnx.state(rl_cluster.inference_worker._models['reference'])
     )
     self.assertEqual(ref_model_mesh, actor_mesh)
+
+  def test_model_loading_maps_logical_axes_to_role_mesh(self):
+    split_index = self.device_count // 2
+    actor_mesh = Mesh(
+        np.array(jax.devices()[:split_index]).reshape(split_index, 1),
+        ('data', 'model'),
+    )
+    rollout_mesh = Mesh(
+        np.array(jax.devices()[split_index:]).reshape(1, split_index),
+        ('data', 'model'),
+    )
+    logical_axis_rules = (('fsdp', 'data'), ('tp', 'model'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: actor_mesh,
+            rl_cluster_lib.Role.REFERENCE: actor_mesh,
+            rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        },
+        role_to_logical_axis_rule={
+            rl_cluster_lib.Role.ACTOR: logical_axis_rules,
+            rl_cluster_lib.Role.REFERENCE: logical_axis_rules,
+            rl_cluster_lib.Role.ROLLOUT: logical_axis_rules,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    ref_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+
+    cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    states = (
+        nnx.state(cluster.actor_trainer.model),
+        nnx.state(cluster.rollout.model()),
+        nnx.state(cluster.inference_worker._models['reference']),
+    )
+    for state in states:
+      for sharding in jax.tree.leaves(
+          jax.tree.map(lambda x: x.sharding, state)
+      ):
+        self.assertNotIn('fsdp', sharding.spec)
+        self.assertNotIn('tp', sharding.spec)
+        self.assertTrue(set(sharding.spec) <= {'data', 'model', None})
 
   @parameterized.named_parameters(
       dict(
@@ -788,16 +852,16 @@ class RlClusterTest(parameterized.TestCase):
       dict(
           testcase_name='missing_role',
           role_to_logical_axis_rules={
-              rl_cluster_lib.Role.ACTOR: ['fsdp'],
+              rl_cluster_lib.Role.ACTOR: [('fsdp', 'fsdp')],
           },
           expected_logical_axis_rules=(),
       ),
       dict(
           testcase_name='with_rule',
           role_to_logical_axis_rules={
-              rl_cluster_lib.Role.REFERENCE: ['fsdp'],
+              rl_cluster_lib.Role.REFERENCE: [('fsdp', 'fsdp')],
           },
-          expected_logical_axis_rules=['fsdp'],
+          expected_logical_axis_rules=[('fsdp', 'fsdp')],
       ),
   )
   def test_logical_axis_rules_cm(

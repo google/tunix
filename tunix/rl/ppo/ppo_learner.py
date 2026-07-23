@@ -32,7 +32,6 @@ from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
 
-
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
@@ -269,6 +268,11 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
         micro_batch_size=self._rollout_micro_batch_size,
     )
+    if rollout_output.diffusion_batch is not None:
+      raise ValueError(
+          "prepared diffusion rollouts are not supported by PPO; use the "
+          "standard GRPO family with a diffusion_logits_fn"
+      )
     padded_completion_ids = np.array([
         utils.pad_to_length(
             completion_ids,
@@ -343,10 +347,14 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
       last_token_scores = jax.device_get(jax_last_token_scores)
     else:
       last_token_scores = self._compute_rewards(
-          prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
+          prompts=training_input[
+              "prompts"
+          ],  # pyrefly: ignore[bad-argument-type]
           completions=rollout_output.text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
+          **{
+              k: v for k, v in training_input.items() if k != "prompts"
+          },  # pyrefly: ignore[bad-argument-type]
       )
       jax_last_token_scores = jax.device_put(last_token_scores)
 
@@ -516,7 +524,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
-    batch_size = len(example["prompts"]) // self._num_generations()  # pyrefly: ignore[bad-argument-type]
+    batch_size = (
+        len(example["prompts"]) // self._num_generations()
+    )  # pyrefly: ignore[bad-argument-type]
     row_offset = steps * batch_size
     row_offsets = np.arange(row_offset, row_offset + batch_size)
     return row_offsets.astype(str).tolist()

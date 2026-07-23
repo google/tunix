@@ -195,6 +195,29 @@ class DiffusionRolloutMergeTest(absltest.TestCase):
     np.testing.assert_array_equal(merged.loss_weights, [[1.0, 1.0], [1.0, 0.0]])
     np.testing.assert_array_equal(merged.model_inputs["example_ids"], [0, 0])
 
+  def test_preserves_host_numpy_batches_until_role_mesh_sharding(self):
+    def host_batch(target_id):
+      return diffusion_types.DiffusionTokenBatch.create(
+          model_inputs={
+              "trace_tokens": np.array([[target_id, 99]], dtype=np.int32),
+              "action_steps": np.array([[0, 1]], dtype=np.int32),
+          },
+          target_ids=np.array([[target_id, -1]], dtype=np.int32),
+          loss_weights=np.array([[1.0, 0.0]], dtype=np.float32),
+      )
+
+    merged = rl_cluster._merge_diffusion_batches(  # pylint: disable=protected-access
+        [_rollout_output(host_batch(1)), _rollout_output(host_batch(2))]
+    )
+
+    self.assertIsInstance(merged.target_ids, np.ndarray)
+    self.assertIsInstance(merged.loss_weights, np.ndarray)
+    self.assertIsInstance(merged.model_inputs["trace_tokens"], np.ndarray)
+    self.assertIsInstance(merged.model_inputs["action_steps"], np.ndarray)
+    np.testing.assert_array_equal(
+        merged.model_inputs["trace_tokens"], [[1, 99], [2, 99]]
+    )
+
   def test_allows_ar_microbatches_to_omit_diffusion_metadata(self):
     self.assertIsNone(
         rl_cluster._merge_diffusion_batches(  # pylint: disable=protected-access
