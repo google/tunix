@@ -25,6 +25,7 @@ import jax
 from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma import params as params_lib
@@ -72,18 +73,18 @@ class ShardingConfig:
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_cndh=(None, 'tp', fsdp, None),
-        qkv_weight_cndh=(None, 'tp', fsdp, None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
-        score_weight_d1=(fsdp, None),
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp',),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
     )
 
 

@@ -23,6 +23,7 @@ import einops
 import flax
 from flax import nnx
 import jax
+from jax.sharding import PartitionSpec as P
 from jax import numpy as jnp
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
@@ -70,19 +71,19 @@ class ShardingConfig:
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_cndh=(None, 'tp', fsdp, None),
-        qkv_weight_cndh=(None, 'tp', fsdp, None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
-        vision_proj=(fsdp, 'tp'),
-        vision_soft_emb_norm_weight=('tp',),
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp',),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        vision_proj=P(fsdp, 'tp'),
+        vision_soft_emb_norm_weight=P('tp',),
         siglip=vision.SigLIPShardingConfig.get_default_sharding(is_sampling),
     )
 
