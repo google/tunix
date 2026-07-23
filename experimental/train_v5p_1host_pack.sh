@@ -10,6 +10,10 @@
 #   * Sequence packing is ON (--max_seq_token_per_tpu), to exercise the CL1/CL2
 #     packing framework.
 #   * WANDB defaults to online so you can watch the loss curve.
+#   * Perfetto RL perf tracing is ON for the WHOLE run (v1 aggregate span
+#     metrics + v2 Perfetto trace), so one converge run yields BOTH convergence
+#     (wandb) and full-run performance (ui.perfetto.dev) -- unlike xprof which
+#     is capped at ~2GB / a few steps. The short xprof window still runs too.
 #
 # Usage (on the TPU VM, tunix repo root, deps present -- e.g. inside the
 # tunix_base_image container):
@@ -56,10 +60,19 @@ MAX_STEPS="${MAX_STEPS:-200}"              # REAL run length (training continues
 LOG_DIR="${LOG_DIR:-/tmp/train_v5p_logs}"
 RUN_TAG="${RUN_TAG:-v5p_1host_pack}"
 
-# Profiler: traces a window then KEEPS TRAINING. Set PROFILER_STEPS=0 to skip.
+# xprof: detailed kernel trace of a short window then KEEPS TRAINING (2GB cap,
+# so only a few steps). Set PROFILER_STEPS=0 to skip.
 TRACE_DEST="${TRACE_DEST:-gs://yuxzhang-tunix-models/xprof}"
 PROFILER_SKIP="${PROFILER_SKIP:-10}"
 PROFILER_STEPS="${PROFILER_STEPS:-5}"
+
+# Perfetto RL perf tracing: low overhead, runs the WHOLE training (no 2GB cap).
+# v1 = aggregate span metrics (rollout/wait time) into the metrics stream;
+# v2 = a Perfetto trace file at PERF_TRACE_DIR (view at ui.perfetto.dev). Both
+# on by default so one converge run gives loss (wandb) + full-run performance.
+ENABLE_PERF_V1="${ENABLE_PERF_V1:-1}"
+ENABLE_PERF_V2="${ENABLE_PERF_V2:-1}"
+PERF_TRACE_DIR="${PERF_TRACE_DIR:-gs://yuxzhang-tunix-models/perfetto/${RUN_TAG}}"
 
 mkdir -p "$LOG_DIR"
 case "$TRACE_DEST" in gs://*) ;; *) mkdir -p "$TRACE_DEST" ;; esac
@@ -155,6 +168,12 @@ if [ "${PROFILER_STEPS}" != "0" ]; then
               --profiler_steps "$PROFILER_STEPS")
 fi
 
+perf_args=()
+[ "${ENABLE_PERF_V1}" != "0" ] && perf_args+=(--enable_perf_v1)
+if [ "${ENABLE_PERF_V2}" != "0" ]; then
+  perf_args+=(--enable_perf_v2 --perf_trace_dir "$PERF_TRACE_DIR")
+fi
+
 log="$LOG_DIR/${RUN_TAG}_${GRAD_ACCUM}.log"
 echo "===== TRAIN [$GRAD_ACCUM] packing=${MAX_SEQ_TOKEN} mesh=${MESH_FSDP}x${MESH_TP} "\
 "batch=${BATCH}/${MINI}/${MICRO}/${LOGPS} steps=${MAX_STEPS} (log: $log) ====="
@@ -176,6 +195,7 @@ python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py \
   --grad_accum "$GRAD_ACCUM" \
   "${pack_args[@]}" \
   "${prof_args[@]}" \
+  "${perf_args[@]}" \
   2>&1 | tee "$log"
 
 rc=${PIPESTATUS[0]}
@@ -191,6 +211,8 @@ if [ -f "$log" ]; then
   grep -inE "steps?/sec|sec/step|step_time|train_step|HBM" "$log" | tail -12
   echo "--- packing efficiency (dummy_ratio; want << 1) ---"
   grep -inE "dummy_ratio|pack_sequences" "$log" | tail -6
-  [ "${PROFILER_STEPS}" != "0" ] && echo "--- trace: $trace_dir ---"
+  [ "${PROFILER_STEPS}" != "0" ] && echo "--- xprof (kernel) trace: $trace_dir ---"
+  [ "${ENABLE_PERF_V2}" != "0" ] && \
+    echo "--- Perfetto (full-run) trace: $PERF_TRACE_DIR  (open at ui.perfetto.dev) ---"
 fi
 exit "$rc"

@@ -131,6 +131,9 @@ from tunix.oss import utils as oss_utils
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.sft import profiler as profiler_lib
+from tunix.perf import export as perf_export
+from tunix.perf import metrics as perf_metrics
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.rl.rollout import base_rollout
@@ -167,6 +170,12 @@ arg_parser.add_argument(
 arg_parser.add_argument("--profiler_log_dir", type=str, default=None)
 arg_parser.add_argument("--profiler_skip_steps", type=int, default=5)
 arg_parser.add_argument("--profiler_steps", type=int, default=3)
+# Lightweight RL perf tracing (low overhead, runs the WHOLE training, no 2GB
+# xprof cap): v1 exports aggregate span metrics (rollout/wait time) into the
+# metrics stream; v2 writes a Perfetto trace to --perf_trace_dir (ui.perfetto.dev).
+arg_parser.add_argument("--enable_perf_v1", action="store_true")
+arg_parser.add_argument("--enable_perf_v2", action="store_true")
+arg_parser.add_argument("--perf_trace_dir", type=str, default=None)
 args, _ = arg_parser.parse_known_args()
 
 
@@ -783,11 +792,32 @@ def main() -> None:
       loss_agg_mode="sequence-mean-token-mean",
   )
 
+  # Lightweight RL perf tracing over the whole run (complements the short xprof
+  # window above). v1 feeds aggregate span metrics into the metrics stream; v2
+  # writes a Perfetto trace to --perf_trace_dir for ui.perfetto.dev.
+  perf_config = (
+      perf_metrics.PerfMetricsConfig()
+      if (args.enable_perf_v1 or args.enable_perf_v2)
+      else None
+  )
+  if args.enable_perf_v1:
+    perf_config.custom_export_fn = (
+        perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+    )
+  if args.enable_perf_v2:
+    perf_config.custom_export_fn_v2 = (
+        perf_export_v2.PerfMetricsExport.from_cluster_config(
+            cluster_config=cluster_config,
+            trace_dir=args.perf_trace_dir,
+        ).export_metrics
+    )
+
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=actor,
       reference=reference,
       tokenizer=tokenizer,
       cluster_config=cluster_config,
+      perf_config=perf_config,
   )
   show_hbm_usage("after RLCluster creation")
 
