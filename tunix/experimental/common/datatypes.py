@@ -237,3 +237,75 @@ class RLTrainerPayload(TrainerPayload):
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class LogprobsRequest:
+  """Request to score per-token log-probabilities under a frozen model.
+
+  Attributes:
+    request_id: Unique id for this request; echoed on the result.
+    prompt_tokens: [B, P], LEFT-padded.
+    completion_tokens: [B, C], RIGHT-padded; the result aligns to these
+      completion columns.
+    temperature: Softmax temperature to score under. Mandatory: it must match
+      the temperature the tokens were sampled at, or the log-probs are biased.
+    model_role: Which hosted model to score against (v1: "reference").
+  """
+
+  request_id: str
+  prompt_tokens: np.ndarray
+  completion_tokens: np.ndarray
+  temperature: float
+  model_role: str = "reference"
+
+
+@dataclasses.dataclass(kw_only=True)
+class LogprobsResult:
+  """Per-token log-probabilities for a LogprobsRequest.
+
+  Attributes:
+    request_id: Echoes the originating request.
+    per_token_logps: [B, C], aligned to the request's completion columns.
+    model_version: Version of the scoring weights (constant for a frozen model).
+    error: Failure details when the request did not succeed, else None.
+  """
+
+  request_id: str
+  per_token_logps: np.ndarray
+  model_version: int = 0
+  error: ErrorInfo | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class ScoreRequest:
+  """Request to score scalar rewards/values under a hosted model.
+
+  Attributes:
+    request_id: Unique id for this request; echoed on the result.
+    prompt_tokens: [B, P], LEFT-padded.
+    completion_tokens: [B, C], RIGHT-padded.
+    model_role: Which hosted model to score against (e.g. "reward").
+  """
+
+  request_id: str
+  prompt_tokens: np.ndarray
+  completion_tokens: np.ndarray
+  model_role: str = "reward"
+
+
+@dataclasses.dataclass(kw_only=True)
+class ScoreResult:
+  """Scalar scores for a ScoreRequest.
+
+  Attributes:
+    request_id: Echoes the originating request.
+    scores: [B], one scalar per row.
+    model_version: Version of the scoring weights (constant for a frozen model).
+    error: Failure details when the request did not succeed, else None.
+  """
+
+  request_id: str
+  scores: np.ndarray
+  model_version: int = 0
+  error: ErrorInfo | None = None

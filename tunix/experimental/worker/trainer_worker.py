@@ -95,6 +95,6 @@ class TrainerWorker(abstract_worker.Worker):
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
     self._trainer.prepare_weight_sync(**kwargs)
 
-  def get_metrics(self) -> List[Any]:
+  def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
     return self._trainer.get_metrics()
