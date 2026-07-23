@@ -314,7 +314,12 @@ DELTA: stream=301.6s optax=122.5s  stream-optax=179.1s  stream/optax=2.46x
 
 **Suggested Fixes:**
 - **OOM Constraint:** Immediately limit the `flash_attention_block_size` to `256` or `128` during pure debugging/SFT routines to ensure robust compilation bounds.
-- **Latency Fix (Ongoing):** Profile the HLO dump and inspect the `stream` grad accum loop logic inside `peft_trainer.py` to enforce strict layout bounds (e.g. leveraging `jax.lax.scan` unrolling properly over micro-batches) rather than ballooning the DAG.
+- **Latency Fix (Status: Root causes identified!):** 
+  1. **XLA Compile Bloat (301s -> 133s):** Confirmed that `nnx.cond(is_update_step, ...)` branching over the entire 2B PyTree (model, optimizer, accumulator) caused the XLA graph to explode. Ablation A1 (bypassing the cond when `gradient_accumulation_steps == 1`) successfully dropped the `_train_step` XLA compilation time from 301.6s down to 133.0s (matching standard `optax`).
+     *(See `compile_repro_baseline_with_cond.log` for the 301s baseline and `compile_repro_ablation_A1_stream.log` for the successful 133s ablation run. These files provide the direct before/after evidence.)*
+  2. **Python Tracing Overhead (191s):** Found a massive 191-second JAX frontend tracing overhead. `GradientAccumulator` wrongly packs the entire PyTree of parameter gradients into a single `nnx.Variable` (`self.grads = nnx.data(...)`). During accumulation, `tree_map` stops at the root and executes `self.grads[...] = self.grads[...] + grads`. This forces `nnx.Variable.__setitem__` to recursively walk and state-track a 10,000+ tensor PyTree on every JIT trace pass, destroying Python performance.
 
 **Over to the reviewing agent:**
-The OOM bug is mitigated using a 256 block size override. We have officially confirmed the user's `stream` performance anomaly, reproducing the exact 2.46x compile times. Ready to start P1.2 trace analysis.
+1. The OOM bug is mitigated using a 256 block size override. 
+2. The XLA graph bloat is confirmed to be `nnx.cond` over full model states.
+3. The next step is to redesign `GradientAccumulator` to hold a standard Python dictionary of `nnx.Variable` leaves rather than a single root variable, which should instantly eliminate the 191s tracing delay.
