@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gsm8k-refactor-v6e-worker
+  namespace: default
+spec:
+  backoffLimit: 10
+  completions: 64
+  parallelism: 64
+  completionMode: Indexed
+  template:
+    metadata:
+      labels:
+        app: pathways-v6e-worker
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 16x16
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Never
+      containers:
+      - name: pathways-worker
+        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+        args:
+          - --server_port=29000
+          - --resource_manager_address=pathways-v6e-head-svc.default.svc.cluster.local:29001
+          - --node_type=worker
+          - --instance_type=tpuv6e:16x16
+        env:
+          - name: XLA_PYTHON_CLIENT_PREALLOCATE
+            value: 'true'
+          - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+            value: '0.9'
+          - name: ENABLE_PATHWAYS_PERSISTENCE
+            value: '0'
+        resources:
+          limits:
+            google.com/tpu: '4'
