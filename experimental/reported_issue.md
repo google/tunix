@@ -288,3 +288,33 @@ NotImplementedError: Failed to find assignment for logical_axis_index 1 of size 
 **Suggested Fixes:**
 1. **Code Suboptimisation**: Inject `allow_split_physical_axes=True` into `jax._src.mesh_utils.create_device_mesh` calls inside the training script to force the fragmented map.
 2. **Topology Alignment**: Reconfigure the logical parameters to perfectly divide into the 2D network. Because `tp` usually maps to a single physical slice edge natively, this would mean tuning it to exactly `--mesh_fsdp 16 --mesh_tp 16` or `--mesh_fsdp 256 --mesh_tp 1`.
+
+## 14. XLA CompileTimeScopedVmemOom (Splash Attention) & Slow stream Grad Accum Compilation
+**Severity:** High (Productivity Blocker)
+
+**Symptom:**
+During XLA compilation on a TPU v5p for the stream grad accum baseline (`experimental/compile_repro_sft.py`), compilation crashes deep in `tpu_custom_call` for `splash_mha_fwd` due to an out of memory exception on the `vmem` scope. Once fixed, the `stream` gradient accumulation variants then take 2.46x longer to compile (301.6s vs 122.5s) compared to standard `optax` accumulation, severely bottlenecking active debugging iterations.
+
+**Setup & Hyperparameters:**
+- Hardware: tpuv5p:4
+- Config: Gemma4-E2B, Flash Attention enabled (`use_flash_attention=True`), `grad_accum=stream`.
+
+**Root Cause / Bottleneck Analysis:**
+1. **OOM:** The `tunix.models.gemma4.model.ModelConfig` sets a dangerously large default `flash_attention_block_size: int = 1024`. During Pallas Splash Attention layout compilation, the XLA VMEM stack allocation reaches 19.85MB, severely overflowing the 16.00MB TPU v5p vmem hardware limit.
+2. **Compilation Latency:** The 2.46x slow-down indicates aggressive Python-level loop unwrapping or redundant HLO graph instantiation specifically when the `stream` configuration invokes its custom accumulators, as opposed to the standard `optax.MultiStep` logic.
+
+**Diagnostic Proof:**
+```text
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: E1001: CompileTimeScopedVmemOom:
+Ran out of memory in memory space vmem while allocating on stack for %splash_mha_fwd...
+Scoped allocation with size 19.85M and limit 16.00M exceeded scoped vmem limit by 3.85M.
+---
+DELTA: stream=301.6s optax=122.5s  stream-optax=179.1s  stream/optax=2.46x
+```
+
+**Suggested Fixes:**
+- **OOM Constraint:** Immediately limit the `flash_attention_block_size` to `256` or `128` during pure debugging/SFT routines to ensure robust compilation bounds.
+- **Latency Fix (Ongoing):** Profile the HLO dump and inspect the `stream` grad accum loop logic inside `peft_trainer.py` to enforce strict layout bounds (e.g. leveraging `jax.lax.scan` unrolling properly over micro-batches) rather than ballooning the DAG.
+
+**Over to the reviewing agent:**
+The OOM bug is mitigated using a 256 block size override. We have officially confirmed the user's `stream` performance anomaly, reproducing the exact 2.46x compile times. Ready to start P1.2 trace analysis.
