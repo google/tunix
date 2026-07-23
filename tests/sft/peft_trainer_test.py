@@ -571,6 +571,10 @@ class PeftTrainerTest(parameterized.TestCase):
     )
     trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    checkpoint_metadata = {'training_contract': 'test-v1'}
+    trainer.custom_checkpoint_metadata = mock.Mock(
+        return_value=checkpoint_metadata
+    )
 
     train_ds = eval_ds = dummy_datasets(batch_size=2, repeat=1)  # 4 batches
     trainer.train(train_ds, eval_ds)
@@ -591,7 +595,7 @@ class PeftTrainerTest(parameterized.TestCase):
                     mock.ANY,
                     mock.ANY,
                     save_only_lora_params=True,
-                    custom_metadata={},
+                    custom_metadata=checkpoint_metadata,
                 )
                 for i in expected_save_steps
             ],
@@ -601,6 +605,7 @@ class PeftTrainerTest(parameterized.TestCase):
                 mock.ANY,
                 mock.ANY,
                 save_only_lora_params=True,
+                custom_metadata=checkpoint_metadata,
                 force=True,
             ),
             mock.call.close(),

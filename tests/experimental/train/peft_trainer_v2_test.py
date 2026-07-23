@@ -20,6 +20,7 @@ import os
 import tempfile
 from typing import Any, Tuple
 from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -33,8 +34,8 @@ import orbax.checkpoint as ocp
 from tunix.experimental.train import peft_trainer_v2
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
-from tunix.sft import profiler
 from tunix.sft import peft_trainer
+from tunix.sft import profiler
 from tunix.sft import utils as sft_utils
 from tunix.tests import test_common as tc
 from tunix.utils import compat
@@ -221,7 +222,9 @@ class PeftTrainerTest(parameterized.TestCase):
     # the model and optimizer states are the same as the trained ones.
     new_model, new_optimizer = create_model_and_optimizer()
 
-    resumed_trainer = peft_trainer_v2.PeftTrainer(new_model, new_optimizer, config)
+    resumed_trainer = peft_trainer_v2.PeftTrainer(
+        new_model, new_optimizer, config
+    )
     resumed_model_state = nnx.state(
         resumed_trainer.model, nnx.LoRAParam if enable_lora else nnx.Param
     )
@@ -344,7 +347,9 @@ class PeftTrainerTest(parameterized.TestCase):
     # compare with unsharded model
     rngs = nnx.Rngs(0)
     unsharded_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
-    trainer = peft_trainer_v2.PeftTrainer(unsharded_model, optax.sgd(1e-3), config)
+    trainer = peft_trainer_v2.PeftTrainer(
+        unsharded_model, optax.sgd(1e-3), config
+    )
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, self.eval_ds)
     unsharded_variables = nnx.state(unsharded_model, nnx.Param)
@@ -531,6 +536,10 @@ class PeftTrainerTest(parameterized.TestCase):
     )
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    checkpoint_metadata = {'training_contract': 'test-v1'}
+    trainer.custom_checkpoint_metadata = mock.Mock(
+        return_value=checkpoint_metadata
+    )
 
     train_ds = eval_ds = dummy_datasets(batch_size=2, repeat=1)  # 4 batches
     trainer.train(train_ds, eval_ds)
@@ -551,7 +560,7 @@ class PeftTrainerTest(parameterized.TestCase):
                     mock.ANY,
                     mock.ANY,
                     save_only_lora_params=True,
-                    custom_metadata={},
+                    custom_metadata=checkpoint_metadata,
                 )
                 for i in expected_save_steps
             ],
@@ -561,6 +570,7 @@ class PeftTrainerTest(parameterized.TestCase):
                 mock.ANY,
                 mock.ANY,
                 save_only_lora_params=True,
+                custom_metadata=checkpoint_metadata,
                 force=True,
             ),
             mock.call.close(),
@@ -622,9 +632,7 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
 
     custom_metadata = {'global_step': 42, 'role': 'actor'}
-    trainer.save_checkpoint(
-        metadata=custom_metadata, step=10, force=True
-    )
+    trainer.save_checkpoint(metadata=custom_metadata, step=10, force=True)
 
     mock_cm.save.assert_called_once_with(
         10,
@@ -784,7 +792,9 @@ class PeftTrainerTest(parameterized.TestCase):
     optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
         learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
     )
-    config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    config_v2 = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2, max_steps=1
+    )
     trainer_v2 = peft_trainer_v2.PeftTrainer(model_v2, optimizer_v2, config_v2)
     trainer_v2 = trainer_v2.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer_v2.train(train_ds, None)

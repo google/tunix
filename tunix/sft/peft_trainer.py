@@ -1062,6 +1062,7 @@ class PeftTrainer:
           self.model,
           self.optimizer,
           save_only_lora_params=self._lora_enabled,
+          custom_metadata=self.custom_checkpoint_metadata(),
           force=True,
       )
 

@@ -33,6 +33,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.experimental.common import datatypes
+from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.train import abstract_trainer
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
@@ -45,7 +46,6 @@ from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
-from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.sft import utils
 from typing_extensions import override
 
@@ -433,7 +433,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       PeftTrainer.
     """
     self.clear_jit_cache()
-    self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
+    self.gen_model_input_fn = (
+        gen_model_input_fn  # pyrefly: ignore[bad-assignment]
+    )
     return self
 
   def _fwd_bwd_step(
@@ -683,7 +685,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ):
     """Logs the metrics to the metrics logger and console."""
     perplexity = np.exp(jax.device_get(loss))
-    self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)  # pyrefly: ignore[missing-attribute]
+    self.metrics_logger.log(
+        self.metrics_prefix, "loss", loss, self._mode, step
+    )  # pyrefly: ignore[missing-attribute]
     self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
     )
@@ -705,7 +709,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      self.metrics_logger.log(
+          self.metrics_prefix, k, v, self._mode, step
+      )  # pyrefly: ignore[missing-attribute]
 
   def _buffer_metrics(
       self,
@@ -773,9 +779,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     weighted_metrics = {}
     scalar_metrics = {"loss": loss}
     for k, val in additional_metrics.items():
-      if isinstance(
-          val, (utils.WeightedMetric, exp_metrics.WeightedMetric)
-      ):
+      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
         weighted_metrics[k] = val
       else:
         scalar_metrics[k] = val
@@ -950,8 +954,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
         1,
     )
-    fwd_bwd_step, _, _ = (
-        self.jit_fwd_bwd_update_and_eval_step(skip_jit, cache_nnx_graph)
+    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
+        skip_jit, cache_nnx_graph
     )
     if not skip_jit:
       cache_size = fwd_bwd_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
@@ -1109,6 +1113,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           self.model,
           self.optimizer,
           save_only_lora_params=self._lora_enabled,
+          custom_metadata=self.custom_checkpoint_metadata(),
           force=True,
       )
 
