@@ -38,6 +38,7 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.diffusion import types as diffusion_types
 from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
@@ -59,6 +60,60 @@ from tunix.sft import utils as sft_utils
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
+
+
+def _merge_diffusion_batches(
+    outputs: list[base_rollout.RolloutOutput],
+) -> diffusion_types.DiffusionTokenBatch | None:
+  """Merges optional prepared diffusion metadata across rollout microbatches."""
+
+  batches = [output.diffusion_batch for output in outputs]
+  present = [batch is not None for batch in batches]
+  if any(present) and not all(present):
+    raise ValueError(
+        "rollout microbatches must either all provide diffusion_batch or all "
+        "omit it"
+    )
+  if not any(present):
+    return None
+
+  diffusion_batches = []
+  for index, (output, batch) in enumerate(zip(outputs, batches)):
+    if batch is None:
+      continue
+    batch = batch.validate()
+    if batch.target_ids.shape[0] != len(output.text):
+      raise ValueError(
+          "diffusion_batch batch size must match its rollout output; "
+          f"microbatch {index} has {batch.target_ids.shape[0]} prepared "
+          f"examples and {len(output.text)} generated examples"
+      )
+    diffusion_batches.append(batch)
+  model_input_structure = jax.tree.structure(diffusion_batches[0].model_inputs)
+  if any(
+      jax.tree.structure(batch.model_inputs) != model_input_structure
+      for batch in diffusion_batches[1:]
+  ):
+    raise ValueError(
+        "diffusion_batch model_inputs must have the same pytree structure "
+        "across rollout microbatches"
+    )
+
+  def concatenate(*arrays):
+    return jnp.concatenate([jnp.asarray(array) for array in arrays], axis=0)
+
+  return diffusion_types.DiffusionTokenBatch.create(
+      model_inputs=jax.tree.map(
+          concatenate,
+          *(batch.model_inputs for batch in diffusion_batches),
+      ),
+      target_ids=concatenate(
+          *(batch.target_ids for batch in diffusion_batches)
+      ),
+      loss_weights=concatenate(
+          *(batch.loss_weights for batch in diffusion_batches)
+      ),
+  )
 
 
 class Mode(enum.Enum):
@@ -980,6 +1035,7 @@ class RLCluster:
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,
+        diffusion_batch=_merge_diffusion_batches(outputs),
     )
 
   def get_ref_per_token_logps(

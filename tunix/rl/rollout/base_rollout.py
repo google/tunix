@@ -22,6 +22,7 @@ import jax
 from jax import numpy as jnp
 import jaxtyping
 import numpy as np
+from tunix.diffusion import types as diffusion_types
 from tunix.generate import mappings
 
 ABC = abc.ABC
@@ -62,6 +63,9 @@ class RolloutOutput:
 
   # The log probs from sampler generations.
   logprobs: list[np.ndarray] | None
+
+  # Optional prepared inputs for target-aligned diffusion policy scoring.
+  diffusion_batch: diffusion_types.DiffusionTokenBatch | None = None
 
 
 @dataclasses.dataclass
@@ -185,7 +189,9 @@ class RolloutConfig:
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   # Additional keyword arguments forwarded directly to the vLLM sampling params.
-  rollout_vllm_sampling_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
+  rollout_vllm_sampling_kwargs: dict[str, Any] = dataclasses.field(
+      default_factory=dict
+  )
 
   # SG-Lang JAX specific rollout configs.
 
