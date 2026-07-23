@@ -79,6 +79,7 @@ class DiscoveryServer:
     if self._server:
       self._server.stop(timeout)
       self._server.wait_for_termination(timeout)
+      self._server = None
 
 
 def register(
