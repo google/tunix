@@ -1753,6 +1753,11 @@ def transfer_state_directly(
             filtered_tgt_flat[key_tuple] = tgt_val
             continue
 
+    logging.info(f"Filtered source keys: {len(filtered_src_flat)} from {len(src_flat)}. Filtered target keys: {len(filtered_tgt_flat)} from {len(tgt_flat)}")
+    if len(filtered_tgt_flat) < len(tgt_flat):
+        missing_keys = set(tgt_flat.keys()) - set(filtered_tgt_flat.keys())
+        logging.warning(f"Target keys not matched! Missing {len(missing_keys)} keys. E.g. {list(missing_keys)[:10]}")
+
     # Unflatten back to nested structure
     return (
         traverse_util.unflatten_dict(filtered_src_flat),
