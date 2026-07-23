@@ -33,6 +33,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.experimental.common import datatypes
+from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.train import abstract_trainer
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
@@ -45,7 +46,6 @@ from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
-from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.sft import utils
 from typing_extensions import override
 
@@ -558,8 +558,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """
     if mesh.empty:
       return
-    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
-    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
     def _shard(x, p):
       if not isinstance(x, (jax.Array, np.ndarray)):
@@ -574,24 +572,23 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           return jax.device_put(x, sharding)
       return x
 
+    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
     optimizer_sharded_state = jax.tree.map(
         _shard, optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
-    model_state = nnx.state(self.model, wrt_target)
-    model_pspecs = nnx.get_partition_spec(model_state)
-
     # Partition Gradients similar to the model
-    grads_sharded = jax.lax.with_sharding_constraint(
-        self.grad_accumulator.grads, model_pspecs
+    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
+    self.grad_accumulator.grads = jax.tree.map(
+        _shard, self.grad_accumulator.grads, grad_pspecs
     )
-    self.grad_accumulator.grads = grads_sharded
 
     # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.lax.with_sharding_constraint(
-        self.grad_accumulator.denom[...], jax.sharding.PartitionSpec()
+    self.grad_accumulator.denom[...] = jax.device_put(
+        self.grad_accumulator.denom[...],
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
     )
 
   def jit_fwd_bwd_update_and_eval_step(
@@ -773,9 +770,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     weighted_metrics = {}
     scalar_metrics = {"loss": loss}
     for k, val in additional_metrics.items():
-      if isinstance(
-          val, (utils.WeightedMetric, exp_metrics.WeightedMetric)
-      ):
+      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
         weighted_metrics[k] = val
       else:
         scalar_metrics[k] = val
@@ -899,11 +894,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
-    """
-    Saves a checkpoint of the trainer state (model + optimizer).
-    Vanilla implementation of save_checkpoint on a train_steps.
-    Sub-batch checkpointing will be added later once it is supported in the
-    checkpoint manager.
+    """Saves a checkpoint of the trainer state (model + optimizer).
+
+    Vanilla implementation of save_checkpoint on a train_steps. Sub-batch
+    checkpointing will be added later once it is supported in the checkpoint
+    manager.
     """
     step = kwargs.pop("step", self._train_steps)
     if metadata is None:
@@ -950,8 +945,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
         1,
     )
-    fwd_bwd_step, _, _ = (
-        self.jit_fwd_bwd_update_and_eval_step(skip_jit, cache_nnx_graph)
+    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
+        skip_jit, cache_nnx_graph
     )
     if not skip_jit:
       cache_size = fwd_bwd_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
