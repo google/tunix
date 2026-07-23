@@ -887,39 +887,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       full_batch_chunks.extend(chunked_train_micro_batch)
 
       # --- Evaluation Logic on FIRST microbatch ---
-      current_eval_dataset = None
-      if update_steps_since_last_sync == 0:
-        current_train_step = self.rl_cluster.actor_trainer.train_steps
-        if (
-            all_eval_prompts
-            and current_train_step % training_config.eval_every_n_steps == 0
-            and current_train_step != self._last_eval_train_step
-        ):
-          self._last_eval_train_step = current_train_step
-          self._eval_iter_steps = 0
-          eval_orchestrator = self._build_orchestrator()
-
-          async def _eval_runner_async(current_eval_orchestrator):
-            eval_examples = []
-            async for batch in self._orchestrator_producer(
-                current_eval_orchestrator,
-                all_eval_prompts,
-                num_generations=self._num_generations(),
-            ):
-              eval_example = self._batch_to_train_example(
-                  batch,
-                  rl_cluster_lib.Mode.EVAL,
-              )
-              eval_examples.extend(eval_example)
-            return eval_examples
-
-          eval_future = asyncio.run_coroutine_threadsafe(
-              _eval_runner_async(eval_orchestrator), self.loop
-          )
-          eval_examples = eval_future.result()
-          self._eval_iter_steps += 1
-          current_eval_dataset = eval_examples
-          did_eval_this_global_step = True
+      current_eval_dataset = self._maybe_run_eval(
+          update_steps_since_last_sync, all_eval_prompts, training_config
+      )
+      if current_eval_dataset is not None:
+        did_eval_this_global_step = True
 
       # --- First iteration Training Step (Parallelized with Rollout) ---
       # Note: Suppose one full batch has m minibatches, each minibatch has n
@@ -1065,51 +1037,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             mode=rl_cluster_lib.Mode.TRAIN,
             step=self.rl_cluster.global_steps,
         )
-        if self.should_sync_weights:
-          logging.info("Requesting sync lock to sync weights...")
-          self._rollout_sync_lock.acquire_weight_sync()
-          try:
-            logging.info("Sync lock acquired. Syncing weights.")
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.WEIGHT_SYNC,
-                self.rl_cluster.perf_v2.all_devices,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                },
-            ):
-              self.rl_cluster.sync_weights()
-            self.policy_version += 1
-            logging.info(
-                "Weights synced. Policy version incremented to %d.",
-                self.policy_version,
-            )
-            try:
-              with self.rl_cluster.perf_v2.span(
-                  perf_constants.DATA_LOADING,
-                  tags={
-                      perf_constants.STEP: self.rl_cluster.global_steps,
-                  },
-              ):
-                batch = next(full_dataset_iterator)
-              self._put_prompts_to_queue(prompt_queue, batch)
-            except StopIteration:
-              prompt_queue.put(None)
-          finally:
-            self._rollout_sync_lock.release_weight_sync()
-            logging.info("Sync lock released.")
-        else:
-          self.rl_cluster.global_steps += 1
-          try:
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.DATA_LOADING,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                },
-            ):
-              batch = next(full_dataset_iterator)
-            self._put_prompts_to_queue(prompt_queue, batch)
-          except StopIteration:
-            prompt_queue.put(None)
+        self._sync_and_advance_step(prompt_queue, full_dataset_iterator)
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf_v2.export(),
@@ -1121,6 +1049,103 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     _ = producer_future.result()
     self.rl_cluster.close()
+
+  def _maybe_run_eval(
+      self, update_steps_since_last_sync, all_eval_prompts, training_config
+  ):
+    """Runs eval on the first micro-batch of a global step, on the eval cadence.
+
+    Returns the eval TrainExamples (or None if no eval ran this step). This is
+    the seam an orchestrator overrides to generate eval rollouts via workers.
+    """
+    if update_steps_since_last_sync != 0:
+      return None
+    current_train_step = self.rl_cluster.actor_trainer.train_steps
+    if not (
+        all_eval_prompts
+        and current_train_step % training_config.eval_every_n_steps == 0
+        and current_train_step != self._last_eval_train_step
+    ):
+      return None
+    self._last_eval_train_step = current_train_step
+    self._eval_iter_steps = 0
+    eval_orchestrator = self._build_orchestrator()
+
+    async def _eval_runner_async(current_eval_orchestrator):
+      eval_examples = []
+      async for batch in self._orchestrator_producer(
+          current_eval_orchestrator,
+          all_eval_prompts,
+          num_generations=self._num_generations(),
+      ):
+        eval_example = self._batch_to_train_example(
+            batch,
+            rl_cluster_lib.Mode.EVAL,
+        )
+        eval_examples.extend(eval_example)
+      return eval_examples
+
+    eval_future = asyncio.run_coroutine_threadsafe(
+        _eval_runner_async(eval_orchestrator), self.loop
+    )
+    eval_examples = eval_future.result()
+    self._eval_iter_steps += 1
+    return eval_examples
+
+  def _sync_and_advance_step(self, prompt_queue, full_dataset_iterator) -> None:
+    """Advances one global step: sync weights if due, then feed the next batch.
+
+    At a full-batch boundary the learner either (a) acquires the rollout sync
+    fence, syncs weights, and bumps ``policy_version``, or (b) just advances
+    ``global_steps`` when weights are shared; either way it enqueues the next
+    dataset batch (or a ``None`` sentinel on exhaustion). This is the seam an
+    orchestrator overrides to sync via workers instead of the in-process cluster.
+    """
+    if self.should_sync_weights:
+      logging.info("Requesting sync lock to sync weights...")
+      self._rollout_sync_lock.acquire_weight_sync()
+      try:
+        logging.info("Sync lock acquired. Syncing weights.")
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.WEIGHT_SYNC,
+            self.rl_cluster.perf_v2.all_devices,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+            },
+        ):
+          self.rl_cluster.sync_weights()
+        self.policy_version += 1
+        logging.info(
+            "Weights synced. Policy version incremented to %d.",
+            self.policy_version,
+        )
+        try:
+          with self.rl_cluster.perf_v2.span(
+              perf_constants.DATA_LOADING,
+              tags={
+                  perf_constants.STEP: self.rl_cluster.global_steps,
+              },
+          ):
+            batch = next(full_dataset_iterator)
+          self._put_prompts_to_queue(prompt_queue, batch)
+        except StopIteration:
+          prompt_queue.put(None)
+      finally:
+        self._rollout_sync_lock.release_weight_sync()
+        logging.info("Sync lock released.")
+    else:
+      self.rl_cluster.global_steps += 1
+      try:
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.DATA_LOADING,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+            },
+        ):
+          batch = next(full_dataset_iterator)
+        self._put_prompts_to_queue(prompt_queue, batch)
+      except StopIteration:
+        prompt_queue.put(None)
 
   def _put_prompts_to_queue(
       self,
