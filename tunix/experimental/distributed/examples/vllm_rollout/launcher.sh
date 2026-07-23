@@ -61,9 +61,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Calculate repo root path (four directories up from experimental/distributed/examples/vllm_rollout)
+# Locate repo root path by traversing upwards until finding tunix/experimental/distributed/runtime/main.py
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-REPO_ROOT="$(dirname "$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")")"
+REPO_ROOT="$SCRIPT_DIR"
+while [[ "$REPO_ROOT" != "/" && ! -f "$REPO_ROOT/tunix/experimental/distributed/runtime/main.py" ]]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+if [[ ! -f "$REPO_ROOT/tunix/experimental/distributed/runtime/main.py" ]]; then
+  echo "Error: Could not locate repo root containing tunix/experimental/distributed/runtime/main.py." >&2
+  exit 1
+fi
 
 # Configures kubectl to connect to the required GKE cluster and namespace.
 enter_kube_context() {
