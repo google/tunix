@@ -13,6 +13,8 @@ The Tunix distributed process runtime provides a **platform-agnostic execution f
 - [Example 3: Peer Discovery and Inter-Process Communication](#example-3-peer-discovery-and-inter-process-communication)
 - [Example 4: Simulated Distributed RL Workload (Local)](#example-4-simulated-distributed-rl-workload-local)
 - [Example 5: Simulated Distributed RL Workload on Kubernetes](#example-5-simulated-distributed-rl-workload-on-kubernetes)
+- [Example 6: Distributed RL Generation with vLLM Workers](#example-6-distributed-rl-generation-with-vllm-workers)
+
 
 ---
 
@@ -233,4 +235,61 @@ bash examples/distributed/rl/launcher.sh --role=rollout
 # 3. Deploy the trainer worker pod
 bash examples/distributed/rl/launcher.sh --role=trainer
 ```
+
+---
+
+## Example 6: Distributed RL Generation with vLLM Workers
+
+This example demonstrates a distributed reinforcement learning generation pipeline using **vLLM** and the Tunix remote execution framework (`remote_execution.GrpcRemoteExecutionServer` / `ActorHandle`).
+
+- **Orchestrator** (`vllm_rollout/orchestrator.py`): Hosts the IPC discovery service, discovers connecting vLLM rollout workers, manages remote actor handles, and continuously submits generation requests in an infinite loop while periodically logging throughput statistics (RPS and per-worker request counts).
+- **Rollout Workers** (`vllm_rollout/rollout.py`): Launch an embedded vLLM OpenAI-compatible server subprocess (e.g., serving `Qwen/Qwen2.5-0.5B`) and expose a gRPC remote execution service for sampling.
+- **Remote Demo** (`vllm_rollout/remote.py`): A standalone demo script illustrating basic client/server remote method invocation over gRPC.
+
+### Run Locally with Launcher Script
+
+You can run the orchestrator and rollout workers locally using the provided launcher script:
+
+```shell
+# 1. Start the orchestrator locally (defaults to port 12345, waiting for 1 worker)
+bash examples/distributed/vllm_rollout/launcher.sh --role=orchestrator --local
+
+# 2. In a separate terminal, start Rollout Worker 0 locally
+bash examples/distributed/vllm_rollout/launcher.sh --role=rollout --local
+```
+
+### Run on Kubernetes (GKE)
+
+To deploy the vLLM orchestrator and rollout worker JobSets (using TPU slices for vLLM inference) on a Kubernetes cluster:
+
+```shell
+# 1. Deploy the orchestrator JobSet
+bash examples/distributed/vllm_rollout/launcher.sh --role=orchestrator
+
+# 2. Deploy 4 TPU-backed rollout worker JobSets (rollout-0 through rollout-3)
+bash examples/distributed/vllm_rollout/launcher.sh --role=rollout
+```
+
+### Expected Output
+
+Once workers connect, the orchestrator begins the continuous generation loop, printing a summary every 10 seconds:
+
+```
+discovered rollout service rollout-0 at grpc://localhost:11111
+starting infinite generation loop...
+
+--- 10 Seconds Summary ---
+
+Requests per second (RPS): 1.12
+
+Worker Request Counts: rollout-0=12
+
+Sample Request: What is 123 + 456? Please explain each step in detail and verify the result.
+
+Sample Response: To solve the problem, we need to add the two numbers 123 and 456 together. Here are the steps:...
+
+------------------------
+
+```
+
 
