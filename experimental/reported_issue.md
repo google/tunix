@@ -376,3 +376,29 @@ sudo docker run --rm --privileged --net=host \
 - Each `.svg` is >100KB and contains `flax/nnx` frames (grep the SVG text for `nnx`).
 - If `py-spy` fails to attach (ptrace), rerun with `--nonblocking` and note it in the commit message.
 - MODEL_PATH prerequisite is the same as issue 14 (`/mnt/workspace/models/google/gemma-4-e2b-it` must exist).
+
+## 16. Python Tracing Sharding Constraint Overhead (Identified by Lin Chai)
+**Severity:** High (Productivity Blocker)
+
+**Symptom:**
+In addition to the NNX state traversal overhead, the `stream` gradient accumulation path takes multiple minutes (up to 7 minutes) during startup or tracing on large models.
+
+**Root Cause:**
+The `jax.lax.with_sharding_constraint` operator was being applied to the massive `grad_accumulator.grads` PyTree *outside* of the `jit` compile boundaries (specifically inside `_shard_optimizer` during pre-flight setup). Since it is an XLA compiler hint, evaluating it eagerly on the CPU runtime forces JAX to inadvertently trace the entire underlying NNX graph. 
+
+**Resolution:**
+Replacing the scalar/PyTree constraint wrappers with explicit Python-level mapping and `jax.device_put` avoids this eager tracing trap.
+```python
+# Before
+# grads_sharded = jax.lax.with_sharding_constraint(self.grad_accumulator.grads, model_pspecs)
+# self.grad_accumulator.denom[...] = jax.lax.with_sharding_constraint(self.grad_accumulator.denom[...], jax.sharding.PartitionSpec())
+
+# After
+grads_sharded = jax.tree.map(_shard, self.grad_accumulator.grads, model_pspecs)
+self.grad_accumulator.grads = grads_sharded
+self.grad_accumulator.denom[...] = jax.device_put(
+    self.grad_accumulator.denom[...], 
+    jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+)
+```
+This simple optimization reduced the initialization/tracing penalty from ~7 minutes down to 3.5 minutes on a standard setup. Note: other trace regressions (like the +61s A1 NNX state delta) still require the flamegraph analysis from Issue 15.
