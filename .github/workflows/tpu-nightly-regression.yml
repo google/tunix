@@ -118,6 +118,7 @@ jobs:
 
         echo "🔍 Finding scripts in $SCRIPT_DIR"
         FINAL_EXIT_CODE=0
+        FAILED_SCRIPTS=()
         for script in "$SCRIPT_DIR"/*.sh; do
           if [ -f "$script" ]; then
             echo "::group::📦 Executing: $script"
@@ -135,13 +136,17 @@ jobs:
               echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
               echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
               FINAL_EXIT_CODE=1
+              FAILED_SCRIPTS+=("$script")
             fi
             echo "::endgroup::"
           fi
         done
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
-          echo "🚫 One or more SFT scripts failed." >&2
+          echo "🚫 One or more SFT scripts failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         fi
         echo "🎉 All SFT scripts completed execution."
@@ -172,6 +177,7 @@ jobs:
 
         echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
         FINAL_EXIT_CODE=0
+        FAILED_SCRIPTS=()
 
         while IFS= read -r script; do
           if [ -f "$script" ]; then
@@ -195,13 +201,17 @@ jobs:
               echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
               echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
               FINAL_EXIT_CODE=1
+              FAILED_SCRIPTS+=("$script")
             fi
             echo "::endgroup::"
           fi
         done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
-          echo "🚫 One or more RL scripts failed." >&2
+          echo "🚫 One or more RL scripts failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         fi
         echo "🎉 All RL scripts completed execution."
@@ -219,6 +229,7 @@ jobs:
         echo "|---|---|" >> $GITHUB_STEP_SUMMARY
 
         FAILED=0
+        FAILED_SCRIPTS=()
 
         function run_and_log() {
           local name="$1"
@@ -231,6 +242,7 @@ jobs:
             echo "❌ Failed to complete: $name" >&2
             echo "| $name | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
             FAILED=1
+            FAILED_SCRIPTS+=("$name")
           fi
           echo "::endgroup::"
         }
@@ -272,7 +284,10 @@ jobs:
         run_and_log "sglang_jax disaggregated-3-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way"
 
         if [ "$FAILED" -ne 0 ]; then
-          echo "🚫 One or more regression scripts failed." >&2
+          echo "🚫 One or more regression scripts failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         fi
         echo "🎉 All regression scripts completed execution."
@@ -346,10 +361,10 @@ jobs:
         print(f'TPU available: {has_tpu}')
 
         if not has_tpu:
-            print('ERROR: No TPU devices found!')
-            exit(1)
+          print('ERROR: No TPU devices found!')
+          exit(1)
         else:
-            print(f'SUCCESS: Found {len(devices)} TPU device(s)')
+          print(f'SUCCESS: Found {len(devices)} TPU device(s)')
         "
 
     - name: Run latest tests
@@ -359,27 +374,29 @@ jobs:
       run: |
         mkdir -p /tmp/grpo_test/rl/grpo/data
         FAILED=0
+        FAILED_SCRIPTS=()
 
         echo "📦 Executing Non-Agentic CLI (vLLM Batch Mode, Colocated) ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Batch Mode, Colocated)"); }
 
         pkill -9 -f "vllm" || true
         sleep 5
 
         echo "📦 Executing Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way) ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way)"); }
 
         pkill -9 -f "vllm" || true
         sleep 5
 
         echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4) ..."
         model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
-          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || FAILED=1
-
-
+          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || { FAILED=1; FAILED_SCRIPTS+=("Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4)"); }
 
         if [ "$FAILED" -ne 0 ]; then
-          echo "❌ One or more run_latest tests failed."
+          echo "❌ One or more run_latest tests failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         else
           echo "✅ All run_latest tests completed successfully."
