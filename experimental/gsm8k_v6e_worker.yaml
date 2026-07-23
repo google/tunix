@@ -1,3 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pathways-worker-svc
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    app: pathways-v6e-worker
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -13,6 +23,7 @@ spec:
       labels:
         app: pathways-v6e-worker
     spec:
+      subdomain: pathways-worker-svc
       nodeSelector:
         cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
         cloud.google.com/gke-tpu-topology: 16x16
@@ -42,6 +53,9 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+
+          - name: TPU_WORKER_HOSTNAMES
+            value: 'gsm8k-refactor-v6e-worker-0.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-1.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-2.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-3.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-4.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-5.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-6.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-7.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-8.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-9.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-10.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-11.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-12.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-13.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-14.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-15.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-16.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-17.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-18.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-19.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-20.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-21.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-22.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-23.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-24.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-25.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-26.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-27.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-28.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-29.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-30.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-31.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-32.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-33.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-34.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-35.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-36.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-37.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-38.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-39.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-40.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-41.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-42.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-43.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-44.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-45.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-46.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-47.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-48.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-49.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-50.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-51.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-52.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-53.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-54.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-55.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-56.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-57.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-58.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-59.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-60.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-61.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-62.pathways-worker-svc.default.svc.cluster.local,gsm8k-refactor-v6e-worker-63.pathways-worker-svc.default.svc.cluster.local'
         resources:
           limits:
             google.com/tpu: '4'
