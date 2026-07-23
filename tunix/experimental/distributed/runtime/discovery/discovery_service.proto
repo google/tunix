@@ -14,20 +14,29 @@
 
 // Compile with
 //  $ pip install grpcio grpcio-tools
-//  $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto
+//  $ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=.
+//  tunix/experimental/distributed/runtime/discovery/discovery_service.proto
 
 syntax = "proto3";
 
 package tunix.experimental.distributed.runtime.discovery;
 
+// Request message sent by worker nodes when registering with the discovery
+// service.
 message RegisterRequest {
+  // Hostname or reachable FQDN of the registering worker node.
   string hostname = 1;
+  // Network port on which the registering node is listening.
   uint32 port = 2;
+  // Custom serialized metadata bytes describing this node.
   bytes metadata = 3;
 }
 
+// Response returned by the discovery service after successful registration.
 message RegisterResponse {}
 
+// Discovery service used by distributed workers to register their coordinates.
 service DiscoveryService {
-  rpc Register (RegisterRequest) returns (RegisterResponse);
+  // Registers a worker node with the discovery service.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
 }

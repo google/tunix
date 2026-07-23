@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -30,7 +44,7 @@ spec:
             terminationGracePeriodSeconds: 10
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
             affinity:
               podAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
@@ -53,14 +67,14 @@ spec:
               restartPolicy: Always
               resources:
                 limits:
-                  cpu: "24" # 8
+                  cpu: "24"
                   memory: 32G
               args:
               - --server_port=29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
               - --node_type=resource_manager
               - --instance_count=${REPLICAS}
-              - --instance_type=${PW_INSTANCE_TYPE}:${TOPOLOGY}
+              - --instance_type=${PW_INSTANCE_TYPE}:${TPU_TOPOLOGY}
               env:
               - name: REPLICATED_JOB_NAME
                 valueFrom:
@@ -88,7 +102,7 @@ spec:
               resources:
                 limits:
                   cpu: "16"
-                  memory: 100G # 32G
+                  memory: ${PATHWAYS_PROXY_MEMORY_LIMIT}
               args:
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
@@ -110,12 +124,16 @@ spec:
               # resources:
               #   limits:
               #     cpu: "24"
-              #     memory: 100G
+              #     memory: 32G
               command:
                 - bash
                 - -c
                 - |
-                  echo "XPK Start: $$(date)"
+                  # PID 1 wrapper: forwards SIGTERM to background child process so K8s
+                  # termination grace period shuts down workload cleanly without SIGKILL.
+                  # Polling sleep loop ensures bash wakes up promptly to run trap handler.
+
+                  echo "Program Start: $$(date)"
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
@@ -129,7 +147,7 @@ spec:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "XPK End: $$(date)"
+                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
@@ -185,7 +203,7 @@ spec:
             terminationGracePeriodSeconds: 10
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
             affinity:
               # place on nodes in the same nodepool
               podAffinity:
