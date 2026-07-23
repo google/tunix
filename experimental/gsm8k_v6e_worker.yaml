@@ -4,7 +4,7 @@ metadata:
   name: gsm8k-refactor-v6e-worker
   namespace: default
 spec:
-  backoffLimit: 10
+  backoffLimit: 100
   completions: 64
   parallelism: 64
   completionMode: Indexed
