@@ -29,7 +29,7 @@ python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
 
 # Compile the RL simulation service proto (required for Examples 4 & 5)
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
-    examples/distributed/rl/service.proto
+    tunix/experimental/distributed/examples/rl/service.proto
 ```
 
 ---
@@ -51,9 +51,8 @@ def main(argv: list[str], context: ProcessContext | None) -> None:
 Execute the process via the distributed process runtime module `tunix.experimental.distributed.runtime.main`:
 
 ```shell
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
-    --process_main=basics.basic.main
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.basic.main
 ```
 
 ### Expected Output
@@ -84,9 +83,8 @@ def main(argv: list[str], context: ProcessContext | None) -> None:
 ### Run Locally
 
 ```shell
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
-    --process_main=basics.flag.main \
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.flag.main \
     --message="hello flag"
 ```
 
@@ -128,16 +126,14 @@ In separate terminal windows (or sequentially):
 
 ```shell
 # Terminal 1: Start the door service
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
-    --process_main=basics.door.main \
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.door.main \
     --discovery_id=door \
     --discovery_port=12345
 
 # Terminal 2: Start the knocker process to connect to door
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
-    --process_main=basics.knocker.main \
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.knocker.main \
     --discovery_addrs=door:12345 \
     --say="open the door"
 ```
@@ -183,34 +179,30 @@ Open separate terminal sessions for each role:
 
 ```shell
 # 1. Start the orchestrator (acts as discovery hub on port 12345)
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
+python -m tunix.experimental.distributed.runtime.main \
     --discovery_id=orchestrator \
     --discovery_port=12345 \
-    --process_main=rl.orchestrator.main \
+    --process_main=tunix.experimental.distributed.examples.rl.orchestrator.main \
     --max_train_step=1000
 
 # 2. Start Rollout Worker 0
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
+python -m tunix.experimental.distributed.runtime.main \
     --discovery_addrs=orchestrator:12345 \
-    --process_main=rl.rollout.main \
+    --process_main=tunix.experimental.distributed.examples.rl.rollout.main \
     --server_id=rollout-0 \
     --server_port=11111
 
 # 3. Start Rollout Worker 1
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
+python -m tunix.experimental.distributed.runtime.main \
     --discovery_addrs=orchestrator:12345 \
-    --process_main=rl.rollout.main \
+    --process_main=tunix.experimental.distributed.examples.rl.rollout.main \
     --server_id=rollout-1 \
     --server_port=22222
 
 # 4. Start Trainer Worker
-PYTHONPATH=./examples/distributed \
-    python -m tunix.experimental.distributed.runtime.main \
+python -m tunix.experimental.distributed.runtime.main \
     --discovery_addrs=orchestrator:12345 \
-    --process_main=rl.trainer.main \
+    --process_main=tunix.experimental.distributed.examples.rl.trainer.main \
     --server_id=trainer \
     --server_port=33333
 ```
@@ -227,13 +219,13 @@ The helper launcher script (`launcher.sh`) generates Kubernetes deployment manif
 
 ```shell
 # 1. Deploy the orchestrator JobSet
-bash examples/distributed/rl/launcher.sh --role=orchestrator
+bash tunix/experimental/distributed/examples/rl/launcher.sh --role=orchestrator
 
 # 2. Deploy the rollout worker pods
-bash examples/distributed/rl/launcher.sh --role=rollout
+bash tunix/experimental/distributed/examples/rl/launcher.sh --role=rollout
 
 # 3. Deploy the trainer worker pod
-bash examples/distributed/rl/launcher.sh --role=trainer
+bash tunix/experimental/distributed/examples/rl/launcher.sh --role=trainer
 ```
 
 ---
@@ -252,10 +244,10 @@ You can run the orchestrator and rollout workers locally using the provided laun
 
 ```shell
 # 1. Start the orchestrator locally (defaults to port 12345, waiting for 1 worker)
-bash examples/distributed/vllm_rollout/launcher.sh --role=orchestrator --local
+bash tunix/experimental/distributed/examples/vllm_rollout/launcher.sh --role=orchestrator --local
 
 # 2. In a separate terminal, start Rollout Worker 0 locally
-bash examples/distributed/vllm_rollout/launcher.sh --role=rollout --local
+bash tunix/experimental/distributed/examples/vllm_rollout/launcher.sh --role=rollout --local
 ```
 
 ### Run on Kubernetes (GKE)
@@ -264,10 +256,10 @@ To deploy the vLLM orchestrator and rollout worker JobSets (using TPU slices for
 
 ```shell
 # 1. Deploy the orchestrator JobSet
-bash examples/distributed/vllm_rollout/launcher.sh --role=orchestrator
+bash tunix/experimental/distributed/examples/vllm_rollout/launcher.sh --role=orchestrator
 
 # 2. Deploy 4 TPU-backed rollout worker JobSets (rollout-0 through rollout-3)
-bash examples/distributed/vllm_rollout/launcher.sh --role=rollout
+bash tunix/experimental/distributed/examples/vllm_rollout/launcher.sh --role=rollout
 ```
 
 ### Expected Output

@@ -14,5 +14,5 @@ def main(argv, context: ProcessContext | None) -> None:
   args = parser.parse_args(argv)
 
   logging.info(args.message)
-
+  assert context is not None
   context.ipc.discovery.register(metadata=pickle.dumps(args.say))

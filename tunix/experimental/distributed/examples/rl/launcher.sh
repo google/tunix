@@ -51,9 +51,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Calculate repo root path (three directories up from examples/distributed/rl)
+# Locate repo root path by traversing upwards until finding tunix/experimental/distributed/runtime/main.py
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-REPO_ROOT="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
+REPO_ROOT="$SCRIPT_DIR"
+while [[ "$REPO_ROOT" != "/" && ! -f "$REPO_ROOT/tunix/experimental/distributed/runtime/main.py" ]]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+if [[ ! -f "$REPO_ROOT/tunix/experimental/distributed/runtime/main.py" ]]; then
+  echo "Error: Could not locate repo root containing tunix/experimental/distributed/runtime/main.py." >&2
+  exit 1
+fi
 
 enter_kube_context() {
   PROJECT="cloud-tpu-multipod-dev"
@@ -72,17 +79,26 @@ enter_kube_context() {
 launch_orchestrator() {
   if [[ "$LOCAL_MODE" == "true" ]]; then
     cd "$REPO_ROOT"
-    PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_id=orchestrator --discovery_port=12345 --process_main=rl.orchestrator.main --max_train_step=1000
+    python -m tunix.experimental.distributed.runtime.main \
+      --discovery_id=orchestrator \
+      --discovery_port=12345 \
+      --process_main=tunix.experimental.distributed.examples.rl.orchestrator.main \
+      --max_train_step=1000
   else
-    cd "$REPO_ROOT/tunix/experimental/distributed/deployment"
+    cd "$REPO_ROOT"
     kubectl delete jobset orchestrator
-    python yaml_generator.py \
-      yamls/jobset.cpu.yaml \
+    python tunix/experimental/distributed/deployment/yaml_generator.py \
+      tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
       --jobset_name=orchestrator \
       --cpu_machine=n2-standard-64 \
       --worker_container_image="$TUNIX_IMAGE" \
       --worker_container_port=12345 \
-      --worker_startup_command="PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_id=orchestrator --discovery_port=12345 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor --process_main=rl.orchestrator.main --max_train_step=1000" \
+      --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
+        --discovery_id=orchestrator \
+        --discovery_port=12345 \
+        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+        --process_main=tunix.experimental.distributed.examples.rl.orchestrator.main \
+        --max_train_step=1000" \
       | kubectl apply -f -
   fi
 }
@@ -91,20 +107,29 @@ launch_rollout() {
   if [[ "$LOCAL_MODE" == "true" ]]; then
     cd "$REPO_ROOT"
     for ((i=0; i<=3; i++)); do
-      PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_main=rl.rollout.main --server_id=rollout-$i --server_port=$((10000+i)) &
+      python -m tunix.experimental.distributed.runtime.main \
+        --discovery_addrs=orchestrator:12345 \
+        --process_main=tunix.experimental.distributed.examples.rl.rollout.main \
+        --server_id=rollout-$i \
+        --server_port=$((10000+i)) &
     done
     wait
   else
-    cd "$REPO_ROOT/tunix/experimental/distributed/deployment"
+    cd "$REPO_ROOT"
     for ((i=0; i<=3; i++)); do
       kubectl delete jobset rollout-$i
-      python yaml_generator.py \
-        yamls/jobset.pathways.yaml \
+      python tunix/experimental/distributed/deployment/yaml_generator.py \
+        tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
         --jobset_name=rollout-$i \
         --tpu_slice=tpuv5e:4x4 \
         --worker_container_image="$TUNIX_IMAGE" \
         --worker_container_port=$((10000+i)) \
-        --worker_startup_command="PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor --process_main=rl.rollout.main --server_id=rollout-$i --server_port=$((10000+i))" \
+        --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
+          --discovery_addrs=orchestrator:12345 \
+          --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+          --process_main=tunix.experimental.distributed.examples.rl.rollout.main \
+          --server_id=rollout-$i \
+          --server_port=$((10000+i))" \
         | kubectl apply -f -
     done
   fi
@@ -113,17 +138,26 @@ launch_rollout() {
 launch_trainer() {
   if [[ "$LOCAL_MODE" == "true" ]]; then
     cd "$REPO_ROOT"
-    PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_main=rl.trainer.main --server_id=trainer --server_port=20000
+    python -m tunix.experimental.distributed.runtime.main \
+      --discovery_addrs=orchestrator:12345 \
+      --process_main=tunix.experimental.distributed.examples.rl.trainer.main \
+      --server_id=trainer \
+      --server_port=20000
   else
-    cd "$REPO_ROOT/tunix/experimental/distributed/deployment"
+    cd "$REPO_ROOT"
     kubectl delete jobset trainer
-    python yaml_generator.py \
-      yamls/jobset.pathways.yaml \
+    python tunix/experimental/distributed/deployment/yaml_generator.py \
+      tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
       --jobset_name=trainer \
       --tpu_slice=tpuv5e:4x4 \
       --worker_container_image="$TUNIX_IMAGE" \
       --worker_container_port=20000 \
-      --worker_startup_command="PYTHONPATH=./examples/distributed python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orchestrator:12345 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor --process_main=rl.trainer.main --server_id=trainer --server_port=20000" \
+      --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
+        --discovery_addrs=orchestrator:12345 \
+        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+        --process_main=tunix.experimental.distributed.examples.rl.trainer.main \
+        --server_id=trainer \
+        --server_port=20000" \
       | kubectl apply -f -
   fi
 }

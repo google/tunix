@@ -15,6 +15,7 @@ def main(argv, context: ProcessContext | None) -> None:
   logging.info(args.message)
 
   knock_future = futures.Future()
+  assert context is not None
   context.ipc.discovery.on_register(
       callback=lambda hostname, _, metadata: (
           logging.info(

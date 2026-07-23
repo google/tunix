@@ -5,11 +5,11 @@ import pickle
 import time
 from typing import Callable
 
-from examples.distributed.rl import service_pb2 as pb2
-from examples.distributed.rl import service_pb2_grpc as pb2_grpc
 import grpc
 import jax
 import jax.numpy as jnp
+from tunix.experimental.distributed.examples.rl import service_pb2 as pb2
+from tunix.experimental.distributed.examples.rl import service_pb2_grpc as pb2_grpc
 from tunix.experimental.distributed.runtime.context import ProcessContext
 
 
@@ -80,7 +80,7 @@ def main(argv, context: ProcessContext | None) -> None:
 
   server = TrainerServer()
   server.start(args.server_port, on_train=on_train)
-
+  assert context is not None
   context.ipc.discovery.register(
       metadata=pickle.dumps({
           "service_type": "trainer",

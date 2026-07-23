@@ -6,9 +6,9 @@ import queue
 import random
 import time
 
-from examples.distributed.rl import service_pb2 as pb2
-from examples.distributed.rl import service_pb2_grpc as pb2_grpc
 import grpc
+from tunix.experimental.distributed.examples.rl import service_pb2 as pb2
+from tunix.experimental.distributed.examples.rl import service_pb2_grpc as pb2_grpc
 from tunix.experimental.distributed.runtime.context import ProcessContext
 
 
@@ -27,7 +27,9 @@ class RolloutClient:
         response = stub.Generate(request)
         return response.completion
       except grpc.RpcError as e:
-        raise RuntimeError(f"generate failed: {e.code()} - {e.details()}")
+        raise RuntimeError(
+            f"generate failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
+        )
 
 
 class TrainerClient:
@@ -45,7 +47,9 @@ class TrainerClient:
         response = stub.Train(request)
         return response.weights
       except grpc.RpcError as e:
-        raise RuntimeError(f"train failed: {e.code()} - {e.details()}")
+        raise RuntimeError(
+            f"train failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
+        )
 
 
 def main(argv, context: ProcessContext | None) -> None:
@@ -85,6 +89,7 @@ def main(argv, context: ProcessContext | None) -> None:
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
+  assert context is not None
   context.ipc.discovery.on_register(accept_worker)
 
   def pick_rollout_client():
