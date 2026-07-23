@@ -502,23 +502,30 @@ class PeftTrainer:
     def skip_updates(model, optimizer, grad_accumulator):
       return jnp.array(0.0, dtype=jnp.float32)
 
-    # If the mesh is not empty, then we need to replicate the is_update_step
-    # across all devices to avoid deadlock so that all devices see the same
-    # update step.
-    mesh = pxla.thread_resources.env.physical_mesh
-    if not mesh.empty:
-      is_update_step = jax.lax.with_sharding_constraint(
-          is_update_step, jax.sharding.PartitionSpec()
-      )
+    # ABLATION A1 (tasks/grad_accum_compile_regression): at accumulation depth
+    # 1 every step is an update step, so the cond predicate is statically True
+    # and nnx.cond can be bypassed. Only valid when is_update_step is not
+    # driven by the data pipeline (pure SFT). Revert or tighten before landing.
+    if self.config.get_with_default("gradient_accumulation_steps", 1) == 1:
+      grad_norm = apply_updates(model, optimizer, grad_accumulator)
+    else:
+      # If the mesh is not empty, then we need to replicate the is_update_step
+      # across all devices to avoid deadlock so that all devices see the same
+      # update step.
+      mesh = pxla.thread_resources.env.physical_mesh
+      if not mesh.empty:
+        is_update_step = jax.lax.with_sharding_constraint(
+            is_update_step, jax.sharding.PartitionSpec()
+        )
 
-    grad_norm = nnx.cond(
-        is_update_step,
-        apply_updates,
-        skip_updates,
-        model,
-        optimizer,
-        grad_accumulator,
-    )
+      grad_norm = nnx.cond(
+          is_update_step,
+          apply_updates,
+          skip_updates,
+          model,
+          optimizer,
+          grad_accumulator,
+      )
 
     if isinstance(aux, utils.LossOutput):
       # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
