@@ -40,6 +40,7 @@ exclude_patterns = [
     ),
     "_collections/examples/sft/**",
     "_collections/examples/deepscaler/**",
+    "_collections/examples/distributed/**",
 ]
 
 source_suffix = [".rst", ".md", ".ipynb"]
@@ -69,7 +70,7 @@ sphinx_gallery_conf = {
         "_collections/gallery"
     ),  # path to where to save gallery generated output
     "filename_pattern": "*.py",
-    "ignore_pattern": r"rl/|sft/|deepscaler/",
+    "ignore_pattern": r"rl/|sft/|deepscaler/|distributed/",
 }
 
 # -- Options for myst -------------------------------------------------------
@@ -96,6 +97,7 @@ collections = {
             "rl",
             "sft",
             "deepscaler",
+            "distributed",
         ],
     }
 }
