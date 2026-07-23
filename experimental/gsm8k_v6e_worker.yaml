@@ -34,6 +34,14 @@ spec:
             value: '0.9'
           - name: ENABLE_PATHWAYS_PERSISTENCE
             value: '0'
+          - name: TPU_WORKER_ID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+          - name: CLOUD_TPU_TASK_ID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
         resources:
           limits:
             google.com/tpu: '4'
