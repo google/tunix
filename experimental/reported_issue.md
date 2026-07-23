@@ -323,3 +323,56 @@ DELTA: stream=301.6s optax=122.5s  stream-optax=179.1s  stream/optax=2.46x
 1. The OOM bug is mitigated using a 256 block size override. 
 2. The XLA graph bloat is confirmed to be `nnx.cond` over full model states.
 3. The next step is to redesign `GradientAccumulator` to hold a standard Python dictionary of `nnx.Variable` leaves rather than a single root variable, which should instantly eliminate the 191s tracing delay.
+
+## 15. ACTION REQUEST: capture py-spy flamegraphs for the stream grad-accum tracing overhead
+**Type:** Runnable task for the cluster-side agent (single-host TPU v5p VM, same setup as issue 14).
+**Goal:** Decide the `GradientAccumulator` redesign with evidence. We need function-level attribution of the Python tracing overhead BEFORE refactoring, so we cut the right thing.
+
+**Context (corrected measurements — supersedes the wording in issue 14's "Latency Fix" block):**
+All numbers from `compile_repro_baseline_with_cond.log` and `compile_repro_ablation_A1_stream.log` (JAX 0.10.0, v5p 2x2 mesh, cold jit cache, one variant per process):
+
+| phase of `jit(_train_step)`      | stream baseline (062572ad) | stream + A1 cond-bypass (b1b6b9da) | optax |
+|----------------------------------|---------------------------:|-----------------------------------:|------:|
+| Python tracing                   | 131.0s                     | **192.0s (went UP +61s)**           | 6.3s  |
+| XLA compilation (per compile)    | 162.5s                     | 133.1s (**compiled TWICE**: +132.0s)| 110.5s|
+| total train wall                 | 301.6s                     | 467.8s                              | 122.5s|
+
+Notes vs issue 14's summary: 301.6s is train WALL, not XLA compile time; XLA went 162.5 -> 133.1 (optax is 110.5, so not fully "matching"); and the A1 run recompiled `_train_step` a second time (sharding/layout instability after removing the cond — the cond's pass-through false-branch was pinning output shardings to input shardings). Also, `self.grads` is an `nnx.data(...)`-wrapped State with ONE `nnx.Variable` per leaf (peft_trainer.py:196-198), not a single root Variable; leaf count is O(hundreds), not 10k+.
+
+**Open question the flamegraphs must answer:**
+Tracing cost is NOT the `nnx.cond` wrapper (bypassing it made tracing WORSE, 131s -> 192s). Suspect: per-mutation NNX bookkeeping during trace (`Variable.__setitem__` / trace-context checks / graph traversal) in `GradientAccumulator.add/get/reset` and `optimizer.update`, possibly cheaper inside the cond's split/merge context than at the top level of `nnx.jit`. The two flamegraphs should name the exact functions and explain the +61s delta.
+
+**Runbook (run the block twice, sequentially — NOT in parallel, they share the TPUs):**
+Run A: `PIN=062572ad OUT=flame_baseline_cond` (baseline with cond, explains the 131s)
+Run B: `PIN=b1b6b9da OUT=flame_a1_bypass` (A1 bypass, explains the 192s)
+
+```bash
+PIN=062572ad OUT=flame_baseline_cond   # <-- run B: PIN=b1b6b9da OUT=flame_a1_bypass
+sudo docker run --rm --privileged --net=host \
+  -v /tmp/compile_repro_logs:/tmp/compile_repro_logs \
+  -v /mnt/workspace:/mnt/workspace \
+  europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest \
+  bash -c "
+    set -e
+    git config --global --add safe.directory \$(pwd)
+    git init
+    git remote set-url origin https://github.com/google/tunix.git 2>/dev/null \
+      || git remote add origin https://github.com/google/tunix.git
+    git fetch origin $PIN && git reset --hard $PIN
+    pip install --quiet py-spy
+    JAX_LOG_COMPILES=1 PYTHONPATH=\$(pwd) PYTHONUNBUFFERED=1 \
+    py-spy record -o /tmp/compile_repro_logs/$OUT.svg --rate 50 -- \
+      python3 experimental/compile_repro_sft.py --grad_accum stream \
+      2>&1 | tee /tmp/compile_repro_logs/$OUT.log
+  "
+```
+
+**Deliverables (commit to branch `yuxzhang/refactor_loss_accum_ablation` and push):**
+- `experimental/flame_baseline_cond.svg` + `experimental/flame_baseline_cond.log`
+- `experimental/flame_a1_bypass.svg` + `experimental/flame_a1_bypass.log`
+
+**Success criteria / sanity checks:**
+- Each `.log` contains a `Finished tracing _train_step for jit in ...` line (expect ~131s / ~192s ballpark; note the fresh numbers, they're an extra variance sample).
+- Each `.svg` is >100KB and contains `flax/nnx` frames (grep the SVG text for `nnx`).
+- If `py-spy` fails to attach (ptrace), rerun with `--nonblocking` and note it in the commit message.
+- MODEL_PATH prerequisite is the same as issue 14 (`/mnt/workspace/models/google/gemma-4-e2b-it` must exist).
