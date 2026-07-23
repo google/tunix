@@ -100,6 +100,12 @@ parser.add_argument(
         "rollout_micro_batch_size * num_generations when unset."
     ),
 )
+parser.add_argument(
+    "--max_num_batched_tokens",
+    type=int,
+    default=8192,
+    help="vLLM max_num_batched_tokens.",
+)
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -529,9 +535,7 @@ VLLM_MAX_NUM_SEQS = (
 VLLM_UTILIZATION = args.vllm_utilization
 
 # Max number of tokens to be processed in parallel by vllm.
-# Divide by 8 for on policy, 1 step off divide by 4
-
-VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+VLLM_MAX_BATCHED_TOKENS = args.max_num_batched_tokens
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = True
