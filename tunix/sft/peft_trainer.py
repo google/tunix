@@ -201,7 +201,13 @@ class GradientAccumulator(nnx.Module):
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
       g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
-      acc_var[...] = acc_var[...] + g
+      # Use set_value (no index) rather than `acc_var[...] = ...`. The indexed
+      # __setitem__ fast path compares the new/old value `.sharding`; during
+      # trace those are tracers, and reading `Tracer.sharding` triggers a
+      # partial-eval provenance scan (find_progenitors) that is ~super-linear
+      # per leaf and dominates compile-time tracing. set_value with no index
+      # takes the plain-assignment branch and skips the sharding comparison.
+      acc_var.set_value(acc_var[...] + g)
 
     jax.tree_util.tree_map(
         _add,
@@ -214,7 +220,7 @@ class GradientAccumulator(nnx.Module):
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
     else:
       denom_val = denom.astype(jnp.float32)
-    self.denom[...] = self.denom[...] + denom_val
+    self.denom.set_value(self.denom[...] + denom_val)
 
   def get(self):
     scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
@@ -227,14 +233,16 @@ class GradientAccumulator(nnx.Module):
 
   def reset(self):
     def _zero_in_place(v):
-      v[...] = jnp.zeros_like(v[...])
+      # set_value (no index) instead of `v[...] = ...`; see `add` for why the
+      # indexed fast path is expensive during trace.
+      v.set_value(jnp.zeros_like(v[...]))
 
     jax.tree_util.tree_map(
         _zero_in_place,
         self.grads,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
-    self.denom[...] = jnp.zeros_like(self.denom[...])
+    self.denom.set_value(jnp.zeros_like(self.denom[...]))
 
 
 def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
@@ -483,9 +491,6 @@ class PeftTrainer:
       # Compute exactly equivalent legacy loss val
       loss_val = aux.primary_loss.compute()
 
-    # TODO(b/491970038): update denom for sequence packing.
-    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
-
     def apply_updates(model, optimizer, grad_accumulator):
       acc_grads = grad_accumulator.get()
       # Compute the norm in float32 to 1) match `skip_updates()` return type and
@@ -502,13 +507,21 @@ class PeftTrainer:
     def skip_updates(model, optimizer, grad_accumulator):
       return jnp.array(0.0, dtype=jnp.float32)
 
-    # ABLATION A1 (tasks/grad_accum_compile_regression): at accumulation depth
-    # 1 every step is an update step, so the cond predicate is statically True
-    # and nnx.cond can be bypassed. Only valid when is_update_step is not
-    # driven by the data pipeline (pure SFT). Revert or tighten before landing.
+    # At accumulation depth 1 every step is an update step, and the accumulator
+    # is a mathematical no-op (add one microbatch with denom=1, divide by 1,
+    # reset), so skip both the accumulator and the nnx.cond wrapper and update
+    # directly from `grads` — exactly the optax path. This removes the per-leaf
+    # set_value provenance scan (add/reset) and the XLA Conditional at depth 1.
+    # Unlike the earlier bypass, the accumulator is not touched at all, so there
+    # is no reset-to-zeros that lets SPMD re-shard state and force a 2nd compile.
     if self.config.get_with_default("gradient_accumulation_steps", 1) == 1:
-      grad_norm = apply_updates(model, optimizer, grad_accumulator)
+      grad_norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
+      )
+      optimizer.update(model, grads)
     else:
+      # TODO(b/491970038): update denom for sequence packing.
+      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
       # If the mesh is not empty, then we need to replicate the is_update_step
       # across all devices to avoid deadlock so that all devices see the same
       # update step.
@@ -631,33 +644,29 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
+
+    # Place concrete state onto its target sharding with jax.device_put instead
+    # of eager jax.lax.with_sharding_constraint. The latter is a compiler hint;
+    # evaluated eagerly on the full NNX PyTree it forces a full graph trace
+    # (minutes on large models). device_put places each addressable leaf
+    # directly. (Ported from Tianshu Bao's fix, CL 952815066.)
+    def _shard(x, p):
+      if not isinstance(x, (jax.Array, np.ndarray)):
+        return x
+      if p is None:
+        p = shd.PartitionSpec()
+      sharding = sharding_utils.get_sharding(x, mesh, p)
+      if hasattr(x, "sharding") and x.sharding == sharding:
+        return x
+      if getattr(x, "is_fully_addressable", True):
+        with jax.transfer_guard("allow"):
+          return jax.device_put(x, sharding)
+      return x
+
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
-
-    def _sanitize_pspec(a, p):
-      if isinstance(p, jax.sharding.PartitionSpec) and hasattr(a, 'ndim') and hasattr(a, 'shape'):
-        spec_tuple = list(p)
-        if len(spec_tuple) > a.ndim:
-          spec_tuple = spec_tuple[:a.ndim]
-        mesh_dict = dict(mesh.shape)
-        sanitized = []
-        for i, axis_spec in enumerate(spec_tuple):
-          if axis_spec and axis_spec in mesh_dict:
-            dim_size = a.shape[i]
-            axis_size = mesh_dict[axis_spec]
-            if dim_size % axis_size != 0:
-              sanitized.append(None)
-              continue
-          sanitized.append(axis_spec)
-        return jax.sharding.PartitionSpec(*sanitized)
-      return p
-
-    optimizer_pspecs = jax.tree.map(
-        _sanitize_pspec, optimizer_state, optimizer_pspecs
-    )
-
-    optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state, optimizer_pspecs
+    optimizer_sharded_state = jax.tree.map(
+        _shard, optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
@@ -665,20 +674,16 @@ class PeftTrainer:
     if self.config.grad_accum == "optax":
       return
 
-    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
-    model_state = nnx.state(self.model, wrt_target)
-    model_pspecs = nnx.get_partition_spec(model_state)
-    model_pspecs = jax.tree.map(_sanitize_pspec, model_state, model_pspecs)
-
-    # Partition Gradients similar to the model
-    grads_sharded = jax.lax.with_sharding_constraint(
-        self.grad_accumulator.grads, model_pspecs
+    # Partition gradients the same as their target state.
+    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
+    self.grad_accumulator.grads = jax.tree.map(
+        _shard, self.grad_accumulator.grads, grad_pspecs
     )
-    self.grad_accumulator.grads = grads_sharded
 
-    # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.lax.with_sharding_constraint(
-        self.grad_accumulator.denom[...], jax.sharding.PartitionSpec()
+    # Denominator is a scalar — replicate across all devices.
+    self.grad_accumulator.denom[...] = jax.device_put(
+        self.grad_accumulator.denom[...],
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
     )
 
   def jit_train_and_eval_step(

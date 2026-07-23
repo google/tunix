@@ -887,6 +887,27 @@ class GradientAccumulatorTest(parameterized.TestCase):
         out,
     )
 
+  def test_depth1_single_add_denom_one_is_identity(self):
+    """At depth 1, add(g, denom=1) then get() returns g exactly.
+
+    This is the premise the depth-1 fast path in `_train_step` relies on:
+    when ``gradient_accumulation_steps in (None, 1)`` the accumulator is a
+    mathematical no-op — add one micro-batch with denom=1, divide by
+    ``max(denom, 1) = 1``, reset — so skipping the accumulator and updating
+    directly from ``grads`` is numerically identical. Guards that
+    ``get()`` returns ``Σg / max(Σd, 1) = g / 1 = g`` with no scaling drift,
+    which is what makes the direct-update path a behavior-preserving change.
+    """
+    model, acc = self._make_accumulator()
+    grads = self._ones_like_params(model, scale=2.5)
+    acc.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    out = _unwrap(acc.get())
+    jax.tree_util.tree_map(
+        lambda g, o: np.testing.assert_allclose(o, g, rtol=1e-7, atol=1e-7),
+        _unwrap(grads),
+        out,
+    )
+
   @parameterized.named_parameters(
       dict(testcase_name='equal_denoms', denoms=(4.0, 4.0, 4.0, 4.0)),
       dict(testcase_name='varying_denoms', denoms=(1.0, 7.0, 3.0, 5.0)),

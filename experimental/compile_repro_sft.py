@@ -132,9 +132,25 @@ def main():
       for _ in range(args.max_steps + 2)
   ]
 
+  # Optional xprof capture (env-gated). With NO warmup, the first train_step's
+  # Python tracing + XLA compilation happen inside this window, so xprof can
+  # attribute both phases. Default host_tracer already captures the XLA compile
+  # TraceMe (compile blocks / passes) — the compilation view py-spy cannot give
+  # (goal B). To also capture Python tracing (set_value/.sharding, goal A),
+  # raise the python tracer level; the exact API varies across jax versions, so
+  # set it via jax.profiler.ProfileOptions / start_trace against the installed
+  # jax, and keep MAX_STEPS=1 so the instrumenting tracer does not overflow the
+  # ~2GB trace file.
+  xprof_dir = os.environ.get("PROFILE_XPROF")
   t0 = time.perf_counter()
-  with mesh:
-    trainer.train(ds, None)
+  if xprof_dir:
+    os.makedirs(xprof_dir, exist_ok=True)
+    with mesh, jax.profiler.trace(xprof_dir):
+      trainer.train(ds, None)
+    print(f"[[COMPILE_REPRO]] xprof trace -> {xprof_dir}", flush=True)
+  else:
+    with mesh:
+      trainer.train(ds, None)
   print(
       f"[[COMPILE_REPRO]] grad_accum={args.grad_accum} "
       f"mesh={args.mesh_fsdp}x{args.mesh_tp} "
