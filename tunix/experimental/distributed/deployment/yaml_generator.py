@@ -62,6 +62,11 @@ def main() -> None:
       default="gs://cloud-pathways-staging/tmp",
       help="GCS scratch location",
   )
+  parser.add_argument(
+      "--pathways_proxy_memory_limit",
+      default="100G",
+      help="Memory limit of the Pathways proxy container",
+  )
 
   parser.add_argument(
       "--worker_container_name",
@@ -144,6 +149,7 @@ def main() -> None:
         SERVER_IMAGE=args.pathways_server_image,
         PROXY_IMAGE=args.pathways_proxy_server_image,
         GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,
+        PATHWAYS_PROXY_MEMORY_LIMIT=args.pathways_proxy_memory_limit,
         CPU_MACHINE=args.cpu_machine,
         TPU_MACHINE=tpu_machine,
         TPU_TYPE=tpu_type,

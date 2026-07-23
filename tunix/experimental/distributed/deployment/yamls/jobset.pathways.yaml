@@ -102,7 +102,7 @@ spec:
               resources:
                 limits:
                   cpu: "16"
-                  memory: 100G
+                  memory: ${PATHWAYS_PROXY_MEMORY_LIMIT}
               args:
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
