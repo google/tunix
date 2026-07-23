@@ -309,3 +309,70 @@ Because the `batch_size=64` matches the `max_concurrency=64`, the rollout phase 
 2. We rely on the Kubernetes `TIMEOUT=10800` (3 hours) to aggressively murder the job entirely if needed, but per-episode long-tails are bleeding compute.
 **Proposed Mitigation**:
 - Reduce the `execute_bash` CPU sandbox timeout from 300s to 120s to punish infinite-loops faster and accelerate the 50-turn cap depletion, returning the node to the active pool faster.
+
+## 10. APC-Off Validation, Final Config, and the reward=0 Cold-Start Root Cause
+
+**Status**: Resolved (pipeline correct) / Open (no learning signal yet)
+
+### 10.1 APC disabled on the CORRECT branch (Section 8 fix), and validated
+The APC toggle (`enable_prefix_caching`) lives in `examples/deepswe/train_deepswe_nb.py`,
+which the pod pulls from the `yuxzhang/deepswe-quality-fix` branch (the yaml's
+`git fetch origin yuxzhang/deepswe-quality-fix`). An earlier attempt set it False on
+`swe-evaluation-dev`'s copy of the train script — that is a **no-op**, because the pod
+never runs that branch's code. The effective disable now lives on `deepswe-quality-fix`.
+
+Validation from the Epoch-1 snapshot (APC OFF), confirming Section 8 was caused by APC:
+- `sampler-trainer logp_diff` dropped from **max 9.8** (Section 8, APC on) to
+  **mean 0.002 / max 0.92 / pearson 0.998**.
+- TIS importance weights: `weight_mean=0.999, weight_max=2.0 (=threshold), frac_clipped=0.0001`
+  — i.e. the rollout is effectively on-policy again (ratio ≈ 1). APC was conclusively the
+  cause of the Section 8 gradient-corrupting divergence.
+
+### 10.2 Final APC-off config (locked)
+- `enable_prefix_caching=False` (on `deepswe-quality-fix`).
+- `--max_concurrency` / `--rollout_vllm_max_num_seqs` / `MAX_CONCURRENT` = **64** (APC-off
+  returns to the prefill-starved regime; fewer concurrent trajectories = less prefill contention).
+- `--episode_timeout_secs=5400` (**90 min**): bounds infinite-loop stragglers (Section 9). The
+  Epoch-1 snapshot shows the first PPO epoch completes at ~1.0 h (PPO gathers the batch without
+  waiting for stragglers), so 90 min does not truncate legit work — it frees zombie sandbox nodes
+  ~1.5 h earlier than the 3 h default.
+- **UNCHANGED**: `execute_bash` 300s, `activeDeadlineSeconds=10800` (3 h), topology
+  (`completions/parallelism 64`, `4x8x8`), `JAX_RANDOM_WEIGHTS=1`.
+- **Kept**: gold whitelist filter, timestamp `RUN_TAG`, `TUNIX_DEBUG_LOGP_DIFF=1`.
+
+Note on `JAX_RANDOM_WEIGHTS=1`: this is **not** a random-model flag. It is set by
+`vllm_sampler.py` whenever `init_with_random_weights` is on, so the vLLM engine bootstraps with
+dummy weights and then receives the **real** Qwen3-32B weights synced from the actor (which loads
+`create_model_from_safe_tensors`). Do NOT flip it to 0 — it would break the vLLM bootstrap.
+
+### 10.3 reward=0 root cause: RL cold-start + overlong masking (NOT a param/APC bug)
+The SWE env returns 0 reward per step by design (`swe_env.py`: *"RepoEnv always returns 0 reward,
+must be evaluated by DockerRuntime"*). The real reward is the test-suite result computed at
+**episode end** by `env.compute_reward` (`final_reward_fn`), which runs inside the docker sandbox.
+
+In the Epoch-1 snapshot ALL 151 completed trajectories have reward=0. Two compounding causes:
+1. A large fraction of trajectories run to **step 45–49** (near `max_turns=50`) without ever
+   submitting — they explore (search/view) and hit `MAX_STEPS_REACHED`. Because
+   `overlong_filter=True` and `MAX_STEPS_REACHED ∈ filter_statuses`, `_append_final_reward` is
+   **skipped** (`trajectory_collect_engine` `masked_out`) → `compute_reward` never runs → reward
+   stays 0.
+2. Only ~152 trajectories actually submit (`function=finish` → `SUCCEEDED`), which should trigger
+   `compute_reward`; the base (un-RL-tuned) Qwen3-32B's patches evidently fail the tests → reward 0.
+
+Net: no trajectory earns a passing-test reward → GRPO advantages are all 0 (degenerate) → zero
+gradient → **no learning**. This is a classic agentic-RL cold-start, decoupled from APC/config;
+re-running the same config yields the same 0 reward.
+
+**To bootstrap learning** you need reward variance (positive samples): SFT warm-start on the gold
+trajectories, easier tasks, or scaffold changes that make the agent submit before `max_turns`.
+**Open item**: confirm `compute_reward` actually runs & returns for the ~152 submitters (rule out a
+reward-wiring/runtime failure vs pure cold-start).
+
+### 10.4 Sandbox timeout must stay LOOSER than the episode timeout
+- `--episode_timeout_secs` (90 min) = tunix per-trajectory rollout cap (in-process).
+- `activeDeadlineSeconds` (3 h) = k8s sandbox pod hard deadline (backstop).
+- `compute_reward` runs the test suite **in the sandbox, AFTER the rollout ends**
+  (`reward_timeout=1800s` / 30 min). The sandbox must survive rollout(≤90 min) + reward
+  test(≤30 min) + margin. **Do NOT lower `activeDeadlineSeconds` to 90 min** — a trajectory that
+  rolls out near the cap would have its sandbox killed before the reward test completes, producing
+  spurious reward=0. Keep `90 min (episode) < 3 h (sandbox)`.
