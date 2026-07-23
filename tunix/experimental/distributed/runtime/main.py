@@ -208,7 +208,11 @@ def main(argv: list[str]) -> None:
 
   process_executor = import_symbol(main_args.process_executor)()
 
-  logging.basicConfig(level=logging.DEBUG, format="%(message)s", force=True)
+  logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s [%(filename)s:%(lineno)d] %(levelname)s %(message)s",
+      force=True,
+  )
 
   prepared_processes = [
       prepare_process(slice_argv)
