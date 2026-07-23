@@ -282,8 +282,14 @@ if math.prod(SHARED_MESH_SHAPE) != jax.device_count():
       f"Got mesh={SHARED_MESH_SHAPE}, devices={jax.device_count()}."
   )
 
+# allow_split_physical_axes lets a logical axis span a fragment of a physical
+# axis. Needed on flat 2D topologies (e.g. TPU v6e 16x16) where a logical mesh
+# like (fsdp=64, tp=4) does not factor into whole physical-axis subsets; a no-op
+# on 3D v5p (e.g. 4x4x8) where (32, 4) already factors cleanly.
 shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+    SHARED_MESH_SHAPE,
+    jax.devices()[: math.prod(SHARED_MESH_SHAPE)],
+    allow_split_physical_axes=True,
 )
 shared_mesh = jax.sharding.Mesh(
     shared_device_list,
