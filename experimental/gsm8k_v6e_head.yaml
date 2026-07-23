@@ -14,7 +14,7 @@ spec:
         app: pathways-v6e-head
     spec:
       nodeSelector:
-        cloud.google.com/gke-nodepool: cpu-np
+        cloud.google.com/gke-nodepool: cpu-np-rw
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       restartPolicy: Always
