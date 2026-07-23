@@ -413,20 +413,48 @@ This simple optimization reduced the initialization/tracing penalty from ~7 minu
 - **Fix 3 (setup):** ported `_shard_optimizer` to place state via `jax.device_put` instead of eager `jax.lax.with_sharding_constraint` (Lin Chai §16 / Tianshu Bao CL 952815066). Negligible on E2B (0.3% in the flamegraph), matters on large models — included for upstream alignment, not expected to move the E2B numbers.
 
 **Run A — fix verification (the main event):**
+Run BOTH variants (no arg) so optax is a fresh SAME-SESSION control for the fixed
+stream, and the wrapper prints the DELTA line automatically:
 ```bash
-bash experimental/compile_repro_v5p_docker.sh stream
+bash experimental/compile_repro_v5p_docker.sh
 ```
+This runs optax (control, unchanged code, expect ~122s) then stream (with the
+fix, expect ~122s if fixed) and prints `DELTA: stream=... optax=... stream/optax=`
+(expect ~1.0x, was 2.46x). optax on the fix branch also exercises Fix 3's
+`_shard_optimizer` (device_put), so both variants are on equal footing.
 Also run the numerical unit test inside the same image (needs flax, CPU-only):
 ```bash
 python3 -m pytest tests/sft/peft_trainer_test.py -k GradientAccumulator -q
 ```
 
-**Run B — optax control flamegraph (for the before/control/after triple):**
-Same py-spy docker block as §15 but pinned to `062572ad` with `--grad_accum optax`, 10Hz, local dir:
+**Run B — optax control flamegraph (optional, for the before/control/after triple):**
+py-spy on the optax path, pinned to the clean baseline `062572ad` (optax code is
+unchanged by the fix, so any commit works; pin for reproducibility), 10Hz, local dir:
 ```bash
 PIN=062572ad OUT=flame_optax PROFILE_DIR=/mnt/workspace/grad_accum_profiles
-# ... (issue 15's py-spy docker run, git reset --hard $PIN, py-spy record --rate 10 -- python3 experimental/compile_repro_sft.py --grad_accum optax)
+mkdir -p "$PROFILE_DIR"
+sudo docker run --rm --privileged --net=host \
+  -e PIN="$PIN" -e OUT="$OUT" -e PROFILE_DIR="$PROFILE_DIR" \
+  -v /mnt/workspace:/mnt/workspace \
+  europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest \
+  bash -c '
+    set -euo pipefail
+    git config --global --add safe.directory "$(pwd)"
+    git init
+    git remote set-url origin https://github.com/google/tunix.git 2>/dev/null \
+      || git remote add origin https://github.com/google/tunix.git
+    git fetch origin "$PIN"
+    git reset --hard "$PIN"
+    pip install --quiet py-spy
+    JAX_LOG_COMPILES=1 PYTHONPATH="$(pwd)" PYTHONUNBUFFERED=1 \
+      py-spy record -o "$PROFILE_DIR/$OUT.svg" --rate 10 -- \
+      python3 experimental/compile_repro_sft.py --grad_accum optax \
+      2>&1 | tee "$PROFILE_DIR/$OUT.log"
+  '
 ```
+Expect: a short `trace_to_jaxpr` (~6s) with NO GradientAccumulator add/reset /
+`set_value` wide bars (optax has no accumulator). This is the "control" third of
+the optax / stream-baseline / stream-fixed flamegraph triple.
 
 **Run C (optional) — xprof capture:** `PROFILE_XPROF=/mnt/workspace/xprof_out MAX_STEPS=1` env on `compile_repro_sft.py`, no warmup. Default host_tracer captures the XLA compile TraceMe (compile-block timing — the view py-spy cannot give). To also capture Python tracing set the python tracer level per the installed jax version (keep MAX_STEPS=1 to avoid the 2GB overflow).
 
