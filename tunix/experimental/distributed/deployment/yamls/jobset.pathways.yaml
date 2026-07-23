@@ -172,9 +172,11 @@ spec:
                   fieldRef:
                     fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
               - name: JAX_PLATFORMS
-                value: "proxy"
+                value: "proxy,cpu"
               - name: JAX_BACKEND_TARGET
                 value: "grpc://localhost:29000"
+              - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                value: "0"
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
