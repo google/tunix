@@ -210,7 +210,7 @@ class MoERagged(nnx.Module):
   def __call__(self, x, router_input=None):
     remat_config = getattr(self.config, 'remat_config', None)
     if remat_config is not None and str(remat_config).endswith('BLOCK'):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
+      return nnx.remat(self.block.__func__)(
           self, x, router_input
       )
     else:

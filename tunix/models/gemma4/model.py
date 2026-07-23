@@ -1196,7 +1196,7 @@ class Attention(nnx.Module):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument. graph_updates=False prevents TraceContextError
       # when mutating params across jax transformation trace levels.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
+      return nnx.remat(self.block.__func__)(
           self, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
       )
     else:
@@ -1295,7 +1295,7 @@ class FeedForward(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+      return nnx.remat(self.block.__func__)(self, x)
     else:
       return self.block(x)
 
@@ -1466,7 +1466,7 @@ class DecoderLayer(nnx.Module):
         remat_config == RematConfig.DECODER
         or remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
+      return nnx.remat(self.block.__func__)(
           self,
           x,
           segment_pos,
