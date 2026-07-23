@@ -293,3 +293,19 @@ The discrepancy is strongly correlated with **Automatic Prefix Caching (APC)** b
 **Proposed Mitigation**:
 - The APC logic in the inference backend seems fundamentally broken for mathematically-strict RL training loops where strict replication of generation logits is required.
 - We must immediately disable APC (`--enable_prefix_caching=False`) in the rollout config, or thoroughly investigate the RoPE alignment when prefix chunks are injected.
+
+## 9. Rollout Completion & Long-Tail Straggler Profiling
+**Severity**: Performance / Scaling Bottleneck
+**Reference Log**: [deepswe_epoch1_snapshot_20260723.txt](deepswe_epoch1_snapshot_20260723.txt) (Captured successful 1-hour Epoch 1 completion and fixed PPO `logp_diff` metrics).
+
+**Observation**: During a 256-chip execution (`MAX_CONCURRENCY=64`, `batch_size=64`, `TIMEOUT=10800`), an audit revealed:
+- **Fast Path Success**: The first complete PPO epoch (batch size 64) successfully finished gathering and updated the model at exactly the **1.0 hour mark** (Checkpoint `1` saved).
+- By **1.5 hours**, over **143 total trajectories** had been collected across Epoch 1 and the start of Epoch 2.
+- **Stragglers**: ~21 instances persistently get stuck in a `execute_bash` loop bottleneck across the nodes.
+**Root Cause Analysis**:
+Because the `batch_size=64` matches the `max_concurrency=64`, the rollout phase can theoretically be blocked until the slowest straggler dies. If an agent repeats infinite loop bash commands for `max_turns=50`, each sandbox timeout lasting 300s pushes their active time to `50 * 300s = ~4.1 hours`.
+**Impact on Scale-up**:
+1. Currently, PPO seems to gracefully gather the needed batch (since it pushed Checkpoint 1 at 1 hr) meaning the long-tail is partially buffered or discarded, but those straggling worker nodes are effectively rendered useless zombies for hours.
+2. We rely on the Kubernetes `TIMEOUT=10800` (3 hours) to aggressively murder the job entirely if needed, but per-episode long-tails are bleeding compute.
+**Proposed Mitigation**:
+- Reduce the `execute_bash` CPU sandbox timeout from 300s to 120s to punish infinite-loops faster and accelerate the 50-turn cap depletion, returning the node to the active pool faster.
