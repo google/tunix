@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# pytype: disable=attribute-error
 """DeepSWE evaluation with deepscaler-style task-level parallelism.
 
 This script intentionally does not modify the existing eval entrypoint.
@@ -63,8 +64,8 @@ import sys
 import threading
 import time
 
-from datasets import load_dataset
-from guarded_swe_env import GuardedSWEEnv
+import datasets
+from .guarded_swe_env import GuardedSWEEnv
 from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
@@ -72,8 +73,8 @@ from jax.sharding import Mesh
 from kubernetes import client
 from kubernetes import config as k8s_config
 import numpy as np
-from swe_agent import SWEAgent
-from swe_env import SWEEnv
+from .swe_agent import SWEAgent
+from .swe_env import SWEEnv
 from transformers import AutoTokenizer
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.qwen3 import model as model_lib
@@ -165,7 +166,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # ========================== Dataset ==========================
 
 logger.info("Loading dataset %s split=%s ...", DATASET_NAME, DATASET_SPLIT)
-dataset = load_dataset(
+dataset = datasets.load_dataset(
     DATASET_NAME,
     split=DATASET_SPLIT,
     cache_dir=DATASET_CACHE,
@@ -258,7 +259,7 @@ if ROLLOUT_ENGINE == "vanilla":
 
 elif ROLLOUT_ENGINE == "vllm":
   from tunix.generate import mappings
-  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler  # pytype: disable=import-error
 
   os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
@@ -295,7 +296,7 @@ elif ROLLOUT_ENGINE == "vllm":
 
 elif ROLLOUT_ENGINE == "sglang_jax":
   from tunix.generate import mappings
-  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
+  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler  # pytype: disable=import-error
 
   mapping_config = mappings.MappingConfig.build(
       mapping_obj=None,

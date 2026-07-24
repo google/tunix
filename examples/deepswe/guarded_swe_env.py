@@ -1,7 +1,7 @@
 """SWE environment wrapper with lightweight action guarding."""
 
-from action_guard import ActionGuard, GuardConfig
-from swe_env import SWEEnv
+from .action_guard import ActionGuard, GuardConfig
+from .swe_env import SWEEnv
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
 
