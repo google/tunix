@@ -25,10 +25,13 @@
 #     recipe (batch 64 on 64 chips) scaled by chip count; 128 episodes/step.
 #     All optimizer/algo hyperparams (LR 1e-6, rloo, gspo-token, eps .003/.005)
 #     stay at the script's converged defaults.
-#   memory: actor fp32 8GB + Adam 16GB + grads 8GB + ref bf16 4GB + vLLM(0.20)
-#     19GB + logits/activations ~10GB ~= 65GB/chip < 95GB.
-#   packing: single seq max = prompt 2048 + response 2048 = 4096; budget 16384
-#     -> ~4 seqs/row (same density as gsm8k at 8192).
+#   memory: actor fp32 8GB + Adam 16GB + grads 8GB + ref bf16 4GB + vLLM(0.3)
+#     28GB + logits/activations ~10GB ~= 74GB/chip < 95GB. (vLLM at the script
+#     default 0.20 OOMed at startup on 4 chips -> ROLLOUT_HBM defaults 0.3.)
+#   packing: single seq max = prompt 2048 + response 2048 = 4096; budget 8192
+#     -> ~2 seqs/row. NOTE micro counts PACKED ROWS: micro 4 x 8192 = 32k
+#     tokens/micro-step (2x the unpack arm); drop to MICRO=2 LOGPS=2 if the
+#     TRAIN side OOMs (that makes the per-micro token load equal to unpack).
 #   steps: MAX_STEPS -> --num_batches with --num_epochs 1 (the script computes
 #     max_steps = num_batches * epochs); 200 x batch16 = 3200 prompts <= the
 #     generated train set (10000).
@@ -39,6 +42,20 @@ TUNIX_DIR="${TUNIX_DIR:-$(dirname "$SCRIPT_DIR")}"
 
 # ---- knobs (same ENV interface as train_v5p_1host_pack.sh) ----------------
 ENGINE="${ROLLOUT_ENGINE:-vllm}"           # vllm | vanilla
+ROLLOUT_HBM="${ROLLOUT_HBM:-0.4}"          # vLLM HBM utilization. Colocated
+                                           # semantics: bounds TOTAL HBM incl.
+                                           # trainer-resident weights, so init
+                                           # needs >= (ref 4.1 + actor 8.2 +
+                                           # rollout weights 8.2 + ws)/95 ~=
+                                           # 0.25 -- 0.2 OOMs vLLM serving at
+                                           # startup. 0.4 leaves ~16GB KV and
+                                           # ~18GB trainer headroom; do NOT go
+                                           # to 0.6 (that flips the OOM to the
+                                           # trainer peak on 8B).
+LOGPS_CHUNK="${LOGPS_CHUNK:-2048}"         # chunked logp (0 = full logits).
+                                           # Full logits at LOGPS=4 are ~40GB
+                                           # /chip -> the inference-worker OOM;
+                                           # chunk 2048 caps them at ~0.6GB.
 MESH_FSDP="${MESH_FSDP:-2}"                # mesh (2,2) = 2 fsdp x 2 tp
 MESH_TP="${MESH_TP:-2}"
 BATCH="${BATCH:-16}"
@@ -191,6 +208,8 @@ python3 -X faulthandler -u examples/frozenlake/train_frozenlake_qwen3.py \
   --train_micro_batch_size "$MICRO" \
   --compute_logps_micro_batch_size "$LOGPS" \
   --num_generations "$NUM_GEN" \
+  --rollout_vllm_hbm_utilization "$ROLLOUT_HBM" \
+  --compute_logps_chunk_size "$LOGPS_CHUNK" \
   --num_batches "$MAX_STEPS" --num_epochs "$NUM_EPOCHS" \
   --run_name "$RUN_TAG" \
   "${pack_args[@]}" \

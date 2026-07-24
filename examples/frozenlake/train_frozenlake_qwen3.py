@@ -155,6 +155,19 @@ arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
 arg_parser.add_argument("--max_segments_per_packed_row", type=int, default=None)
 # wandb run name (e.g. cl3_frozenlake_pack) so pack/unpack arms are comparable.
 arg_parser.add_argument("--run_name", type=str, default="")
+# vLLM rollout HBM fraction. 0.20 fits the 64-chip swe-evaluation runs; on a
+# 4-chip host the rollout must also hold ~8GB/chip of Qwen3-8B weights inside
+# this budget, so bump it (e.g. 0.3) if vLLM OOMs at startup.
+arg_parser.add_argument(
+    "--rollout_vllm_hbm_utilization", type=float, default=0.20
+)
+# Chunked logp computation: materialize logits [chunk, vocab/TP] instead of
+# the full [tokens, vocab/TP] (0 = off). At compute_logps_micro_batch_size=4
+# (= 32 seqs x 4096 = 65.5k tokens/chip after fsdp) the full fp32 logits are
+# ~20GB (x2 with the log_softmax intermediate) and OOM the inference worker
+# on a 4-chip host; chunk 2048 caps that at ~0.6GB. Qwen3 supports the
+# required skip_lm_head / compute_final_logits (model.py).
+arg_parser.add_argument("--compute_logps_chunk_size", type=int, default=2048)
 # Profiler (off by default): set --profiler_log_dir to enable xprof.
 arg_parser.add_argument("--profiler_log_dir", type=str, default=None)
 arg_parser.add_argument("--profiler_skip_steps", type=int, default=5)
@@ -459,7 +472,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.20,
+    "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -517,6 +530,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # effective optimizer batch size or training dynamics.
         train_micro_batch_size=args.train_micro_batch_size,
         compute_logps_micro_batch_size=args.compute_logps_micro_batch_size,
+        compute_logps_chunk_size=args.compute_logps_chunk_size,
         # Sequence packing: None = OFF (the historical unpacked path).
         max_seq_token_per_tpu=MAX_SEQ_TOKEN_PER_TPU,
         max_segments_per_packed_row=MAX_SEGMENTS_PER_PACKED_ROW,

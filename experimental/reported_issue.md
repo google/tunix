@@ -563,6 +563,20 @@ gemma-style pinned-schedule traps. FrozenLake hyperparams are the CONVERGED swe-
 scaled by chip count: batch/mini 64->16, micro/logps 4 (unchanged), num_gen 8, all algo params
 (rloo, gspo-token, eps .003/.005) at script defaults; mesh (16,4)->(2,2).
 
+**OOM postmortem (Qwen3-8B, 4-chip) — TWO separate bombs, both fixed:**
+1. *vLLM serving OOM at startup (the one observed).* Colocated `hbm_utilization` bounds TOTAL
+   HBM including trainer-resident weights, so vLLM init needs >= (ref 4.1 + actor 8.2 + rollout
+   weights 8.2 + workspace)/95 ~= 0.25 — the script default 0.20 cannot even start. Fix:
+   `ROLLOUT_HBM=0.4` (wrapper default; ~16GB KV pool + ~18GB trainer headroom). Do NOT use 0.6
+   like the gemma yaml did — on 8B that flips the OOM to the trainer peak (~96GB > 95); 0.5 is
+   the ceiling. (The gemma4_e2b.yaml 0.6 bump itself is a no-op for this path — the qwen3
+   script does not read that yaml.)
+2. *Full-logits logp bomb (would hit next).* The script did not enable chunked logps: LOGPS=4
+   prompts = 32 seqs x 4096 = 65.5k tokens/chip (after fsdp2) x vocab/tp2 x fp32 ~= 20GB, x2
+   with the log_softmax intermediate ~= 40GB. Fix: `--compute_logps_chunk_size 2048` (wrapper
+   `LOGPS_CHUNK`, default 2048) — caps logits at ~0.6GB; algo_core consumes the same knob so
+   the TRAIN forward/backward is chunked too (both arms, no MICRO/LOGPS reduction needed).
+
 **FrozenLake first-run check (before trusting run C):** single-seq max is pinned at
 prompt 2048 + response 2048 = 4096, so budget 16384 = ~4 seqs/row by construction. Still check the
 SUMMARY's printed row count / accumulation depth: with a large budget the pack can collapse to

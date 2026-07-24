@@ -28,7 +28,7 @@ BRANCH="${BRANCH:-yuxzhang/refactor_loss_accum_ablation}"
 
 # Pass the inner train script's knobs through only when the caller set them.
 PASS_ENV=()
-for var in MAX_TOKEN_PER_TPU MAX_SEGMENTS_PER_ROW ROLLOUT_ENGINE \
+for var in MAX_TOKEN_PER_TPU MAX_SEGMENTS_PER_ROW ROLLOUT_ENGINE ROLLOUT_HBM LOGPS_CHUNK \
            MESH_FSDP MESH_TP \
            BATCH MINI MICRO LOGPS NUM_GEN MAX_STEPS NUM_EPOCHS RUN_TAG \
            ENABLE_PERF_V1 ENABLE_PERF_V2 PERF_TRACE_DIR \
