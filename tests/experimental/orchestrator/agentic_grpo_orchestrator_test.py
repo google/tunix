@@ -15,6 +15,7 @@
 """Tests for the AgenticGRPOOrchestrator seam routing."""
 
 import contextlib
+import types
 
 from absl.testing import absltest
 from tunix.experimental.orchestrator import agentic_grpo_orchestrator
@@ -53,6 +54,17 @@ class _FakeRolloutWorker:
     return "worker_output"
 
 
+class _FakeInferenceWorker:
+  """Records per_token_logps() calls."""
+
+  def __init__(self):
+    self.calls = []
+
+  def per_token_logps(self, **kwargs):
+    self.calls.append(kwargs)
+    return "worker_logps"
+
+
 class _FakePerf:
   all_devices = ()
 
@@ -68,6 +80,12 @@ class _FakeCluster:
     self.global_steps = 0
     self.synced = 0
     self.generate_calls = []
+    self.ref_calls = []
+    self.cluster_config = types.SimpleNamespace(
+        training_config=types.SimpleNamespace(
+            compute_logps_micro_batch_size=2
+        )
+    )
 
   def sync_weights(self):
     self.synced += 1
@@ -75,6 +93,10 @@ class _FakeCluster:
   def generate(self, **kwargs):
     self.generate_calls.append(kwargs)
     return "cluster_output"
+
+  def get_ref_per_token_logps(self, **kwargs):
+    self.ref_calls.append(kwargs)
+    return "ref_logps"
 
 
 class AgenticGRPOOrchestratorTest(absltest.TestCase):
@@ -166,6 +188,39 @@ class AgenticGRPOOrchestratorTest(absltest.TestCase):
     self.assertEqual(
         cluster.generate_calls[0]["mode"], rl_cluster_lib.Mode.TRAIN
     )
+
+  def test_ref_per_token_logps_routes_to_inference_worker(self):
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    worker = _FakeInferenceWorker()
+    orchestrator._inference_worker = worker
+
+    out = orchestrator._ref_per_token_logps("pids", "cids", 0, 1)
+
+    self.assertEqual(out, "worker_logps")
+    self.assertLen(worker.calls, 1)
+    self.assertEqual(worker.calls[0]["prompt_ids"], "pids")
+    self.assertEqual(worker.calls[0]["completion_ids"], "cids")
+    self.assertEqual(worker.calls[0]["pad_id"], 0)
+    self.assertEqual(worker.calls[0]["eos_id"], 1)
+
+  def test_ref_per_token_logps_falls_back_to_in_process_reference(self):
+    # With no handle, the seam reuses the inherited in-process reference role,
+    # deriving micro_batch_size from the cluster config as the base does.
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    orchestrator._inference_worker = None
+    cluster = _FakeCluster()
+    orchestrator.rl_cluster = cluster
+
+    out = orchestrator._ref_per_token_logps("pids", "cids", 0, 1)
+
+    self.assertEqual(out, "ref_logps")
+    self.assertLen(cluster.ref_calls, 1)
+    self.assertEqual(cluster.ref_calls[0]["prompt_tokens"], "pids")
+    self.assertEqual(cluster.ref_calls[0]["micro_batch_size"], 2)
 
 
 if __name__ == "__main__":

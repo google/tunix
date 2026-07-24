@@ -28,10 +28,16 @@ the in-process `RLCluster`:
   * `_generate` -> a rollout worker handle, reusing `_model_call`'s chat
     parsing, policy-version stamping, and trace tagging, plus the whole
     episode/env orchestration that surrounds each generation.
+  * `_ref_per_token_logps` -> an inference worker handle, reusing all of the
+    `_process_results` postprocess (padding, masking, advantage math) around it.
 
-Remaining seams (`_maybe_run_eval`/`_process_micro_batch`) are wired the same
-way in follow-up steps. Everything else -- reward/advantage math, TrainExample
-assembly, metrics, checkpointing -- is inherited unchanged.
+`_maybe_run_eval` needs no override: it builds an orchestrator that already
+routes generation through `_generate` and reference scoring through
+`_ref_per_token_logps`, and it never trains or syncs weights. Remaining worker
+boundaries inside the postprocess (actor per-token logps -> trainer worker,
+metric buffering -> a metrics pump, reward-fn evaluation) are wired the same way
+in follow-up steps. Everything else -- grouping, advantage math, TrainExample
+assembly, checkpointing -- is inherited unchanged.
 
 Handle contracts:
     trainer_worker.train(chunks: list, eval_ds, skip_jit: bool) -> None
@@ -39,6 +45,8 @@ Handle contracts:
     rollout_worker.generate(prompts, apply_chat_template: bool,
                             trace_tags: dict, max_generation_steps: int | None)
         -> base_rollout.RolloutOutput
+    inference_worker.per_token_logps(prompt_ids, completion_ids,
+                                     pad_id, eos_id) -> array
 """
 
 from typing import Any
@@ -55,6 +63,7 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
       trainer_worker: Any,
       weight_sync: Any = None,
       rollout_worker: Any = None,
+      inference_worker: Any = None,
       **kwargs,
   ):
     """Initializes the orchestrator.
@@ -67,6 +76,9 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
         during incremental bring-up).
       rollout_worker: Optional handle exposing `generate(...)`; drives per-turn
         generation. If None, generation falls back to the in-process cluster.
+      inference_worker: Optional handle exposing `per_token_logps(...)`; computes
+        reference-model scores. If None, scoring falls back to the in-process
+        reference role.
       **kwargs: Forwarded to `GRPOLearner.__init__` (rl_cluster, algo_config,
         reward_fns, ...). The in-process cluster still backs the not-yet-routed
         stages (metrics, step counter) during incremental bring-up.
@@ -75,6 +87,7 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
     self._trainer_worker = trainer_worker
     self._weight_sync = weight_sync
     self._rollout_worker = rollout_worker
+    self._inference_worker = inference_worker
 
   def _train_micro_batch(self, chunks, eval_ds, skip_jit) -> None:
     """Routes the trainer pass to the trainer worker (reused loop calls this)."""
@@ -100,4 +113,19 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
       )
     return super()._generate(
         prompts, apply_chat_template, trace_tags, max_generation_steps
+    )
+
+  def _ref_per_token_logps(
+      self, prompt_ids, completion_ids, pad_value, eos_value
+  ):
+    """Routes reference scoring to the inference worker (postprocess reused)."""
+    if self._inference_worker is not None:
+      return self._inference_worker.per_token_logps(
+          prompt_ids=prompt_ids,
+          completion_ids=completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+      )
+    return super()._ref_per_token_logps(
+        prompt_ids, completion_ids, pad_value, eos_value
     )
