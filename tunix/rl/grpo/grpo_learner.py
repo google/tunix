@@ -228,6 +228,23 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
 
+    # === GRPO FIX: validate grouping ===
+    if self._rollout_micro_batch_size < self.algo_config.num_generations:
+      raise ValueError(
+        f"GRPO requires rollout_micro_batch_size >= num_generations. "
+        f"Got rollout_micro_batch_size={self._rollout_micro_batch_size}, "
+        f"num_generations={self.algo_config.num_generations}. "
+        f"Increase train_micro_batch_size or reduce num_generations."
+      )
+
+    if self._compute_logps_micro_batch_size < self.algo_config.num_generations:
+      raise ValueError(
+        f"GRPO requires compute_logps_micro_batch_size >= num_generations. "
+        f"Got compute_logps_micro_batch_size={self._compute_logps_micro_batch_size}, "
+        f"num_generations={self.algo_config.num_generations}. "
+        f"Increase compute_logps_micro_batch_size or reduce num_generations."
+      )
+    # ==================================
     # TODO (noghabi): Add mini batch and micro batch tags
     perf_tags = {
         perf_constants.STEP: self.rl_cluster.global_steps,
