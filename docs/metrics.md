@@ -210,6 +210,90 @@ depends on the execution environment.
     *   `log_dir`: Directory where event files are written.
     *   `flush_every_n_steps`: Frequency of flushing logs to disk (default: 100).
 
+### Experimental: OpenTelemetry double-write
+
+Tunix is evaluating [OpenTelemetry](https://opentelemetry.io/) as a
+vendor-neutral instrumentation layer. As an opt-in first step, `MetricsLogger`
+supports a **double-write** mode: every scalar passed to `log()` is emitted
+both through the existing Metrax/`jax.monitoring` backends (unchanged, still
+the default) and as an OpenTelemetry gauge measurement. This lets you compare
+the two pipelines side by side before any switch is made.
+
+Enable it with the `enable_opentelemetry` flag (requires
+`pip install 'google-tunix[otel]'`):
+
+```python
+# OTLP exporter: pip install opentelemetry-exporter-otlp
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+    OTLPMetricExporter,
+)
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from tunix.sft import metrics_logger
+
+reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+provider = MeterProvider(metric_readers=[reader])
+
+options = metrics_logger.MetricsLoggerOptions(
+    log_dir="/tmp/logs",          # Existing backends keep working unchanged.
+    enable_opentelemetry=True,    # Additionally emit OpenTelemetry gauges.
+)
+logger = metrics_logger.MetricsLogger(options, otel_meter_provider=provider)
+```
+
+Key properties of the double-write path:
+
+*   **Off by default.** With the flag unset, behavior is identical to previous
+    releases; the OpenTelemetry API does not even need to be installed.
+*   **Application-owned providers.** Tunix never configures exporters or shuts
+    down providers. Configure the global `MeterProvider` (or inject one via the
+    keyword-only `otel_meter_provider` argument) and own its flush/shutdown.
+    `MetricsLogger.close()` only closes the Metrax backends.
+*   **Process policy.** Like the Metrax backends, only JAX process 0 emits.
+*   **Naming.** Known metrics map to stable instrument names
+    (`loss` → `tunix.training.loss`, `perplexity` →
+    `tunix.training.perplexity`, `learning_rate` →
+    `tunix.training.learning_rate`, `grad_norm` →
+    `tunix.training.gradient.norm`); other metric keys are normalized into the
+    `tunix.*` namespace (e.g. `rewards/score mean` →
+    `tunix.rewards.score.mean`). The legacy prefix and mode become the
+    low-cardinality attributes `tunix.metrics.prefix` and
+    `tunix.training.mode`, and the logical step is emitted as a separate
+    `tunix.training.step` gauge.
+
+#### OpenTelemetry → Weights & Biases
+
+W&B ingests OpenTelemetry traces natively (via the
+[Weave OTLP endpoint](https://docs.wandb.ai/weave/guides/tracking/otel)), but
+has no OTLP endpoint for run metrics. Tunix therefore ships
+`tunix.sft.otel_wandb.WandbMetricsExporter`, an OpenTelemetry SDK metric
+exporter that forwards the gauges above to `wandb.log`, using the familiar
+`{prefix}/{mode}/{name}` chart keys (e.g. `actor/train/tunix.training.loss`)
+and the `tunix.training.step` gauge as the W&B step:
+
+```python
+import wandb
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from tunix.sft import metrics_logger
+from tunix.sft import otel_wandb
+
+run = wandb.init(project="my-project")
+reader = PeriodicExportingMetricReader(
+    otel_wandb.WandbMetricsExporter(run), export_interval_millis=10_000
+)
+provider = MeterProvider(metric_readers=[reader])
+
+options = metrics_logger.MetricsLoggerOptions(
+    log_dir="/tmp/logs",
+    enable_opentelemetry=True,
+)
+logger = metrics_logger.MetricsLogger(options, otel_meter_provider=provider)
+```
+
+Because the Metrax `WandbBackend` also remains active by default, you can point
+both pipelines at the same W&B project and compare the charts directly.
+
 ### Custom metric logger
 
 You can integrate any logging service by creating a custom backend that conforms
