@@ -18,6 +18,7 @@ import contextlib
 
 from absl.testing import absltest
 from tunix.experimental.orchestrator import agentic_grpo_orchestrator
+from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic import agentic_grpo_learner
 
 
@@ -41,6 +42,17 @@ class _FakeWeightSync:
     self.syncs += 1
 
 
+class _FakeRolloutWorker:
+  """Records generate() calls."""
+
+  def __init__(self):
+    self.calls = []
+
+  def generate(self, **kwargs):
+    self.calls.append(kwargs)
+    return "worker_output"
+
+
 class _FakePerf:
   all_devices = ()
 
@@ -49,15 +61,20 @@ class _FakePerf:
 
 
 class _FakeCluster:
-  """Minimal cluster exercising the in-process weight-sync fallback."""
+  """Minimal cluster exercising the in-process fallback paths."""
 
   def __init__(self):
     self.perf_v2 = _FakePerf()
     self.global_steps = 0
     self.synced = 0
+    self.generate_calls = []
 
   def sync_weights(self):
     self.synced += 1
+
+  def generate(self, **kwargs):
+    self.generate_calls.append(kwargs)
+    return "cluster_output"
 
 
 class AgenticGRPOOrchestratorTest(absltest.TestCase):
@@ -107,6 +124,48 @@ class AgenticGRPOOrchestratorTest(absltest.TestCase):
     orchestrator._sync_weights()
 
     self.assertEqual(cluster.synced, 1)
+
+  def test_generate_routes_to_rollout_worker(self):
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    worker = _FakeRolloutWorker()
+    orchestrator._rollout_worker = worker
+
+    out = orchestrator._generate(
+        prompts=["p0"],
+        apply_chat_template=True,
+        trace_tags={"group_id": 1},
+        max_generation_steps=None,
+    )
+
+    self.assertEqual(out, "worker_output")
+    self.assertLen(worker.calls, 1)
+    self.assertEqual(worker.calls[0]["prompts"], ["p0"])
+    self.assertTrue(worker.calls[0]["apply_chat_template"])
+
+  def test_generate_falls_back_to_in_process_cluster(self):
+    # With no handle, the seam reuses the inherited in-process generate path
+    # (always TRAIN mode, as in the base learner).
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    orchestrator._rollout_worker = None
+    cluster = _FakeCluster()
+    orchestrator.rl_cluster = cluster
+
+    out = orchestrator._generate(
+        prompts=["p0"],
+        apply_chat_template=True,
+        trace_tags={},
+        max_generation_steps=3,
+    )
+
+    self.assertEqual(out, "cluster_output")
+    self.assertLen(cluster.generate_calls, 1)
+    self.assertEqual(
+        cluster.generate_calls[0]["mode"], rl_cluster_lib.Mode.TRAIN
+    )
 
 
 if __name__ == "__main__":

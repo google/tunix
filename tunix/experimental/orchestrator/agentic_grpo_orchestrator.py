@@ -25,15 +25,20 @@ the in-process `RLCluster`:
     `peft_trainer`'s grad-accumulating `train`; a remote one is an RPC stub).
   * `_sync_weights` -> a weight-sync handle, reusing the base's fence,
     step-advance, and prompt-feed around it.
+  * `_generate` -> a rollout worker handle, reusing `_model_call`'s chat
+    parsing, policy-version stamping, and trace tagging, plus the whole
+    episode/env orchestration that surrounds each generation.
 
-Remaining seams (`_model_call` -> rollout workers, `_maybe_run_eval`/
-`_process_micro_batch`) are wired the same way in follow-up steps. Everything
-else -- reward/advantage math, TrainExample assembly, metrics, checkpointing --
-is inherited unchanged.
+Remaining seams (`_maybe_run_eval`/`_process_micro_batch`) are wired the same
+way in follow-up steps. Everything else -- reward/advantage math, TrainExample
+assembly, metrics, checkpointing -- is inherited unchanged.
 
 Handle contracts:
     trainer_worker.train(chunks: list, eval_ds, skip_jit: bool) -> None
     weight_sync.sync() -> None
+    rollout_worker.generate(prompts, apply_chat_template: bool,
+                            trace_tags: dict, max_generation_steps: int | None)
+        -> base_rollout.RolloutOutput
 """
 
 from typing import Any
@@ -45,7 +50,12 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
   """GRPOLearner whose divergent seams are routed to role-based workers."""
 
   def __init__(
-      self, *, trainer_worker: Any, weight_sync: Any = None, **kwargs
+      self,
+      *,
+      trainer_worker: Any,
+      weight_sync: Any = None,
+      rollout_worker: Any = None,
+      **kwargs,
   ):
     """Initializes the orchestrator.
 
@@ -55,13 +65,16 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
       weight_sync: Optional handle exposing `sync()`; drives the weight sync via
         workers. If None, the sync falls back to the in-process cluster (useful
         during incremental bring-up).
+      rollout_worker: Optional handle exposing `generate(...)`; drives per-turn
+        generation. If None, generation falls back to the in-process cluster.
       **kwargs: Forwarded to `GRPOLearner.__init__` (rl_cluster, algo_config,
         reward_fns, ...). The in-process cluster still backs the not-yet-routed
-        stages (metrics, step counter, generation) during incremental bring-up.
+        stages (metrics, step counter) during incremental bring-up.
     """
     super().__init__(**kwargs)
     self._trainer_worker = trainer_worker
     self._weight_sync = weight_sync
+    self._rollout_worker = rollout_worker
 
   def _train_micro_batch(self, chunks, eval_ds, skip_jit) -> None:
     """Routes the trainer pass to the trainer worker (reused loop calls this)."""
@@ -73,3 +86,18 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
       self._weight_sync.sync()
     else:
       super()._sync_weights()
+
+  def _generate(
+      self, prompts, apply_chat_template, trace_tags, max_generation_steps
+  ):
+    """Routes one generation to the rollout worker (episode/env logic reused)."""
+    if self._rollout_worker is not None:
+      return self._rollout_worker.generate(
+          prompts=prompts,
+          apply_chat_template=apply_chat_template,
+          trace_tags=trace_tags,
+          max_generation_steps=max_generation_steps,
+      )
+    return super()._generate(
+        prompts, apply_chat_template, trace_tags, max_generation_steps
+    )
