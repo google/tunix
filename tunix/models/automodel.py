@@ -18,6 +18,7 @@ import enum
 import gc
 import importlib
 import os
+from pathlib import Path
 import shutil
 from typing import Any
 
@@ -30,6 +31,15 @@ from tunix.models import maxtext_parallelism
 from tunix.models import naming
 
 _BASE_MODULE_PATH = 'tunix.models'  # pylint: disable=invalid-name
+
+
+def _maxtext_base_config_path(pyconfig_module: Any) -> str:
+  """Finds base.yml next to the imported MaxText pyconfig module."""
+  module_file = getattr(pyconfig_module, '__file__', None)
+  if module_file is None:
+    # Some internal loaders and unit-test module shims do not expose __file__.
+    return 'src/maxtext/configs/base.yml'
+  return str(Path(module_file).resolve().with_name('base.yml'))
 
 
 class ModelModule(enum.Enum):
@@ -508,7 +518,7 @@ class AutoModel:
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       argv = [
           '',
-          'src/maxtext/configs/base.yml',
+          _maxtext_base_config_path(pyconfig),
           f'model_name={naming_info.model_name}',
       ]
 

@@ -252,6 +252,7 @@ class AutoModelTest(parameterized.TestCase):
     m_pyconfig.initialize = mock.MagicMock(return_value=mock_config)
     m_creation.from_pretrained = mock.MagicMock()
     m_types.MaxTextConfig = MockMaxTextConfig
+    m_pyconfig.__file__ = "/opt/maxtext/configs/pyconfig.py"
     m_configs.pyconfig = m_pyconfig
     m_configs.types = m_types
     m_utils.model_creation_utils = m_creation
@@ -277,6 +278,7 @@ class AutoModelTest(parameterized.TestCase):
       )
 
     called_argv = m_pyconfig.initialize.call_args[0][0]
+    self.assertEqual(called_argv[1], "/opt/maxtext/configs/base.yml")
     self.assertIn("ici_pipeline_parallelism=2", called_argv)
     self.assertIn("ici_tensor_parallelism=4", called_argv)
     self.assertIn("num_layers_per_pipeline_stage=18", called_argv)
