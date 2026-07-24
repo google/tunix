@@ -41,7 +41,11 @@ print("Logging configured at INFO level.")
 from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
 from tunix.oss import utils as oss_utils
+from tunix.perf import export as perf_export
+from tunix.perf import metrics as perf_metrics
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.sft import metrics_logger
+from tunix.sft import profiler as profiler_lib
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -136,16 +140,45 @@ arg_parser.add_argument(
     "--advantage_estimator", type=str, default="rloo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
+arg_parser.add_argument("--num_epochs", type=int, default=3)
+# Mesh (fsdp, tp). mesh_tp=0 means "all remaining devices" -> the historical
+# pure-TP default (1, device_count). Set e.g. --mesh_fsdp 2 --mesh_tp 2 for a
+# (2,2) mesh; the vLLM rollout's dp/tp follow the mesh automatically below.
+arg_parser.add_argument("--mesh_fsdp", type=int, default=1)
+arg_parser.add_argument("--mesh_tp", type=int, default=0)
+# Memory-shaping micro-batches (see RLTrainingConfig comment below).
+arg_parser.add_argument("--train_micro_batch_size", type=int, default=4)
+arg_parser.add_argument("--compute_logps_micro_batch_size", type=int, default=4)
+# Sequence packing (None = OFF). Budget tokens per packed row; the segment cap
+# defaults to the budget-derived safe bound when unset.
+arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
+arg_parser.add_argument("--max_segments_per_packed_row", type=int, default=None)
+# wandb run name (e.g. cl3_frozenlake_pack) so pack/unpack arms are comparable.
+arg_parser.add_argument("--run_name", type=str, default="")
+# Profiler (off by default): set --profiler_log_dir to enable xprof.
+arg_parser.add_argument("--profiler_log_dir", type=str, default=None)
+arg_parser.add_argument("--profiler_skip_steps", type=int, default=5)
+arg_parser.add_argument("--profiler_steps", type=int, default=3)
+# RL perf tracing: v1 feeds aggregate span metrics into the metrics stream;
+# v2 writes a Perfetto trace to --perf_trace_dir (ui.perfetto.dev).
+arg_parser.add_argument("--enable_perf_v1", action="store_true")
+arg_parser.add_argument("--enable_perf_v2", action="store_true")
+arg_parser.add_argument("--perf_trace_dir", type=str, default=None)
 args, _ = arg_parser.parse_known_args()
 
 TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-# Single shared mesh across actor / reference / rollout. Pure tensor-parallel
-# (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
-# fsdp axis.
-SHARED_MESH_SHAPE = (1, jax.device_count())
+# Single shared mesh across actor / reference / rollout. Default is pure
+# tensor-parallel (fsdp=1) so the VANILLA sampler's batch=1 prefill is not
+# split across an fsdp axis; with the vLLM engine fsdp>1 is fine (rollout
+# parallelism follows the mesh via tensor/data_parallel_size below) and gives
+# pack_size = fsdp for sequence packing.
+SHARED_MESH_SHAPE = (
+    args.mesh_fsdp,
+    args.mesh_tp or jax.device_count() // args.mesh_fsdp,
+)
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
@@ -187,14 +220,27 @@ MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
 # Held-out eval pool size in batches. The frozenlake test set ships with 100
 # prompts; NUM_TEST_BATCHES * BATCH_SIZE should be >= 100 to cover one full
-# pass per eval. With the default BATCH_SIZE=64, NUM_TEST_BATCHES=2 is
-# sufficient. Eval wall-time scales linearly with NUM_TEST_BATCHES *
-# BATCH_SIZE * num_generations.
-NUM_TEST_BATCHES = 2
+# pass per eval (ceil keeps that true for any batch size; equals the old
+# hardcoded 2 at the default BATCH_SIZE=64). Eval wall-time scales linearly
+# with NUM_TEST_BATCHES * BATCH_SIZE * num_generations.
+NUM_TEST_BATCHES = -(-100 // BATCH_SIZE)
 
 EVAL_EVERY_N_STEPS = 10
-NUM_EPOCHS = 3
+NUM_EPOCHS = args.num_epochs
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+
+# ====== Sequence packing + profiling ======
+MAX_SEQ_TOKEN_PER_TPU = args.max_seq_token_per_tpu
+MAX_SEGMENTS_PER_PACKED_ROW = args.max_segments_per_packed_row
+PROFILER_OPTIONS = (
+    profiler_lib.ProfilerOptions(
+        log_dir=args.profiler_log_dir,
+        skip_first_n_steps=args.profiler_skip_steps,
+        profiler_steps=args.profiler_steps,
+    )
+    if args.profiler_log_dir
+    else None
+)
 
 MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
@@ -374,6 +420,7 @@ wandb_config.update({
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=TB_LOG_DIR,
     project_name="tunix-frozenlake",
+    run_name=args.run_name,
     flush_every_n_steps=1,
     backend_kwargs={"wandb": {"config": wandb_config}},
 )
@@ -468,8 +515,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # dominant allocation on small TPU slices) at the cost of more
         # micro-step launches per optimizer update. It does NOT change the
         # effective optimizer batch size or training dynamics.
-        train_micro_batch_size=4,
-        compute_logps_micro_batch_size=4,
+        train_micro_batch_size=args.train_micro_batch_size,
+        compute_logps_micro_batch_size=args.compute_logps_micro_batch_size,
+        # Sequence packing: None = OFF (the historical unpacked path).
+        max_seq_token_per_tpu=MAX_SEQ_TOKEN_PER_TPU,
+        max_segments_per_packed_row=MAX_SEGMENTS_PER_PACKED_ROW,
+        profiler_options=PROFILER_OPTIONS,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -502,11 +553,32 @@ grpo_config = GRPOConfig(
     advantage_estimator=args.advantage_estimator,
 )
 
+# Lightweight RL perf tracing over the whole run (complements the short xprof
+# window). v1 feeds aggregate span metrics into the metrics stream; v2 writes
+# a Perfetto trace to --perf_trace_dir for ui.perfetto.dev.
+perf_config = (
+    perf_metrics.PerfMetricsConfig()
+    if (args.enable_perf_v1 or args.enable_perf_v2)
+    else None
+)
+if args.enable_perf_v1:
+  perf_config.custom_export_fn = (
+      perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+  )
+if args.enable_perf_v2:
+  perf_config.custom_export_fn_v2 = (
+      perf_export_v2.PerfMetricsExport.from_cluster_config(
+          cluster_config=cluster_config,
+          trace_dir=args.perf_trace_dir,
+      ).export_metrics
+  )
+
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen_actor,
     reference=qwen_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_config,
 )
 show_hbm_usage("after RLCluster creation")
 

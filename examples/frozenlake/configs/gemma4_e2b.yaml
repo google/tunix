@@ -71,12 +71,6 @@ num_train_epochs: 1
 rl_training_config:
   mini_batch_size: 64
   train_micro_batch_size: 2
-  # Sequence-packing token budget per TPU row. null = packing OFF (unpacked).
-  # Override to e.g. 16384 to pack (single FrozenLake seq ~4096 -> ~4 seqs/row).
-  max_seq_token_per_tpu: null
-  # Static cap on segments per packed row (loss num_segments buckets).
-  # null -> derived from max_seq_token_per_tpu (safe budget-sized bound).
-  max_segments_per_packed_row: null
   actor_optimizer_config:
     opt_type: "adamw"
     peak_value: 1e-6

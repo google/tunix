@@ -511,8 +511,10 @@ consolidated `packing/dummy_ratio`) is integrated into `yuxzhang/refactor_loss_a
 (commit `de4cf2cb`). refactor is now the CL1+CL2+CL3 "final trace" version. We validate that
 turning packing ON is convergence-neutral (the segment-aware loss is correct) on **two recipes**:
 - **gsm8k** — Qwen3-1.7B, `examples/math_gsm8k/qwen3_grpo_demo.py`, mesh 4x1, budget 8192.
-- **FrozenLake** — Gemma4-E2B, `grpo_main` CLI + `examples/frozenlake/configs/gemma4_e2b.yaml`,
-  agentic, mesh 2x2, vLLM colocated dp2 tp2, budget 16384.
+- **FrozenLake** — **Qwen3-8B**, `examples/frozenlake/train_frozenlake_qwen3.py` (the recipe with
+  ESTABLISHED convergence from the swe-evaluation runs; held-out `rewards/solve_ratio` climbs),
+  agentic multi-turn, mesh 2x2 (vLLM dp/tp follow the mesh), budget 16384. The earlier
+  Gemma4-E2B CLI plan was ABANDONED — no convergence evidence for E2B on this task.
 
 **BUG FIXED FIRST (blocks any e2e packing run):** CL3's plumbing reads
 `self._training_config.max_segments_per_packed_row` (rl_learner.py, agentic_rl_learner.py) but
@@ -521,8 +523,8 @@ so packing crashed with `AttributeError` the moment it ran through the learner (
 tests call `pack_sequences(...)` directly). Fixed by adding
 `max_segments_per_packed_row: int | None = None` to `peft_trainer.TrainingConfig` (default None
 -> budget-derived `num_segments = max_seq_token_per_tpu + 1`, the safe bound). Exposed as an
-override: `MAX_SEGMENTS_PER_ROW=N` (both wrappers), `--max_segments_per_packed_row N` (gsm8k demo),
-`rl_training_config.max_segments_per_packed_row=N` (FrozenLake CLI). Leave unset for the default.
+override: `MAX_SEGMENTS_PER_ROW=N` (both wrappers) / `--max_segments_per_packed_row N` (both
+scripts). Leave unset for the default.
 
 **Wrappers (one run each yields wandb convergence + full-run Perfetto + a short xprof window):**
 - gsm8k: `experimental/train_v5p_1host_docker.sh` (runs `train_v5p_1host_pack.sh`).
@@ -541,7 +543,7 @@ RUN_TAG=cl3_gsm8k_pack \
 MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_gsm8k_unpack_stream \
   bash experimental/train_v5p_1host_docker.sh
 
-# ---- FrozenLake (Gemma4-E2B) ----
+# ---- FrozenLake (Qwen3-8B) ----
 # C) packed
 RUN_TAG=cl3_frozenlake_pack \
   bash experimental/train_frozenlake_v5p_1host_docker.sh
@@ -552,30 +554,28 @@ MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_frozenlake_unpack \
 Do NOT use `train_v5p_1host_unpack_optax.sh` for parity — that is unpack+optax (mean-of-means), a
 different accumulation, meant for the separate end-to-end PERF comparison (pack+stream vs baseline).
 
-**max_steps semantics (two different knobs, don't confuse):** `env_kwargs.max_steps=8` is the
-FrozenLake episode length (multi-turn env steps, untouched); `rl_training_config.max_steps` is
-TRAINING updates (peft_trainer.py:359 "# of times model has been updated"). The CLI clamps
-`max_steps <= num_batches * num_train_epochs * train_fraction` and RAISES if exceeded
-(base_rl_pipeline.py:663) — the gemma yaml pins `num_batches=5`, so the FrozenLake wrapper also
-overrides `num_batches` (default = MAX_STEPS, since batch==mini -> 1 update/batch). If you set
-MAX_STEPS yourself, NUM_BATCHES follows automatically; override NUM_BATCHES only for epochs>1
-setups. NOTE the original `run_gemma4_e2b.sh` recipe is a 5-STEP SMOKE config (num_batches=5,
-max_steps=5, decay_steps=9) — never a convergence recipe. The wrapper lifts all three: the
-pinned `decay_steps: 9` would otherwise survive the CLI's auto-scaling (it only fills UNSET
-values) and drive LR to ~0 by step ~9, flat-lining the remaining ~190 steps; the wrapper ties
-`actor_optimizer_config.decay_steps` to MAX_STEPS (warmup auto-fills to 0.1*MAX_STEPS).
+**max_steps semantics (two different knobs, don't confuse):** the script's
+`env_kwargs={"max_steps": 8}` is the FrozenLake episode length (multi-turn env steps, untouched);
+training length is `max_steps = num_batches * num_epochs` computed by the script. The wrapper maps
+`MAX_STEPS` -> `--num_batches` with `--num_epochs 1` (200 x batch16 = 3200 prompts <= the
+generated 10000-prompt train set). LR is a constant 1e-6 (plain adamw, no schedule) — none of the
+gemma-style pinned-schedule traps. FrozenLake hyperparams are the CONVERGED swe-evaluation recipe
+scaled by chip count: batch/mini 64->16, micro/logps 4 (unchanged), num_gen 8, all algo params
+(rloo, gspo-token, eps .003/.005) at script defaults; mesh (16,4)->(2,2).
 
-**FrozenLake first-run check (before trusting run C):** the FrozenLake single-seq max is
-`max_prompt_length + max_response_length`; `max_response_length` is not pinned in the yaml. The
-run SUMMARY prints the real prompt/completion max length + the packed row count. Confirm the
-budget (16384) >= the longest single sequence; if the real single seq is ~8k, bump to 32768
-(`MAX_TOKEN_PER_TPU=32768`). Also note the printed row count / accumulation depth: with a large
-budget the pack can collapse to depth-1 (depth-1 fast path) instead of depth>1 (accumulation
-path) — do not assume; gsm8k (short seqs) exercises depth>1, FrozenLake may exercise depth-1.
+**FrozenLake first-run check (before trusting run C):** single-seq max is pinned at
+prompt 2048 + response 2048 = 4096, so budget 16384 = ~4 seqs/row by construction. Still check the
+SUMMARY's printed row count / accumulation depth: with a large budget the pack can collapse to
+depth-1 (depth-1 fast path) instead of depth>1 (accumulation path) — do not assume; gsm8k (short
+seqs) exercises depth>1, FrozenLake may exercise depth-1. mesh (2,2) -> pack_size = fsdp = 2
+(chunks are [2, 16384]). Also confirm in the log that vLLM came up as dp2 tp2 (it derives both
+from the mesh).
 
 **Success criteria per recipe (compare in wandb / the SUMMARY):**
 - `loss` and `reward` curves of pack vs unpack overlap within noise -> segment-aware loss is
   correct (packing convergence-neutral). Tight tracking, not just "similar trend".
+- FrozenLake: eval `rewards/solve_ratio` (every 10 steps, held-out test set) CLIMBS in both arms
+  and tracks between them — this is the recipe's established convergence signal.
 - `reduced_pg_loss` (mean-of-means, history-comparable probe) matches between the two arms.
 - `packing/dummy_ratio` << 1 in the packed arm (efficient packing); absent in unpack.
 - No NaN / divergence in any of the four.
@@ -583,4 +583,5 @@ path) — do not assume; gsm8k (short seqs) exercises depth>1, FrozenLake may ex
   (`gs://yuxzhang-tunix-models/xprof/<RUN_TAG>`) captured for free -> ui.perfetto.dev.
 
 **Prereqs:** `gcloud auth configure-docker europe-west4-docker.pkg.dev` one-time; `/mnt/workspace`
-mounted (HF model cache). gsm8k default mesh 4x1; FrozenLake default mesh 2x2 + vLLM dp2 tp2.
+mounted (HF model cache; Qwen/Qwen3-8B is ~16GB of safetensors and is NOT license-gated). gsm8k
+default mesh 4x1; FrozenLake default mesh 2x2 (vLLM dp2 tp2 derived from the mesh).

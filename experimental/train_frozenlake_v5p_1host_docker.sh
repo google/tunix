@@ -4,8 +4,9 @@
 # container on a TPU VM. The FrozenLake analogue of train_v5p_1host_docker.sh
 # (which launches the gsm8k train_v5p_1host_pack.sh).
 #
-# One run yields convergence (wandb loss/reward) + a full-run Perfetto trace +
-# a short xprof kernel window, for Gemma4-E2B via the grpo_main CLI.
+# One run yields convergence (wandb loss/reward + eval solve_ratio) + a
+# full-run Perfetto trace + a short xprof kernel window, for Qwen3-8B via
+# examples/frozenlake/train_frozenlake_qwen3.py (the converged recipe).
 #
 # Usage on the TPU VM (docker preinstalled):
 #   # packed (segment-aware CL3 + weighted stream)
@@ -27,9 +28,9 @@ BRANCH="${BRANCH:-yuxzhang/refactor_loss_accum_ablation}"
 
 # Pass the inner train script's knobs through only when the caller set them.
 PASS_ENV=()
-for var in MAX_TOKEN_PER_TPU MAX_SEGMENTS_PER_ROW ROLLOUT_ENGINE ROLLOUT_HBM \
-           MESH_FSDP MESH_TP VLLM_DP VLLM_TP \
-           BATCH MINI MICRO NUM_GEN MAX_STEPS NUM_BATCHES RUN_TAG \
+for var in MAX_TOKEN_PER_TPU MAX_SEGMENTS_PER_ROW ROLLOUT_ENGINE \
+           MESH_FSDP MESH_TP \
+           BATCH MINI MICRO LOGPS NUM_GEN MAX_STEPS NUM_EPOCHS RUN_TAG \
            ENABLE_PERF_V1 ENABLE_PERF_V2 PERF_TRACE_DIR \
            TRACE_DEST PROFILER_SKIP PROFILER_STEPS LOG_DIR \
            HF_TOKEN HF_HOME WANDB_MODE WANDB_API_KEY; do
