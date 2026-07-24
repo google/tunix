@@ -552,6 +552,15 @@ MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_frozenlake_unpack \
 Do NOT use `train_v5p_1host_unpack_optax.sh` for parity — that is unpack+optax (mean-of-means), a
 different accumulation, meant for the separate end-to-end PERF comparison (pack+stream vs baseline).
 
+**max_steps semantics (two different knobs, don't confuse):** `env_kwargs.max_steps=8` is the
+FrozenLake episode length (multi-turn env steps, untouched); `rl_training_config.max_steps` is
+TRAINING updates (peft_trainer.py:359 "# of times model has been updated"). The CLI clamps
+`max_steps <= num_batches * num_train_epochs * train_fraction` and RAISES if exceeded
+(base_rl_pipeline.py:663) — the gemma yaml pins `num_batches=5`, so the FrozenLake wrapper also
+overrides `num_batches` (default = MAX_STEPS, since batch==mini -> 1 update/batch). If you set
+MAX_STEPS yourself, NUM_BATCHES follows automatically; override NUM_BATCHES only for epochs>1
+setups.
+
 **FrozenLake first-run check (before trusting run C):** the FrozenLake single-seq max is
 `max_prompt_length + max_response_length`; `max_response_length` is not pinned in the yaml. The
 run SUMMARY prints the real prompt/completion max length + the packed row count. Confirm the

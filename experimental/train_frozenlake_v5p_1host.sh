@@ -56,7 +56,13 @@ MICRO="${MICRO:-2}"
 NUM_GEN="${NUM_GEN:-8}"                     # RLOO baseline samples (keep 8)
 MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-16384}"   # packing budget; 0 = DISABLE
 MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # segment/row cap (loss num_segments); empty = None = budget-derived
-MAX_STEPS="${MAX_STEPS:-200}"              # REAL run length
+MAX_STEPS="${MAX_STEPS:-200}"              # REAL run length (training UPDATES;
+                                           # env multi-turn steps is env_kwargs.
+                                           # max_steps=8, untouched)
+# The CLI clamps max_steps <= num_batches * num_train_epochs * train_fraction
+# (base_rl_pipeline.py:663, raises if exceeded). gemma yaml pins num_batches=5,
+# so we must lift it: with batch==mini (1 update/batch) num_batches = MAX_STEPS.
+NUM_BATCHES="${NUM_BATCHES:-$MAX_STEPS}"
 LOG_DIR="${LOG_DIR:-/tmp/train_frozenlake_logs}"
 RUN_TAG="${RUN_TAG:-frozenlake_v5p_pack}"
 
@@ -86,6 +92,7 @@ overrides=(
   "$BASE_CONFIG"
   "override_config_file=$OVERRIDE_CONFIG"
   "batch_size=$BATCH"
+  "num_batches=$NUM_BATCHES"
   "model_config.mesh.shape=($MESH_FSDP,$MESH_TP)"
   "actor_model_config.mesh.shape=($MESH_FSDP,$MESH_TP)"
   "vllm_config.data_parallel_size=$VLLM_DP"
