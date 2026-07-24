@@ -29,7 +29,7 @@ class MaxTextPipelineConfigTest(parameterized.TestCase):
           tensor_parallelism=4,
           layers_per_stage=18,
           microbatches=4,
-          expected_shapes=(1, 1, 2, 1, 1, 1, 1, 4, 1, 1, 1),
+          expected_shapes=(1, 1, 2, 1, 1, 1, 1, 4, 1, 1, 1, 1),
       ),
       dict(
           testcase_name="pp4_tp2_qwen3_8b",
@@ -37,7 +37,7 @@ class MaxTextPipelineConfigTest(parameterized.TestCase):
           tensor_parallelism=2,
           layers_per_stage=9,
           microbatches=8,
-          expected_shapes=(1, 1, 4, 1, 1, 1, 1, 2, 1, 1, 1),
+          expected_shapes=(1, 1, 4, 1, 1, 1, 1, 2, 1, 1, 1, 1),
       ),
   )
   def test_hybrid_layout(
@@ -67,6 +67,25 @@ class MaxTextPipelineConfigTest(parameterized.TestCase):
         tensor_parallelism,
     )
     config.validate_batch_size(16)
+
+  def test_mesh_axes_match_maxtext_default_order(self):
+    self.assertEqual(
+        maxtext_parallelism.MAXTEXT_MESH_AXIS_NAMES,
+        (
+            "diloco",
+            "data",
+            "stage",
+            "fsdp",
+            "fsdp_transpose",
+            "context",
+            "context_autoregressive",
+            "tensor",
+            "tensor_transpose",
+            "tensor_sequence",
+            "expert",
+            "autoregressive",
+        ),
+    )
 
   def test_validate_exact_mesh(self):
     config = maxtext_parallelism.MaxTextPipelineConfig(

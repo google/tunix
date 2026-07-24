@@ -14,12 +14,12 @@
 
 """Pipeline-parallel configuration helpers for MaxText-backed models."""
 
+from collections.abc import Sequence
 import dataclasses
 import math
-from typing import Any, Sequence
+from typing import Any
 
 from tunix.utils import mesh as mesh_lib
-
 
 # Keep this in the same order as MaxText's default ``mesh_axes``. Including
 # singleton axes matters because MaxText logical partition rules may refer to
@@ -33,6 +33,7 @@ MAXTEXT_MESH_AXIS_NAMES = (
     "context",
     "context_autoregressive",
     "tensor",
+    "tensor_transpose",
     "tensor_sequence",
     "expert",
     "autoregressive",
