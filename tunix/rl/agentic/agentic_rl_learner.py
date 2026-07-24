@@ -1101,6 +1101,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._eval_iter_steps += 1
     return eval_examples
 
+  def _sync_weights(self) -> None:
+    """Performs the weight sync itself (actor -> rollout).
+
+    The seam an orchestrator overrides to sync via worker handles instead of the
+    in-process cluster; the surrounding fence, step-advance, and prompt-feed stay
+    in `_sync_and_advance_step`.
+    """
+    with self.rl_cluster.perf_v2.span(
+        perf_constants.WEIGHT_SYNC,
+        self.rl_cluster.perf_v2.all_devices,
+        tags={
+            perf_constants.STEP: self.rl_cluster.global_steps,
+        },
+    ):
+      self.rl_cluster.sync_weights()
+
   def _sync_and_advance_step(self, prompt_queue, full_dataset_iterator) -> None:
     """Advances one global step: sync weights if due, then feed the next batch.
 
@@ -1115,14 +1131,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self._rollout_sync_lock.acquire_weight_sync()
       try:
         logging.info("Sync lock acquired. Syncing weights.")
-        with self.rl_cluster.perf_v2.span(
-            perf_constants.WEIGHT_SYNC,
-            self.rl_cluster.perf_v2.all_devices,
-            tags={
-                perf_constants.STEP: self.rl_cluster.global_steps,
-            },
-        ):
-          self.rl_cluster.sync_weights()
+        self._sync_weights()
         self.policy_version += 1
         logging.info(
             "Weights synced. Policy version incremented to %d.",
