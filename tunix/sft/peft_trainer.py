@@ -88,6 +88,7 @@ class TrainingConfig:
 
   # Sequence packing configuration.
   max_seq_token_per_tpu: int | None = None
+  max_segments_per_packed_row: int | None = None
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -469,8 +470,11 @@ class PeftTrainer:
       # Accumulate the UNREDUCED gradients (d/dparam of the sum) weighted by the
       # loss's real denominator, so the optimizer step sees the GLOBAL weighted
       # mean (Sum grads / Sum denom) across micro-batches rather than a
-      # mean-of-means. The denom is token-count for token-mean and sequence-count
-      # for sequence-mean, so each mode is normalized correctly (b/491970038).
+      # mean-of-means. The denom is token-count for token-mean and sequence- (or
+      # segment-) count for sequence-mean, so each mode is normalized correctly
+      # even when micro-batch denominators differ, e.g. under sequence packing
+      # (b/491970038). Dropping the per-micro `grads *= 1/denom` scale is half of
+      # a coupled pair: keeping it here would divide by the denominator twice.
       grad_accumulator.add(grads, denom=aux.primary_loss.denominator)
     else:
       grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))

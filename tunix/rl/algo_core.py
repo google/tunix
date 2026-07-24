@@ -398,17 +398,17 @@ def grpo_loss_fn(
   )
   epsilon_c = getattr(algo_config, "epsilon_c", None)
   loss_aggregation_mode = algo_config.loss_agg_mode
-  # Sequence-packing: unpack per-token tensors to [n_max, r_max] (row = sequence)
-  # before aggregation so every loss_agg_mode reduces per-sequence. None -> the
-  # non-packed path is unchanged. r_max = T (a sequence fits in one pack row).
-  seg_ids = getattr(train_example, "segment_ids", None)
-  seg_pos = getattr(train_example, "segment_positions", None)
-  unpack_n_max = kwargs.get("unpack_n_max", 0)
 
   completion_ids, completion_mask = (
       train_example.completion_ids,
       train_example.completion_mask,
   )
+  # Packing metadata: `segment_ids` labels each token's sequence within a packed
+  # row; `num_segments` is the static segment-bucket count. Both are None when
+  # not packing, in which case every aggregate_loss/reduced_loss_agg below (and
+  # the gspo-token pooling) takes its per-row branch unchanged.
+  segment_ids = getattr(train_example, "segment_ids", None)
+  num_segments = getattr(train_example, "num_segments", None)
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
@@ -421,7 +421,7 @@ def grpo_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_entropy=True,
-      segment_ids=getattr(train_example, "segment_ids", None),
+      segment_ids=segment_ids,
       segment_positions=getattr(train_example, "segment_positions", None),
       temperature=algo_config.temperature,
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
@@ -446,13 +446,33 @@ def grpo_loss_fn(
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
-    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
-        axis=-1
-    ) / jnp.clip(completion_mask.sum(-1), min=1)
+    if segment_ids is None:
+      # Per-row mean log-ratio: each row is exactly one sequence.
+      seq_mean_ratio = (seq_importance_ratio * completion_mask).sum(
+          axis=-1
+      ) / jnp.clip(completion_mask.sum(-1), min=1)
+      seq_mean_ratio = jnp.expand_dims(seq_mean_ratio, axis=-1)
+    else:
+      # Per-SEGMENT mean log-ratio: a packed row holds K sequences, so pooling
+      # per row would mix them into one biased ratio. Pool per segment, then
+      # scatter each token its own segment's mean via take_along_axis. Padding
+      # (segment 0, mask 0) yields 0 and is masked out downstream.
+      per_seg_sum = common.segmented_sum(
+          seq_importance_ratio * completion_mask, segment_ids, num_segments
+      )
+      per_seg_count = common.segmented_count(
+          segment_ids, num_segments, mask=completion_mask
+      )
+      per_seg_mean = per_seg_sum / jnp.clip(per_seg_count, min=1.0)
+      seq_mean_ratio = jnp.take_along_axis(
+          per_seg_mean, segment_ids.astype(jnp.int32), axis=1
+      )
+    # Sequence-level VALUE, per-token GRADIENT (stop-gradient trick): the
+    # `x - stop_grad(x)` term is 0 in value but carries d/dtheta per token.
     seq_importance_ratio = (
         per_token_logps
         - jax.lax.stop_gradient(per_token_logps)
-        + jnp.expand_dims(jax.lax.stop_gradient(seq_importance_ratio), axis=-1)
+        + jax.lax.stop_gradient(seq_mean_ratio)
     )
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
@@ -484,14 +504,12 @@ def grpo_loss_fn(
   per_token_pg_clipfrac_lower = (
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
-  pg_clipfrac_lower = common.aggregate_loss_packed(
+  pg_clipfrac_lower = common.aggregate_loss(
       per_token_pg_clipfrac_lower,
       completion_mask,
       loss_aggregation_mode,
-      segment_ids=seg_ids,
-      segment_positions=seg_pos,
-      n_max=unpack_n_max,
-      r_max=per_token_pg_clipfrac_lower.shape[1],
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
@@ -509,17 +527,19 @@ def grpo_loss_fn(
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
   #   reduced   (eager per-sequence mean, pre-CL form) — metric only
-  unreduced_pg_loss = common.aggregate_loss_packed(
+  unreduced_pg_loss = common.aggregate_loss(
       per_token_loss,
       completion_mask,
       loss_aggregation_mode,
-      segment_ids=seg_ids,
-      segment_positions=seg_pos,
-      n_max=unpack_n_max,
-      r_max=per_token_loss.shape[1],
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
   reduced_pg_loss = common.reduced_loss_agg(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
   total_loss = unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
@@ -587,14 +607,12 @@ def grpo_loss_fn(
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss_packed(
+    kl_loss = common.aggregate_loss(
         kl,
         completion_mask,
         loss_aggregation_mode,
-        segment_ids=seg_ids,
-        segment_positions=seg_pos,
-        n_max=unpack_n_max,
-        r_max=kl.shape[1],
+        segment_ids=segment_ids,
+        num_segments=num_segments,
     )
     aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
     if beta is not None and beta != 0.0:
@@ -605,14 +623,12 @@ def grpo_loss_fn(
           min_denom=unreduced_pg_loss.min_denom,
       )
 
-  entropy_loss = common.aggregate_loss_packed(
+  entropy_loss = common.aggregate_loss(
       token_entropy,
       completion_mask,
       loss_aggregation_mode,
-      segment_ids=seg_ids,
-      segment_positions=seg_pos,
-      n_max=unpack_n_max,
-      r_max=token_entropy.shape[1],
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
   aux["entropy"] = entropy_loss
 

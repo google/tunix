@@ -743,6 +743,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.max_seq_token_per_tpu,
           sequences_per_update=mini_batch_size * self._num_generations(),
           pack_size=pack_size,
+          max_segments_per_packed_row=(
+              self._training_config.max_segments_per_packed_row
+          ),
       )
 
     curr_eval_ds = None

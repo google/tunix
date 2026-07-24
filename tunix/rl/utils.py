@@ -402,13 +402,18 @@ def _item_tokens(item: Mapping[str, Any]) -> int:
 
 
 def _fill_one_chunk(
-    items: Sequence[Mapping[str, Any]], pack_size: int, budget: int
+    items: Sequence[Mapping[str, Any]],
+    pack_size: int,
+    budget: int,
+    max_segments: int,
 ) -> tuple[list[list[Mapping[str, Any]]], list[Mapping[str, Any]]]:
   """Fills ONE chunk of `pack_size` fixed-capacity bins, first-fit-decreasing.
 
   Sorts the items by token length descending and greedily places each into the
-  first bin with room (<= budget). Items that do not fit any of the pack_size
-  bins are returned as `leftover` (in their original order) for a later chunk.
+  first bin with room, where a bin has room only if it stays within both the
+  token `budget` AND `max_segments` sequences (so the loss's static
+  `num_segments = max_segments + 1` buckets never overflow). Items that fit no
+  bin are returned as `leftover` (in their original order) for a later chunk.
 
   Returns (bins, leftover): `bins` is exactly `pack_size` lists (some may be
   empty); `leftover` are the items that did not fit.
@@ -419,7 +424,7 @@ def _fill_one_chunk(
   for item in sorted(items, key=_item_tokens, reverse=True):
     n = _item_tokens(item)
     for b in range(pack_size):
-      if loads[b] + n <= budget:
+      if loads[b] + n <= budget and len(bins[b]) < max_segments:
         bins[b].append(item)
         loads[b] += n
         break
@@ -434,6 +439,7 @@ def pack_sequences(
     pad_id: int = 0,
     sequences_per_update: int | None = None,
     pack_size: int = 1,
+    max_segments_per_packed_row: int | None = None,
 ) -> Iterator[list[common.TrainExample]]:
   """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
 
@@ -460,6 +466,16 @@ def pack_sequences(
       max_token_budget, a mid-mini-batch stream end, or a boundary inside an
       input example.
   """
+
+  # Real segments per row are bounded by the token budget (each segment >= 1
+  # token). `None` uses that safe bound so `num_segments = budget + 1` never
+  # overflows; a smaller override shrinks the loss buckets and is enforced by
+  # the raise in `_flush_pack`.
+  effective_max_segments = (
+      max_segments_per_packed_row
+      if max_segments_per_packed_row is not None
+      else max_token_budget
+  )
 
   def _flush_pack(pack_items, example_cls, first_item) -> common.TrainExample:
     first_item = first_item or {}
@@ -501,6 +517,17 @@ def pack_sequences(
       if has_policy_version:
         kwargs["policy_version"] = first_item["policy_version"]
       return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
+
+    # `len(pack_items)` is the real segment count of this row. It cannot exceed
+    # the token budget (each segment >= 1 token), so the default bound never
+    # trips; a too-small `max_segments_per_packed_row` override does, and we
+    # fail loud rather than let `segment_sum` silently drop the overflow.
+    if len(pack_items) > effective_max_segments:
+      raise ValueError(
+          f"pack_sequences: a packed row has {len(pack_items)} segments, "
+          f"exceeding max_segments_per_packed_row={effective_max_segments}; "
+          "increase it (or leave it None for the budget-derived safe default)."
+      )
 
     current_tokens = sum(
         len(it["prompt_ids"]) + len(it["completion_ids"]) for it in pack_items
@@ -597,8 +624,14 @@ def pack_sequences(
     )
 
   def _mark(merged, is_update):
+    # `num_segments = effective_max_segments + 1` (+1 = padding bucket) is a
+    # static upper bound, fixed every step so the segment-aware loss compiles
+    # once. Set here (not per bin) so every emitted chunk carries it.
     return [
-        merged.replace(is_update_step=jnp.array([is_update], dtype=jnp.bool_))
+        merged.replace(
+            is_update_step=jnp.array([is_update], dtype=jnp.bool_),
+            num_segments=effective_max_segments + 1,
+        )
     ]
 
   # See the docstring: buffer sequences, emit a chunk once it holds a chunk's
@@ -618,7 +651,9 @@ def pack_sequences(
           " no packed example would be produced, dropping a gradient update."
       )
     while buffered:
-      chunk, buffered = _fill_one_chunk(buffered, pack_size, max_token_budget)
+      chunk, buffered = _fill_one_chunk(
+          buffered, pack_size, max_token_budget, effective_max_segments
+      )
       chunks_in_mini += 1
       yield _mark(_emit(chunk), not buffered)  # last chunk (empty leftover).
     total_cap = chunks_in_mini * chunk_capacity
@@ -663,7 +698,9 @@ def pack_sequences(
     else:
       # Not the boundary yet: emit whole chunks eagerly, keep the remainder.
       while sum(_item_tokens(it) for it in buffered) >= chunk_capacity:
-        chunk, buffered = _fill_one_chunk(buffered, pack_size, max_token_budget)
+        chunk, buffered = _fill_one_chunk(
+            buffered, pack_size, max_token_budget, effective_max_segments
+        )
         chunks_in_mini += 1
         yield _mark(_emit(chunk), False)
 
