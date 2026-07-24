@@ -25,8 +25,8 @@ import threading
 import time
 from typing import Any, Sequence
 
+from tunix.experimental.common import datatypes as data_types
 from tunix.experimental.distributed.runtime.context import ProcessContext
-from tunix.experimental.rollout import data_types
 from tunix.experimental.worker import remote_execution
 
 
