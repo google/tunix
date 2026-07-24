@@ -454,15 +454,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
-    result = self.rl_cluster.generate(
+    result = self._generate(
         prompts=chat_lists,  # pyrefly: ignore[bad-argument-type]
         apply_chat_template=False if self.chat_parser else True,
-        mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
     )
 
     return result
+
+  def _generate(
+      self,
+      prompts,
+      apply_chat_template: bool,
+      trace_tags: dict[str, Any],
+      max_generation_steps: int | None,
+  ) -> base_rollout.RolloutOutput:
+    """Runs one model generation for a rollout turn.
+
+    The seam an orchestrator overrides to route generation to a rollout worker
+    instead of the in-process cluster; chat parsing, policy-version stamping, and
+    trace tagging stay in `_model_call`.
+    """
+    return self.rl_cluster.generate(
+        prompts=prompts,
+        apply_chat_template=apply_chat_template,
+        mode=rl_cluster_lib.Mode.TRAIN,
+        trace_tags=trace_tags,
+        max_generation_steps=max_generation_steps,
+    )
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
