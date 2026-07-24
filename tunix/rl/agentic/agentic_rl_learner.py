@@ -842,20 +842,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       #   continue
       # train_micro_batch = filtered_train_micro_batch
 
-      if self._process_in_consumer:
-        # train_micro_batch is a list of lists of trajectories.
-        all_trajectories = [t for group in train_micro_batch for t in group]
-        train_examples = self._batch_to_train_example(
-            batch_results=all_trajectories,
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
-        # GRPO returns a list with a single TrainExample.
-        merged_train_micro_batch = train_examples[0]
-      else:
-        # TODO(b/491970038): handle seq packing case differently
-        merged_train_micro_batch = jax.tree.map(
-            lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
-        )
+      merged_train_micro_batch = self._process_micro_batch(train_micro_batch)
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the
@@ -898,13 +885,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # microbatches, and #iterations=K, we will:
       #   1. Train on the m * n microbatches once as we get them from rollout.
       #   2. When we get the full batch, repeat K-1 times on the entire batch.
-      self.rl_cluster.update_actor(
+      self._train_micro_batch(
           chunked_train_micro_batch, current_eval_dataset, skip_jit
       )
-      if hasattr(self.rl_cluster, "critic_trainer"):
-        self.rl_cluster.update_critic(
-            chunked_train_micro_batch, current_eval_dataset, skip_jit
-        )
 
       # --- Weight Sync Logic ---
       if is_packed:
@@ -932,13 +915,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
           # TODO(yixuanm): Eval during iteration too. Skipping for now as we 
           # will refactor the learner soon.
-          self.rl_cluster.update_actor(
-              full_batch_chunks, None, skip_jit
-          )
-          if hasattr(self.rl_cluster, "critic_trainer"):
-            self.rl_cluster.update_critic(
-                full_batch_chunks, None, skip_jit
-            )
+          self._train_micro_batch(full_batch_chunks, None, skip_jit)
         full_batch_chunks.clear()
 
 
@@ -1049,6 +1026,38 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     _ = producer_future.result()
     self.rl_cluster.close()
+
+  def _process_micro_batch(self, train_micro_batch):
+    """Merges a consumed micro-batch into a single training example.
+
+    When rewards/logps are deferred to the consumer, `train_micro_batch` is a
+    list of trajectory groups that are postprocessed here; otherwise it is a list
+    of `TrainExample`s concatenated along the batch axis. The seam an
+    orchestrator overrides to assemble via workers.
+    """
+    if self._process_in_consumer:
+      # train_micro_batch is a list of lists of trajectories.
+      all_trajectories = [t for group in train_micro_batch for t in group]
+      train_examples = self._batch_to_train_example(
+          batch_results=all_trajectories,
+          mode=rl_cluster_lib.Mode.TRAIN,
+      )
+      # GRPO returns a list with a single TrainExample.
+      return train_examples[0]
+    # TODO(b/491970038): handle seq packing case differently
+    return jax.tree.map(
+        lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+    )
+
+  def _train_micro_batch(self, chunks, eval_ds, skip_jit) -> None:
+    """Runs one trainer pass over the chunked micro-batch (actor + optional critic).
+
+    The seam an orchestrator overrides to train via a trainer worker instead of
+    the in-process cluster.
+    """
+    self.rl_cluster.update_actor(chunks, eval_ds, skip_jit)
+    if hasattr(self.rl_cluster, "critic_trainer"):
+      self.rl_cluster.update_critic(chunks, eval_ds, skip_jit)
 
   def _maybe_run_eval(
       self, update_steps_since_last_sync, all_eval_prompts, training_config
