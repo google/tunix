@@ -7,7 +7,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential git python3 python3-pip && \
+    apt-get install -y build-essential git python3 python3-pip curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
@@ -36,6 +36,8 @@ COPY . .
 RUN pip install -e .
 
 RUN bash /app/scripts/install_tunix_vllm_requirement.sh
+RUN pip install kubernetes
+RUN pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
 
 # Set the default command to bash
 CMD ["bash"]
