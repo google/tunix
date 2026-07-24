@@ -599,3 +599,72 @@ from the mesh).
 **Prereqs:** `gcloud auth configure-docker europe-west4-docker.pkg.dev` one-time; `/mnt/workspace`
 mounted (HF model cache; Qwen/Qwen3-8B is ~16GB of safetensors and is NOT license-gated). gsm8k
 default mesh 4x1; FrozenLake default mesh 2x2 (vLLM dp2 tp2 derived from the mesh).
+
+## 19. ACTION REQUEST: sequence-packing cost-model microbench (why packing did not speed anything up)
+
+**Observation to explain (gsm8k, controlled: 32 sequences per micro-batch either way, fsdp=4):**
+packing `[4, 8192]` (8 seqs/pack, dummy_ratio ~0.2) vs unpacking `[32, 2048]` left **total train
+time FLAT**, while **flash-attention BACKWARD went 6ms -> 16ms** and HBM dropped 76 -> 61GB.
+
+**Hypothesis (from the JAX source, to be confirmed on TPU).** Splash attention builds its block
+schedule from a STATIC mask: `_process_mask(mask, block_shape, ...)` in
+`splash_attention_mask_info.py:518` takes no segment information, and the pallas grid width is
+`mask_info.data_next.shape[-1]` (`splash_attention_kernel.py:1141` fwd, `:1476` bwd).
+`segment_ids` is an ordinary kernel input that only zeroes blocks that were ALREADY computed
+(`_apply_mask_and_soft_cap`, `:596-677`). So a packed row costs `row_len^2 / 2` no matter how many
+sequences it holds, which predicts a **BUDGET LAW**: at a fixed token total T (rows = T/budget),
+`attention ~ T * budget` (LINEAR in the budget) while `mlp ~ T` (budget-independent). Packing
+always saves MLP/lm_head tokens but pays an attention penalty that grows with the budget.
+
+**What to run (needs a TPU VM; no model files, no vLLM, random weights, seconds per case):**
+```bash
+# in the container, one command:
+bash experimental/bench_splash_v5p_docker.sh
+# sweep the budget to see the linearity directly:
+BUDGETS=8192,4096,2048 bash experimental/bench_splash_v5p_docker.sh
+# FrozenLake geometry instead of gsm8k:
+MODEL_CONFIG=qwen3_8b bash experimental/bench_splash_v5p_docker.sh
+```
+`bench_splash_v5p_docker.sh` pulls the branch inside `tunix_base_image` and runs
+`bench_splash_v5p.sh` -> `bench_splash_packed.py`. Unlike the training runbooks it needs NO
+`/mnt/workspace`, no HF token and no model download. Add `TRACE_DEST=` to skip the xprof writes or
+`SKIP_LAYER=1` for an attention-only read.
+
+**Fidelity (why these numbers should match the e2e trace).** Data comes from the production packer
+`rl_utils.pack_sequences`; the module under test is the production `model_lib.Attention` /
+`DecoderLayer`; and each arm's `(positions, attn_mask, segment_ids)` comes from the production
+`common.process_ids`. That last point matters: the UNPACKED arm is NOT segment-free -- production
+feeds splash a per-position non-pad `segment_ids` (0/1) because the kernel only takes a static
+causal mask, so BOTH arms run the `*_segmented` kernel and the only remaining variable is row
+length. The unpacked arm also carries its real padding (~0.38 real-token fraction at the default
+700-950 tokens out of 2048).
+
+**Cases and the verdicts they settle (the script prints the ratios):**
+| case | shape | expectation |
+|---|---|---|
+| `U` | `[8, 2048]` unpacked, real=0.38 | baseline |
+| `P8192` | `[1, 8192]` packed, 8 segs, dummy~0.23 | attention ~2x U; bwd should land near the e2e 16ms |
+| `P4096` | `[2, 4096]` packed | attention ~1x U -- the budget law's payoff |
+| `C8192` | `[1, 8192]`, segment_ids dropped | ~P8192 (cost is row length, not the segment feature) |
+| `E` | the same geometries through a full DecoderLayer | P8192 ~ U (reproduces the flat total), P4096 < U |
+
+- **V1 (mechanism)**: `P8192/U ~ 2.0`, `P4096/U ~ 1.0`, `C ~ P8192` -> attention is linear in the
+  budget and segment_ids does not save compute.
+- **V2 (this bench == the real run)**: the bench's backward numbers should sit near the e2e 16/6ms,
+  and the xprof kernel names must match the e2e trace symbol-for-symbol -- packed/unpacked both
+  show `splash_..._segmented_{fwd,dq,dkv}` with the same `xprof_metadata` block sizes. Traces land
+  in `gs://yuxzhang-tunix-models/xprof/splash_bench/splash_bench_<case>`.
+- **V3 (the flat total)**: case E reproduces "packing changed nothing" at 8192 and shows a win at
+  4096.
+- **V4 (the fix)**: not wired yet -- once V1 holds, add a static block-diagonal `NumpyMask` case; if
+  it lands at ~U, a band/LocalMask built from the segment cap would recover the attention penalty
+  statically (something `segment_ids` can never do).
+
+**What the answers decide** (see `tasks/cl944_fsdp_packing/phase10.md`): (1) whether the packing
+budget defaults should drop from 8192 to ~4096 (smallest budget that still fits the longest single
+sequence), (2) whether the KK load-balancing CL is worth landing on TPU -- a CPU experiment already
+shows KK and our FFD produce the same row counts in 197/200 trials, and balancing cannot help when
+every row costs the same regardless of content, (3) whether to open the LocalMask work.
+
+**Report back**: the printed table + VERDICTS block, and the xprof kernel names for one packed and
+one unpacked case.
