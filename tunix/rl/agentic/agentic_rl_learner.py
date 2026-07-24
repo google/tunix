@@ -644,6 +644,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
     )
 
+  def _actor_per_token_logps(
+      self, prompt_ids, completion_ids, pad_value, eos_value
+  ):
+    """Actor-model per-token logprobs over a padded group.
+
+    The seam an orchestrator overrides to compute actor scores on a TrainerWorker
+    (which holds the actor weights) instead of the in-process actor role. Used for
+    the sampler-vs-trainer logp diagnostic and, on the sampler-IS `token` path, as
+    the `old_per_token_logps` baseline.
+    """
+    return self.rl_cluster.get_actor_per_token_logps(
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_value,
+        eos_id=eos_value,
+        micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+    )
+
   @abc.abstractmethod
   def _process_results(
       self,

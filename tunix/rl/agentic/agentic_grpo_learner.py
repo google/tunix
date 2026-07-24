@@ -453,12 +453,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           have_actor_mesh or self.algo_config.sampler_is == "token"
       )
       if need_trainer_logps:
-        trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
-            pad_id=pad_value,
-            eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+        trainer_per_token_logps = self._actor_per_token_logps(
+            prompt_ids, completion_ids, pad_value, eos_value
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -473,12 +469,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     elif self.algo_config.use_rollout_logps:
       old_per_token_logps = None
     else:
-      trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
-          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+      trainer_per_token_logps = self._actor_per_token_logps(
+          prompt_ids, completion_ids, pad_value, eos_value
       )
       old_per_token_logps = trainer_per_token_logps
 
