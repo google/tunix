@@ -504,43 +504,70 @@ JAX_PLATFORMS=cpu python3 -m pytest tests/sft/peft_trainer_test.py -k GradientAc
   human review: one XlaCompile block at the start, then only small steps; any LATER XlaCompile block = a
   recompile, and its position tells you the cycle boundary it happened at.
 
-## 18. Runbook: CL3 segment-aware convergence validation (pack vs unpack)
+## 18. Runbook: CL3 segment-aware convergence validation — TWO recipes, FOUR runs (pack vs unpack)
 
 **Context:** CL3 (segment-aware loss aggregation + weighted-denom gradient accumulation +
 consolidated `packing/dummy_ratio`) is integrated into `yuxzhang/refactor_loss_accum_ablation`
-(commit `de4cf2cb`). refactor is now the CL1+CL2+CL3 "final trace" version. This validates that
-turning packing ON is convergence-neutral, i.e. the segment-aware loss is correct.
+(commit `de4cf2cb`). refactor is now the CL1+CL2+CL3 "final trace" version. We validate that
+turning packing ON is convergence-neutral (the segment-aware loss is correct) on **two recipes**:
+- **gsm8k** — Qwen3-1.7B, `examples/math_gsm8k/qwen3_grpo_demo.py`, mesh 4x1, budget 8192.
+- **FrozenLake** — Gemma4-E2B, `grpo_main` CLI + `examples/frozenlake/configs/gemma4_e2b.yaml`,
+  agentic, mesh 2x2, vLLM colocated dp2 tp2, budget 16384.
 
-**Wrapper:** use `experimental/train_v5p_1host_docker.sh` (runs the REAL training
-`train_v5p_1host_pack.sh` in the container — one run yields wandb convergence + a full-run
-Perfetto trace + a short xprof window). This is NOT the grad-accum profiling wrapper
-(`train_v5p_docker.sh` / `profile_v5p_docker.sh`, which run `profile_v5p_grad_accum.sh`).
+**BUG FIXED FIRST (blocks any e2e packing run):** CL3's plumbing reads
+`self._training_config.max_segments_per_packed_row` (rl_learner.py, agentic_rl_learner.py) but
+that was never a field on `TrainingConfig`/`RLTrainingConfig` (both `@dataclass(slots=True)`),
+so packing crashed with `AttributeError` the moment it ran through the learner (latent — unit
+tests call `pack_sequences(...)` directly). Fixed by adding
+`max_segments_per_packed_row: int | None = None` to `peft_trainer.TrainingConfig` (default None
+-> budget-derived `num_segments = max_seq_token_per_tpu + 1`, the safe bound). Exposed as an
+override: `MAX_SEGMENTS_PER_ROW=N` (both wrappers), `--max_segments_per_packed_row N` (gsm8k demo),
+`rl_training_config.max_segments_per_packed_row=N` (FrozenLake CLI). Leave unset for the default.
 
-**The two runs — convergence PARITY (both stream+weighted, only packing differs):**
+**Wrappers (one run each yields wandb convergence + full-run Perfetto + a short xprof window):**
+- gsm8k: `experimental/train_v5p_1host_docker.sh` (runs `train_v5p_1host_pack.sh`).
+- FrozenLake: `experimental/train_frozenlake_v5p_1host_docker.sh` (runs
+  `train_frozenlake_v5p_1host.sh`).
+These are NOT the grad-accum profiling wrappers (`train_v5p_docker.sh` / `profile_v5p_docker.sh`).
+
+**The FOUR runs — each recipe is a pack-vs-unpack PARITY pair (both stream+weighted, only packing
+differs via `MAX_TOKEN_PER_TPU`; 0 = off):**
 ```bash
+# ---- gsm8k (Qwen3-1.7B) ----
 # A) packed: segment-aware CL3 + weighted stream accumulation
-RUN_TAG=cl3_pack \
+RUN_TAG=cl3_gsm8k_pack \
   bash experimental/train_v5p_1host_docker.sh
-
 # B) unpack parity: SAME stream+weighted accumulation, packing OFF
-MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_unpack_stream \
+MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_gsm8k_unpack_stream \
   bash experimental/train_v5p_1host_docker.sh
+
+# ---- FrozenLake (Gemma4-E2B) ----
+# C) packed
+RUN_TAG=cl3_frozenlake_pack \
+  bash experimental/train_frozenlake_v5p_1host_docker.sh
+# D) unpack parity
+MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_frozenlake_unpack \
+  bash experimental/train_frozenlake_v5p_1host_docker.sh
 ```
-The two differ ONLY in `MAX_TOKEN_PER_TPU` (packing budget; 0 = off). Do NOT use
-`train_v5p_1host_unpack_optax.sh` for parity — that is unpack+optax (mean-of-means), a different
-accumulation, meant for the separate end-to-end PERF comparison (new pack+stream vs old baseline).
+Do NOT use `train_v5p_1host_unpack_optax.sh` for parity — that is unpack+optax (mean-of-means), a
+different accumulation, meant for the separate end-to-end PERF comparison (pack+stream vs baseline).
 
-**Success criteria (what to compare in wandb / the SUMMARY):**
-- `loss` and `reward` curves of A (pack) vs B (unpack) overlap within noise -> segment-aware loss
-  is correct (packing convergence-neutral). Aim for tight tracking, not just "similar trend".
-- `reduced_pg_loss` (mean-of-means, the history-comparable probe) matches between A and B and is
-  comparable to pre-packing runs.
-- `packing/dummy_ratio` << 1 in run A (efficient packing); absent in B (packing off).
-- No NaN / divergence in either.
-- Perfetto trace (`gs://yuxzhang-tunix-models/perfetto/cl3_pack` and
-  `gs://yuxzhang-tunix-models/perfetto/cl3_unpack_stream`) + the short xprof window
-  (`gs://yuxzhang-tunix-models/xprof/cl3_pack_stream`) are captured for free -> open the Perfetto
-  files at ui.perfetto.dev for the full-run performance.
+**FrozenLake first-run check (before trusting run C):** the FrozenLake single-seq max is
+`max_prompt_length + max_response_length`; `max_response_length` is not pinned in the yaml. The
+run SUMMARY prints the real prompt/completion max length + the packed row count. Confirm the
+budget (16384) >= the longest single sequence; if the real single seq is ~8k, bump to 32768
+(`MAX_TOKEN_PER_TPU=32768`). Also note the printed row count / accumulation depth: with a large
+budget the pack can collapse to depth-1 (depth-1 fast path) instead of depth>1 (accumulation
+path) — do not assume; gsm8k (short seqs) exercises depth>1, FrozenLake may exercise depth-1.
 
-**Prereqs:** same as issues 14-17 — `gcloud auth configure-docker europe-west4-docker.pkg.dev`
-one-time; `/mnt/workspace` mounted (HF model cache); v5p 4-chip default mesh (4x1).
+**Success criteria per recipe (compare in wandb / the SUMMARY):**
+- `loss` and `reward` curves of pack vs unpack overlap within noise -> segment-aware loss is
+  correct (packing convergence-neutral). Tight tracking, not just "similar trend".
+- `reduced_pg_loss` (mean-of-means, history-comparable probe) matches between the two arms.
+- `packing/dummy_ratio` << 1 in the packed arm (efficient packing); absent in unpack.
+- No NaN / divergence in any of the four.
+- Perfetto (`gs://yuxzhang-tunix-models/perfetto/<RUN_TAG>`) + xprof
+  (`gs://yuxzhang-tunix-models/xprof/<RUN_TAG>`) captured for free -> ui.perfetto.dev.
+
+**Prereqs:** `gcloud auth configure-docker europe-west4-docker.pkg.dev` one-time; `/mnt/workspace`
+mounted (HF model cache). gsm8k default mesh 4x1; FrozenLake default mesh 2x2 + vLLM dp2 tp2.

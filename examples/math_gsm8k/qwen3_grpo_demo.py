@@ -150,6 +150,7 @@ arg_parser.add_argument("--train_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 # Sequence packing: max tokens per packed row on a TPU. None disables packing.
 arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
+arg_parser.add_argument("--max_segments_per_packed_row", type=int, default=None)
 arg_parser.add_argument("--max_steps", type=int, default=200)
 arg_parser.add_argument("--max_response_length", type=int, default=1024)
 arg_parser.add_argument("--max_concurrency", type=int, default=None)
@@ -201,6 +202,7 @@ MINI_BATCH_SIZE = args.mini_batch_size
 TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
 COMPUTE_LOGPS_MICRO_BATCH_SIZE = args.compute_logps_micro_batch_size
 MAX_SEQ_TOKEN_PER_TPU = args.max_seq_token_per_tpu
+MAX_SEGMENTS_PER_PACKED_ROW = args.max_segments_per_packed_row
 
 MAX_STEPS = args.max_steps
 NUM_EPOCHS = 1000
@@ -762,6 +764,7 @@ def main() -> None:
           train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
           max_seq_token_per_tpu=MAX_SEQ_TOKEN_PER_TPU,
+          max_segments_per_packed_row=MAX_SEGMENTS_PER_PACKED_ROW,
           grad_accum=GRAD_ACCUM,
           profiler_options=PROFILER_OPTIONS,
           metrics_logging_options=metrics_logging_options,

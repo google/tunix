@@ -54,7 +54,8 @@ BATCH="${BATCH:-16}"
 MINI="${MINI:-16}"
 MICRO="${MICRO:-4}"
 LOGPS="${LOGPS:-4}"
-MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-4096}"     # packing budget; set 0 to DISABLE packing
+MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-8192}"     # packing budget (4 seqs/row @ 2048 each); set 0 to DISABLE packing
+MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"   # segment/row cap (loss num_segments); empty = None = budget-derived
 MAX_STEPS="${MAX_STEPS:-200}"              # REAL run length (training continues
                                            # past the profiler window)
 LOG_DIR="${LOG_DIR:-/tmp/train_v5p_logs}"
@@ -158,6 +159,8 @@ fi
 pack_args=()
 if [ "${MAX_TOKEN_PER_TPU}" != "0" ]; then
   pack_args+=(--max_seq_token_per_tpu "$MAX_TOKEN_PER_TPU")
+  [ -n "${MAX_SEGMENTS_PER_ROW}" ] && \
+    pack_args+=(--max_segments_per_packed_row "$MAX_SEGMENTS_PER_ROW")
 fi
 
 prof_args=()
