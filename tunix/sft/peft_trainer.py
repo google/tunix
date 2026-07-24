@@ -15,6 +15,7 @@
 """PEFT trainer."""
 
 from collections.abc import Iterable
+import collections
 import contextlib
 import dataclasses
 import functools
@@ -641,15 +642,52 @@ class PeftTrainer:
 
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
-    try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"].value
-    except AttributeError:
-      for chainpart in self.optimizer.opt_state:
-        if isinstance(chainpart, optax.EmptyState):
-          break
-        if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"].value
+
+    def _find_hyperparams(state: Any) -> dict | None:
+      """Helper to find hyperparams in optax optimizer state using BFS."""
+      q = collections.deque()
+      if state is not None:
+        q.append(state)
+      visited_ids = set()
+
+      while q:
+        node = q.popleft()
+        try:
+          node_id = id(node)
+          if node_id in visited_ids:
+            continue
+          visited_ids.add(node_id)
+        except TypeError:
+          pass
+
+        if hasattr(node, "hyperparams") and isinstance(node.hyperparams, dict):
+          return node.hyperparams
+
+        if isinstance(node, (list, tuple)):
+          for item in node:
+            if item is not None:
+              q.append(item)
+
+        if hasattr(node, "inner_state") and node.inner_state is not None:
+          q.append(node.inner_state)
+        if (
+            hasattr(node, "inner_opt_state")
+            and node.inner_opt_state is not None
+        ):
+          q.append(node.inner_opt_state)
+
       return None
+
+    try:
+      params = _find_hyperparams(self.optimizer.opt_state)
+      if params and "learning_rate" in params:
+        lr = params["learning_rate"]
+        return float(lr)
+    except Exception:  # pylint: disable=broad-except-catching
+      logging.warning(
+          "Could not extract learning rate from optimizer state.", exc_info=True
+      )
+    return None
 
   def _log_metrics(
       self,
