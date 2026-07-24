@@ -32,7 +32,7 @@ esac
 # Pass the inner script's knobs through only when the caller set them.
 PASS_ENV=()
 for var in MODEL_PATH MESH_FSDP MESH_TP MAX_STEPS GRAD_ACCUM_STEPS LOG_DIR \
-           HF_TOKEN WANDB_MODE; do
+           PROFILE_XPROF HF_TOKEN WANDB_MODE; do
   if [ -n "${!var:-}" ]; then PASS_ENV+=(-e "$var=${!var}"); fi
 done
 

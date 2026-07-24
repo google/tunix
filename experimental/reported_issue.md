@@ -467,3 +467,49 @@ For the stream fix run, the three `jit(_train_step)` lines + compile count:
 - Commit the optax flamegraph (`flame_optax.svg` + `.log`) back to the branch.
 
 **Success criteria:** stream tracing ≈ optax (~6s), single compile, wall ≈ optax, numerical test green. If tracing did not drop, Fix 1 did not take (check the installed flax `set_value` no-index branch). If it double-compiled, Fix 2 needs the sharding pin.
+
+## 18. ACTION REQUEST: multi-step recompilation guard (depth-1 and depth>1)
+**Type:** Runnable task for the cluster-side agent (same v5p VM/setup as issues 14/15/17).
+**Prereq:** branch tip includes the fix `519b947a` AND the wrapper passthrough commit for `PROFILE_XPROF` (this section's commit). MODEL_PATH as in issue 14.
+
+**Purpose:** Issue 17 verified the fix at depth-1 x 3 steps (single compile, 2.46x -> 1.12x). Two gaps remain:
+1. **More steps at depth-1** — confirm no recompilation appears at later steps (sharding drift would show as a surprise XlaCompile block minutes long).
+2. **depth>1 (NEW coverage)** — the accumulator+`nnx.cond` path still runs there (only Fix 1 applies, not the depth-1 direct-update), and `reset()` zeroes the accumulator at EVERY cycle boundary — exactly the action that caused the A1 sharding-drift double-compile. Never tested beyond depth 1.
+
+**Detector (primary, free): `JAX_LOG_COMPILES` compile-line count.** The harness already sets it. For each run:
+```bash
+grep -c "Finished XLA compilation of jit(_train_step)" <log>
+# 1  = no recompilation  -> PASS
+# >=2 = recompilation -> FAIL: extract the two "Compiling jit(_train_step) ... Argument mapping:" lines
+#       and report them (diffing the P(...) specs shows which state tree re-sharded; cf. the 143->673 analysis)
+```
+
+**Run 1 — depth-1, 20 steps:**
+```bash
+MAX_STEPS=20 bash experimental/compile_repro_v5p_docker.sh stream
+```
+Expect: compile count 1; train_wall ~= one compile (~130s) + 20 sub-second steps.
+
+**Run 2 — depth>1, ~8 accumulation cycles (the important one):**
+```bash
+GRAD_ACCUM_STEPS=4 MAX_STEPS=30 bash experimental/compile_repro_v5p_docker.sh stream
+```
+Note: the harness builds MAX_STEPS+2 micro-batches, so this is ~8 full add/add/add/update+reset cycles.
+Expect: compile count 1 (the traced-bool cond predicate does NOT retrigger compiles; what we are guarding
+against is reset-to-zeros re-sharding donated buffers at cycle boundaries). Also eyeball step-time cadence:
+any minutes-long stall mid-run = a hidden recompile.
+
+**Run 3 (optional) — same two runs with an xprof timeline:**
+```bash
+PROFILE_XPROF=/mnt/workspace/xprof_multistep_d1 MAX_STEPS=20 \
+  bash experimental/compile_repro_v5p_docker.sh stream
+PROFILE_XPROF=/mnt/workspace/xprof_multistep_acc4 GRAD_ACCUM_STEPS=4 MAX_STEPS=30 \
+  bash experimental/compile_repro_v5p_docker.sh stream
+```
+- Do NOT enable the python tracer (multi-step + instrumentation would blow the 2GB trace limit); the default
+  host+device tracers are what we want here.
+- Read in trace_viewer: ONE big XlaCompile block at the start is normal; ANY later XlaCompile block = a
+  recompile, and its position tells you the step/cycle it happened at.
+
+**Report back:** per run — compile-line count, the [[COMPILE_REPRO]] wall line, and (if count >= 2) the two
+Argument-mapping lines. Commit logs under experimental/tracing_logs/ as before.
