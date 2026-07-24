@@ -104,6 +104,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self,
       tokenizer: Any,
       config: SglangJaxConfig,
+      converter: Any = None,
       **kwargs,
   ):
     """Initializes the SglangJaxSampler.
@@ -115,6 +116,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     self.tokenizer = tokenizer
     if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
       self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.converter = converter
     self.args = self._sglang_jax_config(config)
     if kwargs:
       self.args.update(kwargs)
@@ -146,7 +148,17 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
-    new_state = utils.transfer_state_with_mappings(
+    if getattr(self, 'converter', None) is not None:
+      import logging
+      logging.info("Using native WeightConverter specifically for Qwen3 integration.")
+      sglang_state = self.converter.convert(
+          updated_weights, target_state=self.transformer_state
+      )
+      new_state = reshard.reshard_pytree(
+          source=sglang_state, target=self.transformer_state
+      )
+    else:
+      new_state = utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
         key_mappings=self.to_hf_key_mappings,

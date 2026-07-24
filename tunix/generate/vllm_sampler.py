@@ -124,6 +124,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       tokenizer: Any,
       config: VllmConfig,
+      converter: Any = None,
   ):
     """Initializes the VllmSampler.
 
@@ -150,6 +151,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
+    self.converter = converter
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -199,7 +201,41 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # Synchronization point before weight sync
     jax.effects_barrier()
 
-    if self.to_hf_key_mappings:
+    if self.converter is not None:
+      from flax import traverse_util
+      logging.info("Using native WeightConverter specifically for Qwen3 integration.")
+      vllm_state = self.converter.convert(
+          updated_weights, target_state=self.transformer_state
+      )
+
+      if isinstance(self.transformer_state, nnx.State):
+        state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
+      else:
+        state_dict = self.transformer_state
+
+      if self.config.reshard_chunk_size is not None:
+        src_flat = traverse_util.flatten_dict(vllm_state)
+        spec_flat = traverse_util.flatten_dict(state_dict)
+
+        resharded_flat = utils._reshard_in_chunks(
+            src_flat,
+            spec_flat,
+            reshard.reshard_pytree,
+            self.config.reshard_chunk_size,
+            self.config.delete_dst_buffers,
+        )
+        resharded_weights = traverse_util.unflatten_dict(resharded_flat)
+      else:
+        resharded_weights = reshard.reshard_pytree(
+            source=vllm_state,
+            target=state_dict,
+        )
+
+      if isinstance(self.transformer_state, nnx.State):
+        nnx.update(self.transformer_state, resharded_weights)
+      else:
+        self._model_runner.state = resharded_weights
+    elif self.to_hf_key_mappings:
       preprocess_fn = self.config.mapping_config.preprocess_src_state
       if preprocess_fn:
         updated_weights = preprocess_fn(updated_weights)
