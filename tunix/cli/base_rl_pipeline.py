@@ -31,11 +31,11 @@ from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
-from tunix.models.gemma import model as gemma_lib
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import utils as rl_utils
 from tunix.rl.rollout import base_rollout
 from tunix.utils import mesh as mesh_lib
 
@@ -589,8 +589,17 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           params=jax.random.key(critic_model_config.get("rng_seed", 0))
       )
 
-      # TODO: b/531803907 - Support all critic model types, not just Gemma
-      critic_model = gemma_lib.GemmaWithScoreHead(critic_model, rngs=rngs)
+      if hasattr(critic_model.config.shd_config, "score_weight_d1"):
+        critic_model = rl_utils.TransformerWithScoreHead(
+            critic_model, rngs=rngs
+        )
+      elif hasattr(critic_model, "lm_head"):
+        critic_model = rl_utils.create_critic_model(critic_model, rngs=rngs)
+      else:
+        model_name = critic_model_config.get("model_name")
+        raise ValueError(
+            f"Cannot create score head for Transformer backbone {model_name}."
+        )
 
     cluster_config = self.create_cluster_config(
         role_to_mesh=role_to_mesh,
