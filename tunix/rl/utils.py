@@ -45,6 +45,11 @@ def is_positive_integer(value: int | None, name: str):
   if value is not None and (not isinstance(value, int) or value <= 0):
     raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
+def is_positive_integer(value, name: str):
+    """Checks if the value is positive and integer-like."""
+    # Use the new helper instead of calling .is_integer() directly
+    if value is not None and (not is_integer_value(value) or value <= 0):
+        raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 def check_divisibility(
     small_size,
