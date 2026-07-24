@@ -19,9 +19,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Baseline defaults: packing OFF (MAX_SEQ_TOKEN=0), optax accumulation, own tag.
+# Baseline defaults: packing OFF (MAX_TOKEN_PER_TPU=0), optax accumulation, own tag.
 # Each stays overridable from the environment.
-MAX_SEQ_TOKEN="${MAX_SEQ_TOKEN:-0}" \
+MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-0}" \
 GRAD_ACCUM="${GRAD_ACCUM:-optax}" \
 RUN_TAG="${RUN_TAG:-v5p_1host_unpack_optax}" \
   exec bash "$SCRIPT_DIR/train_v5p_1host_pack.sh"

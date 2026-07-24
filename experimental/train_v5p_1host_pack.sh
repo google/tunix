@@ -54,7 +54,7 @@ BATCH="${BATCH:-16}"
 MINI="${MINI:-16}"
 MICRO="${MICRO:-4}"
 LOGPS="${LOGPS:-4}"
-MAX_SEQ_TOKEN="${MAX_SEQ_TOKEN:-4096}"     # packing budget; set 0 to DISABLE packing
+MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-4096}"     # packing budget; set 0 to DISABLE packing
 MAX_STEPS="${MAX_STEPS:-200}"              # REAL run length (training continues
                                            # past the profiler window)
 LOG_DIR="${LOG_DIR:-/tmp/train_v5p_logs}"
@@ -156,8 +156,8 @@ fi
 # Assemble args. Packing and profiler are added conditionally.
 # ---------------------------------------------------------------------------
 pack_args=()
-if [ "${MAX_SEQ_TOKEN}" != "0" ]; then
-  pack_args+=(--max_seq_token_per_tpu "$MAX_SEQ_TOKEN")
+if [ "${MAX_TOKEN_PER_TPU}" != "0" ]; then
+  pack_args+=(--max_seq_token_per_tpu "$MAX_TOKEN_PER_TPU")
 fi
 
 prof_args=()
@@ -175,7 +175,7 @@ if [ "${ENABLE_PERF_V2}" != "0" ]; then
 fi
 
 log="$LOG_DIR/${RUN_TAG}_${GRAD_ACCUM}.log"
-echo "===== TRAIN [$GRAD_ACCUM] packing=${MAX_SEQ_TOKEN} mesh=${MESH_FSDP}x${MESH_TP} "\
+echo "===== TRAIN [$GRAD_ACCUM] packing=${MAX_TOKEN_PER_TPU} mesh=${MESH_FSDP}x${MESH_TP} "\
 "batch=${BATCH}/${MINI}/${MICRO}/${LOGPS} steps=${MAX_STEPS} (log: $log) ====="
 
 ROLLOUT_ENGINE="$ENGINE" \

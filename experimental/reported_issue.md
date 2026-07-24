@@ -503,3 +503,44 @@ JAX_PLATFORMS=cpu python3 -m pytest tests/sft/peft_trainer_test.py -k GradientAc
 - Commit the run log + xprof trace under `experimental/tracing_logs/` as before. The xprof timeline is for
   human review: one XlaCompile block at the start, then only small steps; any LATER XlaCompile block = a
   recompile, and its position tells you the cycle boundary it happened at.
+
+## 18. Runbook: CL3 segment-aware convergence validation (pack vs unpack)
+
+**Context:** CL3 (segment-aware loss aggregation + weighted-denom gradient accumulation +
+consolidated `packing/dummy_ratio`) is integrated into `yuxzhang/refactor_loss_accum_ablation`
+(commit `de4cf2cb`). refactor is now the CL1+CL2+CL3 "final trace" version. This validates that
+turning packing ON is convergence-neutral, i.e. the segment-aware loss is correct.
+
+**Wrapper:** use `experimental/train_v5p_1host_docker.sh` (runs the REAL training
+`train_v5p_1host_pack.sh` in the container — one run yields wandb convergence + a full-run
+Perfetto trace + a short xprof window). This is NOT the grad-accum profiling wrapper
+(`train_v5p_docker.sh` / `profile_v5p_docker.sh`, which run `profile_v5p_grad_accum.sh`).
+
+**The two runs — convergence PARITY (both stream+weighted, only packing differs):**
+```bash
+# A) packed: segment-aware CL3 + weighted stream accumulation
+RUN_TAG=cl3_pack \
+  bash experimental/train_v5p_1host_docker.sh
+
+# B) unpack parity: SAME stream+weighted accumulation, packing OFF
+MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_unpack_stream \
+  bash experimental/train_v5p_1host_docker.sh
+```
+The two differ ONLY in `MAX_TOKEN_PER_TPU` (packing budget; 0 = off). Do NOT use
+`train_v5p_1host_unpack_optax.sh` for parity — that is unpack+optax (mean-of-means), a different
+accumulation, meant for the separate end-to-end PERF comparison (new pack+stream vs old baseline).
+
+**Success criteria (what to compare in wandb / the SUMMARY):**
+- `loss` and `reward` curves of A (pack) vs B (unpack) overlap within noise -> segment-aware loss
+  is correct (packing convergence-neutral). Aim for tight tracking, not just "similar trend".
+- `reduced_pg_loss` (mean-of-means, the history-comparable probe) matches between A and B and is
+  comparable to pre-packing runs.
+- `packing/dummy_ratio` << 1 in run A (efficient packing); absent in B (packing off).
+- No NaN / divergence in either.
+- Perfetto trace (`gs://yuxzhang-tunix-models/perfetto/cl3_pack` and
+  `gs://yuxzhang-tunix-models/perfetto/cl3_unpack_stream`) + the short xprof window
+  (`gs://yuxzhang-tunix-models/xprof/cl3_pack_stream`) are captured for free -> open the Perfetto
+  files at ui.perfetto.dev for the full-run performance.
+
+**Prereqs:** same as issues 14-17 — `gcloud auth configure-docker europe-west4-docker.pkg.dev`
+one-time; `/mnt/workspace` mounted (HF model cache); v5p 4-chip default mesh (4x1).
