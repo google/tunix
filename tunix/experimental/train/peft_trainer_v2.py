@@ -201,7 +201,10 @@ class GradientAccumulator(nnx.Module):
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
       g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
-      acc_var[...] = acc_var[...] + g
+      # set_value (no index) avoids the indexed __setitem__ "slow" path, whose
+      # `.sharding` check on tracers triggers a per-leaf provenance scan that
+      # dominates trace time; the stored value is identical.
+      acc_var.set_value(acc_var[...] + g)
 
     jax.tree_util.tree_map(
         _add,
