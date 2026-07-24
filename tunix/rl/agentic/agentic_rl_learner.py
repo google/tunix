@@ -627,6 +627,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         expected_step=expected_step,
     )
 
+  def _ref_per_token_logps(
+      self, prompt_ids, completion_ids, pad_value, eos_value
+  ):
+    """Reference-model per-token logprobs over a padded group.
+
+    The seam an orchestrator overrides to compute reference scores on an
+    InferenceWorker hosting the frozen reference model, instead of the in-process
+    reference role.
+    """
+    return self.rl_cluster.get_ref_per_token_logps(
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_value,
+        eos_id=eos_value,
+        micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+    )
+
   @abc.abstractmethod
   def _process_results(
       self,

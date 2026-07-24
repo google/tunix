@@ -507,12 +507,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
           tags=perf_tags,
       ) as interval_v2:
-        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
-            pad_id=pad_value,
-            eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+        ref_per_token_logps = self._ref_per_token_logps(
+            prompt_ids, completion_ids, pad_value, eos_value
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
