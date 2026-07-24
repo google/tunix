@@ -433,5 +433,6 @@ class AutoModelTest(parameterized.TestCase):
     self.assertEqual(called_config.flash_attention_block_size, 512)
     self.assertFalse(hasattr(called_config, "invalid_param"))
 
+
 if __name__ == "__main__":
   absltest.main()

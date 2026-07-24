@@ -29,6 +29,9 @@ You can tune CLI parameters in one of three ways. Configurations are merged from
     Individual `key=value` pairs provided as command-line arguments. These override values from both the base config and the override file.
 
 
+Here is the updated section with the formatting improved and the GRPO table added. I have cleaned up the links to point directly to the files.
+
+
 ### Example CLI Scripts
 
 This collection includes command-line interface (CLI) scripts designed to handle various tasks.
@@ -141,16 +144,6 @@ Instead of typing `export` every time, we will save these credentials in a file 
         | **Llama 3.1 8B**  | `run_llama3.1_8b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_llama3.1_8b.sh)    |
         | **Llama 3.2 1B**  | `run_llama3.2_1b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_llama3.2_1b.sh)    |
 
-    *   **PPO Training on GSM8K dataset** ([Source Folder](https://github.com/google/tunix/blob/main/examples/rl/PPO/gsm8k/))
-
-        | Model Variant     | Script Name             | Link                                                                                                                             |
-        | :---------------- | :---------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
-        | **Gemma 2B**      | `run_gemma_7b.sh`       | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_gemma_2b.sh)       |
-        | **Gemma 2 2B**    | `run_gemma2_2b.sh`      | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_gemma2_2b.sh)      |
-        | **Gemma 3 1B**    | `run_gemma3_1b.sh`      | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_gemma3_1b.sh)      |
-        | **Llama 3.1 8B**  | `run_llama3.1_8b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_llama3.1_8b.sh)    |
-        | **Qwen 3 1.7B**  | `run_llama3.2_1b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_qwen3_1.7b.sh)    |
-
 
 
 
@@ -165,8 +158,6 @@ CLI Core code and CLI example launch scripts reside separately. This section pro
   * `peft_main.py`: Main entry point to trigger Parameter-Efficient Fine-Tuning (PEFT) Trainer from the CLI configs.
 
   * `grpo_main.py`: Main entry point to trigger Group Relative Policy Optimization (GRPO) Trainer from the CLI configs.
-
-  * `ppo_main.py`: Main entry point to trigger Proximal Policy Optimization (PPO) Trainer from the CLI configs.
 
   * `config.py`: Logic to read and process the config passed by command line or environment variable.
 
@@ -361,9 +352,9 @@ before performing a parameter update (simulates larger batch sizes).
 
 
 
-#### GRPO Configuration (`grpo_config`, `rollout_config`)
+#### RL & GRPO Configuration (`grpo_config`, `rollout_config`)
 
-Specific parameters for Group Relative Policy Optimization (GRPO).
+Specific parameters for Reinforcement Learning jobs, particularly Group Relative Policy Optimization (GRPO).
 
 * **`num_generations`**: (GRPO specific) The number of responses generated per prompt in a single step (corresponds to $\varepsilon$ in the paper).
 
@@ -374,24 +365,6 @@ Specific parameters for Group Relative Policy Optimization (GRPO).
 * **`temperature`**: Sampling temperature for rollouts. Higher values (e.g., 0.9) encourage diversity, which is critical for GRPO.
 
 * **`total_generation_steps`**: Maximum tokens to generate during the rollout phase.
-
-* **`reward_functions`**: List of python file paths containing the reward logic (e.g., checking math answers for GSM8K).
-
-
-
-#### PPO Configuration (`ppo_config`, `rollout_config`)
-
-Specific parameters for Proximal Policy Optimization (PPO).
-
-* **`num_iterations`**: (PPO specific) The number of iterations per batch (corresponds to $\varmu$ in the paper)
-
-* **`lambda`**: The lambda parameter for Generalized Advantage Estimation (GAE). 
-
-* **`gamma`**: The discount factor for future rewards in GAE.
-
-* **`beta`**: Coefficient for the KL divergence penalty. Keeps the trained model close to the reference model.
-
-* **`epsilon`**: Clipping parameter for the loss function to ensure stable updates.
 
 * **`reward_functions`**: List of python file paths containing the reward logic (e.g., checking math answers for GSM8K).
 

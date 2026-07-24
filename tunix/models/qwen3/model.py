@@ -104,7 +104,6 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
-  score_weight_d1: Tuple[str | None, ...]
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
 
@@ -126,7 +125,6 @@ class ShardingConfig:
         act_btd=P('fsdp', sp, None if is_sampling else 'tp'),
         act_btf=P('fsdp', sp, 'tp'),
         act_btnh=P('fsdp', sp, 'tp', None),
-        score_weight_d1=P(fsdp, None),
         exp_weight_edf=P('fsdp', None, 'tp'),
         exp_weight_efd=P('fsdp', 'tp', None),
     )

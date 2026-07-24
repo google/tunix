@@ -1,4 +1,4 @@
-# Tunix CLI
+# Tunix CLI 
 This directory, `tunix/cli`, contains the core command-line interface scripts for running post-training tasks with the Tunix framework.
 
 Overview
@@ -11,21 +11,17 @@ The Python scripts in this folder are the entry points for initiating training a
 
 - `grpo_main.py`: Main entry point to trigger Group Relative Policy Optimization (GRPO) Trainer from CLI configs
 
-- `ppo_main.py`: Main entry point to trigger Proximal Policy Optimization (PPO) Trainer from CLI configs
-
 
 ## Usage
 While you can run these scripts directly, the intended workflow is to use the wrapper scripts in the examples folder. These examples show how to pass the correct arguments and configurations for various use cases.
 
 For sft, we provide scripts running on mtnt translation dataset. See available [scripts](../../examples/sft/mtnt)
 
-For grpo based rl, we provide scripts running grpo on gsm8k math dataset. See available [scripts](../../examples/rl/grpo/gsm8k)
-
-For ppo based rl, we provide scripts running ppo on gsm8k math dataset. See available [scripts](../../examples/rl/ppo/gsm8k)
+For rl, we provide scripts running grpo on gsm8k math dataset. See available [scripts](../../examples/rl/grpo/gsm8k)
 
 For launching shell scripts from examples, you would navigate to the examples directory and execute a script like this:
 
-### Setup Environment
+### Setup Environment 
 ```
 python3 -m venv .venv
 source .venv/bin/activate

@@ -1025,3 +1025,35 @@ class Gemma(BackendMappingMixin, nnx.Module):
             (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
         ),
     }
+
+
+class GemmaWithScoreHead(nnx.Module):
+  """Gemma transformer with a score head."""
+
+  def __init__(self, transformer: Gemma, rngs: nnx.Rngs):
+    """Initializes the transformer with a score head.
+
+    Args:
+      transformer: The transformer backbone.
+      rngs: The random number generator.
+    """
+
+    self.transformer = transformer
+    self.score = nnx.Linear(
+        in_features=transformer.embed_dim,
+        out_features=1,
+        use_bias=False,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.normal(),
+            transformer.config.shd_config.score_weight_d1,
+        ),
+        rngs=rngs,
+    )
+
+  def __call__(self, *args, **kwargs):
+    self.transformer(*args, **kwargs, output_hidden_states=True)
+    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
+        'all_hidden_states'
+    ].value[-1]
+    score = self.score(hidden_states)
+    return score
