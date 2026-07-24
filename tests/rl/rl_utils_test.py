@@ -305,5 +305,52 @@ class UtilsTest(absltest.TestCase):
       self.assertTrue(bool(np.asarray(batch[0].is_update_step)))
 
 
+class IsPositiveIntegerTest(absltest.TestCase):
+  """Tests for `utils.is_positive_integer`."""
+
+  def test_accepts_python_int(self):
+    utils.is_positive_integer(1, 'x')
+    utils.is_positive_integer(100, 'x')
+
+  def test_accepts_numpy_int(self):
+    utils.is_positive_integer(np.int32(5), 'x')
+    utils.is_positive_integer(np.int64(5), 'x')
+    utils.is_positive_integer(np.uint8(5), 'x')
+
+  def test_accepts_none(self):
+    utils.is_positive_integer(None, 'x')
+
+  def test_rejects_zero(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(0, 'x')
+
+  def test_rejects_negative(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(-1, 'x')
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(np.int64(-5), 'x')
+
+  def test_rejects_bool(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(True, 'x')
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(False, 'x')
+
+  def test_rejects_float(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(1.0, 'x')
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(1.5, 'x')
+
+  def test_rejects_string(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer('5', 'x')
+
+  def test_error_message_includes_name(self):
+    with self.assertRaises(ValueError) as ctx:
+      utils.is_positive_integer(-1, 'max_steps')
+    self.assertIn('max_steps', str(ctx.exception))
+
+
 if __name__ == '__main__':
   absltest.main()
