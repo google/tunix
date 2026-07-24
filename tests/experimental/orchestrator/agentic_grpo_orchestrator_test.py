@@ -33,6 +33,17 @@ class _FakeTrainerWorker:
     self.calls.append((chunks, eval_ds, skip_jit))
 
 
+class _FakeScoringTrainerWorker:
+  """Trainer worker that also exposes per_token_logps() (actor scoring)."""
+
+  def __init__(self):
+    self.calls = []
+
+  def per_token_logps(self, **kwargs):
+    self.calls.append(kwargs)
+    return "actor_logps"
+
+
 class _FakeWeightSync:
   """Records sync() calls."""
 
@@ -81,6 +92,7 @@ class _FakeCluster:
     self.synced = 0
     self.generate_calls = []
     self.ref_calls = []
+    self.actor_calls = []
     self.cluster_config = types.SimpleNamespace(
         training_config=types.SimpleNamespace(
             compute_logps_micro_batch_size=2
@@ -97,6 +109,10 @@ class _FakeCluster:
   def get_ref_per_token_logps(self, **kwargs):
     self.ref_calls.append(kwargs)
     return "ref_logps"
+
+  def get_actor_per_token_logps(self, **kwargs):
+    self.actor_calls.append(kwargs)
+    return "actor_logps_inprocess"
 
 
 class AgenticGRPOOrchestratorTest(absltest.TestCase):
@@ -221,6 +237,39 @@ class AgenticGRPOOrchestratorTest(absltest.TestCase):
     self.assertLen(cluster.ref_calls, 1)
     self.assertEqual(cluster.ref_calls[0]["prompt_tokens"], "pids")
     self.assertEqual(cluster.ref_calls[0]["micro_batch_size"], 2)
+
+  def test_actor_per_token_logps_routes_to_trainer_worker(self):
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    worker = _FakeScoringTrainerWorker()
+    orchestrator._trainer_worker = worker
+
+    out = orchestrator._actor_per_token_logps("pids", "cids", 0, 1)
+
+    self.assertEqual(out, "actor_logps")
+    self.assertLen(worker.calls, 1)
+    self.assertEqual(worker.calls[0]["prompt_ids"], "pids")
+    self.assertEqual(worker.calls[0]["completion_ids"], "cids")
+    self.assertEqual(worker.calls[0]["pad_id"], 0)
+    self.assertEqual(worker.calls[0]["eos_id"], 1)
+
+  def test_actor_per_token_logps_falls_back_when_worker_lacks_capability(self):
+    # A trainer worker that only implements train() (no per_token_logps) reuses
+    # the in-process actor role, deriving micro_batch_size like the base.
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    orchestrator._trainer_worker = _FakeTrainerWorker()
+    cluster = _FakeCluster()
+    orchestrator.rl_cluster = cluster
+
+    out = orchestrator._actor_per_token_logps("pids", "cids", 0, 1)
+
+    self.assertEqual(out, "actor_logps_inprocess")
+    self.assertLen(cluster.actor_calls, 1)
+    self.assertEqual(cluster.actor_calls[0]["prompt_tokens"], "pids")
+    self.assertEqual(cluster.actor_calls[0]["micro_batch_size"], 2)
 
 
 if __name__ == "__main__":

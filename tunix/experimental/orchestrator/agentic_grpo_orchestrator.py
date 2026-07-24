@@ -30,17 +30,21 @@ the in-process `RLCluster`:
     episode/env orchestration that surrounds each generation.
   * `_ref_per_token_logps` -> an inference worker handle, reusing all of the
     `_process_results` postprocess (padding, masking, advantage math) around it.
+  * `_actor_per_token_logps` -> the trainer worker (which holds the actor
+    weights) when it exposes `per_token_logps`; reuses the same postprocess.
 
 `_maybe_run_eval` needs no override: it builds an orchestrator that already
 routes generation through `_generate` and reference scoring through
 `_ref_per_token_logps`, and it never trains or syncs weights. Remaining worker
-boundaries inside the postprocess (actor per-token logps -> trainer worker,
-metric buffering -> a metrics pump, reward-fn evaluation) are wired the same way
-in follow-up steps. Everything else -- grouping, advantage math, TrainExample
-assembly, checkpointing -- is inherited unchanged.
+boundaries inside the postprocess (metric buffering -> a metrics pump, reward-fn
+evaluation) are wired the same way in follow-up steps. Everything else --
+grouping, advantage math, TrainExample assembly, checkpointing -- is inherited
+unchanged.
 
 Handle contracts:
     trainer_worker.train(chunks: list, eval_ds, skip_jit: bool) -> None
+    trainer_worker.per_token_logps(prompt_ids, completion_ids,
+                                   pad_id, eos_id) -> array   # optional
     weight_sync.sync() -> None
     rollout_worker.generate(prompts, apply_chat_template: bool,
                             trace_tags: dict, max_generation_steps: int | None)
@@ -127,5 +131,26 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
           eos_id=eos_value,
       )
     return super()._ref_per_token_logps(
+        prompt_ids, completion_ids, pad_value, eos_value
+    )
+
+  def _actor_per_token_logps(
+      self, prompt_ids, completion_ids, pad_value, eos_value
+  ):
+    """Routes actor scoring to the trainer worker (postprocess reused).
+
+    The trainer worker holds the actor weights; routes when it exposes
+    `per_token_logps`, otherwise reuses the in-process actor role (incremental
+    bring-up).
+    """
+    per_token_logps = getattr(self._trainer_worker, "per_token_logps", None)
+    if per_token_logps is not None:
+      return per_token_logps(
+          prompt_ids=prompt_ids,
+          completion_ids=completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+      )
+    return super()._actor_per_token_logps(
         prompt_ids, completion_ids, pad_value, eos_value
     )
