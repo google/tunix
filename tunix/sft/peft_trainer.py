@@ -91,6 +91,7 @@ class TrainingConfig:
 
   # Sequence packing configuration.
   max_seq_token_per_tpu: int | None = None
+  max_segments_per_packed_row: int | None = None
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
