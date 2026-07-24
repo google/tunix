@@ -484,12 +484,18 @@ class PeftTrainer:
     (loss_val, aux), grads = grad_fn(model, **inputs)
 
     if isinstance(aux, utils.LossOutput):
-      # Scale the unreduced gradients using the metric's scale computation
-      scale = aux.primary_loss.compute_scale()
-      grads = jax.tree.map(lambda g: g * scale, grads)
-
-      # Compute exactly equivalent legacy loss val
+      # Compute exactly equivalent legacy loss val for logging.
       loss_val = aux.primary_loss.compute()
+      # Weighted gradient accumulation: the optimizer step sees the GLOBAL
+      # weighted mean (Sum grads / Sum denom) across micro-batches, not a
+      # mean-of-means. denom is token-count (token-mean) or sequence-/segment-
+      # count (sequence-mean), so each mode normalizes correctly even when
+      # micro-batch denominators differ, e.g. under sequence packing
+      # (b/491970038). The per-micro `grads *= 1/denom` pre-scale is dropped (its
+      # coupled half); dividing here too would double-divide.
+      denom = aux.primary_loss.denominator
+    else:
+      denom = jnp.asarray(1.0, dtype=jnp.float32)
 
     def apply_updates(model, optimizer, grad_accumulator):
       acc_grads = grad_accumulator.get()
@@ -515,13 +521,19 @@ class PeftTrainer:
     # Unlike the earlier bypass, the accumulator is not touched at all, so there
     # is no reset-to-zeros that lets SPMD re-shard state and force a 2nd compile.
     if self.config.get_with_default("gradient_accumulation_steps", 1) == 1:
-      grad_norm = optax.global_norm(
-          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
+      # depth-1 fast path: the accumulator's Sum grads / Sum denom collapses to
+      # grads / denom for a single micro-batch, so apply it directly (matching
+      # `GradientAccumulator.get`'s max(denom, 1) clamp) and skip the accumulator
+      # and the nnx.cond wrapper.
+      scaled_grads = jax.tree_util.tree_map(
+          lambda g: g / jnp.maximum(denom, 1.0), grads
       )
-      optimizer.update(model, grads)
+      grad_norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), scaled_grads)
+      )
+      optimizer.update(model, scaled_grads)
     else:
-      # TODO(b/491970038): update denom for sequence packing.
-      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+      grad_accumulator.add(grads, denom=denom)
       # If the mesh is not empty, then we need to replicate the is_update_step
       # across all devices to avoid deadlock so that all devices see the same
       # update step.

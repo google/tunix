@@ -357,6 +357,68 @@ class UtilsTest(absltest.TestCase):
       )
       self.assertTrue(bool(np.asarray(pack2.is_update_step)[0]))
 
+  def test_pack_sequences_sets_num_segments_to_budget_plus_one(self):
+    # num_segments is the static (pytree_node=False) segment-bucket upper bound.
+    # It must equal budget + 1 (a pack of `budget` tokens holds at most `budget`
+    # unit-length segments) and be a plain Python int (a fixed value every step
+    # so the segment-aware loss compiles once, no per-step recompilation).
+    budget = 10
+    example1 = self._create_mock_train_example(2, 3)
+    example2 = self._create_mock_train_example(1, 2)
+    packed_batches = list(
+        utils.pack_sequences(
+            iter([[example1, example2]]),
+            max_token_budget=budget,
+            pad_id=0,
+        )
+    )
+    self.assertNotEmpty(packed_batches)
+    for batch in packed_batches:
+      pack = batch[0]
+      self.assertEqual(pack.num_segments, budget + 1)
+      # Static Python int (not a traced jax.Array) -> compiles once.
+      self.assertIsInstance(pack.num_segments, int)
+
+  def test_pack_sequences_num_segments_respects_override(self):
+    # An explicit max_segments_per_packed_row shrinks the buckets:
+    # num_segments = override + 1 (not budget + 1).
+    packed = list(
+        utils.pack_sequences(
+            iter([[self._create_mock_train_example(2, 3)]]),
+            max_token_budget=10,
+            pad_id=0,
+            max_segments_per_packed_row=8,
+        )
+    )
+    self.assertNotEmpty(packed)
+    for batch in packed:
+      self.assertEqual(batch[0].num_segments, 8 + 1)
+
+  def test_pack_sequences_caps_segments_per_row(self):
+    # A small max_segments_per_packed_row is RESPECTED (segments capped per row),
+    # not raised on: three short sequences that would otherwise share a row are
+    # spread across rows so each holds <= max_segments, no sequence is dropped,
+    # and no error is raised (the segment_sum overflow can't happen).
+    max_seg = 1
+    examples = [self._create_mock_train_example(1, 2) for _ in range(3)]
+    packed = list(
+        utils.pack_sequences(
+            iter([examples]),
+            max_token_budget=20,
+            pad_id=0,
+            max_segments_per_packed_row=max_seg,
+        )
+    )
+    self.assertNotEmpty(packed)
+    total_segments = 0
+    for batch in packed:
+      seg = np.asarray(batch[0].segment_ids)  # [pack_size, budget], ids 1..K, 0=pad
+      for row in seg:
+        n = int(row.max())  # segments run 1..K per row; 0 is padding
+        self.assertLessEqual(n, max_seg)  # cap respected
+        total_segments += n
+    self.assertEqual(total_segments, 3)  # no sequence dropped
+
   def test_pack_sequences_packs_multiple_rows_per_chunk(self):
     # pack_size=2: one chunk is [2, budget] and FFD distributes sequences
     # ACROSS the two rows. budget=10, seqs A=6, B=5, C=3 (one mini-batch).

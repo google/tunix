@@ -46,6 +46,98 @@ class AlgoCoreTest(absltest.TestCase):
     )
     np.testing.assert_allclose(advantages, expected_value, rtol=1e-3, atol=1e-3)
 
+  def test_grpo_loss_fn_packed_equals_unpacked(self):
+    # P3.4 gate: grpo_loss_fn gives the SAME primary loss whether two sequences
+    # are packed into one row (segment_ids set) or one-per-row (segment_ids
+    # None). Proves segment_ids/num_segments are threaded into the loss
+    # aggregation and the gspo-token per-segment pooling. old_per_token_logps is
+    # None (is_ratio == 1), so the model output cancels and this isolates the
+    # aggregation wiring: sequence-mean-token-mean over A (adv 1.5, 3 tokens) and
+    # B (adv 3.0, 1 token) = (-1.5 + -3.0) / 2 = -2.25; a broken per-row
+    # aggregation would instead give -1.875.
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    class _SegAwareToy(nnx.Module):
+      """Tiny model whose attention is confined to same-segment positions."""
+
+      def __init__(self, *, vocab, dim, rngs):
+        self.emb = nnx.Embed(vocab, dim, rngs=rngs)
+        self.attn = nnx.MultiHeadAttention(
+            num_heads=2,
+            in_features=dim,
+            qkv_features=dim,
+            use_bias=False,
+            decode=False,
+            rngs=rngs,
+        )
+        self.head = nnx.Linear(dim, vocab, rngs=rngs)
+
+      def __call__(
+          self, x, segment_ids=None, positions=None, cache=None,
+          attention_mask=None,
+      ):
+        h = self.emb(x)
+        if segment_ids is not None:
+          same_seg = segment_ids[:, :, None] == segment_ids[:, None, :]
+          h = self.attn(h, mask=same_seg[:, None, :, :]) + h
+        else:
+          h = self.attn(h) + h
+        return self.head(h), cache
+
+    model = _SegAwareToy(vocab=16, dim=8, rngs=nnx.Rngs(0))
+    packed = common.TrainExample(
+        prompt_ids=jnp.zeros((1, 0), jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), jnp.int32),
+        completion_ids=jnp.array([[3, 4, 5, 6]], jnp.int32),
+        completion_mask=jnp.array([[1, 1, 1, 1]], jnp.float32),
+        advantages=jnp.array([[1.5, 1.5, 1.5, 3.0]], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        segment_ids=jnp.array([[1, 1, 1, 2]], jnp.int32),
+        segment_positions=jnp.array([[0, 1, 2, 0]], jnp.int32),
+        num_segments=3,
+    )
+    unpacked = common.TrainExample(
+        prompt_ids=jnp.array([[7], [7]], jnp.int32),
+        prompt_mask=jnp.array([[1], [1]], jnp.int32),
+        completion_ids=jnp.array([[3, 4, 5], [6, 0, 0]], jnp.int32),
+        completion_mask=jnp.array([[1, 1, 1], [1, 0, 0]], jnp.float32),
+        advantages=jnp.array([1.5, 3.0], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        segment_ids=None,
+        segment_positions=None,
+        num_segments=None,
+    )
+    for loss_algo in ('grpo', 'gspo-token'):
+      cfg = SimpleNamespace(
+          beta=0.0,
+          epsilon=0.2,
+          epsilon_high=0.2,
+          epsilon_c=None,
+          loss_algo=loss_algo,
+          loss_agg_mode='sequence-mean-token-mean',
+          temperature=1.0,
+          kl_loss_mode='low_var_kl',
+          kl_clamp_value=None,
+          force_compute_kl=False,
+      )
+      lp = float(
+          algo_core.grpo_loss_fn(
+              model, packed, cfg, pad_id=0, eos_id=-1
+          ).primary_loss.compute()
+      )
+      lu = float(
+          algo_core.grpo_loss_fn(
+              model, unpacked, cfg, pad_id=0, eos_id=-1
+          ).primary_loss.compute()
+      )
+      with self.subTest(loss_algo=loss_algo):
+        np.testing.assert_allclose(lp, lu, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(lp, -2.25, rtol=1e-4, atol=1e-4)
+
 
 if __name__ == '__main__':
   absltest.main()

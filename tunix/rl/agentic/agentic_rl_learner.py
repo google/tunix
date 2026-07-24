@@ -839,6 +839,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.max_seq_token_per_tpu,
           sequences_per_update=mini_batch_size * self._num_generations(),
           pack_size=pack_size,
+          max_segments_per_packed_row=(
+              self._training_config.max_segments_per_packed_row
+          ),
       )
     update_steps_since_last_sync = 0
     update_steps_per_full_batch = full_batch_size // mini_batch_size
@@ -884,6 +887,30 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # segment-aware forward before the example reaches the trainer.
         merged_train_micro_batch = self._compute_packed_logps(
             merged_train_micro_batch
+        )
+        # Packing efficiency: segment_ids==0 marks padding + dummy packs (real
+        # segments are numbered from 1), i.e. the fraction of wasted compute.
+        # dummy_ratio is a WeightedMetric(pad_positions, total_positions) reduced
+        # with global_weighted_mean = Sum(pad)/Sum(total) -- the true overall
+        # padding fraction, matching how the loss metrics reduce across
+        # micro-batches (equal to a plain mean while every pack is the same size,
+        # but stays correct if pack shapes ever differ).
+        seg = np.asarray(merged_train_micro_batch.segment_ids)
+        self.rl_cluster.buffer_metrics_async(
+            {
+                "packing/dummy_ratio": (
+                    sft_utils.WeightedMetric(
+                        float((seg == 0).sum()), float(seg.size)
+                    ),
+                    common.global_weighted_mean,
+                ),
+                "packing/seqs_per_pack": (
+                    float(seg.max(axis=-1).mean()),
+                    np.mean,
+                ),
+            },
+            mode=rl_cluster_lib.Mode.TRAIN,
+            step=self.rl_cluster.global_steps,
         )
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
