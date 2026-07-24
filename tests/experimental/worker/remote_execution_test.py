@@ -139,6 +139,19 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertEqual(restored.args, ("prompt_1",))
     self.assertEqual(restored.kwargs, {"turns": 5})
 
+  def test_execution_request_default_call(self):
+    req = remote_lib.ExecutionRequest()
+    self.assertEqual(req.method_name, "__call__")
+
+    engine = StubWorkerEngine("actor_call")
+    server = remote_lib.InProcessRemoteExecutionServer(engine)
+    handle = remote_lib.InProcessActorHandle(server)
+
+    res = handle.submit()
+    self.assertEqual(
+        res, "[actor_call] Trajectory for prompt default_prompt (3 turns)"
+    )
+
   def test_actor_handle_sync_and_async_invocation(self):
     async def _run_test():
       engine = StubWorkerEngine("actor_01", latency=0.01)
@@ -152,8 +165,16 @@ class RemoteExecutionTest(absltest.TestCase):
       )
 
       # Test sync execution via submit
-      status = await handle.asubmit("get_status")
+      status = handle.submit("get_status")
       self.assertIn("count=1", status)
+
+      # Test sync execution of a coroutine from inside an event loop raises
+      # RuntimeError
+      with self.assertRaisesRegex(
+          RuntimeError,
+          "submit\\(\\) cannot be called from a running async event loop",
+      ):
+        handle.submit("compute_trajectory", "prompt_c")
 
       # Test exception propagation when paused
       await handle.asubmit("pause")
@@ -162,6 +183,17 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertIn("currently paused", str(cm.exception))
 
     asyncio.run(_run_test())
+
+  def test_server_register_instance(self):
+    server = remote_lib.InProcessRemoteExecutionServer()
+    self.assertIsNone(server.bound_instance)
+
+    engine = StubWorkerEngine("dynamic_worker")
+    server.register_instance(engine)
+    self.assertIsNotNone(server.bound_instance)
+
+    handle = remote_lib.InProcessActorHandle(server)
+    self.assertIn("dynamic_worker", handle.submit("get_status"))
 
   def test_actor_pool_load_balancing_and_streaming(self):
     async def _run_test():
@@ -176,7 +208,8 @@ class RemoteExecutionTest(absltest.TestCase):
 
       pool = remote_lib.RoutingActorPool([handle_a, handle_b])
 
-      # Submit batch of tasks across pool and verify out-of-order completion stream
+      # Submit batch of tasks across pool and verify out-of-order completion
+      # stream
       tasks = [
           ("compute_trajectory", ("req_slow_on_A",), {"turns": 1}),
           ("compute_trajectory", ("req_fast_on_B",), {"turns": 1}),
@@ -247,6 +280,11 @@ class RemoteExecutionTest(absltest.TestCase):
           route_key="prompt_X",
       )
       self.assertTrue(res_traj.startswith("[worker_"))
+
+      # Test synchronous submit across the pool
+      sync_res = smart_pool.submit("get_status")
+      self.assertIn("count=", sync_res)
+
       # KV-cache aware call routes directly to actors[1]
       res_kv = await smart_pool.asubmit("kv_cache_aware", "prompt_v2")
       self.assertIn("[worker_1] KV-cache aware routing for prompt_v2", res_kv)
@@ -264,7 +302,46 @@ class RemoteExecutionTest(absltest.TestCase):
       res_method = await method_pool.asubmit("kv_cache_aware", "any_prompt")
       self.assertIn("[worker_1]", res_method)
 
+      # Verify router without the method raises TypeError
+      class BadRouter:
+        pass
+
+      bad_pool = remote_lib.RoutingActorPool(
+          [handle_0, handle_1], router=BadRouter()
+      )
+      with self.assertRaisesRegex(
+          TypeError, "Router object .* must provide a method"
+      ):
+        await bad_pool.asubmit("kv_cache_aware", "any_prompt")
+
     asyncio.run(_run_test())
+
+  def test_actor_pool_submit_without_actors_raises(self):
+    pool = remote_lib.RoutingActorPool()
+    with self.assertRaisesRegex(
+        RuntimeError, "RoutingActorPool contains no registered ActorHandles"
+    ):
+      pool.submit("any")
+
+  def test_actor_pool_stream_without_actors_raises(self):
+    pool = remote_lib.RoutingActorPool()
+
+    async def _run_pool_err():
+      with self.assertRaisesRegex(
+          RuntimeError,
+          "RoutingActorPool contains no registered ActorHandles",
+      ):
+        async for _ in pool.as_completed_stream([("any", (), {})]):
+          pass
+
+    asyncio.run(_run_pool_err())
+
+  def test_actor_pool_add_invalid_type_raises(self):
+    pool = remote_lib.RoutingActorPool()
+    with self.assertRaisesRegex(
+        TypeError, "Expected str or ActorHandle, got <class 'int'>"
+    ):
+      pool.add_actor(123)  # type: ignore
 
   def test_ray_style_remote_decorators(self):
     """Verifies @remote, @grpc, and @stubby decorators turning classes/funcs into actors."""
@@ -310,7 +387,8 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertEqual(standalone_task.remote(5), 50)
     self.assertEqual(async_standalone_task.remote(5), 100)
 
-    # Verify coroutine function task when called inside an active async event loop
+    # Verify coroutine function task when called inside an active async event
+    # loop
     async def _verify_in_loop():
       res = await async_standalone_task.remote(7)
       self.assertEqual(res, 140)
@@ -323,7 +401,8 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertIsInstance(grpc_handle, remote_lib.GrpcRemoteActorHandle)
     self.assertEqual(grpc_handle.target_address, "grpc://fake-pod:50051")
 
-    # Verify grpc class actor factory (remote gRPC target via explicit address kwarg)
+    # Verify grpc class actor factory (remote gRPC target via explicit address
+    # kwarg)
     explicit_handle = ExplicitGrpcWorker.remote()
     self.assertIsInstance(explicit_handle, remote_lib.GrpcRemoteActorHandle)
     self.assertEqual(explicit_handle.target_address, "grpc://fake-pod:50051")
@@ -333,12 +412,47 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertIsInstance(late_handle, remote_lib.GrpcRemoteActorHandle)
     self.assertEqual(late_handle.target_address, "grpc://allocated-pod:50051")
 
-    # Verify standalone function with non-inprocess transport raises NotImplementedError
+    # Verify standalone function with non-inprocess transport raises
+    # NotImplementedError
     with self.assertRaises(NotImplementedError):
 
       @remote_lib.remote("grpc://fake-pod:50051")
       def remote_grpc_func(x: int) -> int:
         return x * 2
+
+  def test_remote_decorator_invalid_transport_raises(self):
+    @remote_lib.remote(transport="invalid")
+    class BrokenWorker:
+      pass
+
+    with self.assertRaisesRegex(ValueError, "Unsupported transport: invalid"):
+      BrokenWorker.remote()
+
+  def test_remote_decorator_invalid_target_type_raises(self):
+    with self.assertRaisesRegex(
+        TypeError, "@remote expects a class or function"
+    ):
+      remote_lib.remote(12345)
+
+  def test_remote_actor_handle_submit_not_implemented(self):
+    handle = remote_lib.RemoteActorHandle("tcp://dummy")
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        "Remote execution over tcp://dummy not initialized.",
+    ):
+      handle.submit("method")
+
+  def test_remote_actor_handle_asubmit_not_implemented(self):
+    handle = remote_lib.RemoteActorHandle("tcp://dummy")
+
+    async def _run():
+      with self.assertRaisesRegex(
+          NotImplementedError,
+          "Remote execution over tcp://dummy not initialized.",
+      ):
+        await handle.asubmit("method")
+
+    asyncio.run(_run())
 
   def test_real_grpc_tcp_execution(self):
     """Verifies GrpcRemoteExecutionServer and GrpcRemoteActorHandle over physical TCP sockets."""
@@ -363,6 +477,25 @@ class RemoteExecutionTest(absltest.TestCase):
 
         status = await handle.asubmit("get_status")
         self.assertIn("count=1", status)
+
+        # Test GrpcRemoteActorHandle.submit cannot be called inside an event
+        # loop
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "GrpcRemoteActorHandle.submit\\(\\) is blocking and cannot be"
+            " called from a running event loop",
+        ):
+          handle.submit("get_status")
+
+        # Test GrpcRemoteExecutionServer.start_serving cannot be called inside
+        # an event loop
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "GrpcRemoteExecutionServer.start_serving\\(\\) is blocking and"
+            " cannot be called from a running event loop",
+        ):
+          server.start_serving(port)
+
         await handle.close()
       finally:
         await server.stop_serving()
@@ -386,6 +519,12 @@ class RemoteExecutionTest(absltest.TestCase):
     with self.assertRaises(RuntimeError):
       restored.unwrap()
 
+  def test_execution_response_serialization_success(self):
+    res_success = remote_lib.ExecutionResponse(result=42)
+    payload = res_success.serialize()
+    restored = remote_lib.ExecutionResponse.deserialize(payload)
+    self.assertEqual(restored.unwrap(), 42)
+
   def test_execute_request_captures_traceback(self):
     async def _run():
       engine = StubWorkerEngine("worker_1")
@@ -400,6 +539,69 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertIn("compute_trajectory", resp.traceback)
 
     asyncio.run(_run())
+
+  def test_server_error_no_instance_bound_sync(self):
+    server = remote_lib.InProcessRemoteExecutionServer()
+    req = remote_lib.ExecutionRequest("any_method")
+    resp1 = server.execute_sync_request(req)
+    self.assertEqual(resp1.error_type, "InstanceNotBoundError")
+    self.assertEqual(
+        resp1.error_message, "RemoteExecutionServer has no registered instance."
+    )
+
+  def test_server_error_no_instance_bound_async(self):
+    server = remote_lib.InProcessRemoteExecutionServer()
+    req = remote_lib.ExecutionRequest("any_method")
+
+    async def _run_async_err():
+      resp6 = await server.execute_request(req)
+      self.assertEqual(resp6.error_type, "InstanceNotBoundError")
+      self.assertEqual(
+          resp6.error_message,
+          "RemoteExecutionServer has no registered instance.",
+      )
+
+    asyncio.run(_run_async_err())
+
+  def test_server_error_method_not_found_sync(self):
+    server = remote_lib.InProcessRemoteExecutionServer(
+        StubWorkerEngine("worker_01")
+    )
+    resp2 = server.execute_sync_request(
+        remote_lib.ExecutionRequest("missing_method")
+    )
+    self.assertEqual(resp2.error_type, "AttributeError")
+    self.assertEqual(
+        resp2.error_message,
+        "Method 'missing_method' not found on bound instance.",
+    )
+
+  def test_server_error_method_not_found_async(self):
+    server = remote_lib.InProcessRemoteExecutionServer(
+        StubWorkerEngine("worker_01")
+    )
+
+    async def _run_async_err():
+      resp7 = await server.execute_request(
+          remote_lib.ExecutionRequest("missing")
+      )
+      self.assertEqual(resp7.error_type, "AttributeError")
+      self.assertEqual(
+          resp7.error_message, "Method 'missing' not found on bound instance."
+      )
+
+    asyncio.run(_run_async_err())
+
+  def test_server_error_exception_during_sync_execution(self):
+    class ThrowingWorker:
+
+      def fail(self):
+        raise ValueError("Intentional failure")
+
+    server = remote_lib.InProcessRemoteExecutionServer(ThrowingWorker())
+    resp4 = server.execute_sync_request(remote_lib.ExecutionRequest("fail"))
+    self.assertEqual(resp4.error_type, "ValueError")
+    self.assertEqual(resp4.error_message, "Intentional failure")
 
   def test_handle_execute_returns_error_for_unserializable_result(self):
     async def _run():
@@ -465,8 +667,8 @@ class RemoteExecutionTest(absltest.TestCase):
       try:
         first = handle.submit("compute_trajectory", "p1", turns=1)
         self.assertIn("sync_worker", first)
-        # The 2nd blocking call reuses the handle's persistent submit loop and its
-        # channel; it must not rebuild the channel or fail on a stale loop.
+        # The 2nd blocking call reuses the handle's persistent submit loop and
+        # its channel; it must not rebuild the channel or fail on a stale loop.
         second = handle.submit("compute_trajectory", "p2", turns=1)
         self.assertIn("sync_worker", second)
       finally:
