@@ -627,6 +627,8 @@ class Attention(nnx.Module):
             splash_attn_kernel, query_proj, key_proj, value_proj
         )
       qkv = qkv.transpose(0, 2, 1, 3)
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
     else:
       # GQA
       query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
