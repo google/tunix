@@ -46,7 +46,7 @@ MINI="${MINI:-16}"
 MICRO="${MICRO:-4}"
 LOGPS="${LOGPS:-4}"
 NUM_GEN="${NUM_GEN:-8}"                    # RLOO baseline samples (keep 8)
-MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-16384}"   # packing budget; 0 = DISABLE
+MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-8192}"   # packing budget; 0 = DISABLE
 MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # segment cap; empty = budget-derived
 MAX_STEPS="${MAX_STEPS:-200}"              # training updates (= --num_batches,
 NUM_EPOCHS="${NUM_EPOCHS:-1}"              #   with --num_epochs 1)
