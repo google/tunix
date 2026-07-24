@@ -104,6 +104,12 @@ parser.add_argument(
     default=None,
     help="Number of flat keys to reshard at a time. None for single-call.",
 )
+parser.add_argument(
+    "--max_num_batched_tokens",
+    type=int,
+    default=8192,
+    help="vLLM max_num_batched_tokens.",
+)
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -488,7 +494,7 @@ VLLM_UTILIZATION = args.vllm_utilization
 VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
 # Max number of tokens to be processed in parallel by vllm.
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE
+VLLM_MAX_BATCHED_TOKENS = args.max_num_batched_tokens
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
