@@ -887,6 +887,29 @@ class GradientAccumulatorTest(parameterized.TestCase):
         out,
     )
 
+  def test_setitem_vs_set_value_write_equivalence(self):
+    """set_value(x) stores the same value/dtype/type as `v[...] = x`."""
+    v_setitem = nnx.Variable(jnp.arange(6, dtype=jnp.float32).reshape(2, 3))
+    v_setvalue = nnx.Variable(jnp.arange(6, dtype=jnp.float32).reshape(2, 3))
+    new = jnp.full((2, 3), 7.0, dtype=jnp.float32)
+    v_setitem[...] = new
+    v_setvalue.set_value(new)
+    np.testing.assert_array_equal(v_setitem[...], v_setvalue[...])
+    self.assertEqual(v_setitem[...].dtype, v_setvalue[...].dtype)
+    self.assertIs(type(v_setitem), type(v_setvalue))
+
+  def test_depth1_single_add_denom_one_is_identity(self):
+    """At depth 1, add(g, denom=1) -> get() returns g exactly (fast-path premise)."""
+    model, acc = self._make_accumulator()
+    grads = self._ones_like_params(model, scale=2.5)
+    acc.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    out = _unwrap(acc.get())
+    jax.tree_util.tree_map(
+        lambda g, o: np.testing.assert_allclose(o, g, rtol=1e-7, atol=1e-7),
+        _unwrap(grads),
+        out,
+    )
+
   @parameterized.named_parameters(
       dict(testcase_name='equal_denoms', denoms=(4.0, 4.0, 4.0, 4.0)),
       dict(testcase_name='varying_denoms', denoms=(1.0, 7.0, 3.0, 5.0)),
@@ -1345,6 +1368,186 @@ class GradientAccumulatorTest(parameterized.TestCase):
     self.assertNotEmpty(float_dtypes)
     for d in float_dtypes:
       self.assertEqual(d, jnp.float32)
+
+
+class Depth1FastPathTest(parameterized.TestCase):
+  """Depth-1 fast path: numeric equivalence, accumulator untouched, no
+  `cond` in the depth-1 jaxpr, packing keeps the cond path."""
+
+  def _make_trainer(self, accum_steps=None, max_seq_token=None):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=4,
+        gradient_accumulation_steps=accum_steps,
+        max_seq_token_per_tpu=max_seq_token,
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+  def _train_step_primitives(self, trainer):
+    """Top-level jaxpr primitive names of one traced `_train_step` call."""
+    x = dummy_datasets(batch_size=4)[0]
+    graphdef, state = nnx.split(
+        (trainer.model, trainer.optimizer, trainer.grad_accumulator)
+    )
+
+    def pure_step(state, tokens, mask, flag):
+      model, optimizer, accumulator = nnx.merge(graphdef, state)
+      out = trainer._train_step(
+          model,
+          optimizer,
+          accumulator,
+          peft_trainer.TrainingInput(input_tokens=tokens, input_mask=mask),
+          flag,
+      )
+      _, new_state = nnx.split((model, optimizer, accumulator))
+      return out, new_state
+
+    jaxpr = jax.make_jaxpr(pure_step)(
+        state, x.input_tokens, x.input_mask, jnp.array(True)
+    )
+    return {eqn.primitive.name for eqn in jaxpr.eqns}
+
+  def test_depth1_fast_path_matches_accumulator_path(self):
+    """Direct update from grads matches add(1) -> get() -> update -> reset."""
+    rngs_a, rngs_b = nnx.Rngs(0), nnx.Rngs(0)
+    model_a = nnx.Linear(in_features=4, out_features=2, rngs=rngs_a)
+    model_b = nnx.Linear(in_features=4, out_features=2, rngs=rngs_b)
+    opt_a = nnx.Optimizer(model_a, optax.adamw(1e-3), wrt=nnx.Param)
+    opt_b = nnx.Optimizer(model_b, optax.adamw(1e-3), wrt=nnx.Param)
+    grads = jax.tree_util.tree_map(
+        lambda x: 0.5 * jnp.ones_like(x), nnx.state(model_a, nnx.Param)
+    )
+
+    # Old accumulator path (what depth 1 used to run).
+    acc = peft_trainer.GradientAccumulator(model_a, nnx.Param)
+    acc.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    acc_grads = acc.get()
+    norm_a = optax.global_norm(
+        jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
+    )
+    opt_a.update(model_a, acc_grads)
+    acc.reset()
+
+    # New fast path (direct update).
+    norm_b = optax.global_norm(
+        jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
+    )
+    opt_b.update(model_b, grads)
+
+    np.testing.assert_allclose(norm_a, norm_b, rtol=1e-7)
+    jax.tree_util.tree_map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-6),
+        _unwrap(nnx.state(model_a, nnx.Param)),
+        _unwrap(nnx.state(model_b, nnx.Param)),
+    )
+
+  def test_depth1_accumulator_untouched(self):
+    """Depth-1 training must not write the accumulator (keeps shardings stable)."""
+    trainer = self._make_trainer(accum_steps=None)
+    trainer.train(dummy_datasets(batch_size=4))
+    jax.tree_util.tree_map(
+        lambda v: np.testing.assert_array_equal(v, jnp.zeros_like(v)),
+        _unwrap(trainer.grad_accumulator.grads),
+    )
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
+
+  def test_depth1_jaxpr_has_no_cond(self):
+    """Sentinel: the depth-1 step jaxpr must contain no `cond` primitive."""
+    self.assertNotIn(
+        'cond', self._train_step_primitives(self._make_trainer())
+    )
+
+  def test_depth_gt1_jaxpr_has_cond(self):
+    """Depth>1 keeps the cond path (update cadence needs it)."""
+    self.assertIn(
+        'cond', self._train_step_primitives(self._make_trainer(accum_steps=2))
+    )
+
+  def test_packing_config_keeps_cond_path(self):
+    """Packing keeps the cond path at depth 1 (data-driven update cadence)."""
+    trainer = self._make_trainer(accum_steps=None, max_seq_token=64)
+    self.assertIn('cond', self._train_step_primitives(trainer))
+
+  def test_packing_config_respects_skip_step(self):
+    """With packing config, is_update_step=False must not update weights."""
+    trainer = self._make_trainer(accum_steps=None, max_seq_token=64)
+    before = jax.tree.map(
+        jnp.copy, _unwrap(nnx.state(trainer.model, nnx.Param))
+    )
+    _, _, grad_norm = trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        dummy_datasets(batch_size=4)[0],
+        jnp.array(False),
+    )
+    np.testing.assert_array_equal(grad_norm, 0.0)
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        before,
+        _unwrap(nnx.state(trainer.model, nnx.Param)),
+    )
+
+  def test_data_driven_false_flag_raises_on_fast_path_config(self):
+    """A data-driven is_update_step=False must fail loudly at depth 1."""
+
+    class _FlaggedInput:
+
+      def __init__(self, base):
+        self.input_tokens = base.input_tokens
+        self.input_mask = base.input_mask
+        self.is_update_step = False
+
+    trainer = self._make_trainer(accum_steps=None)
+    ds = [_FlaggedInput(dummy_datasets(batch_size=4)[0])]
+    with self.assertRaisesRegex(ValueError, 'is_update_step=False'):
+      trainer.train(ds)
+
+  def test_depth2_cadence(self):
+    """Depth 2: skip step accumulates only; update step applies and resets."""
+    trainer = self._make_trainer(accum_steps=2)
+    ds = dummy_datasets(batch_size=4)
+    before = jax.tree.map(
+        jnp.copy, _unwrap(nnx.state(trainer.model, nnx.Param))
+    )
+
+    # Micro-step 1: accumulate only.
+    trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        ds[0],
+        jnp.array(False),
+    )
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        before,
+        _unwrap(nnx.state(trainer.model, nnx.Param)),
+    )
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 1.0)
+
+    # Micro-step 2: update and reset.
+    trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        ds[1],
+        jnp.array(True),
+    )
+    with self.assertRaises(AssertionError):
+      jax.tree_util.tree_map(
+          np.testing.assert_array_equal,
+          before,
+          _unwrap(nnx.state(trainer.model, nnx.Param)),
+      )
+    jax.tree_util.tree_map(
+        lambda v: np.testing.assert_array_equal(v, jnp.zeros_like(v)),
+        _unwrap(trainer.grad_accumulator.grads),
+    )
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
 
 
 if __name__ == '__main__':
