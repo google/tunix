@@ -44,6 +44,22 @@ class _FakeScoringTrainerWorker:
     return "actor_logps"
 
 
+class _FakeMetricsTrainerWorker:
+  """Trainer worker that trains and exposes a drainable metrics buffer."""
+
+  def __init__(self, metrics):
+    self.calls = []
+    self.drained = 0
+    self._metrics = metrics
+
+  def train(self, chunks, eval_ds, skip_jit):
+    self.calls.append((chunks, eval_ds, skip_jit))
+
+  def drain_metrics(self):
+    self.drained += 1
+    return self._metrics
+
+
 class _FakeWeightSync:
   """Records sync() calls."""
 
@@ -93,6 +109,7 @@ class _FakeCluster:
     self.generate_calls = []
     self.ref_calls = []
     self.actor_calls = []
+    self.buffered_metrics = []
     self.cluster_config = types.SimpleNamespace(
         training_config=types.SimpleNamespace(
             compute_logps_micro_batch_size=2
@@ -101,6 +118,9 @@ class _FakeCluster:
 
   def sync_weights(self):
     self.synced += 1
+
+  def buffer_metrics(self, metrics, **kwargs):
+    self.buffered_metrics.append(metrics)
 
   def generate(self, **kwargs):
     self.generate_calls.append(kwargs)
@@ -138,6 +158,35 @@ class AgenticGRPOOrchestratorTest(absltest.TestCase):
     orchestrator._train_micro_batch(["chunk0", "chunk1"], "eval_ds", False)
 
     self.assertEqual(worker.calls, [(["chunk0", "chunk1"], "eval_ds", False)])
+
+  def test_train_micro_batch_pumps_metrics_from_worker(self):
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    worker = _FakeMetricsTrainerWorker({"loss": (0.5, None)})
+    orchestrator._trainer_worker = worker
+    cluster = _FakeCluster()
+    orchestrator.rl_cluster = cluster
+
+    orchestrator._train_micro_batch(["c"], None, False)
+
+    self.assertEqual(worker.calls, [(["c"], None, False)])
+    self.assertEqual(worker.drained, 1)
+    self.assertEqual(cluster.buffered_metrics, [{"loss": (0.5, None)}])
+
+  def test_train_micro_batch_skips_metrics_without_drain(self):
+    # A trainer worker that only implements train() (no drain_metrics) leaves the
+    # shared logger untouched from the orchestrator side.
+    orchestrator = object.__new__(
+        agentic_grpo_orchestrator.AgenticGRPOOrchestrator
+    )
+    orchestrator._trainer_worker = _FakeTrainerWorker()
+    cluster = _FakeCluster()
+    orchestrator.rl_cluster = cluster
+
+    orchestrator._train_micro_batch(["c"], None, False)
+
+    self.assertEqual(cluster.buffered_metrics, [])
 
   def test_sync_weights_routes_to_weight_sync_handle(self):
     orchestrator = object.__new__(

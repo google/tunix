@@ -22,7 +22,8 @@ distributed run diverges, routing them to role-based worker handles instead of
 the in-process `RLCluster`:
 
   * `_train_micro_batch` -> a TrainerWorker handle (a real handle wraps
-    `peft_trainer`'s grad-accumulating `train`; a remote one is an RPC stub).
+    `peft_trainer`'s grad-accumulating `train`; a remote one is an RPC stub);
+    after training it drains the worker's metrics into the shared logger.
   * `_sync_weights` -> a weight-sync handle, reusing the base's fence,
     step-advance, and prompt-feed around it.
   * `_generate` -> a rollout worker handle, reusing `_model_call`'s chat
@@ -35,16 +36,18 @@ the in-process `RLCluster`:
 
 `_maybe_run_eval` needs no override: it builds an orchestrator that already
 routes generation through `_generate` and reference scoring through
-`_ref_per_token_logps`, and it never trains or syncs weights. Remaining worker
-boundaries inside the postprocess (metric buffering -> a metrics pump, reward-fn
-evaluation) are wired the same way in follow-up steps. Everything else --
-grouping, advantage math, TrainExample assembly, checkpointing -- is inherited
-unchanged.
+`_ref_per_token_logps`, and it never trains or syncs weights. The one remaining
+worker boundary inside the postprocess (reward-fn evaluation) is wired the same
+way in a follow-up step. Everything else -- grouping, advantage math,
+TrainExample assembly, checkpointing -- is inherited unchanged. (Metrics computed
+in `_process_results` already run on the orchestrator and land in the shared
+logger; only the trainer worker's own metrics are pulled, at the train seam.)
 
 Handle contracts:
     trainer_worker.train(chunks: list, eval_ds, skip_jit: bool) -> None
     trainer_worker.per_token_logps(prompt_ids, completion_ids,
                                    pad_id, eos_id) -> array   # optional
+    trainer_worker.drain_metrics() -> dict | None             # optional
     weight_sync.sync() -> None
     rollout_worker.generate(prompts, apply_chat_template: bool,
                             trace_tags: dict, max_generation_steps: int | None)
@@ -84,8 +87,9 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
         reference-model scores. If None, scoring falls back to the in-process
         reference role.
       **kwargs: Forwarded to `GRPOLearner.__init__` (rl_cluster, algo_config,
-        reward_fns, ...). The in-process cluster still backs the not-yet-routed
-        stages (metrics, step counter) during incremental bring-up.
+        reward_fns, ...). The in-process cluster still backs the shared stages
+        (step counter, metric aggregation/logging, checkpointing) during
+        incremental bring-up.
     """
     super().__init__(**kwargs)
     self._trainer_worker = trainer_worker
@@ -94,8 +98,23 @@ class AgenticGRPOOrchestrator(agentic_grpo_learner.GRPOLearner):
     self._inference_worker = inference_worker
 
   def _train_micro_batch(self, chunks, eval_ds, skip_jit) -> None:
-    """Routes the trainer pass to the trainer worker (reused loop calls this)."""
+    """Routes the trainer pass to the trainer worker, then pulls its metrics."""
     self._trainer_worker.train(chunks, eval_ds, skip_jit)
+    self._pump_trainer_metrics()
+
+  def _pump_trainer_metrics(self) -> None:
+    """Drains the trainer worker's metrics into the shared logger.
+
+    In-process the trainer writes to `rl_cluster`'s logger directly; a remote
+    worker accumulates metrics on its own side, so drain them here and buffer
+    them under the current step. No-op when the worker exposes no `drain_metrics`.
+    """
+    drain = getattr(self._trainer_worker, "drain_metrics", None)
+    if drain is None:
+      return
+    metrics = drain()
+    if metrics:
+      self.rl_cluster.buffer_metrics(metrics)
 
   def _sync_weights(self) -> None:
     """Routes the weight sync to the worker coordinator (fence/advance reused)."""
