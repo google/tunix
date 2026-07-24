@@ -110,7 +110,7 @@ rollout_engine: "vllm"
 
 vllm_config:
   model_version: "google/gemma-4-E2B-it"
-  hbm_utilization: 0.2
+  hbm_utilization: 0.6
   tpu_backend_type: "jax"
   server_mode: True
   async_scheduling: False
