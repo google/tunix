@@ -197,7 +197,10 @@ class GradientAccumulator(nnx.Module):
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
       g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
-      acc_var[...] = acc_var[...] + g
+      # set_value (no index) avoids the indexed __setitem__ fast path, whose
+      # `.sharding` check on tracers triggers a per-leaf provenance scan that
+      # dominates trace time; the stored value is identical.
+      acc_var.set_value(acc_var[...] + g)
 
     jax.tree_util.tree_map(
         _add,
@@ -210,7 +213,7 @@ class GradientAccumulator(nnx.Module):
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
     else:
       denom_val = denom.astype(jnp.float32)
-    self.denom[...] = self.denom[...] + denom_val
+    self.denom.set_value(self.denom[...] + denom_val)
 
   def get(self):
     scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
@@ -223,14 +226,15 @@ class GradientAccumulator(nnx.Module):
 
   def reset(self):
     def _zero_in_place(v):
-      v[...] = jnp.zeros_like(v[...])
+      # set_value (no index); see `add` for why.
+      v.set_value(jnp.zeros_like(v[...]))
 
     jax.tree_util.tree_map(
         _zero_in_place,
         self.grads,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
-    self.denom[...] = jnp.zeros_like(self.denom[...])
+    self.denom.set_value(jnp.zeros_like(self.denom[...]))
 
 
 def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
@@ -470,9 +474,6 @@ class PeftTrainer:
       # Compute exactly equivalent legacy loss val
       loss_val = aux.primary_loss.compute()
 
-    # TODO(b/491970038): update denom for sequence packing.
-    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
-
     def apply_updates(model, optimizer, grad_accumulator):
       acc_grads = grad_accumulator.get()
       # Compute the norm in float32 to 1) match `skip_updates()` return type and
@@ -489,23 +490,39 @@ class PeftTrainer:
     def skip_updates(model, optimizer, grad_accumulator):
       return jnp.array(0.0, dtype=jnp.float32)
 
-    # If the mesh is not empty, then we need to replicate the is_update_step
-    # across all devices to avoid deadlock so that all devices see the same
-    # update step.
-    mesh = pxla.thread_resources.env.physical_mesh
-    if not mesh.empty:
-      is_update_step = jax.lax.with_sharding_constraint(
-          is_update_step, jax.sharding.PartitionSpec()
+    # At depth 1 the accumulator is a no-op and the cond predicate is always
+    # True, so update directly from `grads` (no per-leaf accumulator writes,
+    # no XLA Conditional, accumulator shardings untouched); sequence packing
+    # keeps the cond path since its cadence comes from `is_update_step`.
+    if (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_token_per_tpu is None
+    ):
+      grad_norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
+      optimizer.update(model, grads)
+    else:
+      # TODO(b/491970038): update denom for sequence packing.
+      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
-    grad_norm = nnx.cond(
-        is_update_step,
-        apply_updates,
-        skip_updates,
-        model,
-        optimizer,
-        grad_accumulator,
-    )
+      # If the mesh is not empty, then we need to replicate the is_update_step
+      # across all devices to avoid deadlock so that all devices see the same
+      # update step.
+      mesh = pxla.thread_resources.env.physical_mesh
+      if not mesh.empty:
+        is_update_step = jax.lax.with_sharding_constraint(
+            is_update_step, jax.sharding.PartitionSpec()
+        )
+
+      grad_norm = nnx.cond(
+          is_update_step,
+          apply_updates,
+          skip_updates,
+          model,
+          optimizer,
+          grad_accumulator,
+      )
 
     if isinstance(aux, utils.LossOutput):
       # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
@@ -915,6 +932,19 @@ class PeftTrainer:
               self._iter_steps
               % self.config.get_with_default("gradient_accumulation_steps", 1)
               == 0
+          )
+        elif (
+            not is_update_step_val
+            and self.config.get_with_default("gradient_accumulation_steps", 1)
+            == 1
+            and self.config.max_seq_token_per_tpu is None
+        ):
+          # The depth-1 direct-update path in `_train_step` updates on every
+          # step; a data-driven skip flag would be silently ignored there.
+          raise ValueError(
+              "data-driven is_update_step=False conflicts with the depth-1"
+              " direct-update path; set gradient_accumulation_steps>1 or"
+              " max_seq_token_per_tpu."
           )
 
         with self._perf_tracer.span(
