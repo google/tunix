@@ -249,7 +249,9 @@ def main():
   args = parse_args()
   budgets = [int(b) for b in args.budgets.split(",") if b]
 
-  print(f"jax devices: {jax.devices()}")
+  mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(-1, 1), ('fsdp', 'tp'))
+  mesh.__enter__()
+  print(f"jax devices: {jax.devices()}, using dp={mesh.shape['fsdp']} mesh")
   print(
       f"geometry: {args.num_seqs} seqs x {args.seq_len} padded "
       f"(real {args.min_tokens}-{args.max_tokens}), budgets={budgets}"
