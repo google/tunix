@@ -57,10 +57,21 @@ TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
+_GROUP_ID_OVERRIDE_KEY = "_tunix_group_id_override"
+
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   policy_version: np.ndarray | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _SkippedTrainingGroup:
+  group_id: Any
+  clip_ratio: float
+  clipped_count: int
+  total_count: int
+  status_counts: Dict[str, int]
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -92,6 +103,10 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
+  # If set, groups whose clipped/masked trajectory ratio is greater than this
+  # threshold are skipped before advantage computation/training. The consumer
+  # replaces each skipped group with one extra rollout prompt.
+  group_clip_filter_threshold: float | None = None
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -427,6 +442,99 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     return agent, env
 
+  def _trajectory_status_name(self, item: Any) -> str | None:
+    traj = getattr(item, "traj", None)
+    if isinstance(traj, dict):
+      status = traj.get("status")
+    else:
+      status = getattr(traj, "status", None)
+    return getattr(status, "name", status)
+
+  def _status_is_filtered_for_training(self, status_name: str | None) -> bool:
+    status_name = getattr(status_name, "name", status_name)
+    if not (
+        self.algo_config.overlong_filter
+        and self.algo_config.filter_statuses
+        and status_name
+    ):
+      return False
+    filtered_status_names = {
+        getattr(status, "name", status)
+        for status in self.algo_config.filter_statuses
+    }
+    return status_name in filtered_status_names
+
+  def _trajectory_is_clipped_for_group_filter(self, item: Any) -> bool:
+    """Returns whether a trajectory should count as clipped for group filtering."""
+    traj = getattr(item, "traj", None)
+    if not isinstance(traj, dict):
+      return False
+
+    if self._status_is_filtered_for_training(traj.get("status")):
+      return True
+
+    completion_masks = traj.get("conversation_masks")
+    if completion_masks is not None:
+      masks = np.asarray(completion_masks)
+      if masks.size > 0 and not np.any(masks):
+        return True
+
+    completion_tokens = traj.get("conversation_tokens")
+    if completion_tokens is None:
+      return False
+    token_count = len(completion_tokens)
+    if (
+        self.algo_config.max_response_length is None
+        or token_count < self.algo_config.max_response_length
+    ):
+      return False
+
+    try:
+      eos_id = self.rl_cluster.rollout.eos_id()
+      return token_count == 0 or completion_tokens[-1] != eos_id
+    except Exception:  # pylint: disable=broad-except
+      return True
+
+  def _group_clip_filter_marker(
+      self, batch_results: Sequence[Any]
+  ) -> _SkippedTrainingGroup | None:
+    threshold = self.algo_config.group_clip_filter_threshold
+    if threshold is None or threshold < 0:
+      return None
+
+    total_count = len(batch_results)
+    if total_count == 0:
+      return None
+
+    status_counts = {}
+    clipped_count = 0
+    for item in batch_results:
+      status_name = self._trajectory_status_name(item) or "UNKNOWN"
+      status_counts[status_name] = status_counts.get(status_name, 0) + 1
+      if self._trajectory_is_clipped_for_group_filter(item):
+        clipped_count += 1
+
+    clip_ratio = clipped_count / total_count
+    if clip_ratio <= threshold:
+      return None
+
+    group_id = getattr(batch_results[0], "group_id", None)
+    return _SkippedTrainingGroup(
+        group_id=group_id,
+        clip_ratio=clip_ratio,
+        clipped_count=clipped_count,
+        total_count=total_count,
+        status_counts=status_counts,
+    )
+
+  def _extract_group_id_override(
+      self, single_example: TrainingInputT
+  ) -> int | None:
+    override = single_example.pop(_GROUP_ID_OVERRIDE_KEY, None)
+    if override is None:
+      return None
+    return int(np.asarray(override).reshape(-1)[0])
+
   def _model_call(
       self,
       chat_lists: List[Dict[str, str]],
@@ -510,6 +618,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       group_id = self.rl_cluster.global_steps * self._full_batch_size
       if is_async_iterator:
         async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          group_id_override = self._extract_group_id_override(single_example)
+          current_group_id = (
+              group_id_override if group_id_override is not None else group_id
+          )
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -517,29 +629,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   None,
                   self._create_agent_env_pair,
                   copy.deepcopy(single_example),
-                  group_id,
+                  current_group_id,
                   pair_index,
               )
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
             yield agent, env
-          group_id += 1
+          if group_id_override is None:
+            group_id += 1
       else:
         for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          group_id_override = self._extract_group_id_override(single_example)
+          current_group_id = (
+              group_id_override if group_id_override is not None else group_id
+          )
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
                   None,
                   self._create_agent_env_pair,
                   copy.deepcopy(single_example),
-                  group_id,
+                  current_group_id,
                   pair_index,
               )
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
             yield agent, env
-          group_id += 1
+          if group_id_override is None:
+            group_id += 1
 
     # Start producers in the background.
     producer_task = asyncio.create_task(
@@ -659,6 +777,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           collect_mode="Token",
       ):
         try:
+          skipped_group = self._group_clip_filter_marker(batch)
+          if skipped_group is not None:
+            logging.warning(
+                "Skipping training group %s: clip_ratio=%.3f > %.3f"
+                " clipped=%d/%d statuses=%s",
+                skipped_group.group_id,
+                skipped_group.clip_ratio,
+                self.algo_config.group_clip_filter_threshold,
+                skipped_group.clipped_count,
+                skipped_group.total_count,
+                skipped_group.status_counts,
+            )
+            self.rl_cluster.buffer_metrics_async(
+                {
+                    "generation/completions/group_clip_filter/skip": (
+                        1,
+                        np.sum,
+                    ),
+                    "generation/completions/group_clip_filter/clip_ratio": (
+                        skipped_group.clip_ratio,
+                        np.mean,
+                    ),
+                },
+                mode=rl_cluster_lib.Mode.TRAIN,
+                step=self.rl_cluster.global_steps,
+            )
+            train_data_queue.put(skipped_group)
+            continue
+
           if self._process_in_consumer:
             # Put raw batch (list of trajectories) into queue.
             # We put it once, and consumer will handle iterations.
@@ -684,15 +831,31 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue.put(None)
 
   def _data_consumer_batch_generator(
-      self, queue: queue_lib.AbstractDataQueue, batch_size: int
+      self,
+      queue: queue_lib.AbstractDataQueue,
+      batch_size: int,
+      on_skipped_group: Callable[[_SkippedTrainingGroup], None] | None = None,
   ):
     """Yields micro-batches from a queue until a None is received."""
     item_iterator = iter(lambda: queue.get(block=True), None)
+    batch = []
     while True:
-      batch = list(itertools.islice(item_iterator, batch_size))
-      if not batch:
-        return  # The iterator is exhausted.
-      yield batch
+      try:
+        item = next(item_iterator)
+      except StopIteration:
+        if batch:
+          yield batch
+        return
+
+      if isinstance(item, _SkippedTrainingGroup):
+        if on_skipped_group is not None:
+          on_skipped_group(item)
+        continue
+
+      batch.append(item)
+      if len(batch) == batch_size:
+        yield batch
+        batch = []
 
   def train(
       self,
@@ -768,6 +931,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     logging.info("Starting AgenticRLLearner training loop.")
     full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
+    single_prompt_iterator = self._create_micro_batch_iterator(
+        full_dataset_iterator, 1
+    )
 
     all_eval_prompts = (
         list(self._create_micro_batch_iterator(iter(eval_dataset), 1))
@@ -783,16 +949,57 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     orchestrator = self._build_orchestrator()
 
     prompt_queue = queue.Queue()
+    prompt_input_exhausted = False
+
+    def _put_next_prompt_group_to_queue(
+        group_id_override: int | None = None,
+    ) -> bool:
+      nonlocal prompt_input_exhausted
+      if prompt_input_exhausted:
+        return False
+      try:
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.DATA_LOADING,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+            },
+        ):
+          prompt = next(single_prompt_iterator)
+        if group_id_override is not None:
+          prompt = dict(prompt)
+          prompt[_GROUP_ID_OVERRIDE_KEY] = np.array([group_id_override])
+        prompt_queue.put(prompt)
+        return True
+      except StopIteration:
+        prompt_input_exhausted = True
+        prompt_queue.put(None)
+        return False
+
+    def _put_prompt_groups_to_queue(num_groups: int) -> None:
+      for _ in range(num_groups):
+        if not _put_next_prompt_group_to_queue():
+          break
+
+    def _replace_skipped_group(skipped_group: _SkippedTrainingGroup) -> None:
+      logging.info(
+          "Replacing skipped training group %s with one extra rollout prompt.",
+          skipped_group.group_id,
+      )
+      if not _put_next_prompt_group_to_queue(
+          group_id_override=skipped_group.group_id
+      ):
+        logging.warning(
+            "Unable to replace skipped training group %s: dataset exhausted.",
+            skipped_group.group_id,
+        )
+
     initial_buffer_size = self.algo_config.off_policy_steps + 1
     logging.info(
-        "Prefilling prompt queue with %d batches.", initial_buffer_size
+        "Prefilling prompt queue with %d batches (%d groups).",
+        initial_buffer_size,
+        initial_buffer_size * full_batch_size,
     )
-    for _ in range(initial_buffer_size):
-      try:
-        self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
-      except StopIteration:
-        prompt_queue.put(None)
-        break
+    _put_prompt_groups_to_queue(initial_buffer_size * full_batch_size)
 
     producer_future = asyncio.run_coroutine_threadsafe(
         self._producer(orchestrator, prompt_queue, train_data_queue),
@@ -801,7 +1008,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue, train_micro_batch_size
+        train_data_queue,
+        train_micro_batch_size,
+        on_skipped_group=_replace_skipped_group,
     )
     is_packed = self._training_config.max_seq_token_per_tpu is not None
     if is_packed:
@@ -946,10 +1155,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # `is_update_step` flips True every `grad_acc_steps` micro-batches.
         unpacked_micro_step_counter += 1
         is_update = unpacked_micro_step_counter % grad_acc_steps == 0
-        
+
       if is_update:
         update_steps_since_last_sync += 1
-        
+
       if update_steps_since_last_sync == update_steps_per_full_batch:
         # --- Remaining Iterations Training Step ---
         iterations = self._num_iterations()
@@ -958,7 +1167,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           # TODO(b/483779605) Sub-step checkpointing.
           self._iter_steps += len(full_batch_chunks)
 
-          # TODO(yixuanm): Eval during iteration too. Skipping for now as we 
+          # TODO(yixuanm): Eval during iteration too. Skipping for now as we
           # will refactor the learner soon.
           self.rl_cluster.update_actor(
               full_batch_chunks, None, skip_jit
@@ -968,7 +1177,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 full_batch_chunks, None, skip_jit
             )
         full_batch_chunks.clear()
-
 
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
@@ -1083,33 +1291,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 "Weights synced. Policy version incremented to %d.",
                 self.policy_version,
             )
-            try:
-              with self.rl_cluster.perf_v2.span(
-                  perf_constants.DATA_LOADING,
-                  tags={
-                      perf_constants.STEP: self.rl_cluster.global_steps,
-                  },
-              ):
-                batch = next(full_dataset_iterator)
-              self._put_prompts_to_queue(prompt_queue, batch)
-            except StopIteration:
-              prompt_queue.put(None)
+            _put_prompt_groups_to_queue(full_batch_size)
           finally:
             self._rollout_sync_lock.release_weight_sync()
             logging.info("Sync lock released.")
         else:
           self.rl_cluster.global_steps += 1
-          try:
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.DATA_LOADING,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                },
-            ):
-              batch = next(full_dataset_iterator)
-            self._put_prompts_to_queue(prompt_queue, batch)
-          except StopIteration:
-            prompt_queue.put(None)
+          _put_prompt_groups_to_queue(full_batch_size)
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf_v2.export(),
