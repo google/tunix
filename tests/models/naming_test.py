@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import requests
@@ -19,8 +21,6 @@ import tenacity
 from tunix.models import naming
 from tunix.models import registry
 from tunix.utils import env_utils
-
-
 def _get_test_cases_for_get_model_config_id() -> list[dict[str, str]]:
   test_cases = []
   for model_info in registry.MODEL_CATALOG:
@@ -160,8 +160,13 @@ class TestNaming(parameterized.TestCase):
       reraise=True,
   )
   def _head_huggingface_model(self, model_id: str) -> requests.Response:
+    headers = {}
+    hf_token = os.environ.get('HF_TOKEN')
+    if hf_token:
+      headers['Authorization'] = f'Bearer {hf_token}'
     return requests.head(
         f'https://huggingface.co/{model_id}',
+        headers=headers,
         allow_redirects=True,
         timeout=10,
     )
