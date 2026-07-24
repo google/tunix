@@ -559,7 +559,11 @@ TRAINING updates (peft_trainer.py:359 "# of times model has been updated"). The 
 (base_rl_pipeline.py:663) — the gemma yaml pins `num_batches=5`, so the FrozenLake wrapper also
 overrides `num_batches` (default = MAX_STEPS, since batch==mini -> 1 update/batch). If you set
 MAX_STEPS yourself, NUM_BATCHES follows automatically; override NUM_BATCHES only for epochs>1
-setups.
+setups. NOTE the original `run_gemma4_e2b.sh` recipe is a 5-STEP SMOKE config (num_batches=5,
+max_steps=5, decay_steps=9) — never a convergence recipe. The wrapper lifts all three: the
+pinned `decay_steps: 9` would otherwise survive the CLI's auto-scaling (it only fills UNSET
+values) and drive LR to ~0 by step ~9, flat-lining the remaining ~190 steps; the wrapper ties
+`actor_optimizer_config.decay_steps` to MAX_STEPS (warmup auto-fills to 0.1*MAX_STEPS).
 
 **FrozenLake first-run check (before trusting run C):** the FrozenLake single-seq max is
 `max_prompt_length + max_response_length`; `max_response_length` is not pinned in the yaml. The

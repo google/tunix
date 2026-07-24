@@ -101,6 +101,12 @@ overrides=(
   "rl_training_config.mini_batch_size=$MINI"
   "rl_training_config.train_micro_batch_size=$MICRO"
   "rl_training_config.max_steps=$MAX_STEPS"
+  # The gemma yaml pins decay_steps: 9 (tuned for its 5-step smoke run) and the
+  # CLI only auto-scales decay_steps to max_steps when UNSET -- pinned values
+  # survive. At 200 steps that means LR ~0 after step ~9 (dead run). Tie the
+  # cosine decay to the real run length. (warmup_steps: 0 is falsy -> the CLI
+  # auto-sets it to 0.1 * max_steps = 20, which is fine.)
+  "rl_training_config.actor_optimizer_config.decay_steps=$MAX_STEPS"
   "agentic_grpo_config.num_generations=$NUM_GEN"
   "rl_training_config.metrics_logging_options.run_name=$RUN_TAG"
 )
