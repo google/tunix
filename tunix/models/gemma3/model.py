@@ -683,10 +683,14 @@ class Attention(nnx.Module):
         self.remat_config == RematConfig.BLOCK
         or self.remat_config == RematConfig.BLOCK.value
     ):
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
@@ -792,8 +796,17 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
@@ -889,9 +902,18 @@ class DecoderLayer(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.DECODER:
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask)

@@ -669,10 +669,14 @@ class Attention(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, segment_ids
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, segment_ids=segment_ids
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
@@ -1043,7 +1047,13 @@ class MLP(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
@@ -1124,8 +1134,14 @@ class DecoderLayer(nnx.Module):
         self.config.remat_config == RematConfig.DECODER
         or self.config.remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, segment_ids
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, segment_ids=segment_ids
       )
     else:
       return self.block(

@@ -20,6 +20,7 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import qwix
 from tunix.models.gemma4 import model as model_lib
 
 
@@ -214,6 +215,51 @@ class ModelTest(absltest.TestCase):
     loss, grads = nnx.value_and_grad(loss_fn)(
         model, tokens, positions, attn_mask
     )
+    self.assertIsNotNone(loss)
+    self.assertIsNotNone(grads)
+
+  def test_remat_qwix_lora_compatibility(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.remat_config = model_lib.RematConfig.BLOCK
+    config.frac_shared_layers = 0.0
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs)
+
+    lora_provider = qwix.LoraProvider(
+        module_path='.*q_einsum|.*kv_einsum|.*attn_vec_einsum|.*gate_proj|.*up_proj|.*down_proj',
+        rank=4,
+        alpha=2.0,
+    )
+    model_input = model.get_model_input()
+    lora_model = qwix.apply_lora_to_model(model, lora_provider, **model_input)
+    lora_model.set_attributes(qwix_rngs=nnx.Rngs(0))
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (2, 32), 0, config.num_embed
+    )
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+
+    @nnx.jit
+    def train_step(m, tok, pos, mask):
+      def loss_fn(model_in):
+        logits, _ = model_in(tok, positions=pos, attention_mask=mask)
+        return jnp.sum(logits)
+
+      return nnx.value_and_grad(loss_fn)(m)
+
+    loss, grads = train_step(lora_model, tokens, positions, attn_mask)
     self.assertIsNotNone(loss)
     self.assertIsNotNone(grads)
 
