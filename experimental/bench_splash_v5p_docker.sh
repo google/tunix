@@ -22,7 +22,7 @@ BRANCH="${BRANCH:-yuxzhang/refactor_loss_accum_ablation}"
 
 # Pass the inner script's knobs through only when the caller set them.
 PASS_ENV=()
-for var in NUM_SEQS SEQ_LEN MIN_TOKENS MAX_TOKENS BUDGETS MODEL_CONFIG \
+for var in NUM_SEQS SEQ_LEN MIN_TOKENS MAX_TOKENS BUDGETS SEGMENT_SWEEP SWEEP_BUDGET MODEL_CONFIG \
            ITERS WARMUP TRACE_DEST TRACE_ITERS WITH_MODULE WITH_LAYER LOG_DIR RUN_TAG; do
   if [ -n "${!var:-}" ]; then PASS_ENV+=(-e "$var=${!var}"); fi
 done

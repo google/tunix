@@ -34,6 +34,10 @@ SEQ_LEN="${SEQ_LEN:-2048}"
 MIN_TOKENS="${MIN_TOKENS:-700}"
 MAX_TOKENS="${MAX_TOKENS:-950}"
 BUDGETS="${BUDGETS:-2048,4096,8192,16384}"
+# Segment counts swept at a FIXED row shape (SWEEP_BUDGET). This is the
+# decisive test: same shape, same tokens, only the segment structure changes.
+SEGMENT_SWEEP="${SEGMENT_SWEEP:-1,2,4,8,16,32}"
+SWEEP_BUDGET="${SWEEP_BUDGET:-8192}"
 # qwen3_1p7b = the gsm8k run this explains; qwen3_8b = the FrozenLake geometry.
 MODEL_CONFIG="${MODEL_CONFIG:-qwen3_1p7b}"
 ITERS="${ITERS:-20}"
@@ -67,6 +71,8 @@ python3 -X faulthandler -u experimental/bench_splash_packed.py \
   --min_tokens "$MIN_TOKENS" \
   --max_tokens "$MAX_TOKENS" \
   --budgets "$BUDGETS" \
+  --segment_sweep "$SEGMENT_SWEEP" \
+  --sweep_budget "$SWEEP_BUDGET" \
   --model_config "$MODEL_CONFIG" \
   --iters "$ITERS" \
   --warmup "$WARMUP" \

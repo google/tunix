@@ -81,6 +81,14 @@ def parse_args():
   p.add_argument("--trace_dest", type=str, default="",
                  help="If set, write one xprof trace per case under here.")
   p.add_argument("--trace_iters", type=int, default=3)
+  p.add_argument("--segment_sweep", type=str, default="1,2,4,8,16,32",
+                 help="Segment counts to sweep at a FIXED row shape (empty to"
+                      " skip). Decouples segment structure from row length:"
+                      " flat timings prove segment_ids only masks, never"
+                      " skips. Includes a skewed control and a cross-check"
+                      " against the real packed row of the same geometry.")
+  p.add_argument("--sweep_budget", type=int, default=8192,
+                 help="Row length held fixed during the segment sweep.")
   p.add_argument("--with_module", action="store_true",
                  help="Also time model_lib.Attention (kernel + projections).")
   p.add_argument("--with_layer", action="store_true",
@@ -164,6 +172,46 @@ def geometry(example, budget, total_real_tokens):
   segs = [int(seg[r].max()) for r in range(rows)]
   dummy = 1.0 - total_real_tokens / float(rows * budget)
   return rows, segs, dummy
+
+
+def synthetic_segment_ids(rows, row_len, num_segments, real_frac=1.0,
+                          skew=False):
+  """Segment ids with the same structure `pack_sequences` produces.
+
+  Real packing couples the row length and the segment count (a bigger budget
+  holds both a longer row AND more sequences), so a budget sweep cannot say
+  which one drives the cost. Synthesizing the ids decouples them: hold the
+  shape fixed and vary only the number of segments. Structure matches the
+  packer's -- ids 1..K in contiguous runs, 0 for the padding tail -- which
+  `gate_p10_geometry` asserts, and one synthetic point is timed against the
+  real packed row of the same geometry as a cross-check.
+
+  Args:
+    rows: Rows in the chunk.
+    row_len: Tokens per row (the packing budget).
+    num_segments: Sequences packed into each row.
+    real_frac: Fraction of the row that is real tokens (the rest is padding,
+      segment 0), mirroring a dummy_ratio of 1 - real_frac.
+    skew: If True, one segment takes half the real tokens and the rest split
+      the remainder -- a control for whether segment SIZE distribution matters.
+
+  Returns:
+    An int32 [rows, row_len] array.
+  """
+  real = int(row_len * real_frac)
+  if skew and num_segments > 1:
+    first = real // 2
+    rest = [(real - first) // (num_segments - 1)] * (num_segments - 1)
+    sizes = [first] + rest
+  else:
+    sizes = [real // num_segments] * num_segments
+  ids = np.zeros((rows, row_len), dtype=np.int32)
+  for r in range(rows):
+    pos = 0
+    for i, size in enumerate(sizes, start=1):
+      ids[r, pos:pos + size] = i
+      pos += size
+  return jnp.asarray(ids)
 
 
 def model_inputs(example, pad_id=0, eos_id=0):
@@ -376,6 +424,57 @@ def main():
     print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
     maybe_trace(args.trace_dest, f"kernel_{name}", f_fb, a_fb, args.trace_iters)
 
+  # ---- segment-structure sweep at a FIXED shape ----------------------------
+  # The budget sweep above varies row length and segment count together. This
+  # holds the shape fixed and varies ONLY the segment structure, which is the
+  # decisive test: if splash skipped cross-segment blocks, more segments would
+  # mean a sparser block-diagonal and a lower cost.
+  sweep_results = {}
+  sweep_counts = [int(s) for s in args.segment_sweep.split(",") if s]
+  if sweep_counts:
+    b_sweep = args.sweep_budget
+    real_frac = 1.0 - 0.234  # the packed dummy_ratio the geometry gate reports
+    print()
+    print("=" * 80)
+    print(f"SEGMENT SWEEP -- shape fixed at [1, {b_sweep}], only the segment"
+          " structure varies")
+    print("=" * 80)
+    print(f"{'case':<12} {'segments':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
+
+    variants = [(f"S{k}", k, False) for k in sweep_counts]
+    # Skew control: same shape and segment count, wildly uneven segment sizes.
+    if max(sweep_counts) > 1:
+      variants.append((f"S{max(sweep_counts)}skew", max(sweep_counts), True))
+
+    for name, k, skew in variants:
+      seg = synthetic_segment_ids(1, b_sweep, k, real_frac=real_frac, skew=skew)
+      (f_fwd, a_fwd), (f_fb, a_fb) = kernel_fns(
+          config, 1, b_sweep, seg, args.seed
+      )
+      t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
+      t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
+      sweep_results[name] = (t_fwd, t_fb)
+      note = f"{k} segments{' (skewed sizes)' if skew else ''}, real={real_frac:.2f}"
+      print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
+      maybe_trace(args.trace_dest, f"sweep_{name}", f_fb, a_fb,
+                  args.trace_iters)
+
+    # Cross-check: the real packed row of this shape must time like the
+    # synthetic one with the same segment count.
+    real_case = next(
+        (c for c in cases
+         if c[0] == f"P{b_sweep}" and c[4][0] == 1), None
+    )
+    if real_case is not None:
+      real_segs = int(np.asarray(real_case[3]).max())
+      seg = synthetic_segment_ids(1, b_sweep, real_segs, real_frac=real_frac)
+      (_, _), (f_fb, a_fb) = kernel_fns(config, 1, b_sweep, seg, args.seed)
+      t_syn = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
+      t_real = kernel_results[f"P{b_sweep}"][1]
+      print(f"{'XCHECK':<12} {f'real packer vs synthetic, {real_segs} segs':<40}"
+            f" {'':>9} {t_real:>5.2f} vs {t_syn:.2f}")
+      sweep_results["_xcheck"] = (t_real, t_syn)
+
   # ---- optional context: module and full layer -----------------------------
   module_results, layer_results = {}, {}
   if args.with_module or args.with_layer:
@@ -443,6 +542,29 @@ def main():
   if any(n.startswith("C") for n in kernel_results):
     print("       C vs its P twin isolates segment_ids: equal cost means"
           " segment_ids does not save compute, only masks.")
+  if sweep_results:
+    keys = [k for k in sweep_results if k != "_xcheck" and "skew" not in k]
+    sbase = sweep_results[keys[0]][1]
+    spread = max(sweep_results[k][1] for k in keys) / min(
+        sweep_results[k][1] for k in keys
+    )
+    print(f"  [V1b] segment sweep at a fixed [1, {args.sweep_budget}] row"
+          f" -- spread across {len(keys)} segment counts = {spread:.2f}x")
+    for k in keys:
+      print(f"       {k:<10} bwd {sweep_results[k][1] / sbase:6.2f}x S1")
+    skew_key = next((k for k in sweep_results if "skew" in k), None)
+    if skew_key:
+      flat = sweep_results[skew_key.replace("skew", "")][1]
+      print(f"       {skew_key:<10} bwd"
+            f" {sweep_results[skew_key][1] / flat:6.2f}x the even split"
+            "   (segment SIZE distribution -- 1.00x kills load balancing)")
+    print("       ~1.00x throughout means segment_ids only masks blocks that"
+          " were computed anyway; a real skip would fall with more segments.")
+    if "_xcheck" in sweep_results:
+      t_real, t_syn = sweep_results["_xcheck"]
+      print(f"  [XC] real packed row {t_real:.2f} ms vs synthetic same-geometry"
+            f" {t_syn:.2f} ms ({t_syn / t_real:.2f}x) -- close means the"
+            " synthetic sweep is representative of production packing.")
   if module_results:
     mbase = module_results["U"][1]
     print("  [V1'] attention MODULE (mixes in token-linear projections, which"
