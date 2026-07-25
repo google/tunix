@@ -54,7 +54,13 @@ BATCH="${BATCH:-16}"
 MINI="${MINI:-16}"
 MICRO="${MICRO:-4}"
 LOGPS="${LOGPS:-4}"
-MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-8192}"     # packing budget (4 seqs/row @ 2048 each); set 0 to DISABLE packing
+# Packing budget = the longest sequence (max_prompt 1024 + max_response 1024),
+# which is also the unpacked row length. Measured on v5p (see
+# tracing_logs/splash_microbench_RUN1_results.log): splash schedules a row's
+# full causal area whatever it holds, so cost tracks rows*len^2 -- keeping the
+# row length and cutting the row count wins (4096 already beat unpacked by 23%
+# at the module level), while doubling the budget cost 89%. Set 0 to DISABLE.
+MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-2048}"
 MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"   # segment/row cap (loss num_segments); empty = None = budget-derived
 MAX_STEPS="${MAX_STEPS:-200}"              # REAL run length (training continues
                                            # past the profiler window)
