@@ -1,176 +1,109 @@
 #!/bin/bash
-# Real (full) agentic FrozenLake GRPO training on a single-host TPU VM
-# (v5p, 4 chips), Qwen3-8B via examples/frozenlake/train_frozenlake_qwen3.py —
-# the recipe whose convergence is established (swe-evaluation runs; solve_ratio
-# climbs on held-out eval). The FrozenLake analogue of train_v5p_1host_pack.sh.
+# Agentic FrozenLake GRPO on a single-host TPU VM (v5p-4), driving
+# examples/frozenlake/train_frozenlake.py -- the Gemma4-E2B recipe whose
+# docstring targets exactly this host class ("Designed for v5p-4 / v6e-8") and
+# which runs rollout and trainer on SEPARATE meshes (the disaggregated vLLM
+# server "avoids the trace-context issues of running the in-process sampler
+# under REMAT", which is what makes its log-probs trustworthy).
 #
-# ONE run yields BOTH:
-#   * convergence  -- wandb loss/reward + eval rewards/solve_ratio every 10
-#                     steps (the script wires the held-out test set).
-#   * performance  -- full-run Perfetto (v1 spans + v2 trace) plus a short
-#                     xprof kernel window. Same as the gsm8k run.
+# The script's own hyperparameters are left alone -- they were tuned for this
+# host. This wrapper only supplies what the script cannot know: the pinned
+# JAX/vLLM versions, a reachable data directory, and the packing switch.
 #
-# Usage (on the TPU VM, tunix repo root, deps present -- e.g. inside the
-# tunix_base_image container):
-#   # packed (segment-aware CL3 + weighted stream)
-#   RUN_TAG=cl3_frozenlake_pack bash experimental/train_frozenlake_v5p_1host.sh
-#   # unpack parity (same stream+weighted accumulation, packing OFF)
-#   MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_frozenlake_unpack \
+# THE TWO RUNS (pack vs unpack; the script packs only when told to, so the
+# plain run IS the unpacked baseline):
+#   # unpacked baseline / convergence reference
+#   RUN_TAG=fl_unpack bash experimental/train_frozenlake_v5p_1host.sh
+#   # packed
+#   MAX_TOKEN_PER_TPU=4096 RUN_TAG=fl_pack \
 #     bash experimental/train_frozenlake_v5p_1host.sh
 #
-# 4-chip sizing rationale (v5p ~95GB/chip; Qwen3-8B):
-#   mesh (2,2) = 2 fsdp x 2 tp -> pack_size = fsdp = 2; the script derives the
-#     vLLM rollout's data/tensor_parallel_size from the mesh (dp2 tp2).
-#   batch 16 / mini 16 / micro 4 / num_gen 8: the converged swe-evaluation
-#     recipe (batch 64 on 64 chips) scaled by chip count; 128 episodes/step.
-#     All optimizer/algo hyperparams (LR 1e-6, rloo, gspo-token, eps .003/.005)
-#     stay at the script's converged defaults.
-#   memory: actor fp32 8GB + Adam 16GB + grads 8GB + ref bf16 4GB + vLLM(0.3)
-#     28GB + logits/activations ~10GB ~= 74GB/chip < 95GB. (vLLM at the script
-#     default 0.20 OOMed at startup on 4 chips -> ROLLOUT_HBM defaults 0.3.)
-#   packing: single seq max = prompt 2048 + response 2048 = 4096; budget 8192
-#     -> ~2 seqs/row. NOTE micro counts PACKED ROWS: micro 4 x 8192 = 32k
-#     tokens/micro-step (2x the unpack arm); drop to MICRO=2 LOGPS=2 if the
-#     TRAIN side OOMs (that makes the per-micro token load equal to unpack).
-#   steps: MAX_STEPS -> --num_batches with --num_epochs 1 (the script computes
-#     max_steps = num_batches * epochs); 200 x batch16 = 3200 prompts <= the
-#     generated train set (10000).
+# Budget 4096 = max_prompt_length (2048) + max_response_length (2048) = the
+# longest sequence, which is also the unpacked row length. Splash schedules a
+# row's full causal area whatever it holds, so keeping the row length and
+# cutting the row count is the win; a larger budget only adds attention cost.
+#
+# Inspect the command without launching (no TPU needed):
+#   DRY_RUN=1 bash experimental/train_frozenlake_v5p_1host.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TUNIX_DIR="${TUNIX_DIR:-$(dirname "$SCRIPT_DIR")}"
 
-# ---- knobs (same ENV interface as train_v5p_1host_pack.sh) ----------------
+# ---- pinned environment ---------------------------------------------------
+# The recipe is only known to converge on these versions; a mismatch changes
+# the vLLM sampler's log-probs, which GRPO consumes as old_per_token_logps.
+JAX_VERSION="${JAX_VERSION:-0.10.1}"
+VLLM_VERSION="${VLLM_VERSION:-0.25.0}"
+SKIP_PIP="${SKIP_PIP:-0}"          # 1 once the versions are already installed
+
+# ---- knobs ----------------------------------------------------------------
 ENGINE="${ROLLOUT_ENGINE:-vllm}"           # vllm | vanilla
-ROLLOUT_HBM="${ROLLOUT_HBM:-0.4}"          # vLLM HBM utilization. Colocated
-                                           # semantics: bounds TOTAL HBM incl.
-                                           # trainer-resident weights, so init
-                                           # needs >= (ref 4.1 + actor 8.2 +
-                                           # rollout weights 8.2 + ws)/95 ~=
-                                           # 0.25 -- 0.2 OOMs vLLM serving at
-                                           # startup. 0.4 leaves ~16GB KV and
-                                           # ~18GB trainer headroom; do NOT go
-                                           # to 0.6 (that flips the OOM to the
-                                           # trainer peak on 8B).
-LOGPS_CHUNK="${LOGPS_CHUNK:-2048}"         # chunked logp (0 = full logits).
-                                           # Full logits at LOGPS=4 are ~40GB
-                                           # /chip -> the inference-worker OOM;
-                                           # chunk 2048 caps them at ~0.6GB.
-MESH_FSDP="${MESH_FSDP:-2}"                # mesh (2,2) = 2 fsdp x 2 tp
-MESH_TP="${MESH_TP:-2}"
-BATCH="${BATCH:-16}"
-MINI="${MINI:-16}"
-MICRO="${MICRO:-4}"
-LOGPS="${LOGPS:-4}"
-NUM_GEN="${NUM_GEN:-8}"                    # RLOO baseline samples (keep 8)
-MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-8192}"   # packing budget; 0 = DISABLE
-MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # segment cap; empty = budget-derived
-MAX_STEPS="${MAX_STEPS:-200}"              # training updates (= --num_batches,
-NUM_EPOCHS="${NUM_EPOCHS:-1}"              #   with --num_epochs 1)
+ROLLOUT_HBM="${ROLLOUT_HBM:-0.2}"          # script default; raise if vLLM OOMs
+MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-0}"       # 0 = packing OFF (baseline)
+MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # empty = budget-derived
+# Script defaults, tuned for this host -- override only deliberately.
+BATCH="${BATCH:-64}"
+MINI="${MINI:-64}"
+NUM_GEN="${NUM_GEN:-8}"
+NUM_BATCHES="${NUM_BATCHES:-150}"          # x NUM_EPOCHS(3) = 450 updates
+DATA_DIR="${DATA_DIR:-/tmp/data/frozenlake}"
+TB_LOG_DIR="${TB_LOG_DIR:-/tmp/tunix-tb/frozenlake}"
+HF_HOME="${HF_HOME:-/mnt/workspace/hf_cache}"
 LOG_DIR="${LOG_DIR:-/tmp/train_frozenlake_logs}"
-RUN_TAG="${RUN_TAG:-frozenlake_v5p_pack}"
+RUN_TAG="${RUN_TAG:-fl_unpack}"
 
-# xprof: short kernel window then KEEPS TRAINING. Set PROFILER_STEPS=0 to skip.
-TRACE_DEST="${TRACE_DEST:-gs://yuxzhang-tunix-models/xprof}"
-PROFILER_SKIP="${PROFILER_SKIP:-10}"
-PROFILER_STEPS="${PROFILER_STEPS:-5}"
-
-# Perfetto RL perf tracing: whole-run, low overhead.
-ENABLE_PERF_V1="${ENABLE_PERF_V1:-1}"
-ENABLE_PERF_V2="${ENABLE_PERF_V2:-1}"
-PERF_TRACE_DIR="${PERF_TRACE_DIR:-gs://yuxzhang-tunix-models/perfetto/${RUN_TAG}}"
-
-mkdir -p "$LOG_DIR"
-case "$TRACE_DEST" in gs://*) ;; *) mkdir -p "$TRACE_DEST" ;; esac
+mkdir -p "$LOG_DIR" "$DATA_DIR" "$TB_LOG_DIR"
 cd "$TUNIX_DIR"
 
 # ---------------------------------------------------------------------------
-# vLLM/tpu_inference needs the qwen3 rope-scaling shim (same as the gsm8k
-# wrapper -- Qwen3-8B goes through the same tpu_inference qwen3 model).
+# Pinned versions, verified rather than assumed.
 # ---------------------------------------------------------------------------
-apply_rope_patch() {
-  python3 - <<'EOF'
-import sys
-try:
-    import tpu_inference.models.jax.qwen3 as m
-except Exception as exc:
-    print(f"ROPE-PATCH: tpu_inference not importable ({exc})")
-    sys.exit(3)
-
-file_path = m.__file__
-with open(file_path, "r") as f:
-    code = f.read()
-
-if "def normalize_rope_scaling" in code:
-    print(f"ROPE-PATCH: already applied -> {file_path}")
-    sys.exit(0)
-
-injected_functions = '''
-from typing import Any, Dict, Optional
-
-def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
-    if rope_scaling is not None:
-        rope_scaling = dict(rope_scaling)
-        if (rope_scaling.get("rope_type", "default") == "default"
-                and "factor" not in rope_scaling
-                and "scale_factor" not in rope_scaling
-                and "mrope_section" not in rope_scaling):
-            rope_scaling = None
-        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
-            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
-    return rope_scaling
-
-def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
-    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
-        config, "rope_scaling", None)
-    return normalize_rope_scaling(rope_scaling)
-
-def get_rope_theta(config: Any, default: float = 10000.0) -> float:
-    rope_parameters = getattr(config, "rope_parameters", None)
-    if rope_parameters is not None and "rope_theta" in rope_parameters:
-        return float(rope_parameters["rope_theta"])
-    return float(getattr(config, "rope_theta", default))
-
-'''
-
-code = injected_functions + code
-code = code.replace(
-    'self.rope_theta = config.rope_parameters["rope_theta"]',
-    'self.rope_theta = get_rope_theta(config, default=1000000.0)')
-code = code.replace(
-    'self.rope_scaling = getattr(config, "rope_scaling", None)',
-    'self.rope_scaling = get_rope_scaling(config)')
-
-with open(file_path, "w") as f:
-    f.write(code)
-print(f"ROPE-PATCH: applied -> {file_path}")
-EOF
-}
-
-if [ "$ENGINE" = "vllm" ]; then
-  apply_rope_patch
-  rc=$?
-  if [ "$rc" = 3 ]; then
-    echo "ERROR: ROLLOUT_ENGINE=vllm but tpu_inference is missing."
-    echo "Run inside the tunix_base_image container, or fall back with:"
-    echo "  ROLLOUT_ENGINE=vanilla bash $0"
-    exit 1
+if [ -z "${DRY_RUN:-}" ]; then
+  if [ "$SKIP_PIP" = "0" ]; then
+    echo "--- installing jax[tpu]==$JAX_VERSION vllm-tpu==$VLLM_VERSION ---"
+    pip install -q "jax[tpu]==$JAX_VERSION" "vllm-tpu==$VLLM_VERSION" || {
+      echo "ERROR: pin install failed"; exit 1; }
   fi
+  python3 - "$JAX_VERSION" "$VLLM_VERSION" <<'EOF' || exit 1
+import sys
+want_jax, want_vllm = sys.argv[1], sys.argv[2]
+import jax
+ok = True
+if jax.__version__ != want_jax:
+    print(f"ERROR: jax {jax.__version__} != {want_jax}"); ok = False
+try:
+    import vllm
+    if not vllm.__version__.startswith(want_vllm):
+        print(f"ERROR: vllm {vllm.__version__} != {want_vllm}"); ok = False
+except ImportError as exc:
+    print(f"ERROR: vllm not importable ({exc})"); ok = False
+if not ok:
+    print("The recipe is only known to converge on the pinned versions; "
+          "install them or set SKIP_PIP=0 to let this script do it.")
+    sys.exit(1)
+print(f"versions OK: jax {jax.__version__}, vllm {vllm.__version__}")
+EOF
 fi
 
 # ---------------------------------------------------------------------------
-# The training script only READS /tmp/data/frozenlake/{train,test}.parquet;
-# generate them once (idempotent: loads existing files when present).
+# Data. The script reads $DATA_DIR/{train,test}.parquet through fsspec; its
+# default bucket is not reachable here, so generate the same schema locally
+# (idempotent -- data.py loads existing files instead of regenerating).
 # ---------------------------------------------------------------------------
-PYTHONPATH="$TUNIX_DIR:${PYTHONPATH:-}" python3 - <<'EOF'
+if [ -z "${DRY_RUN:-}" ]; then
+  PYTHONPATH="$TUNIX_DIR:${PYTHONPATH:-}" python3 - "$DATA_DIR" <<'EOF'
+import sys
 from examples.frozenlake import data
-data.create_dataset(split="train", data_dir="/tmp/data/frozenlake")
-data.create_dataset(split="test", data_dir="/tmp/data/frozenlake")
-print("frozenlake datasets ready")
+d = sys.argv[1]
+for split in ("train", "test"):
+    data.create_dataset(split=split, data_dir=d)
+print(f"frozenlake data ready under {d}")
 EOF
+fi
 
 # ---------------------------------------------------------------------------
-# Assemble args. Packing, profiler and perf flags are added conditionally.
+# Assemble args. Packing is added only when a budget is set.
 # ---------------------------------------------------------------------------
 pack_args=()
 if [ "${MAX_TOKEN_PER_TPU}" != "0" ]; then
@@ -179,61 +112,46 @@ if [ "${MAX_TOKEN_PER_TPU}" != "0" ]; then
     pack_args+=(--max_segments_per_packed_row "$MAX_SEGMENTS_PER_ROW")
 fi
 
-prof_args=()
-trace_dir="$TRACE_DEST/${RUN_TAG}"
-if [ "${PROFILER_STEPS}" != "0" ]; then
-  prof_args+=(--profiler_log_dir "$trace_dir"
-              --profiler_skip_steps "$PROFILER_SKIP"
-              --profiler_steps "$PROFILER_STEPS")
-fi
-
-perf_args=()
-[ "${ENABLE_PERF_V1}" != "0" ] && perf_args+=(--enable_perf_v1)
-if [ "${ENABLE_PERF_V2}" != "0" ]; then
-  perf_args+=(--enable_perf_v2 --perf_trace_dir "$PERF_TRACE_DIR")
-fi
-
 log="$LOG_DIR/${RUN_TAG}.log"
-echo "===== FROZENLAKE[qwen3-8b] packing=${MAX_TOKEN_PER_TPU} mesh=${MESH_FSDP}x${MESH_TP} "\
-"batch=${BATCH}/${MINI}/${MICRO}/${LOGPS} num_gen=${NUM_GEN} steps=${MAX_STEPS} "\
+echo "===== FROZENLAKE[gemma4-e2b] packing=${MAX_TOKEN_PER_TPU} "\
+"batch=${BATCH}/${MINI} num_gen=${NUM_GEN} num_batches=${NUM_BATCHES} "\
 "(log: $log) ====="
 
+cmd=(python3 -X faulthandler -u examples/frozenlake/train_frozenlake.py
+     --batch_size "$BATCH" --mini_batch_size "$MINI"
+     --num_generations "$NUM_GEN" --num_batches "$NUM_BATCHES"
+     --rollout_vllm_hbm_utilization "$ROLLOUT_HBM"
+     "${pack_args[@]}")
+
+if [ -n "${DRY_RUN:-}" ]; then
+  echo "--- DRY_RUN ---"
+  echo "  DATA_DIR=$DATA_DIR TB_LOG_DIR=$TB_LOG_DIR HF_HOME=$HF_HOME"
+  echo "  ROLLOUT_ENGINE=$ENGINE WANDB_RUN_NAME=$RUN_TAG"
+  printf '  %s\n' "${cmd[@]}"
+  exit 0
+fi
+
+DATA_DIR="$DATA_DIR" \
+TB_LOG_DIR="$TB_LOG_DIR" \
+HF_HOME="$HF_HOME" \
 ROLLOUT_ENGINE="$ENGINE" \
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-$RUN_TAG}" \
+WANDB_MODE="${WANDB_MODE:-online}" \
 PYTHONPATH="$TUNIX_DIR:${PYTHONPATH:-}" \
 PYTHONUNBUFFERED=1 \
-WANDB_MODE="${WANDB_MODE:-online}" \
-python3 -X faulthandler -u examples/frozenlake/train_frozenlake_qwen3.py \
-  --mesh_fsdp "$MESH_FSDP" --mesh_tp "$MESH_TP" \
-  --batch_size "$BATCH" --mini_batch_size "$MINI" \
-  --train_micro_batch_size "$MICRO" \
-  --compute_logps_micro_batch_size "$LOGPS" \
-  --num_generations "$NUM_GEN" \
-  --rollout_vllm_hbm_utilization "$ROLLOUT_HBM" \
-  --compute_logps_chunk_size "$LOGPS_CHUNK" \
-  --num_batches "$MAX_STEPS" --num_epochs "$NUM_EPOCHS" \
-  --run_name "$RUN_TAG" \
-  "${pack_args[@]}" \
-  "${prof_args[@]}" \
-  "${perf_args[@]}" \
-  2>&1 | tee "$log"
+"${cmd[@]}" 2>&1 | tee "$log"
 
 rc=${PIPESTATUS[0]}
 echo "===== done (exit=$rc) ====="
 
-# ---------------------------------------------------------------------------
-# Best-effort summary: solve rate / step timing / packing efficiency.
-# ---------------------------------------------------------------------------
 echo
 echo "################ SUMMARY ################"
 if [ -f "$log" ]; then
-  echo "--- convergence (want solve_ratio climbing over steps) ---"
+  echo "--- convergence (want solve_ratio climbing) ---"
   grep -inE "solve_ratio" "$log" | tail -8
+  echo "--- packing (only in the packed arm) ---"
+  grep -inE "dummy_ratio|pack_sequences|seqs_per_pack" "$log" | tail -6
   echo "--- step timing / HBM ---"
-  grep -inE "steps?/sec|sec/step|step_time|train_step|HBM" "$log" | tail -8
-  echo "--- packing efficiency (dummy_ratio; want << 1) + row count/depth ---"
-  grep -inE "dummy_ratio|pack_sequences|pack_size|max_seq_token_per_tpu" "$log" | tail -8
-  [ "${PROFILER_STEPS}" != "0" ] && echo "--- xprof (kernel) trace: $trace_dir ---"
-  [ "${ENABLE_PERF_V2}" != "0" ] && \
-    echo "--- Perfetto (full-run) trace: $PERF_TRACE_DIR  (open at ui.perfetto.dev) ---"
+  grep -inE "steps?/sec|sec/step|step_time|HBM" "$log" | tail -6
 fi
 exit "$rc"

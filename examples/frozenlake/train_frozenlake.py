@@ -162,6 +162,19 @@ arg_parser.add_argument(
     "--advantage_estimator", type=str, default="rloo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
+# Sequence packing. None (the default) keeps the historical unpacked path, so
+# a run without these flags is the unpacked baseline. The budget should be the
+# smallest value that still fits a maximal sequence (max_prompt_length +
+# max_response_length): the attention kernel schedules the full causal area of
+# a row regardless of how many sequences it holds, so a larger budget buys an
+# attention penalty while the saving (fewer rows of padding) is already had.
+arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
+arg_parser.add_argument("--max_segments_per_packed_row", type=int, default=None)
+# Fraction of HBM the colocated vLLM server reserves. It bounds TOTAL usage
+# including trainer-resident weights, so raise it if vLLM fails to start.
+arg_parser.add_argument(
+    "--rollout_vllm_hbm_utilization", type=float, default=0.2
+)
 args, _ = arg_parser.parse_known_args()
 
 TRAIN_FRACTION = 1.0
@@ -259,14 +272,17 @@ ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 # ====== Paths (env-driven so the same image runs anywhere) ======
 MODEL_VERSION = "google/gemma-4-E2B-it"
 MODEL_DOWNLOAD_DIR = huggingface_hub.snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
-DATA_DIR = "gs://tunix/data/Frozenlake"
+# Holds train.parquet / test.parquet. Override to a local directory (see
+# examples/frozenlake/data.py, which generates the same schema) when the
+# default bucket is not reachable.
+DATA_DIR = os.getenv("DATA_DIR", "gs://tunix/data/Frozenlake")
 
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 # Checkpointing is opt-in: set CKPT_DIR to enable, otherwise nothing is written.
 # Orbax's CheckpointManager force-saves the first step regardless of the
 # configured save_interval_steps, so a large interval alone does not disable it.
 CKPT_DIR = os.getenv("CKPT_DIR") or None
-TB_LOG_DIR = "gs://linchai-bucket-dev/tensorboard/grpo"
+TB_LOG_DIR = os.getenv("TB_LOG_DIR", "/tmp/tunix-tb/frozenlake")
 
 
 # ====== Build the single shared mesh ======
@@ -453,7 +469,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.2,
+    "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -531,6 +547,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
         compute_logps_chunk_size=2048,
+        max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+        max_segments_per_packed_row=args.max_segments_per_packed_row,
     ),
     rollout_config=rollout_engine_config,
 )

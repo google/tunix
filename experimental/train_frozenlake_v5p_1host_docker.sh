@@ -4,16 +4,15 @@
 # container on a TPU VM. The FrozenLake analogue of train_v5p_1host_docker.sh
 # (which launches the gsm8k train_v5p_1host_pack.sh).
 #
-# One run yields convergence (wandb loss/reward + eval solve_ratio) + a
-# full-run Perfetto trace + a short xprof kernel window, for Qwen3-8B via
-# examples/frozenlake/train_frozenlake_qwen3.py (the converged recipe).
+# Drives examples/frozenlake/train_frozenlake.py (Gemma4-E2B, separate
+# rollout/trainer meshes), pinning jax[tpu] and vllm-tpu to the versions the
+# recipe is known to converge on and generating the dataset locally.
 #
 # Usage on the TPU VM (docker preinstalled):
-#   # packed (segment-aware CL3 + weighted stream)
-#   RUN_TAG=cl3_frozenlake_pack \
-#     bash experimental/train_frozenlake_v5p_1host_docker.sh
-#   # unpack parity (same stream+weighted accumulation, packing OFF)
-#   MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_frozenlake_unpack \
+#   # unpacked baseline (the script packs only when told to)
+#   RUN_TAG=fl_unpack bash experimental/train_frozenlake_v5p_1host_docker.sh
+#   # packed
+#   MAX_TOKEN_PER_TPU=4096 RUN_TAG=fl_pack \
 #     bash experimental/train_frozenlake_v5p_1host_docker.sh
 #
 # One-time on a fresh VM (artifact-registry pull auth):
@@ -28,12 +27,10 @@ BRANCH="${BRANCH:-yuxzhang/refactor_loss_accum_ablation}"
 
 # Pass the inner train script's knobs through only when the caller set them.
 PASS_ENV=()
-for var in MAX_TOKEN_PER_TPU MAX_SEGMENTS_PER_ROW ROLLOUT_ENGINE ROLLOUT_HBM LOGPS_CHUNK \
-           MESH_FSDP MESH_TP \
-           BATCH MINI MICRO LOGPS NUM_GEN MAX_STEPS NUM_EPOCHS RUN_TAG \
-           ENABLE_PERF_V1 ENABLE_PERF_V2 PERF_TRACE_DIR \
-           TRACE_DEST PROFILER_SKIP PROFILER_STEPS LOG_DIR \
-           HF_TOKEN HF_HOME WANDB_MODE WANDB_API_KEY; do
+for var in MAX_TOKEN_PER_TPU MAX_SEGMENTS_PER_ROW ROLLOUT_ENGINE ROLLOUT_HBM \
+           BATCH MINI NUM_GEN NUM_BATCHES RUN_TAG \
+           JAX_VERSION VLLM_VERSION SKIP_PIP DATA_DIR TB_LOG_DIR LOG_DIR \
+           HF_TOKEN HF_HOME WANDB_MODE WANDB_API_KEY WANDB_RUN_NAME; do
   if [ -n "${!var:-}" ]; then PASS_ENV+=(-e "$var=${!var}"); fi
 done
 
