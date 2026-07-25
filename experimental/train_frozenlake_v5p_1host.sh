@@ -68,8 +68,8 @@ cd "$TUNIX_DIR"
 if [ -z "${DRY_RUN:-}" ]; then
   if [ "$SKIP_PIP" = "0" ]; then
     echo "--- installing jax[tpu]==$JAX_VERSION vllm-tpu==$VLLM_VERSION ---"
-    pip install -q "jax[tpu]==$JAX_VERSION" "vllm-tpu==$VLLM_VERSION" || {
-      echo "ERROR: pin install failed"; exit 1; }
+    pip install -q "jax[tpu]==$JAX_VERSION" || { echo "ERROR: jax install failed"; exit 1; }
+    pip install -q --no-deps "vllm-tpu==$VLLM_VERSION" || { echo "ERROR: vllm install failed"; exit 1; }
   fi
   python3 - "$JAX_VERSION" "$VLLM_VERSION" <<'EOF' || exit 1
 import sys
