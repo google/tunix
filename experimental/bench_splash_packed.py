@@ -35,9 +35,7 @@ heads/tp heads -- what production's head_shards splits off), built through the
 entry point JAX's own splash tests use, `make_splash_mha_single_device`, which
 is `make_splash_mha` with head_shards=q_seq_shards=1 and therefore exactly the
 per-chip kernel when tp=1. Subtracting it from the module time attributes the
-cost between attention and the token-linear projections. `--with_layer` adds a
-full DecoderLayer (attention + MLP), the configuration whose e2e total went
-flat.
+cost between attention and the token-linear projections.
 
 Segment ids and packed rows come from the production packer
 (`rl_utils.pack_sequences`), and each arm's model inputs from the production
@@ -110,9 +108,6 @@ def parse_args():
                  help="Row length held fixed during the segment sweep.")
   p.add_argument("--skip_module", action="store_true",
                  help="Skip the production model_lib.Attention timings.")
-  p.add_argument("--with_layer", action="store_true",
-                 help="Also time a full DecoderLayer (attention + MLP), the"
-                      " configuration whose e2e total went flat.")
   p.add_argument("--skip_kernel", action="store_true",
                  help="Skip the raw per-chip kernel timings (used to attribute"
                       " the module time between attention and projections).")
@@ -395,23 +390,6 @@ def attn_fns(attn, x, segment_pos, attn_mask, segment_ids):
   return (fwd, args), (fwd_bwd, args)
 
 
-def layer_fns(layer, x, segment_pos, attn_mask, segment_ids):
-  @jax.jit
-  def fwd(x, segment_pos, attn_mask, segment_ids):
-    _, out = layer.block(x, segment_pos, None, attn_mask, segment_ids)
-    return out
-
-  @jax.jit
-  def fwd_bwd(x, segment_pos, attn_mask, segment_ids):
-    def loss(x):
-      _, out = layer.block(x, segment_pos, None, attn_mask, segment_ids)
-      return jnp.sum(out.astype(jnp.float32))
-    return jax.grad(loss)(x)
-
-  args = (x, segment_pos, attn_mask, segment_ids)
-  return (fwd, args), (fwd_bwd, args)
-
-
 def main():
   args = parse_args()
   budgets = [int(b) for b in args.budgets.split(",") if b]
@@ -590,27 +568,6 @@ def main():
             f" {'':>9} {t_real:>5.2f} vs {t_syn:.2f}")
       sweep_results["_xcheck"] = (t_real, t_syn)
 
-  # ---- optional: full decoder layer (attention + MLP) -----------------------
-  layer_results = {}
-  if args.with_layer:
-    layer = model_lib.DecoderLayer(config=config, rngs=rngs)
-    print()
-    print("=" * 80)
-    print("FULL DECODER LAYER (attention + MLP) -- the configuration whose e2e"
-          " total went flat")
-    print("=" * 80)
-    print(f"{'case':<12} {'shape':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
-    for name, pos, mask, seg, _, note in cases:
-      if name.startswith("C"):
-        continue
-      (f_fwd, a_fwd), (f_fb, a_fb) = layer_fns(layer, xs[name], pos, mask, seg)
-      t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
-      t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
-      layer_results[name] = (t_fwd, t_fb)
-      print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
-      maybe_trace(args.trace_dest, f"layer_{name}", f_fb, a_fb,
-                  args.trace_iters)
-
   # ---- verdicts ------------------------------------------------------------
   print()
   print("=" * 80)
@@ -674,12 +631,6 @@ def main():
     print("       ^ the projections are linear in the token count, so packing"
           " makes them cheaper and they partly cancel the attention penalty --"
           " which is why the e2e total moved less than the attention did.")
-  if layer_results:
-    lbase = layer_results["U"][1]
-    print("  [V3] full layer -- the flat e2e total should reappear at the e2e"
-          " budget, and a smaller budget should win:")
-    for name, (_, t_fb) in layer_results.items():
-      print(f"       {name:<10} bwd {t_fb / lbase:6.2f}x U")
   print()
   print("  [V2] match the xprof kernel names against the e2e trace: packed and"
         " unpacked both use *_segmented_{fwd,dq,dkv}; only the shapes differ.")

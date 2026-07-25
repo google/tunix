@@ -10,16 +10,15 @@
 # measures directly by running the same data at 8192 and 4096.
 #
 # Runs the production code path: data from rl_utils.pack_sequences, attention
-# from model_lib.Attention / DecoderLayer. No model download, no vLLM, no RL --
-# random weights, a few seconds per case.
+# from model_lib.Attention. No model download, no vLLM, no RL -- random
+# weights, a few seconds per case.
 #
 # Usage (on the TPU VM, from the tunix repo root, deps present - e.g. inside
 # the tunix_base_image container):
 #   bash experimental/bench_splash_v5p.sh
 #
-# Everything is overridable via env vars, e.g. skip the xprof traces and the
-# full-layer case for a quick attention-only read:
-#   WITH_LAYER=1 bash experimental/bench_splash_v5p.sh
+# Everything is overridable via env vars, e.g. a quick kernel-only read:
+#   SKIP_MODULE=1 TRACE_DEST= bash experimental/bench_splash_v5p.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,13 +50,10 @@ ITERS="${ITERS:-20}"
 WARMUP="${WARMUP:-3}"
 TRACE_DEST="${TRACE_DEST:-gs://yuxzhang-tunix-models/xprof/splash_bench}"
 TRACE_ITERS="${TRACE_ITERS:-3}"
-# The raw kernel always runs. These add context at the cost of runtime:
-# the attention module (kernel + projections) and a full decoder layer.
-# The production attention module and the per-chip kernel both run by default;
-# the layer (attention + MLP) is opt-in because it doubles the runtime.
+# The production attention module (kernel + projections) and the per-chip raw
+# kernel both run by default; either can be skipped to halve the runtime.
 SKIP_MODULE="${SKIP_MODULE:-0}"
 SKIP_KERNEL="${SKIP_KERNEL:-0}"
-WITH_LAYER="${WITH_LAYER:-0}"
 LOG_DIR="${LOG_DIR:-/tmp/bench_splash_logs}"
 RUN_TAG="${RUN_TAG:-splash_bench}"
 
@@ -68,7 +64,6 @@ cd "$TUNIX_DIR"
 extra_args=()
 [ "${SKIP_MODULE}" != "0" ] && extra_args+=(--skip_module)
 [ "${SKIP_KERNEL}" != "0" ] && extra_args+=(--skip_kernel)
-[ "${WITH_LAYER}" != "0" ] && extra_args+=(--with_layer)
 
 log="$LOG_DIR/${RUN_TAG}.log"
 echo "===== SPLASH BENCH seqs=${NUM_SEQS}x${SEQ_LEN} real=${MIN_TOKENS}-${MAX_TOKENS} "\

@@ -540,11 +540,13 @@ also already pins `compute_logps_chunk_size=2048`, the fix the other script need
 has really been run. Its hyperparameters (batch 64 / mini 64 / micro 2 / 150 batches x 3 epochs =
 450 updates) are left untouched.
 
-**Environment (FrozenLake only, and it is not optional).** The recipe is known to converge on
-`jax[tpu]==0.10.1` + `vllm-tpu==0.25.0`. A mismatch changes the vLLM sampler's log-probs, which
-feed straight into the GRPO ratio. The wrapper installs and then VERIFIES both, and exits if they
-disagree -- do not paper over that. Pass `SKIP_PIP=1` on later runs to skip the install (the check
-still runs). The script's data bucket is not reachable from here, so the wrapper generates the same
+**Environment (FrozenLake).** Use the container's NATIVE jax/vLLM (currently `jax 0.10.0` +
+`vllm 0.21`); the wrapper defaults to `SKIP_PIP=1` and only verifies them. Do NOT pip-install a
+different pin into the image -- swapping jax or vllm underneath a built image crashes on C++ ABI
+mismatches. If a different pair is ever needed, rebuild the image rather than patching it at
+runtime, and set `JAX_VERSION`/`VLLM_VERSION` so the check matches. The versions do matter for
+convergence (they change the vLLM sampler's log-probs, which feed straight into the GRPO ratio),
+which is why the wrapper still verifies rather than assumes. The script's data bucket is not reachable from here, so the wrapper generates the same
 schema locally into `/tmp/data/frozenlake` (idempotent); the model comes from the HF cache under
 `HF_HOME` (default `/mnt/workspace/hf_cache`, on the persistent disk).
 
@@ -560,7 +562,7 @@ MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_gsm8k_unpack_stream \
 # ---- FrozenLake (Gemma4-E2B) ----
 RUN_TAG=fl_unpack \
   bash experimental/train_frozenlake_v5p_1host_docker.sh      # baseline, packing off
-MAX_TOKEN_PER_TPU=4096 RUN_TAG=fl_pack SKIP_PIP=1 \
+MAX_TOKEN_PER_TPU=8192 RUN_TAG=fl_pack \
   bash experimental/train_frozenlake_v5p_1host_docker.sh
 ```
 Do NOT use `train_v5p_1host_unpack_optax.sh` for parity -- that is unpack+optax (mean-of-means), a
@@ -569,7 +571,7 @@ different accumulation, meant for a separate end-to-end perf comparison.
 **Run the FrozenLake baseline FIRST and stop if it does not converge.** Establishing convergence
 and testing packing are two variables; if the baseline is flat, chase that (versions, mesh, data)
 before touching the packing switch. What to watch on the first run:
-1. the wrapper printing `versions OK: jax 0.10.1, vllm 0.25.x` (it exits otherwise);
+1. the wrapper printing `versions OK: jax 0.10.0, vllm 0.21.x` (it exits otherwise);
 2. vLLM actually starting -- the script's own `rollout_vllm_hbm_utilization` default is 0.2; raise
    it with `ROLLOUT_HBM=0.3` if it fails to allocate;
 3. `rewards/solve_ratio`, logged every 10 steps against the held-out set -- it must climb.
