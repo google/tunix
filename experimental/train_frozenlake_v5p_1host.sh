@@ -2,9 +2,13 @@
 # Agentic FrozenLake GRPO on a single-host TPU VM (v5p-4), driving
 # examples/frozenlake/train_frozenlake.py -- the Gemma4-E2B recipe whose
 # docstring targets exactly this host class ("Designed for v5p-4 / v6e-8") and
-# which runs rollout and trainer on SEPARATE meshes (the disaggregated vLLM
-# server "avoids the trace-context issues of running the in-process sampler
-# under REMAT", which is what makes its log-probs trustworthy).
+# which runs the rollout as a vLLM SERVER rather than an in-process sampler,
+# "avoiding the trace-context issues of running the in-process sampler under
+# REMAT" -- that is what makes its log-probs trustworthy. The separation is
+# process-level, not hardware: both roles are colocated on the same 4 chips,
+# time-shared, under two logical mesh shapes (rollout (dp 2, tp 2), trainer
+# (fsdp 4, tp 1)). Colocation is why ROLLOUT_HBM bounds TOTAL HBM, trainer
+# weights included.
 #
 # The script's own hyperparameters are left alone -- they were tuned for this
 # host. This wrapper only supplies what the script cannot know: the pinned

@@ -528,9 +528,14 @@ choice; expect the packed arm to be SLOWER per step than unpacked, and judge the
 curves, not the clock.
 
 **Why `train_frozenlake.py` (not the CLI, not the Qwen3 script).** Its docstring targets this exact
-host class ("Designed for v5p-4 / v6e-8") and it runs rollout and trainer on SEPARATE meshes -- the
-disaggregated vLLM server "avoids the trace-context issues of running the in-process sampler under
-REMAT", which is what makes the log-probs GRPO consumes as `old_per_token_logps` trustworthy. It
+host class ("Designed for v5p-4 / v6e-8"), and it runs the rollout as a vLLM SERVER
+(`rollout_vllm_server_mode=True`) rather than an in-process sampler, which per the docstring
+"avoids the trace-context issues of running the in-process sampler under REMAT" -- that is what
+makes the log-probs GRPO consumes as `old_per_token_logps` trustworthy. Note this is process-level
+separation, not hardware: both roles run on the SAME 4 chips, colocated and time-shared, with two
+different logical mesh shapes over them (rollout `(dp 2, tp 2)`, trainer `(fsdp 4, tp 1)` -- both
+`jax.devices()[:4]`). Because it is colocated, `rollout_vllm_hbm_utilization` bounds TOTAL HBM
+including the trainer's resident weights, so raise it if vLLM fails to allocate. It
 also already pins `compute_logps_chunk_size=2048`, the fix the other script needed, which says it
 has really been run. Its hyperparameters (batch 64 / mini 64 / micro 2 / 150 batches x 3 epochs =
 450 updates) are left untouched.
@@ -581,8 +586,9 @@ before touching the packing switch. What to watch on the first run:
 - No NaN / divergence in any of the four.
 
 **Prereqs:** `gcloud auth configure-docker europe-west4-docker.pkg.dev` one-time; `/mnt/workspace`
-mounted (HF model cache). gsm8k mesh 4x1; FrozenLake uses the script's own split meshes (rollout
-`(2, N/2)`, trainer `(N, 1)`).
+mounted (HF model cache). One host, 4 chips, for both recipes: gsm8k uses a single `(fsdp 4, tp 1)`
+mesh; FrozenLake lays two logical shapes over the same 4 chips (rollout `(2, N/2)`, trainer
+`(N, 1)`).
 
 ## 19. ACTION REQUEST: sequence-packing cost-model microbench (why packing did not speed anything up)
 
