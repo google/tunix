@@ -39,9 +39,9 @@ TUNIX_DIR="${TUNIX_DIR:-$(dirname "$SCRIPT_DIR")}"
 # ---- pinned environment ---------------------------------------------------
 # The recipe is only known to converge on these versions; a mismatch changes
 # the vLLM sampler's log-probs, which GRPO consumes as old_per_token_logps.
-JAX_VERSION="${JAX_VERSION:-0.10.1}"
-VLLM_VERSION="${VLLM_VERSION:-0.25.0}"
-SKIP_PIP="${SKIP_PIP:-0}"          # 1 once the versions are already installed
+JAX_VERSION="${JAX_VERSION:-0.10.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.21}"
+SKIP_PIP="${SKIP_PIP:-1}"          # 1 once the versions are already installed
 
 # ---- knobs ----------------------------------------------------------------
 ENGINE="${ROLLOUT_ENGINE:-vllm}"           # vllm | vanilla
