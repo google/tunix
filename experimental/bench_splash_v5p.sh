@@ -31,9 +31,13 @@ NUM_SEQS="${NUM_SEQS:-8}"
 SEQ_LEN="${SEQ_LEN:-2048}"
 # Real-token range: 700-950 out of 2048 padded lands at ~20% dummy_ratio, the
 # ratio the e2e packed run reported.
+# Uniform real tokens per sequence: the arms then hold the SAME sequences and
+# therefore the same effective attention work, so the only variable is the row
+# geometry. Set SEQ_TOKENS=0 to sample MIN_TOKENS..MAX_TOKENS (ragged) instead.
+SEQ_TOKENS="${SEQ_TOKENS:-1024}"
 MIN_TOKENS="${MIN_TOKENS:-700}"
 MAX_TOKENS="${MAX_TOKENS:-950}"
-BUDGETS="${BUDGETS:-2048,4096,8192,16384}"
+BUDGETS="${BUDGETS:-4096,8192}"
 # Segment counts swept at a FIXED row shape (SWEEP_BUDGET). This is the
 # decisive test: same shape, same tokens, only the segment structure changes.
 SEGMENT_SWEEP="${SEGMENT_SWEEP:-1,2,4,8,16,32}"
@@ -68,6 +72,7 @@ PYTHONUNBUFFERED=1 \
 python3 -X faulthandler -u experimental/bench_splash_packed.py \
   --num_seqs "$NUM_SEQS" \
   --seq_len "$SEQ_LEN" \
+  --seq_tokens "$SEQ_TOKENS" \
   --min_tokens "$MIN_TOKENS" \
   --max_tokens "$MAX_TOKENS" \
   --budgets "$BUDGETS" \

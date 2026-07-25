@@ -65,13 +65,21 @@ def parse_args():
                  help="Sequences per chip (the e2e run's 32 over fsdp 4).")
   p.add_argument("--seq_len", type=int, default=2048,
                  help="Padded per-sequence length of the unpacked baseline.")
+  p.add_argument("--seq_tokens", type=int, default=1024,
+                 help="Real tokens per sequence, UNIFORM, so the arms are an"
+                      " exact controlled comparison: the same sequences and"
+                      " the same total real tokens laid out over different row"
+                      " geometries. 0 falls back to sampling min..max_tokens.")
   p.add_argument("--min_tokens", type=int, default=700,
-                 help="Real-token sampling range; the default 700-950 lands at")
+                 help="Real-token sampling range, used only when seq_tokens=0")
   p.add_argument("--max_tokens", type=int, default=950,
-                 help="a ~20%% dummy_ratio, matching the e2e run.")
-  p.add_argument("--budgets", type=str, default="2048,4096,8192,16384",
-                 help="Packing budgets to bench; several points make the"
-                      " linear-in-budget prediction directly visible.")
+                 help="(a ~20%% dummy_ratio, matching the e2e run).")
+  p.add_argument("--budgets", type=str, default="4096,8192",
+                 help="Packing budgets to bench. With the defaults the three"
+                      " arms are [8,2048] unpacked, [2,4096] and [1,8192]"
+                      " packed -- the same 8 sequences and therefore the SAME"
+                      " effective attention work, differing only in how much"
+                      " padding / cross-segment area the kernel runs through.")
   p.add_argument("--iters", type=int, default=20,
                  help="Timed samples per case (median reported).")
   p.add_argument("--warmup", type=int, default=3)
@@ -103,15 +111,24 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Data: build TrainExamples and pack them with the production packer.
 # ---------------------------------------------------------------------------
-def make_examples(num_seqs, seq_len, min_tokens, max_tokens, seed):
-  """`num_seqs` TrainExamples, each padded to `seq_len` with a random real length.
+def make_examples(num_seqs, seq_len, min_tokens, max_tokens, seed,
+                  seq_tokens=0):
+  """`num_seqs` TrainExamples, each padded to `seq_len`, real length `seq_tokens`.
+
+  A UNIFORM real length (the default) makes the arms an exact controlled
+  comparison: the same sequences and the same total real tokens, laid out over
+  different row geometries, so any timing difference is the geometry. Pass
+  seq_tokens=0 to sample min..max_tokens instead (a realistic ragged batch).
 
   Mirrors the RL producer's layout: prompts are LEFT-padded, completions are
   RIGHT-padded, so `unpad_train_example` inside pack_sequences recovers exactly
   the real tokens.
   """
   rng = np.random.default_rng(seed)
-  lens = rng.integers(min_tokens, max_tokens + 1, size=num_seqs)
+  if seq_tokens:
+    lens = np.full(num_seqs, seq_tokens, dtype=int)
+  else:
+    lens = rng.integers(min_tokens, max_tokens + 1, size=num_seqs)
   half = seq_len // 2
 
   prompt_ids = np.zeros((num_seqs, half), dtype=np.int32)
@@ -172,6 +189,25 @@ def geometry(example, budget, total_real_tokens):
   segs = [int(seg[r].max()) for r in range(rows)]
   dummy = 1.0 - total_real_tokens / float(rows * budget)
   return rows, segs, dummy
+
+
+def effective_attention_work(segment_ids):
+  """Causal attention work over REAL tokens only: sum of len^2 per segment.
+
+  This is the invariant of the experiment. The same sequences are being
+  attended either way, so every arm has the same effective work no matter how
+  the rows are arranged -- laying 8 x 1024-token sequences out as [8, 2048],
+  [2, 4096] or [1, 8192] does not change what has to be computed. What differs
+  is how much padding and how many cross-segment blocks the kernel runs
+  through on top, so measured time divided by this number IS the waste factor.
+  """
+  seg = np.asarray(segment_ids)
+  work = 0.0
+  for row in seg:
+    ids, counts = np.unique(row[row > 0], return_counts=True)
+    del ids
+    work += float((counts.astype(np.float64) ** 2).sum()) / 2.0
+  return work
 
 
 def synthetic_segment_ids(rows, row_len, num_segments, real_frac=1.0,
@@ -367,9 +403,12 @@ def main():
   )
 
   examples, total_real = make_examples(
-      args.num_seqs, args.seq_len, args.min_tokens, args.max_tokens, args.seed
+      args.num_seqs, args.seq_len, args.min_tokens, args.max_tokens, args.seed,
+      seq_tokens=args.seq_tokens,
   )
-  print(f"total real tokens: {total_real}")
+  print(f"total real tokens: {total_real}"
+        + (f" ({args.num_seqs} x {args.seq_tokens}, uniform)"
+           if args.seq_tokens else " (ragged)"))
 
   config = getattr(model_lib.ModelConfig, args.model_config)()
   config.use_flash_attention = True
@@ -420,7 +459,8 @@ def main():
     )
     t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
     t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
-    kernel_results[name] = (t_fwd, t_fb, batch, seq_len)
+    eff = effective_attention_work(seg) if seg is not None else 0.0
+    kernel_results[name] = (t_fwd, t_fb, batch, seq_len, eff)
     print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
     maybe_trace(args.trace_dest, f"kernel_{name}", f_fb, a_fb, args.trace_iters)
 
@@ -532,13 +572,24 @@ def main():
   print("VERDICTS")
   print("=" * 80)
   base_fwd, base_fb, base_b, base_t = kernel_results["U"]
-  print(f"  [V1] budget law -- kernel cost should track rows * budget^2"
-        f" (= total tokens * budget), i.e. be LINEAR in the budget:")
-  ref_work = base_b * base_t * base_t
-  for name, (t_fwd, t_fb, b, t) in kernel_results.items():
-    work = b * t * t
-    print(f"       {name:<10} bwd {t_fb / base_fb:6.2f}x U   "
-          f"predicted {work / ref_work:6.2f}x   (rows*budget^2)")
+  ref_exec = base_b * base_t * base_t / 2.0
+  ref_eff = kernel_results["U"][4]
+  print("  [V1] Every arm attends the SAME sequences, so the effective work is"
+        " identical; the arms differ only in the padding and cross-segment"
+        " area the kernel runs through on top:")
+  print(f"       {'case':<10} {'shape':>12} {'effective':>11} {'executed':>10}"
+        f" {'waste':>7} {'measured':>10}")
+  for name, (t_fwd, t_fb, b, t, eff) in kernel_results.items():
+    executed = b * t * t / 2.0
+    eff_str = f"{eff / ref_eff:>10.2f}x" if eff else f"{'n/a':>11}"
+    waste = f"{executed / eff:>6.1f}x" if eff else f"{'n/a':>7}"
+    print(f"       {name:<10} {f'[{b}, {t}]':>12} {eff_str}"
+          f" {executed / ref_exec:>9.2f}x {waste} {t_fb / base_fb:>9.2f}x")
+  print("       ^ effective = sum of per-segment len^2/2 (what the sequences"
+        " actually require); executed = rows*len^2/2 (the full causal area the"
+        " static mask schedules). If measured tracks EXECUTED rather than"
+        " EFFECTIVE, the kernel is computing padding and cross-segment blocks"
+        " and segment_ids is only masking them afterwards.")
   if any(n.startswith("C") for n in kernel_results):
     print("       C vs its P twin isolates segment_ids: equal cost means"
           " segment_ids does not save compute, only masks.")

@@ -611,60 +611,76 @@ schedule from a STATIC mask: `_process_mask(mask, block_shape, ...)` in
 `splash_attention_mask_info.py:518` takes no segment information, and the pallas grid width is
 `mask_info.data_next.shape[-1]` (`splash_attention_kernel.py:1141` fwd, `:1476` bwd).
 `segment_ids` is an ordinary kernel input that only zeroes blocks that were ALREADY computed
-(`_apply_mask_and_soft_cap`, `:596-677`). So a packed row costs `row_len^2 / 2` no matter how many
-sequences it holds, which predicts a **BUDGET LAW**: at a fixed token total T (rows = T/budget),
-`attention ~ T * budget` (LINEAR in the budget) while `mlp ~ T` (budget-independent). Packing
-always saves MLP/lm_head tokens but pays an attention penalty that grows with the budget.
+(`_apply_mask_and_soft_cap`, `:596-677`). If that reading is right, a row costs `row_len^2/2`
+however many sequences it holds, and neither padding nor cross-segment area is skipped.
+
+**The experiment: three arms holding the SAME sequences.** 8 sequences of 1024 real tokens are
+laid out three ways. Every arm therefore attends exactly the same tokens -- effective work is
+`8 * 1024^2 / 2 = 4.19M` in all three -- and differs only in how much padding / cross-segment
+area the kernel runs through on top:
+
+| arm | shape | segments per row | effective attn | executed (rows*len^2/2) | waste |
+|---|---|---|---|---|---|
+| `U` (unpacked) | `[8, 2048]` | 1 sequence + 1024 padding | 1.00x | 1.00x | 4.0x |
+| `P4096` (packed) | `[2, 4096]` | 4 | 1.00x | 1.00x | 4.0x |
+| `P8192` (packed) | `[1, 8192]` | 8 | 1.00x | 2.00x | 8.0x |
+
+`U` and `P4096` are the load-bearing pair: identical executed area, but `U` wastes it on padding
+while `P4096` wastes it on cross-segment blocks. If they time the same, the kernel treats both
+kinds of waste identically -- computed, then masked.
+
+**Verdict (one column to read):**
+- measured tracks **executed** (1.00 / 1.00 / 2.00) -> hypothesis confirmed. Two corollaries fall
+  out immediately: the best budget is the smallest one that still fits the longest sequence (a
+  bigger budget only buys attention penalty), and balancing segment sizes across rows -- what the
+  KK load-balancing CL does -- cannot help, since cost depends on row length alone.
+- measured tracks **effective** (1.00 / 1.00 / 1.00) -> splash does skip, and the source reading
+  above is wrong. Say so; the packing budget guidance changes completely.
 
 **What to run (needs a TPU VM; no model files, no vLLM, random weights, seconds per case):**
 ```bash
-# in the container, one command:
+# in the container, one command -- the three arms above plus the controls:
 bash experimental/bench_splash_v5p_docker.sh
-# sweep the budget to see the linearity directly:
-BUDGETS=8192,4096,2048 bash experimental/bench_splash_v5p_docker.sh
-# FrozenLake geometry instead of gsm8k:
-MODEL_CONFIG=qwen3_8b bash experimental/bench_splash_v5p_docker.sh
+# FrozenLake geometry (4096-token sequences) instead of gsm8k:
+SEQ_TOKENS=4096 SEQ_LEN=8192 BUDGETS=8192,16384 MODEL_CONFIG=qwen3_8b \
+  bash experimental/bench_splash_v5p_docker.sh
+# add the surrounding context (attention module = kernel + projections, and a
+# full decoder layer = attention + MLP, which is what went flat e2e):
+WITH_MODULE=1 WITH_LAYER=1 bash experimental/bench_splash_v5p_docker.sh
 ```
 `bench_splash_v5p_docker.sh` pulls the branch inside `tunix_base_image` and runs
 `bench_splash_v5p.sh` -> `bench_splash_packed.py`. Unlike the training runbooks it needs NO
-`/mnt/workspace`, no HF token and no model download. Add `TRACE_DEST=` to skip the xprof writes or
-`SKIP_LAYER=1` for an attention-only read.
+`/mnt/workspace`, no HF token and no model download. `TRACE_DEST=` skips the xprof writes.
 
-**Fidelity (why these numbers should match the e2e trace).** Data comes from the production packer
-`rl_utils.pack_sequences`; the module under test is the production `model_lib.Attention` /
-`DecoderLayer`; and each arm's `(positions, attn_mask, segment_ids)` comes from the production
-`common.process_ids`. That last point matters: the UNPACKED arm is NOT segment-free -- production
-feeds splash a per-position non-pad `segment_ids` (0/1) because the kernel only takes a static
-causal mask, so BOTH arms run the `*_segmented` kernel and the only remaining variable is row
-length. The unpacked arm also carries its real padding (~0.38 real-token fraction at the default
-700-950 tokens out of 2048).
+**Two controls the script also prints.**
+- `C8192`: the `[1, 8192]` shape with `segment_ids` dropped entirely. Same time as `P8192` means
+  the cost is the row length, not the segment feature.
+- A segment sweep at a FIXED `[1, 8192]` shape with synthesized ids (1, 2, 4, 8, 16, 32 segments,
+  plus a deliberately skewed split). Flat timings are the direct evidence that `segment_ids` never
+  skips work; the skewed point additionally says segment SIZE distribution does not matter. The
+  synthetic ids are structurally what `pack_sequences` emits (contiguous runs of 1..K then a 0
+  padding tail), and one synthetic point is timed against the real packed row of the same geometry
+  as a cross-check (`XCHECK` line).
 
-**Cases and the verdicts they settle (the script prints the ratios):**
-| case | shape | expectation |
-|---|---|---|
-| `U` | `[8, 2048]` unpacked, real=0.38 | baseline |
-| `P8192` | `[1, 8192]` packed, 8 segs, dummy~0.23 | attention ~2x U; bwd should land near the e2e 16ms |
-| `P4096` | `[2, 4096]` packed | attention ~1x U -- the budget law's payoff |
-| `C8192` | `[1, 8192]`, segment_ids dropped | ~P8192 (cost is row length, not the segment feature) |
-| `E` | the same geometries through a full DecoderLayer | P8192 ~ U (reproduces the flat total), P4096 < U |
-
-- **V1 (mechanism)**: `P8192/U ~ 2.0`, `P4096/U ~ 1.0`, `C ~ P8192` -> attention is linear in the
-  budget and segment_ids does not save compute.
-- **V2 (this bench == the real run)**: the bench's backward numbers should sit near the e2e 16/6ms,
-  and the xprof kernel names must match the e2e trace symbol-for-symbol -- packed/unpacked both
-  show `splash_..._segmented_{fwd,dq,dkv}` with the same `xprof_metadata` block sizes. Traces land
-  in `gs://yuxzhang-tunix-models/xprof/splash_bench/splash_bench_<case>`.
-- **V3 (the flat total)**: case E reproduces "packing changed nothing" at 8192 and shows a win at
-  4096.
-- **V4 (the fix)**: not wired yet -- once V1 holds, add a static block-diagonal `NumpyMask` case; if
-  it lands at ~U, a band/LocalMask built from the segment cap would recover the attention penalty
-  statically (something `segment_ids` can never do).
+**Fidelity.** The timed callable is the raw kernel, built through the same entry point JAX's own
+splash tests use (`splash.make_splash_mha_single_device`, i.e. `make_splash_mha` with
+head_shards=q_seq_shards=1, under `jax.vmap` over the batch -- the composition
+`model_lib.Attention` performs inside its shard_map). Deliberately excluded: the q/k/v/o
+projections (token-linear, so cheaper when packed -- they would partly cancel the penalty being
+measured; available via `--with_module`), and any mesh/sharding (a packed geometry can have fewer
+rows than chips, which a batch axis on fsdp cannot split). Packed rows and segment ids come from
+the production packer `rl_utils.pack_sequences`, and each arm's `(positions, attn_mask,
+segment_ids)` from the production `common.process_ids` -- which is what gives the unpacked arm its
+real padding AND its per-position non-pad `segment_ids`, so both arms hit the `*_segmented` kernel
+and row length is the only variable. Timing is a median over 20 samples, each dispatching 5 calls
+before one synchronization, after 3 warmup calls.
 
 **What the answers decide** (see `tasks/cl944_fsdp_packing/phase10.md`): (1) whether the packing
-budget defaults should drop from 8192 to ~4096 (smallest budget that still fits the longest single
-sequence), (2) whether the KK load-balancing CL is worth landing on TPU -- a CPU experiment already
-shows KK and our FFD produce the same row counts in 197/200 trials, and balancing cannot help when
-every row costs the same regardless of content, (3) whether to open the LocalMask work.
+budget defaults should drop toward "smallest that fits the longest sequence", (2) whether the KK
+load-balancing CL is worth landing on TPU -- a CPU experiment already shows KK and our FFD produce
+the same row counts in 197/200 trials, and balancing cannot help if cost depends only on row
+length, (3) whether to open the LocalMask work (a static band mask built from the segment cap is
+the only way to make splash actually skip).
 
 **Report back**: the printed table + VERDICTS block, and the xprof kernel names for one packed and
-one unpacked case.
+one unpacked case (both should read `splash_..._segmented_{fwd,dq,dkv}`; only the shapes differ).
