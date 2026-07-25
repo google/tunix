@@ -1,5 +1,6 @@
 from absl.testing import absltest
 from absl.testing import parameterized
+from tunix.experimental.common import datatypes
 from tunix.experimental.trajectory import trajectory
 
 
@@ -314,6 +315,34 @@ class TrajectoryTest(parameterized.TestCase):
     }
     traj = trajectory.Trajectory.from_json_dict(data)
     self.assertLen(traj.subagent_trajectories, 2)
+
+  def test_to_and_from_datatypes_trajectory(self):
+    traj = trajectory.Trajectory(
+        trajectory_id="traj-123",
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+        reward=5.5,
+    )
+    traj.add_step(
+        source=trajectory.Source.AGENT,
+        message="Hello model response",
+        reasoning_content="Thinking process",
+        reward=1.0,
+    )
+    dt_traj = traj.to_datatypes_trajectory()
+    self.assertIsNone(dt_traj.task)
+    self.assertEqual(dt_traj.reward, 5.5)
+    self.assertEqual(dt_traj.status, datatypes.TrajectoryStatus.SUCCEEDED)
+    self.assertLen(dt_traj.steps, 1)
+    self.assertEqual(dt_traj.steps[0].model_response, "Hello model response")
+    self.assertEqual(dt_traj.steps[0].thought, "Thinking process")
+    self.assertEqual(dt_traj.steps[0].reward, 1.0)
+
+    restored = trajectory.Trajectory.from_datatypes_trajectory(
+        dt_traj, trajectory_id="traj-123"
+    )
+    for step in traj.steps:
+      step.timestamp = None
+    self.assertEqual(restored, traj)
 
 
 if __name__ == "__main__":
