@@ -25,8 +25,9 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TUNIX_DIR="${TUNIX_DIR:-$(dirname "$SCRIPT_DIR")}"
 
-# Per-chip geometry of the e2e run being explained: 32 sequences over fsdp 4.
-NUM_SEQS="${NUM_SEQS:-8}"
+# GLOBAL geometry of the e2e run being explained (the mesh shards the batch
+# over fsdp, so 32 sequences become 8 rows/chip unpacked).
+NUM_SEQS="${NUM_SEQS:-32}"
 SEQ_LEN="${SEQ_LEN:-2048}"
 # Real-token range: 700-950 out of 2048 padded lands at ~20% dummy_ratio, the
 # ratio the e2e packed run reported.
@@ -40,6 +41,9 @@ WARMUP="${WARMUP:-3}"
 TRACE_DEST="${TRACE_DEST:-gs://yuxzhang-tunix-models/xprof/splash_bench}"
 TRACE_ITERS="${TRACE_ITERS:-3}"
 SKIP_LAYER="${SKIP_LAYER:-0}"
+# Time the raw splash kernel too (no q/k/v/o projections) -- that ratio is
+# the attention verdict; the module-level one mixes in token-linear work.
+ISOLATE_KERNEL="${ISOLATE_KERNEL:-1}"
 LOG_DIR="${LOG_DIR:-/tmp/bench_splash_logs}"
 RUN_TAG="${RUN_TAG:-splash_bench}"
 
@@ -49,6 +53,7 @@ cd "$TUNIX_DIR"
 
 extra_args=()
 [ "${SKIP_LAYER}" != "0" ] && extra_args+=(--skip_layer)
+[ "${ISOLATE_KERNEL}" != "0" ] && extra_args+=(--isolate_kernel)
 
 log="$LOG_DIR/${RUN_TAG}.log"
 echo "===== SPLASH BENCH seqs=${NUM_SEQS}x${SEQ_LEN} real=${MIN_TOKENS}-${MAX_TOKENS} "\

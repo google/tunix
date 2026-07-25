@@ -41,7 +41,12 @@ import statistics
 import time
 
 import jax
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
 from jax import numpy as jnp
+from jax.sharding import PartitionSpec as P
+import jax.sharding as shd
 import numpy as np
 
 from flax import nnx
@@ -53,8 +58,10 @@ from tunix.rl import utils as rl_utils
 
 def parse_args():
   p = argparse.ArgumentParser(description=__doc__)
-  p.add_argument("--num_seqs", type=int, default=8,
-                 help="Sequences per chip (32 seqs / fsdp 4 in the e2e run).")
+  p.add_argument("--num_seqs", type=int, default=32,
+                 help="GLOBAL sequences per micro-batch (the e2e run's 32). The"
+                      " mesh shards the batch over fsdp, so shapes here are"
+                      " global: 32 seqs over fsdp 4 = 8 rows/chip unpacked.")
   p.add_argument("--seq_len", type=int, default=2048,
                  help="Padded per-sequence length of the unpacked baseline.")
   p.add_argument("--min_tokens", type=int, default=700,
@@ -69,6 +76,9 @@ def parse_args():
   p.add_argument("--trace_dest", type=str, default="",
                  help="If set, write one xprof trace per case under here.")
   p.add_argument("--trace_iters", type=int, default=3)
+  p.add_argument("--isolate_kernel", action="store_true",
+                 help="Also time the raw splash kernel (no q/k/v/o projections)"
+                      " so the reported ratio is the attention kernel alone.")
   p.add_argument("--model_config", type=str, default="qwen3_1p7b",
                  help="ModelConfig factory: qwen3_1p7b (the gsm8k run) or "
                       "qwen3_8b (FrozenLake).")
@@ -118,15 +128,17 @@ def make_examples(num_seqs, seq_len, min_tokens, max_tokens, seed):
   ], int(lens.sum())
 
 
-def pack(examples, budget, pack_size, num_seqs):
+def pack(examples, budget, pack_size, num_seqs, row_multiple=1):
   """One packed chunk straight out of the production FFD packer.
 
   The bench needs ALL sequences in a single [rows, budget] chunk so the case is
   one kernel invocation. FFD may not reach the ceil(total/budget) lower bound,
   so widen the chunk until everything fits rather than silently benching a
-  partial chunk.
+  partial chunk. Rows stay a multiple of `row_multiple` (the fsdp axis) so the
+  batch shards evenly, exactly like production's pack_size = fsdp * dp.
   """
-  for rows in range(pack_size, pack_size + 8):
+  pack_size = max(row_multiple, -(-pack_size // row_multiple) * row_multiple)
+  for rows in range(pack_size, pack_size + 8 * row_multiple, row_multiple):
     chunks = list(
         rl_utils.pack_sequences(
             iter([examples]),
@@ -177,15 +189,22 @@ def model_inputs(example, pad_id=0, eos_id=0):
 # ---------------------------------------------------------------------------
 # Timing
 # ---------------------------------------------------------------------------
-def timed(fn, args, iters, warmup):
-  """Median wall time (ms) of `fn(*args)`, warmup excluded."""
+def timed(fn, args, iters, warmup, inner=5):
+  """Median per-call wall time (ms) of `fn(*args)`, warmup excluded.
+
+  Each sample dispatches `inner` calls and synchronizes once, so JAX's
+  per-dispatch overhead is amortized instead of being charged to every
+  measurement (it would be a visible fraction of a sub-millisecond case).
+  """
   for _ in range(warmup):
     jax.block_until_ready(fn(*args))
   samples = []
   for _ in range(iters):
     t0 = time.perf_counter()
-    jax.block_until_ready(fn(*args))
-    samples.append((time.perf_counter() - t0) * 1e3)
+    for _ in range(inner):
+      out = fn(*args)
+    jax.block_until_ready(out)
+    samples.append((time.perf_counter() - t0) * 1e3 / inner)
   return statistics.median(samples)
 
 
@@ -202,6 +221,72 @@ def maybe_trace(trace_dest, name, fn, args, iters):
 # ---------------------------------------------------------------------------
 def build_attention(config, rngs):
   return model_lib.Attention(config=config, rngs=rngs)
+
+
+def splash_kernel_fns(config, mesh, q, k, v, segment_ids):
+  """(forward, forward+backward) closures over the RAW splash kernel.
+
+  `model_lib.Attention` also runs the q/k/v/o projections, whose cost is linear
+  in the token count and therefore CHEAPER for a packed row -- that partly
+  cancels the attention penalty and pulls the module-level ratio below the
+  kernel's. This path mirrors the kernel construction in the qwen3 attention
+  (model.py: CausalMask + MultiHeadMask + BlockSizes, sharded with the same
+  act_btnh spec) but feeds q/k/v directly, so the reported ratio is the
+  attention kernel alone. Cross-check: the xprof kernel names/metadata must
+  match the module case.
+  """
+  qh = q.shape[1]
+  seq_len = q.shape[2]
+  causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+  multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
+  block = config.flash_attention_block_size
+  block_sizes = splash.BlockSizes(
+      block_q=block, block_kv=block, block_q_dkv=block, block_kv_dkv=block,
+      block_kv_dkv_compute=block, block_q_dq=block, block_kv_dq=block,
+  )
+  shd_b, shd_t, shd_n, shd_h = config.shd_config.act_btnh
+  head_shards = mesh.shape[shd_n] if shd_n in mesh.shape else 1
+  q_seq_shards = mesh.shape[shd_t] if shd_t in mesh.shape else 1
+  kernel = splash.make_splash_mha(
+      multi_head_mask, block_sizes=block_sizes,
+      head_shards=head_shards, q_seq_shards=q_seq_shards,
+  )
+
+  shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+  unsharded_seq = P(shd_b, shd_n, None, shd_h)
+  kernel_spec = kernel.manual_sharding_spec(
+      shd.NamedSharding(mesh, P(shd_n, shd_t))
+  )
+  seg_spec = P(shd_b, shd_t)
+  unsharded_seg_spec = P(shd_b, None)
+
+  def call(q, k, v, seg):
+    @functools.partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq,
+                  seg_spec, unsharded_seg_spec),
+        out_specs=shd_spec,
+        check_rep=False,
+    )
+    def sharded(kern, q_block, k_block, v_block, q_seg, kv_seg):
+      seg_ids = splash.SegmentIds(q=q_seg, kv=kv_seg)
+      return jax.vmap(kern)(q_block, k_block, v_block, segment_ids=seg_ids)
+
+    return sharded(kernel, q, k, v, seg, seg)
+
+  @jax.jit
+  def fwd(q, k, v, seg):
+    return call(q, k, v, seg)
+
+  @jax.jit
+  def fwd_bwd(q, k, v, seg):
+    return jax.grad(
+        lambda q: jnp.sum(call(q, k, v, seg).astype(jnp.float32))
+    )(q)
+
+  args = (q, k, v, segment_ids)
+  return (fwd, args), (fwd_bwd, args)
 
 
 def attn_fns(attn, x, segment_pos, attn_mask, segment_ids):
@@ -285,11 +370,13 @@ def main():
       f"{list(shape_u)} unpacked, real={real_frac:.2f}",
   ))
 
+  fsdp = mesh.shape.get("fsdp", 1)
   for budget in budgets:
     # rows = ceil(total_real / budget) is what the packer will produce; ask for
-    # that many rows per chunk so one chunk holds everything.
+    # that many rows per chunk (rounded up to an fsdp multiple, as production's
+    # pack_size = fsdp * dp does) so one chunk holds everything and shards.
     rows = -(-total_real // budget)
-    ex = pack(examples, budget, rows, args.num_seqs)
+    ex = pack(examples, budget, rows, args.num_seqs, row_multiple=fsdp)
     r, segs, dummy = geometry(ex, budget, total_real)
     pos_p, mask_p, seg_p, shape_p = model_inputs(ex)
     x_p = jax.random.normal(key, (*shape_p, d), jnp.bfloat16)
@@ -317,6 +404,34 @@ def main():
     print(f"{name:<10} {note:<38} {t_fwd:>9.2f} {t_fb:>11.2f}")
     maybe_trace(args.trace_dest, f"attn_{name}", f_fb, a_fb, args.trace_iters)
 
+  # ---- raw kernel, no projections ------------------------------------------
+  kernel_results = {}
+  if args.isolate_kernel:
+    print()
+    print("=" * 78)
+    print("CASE K -- raw splash kernel (no q/k/v/o projections)")
+    print("=" * 78)
+    print(f"{'case':<10} {'shape':<38} {'fwd ms':>9} {'fwd+bwd ms':>11}")
+    qh, hd = config.num_heads, config.head_dim
+    for name, x, _, _, seg, note in cases:
+      if seg is None:
+        continue  # splash needs segment_ids on this path
+      b, t = x.shape[0], x.shape[1]
+      qkv = [
+          jax.random.normal(jax.random.fold_in(key, i), (b, qh, t, hd),
+                            jnp.bfloat16)
+          for i in range(3)
+      ]
+      (f_fwd, a_fwd), (f_fb, a_fb) = splash_kernel_fns(
+          config, mesh, qkv[0], qkv[1], qkv[2], seg
+      )
+      t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup)
+      t_fb = timed(f_fb, a_fb, args.iters, args.warmup)
+      kernel_results[name] = (t_fwd, t_fb)
+      print(f"{name:<10} {note:<38} {t_fwd:>9.2f} {t_fb:>11.2f}")
+      maybe_trace(args.trace_dest, f"kernel_{name}", f_fb, a_fb,
+                  args.trace_iters)
+
   # ---- full decoder layer (attention + MLP) --------------------------------
   if not args.skip_layer:
     layer = model_lib.DecoderLayer(config=config, rngs=rngs)
@@ -343,12 +458,25 @@ def main():
   print("=" * 78)
   print("VERDICTS")
   print("=" * 78)
+  if kernel_results:
+    kbase = kernel_results["U"][1]
+    for name, (_, t_fb) in kernel_results.items():
+      if name == "U":
+        continue
+      print(f"  [V1] KERNEL bwd {name}/U = {t_fb / kbase:.2f}x"
+            f"   (predicted: P8192~2.0, P4096~1.0 -- attention is linear in the"
+            " budget)")
+    print("       ^ this is the verdict for V1; the module rows below mix in"
+          " the q/k/v/o projections, which are cheaper when packed and pull the"
+          " ratio down.")
   base = results["U"][1]
   for name, (_, t_fb) in results.items():
     if name == "U":
       continue
-    print(f"  [V1] attn bwd {name}/U = {t_fb / base:.2f}x"
-          f"   (predicted: P8192~2.0, P4096~1.0, C~P8192)")
+    suffix = "" if kernel_results else (
+        "   (module-level: attention penalty PARTLY CANCELLED by the cheaper"
+        " projections; rerun with --isolate_kernel for the kernel ratio)")
+    print(f"  [V1'] attn-module bwd {name}/U = {t_fb / base:.2f}x{suffix}")
   if layer_results:
     lbase = layer_results["U"][1]
     for name, (_, t_fb) in layer_results.items():
