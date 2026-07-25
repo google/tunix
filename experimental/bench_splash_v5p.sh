@@ -19,31 +19,31 @@
 #
 # Everything is overridable via env vars, e.g. skip the xprof traces and the
 # full-layer case for a quick attention-only read:
-#   TRACE_DEST= SKIP_LAYER=1 bash experimental/bench_splash_v5p.sh
+#   WITH_MODULE=1 WITH_LAYER=1 bash experimental/bench_splash_v5p.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TUNIX_DIR="${TUNIX_DIR:-$(dirname "$SCRIPT_DIR")}"
 
-# GLOBAL geometry of the e2e run being explained (the mesh shards the batch
-# over fsdp, so 32 sequences become 8 rows/chip unpacked).
-NUM_SEQS="${NUM_SEQS:-32}"
+# Per-chip geometry of the e2e run being explained: 32 sequences over fsdp 4.
+# The kernel bench is single-device, so this is exactly one chip's share.
+NUM_SEQS="${NUM_SEQS:-8}"
 SEQ_LEN="${SEQ_LEN:-2048}"
 # Real-token range: 700-950 out of 2048 padded lands at ~20% dummy_ratio, the
 # ratio the e2e packed run reported.
 MIN_TOKENS="${MIN_TOKENS:-700}"
 MAX_TOKENS="${MAX_TOKENS:-950}"
-BUDGETS="${BUDGETS:-8192,4096}"
+BUDGETS="${BUDGETS:-2048,4096,8192,16384}"
 # qwen3_1p7b = the gsm8k run this explains; qwen3_8b = the FrozenLake geometry.
 MODEL_CONFIG="${MODEL_CONFIG:-qwen3_1p7b}"
 ITERS="${ITERS:-20}"
 WARMUP="${WARMUP:-3}"
 TRACE_DEST="${TRACE_DEST:-gs://yuxzhang-tunix-models/xprof/splash_bench}"
 TRACE_ITERS="${TRACE_ITERS:-3}"
-SKIP_LAYER="${SKIP_LAYER:-0}"
-# Time the raw splash kernel too (no q/k/v/o projections) -- that ratio is
-# the attention verdict; the module-level one mixes in token-linear work.
-ISOLATE_KERNEL="${ISOLATE_KERNEL:-1}"
+# The raw kernel always runs. These add context at the cost of runtime:
+# the attention module (kernel + projections) and a full decoder layer.
+WITH_MODULE="${WITH_MODULE:-0}"
+WITH_LAYER="${WITH_LAYER:-0}"
 LOG_DIR="${LOG_DIR:-/tmp/bench_splash_logs}"
 RUN_TAG="${RUN_TAG:-splash_bench}"
 
@@ -52,8 +52,8 @@ case "$TRACE_DEST" in gs://*|"") ;; *) mkdir -p "$TRACE_DEST" ;; esac
 cd "$TUNIX_DIR"
 
 extra_args=()
-[ "${SKIP_LAYER}" != "0" ] && extra_args+=(--skip_layer)
-[ "${ISOLATE_KERNEL}" != "0" ] && extra_args+=(--isolate_kernel)
+[ "${WITH_MODULE}" != "0" ] && extra_args+=(--with_module)
+[ "${WITH_LAYER}" != "0" ] && extra_args+=(--with_layer)
 
 log="$LOG_DIR/${RUN_TAG}.log"
 echo "===== SPLASH BENCH seqs=${NUM_SEQS}x${SEQ_LEN} real=${MIN_TOKENS}-${MAX_TOKENS} "\
