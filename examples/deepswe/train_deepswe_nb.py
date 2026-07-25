@@ -250,6 +250,49 @@ args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
+
+# Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector.
+def patch_kubernetes_runtime():
+  try:
+    from r2egym.agenthub.runtime.docker import DockerRuntime
+    import os
+
+    original_start_kubernetes_pod = DockerRuntime._start_kubernetes_pod
+
+    def patched_start_kubernetes_pod(
+        self, docker_image, command, pod_name, **docker_kwargs
+    ):
+      original_create_namespaced_pod = self.client.create_namespaced_pod
+
+      def patched_create_namespaced_pod(*args, **kwargs):
+        body = kwargs.get("body")
+        if body and "spec" in body:
+          key = os.environ.get(
+              "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
+          )
+          val = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
+          body["spec"]["nodeSelector"] = {key: val}
+          print(f"[Monkeypatch] Overrode nodeSelector to {key}={val}")
+        return original_create_namespaced_pod(*args, **kwargs)
+
+      self.client.create_namespaced_pod = patched_create_namespaced_pod
+      try:
+        return original_start_kubernetes_pod(
+            self, docker_image, command, pod_name, **docker_kwargs
+        )
+      finally:
+        self.client.create_namespaced_pod = original_create_namespaced_pod
+
+    DockerRuntime._start_kubernetes_pod = patched_start_kubernetes_pod
+    print(
+        "[Monkeypatch] Successfully patched DockerRuntime._start_kubernetes_pod"
+    )
+  except Exception as e:
+    print(f"[Monkeypatch] Failed to patch DockerRuntime: {e}")
+
+
+patch_kubernetes_runtime()
+
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
 absl_logging.use_python_logging()
