@@ -507,98 +507,78 @@ JAX_PLATFORMS=cpu python3 -m pytest tests/sft/peft_trainer_test.py -k GradientAc
 ## 18. Runbook: CL3 segment-aware convergence validation — TWO recipes, FOUR runs (pack vs unpack)
 
 **Context:** CL3 (segment-aware loss aggregation + weighted-denom gradient accumulation +
-consolidated `packing/dummy_ratio`) is integrated into `yuxzhang/refactor_loss_accum_ablation`
-(commit `de4cf2cb`). refactor is now the CL1+CL2+CL3 "final trace" version. We validate that
-turning packing ON is convergence-neutral (the segment-aware loss is correct) on **two recipes**:
-- **gsm8k** — Qwen3-1.7B, `examples/math_gsm8k/qwen3_grpo_demo.py`, mesh 4x1, budget 8192.
-- **FrozenLake** — **Qwen3-8B**, `examples/frozenlake/train_frozenlake_qwen3.py` (the recipe with
-  ESTABLISHED convergence from the swe-evaluation runs; held-out `rewards/solve_ratio` climbs),
-  agentic multi-turn, mesh 2x2 (vLLM dp/tp follow the mesh), budget 16384. The earlier
-  Gemma4-E2B CLI plan was ABANDONED — no convergence evidence for E2B on this task.
+consolidated `packing/dummy_ratio`) is integrated into `yuxzhang/refactor_loss_accum_ablation`,
+which is now the CL1+CL2+CL3 "final trace" version. These runs validate that turning packing ON is
+convergence-neutral -- i.e. the segment-aware loss is correct -- on two recipes:
 
-**BUG FIXED FIRST (blocks any e2e packing run):** CL3's plumbing reads
-`self._training_config.max_segments_per_packed_row` (rl_learner.py, agentic_rl_learner.py) but
-that was never a field on `TrainingConfig`/`RLTrainingConfig` (both `@dataclass(slots=True)`),
-so packing crashed with `AttributeError` the moment it ran through the learner (latent — unit
-tests call `pack_sequences(...)` directly). Fixed by adding
-`max_segments_per_packed_row: int | None = None` to `peft_trainer.TrainingConfig` (default None
--> budget-derived `num_segments = max_seq_token_per_tpu + 1`, the safe bound). Exposed as an
-override: `MAX_SEGMENTS_PER_ROW=N` (both wrappers) / `--max_segments_per_packed_row N` (both
-scripts). Leave unset for the default.
+| recipe | script | model | packing budget |
+|---|---|---|---|
+| gsm8k | `examples/math_gsm8k/qwen3_grpo_demo.py` | Qwen3-1.7B | **2048** = max_prompt 1024 + max_response 1024 |
+| FrozenLake | `examples/frozenlake/train_frozenlake.py` | Gemma4-E2B | **4096** = max_prompt 2048 + max_response 2048 |
 
-**Wrappers (one run each yields wandb convergence + full-run Perfetto + a short xprof window):**
-- gsm8k: `experimental/train_v5p_1host_docker.sh` (runs `train_v5p_1host_pack.sh`).
-- FrozenLake: `experimental/train_frozenlake_v5p_1host_docker.sh` (runs
-  `train_frozenlake_v5p_1host.sh`).
-These are NOT the grad-accum profiling wrappers (`train_v5p_docker.sh` / `profile_v5p_docker.sh`).
+**Why those budgets.** The v5p microbench (section 19, results in
+`tracing_logs/splash_microbench_RUN1_results.log`) showed splash charges a packed row its full
+causal area regardless of how many sequences it holds. So the budget is NOT "as large as fits":
+the win is keeping the row length and cutting the row count, and the optimum is the smallest budget
+that still holds a maximal sequence -- which is the unpacked row length itself. At that setting
+packing beat unpacking by 23% at the module level; at twice that budget it lost 89%.
 
-**The FOUR runs — each recipe is a pack-vs-unpack PARITY pair (both stream+weighted, only packing
-differs via `MAX_TOKEN_PER_TPU`; 0 = off):**
+**Why `train_frozenlake.py` (not the CLI, not the Qwen3 script).** Its docstring targets this exact
+host class ("Designed for v5p-4 / v6e-8") and it runs rollout and trainer on SEPARATE meshes -- the
+disaggregated vLLM server "avoids the trace-context issues of running the in-process sampler under
+REMAT", which is what makes the log-probs GRPO consumes as `old_per_token_logps` trustworthy. It
+also already pins `compute_logps_chunk_size=2048`, the fix the other script needed, which says it
+has really been run. Its hyperparameters (batch 64 / mini 64 / micro 2 / 150 batches x 3 epochs =
+450 updates) are left untouched.
+
+**Environment (FrozenLake only, and it is not optional).** The recipe is known to converge on
+`jax[tpu]==0.10.1` + `vllm-tpu==0.25.0`. A mismatch changes the vLLM sampler's log-probs, which
+feed straight into the GRPO ratio. The wrapper installs and then VERIFIES both, and exits if they
+disagree -- do not paper over that. Pass `SKIP_PIP=1` on later runs to skip the install (the check
+still runs). The script's data bucket is not reachable from here, so the wrapper generates the same
+schema locally into `/tmp/data/frozenlake` (idempotent); the model comes from the HF cache under
+`HF_HOME` (default `/mnt/workspace/hf_cache`, on the persistent disk).
+
+**THE FOUR RUNS.** Each recipe is a pack-vs-unpack pair whose only difference is the packing
+switch. Both scripts pack only when told to, so the plain run IS the unpacked baseline.
 ```bash
 # ---- gsm8k (Qwen3-1.7B) ----
-# A) packed: segment-aware CL3 + weighted stream accumulation
 RUN_TAG=cl3_gsm8k_pack \
-  bash experimental/train_v5p_1host_docker.sh
-# B) unpack parity: SAME stream+weighted accumulation, packing OFF
+  bash experimental/train_v5p_1host_docker.sh                 # budget 2048 (default)
 MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_gsm8k_unpack_stream \
   bash experimental/train_v5p_1host_docker.sh
 
-# ---- FrozenLake (Qwen3-8B) ----
-# C) packed
-RUN_TAG=cl3_frozenlake_pack \
-  bash experimental/train_frozenlake_v5p_1host_docker.sh
-# D) unpack parity
-MAX_TOKEN_PER_TPU=0 RUN_TAG=cl3_frozenlake_unpack \
+# ---- FrozenLake (Gemma4-E2B) ----
+RUN_TAG=fl_unpack \
+  bash experimental/train_frozenlake_v5p_1host_docker.sh      # baseline, packing off
+MAX_TOKEN_PER_TPU=4096 RUN_TAG=fl_pack SKIP_PIP=1 \
   bash experimental/train_frozenlake_v5p_1host_docker.sh
 ```
-Do NOT use `train_v5p_1host_unpack_optax.sh` for parity — that is unpack+optax (mean-of-means), a
-different accumulation, meant for the separate end-to-end PERF comparison (pack+stream vs baseline).
+Do NOT use `train_v5p_1host_unpack_optax.sh` for parity -- that is unpack+optax (mean-of-means), a
+different accumulation, meant for a separate end-to-end perf comparison.
 
-**max_steps semantics (two different knobs, don't confuse):** the script's
-`env_kwargs={"max_steps": 8}` is the FrozenLake episode length (multi-turn env steps, untouched);
-training length is `max_steps = num_batches * num_epochs` computed by the script. The wrapper maps
-`MAX_STEPS` -> `--num_batches` with `--num_epochs 1` (200 x batch16 = 3200 prompts <= the
-generated 10000-prompt train set). LR is a constant 1e-6 (plain adamw, no schedule) — none of the
-gemma-style pinned-schedule traps. FrozenLake hyperparams are the CONVERGED swe-evaluation recipe
-scaled by chip count: batch/mini 64->16, micro/logps 4 (unchanged), num_gen 8, all algo params
-(rloo, gspo-token, eps .003/.005) at script defaults; mesh (16,4)->(2,2).
+**Run the FrozenLake baseline FIRST and stop if it does not converge.** Establishing convergence
+and testing packing are two variables; if the baseline is flat, chase that (versions, mesh, data)
+before touching the packing switch. What to watch on the first run:
+1. the wrapper printing `versions OK: jax 0.10.1, vllm 0.25.x` (it exits otherwise);
+2. vLLM actually starting -- the script's own `rollout_vllm_hbm_utilization` default is 0.2; raise
+   it with `ROLLOUT_HBM=0.3` if it fails to allocate;
+3. `rewards/solve_ratio`, logged every 10 steps against the held-out set -- it must climb.
 
-**OOM postmortem (Qwen3-8B, 4-chip) — TWO separate bombs, both fixed:**
-1. *vLLM serving OOM at startup (the one observed).* Colocated `hbm_utilization` bounds TOTAL
-   HBM including trainer-resident weights, so vLLM init needs >= (ref 4.1 + actor 8.2 + rollout
-   weights 8.2 + workspace)/95 ~= 0.25 — the script default 0.20 cannot even start. Fix:
-   `ROLLOUT_HBM=0.4` (wrapper default; ~16GB KV pool + ~18GB trainer headroom). Do NOT use 0.6
-   like the gemma yaml did — on 8B that flips the OOM to the trainer peak (~96GB > 95); 0.5 is
-   the ceiling. (The gemma4_e2b.yaml 0.6 bump itself is a no-op for this path — the qwen3
-   script does not read that yaml.)
-2. *Full-logits logp bomb (would hit next).* The script did not enable chunked logps: LOGPS=4
-   prompts = 32 seqs x 4096 = 65.5k tokens/chip (after fsdp2) x vocab/tp2 x fp32 ~= 20GB, x2
-   with the log_softmax intermediate ~= 40GB. Fix: `--compute_logps_chunk_size 2048` (wrapper
-   `LOGPS_CHUNK`, default 2048) — caps logits at ~0.6GB; algo_core consumes the same knob so
-   the TRAIN forward/backward is chunked too (both arms, no MICRO/LOGPS reduction needed).
-
-**FrozenLake first-run check (before trusting run C):** single-seq max is pinned at
-prompt 2048 + response 2048 = 4096, so budget 16384 = ~4 seqs/row by construction. Still check the
-SUMMARY's printed row count / accumulation depth: with a large budget the pack can collapse to
-depth-1 (depth-1 fast path) instead of depth>1 (accumulation path) — do not assume; gsm8k (short
-seqs) exercises depth>1, FrozenLake may exercise depth-1. mesh (2,2) -> pack_size = fsdp = 2
-(chunks are [2, 16384]). Also confirm in the log that vLLM came up as dp2 tp2 (it derives both
-from the mesh).
-
-**Success criteria per recipe (compare in wandb / the SUMMARY):**
-- `loss` and `reward` curves of pack vs unpack overlap within noise -> segment-aware loss is
-  correct (packing convergence-neutral). Tight tracking, not just "similar trend".
-- FrozenLake: eval `rewards/solve_ratio` (every 10 steps, held-out test set) CLIMBS in both arms
-  and tracks between them — this is the recipe's established convergence signal.
-- `reduced_pg_loss` (mean-of-means, history-comparable probe) matches between the two arms.
-- `packing/dummy_ratio` << 1 in the packed arm (efficient packing); absent in unpack.
+**Success criteria per recipe (wandb / the run SUMMARY):**
+- `loss` and `reward` curves of pack vs unpack overlap within noise -> the segment-aware loss is
+  correct and packing is convergence-neutral. Tight tracking, not just "similar trend".
+- FrozenLake: eval `rewards/solve_ratio` climbs in BOTH arms and tracks between them.
+- `reduced_pg_loss` (mean-of-means, the history-comparable probe) matches between the two arms.
+  Note it is a probe only: the gradient follows `unreduced_pg_loss` (global weighted mean), and
+  under packing the two diverge by design -- the unpacked arm's micro-batches all carry the same
+  denominator, so there mean-of-means and the weighted mean coincide.
+- `packing/dummy_ratio` << 1 in the packed arm; absent in unpack.
 - No NaN / divergence in any of the four.
-- Perfetto (`gs://yuxzhang-tunix-models/perfetto/<RUN_TAG>`) + xprof
-  (`gs://yuxzhang-tunix-models/xprof/<RUN_TAG>`) captured for free -> ui.perfetto.dev.
 
 **Prereqs:** `gcloud auth configure-docker europe-west4-docker.pkg.dev` one-time; `/mnt/workspace`
-mounted (HF model cache; Qwen/Qwen3-8B is ~16GB of safetensors and is NOT license-gated). gsm8k
-default mesh 4x1; FrozenLake default mesh 2x2 (vLLM dp2 tp2 derived from the mesh).
+mounted (HF model cache). gsm8k mesh 4x1; FrozenLake uses the script's own split meshes (rollout
+`(2, N/2)`, trainer `(N, 1)`).
 
 ## 19. ACTION REQUEST: sequence-packing cost-model microbench (why packing did not speed anything up)
 
