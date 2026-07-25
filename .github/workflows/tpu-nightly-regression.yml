@@ -161,51 +161,58 @@ jobs:
         KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
-        SCRIPT_DIR="./examples/rl/grpo/gsm8k"
+        SCRIPT_DIRS=(
+          "./examples/rl/grpo/gsm8k"
+          "./examples/rl/ppo/gsm8k"
+        )
         EXCLUDE_DIR="verl_compatible"
         MAX_STEPS=5
         EVAL_EVERY_N_STEPS=1
 
-        if [ ! -d "$SCRIPT_DIR" ]; then
-          echo "Directory $SCRIPT_DIR does not exist" >&2
-          exit 1
-        fi
+        for dir in "${SCRIPT_DIRS[@]}"; do
+          if [ ! -d "$dir" ]; then
+            echo "Directory $dir does not exist" >&2
+            exit 1
+          fi
+        done
 
         echo "### RL Scripts Summary" >> $GITHUB_STEP_SUMMARY
         echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|---|---|" >> $GITHUB_STEP_SUMMARY
 
-        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
+        echo "🔍 Finding scripts in ${SCRIPT_DIRS[*]}, excluding $EXCLUDE_DIR"
         FINAL_EXIT_CODE=0
         FAILED_SCRIPTS=()
 
-        while IFS= read -r script; do
-          if [ -f "$script" ]; then
-            # TODO(b/510383570)
-            if [[ "$script" == *"run_qwen3_8b"* ]]; then
-              echo "⏭️ Skipping: $script"
-              echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
-              continue
-            fi
+        for SCRIPT_DIR in "${SCRIPT_DIRS[@]}"; do
+          while IFS= read -r script; do
+            if [ -f "$script" ]; then
+              # TODO(b/510383570)
+              if [[ "$script" == *"run_qwen3_8b"* ]]; then
+                echo "⏭️ Skipping: $script"
+                echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+                continue
+              fi
 
-            echo "::group::📦 Executing: $script"
-            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
-            chmod +x "$script"
-            if bash "$script" \
-                rl_training_config.max_steps="$MAX_STEPS" \
-                rl_training_config.eval_every_n_steps="$EVAL_EVERY_N_STEPS"; then
-              echo "✅ Successfully completed: $script"
-              echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
-            else
-              exit_code=$?
-              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
-              echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
-              FINAL_EXIT_CODE=1
-              FAILED_SCRIPTS+=("$script")
+              echo "::group::📦 Executing: $script"
+              echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+              chmod +x "$script"
+              if bash "$script" \
+                  rl_training_config.max_steps="$MAX_STEPS" \
+                  rl_training_config.eval_every_n_steps="$EVAL_EVERY_N_STEPS"; then
+                echo "✅ Successfully completed: $script"
+                echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+              else
+                exit_code=$?
+                echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+                echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+                FINAL_EXIT_CODE=1
+                FAILED_SCRIPTS+=("$script")
+              fi
+              echo "::endgroup::"
             fi
-            echo "::endgroup::"
-          fi
-        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
+          done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
+        done
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
           echo "🚫 One or more RL scripts failed:" >&2

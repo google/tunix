@@ -60,6 +60,7 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -77,6 +78,7 @@ class ShardingConfig:
         act_btd=P('fsdp', None, None if is_sampling else 'tp'),
         act_btf=P('fsdp', None, 'tp'),
         act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
     )
 
 

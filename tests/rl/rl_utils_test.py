@@ -151,6 +151,50 @@ class UtilsTest(absltest.TestCase):
     out, _ = critic_model(x, positions, None, attn_mask)
     self.assertEqual(out.shape, (2, 3, 1))
 
+  def test_create_critic_model_with_qwix_path(self):
+    actor_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    setattr(actor_model, 'qwix_path', 'ex_qwix_path')
+    critic_model = utils.create_critic_model(actor_model)
+
+    x = jnp.array([[1, 2, 3], [4, 5, 6]])
+    positions = jnp.arange(x.shape[1])
+    attn_mask = common.make_causal_attn_mask(jnp.ones_like(x))
+    out, _ = critic_model(x, positions, None, attn_mask)
+    self.assertEqual(out.shape, (2, 3, 1))
+    self.assertTrue(hasattr(critic_model, 'qwix_path'))
+    self.assertEqual(critic_model.qwix_path, 'ex_qwix_path')
+
+  def test_transformer_with_score_head_forward_pass(self):
+    class DummyShardingConfig:
+      score_weight_d1: tuple[str, str] = ('hidden', 'data')
+
+    rngs = nnx.Rngs(0)
+
+    config = tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize())
+    config.shd_config = DummyShardingConfig
+
+    actor_model = tc.ToyTransformer(
+        config=config,
+        rngs=rngs,
+    )
+    num_heads = 1
+    actor_model.embed_dim = actor_model.config.head_dim * num_heads
+
+    critic_model = utils.TransformerWithScoreHead(
+        transformer=actor_model,
+        rngs=rngs,
+    )
+
+    x = jnp.array([[1, 2, 3], [4, 5, 6]])
+    positions = jnp.arange(x.shape[1])
+    attn_mask = common.make_causal_attn_mask(jnp.ones_like(x))
+
+    out = critic_model(x, positions, None, attn_mask)
+    self.assertEqual(out.shape, (2, 3, 1))
+
   def test_put_params_on_memory_kind(self):
     # Test valid memory kind
     params = {'a': jnp.array([1.0, 2.0]), 'b': jnp.array([3.0])}

@@ -210,6 +210,27 @@ rl_training_config:
     <<: *base_optimizer_config
 
   critic_optimizer_config: null
+
+############################### PPO Config ###############################
+ppo_config:
+  # The number of iterations per batch (𝜇 in PPO algo 1).
+  num_iterations: 1
+
+  # The lambda parameter (λ) for Generalized Advantage Estimation (GAE).
+  gae_lambda: 0.95
+
+  # The discount factor for future rewards in GAE (δ).
+  gamma: 1.0
+
+  # The coefficient for the KL divergence penalty (𝛽) in the PPO loss function.
+  # Important to keep a high enough value for this, otherwise, the KL divergence
+  # can increase unchecked.
+  beta: 0.08
+
+  # Epsilon value for clipping (𝜀 in PPO loss in paper). It is used to
+  # stablize updates.
+  epsilon: 0.2
+
 ############################### GRPO Config ###############################
 grpo_config:
   # The number of times the policy generates multiple responses for a given prompt
@@ -264,6 +285,7 @@ env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
 
+agentic_ppo_config: {}
 agentic_grpo_config: {}
 
  ############################# Reward Fns #############################
