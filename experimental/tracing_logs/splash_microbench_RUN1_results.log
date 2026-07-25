@@ -1,0 +1,66 @@
+===== SPLASH BENCH seqs=32x2048 real=700-950 budgets=4096,8192 iters=20 (log: /tmp/bench_splash_logs/splash_bench.log) =====
+jax devices: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)]
+production mesh: fsdp=4 tp=1
+geometry (GLOBAL, as the e2e run executes): 32 seqs x 2048 padded, budgets=[4096, 8192]
+total real tokens: 32768 (32 x 1024, uniform)
+
+================================================================================
+PRODUCTION ATTENTION MODULE -- model_lib.Attention on the fsdp4xtp1 mesh, hidden 2048, 16q/8kv heads x 128
+================================================================================
+case         shape                                       fwd ms  fwd+bwd ms
+U            [32, 2048] unpacked, real=0.50                5.87       12.32
+P4096        [8, 4096] packed, segs/row=[4, 4, 4, 4, 4, 4, 4, 4], dummy=0.000      4.22        9.45
+P8192        [4, 8192] packed, segs/row=[8, 8, 8, 8], dummy=0.000      6.33       23.26
+C8192        [4, 8192] packed shape, NO segment_ids        5.78       23.08
+
+================================================================================
+RAW SPLASH KERNEL, ONE CHIP'S SHARE (batch/4 rows, 16 of 16 heads)
+================================================================================
+case         shape/chip                                  fwd ms  fwd+bwd ms
+U            [8, 2048] per chip                            2.67        5.01
+P4096        [2, 4096] per chip                            2.37        4.40
+P8192        [1, 8192] per chip                            4.48       11.84
+C8192        [1, 8192] per chip                            3.97       11.48
+
+================================================================================
+SEGMENT SWEEP -- shape fixed at [1, 8192], only the segment structure varies
+================================================================================
+case         segments                                    fwd ms  fwd+bwd ms
+S1           1 segments, real=0.77                         4.48       11.84
+S2           2 segments, real=0.77                         4.48       11.84
+S4           4 segments, real=0.77                         4.48       11.84
+S8           8 segments, real=0.77                         4.48       11.84
+S16          16 segments, real=0.77                        4.48       11.84
+S32          32 segments, real=0.77                        4.48       11.84
+S32skew      32 segments (skewed sizes), real=0.77         4.48       11.84
+
+################ SUMMARY ################
+VERDICTS
+================================================================================
+  [V1] Every arm attends the SAME sequences, so the effective work is identical; the arms differ only in the padding and cross-segment area the kernel runs through on top:
+       case              shape   effective   executed   waste   measured
+       U             [8, 2048]       1.00x      1.00x    4.0x      1.00x
+       P4096         [2, 4096]       1.00x      1.00x    4.0x      0.88x
+       P8192         [1, 8192]       1.00x      2.00x    8.0x      2.36x
+       C8192         [1, 8192]         n/a      2.00x     n/a      2.29x
+       ^ effective = sum of per-segment len^2/2 (what the sequences actually require); executed = rows*len^2/2 (the full causal area the static mask schedules). If measured tracks EXECUTED rather than EFFECTIVE, the kernel is computing padding and cross-segment blocks and segment_ids is only masking them afterwards.
+       C vs its P twin isolates segment_ids: equal cost means segment_ids does not save compute, only masks.
+  [V1b] segment sweep at a fixed [1, 8192] row -- spread across 6 segment counts = 1.00x
+       S1         bwd   1.00x S1
+       S2         bwd   1.00x S1
+       S4         bwd   1.00x S1
+       S8         bwd   1.00x S1
+       S16        bwd   1.00x S1
+       S32        bwd   1.00x S1
+       S32skew    bwd   1.00x the even split   (segment SIZE distribution -- 1.00x kills load balancing)
+       ~1.00x throughout means segment_ids only masks blocks that were computed anyway; a real skip would fall with more segments.
+  [V1'] PRODUCTION attention module (what a training step pays):
+       U          bwd   1.00x U   = kernel 5.01ms + projections/norm 7.30ms
+       P4096      bwd   0.77x U   = kernel 4.40ms + projections/norm 5.05ms
+       P8192      bwd   1.89x U   = kernel 11.84ms + projections/norm 11.42ms
+       C8192      bwd   1.87x U   = kernel 11.48ms + projections/norm 11.60ms
+       ^ the projections are linear in the token count, so packing makes them cheaper and they partly cancel the attention penalty -- which is why the e2e total moved less than the attention did.
+
+  [V2] match the xprof kernel names against the e2e trace: packed and unpacked both use *_segmented_{fwd,dq,dkv}; only the shapes differ.
+       traces: gs://yuxzhang-tunix-models/xprof/splash_bench/splash_bench_*
+--- xprof traces: gs://yuxzhang-tunix-models/xprof/splash_bench/splash_bench_*  (match the kernel namesagainst the e2e trace: packed = *_segmented_{fwd,dq,dkv}) ---
