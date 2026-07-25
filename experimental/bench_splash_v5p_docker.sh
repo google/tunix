@@ -14,7 +14,7 @@
 # Knobs of the inner script pass straight through, e.g.:
 #   BUDGETS=8192,4096,2048 bash experimental/bench_splash_v5p_docker.sh
 #   MODEL_CONFIG=qwen3_8b bash experimental/bench_splash_v5p_docker.sh
-#   WITH_MODULE=1 WITH_LAYER=1 bash experimental/bench_splash_v5p_docker.sh
+#   WITH_LAYER=1 bash experimental/bench_splash_v5p_docker.sh
 set -uo pipefail
 
 IMAGE="${IMAGE:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest}"
@@ -23,7 +23,7 @@ BRANCH="${BRANCH:-yuxzhang/refactor_loss_accum_ablation}"
 # Pass the inner script's knobs through only when the caller set them.
 PASS_ENV=()
 for var in NUM_SEQS SEQ_LEN SEQ_TOKENS MIN_TOKENS MAX_TOKENS BUDGETS SEGMENT_SWEEP SWEEP_BUDGET MODEL_CONFIG \
-           ITERS WARMUP TRACE_DEST TRACE_ITERS WITH_MODULE WITH_LAYER LOG_DIR RUN_TAG; do
+           ITERS WARMUP TRACE_DEST TRACE_ITERS MESH_FSDP MESH_TP SKIP_MODULE SKIP_KERNEL WITH_LAYER LOG_DIR RUN_TAG; do
   if [ -n "${!var:-}" ]; then PASS_ENV+=(-e "$var=${!var}"); fi
 done
 

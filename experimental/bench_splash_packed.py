@@ -15,23 +15,29 @@ i.e. packing always saves MLP tokens but pays an attention penalty that grows
 with the budget -- the optimum is the smallest budget that still fits the
 longest single sequence.
 
-The primary measurement is the RAW KERNEL, through the same entry point JAX's
-own tests use (`splash.make_splash_mha_single_device` + `jax.vmap` over the
-batch, the composition `model_lib.Attention` performs inside its shard_map).
-Nothing else is in the timing: no q/k/v/o projections (linear in tokens, so
-cheaper when packed -- they would partly cancel the very penalty being
-measured), no mesh and no shard_map (a packed geometry can have fewer rows
-than chips, which cannot shard). Shapes are therefore ONE CHIP's share of the
-e2e run: 32 sequences over fsdp 4 = 8.
+The primary measurement REPLICATES PRODUCTION: `model_lib.Attention` on the
+production mesh, with the production hidden size and head layout, fed the
+global shapes a training step executes. The module builds `make_splash_mha`
+with head_shards=mesh['tp'], wraps it in shard_map and vmaps over the batch,
+then runs the q/k/v/o projections around it -- nothing is bypassed.
 
-  U        [8, 2048]   unpacked baseline, per-position non-pad segment_ids
-  P<budget>[rows, b]   packed, real pack_sequences segment ids
-  C<budget>[rows, b]   the largest packed shape with segment_ids dropped
-                       (isolates row length from the segment feature itself)
+  U        [32, 2048]  unpacked baseline, per-position non-pad segment_ids
+  P4096    [8, 4096]   packed
+  P8192    [4, 8192]   packed -- the shape the e2e run used
+  C8192    [4, 8192]   the same shape with segment_ids dropped (isolates row
+                       length from the segment feature itself)
 
-Optional context, off by default: --with_module adds `model_lib.Attention`
-(kernel + projections) and --with_layer adds a full `DecoderLayer`
-(attention + MLP), which is what reproduces the flat e2e total.
+The same 8-per-chip sequences are behind all three, so their effective
+attention work is identical and any timing difference is the row geometry.
+
+A second table times the RAW KERNEL on one chip's share (batch/fsdp rows,
+heads/tp heads -- what production's head_shards splits off), built through the
+entry point JAX's own splash tests use, `make_splash_mha_single_device`, which
+is `make_splash_mha` with head_shards=q_seq_shards=1 and therefore exactly the
+per-chip kernel when tp=1. Subtracting it from the module time attributes the
+cost between attention and the token-linear projections. `--with_layer` adds a
+full DecoderLayer (attention + MLP), the configuration whose e2e total went
+flat.
 
 Segment ids and packed rows come from the production packer
 (`rl_utils.pack_sequences`), and each arm's model inputs from the production
@@ -61,8 +67,13 @@ from tunix.rl import utils as rl_utils
 
 def parse_args():
   p = argparse.ArgumentParser(description=__doc__)
-  p.add_argument("--num_seqs", type=int, default=8,
-                 help="Sequences per chip (the e2e run's 32 over fsdp 4).")
+  p.add_argument("--num_seqs", type=int, default=32,
+                 help="GLOBAL sequences per micro-batch -- the e2e run's 32."
+                      " The mesh shards them over fsdp, so the shapes below are"
+                      " the ones the e2e run actually executes.")
+  p.add_argument("--mesh_fsdp", type=int, default=4,
+                 help="Production mesh: gsm8k runs (fsdp 4, tp 1).")
+  p.add_argument("--mesh_tp", type=int, default=1)
   p.add_argument("--seq_len", type=int, default=2048,
                  help="Padded per-sequence length of the unpacked baseline.")
   p.add_argument("--seq_tokens", type=int, default=1024,
@@ -97,10 +108,14 @@ def parse_args():
                       " against the real packed row of the same geometry.")
   p.add_argument("--sweep_budget", type=int, default=8192,
                  help="Row length held fixed during the segment sweep.")
-  p.add_argument("--with_module", action="store_true",
-                 help="Also time model_lib.Attention (kernel + projections).")
+  p.add_argument("--skip_module", action="store_true",
+                 help="Skip the production model_lib.Attention timings.")
   p.add_argument("--with_layer", action="store_true",
-                 help="Also time a full DecoderLayer (attention + MLP).")
+                 help="Also time a full DecoderLayer (attention + MLP), the"
+                      " configuration whose e2e total went flat.")
+  p.add_argument("--skip_kernel", action="store_true",
+                 help="Skip the raw per-chip kernel timings (used to attribute"
+                      " the module time between attention and projections).")
   p.add_argument("--model_config", type=str, default="qwen3_1p7b",
                  help="ModelConfig factory: qwen3_1p7b (the gsm8k run) or"
                       " qwen3_8b (FrozenLake).")
@@ -306,7 +321,7 @@ def maybe_trace(trace_dest, name, fn, args, iters):
 # ---------------------------------------------------------------------------
 # Cases
 # ---------------------------------------------------------------------------
-def kernel_fns(config, batch, seq_len, segment_ids, seed):
+def kernel_fns(config, batch, seq_len, segment_ids, seed, heads_div=1):
   """(forward, forward+backward) closures over the RAW splash kernel.
 
   Built the way JAX's own splash tests build it -- `make_splash_mha_single_
@@ -315,7 +330,12 @@ def kernel_fns(config, batch, seq_len, segment_ids, seed):
   performs inside its shard_map. Single-device means no mesh and no sharding
   constraint on the row count, which a packed geometry can easily violate.
   """
-  qh, kh, hd = config.num_heads, config.num_kv_heads, config.head_dim
+  # Production splits the heads over tp (head_shards=mesh['tp']), so one chip
+  # sees num_heads/tp of them; dividing here makes the single-device kernel
+  # equal to that per-chip share.
+  qh = max(1, config.num_heads // heads_div)
+  kh = max(1, config.num_kv_heads // heads_div)
+  hd = config.head_dim
   mask = mask_lib.MultiHeadMask(
       [mask_lib.CausalMask((seq_len, seq_len)) for _ in range(qh)]
   )
@@ -396,10 +416,23 @@ def main():
   args = parse_args()
   budgets = [int(b) for b in args.budgets.split(",") if b]
 
+  # Production mesh: the module path shards exactly like the e2e run, so the
+  # shapes below are the ones training executes (and the row counts divide by
+  # fsdp for free -- 32/8/4 rows over 4 chips).
+  mesh = jax.sharding.Mesh(
+      np.array(jax.devices()[: args.mesh_fsdp * args.mesh_tp]).reshape(
+          args.mesh_fsdp, args.mesh_tp
+      ),
+      ("fsdp", "tp"),
+  )
+  mesh.__enter__()
+  fsdp, tp = args.mesh_fsdp, args.mesh_tp
+
   print(f"jax devices: {jax.devices()}")
+  print(f"production mesh: fsdp={fsdp} tp={tp}")
   print(
-      f"geometry (per chip): {args.num_seqs} seqs x {args.seq_len} padded "
-      f"(real {args.min_tokens}-{args.max_tokens}), budgets={budgets}"
+      f"geometry (GLOBAL, as the e2e run executes): {args.num_seqs} seqs x "
+      f"{args.seq_len} padded, budgets={budgets}"
   )
 
   examples, total_real = make_examples(
@@ -434,7 +467,9 @@ def main():
             " (a maximal sequence would not fit a row)")
       continue
     rows = -(-total_real // budget)
-    ex = pack(examples, budget, rows, args.num_seqs)
+    # Rows stay an fsdp multiple, as production's pack_size = fsdp * dp does,
+    # so the packed batch shards the same way the e2e run's does.
+    ex = pack(examples, budget, rows, args.num_seqs, row_multiple=fsdp)
     r, segs, dummy = geometry(ex, budget, total_real)
     pos_p, mask_p, seg_p, shape_p = model_inputs(ex)
     note = f"[{r}, {budget}] packed, segs/row={segs}, dummy={dummy:.3f}"
@@ -445,24 +480,64 @@ def main():
       cases.append((f"C{budget}", pos_p, mask_p, None, shape_p,
                     f"[{r}, {budget}] packed shape, NO segment_ids"))
 
-  # ---- raw kernel (the primary measurement) --------------------------------
-  print()
-  print("=" * 80)
-  print("RAW SPLASH KERNEL (make_splash_mha_single_device, vmapped over batch)")
-  print("=" * 80)
-  print(f"{'case':<12} {'shape':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
+  # ---- production module (the primary measurement) -------------------------
+  # model_lib.Attention on the production mesh: the module builds
+  # make_splash_mha with head_shards=mesh['tp'], wraps it in shard_map and
+  # vmaps over the batch, then runs the q/k/v/o projections around it. This is
+  # literally what a training step executes.
+  rngs = nnx.Rngs(params=args.seed)
+  d = config.embed_dim
+  key = jax.random.PRNGKey(args.seed)
+  xs = {
+      name: jax.random.normal(key, (*shape, d), jnp.bfloat16)
+      for name, _, _, _, shape, _ in cases
+  }
+
+  module_results = {}
+  if not args.skip_module:
+    attn = model_lib.Attention(config=config, rngs=rngs)
+    print()
+    print("=" * 80)
+    print(f"PRODUCTION ATTENTION MODULE -- model_lib.Attention on the"
+          f" fsdp{fsdp}xtp{tp} mesh, hidden {d}, {config.num_heads}q/"
+          f"{config.num_kv_heads}kv heads x {config.head_dim}")
+    print("=" * 80)
+    print(f"{'case':<12} {'shape':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
+    for name, pos, mask, seg, _, note in cases:
+      (f_fwd, a_fwd), (f_fb, a_fb) = attn_fns(attn, xs[name], pos, mask, seg)
+      t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
+      t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
+      module_results[name] = (t_fwd, t_fb)
+      print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
+      maybe_trace(args.trace_dest, f"attn_{name}", f_fb, a_fb, args.trace_iters)
+
+  # ---- raw kernel, per chip (attribution) ----------------------------------
+  # Same kernel the module runs, minus the projections, on one chip's share:
+  # batch/fsdp rows and heads/tp heads (production's head_shards=tp splits the
+  # heads, so one chip sees that many). Subtracting gives the projection cost.
   kernel_results = {}
-  for name, _, _, seg, shape, note in cases:
-    batch, seq_len = shape
-    (f_fwd, a_fwd), (f_fb, a_fb) = kernel_fns(
-        config, batch, seq_len, seg, args.seed
-    )
-    t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
-    t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
-    eff = effective_attention_work(seg) if seg is not None else 0.0
-    kernel_results[name] = (t_fwd, t_fb, batch, seq_len, eff)
-    print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
-    maybe_trace(args.trace_dest, f"kernel_{name}", f_fb, a_fb, args.trace_iters)
+  if not args.skip_kernel:
+    print()
+    print("=" * 80)
+    print(f"RAW SPLASH KERNEL, ONE CHIP'S SHARE (batch/{fsdp} rows,"
+          f" {config.num_heads // tp} of {config.num_heads} heads)")
+    print("=" * 80)
+    print(f"{'case':<12} {'shape/chip':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
+    for name, _, _, seg, shape, _ in cases:
+      batch, seq_len = shape
+      chip_batch = max(1, batch // fsdp)
+      chip_seg = None if seg is None else seg[:chip_batch]
+      (f_fwd, a_fwd), (f_fb, a_fb) = kernel_fns(
+          config, chip_batch, seq_len, chip_seg, args.seed, heads_div=tp
+      )
+      t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
+      t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
+      eff = effective_attention_work(chip_seg) if chip_seg is not None else 0.0
+      kernel_results[name] = (t_fwd, t_fb, chip_batch, seq_len, eff)
+      note = f"[{chip_batch}, {seq_len}] per chip"
+      print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
+      maybe_trace(args.trace_dest, f"kernel_{name}", f_fb, a_fb,
+                  args.trace_iters)
 
   # ---- segment-structure sweep at a FIXED shape ----------------------------
   # The budget sweep above varies row length and segment count together. This
@@ -515,56 +590,26 @@ def main():
             f" {'':>9} {t_real:>5.2f} vs {t_syn:.2f}")
       sweep_results["_xcheck"] = (t_real, t_syn)
 
-  # ---- optional context: module and full layer -----------------------------
-  module_results, layer_results = {}, {}
-  if args.with_module or args.with_layer:
-    # A 1-chip mesh: packed geometries can have fewer rows than chips, which a
-    # sharded batch axis (act_btd/act_btnh put batch on fsdp) cannot split.
-    mesh = jax.sharding.Mesh(
-        np.array(jax.devices()[:1]).reshape(1, 1), ("fsdp", "tp")
-    )
-    mesh.__enter__()
-    rngs = nnx.Rngs(params=args.seed)
-    d = config.embed_dim
-    key = jax.random.PRNGKey(args.seed)
-    xs = {
-        name: jax.random.normal(key, (*shape, d), jnp.bfloat16)
-        for name, _, _, _, shape, _ in cases
-    }
-
-    if args.with_module:
-      attn = model_lib.Attention(config=config, rngs=rngs)
-      print()
-      print("=" * 80)
-      print("ATTENTION MODULE (kernel + q/k/v/o projections)")
-      print("=" * 80)
-      print(f"{'case':<12} {'shape':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
-      for name, pos, mask, seg, _, note in cases:
-        (f_fwd, a_fwd), (f_fb, a_fb) = attn_fns(attn, xs[name], pos, mask, seg)
-        t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
-        t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
-        module_results[name] = (t_fwd, t_fb)
-        print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
-        maybe_trace(args.trace_dest, f"attn_{name}", f_fb, a_fb,
-                    args.trace_iters)
-
-    if args.with_layer:
-      layer = model_lib.DecoderLayer(config=config, rngs=rngs)
-      print()
-      print("=" * 80)
-      print("FULL DECODER LAYER (attention + MLP)")
-      print("=" * 80)
-      print(f"{'case':<12} {'shape':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
-      for name, pos, mask, seg, _, note in cases:
-        if name.startswith("C"):
-          continue
-        (f_fwd, a_fwd), (f_fb, a_fb) = layer_fns(layer, xs[name], pos, mask, seg)
-        t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
-        t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
-        layer_results[name] = (t_fwd, t_fb)
-        print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
-        maybe_trace(args.trace_dest, f"layer_{name}", f_fb, a_fb,
-                    args.trace_iters)
+  # ---- optional: full decoder layer (attention + MLP) -----------------------
+  layer_results = {}
+  if args.with_layer:
+    layer = model_lib.DecoderLayer(config=config, rngs=rngs)
+    print()
+    print("=" * 80)
+    print("FULL DECODER LAYER (attention + MLP) -- the configuration whose e2e"
+          " total went flat")
+    print("=" * 80)
+    print(f"{'case':<12} {'shape':<40} {'fwd ms':>9} {'fwd+bwd ms':>11}")
+    for name, pos, mask, seg, _, note in cases:
+      if name.startswith("C"):
+        continue
+      (f_fwd, a_fwd), (f_fb, a_fb) = layer_fns(layer, xs[name], pos, mask, seg)
+      t_fwd = timed(f_fwd, a_fwd, args.iters, args.warmup, args.inner)
+      t_fb = timed(f_fb, a_fb, args.iters, args.warmup, args.inner)
+      layer_results[name] = (t_fwd, t_fb)
+      print(f"{name:<12} {note:<40} {t_fwd:>9.2f} {t_fb:>11.2f}")
+      maybe_trace(args.trace_dest, f"layer_{name}", f_fb, a_fb,
+                  args.trace_iters)
 
   # ---- verdicts ------------------------------------------------------------
   print()
@@ -618,10 +663,17 @@ def main():
             " synthetic sweep is representative of production packing.")
   if module_results:
     mbase = module_results["U"][1]
-    print("  [V1'] attention MODULE (mixes in token-linear projections, which"
-          " are cheaper when packed and pull the ratio below the kernel's):")
+    print("  [V1'] PRODUCTION attention module (what a training step pays):")
     for name, (_, t_fb) in module_results.items():
-      print(f"       {name:<10} bwd {t_fb / mbase:6.2f}x U")
+      line = f"       {name:<10} bwd {t_fb / mbase:6.2f}x U"
+      if name in kernel_results:
+        k = kernel_results[name][1]
+        line += (f"   = kernel {k:.2f}ms + projections/norm"
+                 f" {max(0.0, t_fb - k):.2f}ms")
+      print(line)
+    print("       ^ the projections are linear in the token count, so packing"
+          " makes them cheaper and they partly cancel the attention penalty --"
+          " which is why the e2e total moved less than the attention did.")
   if layer_results:
     lbase = layer_results["U"][1]
     print("  [V3] full layer -- the flat e2e total should reappear at the e2e"

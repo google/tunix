@@ -19,15 +19,18 @@
 #
 # Everything is overridable via env vars, e.g. skip the xprof traces and the
 # full-layer case for a quick attention-only read:
-#   WITH_MODULE=1 WITH_LAYER=1 bash experimental/bench_splash_v5p.sh
+#   WITH_LAYER=1 bash experimental/bench_splash_v5p.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TUNIX_DIR="${TUNIX_DIR:-$(dirname "$SCRIPT_DIR")}"
 
-# Per-chip geometry of the e2e run being explained: 32 sequences over fsdp 4.
-# The kernel bench is single-device, so this is exactly one chip's share.
-NUM_SEQS="${NUM_SEQS:-8}"
+# GLOBAL geometry of the e2e run being explained: 32 sequences over fsdp 4,
+# which is what the production module executes.
+NUM_SEQS="${NUM_SEQS:-32}"
+# Production mesh: gsm8k trains on (fsdp 4, tp 1).
+MESH_FSDP="${MESH_FSDP:-4}"
+MESH_TP="${MESH_TP:-1}"
 SEQ_LEN="${SEQ_LEN:-2048}"
 # Real-token range: 700-950 out of 2048 padded lands at ~20% dummy_ratio, the
 # ratio the e2e packed run reported.
@@ -50,7 +53,10 @@ TRACE_DEST="${TRACE_DEST:-gs://yuxzhang-tunix-models/xprof/splash_bench}"
 TRACE_ITERS="${TRACE_ITERS:-3}"
 # The raw kernel always runs. These add context at the cost of runtime:
 # the attention module (kernel + projections) and a full decoder layer.
-WITH_MODULE="${WITH_MODULE:-0}"
+# The production attention module and the per-chip kernel both run by default;
+# the layer (attention + MLP) is opt-in because it doubles the runtime.
+SKIP_MODULE="${SKIP_MODULE:-0}"
+SKIP_KERNEL="${SKIP_KERNEL:-0}"
 WITH_LAYER="${WITH_LAYER:-0}"
 LOG_DIR="${LOG_DIR:-/tmp/bench_splash_logs}"
 RUN_TAG="${RUN_TAG:-splash_bench}"
@@ -60,7 +66,8 @@ case "$TRACE_DEST" in gs://*|"") ;; *) mkdir -p "$TRACE_DEST" ;; esac
 cd "$TUNIX_DIR"
 
 extra_args=()
-[ "${WITH_MODULE}" != "0" ] && extra_args+=(--with_module)
+[ "${SKIP_MODULE}" != "0" ] && extra_args+=(--skip_module)
+[ "${SKIP_KERNEL}" != "0" ] && extra_args+=(--skip_kernel)
 [ "${WITH_LAYER}" != "0" ] && extra_args+=(--with_layer)
 
 log="$LOG_DIR/${RUN_TAG}.log"
@@ -72,6 +79,7 @@ PYTHONUNBUFFERED=1 \
 python3 -X faulthandler -u experimental/bench_splash_packed.py \
   --num_seqs "$NUM_SEQS" \
   --seq_len "$SEQ_LEN" \
+  --mesh_fsdp "$MESH_FSDP" --mesh_tp "$MESH_TP" \
   --seq_tokens "$SEQ_TOKENS" \
   --min_tokens "$MIN_TOKENS" \
   --max_tokens "$MAX_TOKENS" \
