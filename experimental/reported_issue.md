@@ -513,15 +513,19 @@ convergence-neutral -- i.e. the segment-aware loss is correct -- on two recipes:
 
 | recipe | script | model | packing budget |
 |---|---|---|---|
-| gsm8k | `examples/math_gsm8k/qwen3_grpo_demo.py` | Qwen3-1.7B | **2048** = max_prompt 1024 + max_response 1024 |
-| FrozenLake | `examples/frozenlake/train_frozenlake.py` | Gemma4-E2B | **4096** = max_prompt 2048 + max_response 2048 |
+| gsm8k | `examples/math_gsm8k/qwen3_grpo_demo.py` | Qwen3-1.7B | **8192** = 4 maximal sequences (1024+1024) per row |
+| FrozenLake | `examples/frozenlake/train_frozenlake.py` | Gemma4-E2B | **8192** = 2 maximal sequences (2048+2048) per row |
 
-**Why those budgets.** The v5p microbench (section 19, results in
-`tracing_logs/splash_microbench_RUN1_results.log`) showed splash charges a packed row its full
-causal area regardless of how many sequences it holds. So the budget is NOT "as large as fits":
-the win is keeping the row length and cutting the row count, and the optimum is the smallest budget
-that still holds a maximal sequence -- which is the unpacked row length itself. At that setting
-packing beat unpacking by 23% at the module level; at twice that budget it lost 89%.
+**What the budget costs, so the curves are read correctly.** These runs answer a CONVERGENCE
+question, and the budget does not affect it -- the weighted denominator makes the loss invariant to
+how sequences are grouped into rows. It does affect speed, and not in the intuitive direction: the
+v5p microbench (section 19, `tracing_logs/splash_microbench_RUN1_results.log`) showed splash
+schedules a packed row's full causal area regardless of how many sequences it holds, so attention
+cost tracks rows*len^2. A budget equal to the longest sequence (2048 for gsm8k, 4096 for
+FrozenLake) minimises it -- measured 23% faster than unpacked at the module level -- while 8192
+doubles the attention work at the same token count (measured 1.89x unpacked). 8192 is the density
+choice; expect the packed arm to be SLOWER per step than unpacked, and judge these runs on the
+curves, not the clock.
 
 **Why `train_frozenlake.py` (not the CLI, not the Qwen3 script).** Its docstring targets this exact
 host class ("Designed for v5p-4 / v6e-8") and it runs rollout and trainer on SEPARATE meshes -- the

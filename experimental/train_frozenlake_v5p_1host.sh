@@ -15,13 +15,15 @@
 #   # unpacked baseline / convergence reference
 #   RUN_TAG=fl_unpack bash experimental/train_frozenlake_v5p_1host.sh
 #   # packed
-#   MAX_TOKEN_PER_TPU=4096 RUN_TAG=fl_pack \
+#   MAX_TOKEN_PER_TPU=8192 RUN_TAG=fl_pack \
 #     bash experimental/train_frozenlake_v5p_1host.sh
 #
-# Budget 4096 = max_prompt_length (2048) + max_response_length (2048) = the
-# longest sequence, which is also the unpacked row length. Splash schedules a
-# row's full causal area whatever it holds, so keeping the row length and
-# cutting the row count is the win; a larger budget only adds attention cost.
+# Budget 8192 = 2 maximal sequences (max_prompt 2048 + max_response 2048) per
+# row. Note the measured trade-off (tracing_logs/splash_microbench_RUN1_results
+# .log): splash schedules a row's full causal area whatever it holds, so
+# attention cost tracks rows*len^2 -- 4096 (one maximal sequence, the unpacked
+# row length) minimises it, and each doubling above that doubles the attention
+# work at the same token count.
 #
 # Inspect the command without launching (no TPU needed):
 #   DRY_RUN=1 bash experimental/train_frozenlake_v5p_1host.sh
@@ -40,7 +42,7 @@ SKIP_PIP="${SKIP_PIP:-0}"          # 1 once the versions are already installed
 # ---- knobs ----------------------------------------------------------------
 ENGINE="${ROLLOUT_ENGINE:-vllm}"           # vllm | vanilla
 ROLLOUT_HBM="${ROLLOUT_HBM:-0.2}"          # script default; raise if vLLM OOMs
-MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-0}"       # 0 = packing OFF (baseline)
+MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-0}"       # 0 = packing OFF (baseline); 8192 for the packed arm
 MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # empty = budget-derived
 # Script defaults, tuned for this host -- override only deliberately.
 BATCH="${BATCH:-64}"
