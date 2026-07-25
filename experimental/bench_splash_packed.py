@@ -616,7 +616,7 @@ def main():
   print("=" * 80)
   print("VERDICTS")
   print("=" * 80)
-  base_fwd, base_fb, base_b, base_t = kernel_results["U"]
+  base_fwd, base_fb, base_b, base_t, base_eff = kernel_results["U"]
   ref_exec = base_b * base_t * base_t / 2.0
   ref_eff = kernel_results["U"][4]
   print("  [V1] Every arm attends the SAME sequences, so the effective work is"
