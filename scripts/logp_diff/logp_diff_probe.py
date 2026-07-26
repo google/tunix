@@ -66,15 +66,42 @@ def run_vllm(model_path, mesh_tp, mesh_fsdp, prompt_ids, n_gen, temperature):
   the exact array training stores as trajectory 'old_logprobs' (agentic_grpo_learner.py:542).
   """
   from tunix.generate import vllm_sampler  # noqa: F401  (lazy; wired on remote)
-  # _CRITICAL_REMOTE_VERIFY_: vLLM must use the SAME REAL weights as C, not dummy.
-  #   deepswe's vLLM is init_with_random_weights=True and gets real weights SYNCED from the
-  #   actor by the training loop. This standalone probe has NO training loop, so you MUST
-  #   either (a) load real safetensors into vLLM (init_with_random_weights=False), or
-  #   (b) build the tunix model first and call sampler.update_params(state) to sync — otherwise
-  #   A/B run on RANDOM weights and every diff is meaningless. Verify B/C weight-equal (goal §7.2).
-  # _REMOTE_VERIFY_ (mesh): vLLM manages devices via its sharding config (device_indexes), not the
-  #   nnx Mesh used by C. "Same mesh" for B-vs-C = same devices / same tp; wire explicitly.
-  raise NotImplementedError("_CRITICAL_REMOTE_VERIFY_: wire VllmSampler w/ REAL weights -> (tokens, decode logp)")
+  import jax
+  import numpy as np
+  from jax.sharding import Mesh
+  from transformers import AutoTokenizer
+
+  mesh = Mesh(np.asarray(jax.devices()).reshape(mesh_fsdp, mesh_tp), ("fsdp", "tp"))
+
+  config = vllm_sampler.VllmConfig(
+      return_logprobs=True,
+      init_with_random_weights=False,  # CRITICAL: real weights
+      tpu_backend_type="jax",
+      mesh=mesh,
+      tensor_parallel_size=mesh_tp,
+      data_parallel_size=mesh_fsdp,
+      engine_kwargs={
+          "model": model_path,
+          "trust_remote_code": True,
+          "max_model_len": max(8192, len(prompt_ids) + n_gen + 128),
+      }
+  )
+
+  tok = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=True)
+  sampler = vllm_sampler.VllmSampler(tokenizer=tok, config=config)
+
+  prompt_str = tok.decode(prompt_ids, skip_special_tokens=False)
+
+  outputs = sampler(
+      input_strings=[prompt_str],
+      max_generation_steps=n_gen,
+      temperature=temperature,
+  )
+  
+  full_tokens = np.concatenate([prompt_ids, outputs.tokens[0]], axis=0)
+  a_decode_logp = np.array(outputs.logprobs[0], dtype=np.float32)
+
+  return full_tokens, a_decode_logp, sampler
 
 
 def vllm_prefill_logp(sampler, full_tokens, n_completion):
@@ -87,7 +114,29 @@ def vllm_prefill_logp(sampler, full_tokens, n_completion):
   use the same convention (deepswe T=1.0 -> no scaling; verify for T!=1).
   _REMOTE_VERIFY_: sampling_params.prompt_logprobs=1 (vllm_sampler.py:470); extract & align (b/428730696).
   """
-  raise NotImplementedError("_REMOTE_VERIFY_: wire vLLM prompt_logprobs; slice to last n_completion")
+  from vllm.inputs import TokensPrompt
+  from vllm.sampling_params import SamplingParams
+  import numpy as np
+
+  # Source B prefill logp
+  params = SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=1)
+  
+  if sampler._driver is not None:
+    outputs = sampler._generate_server_mode([TokensPrompt(prompt_token_ids=full_tokens.tolist())], params)
+  else:
+    outputs = sampler.llm.generate([TokensPrompt(prompt_token_ids=full_tokens.tolist())], sampling_params=params, use_tqdm=False)
+
+  out = outputs[0]
+  prompt_logprobs = out.prompt_logprobs
+  
+  res = []
+  start_idx = len(full_tokens) - n_completion
+  for i in range(start_idx, len(full_tokens)):
+    token_id = full_tokens[i]
+    logp = prompt_logprobs[i][token_id].logprob
+    res.append(logp)
+  
+  return np.array(res, dtype=np.float32)
 
 
 # ---------------------------------------------------------------- tunix trainer forward (C)
@@ -154,6 +203,9 @@ def main(argv=None):
     report["comparisons"][pair] = S.compare(reg[x], reg[y], full_tokens, atol=1e-6)
   print("[probe] report:", json.dumps(report, indent=2, default=float))
   # _REMOTE_VERIFY_: write report to args.out (GCS).
+  if args.out.startswith("gs://"):
+    from etils import epath
+    epath.Path(args.out).write_text(json.dumps(report, indent=2, default=float))
   return report
 
 
