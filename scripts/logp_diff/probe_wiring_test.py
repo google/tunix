@@ -28,8 +28,10 @@ def test_probe_main_wiring():
        mock.patch.object(P, "run_vllm", return_value=(full, a, object())), \
        mock.patch.object(P, "vllm_prefill_logp", return_value=b), \
        mock.patch.object(P, "tunix_forward_logp", return_value=c):
+    # local --out so the gs:// GCS-write branch (needs gcsfs, TPU-only) is skipped on CPU.
     rep = P.main(["--mesh_tp", "1", "--mesh_fsdp", "1", "--n_prompt", str(n_prompt),
-                  "--n_gen", str(n_gen), "--pairs", "A-vs-C,B-vs-C,A-vs-B"])
+                  "--n_gen", str(n_gen), "--pairs", "A-vs-C,B-vs-C,A-vs-B",
+                  "--out", "/tmp/logp_report_wiring.json"])
 
   # report structure: the 3 comparisons each with logp_diff stats
   comps = rep["comparisons"]
