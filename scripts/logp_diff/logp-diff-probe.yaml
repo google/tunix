@@ -129,8 +129,12 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
                 - --server_port=29000
-                - --resource_manager_address=train-logp-diff-probe-pathways-head-0-0.logp-diff-probe:29001
+                - --resource_manager_address=logp-diff-probe-pathways-head-0-0.logp-diff-probe:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x8x8
               resources:
                 limits: {google.com/tpu: '4'}
+              volumeMounts:
+              - {mountPath: /root/.config/gcloud, name: gcloud-adc}
+            volumes:
+            - {name: gcloud-adc, secret: {secretName: gcloud-adc-secret}}
