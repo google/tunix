@@ -71,7 +71,9 @@ def run_vllm(model_path, mesh_tp, mesh_fsdp, prompt_ids, n_gen, temperature):
   from jax.sharding import Mesh
   from transformers import AutoTokenizer
 
-  mesh = Mesh(np.asarray(jax.devices()).reshape(mesh_fsdp, mesh_tp), ("fsdp", "tp"))
+  # Use the first tp*fsdp devices -> works on a dedicated small slice (exactly tp*fsdp
+  # chips) AND on a larger atomic slice (e.g. the 256-chip deepswe cluster: use 8, rest idle).
+  mesh = Mesh(np.asarray(jax.devices()[: mesh_fsdp * mesh_tp]).reshape(mesh_fsdp, mesh_tp), ("fsdp", "tp"))
 
   config = vllm_sampler.VllmConfig(
       return_logprobs=True,
@@ -190,8 +192,9 @@ def main(argv=None):
 
   import jax                                                    # lazy
   from jax.sharding import Mesh
-  mesh = Mesh(np.asarray(jax.devices()).reshape(args.mesh_fsdp, args.mesh_tp), ("fsdp", "tp"))
-  print(f"[probe] devices={len(jax.devices())} mesh={mesh.shape}  # _REMOTE_VERIFY_ idle-chip check")
+  n = args.mesh_fsdp * args.mesh_tp   # use first n devices (small dedicated slice OR subset of 256)
+  mesh = Mesh(np.asarray(jax.devices()[:n]).reshape(args.mesh_fsdp, args.mesh_tp), ("fsdp", "tp"))
+  print(f"[probe] devices={len(jax.devices())} using={n} mesh={mesh.shape}  # _REMOTE_VERIFY_ idle-chip check")
 
   prompt_ids, tok = load_prompt_tokens(args.dataset, args.n_prompt, args.model_path)
   # A: real rollout generate -> full tokens + decode logp
