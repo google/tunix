@@ -198,7 +198,7 @@ def vllm_prefill_logp(sampler, full_tokens, n_completion):
   res = []
   start_idx = len(full_tokens) - n_completion
   for i in range(start_idx, len(full_tokens)):
-    token_id = full_tokens[i]
+    token_id = int(full_tokens[i])   # python int: vLLM logprobs dict is keyed by int, not np.int32
     res.append(prompt_logprobs[i][token_id].logprob)
   return np.array(res, dtype=np.float32)
 
@@ -234,14 +234,21 @@ def tunix_forward_logp(model_path, model_version, mesh, prompt_ids, completion_i
   pdt = getattr(jnp, _DTYPE_MAP[param_dtype])                 # actor weights (deepswe --param_dtype=float32)
   model = create_model_from_safe_tensors(model_version, model_path, cfg, mesh, dtype=pdt)
   graphdef, state = nnx.split(model)                            # == trainer split
-  lp = common.compute_per_token_logps(
-      graphdef, state,
-      prompt_tokens=jnp.asarray(prompt_ids)[None, :],
-      completion_tokens=jnp.asarray(completion_ids)[None, :],
-      pad_id=tok.pad_token_id if tok.pad_token_id is not None else 0,
-      eos_id=tok.eos_token_id,
-      stop_gradient=True, return_logits=False, temperature=temperature,
-  )
+  # FIDELITY: the real trainer runs the forward INSIDE the ACTOR mesh context
+  # (rl_cluster.py:1088 `with _get_mesh_and_logical_axis_rules_cm(Role.ACTOR)` = `with mesh:`),
+  # so qwen3's shard()/with_sharding_constraint (model.py:293) see the physical mesh. Without
+  # `with mesh:` pxla.thread_resources.env.physical_mesh is EMPTY -> activations run unsharded
+  # -> different reduction/numerics than training. Wrap to match. (deepswe sets no
+  # role_to_logical_axis_rule -> the mesh context alone suffices.)
+  with mesh:
+    lp = common.compute_per_token_logps(
+        graphdef, state,
+        prompt_tokens=jnp.asarray(prompt_ids)[None, :],
+        completion_tokens=jnp.asarray(completion_ids)[None, :],
+        pad_id=tok.pad_token_id if tok.pad_token_id is not None else 0,
+        eos_id=tok.eos_token_id,
+        stop_gradient=True, return_logits=False, temperature=temperature,
+    )
   return np.asarray(jax.device_get(lp)).reshape(-1)
 
 
