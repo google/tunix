@@ -1,0 +1,127 @@
+# Logp-diff / operator-alignment probe launch (Phase 3).
+# Modeled on experimental/deepswe-256-mlperf.yaml (proven pathways scaffolding);
+# probe-specific changes vs that file:
+#   - git fetch  yuxzhang/logp-diff-probe   (was deepswe-quality-fix)
+#   - runs scripts/logp_diff/logp_diff_probe.py  (forward-only; NO training, NO r2egym sandboxes)
+#   - smaller topology (a forward pass only needs the tp8 model shard); tune instance_type on remote.
+# _REMOTE_VERIFY_: k8s/pathways infra (images, node pool, mesh, instance_type) mirrors swe — verify on cluster.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: logp-diff-probe
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        template:
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: deepswe-cpu-pool
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            initContainers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=localhost:29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp
+              env:
+                - name: PATHWAYS_HEAD
+                  value: localhost
+              resources:
+                limits: {cpu: '16', memory: 300G}
+              volumeMounts:
+              - {mountPath: /root/.config/gcloud, name: gcloud-adc}
+              restartPolicy: Always
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp
+                - --node_type=resource_manager
+                - --instance_count=1
+                - --instance_type=tpuv5:2x2x2   # _REMOTE_VERIFY_ probe topology (>=tp8 model shard); swe used 4x8x8
+              env:
+                - {name: HOST_ADDRESS, value: localhost}
+                - {name: TPU_SKIP_MDS_QUERY, value: 'true'}
+              resources:
+                limits: {cpu: '8', memory: 100G}
+              volumeMounts:
+              - {mountPath: /root/.config/gcloud, name: gcloud-adc}
+              restartPolicy: Always
+            containers:
+            - name: jax-tpu
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest
+              imagePullPolicy: Always
+              command:
+              - bash
+              - -c
+              - |
+                set -e
+                echo "Syncing probe code ..."
+                git config --global --add safe.directory $(pwd)
+                git init
+                git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
+                git fetch origin yuxzhang/logp-diff-probe
+                git reset --hard FETCH_HEAD
+
+                # pathwaysutils hot-patch (same as swe)
+                sed -i '1i import pathwaysutils\ntry:\n    pathwaysutils.initialize()\nexcept Exception: pass\n' scripts/logp_diff/logp_diff_probe.py || true
+                # tpu-inference qwen3 ROPE hot-patch (same as swe; probe uses the same vLLM/tpu_inference)
+                # _REMOTE_VERIFY_: reuse the /tmp/patch_qwen3.py block from deepswe-256-mlperf.yaml if source B (vLLM) is used.
+
+                sleep 30
+                export RUN_TAG="logp_diff_$(date +%Y%m%d_%H%M%S)"
+                export MODEL_BASE_DIR="/mnt/disks/linchai_data/models"
+
+                JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
+                NUM_SLICES=1 VLLM_ENABLE_V1_MULTIPROCESSING=0 NEW_MODEL_DESIGN=1 PYTHONUNBUFFERED=1 \
+                HF_TOKEN=$(echo -n $INJECTED_HF_TOKEN | xargs) \
+                PYTHONPATH=$PYTHONPATH:.:scripts/logp_diff python3 scripts/logp_diff/logp_diff_probe.py \
+                  --model_path="$MODEL_BASE_DIR/Qwen3-32B" \
+                  --model_version="Qwen3-32B" \
+                  --dataset="SWE-bench/SWE-smith-trajectories" \
+                  --n_tokens=32768 \
+                  --mesh_tp=8 --mesh_fsdp=1 \
+                  --sources="B,C" \
+                  --out="gs://yuxzhang-tunix-models/logp-diff/${RUN_TAG}/report.json"
+              env:
+                - {name: INJECTED_HF_TOKEN, valueFrom: {secretKeyRef: {name: hf-token, key: token}}}
+              resources:
+                limits: {cpu: '16', memory: 300G}
+              volumeMounts:
+              - {mountPath: /root/.config/gcloud, name: gcloud-adc}
+              - {mountPath: /mnt/disks/linchai_data, name: data}
+            volumes:
+            - {name: gcloud-adc, hostPath: {path: /root/.config/gcloud}}
+            - {name: data, hostPath: {path: /mnt/disks/linchai_data}}
+  - name: pathways-worker
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 100
+        completions: 2
+        parallelism: 2
+        completionMode: Indexed
+        template:
+          spec:
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=train-logp-diff-probe-pathways-head-0-0.logp-diff-probe:29001
+                - --node_type=worker
+                - --instance_type=tpuv5:2x2x2
+              resources:
+                limits: {google.com/tpu: '4'}
