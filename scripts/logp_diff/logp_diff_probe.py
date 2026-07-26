@@ -90,16 +90,27 @@ def run_vllm(model_path, mesh_tp, mesh_fsdp, prompt_ids, n_gen, temperature):
   tok = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=True)
   sampler = vllm_sampler.VllmSampler(tokenizer=tok, config=config)
 
-  prompt_str = tok.decode(prompt_ids, skip_special_tokens=False)
-
-  outputs = sampler(
-      input_strings=[prompt_str],
-      max_generation_steps=n_gen,
-      temperature=temperature,
-  )
-  
-  full_tokens = np.concatenate([prompt_ids, outputs.tokens[0]], axis=0)
-  a_decode_logp = np.array(outputs.logprobs[0], dtype=np.float32)
+  # FIDELITY: feed the prompt as TOKENS, not decode->re-encode. Text-in
+  # (sampler(input_strings=[tok.decode(prompt_ids)])) re-tokenizes internally
+  # (vllm_sampler.py:519) and the BPE round-trip is NOT identity, so the prompt
+  # vLLM actually prefilled could differ from prompt_ids -> A's generation context
+  # would mismatch C's -> A-vs-C contaminated by a prompt-token shift, not just
+  # kernel/decode. Use the token-in engine path (same as source B).
+  from vllm.inputs import TokensPrompt
+  from vllm.sampling_params import SamplingParams
+  params = SamplingParams(temperature=temperature, max_tokens=n_gen, logprobs=1)
+  tp = [TokensPrompt(prompt_token_ids=prompt_ids.tolist())]
+  if sampler._driver is not None:
+    outs = sampler._generate_server_mode(tp, params)
+  else:
+    outs = sampler.llm.generate(tp, sampling_params=params, use_tqdm=False)
+  gen = outs[0].outputs[0]
+  gen_token_ids = np.asarray(gen.token_ids, dtype=np.int32)
+  # decode logp of each SAMPLED token == source A == training's old_logprobs
+  a_decode_logp = np.asarray(
+      [gen.logprobs[i][int(gen_token_ids[i])].logprob for i in range(len(gen_token_ids))],
+      dtype=np.float32)
+  full_tokens = np.concatenate([prompt_ids, gen_token_ids], axis=0)
 
   return full_tokens, a_decode_logp, sampler
 
