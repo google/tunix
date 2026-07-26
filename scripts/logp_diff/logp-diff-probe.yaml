@@ -148,6 +148,8 @@ spec:
                   --out="gs://yuxzhang-tunix-models/logp-diff/${RUN_TAG}/report.json"
               env:
                 - {name: INJECTED_HF_TOKEN, valueFrom: {secretKeyRef: {name: yuxzhang-secrets, key: HF_TOKEN, optional: true}}}
+                - {name: FLAGS_pathways_enforce_subset_devices_form_subslice, value: "False"}
+                 
               resources:
                 limits: {cpu: '16', memory: 300G}
               volumeMounts:

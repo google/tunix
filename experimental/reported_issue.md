@@ -38,7 +38,8 @@ Loading safetensors checkpoint shards:   0% Completed | 0/17 [00:00<?, ?it/s]
 ```
 
 **Suggested Fixes**:
-Modify the `LLMEngine` / `VllmConfig` kwargs to explicitly bypass `tpu_streaming_loader` and fall back to standard Hugging Face CPU payload preparation by setting `"load_format": "hf"`. Because the Pathways head in this cluster has over 300GB of RAM (safely cushioning the 61GB parameters), CPU-backed parsing correctly scatters arrays without crashing XLA.
+The crash happens fundamentally when JAX calls `device_put()` to scatter any tensor (both native XLA streaming loaded or CPU fallback loaded) onto a strict 64-chip submesh via Pathways `PjRtLoadedExecutable`. 
+We **MUST** explicitly set `- {name: FLAGS_pathways_enforce_subset_devices_form_subslice, value: "False"}` in the `jax-tpu` container environment variables. (This was present in older `deepswe` configurations but omitted in `logp-diff-probe.yaml`). 
 
 **Over to the reviewing agent:**
-When doing RL deep dives on large proxy topologies (200GB+ params) that exceed the Proxy Head's RAM limits, falling back to HuggingFace CPU fallback won't work anymore (OOM). We will need the TPU streaming loader. Could you check JAX issues via the code search to ascertain why `PjRtLoadedExecutable::Execute` crashes when `VLLM` restricts `jax.device_put` to a 64-chip `rollout_mesh` on a globally larger 256-chip execution grid? Is a subset enforcer flag like `FLAGS_pathways_enforce_subset_devices_form_subslice=true` required server-side?
+I've already patched the missing `FLAGS_pathways_enforce_subset_devices_form_subslice` back into the probe yaml. You shouldn't hit this Segfault anymore!
