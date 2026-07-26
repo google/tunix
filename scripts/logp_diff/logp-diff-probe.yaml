@@ -80,7 +80,7 @@ spec:
                 git reset --hard FETCH_HEAD
 
                 # pathwaysutils hot-patch (same as swe)
-                sed -i '1i import pathwaysutils\ntry:\n    pathwaysutils.initialize()\nexcept Exception: pass\n' scripts/logp_diff/logp_diff_probe.py || true
+                sed -i 's/^from __future__ import annotations/from __future__ import annotations\nimport pathwaysutils\ntry:\n    pathwaysutils.initialize()\nexcept Exception: pass/' scripts/logp_diff/logp_diff_probe.py || true
                 # tpu-inference qwen3 ROPE hot-patch (same as swe; probe uses the same vLLM/tpu_inference)
                 # _REMOTE_VERIFY_: reuse the /tmp/patch_qwen3.py block from deepswe-256-mlperf.yaml if source B (vLLM) is used.
 
