@@ -5,6 +5,18 @@
 without a TPU is proven; your job is to wire the `_REMOTE_VERIFY_` hooks, run on TPU, and report back.
 Date: 2026-07-23.
 
+## ⚠️ Heads-up (updates after the initial push — read first)
+- **History was rewritten** (Claude attribution trailers removed). Do **`git fetch && git reset --hard
+  origin/yuxzhang/logp-diff-probe`** — do NOT `git pull` (it would diverge). Content is unchanged +
+  the two fixes below on top; rebase any local unpushed work onto the new tip.
+- **Source A is now token-in** (`run_vllm` uses `TokensPrompt(prompt_ids)`, not `decode(prompt_ids)`→
+  `input_strings`). Reason: the text path re-tokenizes and the BPE round-trip is not identity, which
+  would shift A's prompt vs C's and contaminate A-vs-C. Mirrors source B. **Not CPU-runnable — verify
+  the token-in generate + logprob extraction on the real engine.**
+- **CPU wiring test passes a local `--out`**: the GCS report-write (`epath.Path(gs://…)`) needs `gcsfs`,
+  which is TPU/cluster-only; on CPU pass a local `--out` (the wiring test does this). On the cluster,
+  `--out gs://…` writes the report.
+
 ## Goal
 Eliminate the rollout-vs-train per-token **log-prob diff** on **Qwen3-32B** down to **bitwise**
 (operator / kernel alignment). This is the **Training-Inference Mismatch (TIM)** residual
