@@ -145,6 +145,7 @@ def run_vllm(model_path, rollout_mesh, prompt_ids, n_gen, temperature,
       data_parallel_size=rollout_dp,
       engine_kwargs={
           "model": model_path,
+          "load_format": "hf",
           "trust_remote_code": True,
           "max_model_len": max(len(prompt_ids) + n_gen + 128, 8192),
           "max_num_seqs": max_num_seqs,                     # deepswe 64
