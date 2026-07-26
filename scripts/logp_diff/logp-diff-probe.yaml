@@ -91,9 +91,10 @@ spec:
                   --model_path="$MODEL_BASE_DIR/Qwen3-32B" \
                   --model_version="Qwen3-32B" \
                   --dataset="SWE-bench/SWE-smith-trajectories" \
-                  --n_tokens=32768 \
+                  --n_prompt=2048 --n_gen=512 \
                   --mesh_tp=8 --mesh_fsdp=1 \
-                  --sources="B,C" \
+                  --temperature=1.0 \
+                  --pairs="A-vs-C,B-vs-C,A-vs-B" \
                   --out="gs://yuxzhang-tunix-models/logp-diff/${RUN_TAG}/report.json"
               env:
                 - {name: INJECTED_HF_TOKEN, valueFrom: {secretKeyRef: {name: hf-token, key: token}}}
