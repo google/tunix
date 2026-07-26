@@ -105,15 +105,15 @@ spec:
                   --mesh_sensitivity \
                   --out="gs://yuxzhang-tunix-models/logp-diff/${RUN_TAG}/report.json"
               env:
-                - {name: INJECTED_HF_TOKEN, valueFrom: {secretKeyRef: {name: hf-token, key: token}}}
+                - {name: INJECTED_HF_TOKEN, valueFrom: {secretKeyRef: {name: yuxzhang-secrets, key: HF_TOKEN, optional: true}}}
               resources:
                 limits: {cpu: '16', memory: 300G}
               volumeMounts:
               - {mountPath: /root/.config/gcloud, name: gcloud-adc}
               - {mountPath: /mnt/disks/linchai_data, name: data}
             volumes:
-            - {name: gcloud-adc, hostPath: {path: /root/.config/gcloud}}
-            - {name: data, hostPath: {path: /mnt/disks/linchai_data}}
+            - {name: gcloud-adc, secret: {secretName: gcloud-adc-secret}}
+            - {name: data, persistentVolumeClaim: {claimName: haoyugao-cpu-np-pvc}}
   - name: pathways-worker
     replicas: 1
     template:
