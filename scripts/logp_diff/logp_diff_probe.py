@@ -101,7 +101,9 @@ def load_prompt_tokens(dataset, n_prompt, model_path):
     text = open(dataset).read()
   else:
     from datasets import load_dataset  # lazy
-    row = next(iter(load_dataset(dataset, split="train", streaming=True)))
+    ds = load_dataset(dataset, streaming=True)
+    split_name = "train" if "train" in ds else list(ds.keys())[0]
+    row = next(iter(ds[split_name]))
     text = row.get("text") or json.dumps(row.get("messages") or row)
   ids = tok(text, return_tensors=None)["input_ids"]
   ids = (ids * (n_prompt // max(1, len(ids)) + 1))[:n_prompt]
