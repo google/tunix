@@ -1,0 +1,89 @@
+# TPU runtime image for the FrozenLake convergence runs.
+#
+# Built from python:3.12-slim rather than derived from tunix_base_image, for
+# three measured reasons:
+#   * vllm-tpu ships a cp312-ONLY wheel, so the interpreter must be 3.12;
+#   * vllm-tpu and the git-built vllm that tunix_base_image carries are two
+#     distributions providing the same `vllm` import name -- layering one on the
+#     other overwrites files and leaves orphans behind;
+#   * the base image lives in another project's Artifact Registry, which this
+#     VM's service account cannot read.
+#
+# The whole TPU stack follows from ONE pin: vllm-tpu==X requires
+# tpu-inference==X, which requires exact jax, jaxlib and libtpu. DO NOT add a
+# separate jax pin here -- doing that, then installing vllm with --no-deps, is
+# what swapped libtpu out from under vLLM and produced the C++ ABI crashes.
+#
+# Build, verify and push with experimental/build_frozenlake_image.sh.
+
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential git curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# Separate steps, as the repo's own Dockerfile:26-27 does. Resolving these
+# together with the project turned out to enlarge the search space enough that
+# pip backtracked through every `datasets` release down to 2021 and tried to
+# build pyarrow 3.0 from source. One small resolution each keeps that closed.
+RUN pip install gcsfs
+RUN pip install wandb
+
+WORKDIR /app
+
+# The runner re-fetches the branch into /app at run time, so the copy here is
+# the environment's starting point, not the code under test. Shipping .git makes
+# that fetch incremental instead of a full clone on every run.
+COPY . .
+
+# Two paths. The lock file is the default because reproducing an environment on
+# another machine is the whole point of this image; the resolving path exists to
+# regenerate that lock when the version moves.
+#
+# LOCKED (requirements.frozenlake.lock.txt present): --no-deps against a full
+# freeze of a verified environment. The freeze is already a closed set, so there
+# is nothing for a resolver to decide and nothing for it to get wrong.
+#
+# RESOLVING (NO_LOCK=1, or no lock file): two invocations in this order, because
+# every tpu-inference release pins flax==0.12.4 while this repo asks for
+# flax>=0.12.5 (c40a7c52, a bump with no stated reason) -- a single resolution
+# is impossible. tunix first, TPU stack second, so the TPU stack wins that one
+# package; 0.12.4 is what every working TPU environment here actually runs. The
+# repo's own Dockerfile:36,38 does the same. Then qwix, which the TPU stack
+# drags back to 0.1.2, is reinstated the way
+# scripts/install_tunix_vllm_requirement.sh:39 ends.
+#
+# What must never be split is the ABI-critical chain -- jax, jaxlib, libtpu and
+# tpu-inference all come from one vllm-tpu resolution, so they cannot drift
+# apart. Splitting that chain and then using --no-deps produced the C++ ABI
+# crashes this image exists to end.
+ARG VLLM_TPU_VERSION=0.25.0
+ARG NO_LOCK=
+ARG LOCK_FILE=experimental/requirements.frozenlake.lock.txt
+RUN if [ -z "${NO_LOCK}" ] && [ -f "${LOCK_FILE}" ]; then \
+      echo "--- LOCKED: installing ${LOCK_FILE} ---" && \
+      pip install --no-deps -r "${LOCK_FILE}" && \
+      pip install --no-deps -e . ; \
+    else \
+      echo "--- RESOLVING: vllm-tpu==${VLLM_TPU_VERSION} (regenerates the lock) ---" && \
+      pip install -e . && \
+      pip install "vllm-tpu==${VLLM_TPU_VERSION}" && \
+      pip install --no-deps "qwix>=0.1.6" ; \
+    fi
+
+# A wrong stack must not reach a run. This prints the whole picture before it
+# asserts, so a failed build still tells you what you actually got.
+RUN python3 experimental/verify_tpu_stack.py --vllm-tpu "${VLLM_TPU_VERSION}"
+
+# Recorded so a running container can be identified without re-deriving it.
+ENV TUNIX_VLLM_TPU_VERSION=${VLLM_TPU_VERSION}
+
+CMD ["bash"]

@@ -37,11 +37,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TUNIX_DIR="${TUNIX_DIR:-$(dirname "$SCRIPT_DIR")}"
 
 # ---- pinned environment ---------------------------------------------------
-# The recipe is only known to converge on these versions; a mismatch changes
-# the vLLM sampler's log-probs, which GRPO consumes as old_per_token_logps.
-JAX_VERSION="${JAX_VERSION:-0.10.0}"
-VLLM_VERSION="${VLLM_VERSION:-0.21}"
-SKIP_PIP="${SKIP_PIP:-1}"          # 1 once the versions are already installed
+# The stack lives in the image (experimental/Dockerfile.frozenlake), not here.
+# vllm-tpu pins tpu-inference, which pins jax, jaxlib and libtpu exactly, so
+# installing any of them from this script is what broke the ABI before. This
+# only checks that the run landed in the right environment.
+VLLM_TPU_VERSION="${VLLM_TPU_VERSION:-0.25.0}"
+EXPECT_DEVICES="${EXPECT_DEVICES:-4}"      # v5p-8 = 4 chips; the recipe's mesh
+                                           # shapes assume this
 
 # ---- knobs ----------------------------------------------------------------
 ENGINE="${ROLLOUT_ENGINE:-vllm}"           # vllm | vanilla
@@ -55,7 +57,10 @@ NUM_GEN="${NUM_GEN:-8}"
 NUM_BATCHES="${NUM_BATCHES:-150}"          # x NUM_EPOCHS(3) = 450 updates
 DATA_DIR="${DATA_DIR:-/tmp/data/frozenlake}"
 TB_LOG_DIR="${TB_LOG_DIR:-/tmp/tunix-tb/frozenlake}"
-HF_HOME="${HF_HOME:-/mnt/workspace/hf_cache}"
+# Huggingface's own default location, so this works on a machine that has no
+# particular disk mounted. Point it at a persistent disk to keep the ~5GB model
+# across runs; the docker wrapper mounts whatever this resolves to.
+HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 LOG_DIR="${LOG_DIR:-/tmp/train_frozenlake_logs}"
 RUN_TAG="${RUN_TAG:-fl_unpack}"
 
@@ -63,33 +68,19 @@ mkdir -p "$LOG_DIR" "$DATA_DIR" "$TB_LOG_DIR"
 cd "$TUNIX_DIR"
 
 # ---------------------------------------------------------------------------
-# Pinned versions, verified rather than assumed.
+# The environment is checked, never installed. Initialising the TPU here is the
+# point: an ABI mismatch between libtpu and jax only surfaces on device init, so
+# failing here costs seconds instead of failing inside a training run.
 # ---------------------------------------------------------------------------
 if [ -z "${DRY_RUN:-}" ]; then
-  if [ "$SKIP_PIP" = "0" ]; then
-    echo "--- installing jax[tpu]==$JAX_VERSION vllm-tpu==$VLLM_VERSION ---"
-    pip install -q "jax[tpu]==$JAX_VERSION" || { echo "ERROR: jax install failed"; exit 1; }
-    pip install -q --no-deps "vllm-tpu==$VLLM_VERSION" || { echo "ERROR: vllm install failed"; exit 1; }
-  fi
-  python3 - "$JAX_VERSION" "$VLLM_VERSION" <<'EOF' || exit 1
-import sys
-want_jax, want_vllm = sys.argv[1], sys.argv[2]
-import jax
-ok = True
-if jax.__version__ != want_jax:
-    print(f"ERROR: jax {jax.__version__} != {want_jax}"); ok = False
-try:
-    import vllm
-    if not vllm.__version__.startswith(want_vllm):
-        print(f"ERROR: vllm {vllm.__version__} != {want_vllm}"); ok = False
-except ImportError as exc:
-    print(f"ERROR: vllm not importable ({exc})"); ok = False
-if not ok:
-    print("The recipe is only known to converge on the pinned versions; "
-          "install them or set SKIP_PIP=0 to let this script do it.")
-    sys.exit(1)
-print(f"versions OK: jax {jax.__version__}, vllm {vllm.__version__}")
-EOF
+  python3 "$TUNIX_DIR/experimental/verify_tpu_stack.py" \
+      --vllm-tpu "$VLLM_TPU_VERSION" --devices "$EXPECT_DEVICES" || {
+    echo
+    echo "This is not the FrozenLake environment. Build and run it with:"
+    echo "  bash experimental/build_frozenlake_image.sh"
+    echo "  IMAGE=<the tag it prints> bash experimental/train_frozenlake_v5p_1host_docker.sh"
+    exit 1
+  }
 fi
 
 # ---------------------------------------------------------------------------

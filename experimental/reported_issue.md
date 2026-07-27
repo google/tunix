@@ -685,3 +685,78 @@ the only way to make splash actually skip).
 
 **Report back**: the printed tables + VERDICTS block, and the xprof kernel names for one packed and
 one unpacked case (both should read `splash_..._segmented_{fwd,dq,dkv}`; only the shapes differ).
+
+## 20. Runbook: rebuilding the FrozenLake environment on a new machine
+
+The FrozenLake recipe needs a vLLM/JAX stack the older `tunix_base_image` does not carry. The whole
+environment is now a recipe in this repo rather than an image in a registry -- a fresh build takes
+about 6 minutes, less than pulling 12GB, and travels as source.
+
+**What pins what.** One package decides the entire ABI-critical chain: `vllm-tpu==X` requires
+`tpu-inference==X`, which requires exact `jax`, `jaxlib` and `libtpu`. Never pin jax separately;
+installing jax and then vLLM with `--no-deps` is what produced the C++ ABI crashes this replaced.
+
+| vllm-tpu | tpu-inference | jax / jaxlib | libtpu |
+|---|---|---|---|
+| **0.25.0** (default) | 0.25.0 | **0.10.2** | 0.0.42.1 |
+| 0.23.0 | 0.23.0 | 0.10.1 | 0.0.41 |
+
+By default the build installs `experimental/requirements.frozenlake.lock.txt`, a 275-package freeze
+of an environment that passed all three checks below, so a new machine gets the same environment
+rather than whatever PyPI resolves to that day.
+
+**Prerequisites**: a TPU VM with 4 chips (v5p-8; the recipe's mesh shapes and hyperparameters assume
+that -- set `EXPECT_DEVICES` for anything else), docker, and ~30GB free wherever `Docker Root Dir`
+points (12GB image + 12GB build cache + a 5GB model). The model, `google/gemma-4-E2B-it`, is not
+gated, so no HF token is needed.
+
+**Five steps.**
+
+```bash
+# 1. get the branch
+git clone https://github.com/google/tunix.git && cd tunix
+git fetch origin yuxzhang/refactor_loss_accum_ablation && git checkout FETCH_HEAD
+
+# 2. build (~6 min). L1 asserts the versions inside the build, so a wrong stack
+#    fails here and never reaches a run. L2 then initialises the TPU -- the only
+#    check that catches an ABI mismatch, since libtpu resolves symbols on load.
+bash experimental/build_frozenlake_image.sh
+
+# 3. L3: a real short run. Point HF_HOME at a persistent disk to keep the model.
+HF_HOME=/path/to/persistent/hf WANDB_MODE=offline \
+  NUM_BATCHES=2 RUN_TAG=fl_smoke bash experimental/train_frozenlake_v5p_1host_docker.sh
+
+# 4+5. the two convergence arms (phase8's gate)
+RUN_TAG=fl_unpack bash experimental/train_frozenlake_v5p_1host_docker.sh
+MAX_TOKEN_PER_TPU=8192 RUN_TAG=fl_pack bash experimental/train_frozenlake_v5p_1host_docker.sh
+```
+
+Step 2 is expected to print `--- LOCKED: installing experimental/requirements.frozenlake.lock.txt ---`
+and then, at L1 and L2:
+
+```
+vllm-tpu 0.25.0 | tpu-inference 0.25.0 | jax 0.10.2 | jaxlib 0.10.2 | libtpu 0.0.42.1
+torch 2.10.0 | flax 0.12.4 | google-tunix 0.1.8 | qwix 0.1.8
+stack OK (vllm-tpu 0.25.0, 4 TPU chips)
+```
+
+Any deviation from those versions is the signal that the lock did not take effect.
+
+**Knobs worth knowing.**
+
+- `LOCAL_REPO=1` runs the working tree instead of the pushed branch. The default fetches the branch,
+  which is what a fresh machine wants; this is for iterating on a change that is not committed yet.
+- `NO_LOCK=1` re-resolves from PyPI instead of the lock -- needed when bumping `VLLM_TPU_VERSION`,
+  after which re-freeze: `docker run --rm <image> pip freeze --exclude-editable > experimental/requirements.frozenlake.lock.txt`.
+- `ROLLOUT_HBM` defaults to 0.2 and **that is correct for Gemma4-E2B**: a measured run peaked at
+  35.75 of 95.74 GB. The "0.2 will not start" note earlier in this document is about **Qwen3-8B**;
+  do not carry it over to this recipe.
+
+**Known harmless noise.** After `exit=0`, a weakref finalizer raises
+`AttributeError: 'Gemma4ForCausalLM' object has no attribute 'modules'` from
+`vllm/v1/engine/llm_engine.py:441`, which expects a torch `nn.Module` and gets the JAX model. It
+happens during teardown and does not affect the exit code.
+
+**Not yet judged.** A 2-batch smoke run shows `solve_ratio=0.000` throughout and many
+`MAX_CONTEXT_LIMIT_REACHED` warnings. Two batches of an untrained model prove nothing either way and
+there is no baseline for this recipe; convergence is phase8's gate, on the new machine.
