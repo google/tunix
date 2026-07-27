@@ -142,8 +142,9 @@ pip install --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-publish
 ```
 
 Or install from source:
-```sh
-bash scripts/install_tunix_vllm_requirements.sh
+
+```
+bash scripts/install_tunix_vllm_requirement.sh
 ```
 
 **SGLang-Jax**

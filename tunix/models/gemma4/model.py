@@ -113,33 +113,35 @@ class ShardingConfig:
   per_layer_projection: Tuple[str | None, ...]
   per_layer_input_embedding: Tuple[str | None, ...]
   vision_shd: vision.VisionShardingConfig | None = None
+  # Critic score sharding
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_cndh=(None, 'tp', fsdp, None),
-        qkv_weight_cndh=(None, 'tp', fsdp, None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
-        score_weight_d1=(fsdp, None),
-        vision_proj=(fsdp, 'tp'),
-        vision_soft_emb_norm_weight=('tp',),
-        audio_proj=(fsdp, 'tp'),  # TODO check if good!
-        exp_weight_edf=(fsdp, None, None, 'tp'),
-        exp_weight_efd=(fsdp, 'tp', None),
-        per_layer_model_projection=(fsdp, 'tp'),
-        per_layer_input_gate=(fsdp, 'tp'),
-        per_layer_projection=('tp', fsdp),
-        per_layer_input_embedding=('tp', fsdp),
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp',),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
+        vision_proj=P(fsdp, 'tp'),
+        vision_soft_emb_norm_weight=P('tp',),
+        audio_proj=P(fsdp, 'tp'),  # TODO check if good!
+        exp_weight_edf=P(fsdp, None, None, 'tp'),
+        exp_weight_efd=P(fsdp, 'tp', None),
+        per_layer_model_projection=P(fsdp, 'tp'),
+        per_layer_input_gate=P(fsdp, 'tp'),
+        per_layer_projection=P('tp', fsdp),
+        per_layer_input_embedding=P('tp', fsdp),
         vision_shd=vision.VisionShardingConfig.get_default_sharding(
             is_sampling
         ),
@@ -267,6 +269,33 @@ class ModelConfig:
         vision_encoder=vision.VisionEncoderConfig(use_clipped_linears=True),
         audio_encoder=audio.ConformerConfig(),
     )
+
+  @classmethod
+  def gemma4_12b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls(
+        num_layers=48,
+        num_embed=262144,
+        embed_dim=3840,
+        hidden_dim=3840 * 4,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        num_global_kv_heads=1,
+        sliding_window_size=1024,
+        shd_config=sharding_config,
+        k_eq_v_global=True,
+        attention_pattern=GEMMA4_ATTENTION_PATTERN,
+    )
+
+  @classmethod
+  def gemma4_12b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_12b(sharding_config=sharding_config)
 
   @classmethod
   def gemma4_31b(
@@ -1195,11 +1224,14 @@ class Attention(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument. graph_updates=False prevents TraceContextError
-      # when mutating params across jax transformation trace levels.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
       )
     else:
       return self.block(
@@ -1297,7 +1329,13 @@ class FeedForward(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)
 
@@ -1468,8 +1506,14 @@ class DecoderLayer(nnx.Module):
         remat_config == RematConfig.DECODER
         or remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self,
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state,
           x,
           segment_pos,
           cache,

@@ -196,8 +196,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
-        "kl": np.mean,
-        "pg_clipfrac": np.mean,
+        "kl": common.mean_of_means,
+        "pg_clipfrac": common.mean_of_means,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,

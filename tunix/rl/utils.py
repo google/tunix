@@ -238,9 +238,8 @@ def put_params_on_memory_kind(
   logging.debug("params_on_memory_kind shardings: %s", shardings)
   return params_on_memory_kind
 
-
 def create_critic_model(
-    actor_model: nnx.Module, seed: int = 0, rngs=None, lm_head_to_replace: str = "lm_head"
+    actor_model: nnx.Module, seed: int = 0, rngs: nnx.Rngs = None, lm_head_to_replace: str = "lm_head"
 ) -> nnx.Module:
   """Creates a critic model from an actor model."""
 
@@ -262,6 +261,7 @@ def create_critic_model(
           use_bias=False,
           rngs=rngs,
       )
+
   # If Qwix is active for the model, also assign qwix_path for the new head
   if hasattr(critic_model, "qwix_path"):
     new_head.qwix_path = getattr(lm_head, "qwix_path", (lm_head_to_replace,))
@@ -270,8 +270,44 @@ def create_critic_model(
       lm_head_to_replace,
       new_head
   )
-  
+
   return critic_model
+
+
+class TransformerWithScoreHead(nnx.Module):
+  def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
+    """Initializes the transformer with a score head.
+
+    Args:
+      transformer: The transformer backbone.
+      rngs: The random number generator.
+    """
+    if hasattr(transformer, 'embed_dim'):
+      embed_dim = transformer.embed_dim
+    elif hasattr(transformer.config, 'embed_dim'):
+      embed_dim = transformer.config.embed_dim
+    else:
+      raise ValueError("Could not determine embed dim for the transformer.")
+
+    self.transformer = transformer
+    self.score = nnx.Linear(
+        in_features=embed_dim,
+        out_features=1,
+        use_bias=False,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.normal(),
+            transformer.config.shd_config.score_weight_d1,
+        ),
+        rngs=rngs,
+    )
+
+  def __call__(self, *args, **kwargs):
+    self.transformer(*args, **kwargs, output_hidden_states=True)
+    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
+        'all_hidden_states'
+    ].value[-1]
+    score = self.score(hidden_states)
+    return score
 
 
 def get_partition_spec(
@@ -344,15 +380,33 @@ def pack_sequences(
     item_iterator: Iterator[list[common.TrainExample]],
     max_token_budget: int,
     pad_id: int = 0,
+    target_items_per_update: int | None = None,
 ) -> Iterator[list[common.TrainExample]]:
-  """Packs a stream of TrainExamples into 1D sequences up to a token budget."""
+  """Packs a stream of TrainExamples into 1D sequences up to a token budget.
+
+  TODO(yuxzhang): update boundary uses a fixed grad_acc_steps (mini // micro);
+  packing-native would use dynamic micro-batches + global token norm (b/491970038).
+  """
   buffer = []
   current_tokens = 0
   example_cls = common.TrainExample
+  accumulated_items = 0
 
-  def _flush_buffer() -> list[common.TrainExample]:
+  def _flush_buffer(is_update: bool = False) -> list[common.TrainExample]:
+    """Flushes the buffer into a list of TrainExamples."""
     nonlocal buffer, current_tokens
     if not buffer:
+      if is_update:
+        # An update boundary (is_update=True) with an empty buffer would yield
+        # nothing, silently dropping the optimizer update for this mini-batch
+        # (its accumulated gradients would leak into the next update). This
+        # usually means an empty or all-skipped input batch arrived at a
+        # mini-batch boundary. Fail loudly instead of corrupting training.
+        raise ValueError(
+            "pack_sequences reached an update boundary (is_update=True) with an "
+            "empty buffer; no packed example would be produced, dropping a "
+            "gradient-accumulation update."
+        )
       return []
 
     # TODO(noghabi): Pad to the next power of 2 instead of user defined
@@ -438,6 +492,8 @@ def pack_sequences(
     if has_policy_version:
       kwargs["policy_version"] = buffer[0]["policy_version"]
 
+    kwargs["is_update_step"] = jnp.array(is_update, dtype=jnp.bool_)
+
     packed_example = example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
 
     buffer.clear()
@@ -445,6 +501,7 @@ def pack_sequences(
     return [packed_example]
 
   for item_list in item_iterator:
+    accumulated_items += 1
     for example in item_list:
       example_cls = type(example)
       unpadded_items = unpad_train_example(example)
@@ -462,13 +519,21 @@ def pack_sequences(
           continue
 
         if current_tokens + tokens > max_token_budget:
-          yield _flush_buffer()
+          # Flush normally. The final batch logic below will trigger is_update=True.
+          yield _flush_buffer(is_update=False)
 
         buffer.append(item)
         current_tokens += tokens
 
-  if buffer:
-    yield _flush_buffer()
+    if target_items_per_update and accumulated_items >= target_items_per_update:
+      yield _flush_buffer(is_update=True)
+      accumulated_items = 0
 
+  if buffer:
+    # Leftover at end-of-stream = stream ended mid-mini-batch; forcing is_update
+    # here would update on a partial mini-batch. Require ending on a boundary.
+    if target_items_per_update and accumulated_items % target_items_per_update != 0:
+      raise ValueError("pack_sequences stream ended mid-mini-batch.")
+    yield _flush_buffer(is_update=True)
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"

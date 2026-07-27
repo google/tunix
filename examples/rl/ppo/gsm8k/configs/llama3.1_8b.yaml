@@ -52,7 +52,7 @@ num_train_epochs: 1
 rl_training_config:
   actor_optimizer_config:
     opt_type: "adamw"
-    peak_value: 3e-6
+    peak_value: 1e-5
     schedule_type: "warmup_cosine_decay_schedule"
     init_value: 0.0
     end_value: 0.0
@@ -65,7 +65,7 @@ rl_training_config:
     max_grad_norm: 0.1
   critic_optimizer_config:
     opt_type: "adamw"
-    peak_value: 3e-6
+    peak_value: 1e-5
     schedule_type: "warmup_cosine_decay_schedule"
     init_value: 0.0
     end_value: 0.0

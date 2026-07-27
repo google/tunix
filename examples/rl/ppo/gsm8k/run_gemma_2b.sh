@@ -15,9 +15,9 @@
 
 set -x # Enable xtrace
 
-batch_size=${batch_size:-1}
-train_micro_batch_size=${train_micro_batch_size:-1}
-total_generation_steps=${total_generation_steps:-512}
+batch_size=${batch_size:-8}
+train_micro_batch_size=${train_micro_batch_size:-8}
+total_generation_steps=${total_generation_steps:-768}
 max_prompt_length=${max_prompt_length:-2048}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}

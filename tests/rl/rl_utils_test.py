@@ -151,6 +151,50 @@ class UtilsTest(absltest.TestCase):
     out, _ = critic_model(x, positions, None, attn_mask)
     self.assertEqual(out.shape, (2, 3, 1))
 
+  def test_create_critic_model_with_qwix_path(self):
+    actor_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    setattr(actor_model, 'qwix_path', 'ex_qwix_path')
+    critic_model = utils.create_critic_model(actor_model)
+
+    x = jnp.array([[1, 2, 3], [4, 5, 6]])
+    positions = jnp.arange(x.shape[1])
+    attn_mask = common.make_causal_attn_mask(jnp.ones_like(x))
+    out, _ = critic_model(x, positions, None, attn_mask)
+    self.assertEqual(out.shape, (2, 3, 1))
+    self.assertTrue(hasattr(critic_model, 'qwix_path'))
+    self.assertEqual(critic_model.qwix_path, 'ex_qwix_path')
+
+  def test_transformer_with_score_head_forward_pass(self):
+    class DummyShardingConfig:
+      score_weight_d1: tuple[str, str] = ('hidden', 'data')
+
+    rngs = nnx.Rngs(0)
+
+    config = tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize())
+    config.shd_config = DummyShardingConfig
+
+    actor_model = tc.ToyTransformer(
+        config=config,
+        rngs=rngs,
+    )
+    num_heads = 1
+    actor_model.embed_dim = actor_model.config.head_dim * num_heads
+
+    critic_model = utils.TransformerWithScoreHead(
+        transformer=actor_model,
+        rngs=rngs,
+    )
+
+    x = jnp.array([[1, 2, 3], [4, 5, 6]])
+    positions = jnp.arange(x.shape[1])
+    attn_mask = common.make_causal_attn_mask(jnp.ones_like(x))
+
+    out = critic_model(x, positions, None, attn_mask)
+    self.assertEqual(out.shape, (2, 3, 1))
+
   def test_put_params_on_memory_kind(self):
     # Test valid memory kind
     params = {'a': jnp.array([1.0, 2.0]), 'b': jnp.array([3.0])}
@@ -252,6 +296,57 @@ class UtilsTest(absltest.TestCase):
       np.testing.assert_array_equal(pack2.segment_ids, expected_segments_2)
       np.testing.assert_array_equal(pack2.segment_positions, expected_positions_2)
       np.testing.assert_array_equal(pack2.completion_mask, expected_mask_2)
+
+  def _mock_example(self, prompt_len: int, completion_len: int):
+    return common.TrainExample(
+        prompt_ids=jnp.ones((1, prompt_len), dtype=jnp.int32),
+        prompt_mask=jnp.ones((1, prompt_len), dtype=jnp.int32),
+        completion_ids=jnp.ones((1, completion_len), dtype=jnp.int32) * 2,
+        completion_mask=jnp.ones((1, completion_len), dtype=jnp.int32),
+        advantages=jnp.array([1.5], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        segment_ids=None,
+        segment_positions=None,
+    )
+
+  def test_pack_sequences_raises_on_empty_update_boundary(self):
+    # An update boundary (is_update=True) reached with an empty buffer would
+    # yield nothing and silently drop a gradient-accumulation update; it must
+    # raise instead. An empty input batch at a `target_items_per_update`
+    # boundary triggers exactly this.
+    packed = utils.pack_sequences(
+        iter([[]]),  # one empty item-list -> nothing buffered at the boundary
+        max_token_budget=10,
+        target_items_per_update=1,  # every item-list is an update boundary
+    )
+    with self.assertRaisesRegex(ValueError, 'update boundary'):
+      list(packed)
+
+  def test_pack_sequences_raises_on_mid_mini_batch_end(self):
+    # Stream ends mid-mini-batch (1 item-list but target_items_per_update=2) ->
+    # trailing flush would update on a partial mini-batch -> raise.
+    packed = utils.pack_sequences(
+        iter([[self._mock_example(1, 2)]]),
+        max_token_budget=10,
+        target_items_per_update=2,
+    )
+    with self.assertRaisesRegex(ValueError, 'mid-mini-batch'):
+      list(packed)
+
+  def test_pack_sequences_marks_is_update_step_at_boundary(self):
+    # With target_items_per_update=1 each non-empty flush is an update boundary,
+    # so every packed example is marked is_update_step=True (and no raise).
+    packed = list(
+        utils.pack_sequences(
+            iter([[self._mock_example(1, 2)], [self._mock_example(2, 3)]]),
+            max_token_budget=10,
+            target_items_per_update=1,
+        )
+    )
+    self.assertLen(packed, 2)
+    for batch in packed:
+      self.assertTrue(bool(np.asarray(batch[0].is_update_step)))
 
 
 if __name__ == '__main__':

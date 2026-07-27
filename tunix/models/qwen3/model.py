@@ -107,6 +107,7 @@ class ShardingConfig:
   score_weight_d1: Tuple[str | None, ...]
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
@@ -115,20 +116,20 @@ class ShardingConfig:
     fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        emb_dv=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        q_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        kv_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        o_weight_nhd=('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_df=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_fd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', sp, None if is_sampling else 'tp'),
-        act_btf=('fsdp', sp, 'tp'),
-        act_btnh=('fsdp', sp, 'tp', None),
-        score_weight_d1=(fsdp, None),
-        exp_weight_edf=('fsdp', None, 'tp'),
-        exp_weight_efd=('fsdp', 'tp', None),
+        emb_vd=P('tp', fsdp),
+        emb_dv=P(fsdp, 'tp'),
+        q_weight_dnh=P(fsdp, 'tp', None),
+        kv_weight_dnh=P(fsdp, 'tp', None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp',),
+        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', sp, 'tp'),
+        act_btnh=P('fsdp', sp, 'tp', None),
+        score_weight_d1=P(fsdp, None),
+        exp_weight_edf=P('fsdp', None, 'tp'),
+        exp_weight_efd=P('fsdp', 'tp', None),
     )
 
 
@@ -671,10 +672,14 @@ class Attention(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, segment_ids
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, segment_ids=segment_ids
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
@@ -1045,7 +1050,13 @@ class MLP(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
@@ -1126,8 +1137,14 @@ class DecoderLayer(nnx.Module):
         self.config.remat_config == RematConfig.DECODER
         or self.config.remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, segment_ids
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, segment_ids=segment_ids
       )
     else:
       return self.block(

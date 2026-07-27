@@ -14,27 +14,29 @@
 """Checkpointing options for Tunix."""
 
 import dataclasses
-from typing import Generic, Protocol, TypeVar
+from typing import Protocol
 from absl import logging
 
+import orbax.checkpoint as ocp_v0
 from orbax.checkpoint import v1 as ocp
 
-MetadataT = TypeVar("MetadataT")
 
-
-# We define protocols for async options and NameFormat because Orbax v0 and v1
-# have different implementations of async options. Furthermore, our NameFormat
-# protocol is generically typed (Generic[MetadataT]) because the underlying
-# MetadataT types diverge across v0 and v1. We use Protocols to remain
-# structurally compatible with both versions for a smooth transition.
-class NameFormat(Protocol, Generic[MetadataT]):
-  ...
-
-
-class AsyncOptions(Protocol):
-  @property
-  def timeout_secs(self) -> int | None:
-    ...
+SaveDecisionPolicyType = (
+    ocp_v0.checkpoint_managers.SaveDecisionPolicy
+    | ocp.training.save_decision_policies.SaveDecisionPolicy
+)
+PreservationPolicyType = (
+    ocp_v0.checkpoint_managers.PreservationPolicy
+    | ocp.training.preservation_policies.PreservationPolicy
+)
+StepNameFormatType = (
+    ocp_v0.path.step.NameFormat
+    | ocp.path.step.NameFormat
+)
+AsyncOptionsType = (
+    ocp_v0.AsyncOptions
+    | ocp.options.AsyncOptions
+)
 
 
 class CheckpointingOptions(Protocol):
@@ -46,23 +48,17 @@ class CheckpointingOptions(Protocol):
   """
 
   @property
-  def save_decision_policy(
-      self,
-  ) -> ocp.training.save_decision_policies.SaveDecisionPolicy | None:
+  def save_decision_policy(self) -> SaveDecisionPolicyType | None:
     """Returns the policy that defines when to save a checkpoint."""
     ...
 
   @property
-  def preservation_policy(
-      self,
-  ) -> ocp.training.preservation_policies.PreservationPolicy | None:
+  def preservation_policy(self) -> PreservationPolicyType | None:
     """Returns the policy that defines when to preserve a checkpoint."""
     ...
 
   @property
-  def step_name_format(
-      self,
-  ) -> NameFormat | None:
+  def step_name_format(self) -> StepNameFormatType | None:
     """Returns the format for step names."""
     ...
 
@@ -72,24 +68,19 @@ class CheckpointingOptions(Protocol):
     ...
 
   @property
-  def async_options(self) -> AsyncOptions | None:
+  def async_options(self) -> AsyncOptionsType | None:
     """Returns the options for async operations."""
     ...
 
 
 @dataclasses.dataclass(frozen=True)
 class TunixCheckpointingOptions:
-  save_decision_policy: (
-      ocp.training.save_decision_policies.SaveDecisionPolicy | None
-  ) = None
-  preservation_policy: (
-      ocp.training.preservation_policies.PreservationPolicy | None
-  ) = None
-  step_name_format: (
-      ocp.path.step.NameFormat | None
-  ) = None
+  """Concrete implementation of checkpointing options for Tunix."""
+  save_decision_policy: SaveDecisionPolicyType | None = None
+  preservation_policy: PreservationPolicyType | None = None
+  step_name_format: StepNameFormatType | None = None
   enable_async_checkpointing: bool | None = None
-  async_options: ocp.options.AsyncOptions | None = None
+  async_options: AsyncOptionsType | None = None
 
 
 # Default checkpointing options for Tunix:
@@ -99,10 +90,10 @@ class TunixCheckpointingOptions:
 # - Use async checkpointing.
 # - Timeout for async operations is 1200 seconds.
 DEFAULT_CHECKPOINTING_OPTIONS = TunixCheckpointingOptions(
-    save_decision_policy=ocp.training.save_decision_policies.ContinuousCheckpointingPolicy(  # pyrefly: ignore[bad-argument-type]
+    save_decision_policy=ocp.training.save_decision_policies.ContinuousCheckpointingPolicy(
         minimum_interval_secs=180,
     ),
-    preservation_policy=ocp.training.preservation_policies.LatestN(n=3),  # pyrefly: ignore[bad-argument-type]
+    preservation_policy=ocp.training.preservation_policies.LatestN(n=3),
     step_name_format=ocp.path.step.standard_name_format(),
     enable_async_checkpointing=True,
     async_options=ocp.options.AsyncOptions(timeout_secs=1200),
@@ -111,17 +102,11 @@ DEFAULT_CHECKPOINTING_OPTIONS = TunixCheckpointingOptions(
 
 def create_checkpointing_options(
     *,
-    save_decision_policy: (
-        ocp.training.save_decision_policies.SaveDecisionPolicy | None
-    ) = None,
-    preservation_policy: (
-        ocp.training.preservation_policies.PreservationPolicy | None
-    ) = None,
-    step_name_format: (
-        ocp.path.step.NameFormat | None
-    ) = None,
+    save_decision_policy: SaveDecisionPolicyType | None = None,
+    preservation_policy: PreservationPolicyType | None = None,
+    step_name_format: StepNameFormatType | None = None,
     enable_async_checkpointing: bool | None = None,
-    async_options: ocp.options.AsyncOptions | None = None,
+    async_options: AsyncOptionsType | None = None,
 ) -> TunixCheckpointingOptions:
   """Creates a TunixCheckpointingOptions instance."""
   return TunixCheckpointingOptions(
@@ -206,9 +191,9 @@ def resolve_checkpointing_defaults(
     async_options = DEFAULT_CHECKPOINTING_OPTIONS.async_options
 
   return create_checkpointing_options(
-      save_decision_policy=save_policy,  # pyrefly: ignore[bad-argument-type]
-      preservation_policy=preserve_policy,  # pyrefly: ignore[bad-argument-type]
-      step_name_format=step_name_format,  # pyrefly: ignore[bad-argument-type]
+      save_decision_policy=save_policy,
+      preservation_policy=preserve_policy,
+      step_name_format=step_name_format,
       enable_async_checkpointing=enable_async,
       async_options=async_options,
   )

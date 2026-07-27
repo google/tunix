@@ -19,10 +19,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import common
+from tunix.sft import utils
 from tunix.tests import test_common as tc
 
 jax.config.update("jax_threefry_partitionable", False)
 jax.config.update("jax_default_matmul_precision", "highest")
+
+def _compute_loss(*args, **kwargs):
+  out = getattr(common, "aggregate_loss")(*args, **kwargs)
+  return out.compute()
 
 
 class CommonTest(parameterized.TestCase):
@@ -565,16 +570,83 @@ class CommonTest(parameterized.TestCase):
   ):
     per_token_loss = jnp.array(per_token_loss_list)
     completion_mask = jnp.array(completion_mask_list)
-    actual_loss = common.aggregate_loss(
+    actual_loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode, **kwargs
     )
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-6, atol=1e-6)
+
+  @parameterized.named_parameters(
+      ("token_mean", "token-mean", {}),
+      ("seq_mean_token_mean", "sequence-mean-token-mean", {}),
+      ("seq_mean_token_scale", "sequence-mean-token-scale", {"norm": 5.0}),
+      ("seq_mean_token_sum", "seq-mean-token-sum", {}),
+      ("seq_mean_token_sum_norm", "sequence-mean-token-sum-norm", {"norm": 3.0}),
+  )
+  def test_reduced_equals_unreduced_compute(self, loss_agg_mode, kwargs):
+    # reduced_loss_agg (eager scalar) must equal aggregate_loss(...).compute()
+    # (deferred WeightedMetric) for every mode, including empty rows and
+    # varying lengths. This ties the two independent aggregations together so
+    # they cannot silently diverge.
+    per_token_loss = jnp.array([
+        [0.5, 1.5, 2.5, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 0.0, 0.0, 0.0],
+    ])
+    completion_mask = jnp.array([
+        [1.0, 1.0, 1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+    ])
+    reduced = common.reduced_loss_agg(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+    unreduced = _compute_loss(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+    np.testing.assert_allclose(reduced, unreduced, rtol=1e-6, atol=1e-6)
+
+  def test_mean_of_means_matches_legacy_np_mean(self):
+    # mean_of_means computes each WeightedMetric then averages — exactly what
+    # the old pipeline did (pre-compute to scalar, then np.mean). No regression.
+    metrics = [
+        utils.WeightedMetric(jnp.array(6.0), jnp.array(3.0)),  # -> 2.0
+        utils.WeightedMetric(jnp.array(4.0), jnp.array(1.0)),  # -> 4.0
+    ]
+    legacy = np.mean([float(m.compute()) for m in metrics])
+    self.assertAlmostEqual(float(common.mean_of_means(metrics)), legacy, places=6)
+    self.assertAlmostEqual(float(common.mean_of_means(metrics)), 3.0, places=6)
+
+  def test_mean_of_means_is_np_mean_for_scalars(self):
+    # Safe drop-in for np.mean on plain scalars.
+    self.assertAlmostEqual(
+        float(common.mean_of_means([2.0, 4.0])), 3.0, places=6
+    )
+
+  def test_global_weighted_mean_is_sum_over_sum(self):
+    # Global sum(S)/sum(d), and it DIVERGES from mean_of_means when the
+    # denominator varies across micro-batches.
+    metrics = [
+        utils.WeightedMetric(jnp.array(10.0), jnp.array(4.0)),  # mean 2.5
+        utils.WeightedMetric(jnp.array(2.0), jnp.array(1.0)),   # mean 2.0
+    ]
+    self.assertAlmostEqual(
+        common.global_weighted_mean(metrics), 12.0 / 5.0, places=6
+    )
+    self.assertNotAlmostEqual(
+        common.global_weighted_mean(metrics),
+        float(common.mean_of_means(metrics)),  # 2.25
+        places=3,
+    )
+
+  def test_global_weighted_mean_zero_denominator(self):
+    metrics = [utils.WeightedMetric(jnp.array(0.0), jnp.array(0.0))]
+    self.assertEqual(common.global_weighted_mean(metrics), 0.0)
 
   def test_invalid_mode(self):
     with self.assertRaisesRegex(
         ValueError, "Unsupported loss aggregation mode"
     ):
-      common.aggregate_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
+      _compute_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
 
   @parameterized.named_parameters(
       dict(
@@ -610,7 +682,7 @@ class CommonTest(parameterized.TestCase):
   )
   def test_invalid_norm(self, norm_val, loss_agg_mode):
     with self.assertRaisesRegex(ValueError, "Invalid 'norm' value"):
-      common.aggregate_loss(
+      _compute_loss(
           jnp.ones((2, 2)),
           jnp.ones((2, 2)),
           loss_agg_mode,
@@ -707,7 +779,7 @@ class CommonTest(parameterized.TestCase):
     per_token_loss = jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16)
     completion_mask = jnp.array([1, 1, 0], dtype=jnp.int32)
 
-    loss = common.aggregate_loss(
+    loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode="token-mean"
     )
     self.assertEqual(loss.dtype, jnp.float32)

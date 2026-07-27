@@ -270,23 +270,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
-        "kl": np.mean,
-        "entropy": np.mean,
-        "pg_loss": np.mean,
-        "pg_clipfrac": np.mean,
-        "ppo_kl": np.mean,
-        "kl_loss": np.mean,
-        "is_ratio/mean": np.mean,
+        "kl": common.mean_of_means,
+        "entropy": common.mean_of_means,
+        "reduced_pg_loss": common.mean_of_means,
+        "unreduced_pg_loss": common.global_weighted_mean,
+        "pg_clipfrac": common.mean_of_means,
+        "ppo_kl": common.mean_of_means,
+        "kl_loss": common.mean_of_means,
+        "is_ratio/mean": common.mean_of_means,
         "is_ratio/max": np.max,
         "is_ratio/min": np.min,
-        "log_ratio/abs_mean": np.mean,
-        "pg_loss/unclipped_mean": np.mean,
-        "pg_loss/clipped_mean": np.mean,
-        "advantage/abs_mean": np.mean,
+        "log_ratio/abs_mean": common.mean_of_means,
+        "pg_loss/unclipped_mean": common.mean_of_means,
+        "pg_loss/clipped_mean": common.mean_of_means,
+        "advantage/abs_mean": common.mean_of_means,
         "advantage/max": np.max,
         "advantage/min": np.min,
-        "advantage/nonzero_frac": np.mean,
-        "sampler_is/weight_mean": np.mean,
+        "advantage/nonzero_frac": common.mean_of_means,
+        "sampler_is/weight_mean": common.mean_of_means,
         "sampler_is/weight_min": np.min,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
@@ -463,8 +464,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     old_logprobs_list: List[np.ndarray] = []
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
-    trajectories_to_log: List[Dict[str, Any]] = []
-    original_inputs_list: List[Any] = []
+    raw_completion_lengths: List[int] = []
+    trajectories_to_log = []
 
     for item in trajectories:
         traj = item.traj
@@ -529,6 +530,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_masks_list,
         old_logprobs_list,
     ):
+      raw_completion_lengths.append(
+          min(len(completion_tokens), max_response_length)
+      )
       if (
           len(completion_tokens) >= max_response_length
           and completion_mask[-1] != eos_value
@@ -763,17 +767,146 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         prob_diff_max,
         pearson,
     )
-    
-  def _compute_sampler_is_weights(self, completion_mask, rollout_per_token_logps, trainer_per_token_logps, metrics_to_log):
-    """
-    Compute truncated importance-sampling (TIS) correction weights.
- 
-    Compute per-token TIS weights from the trainer-vs-sampler log-ratio,
-    mask to assistant tokens only (we dampen offending model-emitted
-    positions, not env tokens), clamp at the configured threshold, and
-    detach. The policy loss picks these up via
-    ``train_example.sampler_is_weights``.
-    """
+
+    reward_kwargs = {
+        key: value for key, value in original_inputs.items() if key != "prompts"
+    }
+    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
+    with self.rl_cluster.perf_v2.span(
+        perf_constants.ADVANTAGE_COMPUTATION,
+        tags=perf_tags,
+    ):
+      rewards = self._compute_rewards(
+          prompts=original_inputs["prompts"],
+          completions=completion_texts,
+          mode=mode,
+          **reward_kwargs,
+          expected_step=expected_step,
+      )
+
+      advantage_estimator = function_registry.get_advantage_estimator(
+          self.algo_config.advantage_estimator
+      )
+      advantages = advantage_estimator(
+          rewards=rewards, num_generations=self.algo_config.num_generations
+      )
+
+    logging.debug("Advantages computed: %s", advantages)
+
+    policy_versions = np.array(policy_versions_list, dtype=np.int32)
+
+    # Log completion lengths, rewards and env time.
+    agg_completion_mask = completion_mask.sum(axis=-1)
+    raw_completion_lengths_np = np.asarray(
+        raw_completion_lengths, dtype=np.int32
+    )
+    metrics_to_log = {
+        "generation/completions/mean_length": (
+            np.mean(agg_completion_mask),
+            np.mean,
+        ),
+        "generation/completions/max_length": (
+            np.max(agg_completion_mask),
+            np.max,
+        ),
+        "generation/completions/min_length": (
+            np.min(agg_completion_mask),
+            np.min,
+        ),
+        # Raw length mirrors rLLM/VERL response_length: all trajectory response
+        # tokens after the initial prompt, including env/user tokens, clamped to
+        # max_response_length. The existing *_length metrics remain loss-mask
+        # lengths over assistant-generated tokens only.
+        "generation/completions/mean_raw_length": (
+            np.mean(raw_completion_lengths_np),
+            np.mean,
+        ),
+        "generation/completions/max_raw_length": (
+            np.max(raw_completion_lengths_np),
+            np.max,
+        ),
+        "generation/completions/min_raw_length": (
+            np.min(raw_completion_lengths_np),
+            np.min,
+        ),
+        "generation/completions/clip_ratio": (
+            clipped_completion_count / len(trajectories),
+            np.mean,
+        ),
+        "rewards/advantage/mean": (np.mean(advantages), np.mean),
+        "rewards/advantage/max": (np.max(advantages), np.max),
+        "rewards/advantage/min": (np.min(advantages), np.min),
+        "rewards/advantage/std": (np.std(advantages), np.mean),
+    }
+
+    # Per-token sampler-vs-trainer log-probability agreement diagnostic. When
+    # this diverges from zero, importance ratios used in the policy update
+    # are biased and gradient quality degrades. A mean per-token diff well
+    # under 0.01 nat indicates the trainer and rollout sampler are computing
+    # log-probabilities consistently.
+    if (
+        rollout_per_token_logps is not None
+        and trainer_per_token_logps is not None
+    ):
+      # ``completion_mask`` is the assistant-vs-env mask built upstream
+      # (1 for assistant-generated tokens, 0 for env-injected tokens), and
+      # already correctly scopes the comparison to model-emitted positions.
+      # We deliberately do NOT additionally drop positions where the rollout
+      # logprob equals exactly 0.0 — that value can legitimately occur for
+      # near-certain tokens (e.g. format chars after a structured response)
+      # and excluding them removes the most consistent positions from the
+      # statistic, inflating the per-position mean.
+      mask = completion_mask.astype(jnp.bool_)
+      mask_f = mask.astype(jnp.float32)
+      mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+      diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
+      diff_mean = float((diff * mask_f).sum() / mask_sum)
+      diff_max = float(jnp.where(mask, diff, 0.0).max())
+      # Per-position probability-space diff |exp(rollout) - exp(trainer)|.
+      # More representative than logp_diff for confidence agreement: logp can
+      # diverge arbitrarily for very low-probability tokens while their
+      # contribution to the importance ratio is negligible. prob_diff weights
+      # each position by its actual probability mass.
+      rp = jnp.exp(rollout_per_token_logps)
+      tp = jnp.exp(trainer_per_token_logps)
+      prob_diff = jnp.abs(rp - tp)
+      prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+      prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
+      # Pearson correlation between exp(logp) at masked positions.
+      rp_flat = rp.reshape(-1)
+      tp_flat = tp.reshape(-1)
+      mf = mask_f.reshape(-1)
+      rp_mean = (rp_flat * mf).sum() / mask_sum
+      tp_mean = (tp_flat * mf).sum() / mask_sum
+      rp_d = (rp_flat - rp_mean) * mf
+      tp_d = (tp_flat - tp_mean) * mf
+      cov = (rp_d * tp_d).sum() / mask_sum
+      rp_var = (rp_d * rp_d).sum() / mask_sum
+      tp_var = (tp_d * tp_d).sum() / mask_sum
+      pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+      metrics_to_log.update({
+          "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
+          "sampler_trainer/logp_diff_max": (diff_max, np.max),
+          "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
+          "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
+          "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
+      })
+      logging.info(
+          "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
+          " pearson=%.5f",
+          diff_mean,
+          diff_max,
+          prob_diff_mean,
+          prob_diff_max,
+          pearson,
+      )
+    # Truncated importance-sampling (TIS) correction weights.
+    # Compute per-token TIS weights from the trainer-vs-sampler log-ratio,
+    # mask to assistant tokens only (we dampen offending model-emitted
+    # positions, not env tokens), clamp at the configured threshold, and
+    # detach. The policy loss picks these up via
+    # ``train_example.sampler_is_weights``.
+    sampler_is_weights = None
     if (
         self.algo_config.sampler_is != "token"
         or rollout_per_token_logps is None

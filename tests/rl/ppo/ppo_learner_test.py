@@ -370,7 +370,7 @@ class PPOLearnerTest(parameterized.TestCase):
     ppo_learner = ppo_lib.PPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
-        ppo_config=ppo_config,
+        algo_config=ppo_config,
     )
     self.assertFalse(ppo_learner.should_sync_weights)
     self.assertFalse(ppo_learner.can_enable_async_rollout)
@@ -625,7 +625,7 @@ class PPOLearnerTest(parameterized.TestCase):
     ppo_config = ppo_lib.PPOConfig(num_iterations=num_iterations, beta=beta)
     ppo_learner = ppo_lib.PPOLearner(
         rl_cluster=rl_cluster,
-        ppo_config=ppo_config,
+        algo_config=ppo_config,
     )
 
     ppo_learner._generate_and_compute_advantage = wrap_fn(

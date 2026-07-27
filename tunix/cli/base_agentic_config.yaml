@@ -218,7 +218,7 @@ ppo_config:
 
   # The lambda parameter (λ) for Generalized Advantage Estimation (GAE).
   gae_lambda: 0.95
-  
+
   # The discount factor for future rewards in GAE (δ).
   gamma: 1.0
 

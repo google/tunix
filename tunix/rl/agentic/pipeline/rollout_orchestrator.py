@@ -173,15 +173,23 @@ class RolloutOrchestrator:
         )
       finally:
         self._rollout_sync_lock.release_rollout()
-    except ExceptionGroup as eg:
-      for e in eg.exceptions:
+    except Exception as e:
+      if isinstance(e, ExceptionGroup):
+        for sub_e in e.exceptions:
+          logging.error(
+              "Fatal error in runner for pair %d: %s",
+              env.extra_kwargs["pair_index"],
+              sub_e,
+          )
+      else:
         logging.error(
             "Fatal error in runner for pair %d: %s",
             env.extra_kwargs["pair_index"],
             e,
         )
       traceback.print_exc()
-      raise eg.exceptions[0]
+      await manager.put_exception(e)
+      raise e
     finally:
       logging.debug(
           "Runner for pair %d completed with %d episodes",

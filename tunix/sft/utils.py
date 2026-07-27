@@ -19,10 +19,11 @@ import contextlib
 import functools
 import gc
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from absl import logging
 from flax import nnx
+import flax.struct
 import humanize
 import jax
 import jax.numpy as jnp
@@ -178,3 +179,54 @@ def show_hbm_usage(title=""):
           used / limit,
           devices[i],
       )
+
+
+@flax.struct.dataclass
+class WeightedMetric:
+  """A metric that requires weighted reduction.
+
+  Attributes:
+    unreduced_sum: The sum of the metric values. Should be a scalar ().
+    denominator: The weight or count of valid tokens/examples. Should be a
+      scalar ().
+    eps: Optional epsilon added to denominator for numerical stability.
+    min_denom: Optional minimum bound for the denominator.
+  """
+
+  unreduced_sum: jax.Array
+  denominator: jax.Array
+  eps: float | None = flax.struct.field(default=None, pytree_node=False)
+  min_denom: float | None = flax.struct.field(default=None, pytree_node=False)
+
+  def compute_scale(self) -> jax.Array:
+    """Safely computes the scale factor (1 / denominator) with bounds."""
+    denom = self.denominator
+    if self.eps is not None:
+      denom = denom + self.eps
+    if self.min_denom is not None:
+      denom = jnp.maximum(denom, self.min_denom)
+
+    # JAX Safe Division: Prevent division-by-zero NaNs from poisoning gradients
+    # We replace 0s with 1.0 *before* dividing.
+    safe_denom = jnp.where(denom == 0, 1.0, denom)
+
+    # Calculate scale, masking out pure zero denominators to 0.0
+    scale = 1.0 / safe_denom
+    return jnp.where(denom == 0, 0.0, scale)
+
+  def compute(self) -> jax.Array:
+    """Safely computes total / count with optional legacy equivalence bounds."""
+    return self.unreduced_sum * self.compute_scale()
+
+
+@flax.struct.dataclass
+class LossOutput:
+  """Output of a loss function containing unreduced primary loss and aux metrics.
+
+  Attributes:
+    primary_loss: The main loss to be optimized.
+    aux_metrics: A dictionary of auxiliary metrics.
+  """
+
+  primary_loss: WeightedMetric
+  aux_metrics: Dict[str, WeightedMetric]

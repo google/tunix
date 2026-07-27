@@ -255,13 +255,16 @@ class ORPOTrainerTest(parameterized.TestCase):
         "compute_logps",
         return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps), None),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      loss_output = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
           lambda_orpo=0.1,
           label_smoothing=0,
       )
+      loss = loss_output.primary_loss.compute()
+      aux = loss_output.aux_metrics
+
       # Loss should be a scalar and finite
       self.assertEqual(loss.shape, ())
       self.assertTrue(jnp.isfinite(loss))
@@ -276,8 +279,8 @@ class ORPOTrainerTest(parameterized.TestCase):
       self.assertIn("odds_ratio", aux)
 
       # Check that accuracy is between 0 and 1
-      self.assertGreaterEqual(aux["rewards/accuracy"], 0.0)
-      self.assertLessEqual(aux["rewards/accuracy"], 1.0)
+      self.assertGreaterEqual(aux["rewards/accuracy"].compute(), 0.0)
+      self.assertLessEqual(aux["rewards/accuracy"].compute(), 1.0)
 
   def test_compute_logps_with_prompt_loss(self):
     """Test compute_logps directly to ensure correct slicing when enable_prompt_loss_orpo=True."""
@@ -373,7 +376,7 @@ class ORPOTrainerTest(parameterized.TestCase):
             jnp.array(prompt_chosen_logps),
         ),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      out = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
@@ -381,6 +384,8 @@ class ORPOTrainerTest(parameterized.TestCase):
           label_smoothing=0,
           enable_prompt_loss_orpo=True,
       )
+      loss = out.primary_loss.compute()
+      aux = {k: v.compute() for k, v in out.aux_metrics.items()}
 
       # Assert against mathematically-verified golden values
       self.assertEqual(loss.shape, ())
@@ -428,7 +433,7 @@ class ORPOTrainerTest(parameterized.TestCase):
         "compute_logps",
         return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps), None),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      out = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
@@ -436,6 +441,8 @@ class ORPOTrainerTest(parameterized.TestCase):
           label_smoothing=0,
           average_log_prob_orpo=True,
       )
+      loss = out.primary_loss.compute()
+      aux = {k: v.compute() for k, v in out.aux_metrics.items()}
 
       # Assert against mathematically-verified golden values
       self.assertEqual(loss.shape, ())

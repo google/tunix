@@ -954,6 +954,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        gc.collect()
 
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
@@ -1063,6 +1064,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        gc.collect()
       return per_token_logps
 
   def get_actor_per_token_logps(
@@ -1167,6 +1169,7 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
+      gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
           nnx.state(self.actor_trainer.model), "pinned_host"
