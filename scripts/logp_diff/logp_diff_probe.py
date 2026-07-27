@@ -69,6 +69,9 @@ def _parse_args(argv=None):
   p.add_argument("--pairs", default="A-vs-C,A-vs-B,B-vs-C", help="which source pairs to compare")
   p.add_argument("--mesh_sensitivity", action="store_true",
                  help="also run C2 = tunix @ (fsdp1 x train_tp) to bound the mesh/sharding term")
+  p.add_argument("--sharding_ablation", action="store_true",
+                 help="Phase 3d: also run tunix under DP (is_sampling, =rollout layout) on same tokens; "
+                      "adds mesh(C_fsdp-vs-C_dp) + kernel_matched(C_dp-vs-B) to split mesh vs kernel")
   p.add_argument("--out", default="gs://yuxzhang-tunix-models/logp-diff/report.json")
   p.add_argument("--dry_run", action="store_true")
   return p.parse_args(argv)
@@ -228,7 +231,7 @@ _DTYPE_MAP = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"
 
 
 def tunix_forward_logp(model_path, model_version, mesh, prompt_ids, completion_ids, tok, temperature,
-                       param_dtype="float32", config_dtype="bfloat16"):
+                       param_dtype="float32", config_dtype="bfloat16", sharding="fsdp"):
   """Source C: the EXACT trainer path -- common.compute_per_token_logps on (graphdef, state).
 
   Mirrors rl_cluster.get_actor_per_token_logps (rl_cluster.py:1122): nnx.split the actor,
@@ -251,6 +254,11 @@ def tunix_forward_logp(model_path, model_version, mesh, prompt_ids, completion_i
 
   cfg = call_model_config(model_version)   # authoritative (train_deepswe_nb.py:575)
   cfg.dtype = getattr(jnp, _DTYPE_MAP[config_dtype])          # activations/compute (deepswe --dtype=bfloat16)
+  # SHARDING (Phase 3c/3d): 'fsdp' = train layout (FSDP+TP, is_sampling=False, weights fsdp-sharded);
+  # 'dp' = rollout/inference layout (is_sampling=True -> fsdp=None -> weights REPLICATED + tp = DP+TP).
+  # C(fsdp) vs C(dp) on the same tokens = the MESH term (qwen3/model.py:112). Same physical mesh either way.
+  _SC = type(cfg.shd_config)                                  # the model's ShardingConfig class
+  cfg.shd_config = _SC.get_default_sharding(is_sampling=(sharding == "dp"))
   pdt = getattr(jnp, _DTYPE_MAP[param_dtype])                 # actor weights (deepswe --param_dtype=float32)
   model = create_model_from_safe_tensors(model_version, model_path, cfg, mesh, dtype=pdt)
   graphdef, state = nnx.split(model)                            # == trainer split
@@ -293,6 +301,13 @@ def decompose(logps):
                    "kernel+mesh is entangled (cross-engine); C-vs-C2 bounds the sharding part.")
   if "C2" in logps and "C" in logps:
     out["tunix_sharding_sensitivity(C-vs-C2)"] = H.logp_diff_stats(logps["C"], logps["C2"])
+  # Phase 3d ablation: C = tunix FSDP (train layout), C_dp = tunix DP (rollout/is_sampling layout),
+  # SAME tokens + same physical mesh. C-vs-C_dp isolates the MESH term; C_dp-vs-B is the kernel
+  # under matched (DP+TP) sharding -> lets us split deepswe's 0.92 into mesh vs kernel.
+  if "C_dp" in logps and "C" in logps:
+    out["mesh(C_fsdp-vs-C_dp)"] = H.logp_diff_stats(logps["C"], logps["C_dp"])
+  if "C_dp" in logps and "B" in logps:
+    out["kernel_matched(C_dp-vs-B)"] = H.logp_diff_stats(logps["C_dp"], logps["B"])
   return out
 
 
@@ -308,7 +323,7 @@ def main(argv=None):
           "train_mesh": ("SAME as rollout (colocated)" if args.colocated
                          else f"fsdp{args.train_mesh_fsdp}xtp{args.train_mesh_tp}"),
           "temperature": args.temperature, "pairs": args.pairs,
-          "mesh_sensitivity": args.mesh_sensitivity,
+          "mesh_sensitivity": args.mesh_sensitivity, "sharding_ablation": args.sharding_ablation,
           "actor_param_dtype": args.param_dtype, "config_dtype": args.config_dtype,
           "vllm": {"hbm_util": args.vllm_hbm_util, "max_num_seqs": args.vllm_max_num_seqs,
                    "max_num_batched_tokens": args.vllm_max_num_batched_tokens,
@@ -353,7 +368,15 @@ def main(argv=None):
     jax.clear_caches()
   logps["C"] = tunix_forward_logp(args.model_path, args.model_version, train_mesh,
                                   prompt_ids, completion_ids, tok, args.temperature,
-                                  args.param_dtype, args.config_dtype)
+                                  args.param_dtype, args.config_dtype, sharding="fsdp")
+  if args.sharding_ablation:
+    # Phase 3d MESH term: re-run tunix under DP (is_sampling, = rollout layout) on the SAME tokens
+    # and SAME physical mesh. Free C's model first (another 32B forward on the same chips).
+    import gc, jax
+    gc.collect(); jax.clear_caches()
+    logps["C_dp"] = tunix_forward_logp(args.model_path, args.model_version, train_mesh,
+                                       prompt_ids, completion_ids, tok, args.temperature,
+                                       args.param_dtype, args.config_dtype, sharding="dp")
   if args.mesh_sensitivity:
     from jax.sharding import Mesh
     train_tp = args.train_mesh_tp

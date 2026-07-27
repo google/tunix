@@ -108,6 +108,29 @@ def test_colocated_wiring():
         % dec["kernel+mesh(B-vs-C)"]["max"])
 
 
+def test_sharding_ablation_wiring():
+  """--sharding_ablation (Phase 3d): tunix run under FSDP then DP on same tokens -> mesh term."""
+  n_prompt, n_gen = 256, 64
+  full, a, b, c = _mock_logps(n_prompt, n_gen)
+  c_dp = c + np.random.default_rng(2).standard_normal(n_gen).astype(np.float32) * 0.03  # DP differs from FSDP
+
+  with mock.patch.object(P, "load_prompt_tokens", return_value=(np.arange(n_prompt), FakeTok())), \
+       mock.patch.object(P, "run_vllm", return_value=(full, a, object())), \
+       mock.patch.object(P, "vllm_prefill_logp", return_value=b), \
+       mock.patch.object(P, "tunix_forward_logp", side_effect=[c, c_dp]):   # C(fsdp), then C_dp(dp)
+    rep = P.main(["--colocated", "--rollout_mesh_fsdp", "2", "--rollout_mesh_tp", "2",
+                  "--sharding_ablation", "--vllm_server_mode", "false",
+                  "--n_prompt", str(n_prompt), "--n_gen", str(n_gen),
+                  "--pairs", "A-vs-C,A-vs-B,B-vs-C", "--out", "/tmp/logp_report_ablate.json"])
+  assert rep["plan"]["sharding_ablation"] is True
+  dec = rep["decomposition"]
+  assert "mesh(C_fsdp-vs-C_dp)" in dec, list(dec)
+  assert "kernel_matched(C_dp-vs-B)" in dec, list(dec)
+  assert dec["lengths"]["C_dp"] == n_gen
+  print("  [sharding_ablation] PASS  mesh(C_fsdp-C_dp) max=%.4f  kernel_matched(C_dp-B) max=%.4f"
+        % (dec["mesh(C_fsdp-vs-C_dp)"]["max"], dec["kernel_matched(C_dp-vs-B)"]["max"]))
+
+
 def test_dry_run_no_heavy_imports():
   """--dry_run must not import jax/vllm/tunix (CPU boundary)."""
   plan = P.main(["--dry_run"])
@@ -116,13 +139,16 @@ def test_dry_run_no_heavy_imports():
   # colocated dry-run reflects the shared-mesh plan
   cplan = P.main(["--dry_run", "--colocated", "--rollout_mesh_fsdp", "1", "--rollout_mesh_tp", "4"])
   assert cplan["colocated"] is True and cplan["flow"].startswith("COLOCATED")
-  print("  [dry_run] PASS  args+plan built (disaggregated + colocated), no jax/vllm/tunix import")
+  aplan = P.main(["--dry_run", "--sharding_ablation"])
+  assert aplan["sharding_ablation"] is True
+  print("  [dry_run] PASS  args+plan built (disaggregated + colocated + sharding_ablation), no heavy import")
 
 
 if __name__ == "__main__":
-  print("Running probe wiring tests (disaggregated + colocated, tunix/vLLM mocked):")
+  print("Running probe wiring tests (disaggregated + colocated + ablation, tunix/vLLM mocked):")
   test_dry_run_no_heavy_imports()
   test_probe_main_wiring()
   test_mesh_sensitivity_rung()
   test_colocated_wiring()
+  test_sharding_ablation_wiring()
   print("\nALL PASS")
