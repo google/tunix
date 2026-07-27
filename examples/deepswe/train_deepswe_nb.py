@@ -499,7 +499,7 @@ STEP_TIMEOUT_SECS = args.step_timeout_secs
 REWARD_TIMEOUT_SECS = args.reward_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
-KV_CACHE_SIZE = MAX_PROMPT_LENGTH + 128
+KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
