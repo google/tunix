@@ -55,6 +55,17 @@ class ErrorInfo:
 
 
 @dataclasses.dataclass(kw_only=True)
+class Response:
+  """Standard response for generic RPC requests.
+
+  Attributes:
+    error: Structured failure details when the operation failed, else None.
+  """
+
+  error: ErrorInfo | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
 class SamplingParams:
   """Engine-neutral sampling configuration for a generation request.
 
@@ -77,7 +88,7 @@ class SamplingRequest:
     prompt: The source prompt to sample from (formatted string, token array, or
       chat dictionary).
     request_id: Unique identifier for this request, echoed back on the
-      corresponding SamplingResult so callers can correlate responses.
+      corresponding SamplingResponse so callers can correlate responses.
     sampling_params: Optional per-request sampling configuration.
   """
 
@@ -87,7 +98,7 @@ class SamplingRequest:
 
 
 @dataclasses.dataclass(kw_only=True)
-class SamplingResult:
+class SamplingResponse(Response):
   """Serializable result of a single sampling/completion request from a Sampler.
 
   Attributes:
@@ -110,7 +121,6 @@ class SamplingResult:
   )
   logprobs: np.ndarray | None = None
   finish_reason: str = "stop"
-  error: ErrorInfo | None = None
 
   def __post_init__(self):
     if (
@@ -192,7 +202,7 @@ class TokenSegment:
 
 
 @dataclasses.dataclass(kw_only=True)
-class RolloutResult:
+class RolloutResponse(Response):
   """Serializable result of a generation request.
 
   This is the wire-facing counterpart to RolloutRequest (and to the
@@ -222,7 +232,6 @@ class RolloutResult:
   segments: list[TokenSegment] = dataclasses.field(default_factory=list)
   env_reward: float = 0.0
   policy_version: int = 0
-  error: ErrorInfo | None = None
   # TODO(b/532722981): capture rollout metrics, e.g., env time.
 
   @classmethod
@@ -232,8 +241,8 @@ class RolloutResult:
       traj: Trajectory,
       prompt_tokens: np.ndarray,
       policy_version: int,
-  ) -> "RolloutResult":
-    """Constructs a wire-safe RolloutResult from an internal Trajectory.
+  ) -> "RolloutResponse":
+    """Constructs a wire-safe RolloutResponse from an internal Trajectory.
 
     Extracts only the required arrays (tokens, masks, logprobs) from the
     semantic steps, discarding string metadata and unpicklable objects.
@@ -245,7 +254,7 @@ class RolloutResult:
       policy_version: Weight version used to generate the trajectory.
 
     Returns:
-      A wire-safe RolloutResult.
+      A wire-safe RolloutResponse.
     """
     segments = []
     for step in traj.steps:
@@ -335,7 +344,7 @@ class LogprobsRequest:
 
 
 @dataclasses.dataclass(kw_only=True)
-class LogprobsResult:
+class LogprobsResponse(Response):
   """Per-token log-probabilities for a LogprobsRequest.
 
   Attributes:
@@ -348,7 +357,6 @@ class LogprobsResult:
   request_id: str
   per_token_logps: np.ndarray
   model_version: int = 0
-  error: ErrorInfo | None = None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -369,7 +377,7 @@ class ScoreRequest:
 
 
 @dataclasses.dataclass(kw_only=True)
-class ScoreResult:
+class ScoreResponse(Response):
   """Scalar scores for a ScoreRequest.
 
   Attributes:
@@ -382,4 +390,3 @@ class ScoreResult:
   request_id: str
   scores: np.ndarray
   model_version: int = 0
-  error: ErrorInfo | None = None

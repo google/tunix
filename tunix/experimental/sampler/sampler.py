@@ -53,7 +53,7 @@ class Sampler(Protocol):
           | Sequence[Any]
       ),
       **kwargs,
-  ) -> list[datatypes.SamplingResult] | Any:
+  ) -> list[datatypes.SamplingResponse] | Any:
     """Generates completions for a batch of prompt conversations concurrently."""
     ...
 

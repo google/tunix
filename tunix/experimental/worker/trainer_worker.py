@@ -14,7 +14,7 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
-from typing import Any, Callable, List
+from typing import Any, Callable
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
@@ -40,22 +40,25 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer = trainer_factory()
     self._is_running = False
 
-  def initialize(self) -> None:
+  def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
-    pass
+    return datatypes.Response()
 
-  def compile(self, dummy_data: Any) -> None:
+  def compile(self, dummy_data: Any) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     self._trainer.compile(dummy_data)
+    return datatypes.Response()
 
-  def start(self) -> None:
+  def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
     self._is_running = True
+    return datatypes.Response()
 
-  def stop(self) -> None:
+  def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     self._is_running = False
     self._trainer.close()
+    return datatypes.Response()
 
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
@@ -71,29 +74,39 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self
 
-  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
+  def fwd_bwd(
+      self, payload: datatypes.TrainerPayload, **kwargs
+  ) -> datatypes.Response:
     """Executes forward and backward passes."""
     self._trainer.fwd_bwd(payload, **kwargs)
+    return datatypes.Response()
 
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
     return self._trainer.update(**kwargs)
 
-  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
+  def eval_step(
+      self, payload: datatypes.TrainerPayload, **kwargs
+  ) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
     self._trainer.eval_step(payload, **kwargs)
+    return datatypes.Response()
 
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
+  def save_checkpoint(
+      self, metadata: Any, **kwargs
+  ) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._trainer.save_checkpoint(metadata, **kwargs)
+    return datatypes.Response()
 
   def restore_checkpoint(self, **kwargs) -> Any:
     """Restore state from latest checkpoint and return the metadata pytree."""
     return self._trainer.restore_checkpoint(**kwargs)
 
-  def prepare_weight_sync(self, **kwargs) -> None:
+  def prepare_weight_sync(self, **kwargs) -> datatypes.Response:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
     self._trainer.prepare_weight_sync(**kwargs)
+    return datatypes.Response()
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""

@@ -89,21 +89,22 @@ class InferenceWorker(abstract_worker.Worker):
     self._model_version = model_version
     self._chunk_size = chunk_size
 
-  def initialize(self) -> None:
-    pass
+  def initialize(self) -> datatypes.Response:
+    return datatypes.Response()
 
-  def compile(self, dummy_data: Any) -> None:
+  def compile(self, dummy_data: Any) -> datatypes.Response:
     del dummy_data
+    return datatypes.Response()
 
-  def start(self) -> None:
-    pass
+  def start(self) -> datatypes.Response:
+    return datatypes.Response()
 
-  def stop(self) -> None:
-    pass
+  def stop(self) -> datatypes.Response:
+    return datatypes.Response()
 
   def compute_logps(
       self, req: datatypes.LogprobsRequest
-  ) -> datatypes.LogprobsResult:
+  ) -> datatypes.LogprobsResponse:
     """Scores per-token log-probs for a batch under the frozen reference model."""
     try:
       if req.model_role != "reference":
@@ -128,13 +129,13 @@ class InferenceWorker(abstract_worker.Worker):
       logps = batch_utils.apply_chunked(
           _score, self._chunk_size, req.prompt_tokens, req.completion_tokens
       )
-      return datatypes.LogprobsResult(
+      return datatypes.LogprobsResponse(
           request_id=req.request_id,
           per_token_logps=np.asarray(logps, dtype=np.float32),
           model_version=self._model_version,
       )
     except Exception as e:
-      return datatypes.LogprobsResult(
+      return datatypes.LogprobsResponse(
           request_id=req.request_id,
           per_token_logps=np.zeros((0, 0), dtype=np.float32),
           model_version=self._model_version,
@@ -143,7 +144,7 @@ class InferenceWorker(abstract_worker.Worker):
           ),
       )
 
-  def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResult:
+  def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResponse:
     """Scores one scalar per row under a hosted (frozen) reward model."""
     try:
       if req.model_role != "reward":
@@ -166,13 +167,13 @@ class InferenceWorker(abstract_worker.Worker):
       scores_array = np.asarray(scores, dtype=np.float32)
       if scores_array.ndim == 2:
         scores_array = np.squeeze(scores_array, axis=-1)
-      return datatypes.ScoreResult(
+      return datatypes.ScoreResponse(
           request_id=req.request_id,
           scores=scores_array,
           model_version=self._model_version,
       )
     except Exception as e:
-      return datatypes.ScoreResult(
+      return datatypes.ScoreResponse(
           request_id=req.request_id,
           scores=np.zeros((0,), dtype=np.float32),
           model_version=self._model_version,

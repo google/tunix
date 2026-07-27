@@ -22,12 +22,14 @@ pipeline (e.g. TrainerWorker is a wrapper around the Trainer).
 import abc
 from typing import Any
 
+from tunix.experimental.common import datatypes
+
 
 class Worker(abc.ABC):
   """Base interface for all Workers."""
 
   @abc.abstractmethod
-  def initialize(self) -> None:
+  def initialize(self) -> datatypes.Response:
     """Initializes the worker.
 
     Allocates memory, loads model weights, and sets up mesh/sharding
@@ -36,16 +38,16 @@ class Worker(abc.ABC):
     pass
 
   @abc.abstractmethod
-  def compile(self, dummy_data: Any) -> None:
+  def compile(self, dummy_data: Any) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     pass
 
   @abc.abstractmethod
-  def start(self) -> None:
+  def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
     pass
 
   @abc.abstractmethod
-  def stop(self) -> None:
+  def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     pass
