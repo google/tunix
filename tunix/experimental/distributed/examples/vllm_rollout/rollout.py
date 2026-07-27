@@ -26,11 +26,11 @@ import time
 from typing import Callable, Sequence
 import urllib.request
 
+from tunix.experimental.common import stubs
 from tunix.experimental.distributed.runtime.context import ProcessContext
-from tunix.experimental.rollout import sampler
-from tunix.experimental.rollout import stubs
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker
+
 
 
 def run_vllm_server(
@@ -169,7 +169,7 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
     Args:
       vllm_addr: Base HTTP address of the running local vLLM server.
     """
-    sampler_server = sampler.RaidenSamplerServer(
+    sampler_server = stubs.RaidenSamplerServer(
         server_id="vllm-0",
         openai_base_url=f"{vllm_addr}/v1",
         node_id=1,
@@ -177,11 +177,10 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
         model=args.model_name,
     )
     sampler_server.initialize()
-    sampler_client = sampler.LocalSamplerClient(local_server=sampler_server)
 
-    worker_service = rollout_worker.RolloutWorkerService(
+    worker_service = rollout_worker.RolloutWorker(
         worker_id=args.worker_id,
-        sampler_client=sampler_client,
+        sampler=sampler_server,
         env_pool=stubs.StubEnvironmentPool(pool_size=1),
         agent_factory=stubs.StubAgent,
     )

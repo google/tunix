@@ -70,6 +70,19 @@ def _weight_sync_request_dto() -> datatypes.WeightSyncRequest:
   )
 
 
+def _rollout_request_dto() -> datatypes.RolloutRequest:
+  return datatypes.RolloutRequest(
+      request_id="req-123",
+      prompt="Solve 2+2",
+      prompt_id="req-rollout-42",
+      group_id="group-1",
+      generation_kwargs={"max_tokens": 128, "temperature": 0.5},
+      max_turns=5,
+      target_policy_version=3,
+      metadata={"env": "math"},
+  )
+
+
 class WireSerializationTest(absltest.TestCase):
 
   def test_weight_sync_request_round_trips_through_cloudpickle(self):
@@ -81,6 +94,22 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.policy_version, original.policy_version)
     self.assertEqual(restored.source_metadata, original.source_metadata)
     self.assertEqual(restored.extra_config, original.extra_config)
+
+  def test_rollout_request_round_trips_through_cloudpickle(self):
+    original = _rollout_request_dto()
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, original.request_id)
+    self.assertEqual(restored.prompt, original.prompt)
+    self.assertEqual(restored.prompt_id, original.prompt_id)
+    self.assertEqual(restored.group_id, original.group_id)
+    self.assertEqual(restored.generation_kwargs, original.generation_kwargs)
+    self.assertEqual(restored.max_turns, original.max_turns)
+    self.assertEqual(
+        restored.target_policy_version, original.target_policy_version
+    )
+    self.assertEqual(restored.metadata, original.metadata)
 
   def test_sampling_request_round_trips_through_cloudpickle(self):
     original = _sampling_request_dto()
@@ -177,8 +206,9 @@ class WireSerializationTest(absltest.TestCase):
     )
     request = datatypes.RolloutRequest(
         request_id="req-1",
-        prompt_text="hello",
-        sampling_params=datatypes.SamplingParams(max_tokens=10),
+        prompt_id="prompt-1",
+        prompt="hello",
+        generation_kwargs={"max_tokens": 10},
     )
 
     result = datatypes.RolloutResponse.from_trajectory(
