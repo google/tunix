@@ -480,8 +480,8 @@ class HyperParameters:
     supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
-    # TODO: support gcs, internal and maxtext for gemma4.
-    supported_sources["gemma4"] = ["kaggle", "huggingface"]
+    # TODO: support maxtext for gemma4.
+    supported_sources["gemma4"] = ["kaggle", "huggingface", "gcs", "internal"]
 
     if model_name.startswith(("gemma4", "gemma-4")):
       model_family = "gemma4"
