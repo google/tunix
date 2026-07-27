@@ -326,7 +326,7 @@ tunix_root = os.path.join(workdir, "tunix")
 pathways_root = os.path.join(workdir, "pathways-utils")
 r2egym_root = os.path.join(workdir, "r2egym")
 
-for root in [workdir, tunix_root, pathways_root, r2egym_root]:
+for root in [workdir, pathways_root, r2egym_root]:
   if root not in sys.path:
     sys.path.insert(0, root)
 
