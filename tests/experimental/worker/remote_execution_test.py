@@ -19,6 +19,7 @@ import contextlib
 import socket
 import threading
 import time
+from typing import Any, Optional
 from absl.testing import absltest
 import portpicker
 from tunix.experimental.worker import remote_execution as remote_lib
@@ -120,6 +121,33 @@ def background_server(engine, port):
     loop.close()
 
 
+def create_in_process_handle(
+    engine: Any,
+) -> remote_lib.InProcessActorHandle:
+  """Helper creating an InProcessActorHandle bound to an InProcessRemoteExecutionServer."""
+  server = remote_lib.InProcessRemoteExecutionServer(engine)
+  return remote_lib.InProcessActorHandle(server)
+
+
+@contextlib.asynccontextmanager
+async def running_grpc_server(
+    engine: Any, default_timeout_s: Optional[float] = remote_lib.DEFAULT_TIMEOUT_S
+):
+  """Async context manager managing lifecycle of a GrpcRemoteExecutionServer and handle."""
+  port = portpicker.pick_unused_port()
+  server = remote_lib.GrpcRemoteExecutionServer(engine)
+  await server.start_serving_async(port=port)
+  handle = remote_lib.GrpcRemoteActorHandle(
+      target_address=f"grpc://localhost:{port}",
+      default_timeout_s=default_timeout_s,
+  )
+  try:
+    yield server, handle
+  finally:
+    await handle.close()
+    await server.stop_serving()
+
+
 class _LockReturner:
 
   def get(self):
@@ -143,9 +171,7 @@ class RemoteExecutionTest(absltest.TestCase):
     req = remote_lib.ExecutionRequest()
     self.assertEqual(req.method_name, "__call__")
 
-    engine = StubWorkerEngine("actor_call")
-    server = remote_lib.InProcessRemoteExecutionServer(engine)
-    handle = remote_lib.InProcessActorHandle(server)
+    handle = create_in_process_handle(StubWorkerEngine("actor_call"))
 
     res = handle.submit()
     self.assertEqual(
@@ -155,8 +181,7 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_actor_handle_sync_and_async_invocation(self):
     async def _run_test():
       engine = StubWorkerEngine("actor_01", latency=0.01)
-      server = remote_lib.InProcessRemoteExecutionServer(engine)
-      handle = remote_lib.InProcessActorHandle(server)
+      handle = create_in_process_handle(engine)
 
       # Test async execution via asubmit
       res = await handle.asubmit("compute_trajectory", "prompt_a", turns=2)
@@ -502,6 +527,104 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_server_side_queue_and_polling_in_process(self):
+    async def _run():
+      engine = StubWorkerEngine("async_worker", latency=0.02)
+      handle = create_in_process_handle(engine)
+
+      task_id = await handle.dispatch_task(
+          "compute_trajectory", "prompt_async", turns=2
+      )
+      self.assertTrue(task_id.startswith("task_"))
+
+      # Poll response queue asynchronously
+      resp = await handle.poll_responses(timeout_s=1.0)
+      self.assertIsNotNone(resp)
+      self.assertEqual(
+          resp.unwrap(),
+          "[async_worker] Trajectory for prompt prompt_async (2 turns)",
+      )
+
+    asyncio.run(_run())
+
+  def test_grpc_dispatch_task_and_long_polling(self):
+    """Verifies dispatch_task and poll_responses over real gRPC TCP channels."""
+
+    async def _run_test():
+      engine = StubWorkerEngine("grpc_async_worker", latency=0.05)
+      async with running_grpc_server(engine) as (_, handle):
+        task_id = await handle.dispatch_task(
+            "compute_trajectory", "prompt_grpc_async", turns=3
+        )
+        self.assertTrue(task_id.startswith("task_"))
+
+        # Long-poll response queue over gRPC
+        resp = await handle.poll_responses(timeout_s=2.0)
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp.unwrap(),
+            "[grpc_async_worker] Trajectory for prompt prompt_grpc_async (3"
+            " turns)",
+        )
+
+    asyncio.run(_run_test())
+
+  def test_as_completed_stream_with_none_results(self):
+    """Verifies as_completed_stream handles tasks returning None without deadlocking."""
+
+    class NoneWorker:
+
+      def void_task(self) -> None:
+        return None
+
+    async def _run():
+      handle = create_in_process_handle(NoneWorker())
+      pool = remote_lib.RoutingActorPool([handle])
+
+      tasks = [("void_task", (), {}), ("void_task", (), {})]
+      results = []
+      async for res in pool.as_completed_stream(tasks):
+        results.append(res)
+
+      self.assertEqual(results, [None, None])
+
+    asyncio.run(_run())
+
+  def test_polling_timeout_returns_none(self):
+    """Verifies poll_responses(timeout_s=0.0) and 0.01 return None when queue is empty."""
+
+    async def _run():
+      engine = StubWorkerEngine("slow_worker", latency=2.0)
+      # Test in-process handle (QueueEmpty via get_nowait)
+      handle_inproc = create_in_process_handle(engine)
+      await handle_inproc.dispatch_task("compute_trajectory", "p1")
+      self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.0))
+      self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.01))
+
+      # Test over real gRPC TCP channels
+      async with running_grpc_server(engine) as (_, handle_grpc):
+        await handle_grpc.dispatch_task("compute_trajectory", "p2")
+        self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.0))
+        self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.01))
+
+    asyncio.run(_run())
+
+  def test_background_task_exception_propagation(self):
+    """Verifies exceptions raised during background task execution propagate to client stream."""
+
+    async def _run():
+      engine = StubWorkerEngine("crashing_worker", latency=0.01)
+      engine.pause()
+      handle = create_in_process_handle(engine)
+      pool = remote_lib.RoutingActorPool([handle])
+
+      tasks = [("compute_trajectory", ("failing_prompt",), {})]
+      with self.assertRaisesRegex(RuntimeError, "currently paused"):
+        async for _ in pool.as_completed_stream(tasks):
+          pass
+
+    asyncio.run(_run())
+
   def test_execution_response_error_round_trips(self):
     resp = remote_lib.ExecutionResponse(
         error_message="worker 1 is paused!",
@@ -611,50 +734,54 @@ class RemoteExecutionTest(absltest.TestCase):
       response_bytes = await server._handle_execute(request_bytes, context=None)
 
       resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
-      self.assertEqual(resp.error_type, "ResultSerializationError")
+      self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
+      self.assertIsNotNone(resp.error_message)
+
+    asyncio.run(_run())
+
+  def test_serialize_returns_error_for_unserializable_result(self):
+    resp = remote_lib.ExecutionResponse(result=_LockReturner().get())
+    payload = resp.serialize()
+    restored = remote_lib.ExecutionResponse.deserialize(payload)
+    self.assertEqual(restored.error_type, "ExecutionResponseSerializationError")
+    self.assertIn("failed to serialize result", restored.error_message)
+
+  def test_handle_poll_responses_returns_error_for_unserializable_result(self):
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
+      request = remote_lib.ExecutionRequest("get")
+      await server.dispatch_task(request)
+
+      response_bytes = await server._handle_poll_responses(b"", context=None)
+
+      resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
+      self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
       self.assertIsNotNone(resp.error_message)
 
     asyncio.run(_run())
 
   def test_grpc_large_payload_round_trips(self):
     async def _run():
-      port = portpicker.pick_unused_port()
-      server = remote_lib.GrpcRemoteExecutionServer(
-          StubWorkerEngine("worker_1")
-      )
-      await server.start_serving_async(port=port)
-      try:
-        handle = remote_lib.GrpcRemoteActorHandle(
-            target_address=f"grpc://localhost:{port}"
-        )
+      engine = StubWorkerEngine("worker_1")
+      async with running_grpc_server(engine) as (_, handle):
         # 8 MiB exceeds gRPC's default ~4 MiB message cap.
         blob = "x" * (8 * 1024 * 1024)
         echoed = await handle.asubmit("kv_cache_aware", blob)
         self.assertTrue(echoed.endswith(blob))
         self.assertGreater(len(echoed), len(blob))
-        await handle.close()
-      finally:
-        await server.stop_serving()
 
     asyncio.run(_run())
 
   def test_grpc_asubmit_times_out_on_slow_worker(self):
     async def _run():
-      port = portpicker.pick_unused_port()
-      server = remote_lib.GrpcRemoteExecutionServer(
-          StubWorkerEngine("slow_worker", latency=2.0)
-      )
-      await server.start_serving_async(port=port)
-      try:
-        handle = remote_lib.GrpcRemoteActorHandle(
-            target_address=f"grpc://localhost:{port}", default_timeout_s=0.3
-        )
+      engine = StubWorkerEngine("slow_worker", latency=2.0)
+      async with running_grpc_server(engine, default_timeout_s=0.3) as (
+          _,
+          handle,
+      ):
         with self.assertRaises(Exception) as cm:
           await handle.asubmit("compute_trajectory", "p", turns=1)
         self.assertIn("deadline", str(cm.exception).lower())
-        await handle.close()
-      finally:
-        await server.stop_serving()
 
     asyncio.run(_run())
 
