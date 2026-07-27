@@ -25,8 +25,8 @@ import threading
 import time
 from typing import Any, Sequence
 
+from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime.context import ProcessContext
-from tunix.experimental.rollout import data_types
 from tunix.experimental.worker import remote_execution
 
 
@@ -154,7 +154,8 @@ def orchestrator_main(
 
   def generation_task(request_id: int) -> None:
     rollout_spec, rollout_handle = pick_rollout_worker()
-    request = data_types.RequestInput(
+    request = datatypes.RolloutRequest(
+        request_id=f"req_{request_id}",
         prompt_id=f"long_q_{request_id}",
         prompt=(
             "What is 123 + 456? Please explain each step in detail and verify"

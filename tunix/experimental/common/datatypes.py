@@ -159,13 +159,28 @@ class RolloutRequest:
   Attributes:
     request_id: Unique identifier for this request, echoed back on the
       corresponding result so callers can correlate and de-duplicate responses.
-    prompt_text: The prompt to generate from.
-    sampling_params: Sampling configuration for the generation.
+    prompt: The prompt to generate from (e.g. formatted string, token array, or
+      chat dictionary).
+    prompt_id: Unique identifier for this prompt within a task or dataset.
+    group_id: Optional identifier for grouping related rollout requests (e.g.
+      for GRPO).
+    generation_kwargs: Additional keyword arguments for generation (e.g.
+      sampling parameters like max_tokens and temperature).
+    max_turns: Maximum number of conversation turns for environment interaction.
+    target_policy_version: Policy model version identifier to use for rollout
+      generation.
+    metadata: Optional dictionary for storing arbitrary request metadata or
+      tracking information.
   """
 
-  request_id: str
-  prompt_text: str
-  sampling_params: SamplingParams
+  request_id: str = ""
+  prompt: Any = ""
+  prompt_id: str = "default_prompt"
+  group_id: str = ""
+  generation_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
+  max_turns: int = 10
+  target_policy_version: int = 0
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(kw_only=True)
