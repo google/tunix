@@ -48,6 +48,12 @@ def _parse_args(argv=None):
   p.add_argument("--rollout_mesh_tp", type=int, default=8, help="vLLM tensor_parallel")
   p.add_argument("--train_mesh_fsdp", type=int, default=8, help="tunix actor fsdp shard")
   p.add_argument("--train_mesh_tp", type=int, default=8, help="tunix actor tensor_parallel")
+  # colocated (Phase 3c Step1, 1-host kernel isolation): vLLM + tunix share ONE mesh, run sequentially.
+  # Removes the mesh confound -> B-vs-C = PURE kernel diff. rollout dims == the single mesh; train dims ignored.
+  p.add_argument("--colocated", action="store_true",
+                 help="vLLM+tunix on the SAME mesh (kernel isolation); sequential, frees vLLM HBM before tunix")
+  p.add_argument("--vllm_server_mode", default="true",
+                 help="'true' = Pathways server driver (256); 'false' = in-process LLM (1-host direct, no Pathways)")
   p.add_argument("--temperature", type=float, default=1.0, help="MUST match rollout+trainer (deepswe=1.0)")
   # dtype fidelity (deepswe train_deepswe_nb.py:251-267 DEFAULTS -- yaml does NOT override):
   #   config_dtype is the COMPUTE dtype (weights downcast to it at matmul, qwen3/model.py:328) -> the
@@ -69,18 +75,30 @@ def _parse_args(argv=None):
 
 
 # ---------------------------------------------------------------- meshes (disaggregated)
-def build_meshes(rollout_fsdp, rollout_tp, train_fsdp, train_tp):
-  """Two PHYSICALLY DISJOINT meshes, mirroring train_deepswe_nb.py:648-654.
+def build_meshes(rollout_fsdp, rollout_tp, train_fsdp, train_tp, colocated=False):
+  """Meshes for vLLM (rollout) and tunix (train).
 
-  rollout_mesh = devices[:R]  (R = rollout_fsdp*rollout_tp)   -> vLLM
-  train_mesh   = devices[R:R+T]  (T = train_fsdp*train_tp)    -> tunix actor
-  On the 256-chip deepswe slice with 8x8+8x8, R=64,T=64 -> 128 used, 128 idle (faithful to prod).
-  Returns (rollout_mesh, train_mesh, devices_list) so a C2 sub-mesh can be carved from train chips.
+  DISAGGREGATED (256, default): two PHYSICALLY DISJOINT meshes, mirroring
+  train_deepswe_nb.py:648-654. rollout=devices[:R], train=devices[R:R+T]. Measures kernel+mesh+decode.
+
+  COLOCATED (1-host kernel isolation, Phase 3c): rollout_mesh IS train_mesh (same devices[:R]).
+  vLLM and tunix run on the SAME chips SEQUENTIALLY -> removes the mesh confound -> B-vs-C = PURE
+  kernel diff. Uses the ROLLOUT dims for the single mesh (e.g. fsdp1xtp4 on 4 chips); train dims ignored.
+
+  Returns (rollout_mesh, train_mesh, devices_list).
   """
   import jax                                                    # lazy
   from jax.sharding import Mesh
   devices = list(jax.devices())
-  R, T = rollout_fsdp * rollout_tp, train_fsdp * train_tp
+  R = rollout_fsdp * rollout_tp
+  if colocated:
+    if R > len(devices):
+      raise ValueError(f"colocated needs R({R}) devices, have {len(devices)}")
+    mesh = Mesh(np.asarray(devices[:R]).reshape(rollout_fsdp, rollout_tp), ("fsdp", "tp"))
+    print(f"[probe] COLOCATED single mesh {mesh.shape} on {R} chips "
+          f"(kernel isolation, no mesh confound; sequential vLLM->tunix)")
+    return mesh, mesh, devices                                 # same mesh object for both roles
+  T = train_fsdp * train_tp
   if R + T > len(devices):
     raise ValueError(f"need R({R})+T({T})={R+T} devices, have {len(devices)}")
   rollout_devices = np.asarray(devices[:R]).reshape(rollout_fsdp, rollout_tp)
@@ -112,7 +130,8 @@ def load_prompt_tokens(dataset, n_prompt, model_path):
 
 # ---------------------------------------------------------------- vLLM (A + B, on rollout_mesh)
 def run_vllm(model_path, rollout_mesh, prompt_ids, n_gen, temperature,
-             hbm_util, max_num_seqs, max_num_batched_tokens, enable_prefix_caching):
+             hbm_util, max_num_seqs, max_num_batched_tokens, enable_prefix_caching,
+             server_mode=True):
   """Real rollout on rollout_mesh: generate n_gen tokens -> (full_tokens, A_decode_logp, sampler).
 
   Mirrors deepswe's vLLM rollout (train_deepswe_nb.py:851-872 rollout_vllm_dict):
@@ -135,7 +154,7 @@ def run_vllm(model_path, rollout_mesh, prompt_ids, n_gen, temperature,
   rollout_dp = int(rollout_mesh.shape["fsdp"])   # vLLM interprets the rollout "fsdp" axis as data_parallel
 
   config = vllm_sampler.VllmConfig(
-      server_mode=True,                # deepswe rollout_vllm_server_mode=True
+      server_mode=server_mode,         # 256: True (Pathways driver); 1-host direct: False (in-process LLM)
       return_logprobs=True,
       init_with_random_weights=False,  # deliberate: probe loads real weights (no training loop to sync)
       tpu_backend_type="jax",
@@ -280,23 +299,31 @@ def decompose(logps):
 # ---------------------------------------------------------------- main
 def main(argv=None):
   args = _parse_args(argv)
+  server_mode = str(args.vllm_server_mode).lower() == "true"
+  if args.colocated:
+    args.mesh_sensitivity = False   # same mesh -> no mesh variation to probe (C2 meaningless)
   plan = {"model": args.model_version, "n_prompt": args.n_prompt, "n_gen": args.n_gen,
+          "colocated": args.colocated,
           "rollout_mesh": f"fsdp{args.rollout_mesh_fsdp}xtp{args.rollout_mesh_tp}",
-          "train_mesh": f"fsdp{args.train_mesh_fsdp}xtp{args.train_mesh_tp}",
+          "train_mesh": ("SAME as rollout (colocated)" if args.colocated
+                         else f"fsdp{args.train_mesh_fsdp}xtp{args.train_mesh_tp}"),
           "temperature": args.temperature, "pairs": args.pairs,
           "mesh_sensitivity": args.mesh_sensitivity,
           "actor_param_dtype": args.param_dtype, "config_dtype": args.config_dtype,
           "vllm": {"hbm_util": args.vllm_hbm_util, "max_num_seqs": args.vllm_max_num_seqs,
                    "max_num_batched_tokens": args.vllm_max_num_batched_tokens,
-                   "enable_prefix_caching": args.enable_prefix_caching, "server_mode": True},
-          "flow": "generate->A(decode@rollout); B(prefill@rollout)+C(compute_per_token_logps@train) on same tokens"}
+                   "enable_prefix_caching": args.enable_prefix_caching, "server_mode": server_mode},
+          "flow": ("COLOCATED: A/B(vLLM)->free HBM->C(tunix) on SAME mesh; B-vs-C = pure kernel"
+                   if args.colocated
+                   else "generate->A(decode@rollout); B(prefill@rollout)+C(compute@train) on same tokens")}
   print("[probe] plan:", json.dumps(plan))
   if args.dry_run:
     print("[probe] --dry_run OK (CPU boundary: jax/vllm/tunix not imported).")
     return plan
 
   rollout_mesh, train_mesh, devices = build_meshes(
-      args.rollout_mesh_fsdp, args.rollout_mesh_tp, args.train_mesh_fsdp, args.train_mesh_tp)
+      args.rollout_mesh_fsdp, args.rollout_mesh_tp, args.train_mesh_fsdp, args.train_mesh_tp,
+      colocated=args.colocated)
   R = args.rollout_mesh_fsdp * args.rollout_mesh_tp
 
   prompt_ids, tok = load_prompt_tokens(args.dataset, args.n_prompt, args.model_path)
@@ -304,19 +331,29 @@ def main(argv=None):
   full_tokens, a_decode_logp, sampler = run_vllm(
       args.model_path, rollout_mesh, prompt_ids, args.n_gen, args.temperature,
       args.vllm_hbm_util, args.vllm_max_num_seqs, args.vllm_max_num_batched_tokens,
-      args.enable_prefix_caching)
+      args.enable_prefix_caching, server_mode=server_mode)
   completion_ids = full_tokens[len(prompt_ids):]
   ncomp = len(completion_ids)
 
-  # Evaluate each source's completion-span logp ONCE (cache) -- the real vLLM prefill /
-  # tunix forward are expensive; the old compare() called each up to 3x per pair.
+  # A, B from vLLM (cache once -- the old compare() re-ran the expensive forward up to 3x/pair).
   logps = {
       "A": np.asarray(a_decode_logp, np.float32),
       "B": vllm_prefill_logp(sampler, full_tokens, ncomp),
-      "C": tunix_forward_logp(args.model_path, args.model_version, train_mesh,
-                              prompt_ids, completion_ids, tok, args.temperature,
-                              args.param_dtype, args.config_dtype),
   }
+  if args.colocated:
+    # COLOCATED: vLLM and tunix share the SAME chips. Free vLLM's HBM (the ~0.6*HBM KV pool +
+    # weights) BEFORE loading tunix on top, else 57GB(vLLM)+32GB(tunix fp32) OOMs a 96GB chip.
+    try:
+      sampler.llm.collective_rpc("delete_kv_cache")   # frees the KV pool (vllm_sampler.py:192)
+    except Exception as e:  # noqa: BLE001
+      print(f"[probe] colocated kv-free warning (continuing): {e}")
+    import gc, jax
+    del sampler
+    gc.collect()
+    jax.clear_caches()
+  logps["C"] = tunix_forward_logp(args.model_path, args.model_version, train_mesh,
+                                  prompt_ids, completion_ids, tok, args.temperature,
+                                  args.param_dtype, args.config_dtype)
   if args.mesh_sensitivity:
     from jax.sharding import Mesh
     train_tp = args.train_mesh_tp

@@ -85,17 +85,44 @@ def test_mesh_sensitivity_rung():
         % dec["tunix_sharding_sensitivity(C-vs-C2)"]["max"])
 
 
+def test_colocated_wiring():
+  """--colocated: build_meshes returns ONE shared mesh; sequential vLLM->free->tunix flow (Phase 3c)."""
+  n_prompt, n_gen = 256, 64
+  full, a, b, c = _mock_logps(n_prompt, n_gen)
+
+  with mock.patch.object(P, "load_prompt_tokens", return_value=(np.arange(n_prompt), FakeTok())), \
+       mock.patch.object(P, "run_vllm", return_value=(full, a, object())), \
+       mock.patch.object(P, "vllm_prefill_logp", return_value=b), \
+       mock.patch.object(P, "tunix_forward_logp", return_value=c):
+    # colocated single mesh fsdp1xtp2 = 2 chips (of the forced 8 CPU devices); server_mode off.
+    rep = P.main(["--colocated", "--rollout_mesh_fsdp", "1", "--rollout_mesh_tp", "2",
+                  "--vllm_server_mode", "false", "--n_prompt", str(n_prompt), "--n_gen", str(n_gen),
+                  "--pairs", "A-vs-C,A-vs-B,B-vs-C", "--out", "/tmp/logp_report_coloc.json"])
+  assert rep["plan"]["colocated"] is True
+  assert "SAME as rollout" in rep["plan"]["train_mesh"]
+  assert rep["plan"]["vllm"]["server_mode"] is False
+  dec = rep["decomposition"]
+  assert dec["additivity_residual_max"] < 1e-5, dec["additivity_residual_max"]
+  assert "tunix_sharding_sensitivity(C-vs-C2)" not in dec  # mesh_sensitivity forced off in colocated
+  print("  [colocated] PASS  single shared mesh, sequential free path, kernel(B-vs-C) max = %.4f"
+        % dec["kernel+mesh(B-vs-C)"]["max"])
+
+
 def test_dry_run_no_heavy_imports():
   """--dry_run must not import jax/vllm/tunix (CPU boundary)."""
   plan = P.main(["--dry_run"])
   assert plan["flow"].startswith("generate->A")
   assert plan["rollout_mesh"] and plan["train_mesh"]
-  print("  [dry_run] PASS  args+plan built (rollout+train mesh), no jax/vllm/tunix import")
+  # colocated dry-run reflects the shared-mesh plan
+  cplan = P.main(["--dry_run", "--colocated", "--rollout_mesh_fsdp", "1", "--rollout_mesh_tp", "4"])
+  assert cplan["colocated"] is True and cplan["flow"].startswith("COLOCATED")
+  print("  [dry_run] PASS  args+plan built (disaggregated + colocated), no jax/vllm/tunix import")
 
 
 if __name__ == "__main__":
-  print("Running probe wiring tests (disaggregated, tunix/vLLM mocked):")
+  print("Running probe wiring tests (disaggregated + colocated, tunix/vLLM mocked):")
   test_dry_run_no_heavy_imports()
   test_probe_main_wiring()
   test_mesh_sensitivity_rung()
+  test_colocated_wiring()
   print("\nALL PASS")
