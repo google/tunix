@@ -46,13 +46,16 @@ NOT the solution. (Root cause class: batch-size-dependent reduction order in **R
 ## What's in this branch
 ```
 scripts/logp_diff/
-  logp_diff_probe.py     # THE probe: real 3-source A/B/C on Qwen3-32B (run this on TPU)
-  logp-diff-probe.yaml   # launch JobSet (adapt instance_type/mesh to your cluster)
+  logp_diff_probe.py     # THE probe: 3-source A/B/C on Qwen3-32B; disaggregated (256) + --colocated (1-host)
+  logp-diff-probe.yaml   # Step 2 launch JobSet (256-chip disaggregated)
+  patch_qwen3.py         # tpu_inference RoPE hot-patch as a file (run inside the container; A/B need it)
   harness.py             # framework-agnostic logp-diff + per-op attribution (CPU-proven)
   sources.py             # Source abstraction + compare()
   toy_qwen3.py           # numpy toy qwen3 (mirrors real structure; harness validation only)
   logp_diff_test.py      # CPU gate: 6 known-answer tests (attribution correctness) — ALL PASS
-  probe_wiring_test.py   # CPU gate: runs probe main() with tunix/vLLM mocked — ALL PASS
+  probe_wiring_test.py   # CPU gate: probe main() with tunix/vLLM mocked, disaggregated + colocated — ALL PASS
+experimental/
+  probe_v5p_1host_docker.sh   # Step 1 launcher: 1-host 4-chip COLOCATED kernel probe (direct, no Pathways)
 ```
 
 ## The experiment: three sources, one run
@@ -103,25 +106,40 @@ standalone isolation for RMSNorm/matmul. Attention: compare **post-softmax/post-
   defaults config.dtype to fp32, so the probe sets it explicitly — don't drop that.
 - **No LoRA**: deepswe `--train_with_lora` default False, not passed → plain qwen3 (C is plain too).
 
-## Run
+## Run — TWO-STEP LADDER (Phase 3c)
 
-**Topology: DISAGGREGATED 256 (mirrors deepswe).** vLLM on rollout_mesh (fsdp8×tp8, chips
-0-63), tunix on train_mesh (fsdp8×tp8, chips 64-127), 128 idle — exactly deepswe's 64+64 split.
+Rationale: kernel alignment (B-vs-C) needs only a SAME-mesh comparison, not disaggregation. So
+do the cheap kernel step on 1 host first, then the expensive mesh step on 256. (Decisions locked
+2026-07-26; see `tasks/logprob_diff_operator_alignment/phase3c.md`.)
 
+**CPU gates first (no TPU — run before either step):**
 ```bash
-# --- on the machine with the repo ---
-git fetch origin yuxzhang/logp-diff-probe
-git reset --hard origin/yuxzhang/logp-diff-probe      # NOT git pull (history is rewritten)
-
-# 1) CPU gates first (no TPU needed — proves harness + disaggregated wiring):
+git fetch origin yuxzhang/logp-diff-probe && git reset --hard origin/yuxzhang/logp-diff-probe  # NOT git pull
 cd scripts/logp_diff
-python3 logp_diff_test.py        # expect ALL 6 PASS   (harness known-answer)
-python3 probe_wiring_test.py     # expect ALL PASS     (2-mesh build on 8 CPU devices, mocked engines)
-python3 logp_diff_probe.py --dry_run   # prints the plan (mesh, dtype, vLLM cfg); imports no jax/vllm/tunix
+python3 logp_diff_test.py        # ALL 6 PASS  (harness known-answer)
+python3 probe_wiring_test.py     # ALL PASS    (disaggregated + COLOCATED wiring, mocked engines)
+python3 logp_diff_probe.py --dry_run --colocated --rollout_mesh_tp=4 --rollout_mesh_fsdp=1
+```
 
-# 2) wire the _REMOTE_VERIFY_ hooks (grep in logp_diff_probe.py). #1 = vLLM confinement (below).
+### Step 1 — 1-host COLOCATED (cheap, pure kernel diff)
+4-chip v5p VM, DIRECT (no Pathways). vLLM(A/B) + tunix(C) share ONE mesh (fsdp1×tp4), run
+SEQUENTIALLY (vLLM → free HBM via `delete_kv_cache` → tunix). No mesh confound → **B-vs-C = pure
+kernel diff** (the Phase 4 fix target), at real Qwen3-32B. Caveat: tp4≠tp8, so the MAGNITUDE may
+differ from Step 2 — this validates the method + attribution, not the final number.
+```bash
+# on a single-host v5p TPU VM (docker preinstalled):
+gcloud auth configure-docker europe-west4-docker.pkg.dev          # one-time
+HF_TOKEN=hf_xxx bash experimental/probe_v5p_1host_docker.sh       # fetches branch, patches RoPE, runs
+# report at /tmp/logp_probe_1host/report.json
+```
+Prereq: Qwen3-32B safetensors at `/mnt/disks/linchai_data/models/Qwen3-32B` on the VM.
+Watch (e2e-only, this is what Step 1 de-risks): `--vllm_server_mode=false` in-process vLLM boots;
+`delete_kv_cache` actually frees HBM; colocated vLLM→tunix hand-off doesn't OOM (57GB→48GB/chip).
 
-# 3) on the cluster: apply the JobSet (256-chip 4x8x8 slice).
+### Step 2 — 256 DISAGGREGATED (mirrors deepswe: kernel + mesh + decode)
+vLLM on rollout_mesh (fsdp8×tp8, chips 0-63), tunix on train_mesh (fsdp8×tp8, chips 64-127),
+128 idle — exactly deepswe's 64+64 split. Reproduces the real A-vs-C ~0.92 + the mesh term.
+```bash
 kubectl apply -f scripts/logp_diff/logp-diff-probe.yaml
 # report lands at gs://yuxzhang-tunix-models/logp-diff/${RUN_TAG}/report.json
 ```
