@@ -20,8 +20,8 @@ import numpy as np
 from tunix.experimental.common import datatypes
 
 
-def _sample_result() -> datatypes.RolloutResult:
-  return datatypes.RolloutResult(
+def _sample_response() -> datatypes.RolloutResponse:
+  return datatypes.RolloutResponse(
       request_id="req-1",
       status="SUCCEEDED",
       prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
@@ -43,8 +43,8 @@ def _sample_result() -> datatypes.RolloutResult:
   )
 
 
-def _sample_dto() -> datatypes.SamplingResult:
-  return datatypes.SamplingResult(
+def _sample_dto() -> datatypes.SamplingResponse:
+  return datatypes.SamplingResponse(
       request_id="sample-req-1",
       text="Hello from Tunix sampler!",
       token_ids=np.array([101, 102, 103], dtype=np.int32),
@@ -98,8 +98,8 @@ class WireSerializationTest(absltest.TestCase):
         original.sampling_params.temperature,
     )
 
-  def test_trajectory_result_round_trips_through_cloudpickle(self):
-    original = _sample_result()
+  def test_trajectory_response_round_trips_through_cloudpickle(self):
+    original = _sample_response()
 
     restored = cloudpickle.loads(cloudpickle.dumps(original))
 
@@ -124,7 +124,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertIsNone(restored.segments[1].logps)
 
   def test_error_result_round_trips(self):
-    result = datatypes.RolloutResult(
+    result = datatypes.RolloutResponse(
         request_id="req-2",
         status="TIMEOUT",
         error=datatypes.ErrorInfo(
@@ -181,7 +181,7 @@ class WireSerializationTest(absltest.TestCase):
         sampling_params=datatypes.SamplingParams(max_tokens=10),
     )
 
-    result = datatypes.RolloutResult.from_trajectory(
+    result = datatypes.RolloutResponse.from_trajectory(
         request_id=request.request_id,
         traj=traj,
         prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
@@ -208,7 +208,7 @@ class WireSerializationTest(absltest.TestCase):
     np.testing.assert_array_equal(result.segments[1].loss_mask, [0])
     self.assertIsNone(result.segments[1].logps)
 
-  def test_sampling_result_round_trips_through_cloudpickle(self):
+  def test_sampling_response_round_trips_through_cloudpickle(self):
     original = _sample_dto()
 
     restored = cloudpickle.loads(cloudpickle.dumps(original))
@@ -220,11 +220,11 @@ class WireSerializationTest(absltest.TestCase):
     np.testing.assert_array_equal(restored.token_ids, original.token_ids)
     np.testing.assert_allclose(restored.logprobs, original.logprobs)
 
-  def test_sampling_result_enforces_shapes(self):
+  def test_sampling_response_enforces_shapes(self):
     with self.assertRaisesRegex(
         ValueError, "logprobs shape .* != token_ids shape"
     ):
-      datatypes.SamplingResult(
+      datatypes.SamplingResponse(
           token_ids=np.array([1, 2, 3]),
           logprobs=np.array([-0.1, -0.2]),
       )
