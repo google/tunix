@@ -20,6 +20,13 @@ import numpy as np
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import rl_orchestrator
 from tunix.rl import function_registry
+from tunix.rl.agentic import agentic_grpo_learner
+
+
+def _grpo_adapter():
+  return algorithm_adapter.GRPOAdapter(
+      agentic_grpo_learner.GRPOConfig(num_generations=2)
+  )
 
 
 class _FakeCluster:
@@ -50,7 +57,7 @@ class _FakeCluster:
 
 def _make(cluster=None, algorithm=None):
   cluster = cluster or _FakeCluster()
-  algorithm = algorithm or algorithm_adapter.GRPOAdapter()
+  algorithm = algorithm or _grpo_adapter()
   return rl_orchestrator.RLOrchestrator(cluster, algorithm), cluster
 
 
@@ -110,7 +117,7 @@ class RlOrchestratorTest(absltest.TestCase):
 
   def test_exposes_cluster_and_algorithm(self):
     cluster = _FakeCluster()
-    algorithm = algorithm_adapter.GRPOAdapter()
+    algorithm = _grpo_adapter()
     orch = rl_orchestrator.RLOrchestrator(cluster, algorithm)
     self.assertIs(orch.cluster, cluster)
     self.assertIs(orch.algorithm, algorithm)

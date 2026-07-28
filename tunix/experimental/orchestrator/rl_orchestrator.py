@@ -123,12 +123,35 @@ class RLOrchestrator:
         micro_batch_size=micro_batch_size,
     )
 
-  # --- Advantage estimation (algorithm-parameterized) -----------------------
+  # --- Algorithm-parameterized building blocks ------------------------------
 
   def compute_advantages(self, rewards: Any, *, num_generations: int) -> Any:
     return self._algorithm.compute_advantages(
         rewards, num_generations=num_generations
     )
+
+  def assemble_train_example(
+      self,
+      prompt_token_lists: Any,
+      completion_token_lists: Any,
+      advantages: Any,
+      *,
+      max_prompt_length: int,
+      max_response_length: int,
+      pad_id: int,
+  ) -> Any:
+    return self._algorithm.assemble_train_example(
+        prompt_token_lists,
+        completion_token_lists,
+        advantages,
+        max_prompt_length=max_prompt_length,
+        max_response_length=max_response_length,
+        pad_id=pad_id,
+    )
+
+  def configure_trainer(self) -> None:
+    """Wires the algorithm's loss/model-input adapter onto the cluster trainer."""
+    self._algorithm.configure_trainer(self._cluster)
 
   # --- Shared state ---------------------------------------------------------
 
