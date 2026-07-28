@@ -128,7 +128,20 @@ arg_parser.add_argument(
     help="'grpo' (per-token PPO) or 'gspo-token' (sequence-mean IS).",
 )
 arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
+# NOTE: this is the budget for the WHOLE episode, not for one turn. The
+# collector stops a trajectory once its cumulative response tokens reach this
+# (trajectory_collect_engine.py:472-478), so it is shared across all
+# --env_max_steps turns. At 2048 over 8 turns a verbose model averages 256
+# tokens per turn and its episodes end on the budget rather than at the goal --
+# which yields reward 0 for every trajectory in a group, and GRPO's group-
+# normalised advantage is then identically zero, so there is nothing to learn
+# from. Raise this, or lower --env_max_steps, so episodes can finish.
 arg_parser.add_argument("--max_response_length", type=int, default=2048)
+# Turns per episode. Also bounds the generated map: the environment sets this
+# as a module global before generating, and the map is re-drawn until the goal
+# is reachable within it (env.py:33,174-175), so every map is solvable in about
+# this many moves.
+arg_parser.add_argument("--env_max_steps", type=int, default=8)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 # No top_p / top_k filter at rollout time. The processed_logprobs returned by
 # the rollout engine apply log_softmax over the filtered logit set; if filters
@@ -619,7 +632,7 @@ grpo_trainer = GRPOLearner(
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,
-    env_kwargs={"max_steps": 8},
+    env_kwargs={"max_steps": args.env_max_steps},
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],

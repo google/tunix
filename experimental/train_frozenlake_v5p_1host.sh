@@ -10,9 +10,10 @@
 # (fsdp 4, tp 1)). Colocation is why ROLLOUT_HBM bounds TOTAL HBM, trainer
 # weights included.
 #
-# The script's own hyperparameters are left alone -- they were tuned for this
-# host. This wrapper only supplies what the script cannot know: the pinned
-# JAX/vLLM versions, a reachable data directory, and the packing switch.
+# The script's hyperparameters are left alone with ONE exception, the episode
+# length -- see MAX_RESPONSE below for the measurement that forced it. Otherwise
+# this wrapper only supplies what the script cannot know: the environment check,
+# a reachable data directory, and the packing switch.
 #
 # THE TWO RUNS (pack vs unpack; the script packs only when told to, so the
 # plain run IS the unpacked baseline):
@@ -22,12 +23,13 @@
 #   MAX_TOKEN_PER_TPU=8192 RUN_TAG=fl_pack \
 #     bash experimental/train_frozenlake_v5p_1host.sh
 #
-# Budget 8192 = 2 maximal sequences (max_prompt 2048 + max_response 2048) per
-# row. Note the measured trade-off (tracing_logs/splash_microbench_RUN1_results
-# .log): splash schedules a row's full causal area whatever it holds, so
-# attention cost tracks rows*len^2 -- 4096 (one maximal sequence, the unpacked
-# row length) minimises it, and each doubling above that doubles the attention
-# work at the same token count.
+# The packing budget must be at least one maximal sequence, MAX_PROMPT +
+# MAX_RESPONSE, and that is also the best value: splash schedules a row's full
+# causal area whatever the row holds, so attention cost tracks rows*len^2 and
+# every doubling above the longest sequence doubles the attention work at the
+# same token count (tracing_logs/splash_microbench_RUN1_results.log). At the
+# 4096+4096 default that lower bound is 8192 -- so if you change the lengths,
+# change this budget with them.
 #
 # Inspect the command without launching (no TPU needed):
 #   DRY_RUN=1 bash experimental/train_frozenlake_v5p_1host.sh
@@ -51,6 +53,17 @@ ROLLOUT_HBM="${ROLLOUT_HBM:-0.2}"          # script default; raise if vLLM OOMs
 MAX_TOKEN_PER_TPU="${MAX_TOKEN_PER_TPU:-0}"       # 0 = packing OFF (baseline); 8192 for the packed arm
 MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # empty = budget-derived
 # Script defaults, tuned for this host -- override only deliberately.
+# Episode length. max_response_length is the budget for the WHOLE episode, not
+# for one turn -- the collector ends a trajectory once its cumulative response
+# tokens reach it, so it is shared across ENV_MAX_STEPS turns. The script's own
+# 2048/8 left ~256 tokens per turn, and a measured 2-batch run ended 3872
+# trajectories on that budget instead of at the goal: every group scored 0, and
+# a GRPO group whose rewards are all equal has zero advantage, so the run had no
+# gradient signal at all. 4096+4096 gives ~512 tokens per turn; lowering
+# ENV_MAX_STEPS is the other lever on the same ratio.
+MAX_PROMPT="${MAX_PROMPT:-4096}"
+MAX_RESPONSE="${MAX_RESPONSE:-4096}"
+ENV_MAX_STEPS="${ENV_MAX_STEPS:-8}"
 BATCH="${BATCH:-64}"
 MINI="${MINI:-64}"
 NUM_GEN="${NUM_GEN:-8}"
@@ -111,12 +124,15 @@ fi
 
 log="$LOG_DIR/${RUN_TAG}.log"
 echo "===== FROZENLAKE[gemma4-e2b] packing=${MAX_TOKEN_PER_TPU} "\
+"len=${MAX_PROMPT}+${MAX_RESPONSE} turns=${ENV_MAX_STEPS} "\
 "batch=${BATCH}/${MINI} num_gen=${NUM_GEN} num_batches=${NUM_BATCHES} "\
 "(log: $log) ====="
 
 cmd=(python3 -X faulthandler -u examples/frozenlake/train_frozenlake.py
      --batch_size "$BATCH" --mini_batch_size "$MINI"
      --num_generations "$NUM_GEN" --num_batches "$NUM_BATCHES"
+     --max_prompt_length "$MAX_PROMPT" --max_response_length "$MAX_RESPONSE"
+     --env_max_steps "$ENV_MAX_STEPS"
      --rollout_vllm_hbm_utilization "$ROLLOUT_HBM"
      "${pack_args[@]}")
 
