@@ -36,14 +36,15 @@ fi
 
 # arm = "name GRAD_ACCUM PROMOTE_FP32"
 run_arm() {
-  local name="$1" grad_accum="$2" promote="$3"
+  local name="$1" grad_accum="$2" promote="$3" alloc="${4:-1}"
   local out="$XPROF_DIR/$name"
   echo
-  echo "===== [$name] grad_accum=$grad_accum promote=$promote -> $out ====="
+  echo "===== [$name] grad_accum=$grad_accum promote=$promote alloc_accum=$alloc -> $out ====="
   # PREALLOCATE=false so the allocator sizes on demand and the xprof memory
   # profile reflects real peak HBM instead of the preallocated pool.
   XLA_PYTHON_CLIENT_PREALLOCATE=false \
   PROMOTE_FP32="$promote" \
+  ALLOC_ACCUM="$alloc" \
   PROFILE_XPROF="$out" \
   PYTHONPATH="$TUNIX_DIR:${PYTHONPATH:-}" \
   PYTHONUNBUFFERED=1 \
@@ -56,14 +57,16 @@ run_arm() {
   echo "===== [$name] done (exit=${PIPESTATUS[0]}) ====="
 }
 
-run_arm optax            optax  1
-run_arm stream           stream 1
-run_arm stream_nopromote stream 0
+#         name              grad_accum promote alloc_accum
+run_arm   optax             optax      1       1
+run_arm   stream            stream     1       1
+run_arm   stream_nopromote  stream     0       1
+run_arm   stream_lean       stream     0       0   # both fixes: bf16 moments + no accumulator alloc
 
 echo
 echo "################ SUMMARY ################"
 echo "xprof traces:"
-for name in optax stream stream_nopromote; do
+for name in optax stream stream_nopromote stream_lean; do
   echo "  $name -> $XPROF_DIR/$name"
 done
 echo "Load in memory_viewer (HBM peak) and trace_viewer (update-op fusion)."

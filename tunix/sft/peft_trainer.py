@@ -195,9 +195,18 @@ class GradientAccumulator(nnx.Module):
     sizes.
   """
 
-  def __init__(self, model: nnx.Module, wrt: type[nnx.Variable]):
+  def __init__(
+      self, model: nnx.Module, wrt: type[nnx.Variable], allocate_grads: bool = True
+  ):
     state = nnx.state(model, wrt)
-    self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    if allocate_grads:
+      self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    else:
+      # ABLATION (perf-regression-wip): skip the full grad-tree allocation. At
+      # accumulation depth 1 the fast path never reads the accumulator, so this
+      # reclaims ~one bf16 weight tree of HBM. Only valid when the accumulator
+      # is genuinely unused (depth-1, non-packing).
+      self.grads = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
   def add(self, grads: Any, denom: jax.Array | None = None):
@@ -336,7 +345,17 @@ class PeftTrainer:
       # cost. Default "1" preserves production behavior.
       if os.environ.get("PROMOTE_FP32", "1") == "1":
         _promote_opt_state_floats_to_float32(self.optimizer)
-      self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
+      # ABLATION (perf-regression-wip): ALLOC_ACCUM=0 skips the accumulator's
+      # grad-tree allocation when it is unused (depth-1, non-packing), to
+      # measure the HBM it holds. Default "1" preserves production behavior.
+      _alloc_accum = not (
+          os.environ.get("ALLOC_ACCUM", "1") == "0"
+          and self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+          and self.config.max_seq_token_per_tpu is None
+      )
+      self.grad_accumulator = GradientAccumulator(
+          self.model, wrt_target, allocate_grads=_alloc_accum
+      )
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
