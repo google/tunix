@@ -8,6 +8,7 @@ import faulthandler
 import json
 import logging
 import os
+import pprint
 import signal
 import sys
 
@@ -23,6 +24,7 @@ from kubernetes import client, config as k8s_config
 import numpy as np
 import optax
 from orbax import checkpoint as ocp
+from pydantic import ValidationError
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
@@ -48,9 +50,13 @@ parser.add_argument(
     default="huggingface",
     choices=["huggingface", "maxtext"],
 )
-parser.add_argument("--model_absolute_path", type=str, default=None)
+parser.add_argument(
+    "--model_absolute_path",
+    type=str,
+    default=None,
+)
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--model_version", type=str, default="Qwen3-32B")
+parser.add_argument("--model_version", type=str, default="Qwen/Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--dataset_path", type=str, default=None)
 
@@ -251,7 +257,12 @@ MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
 
-# Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector.
+# Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes
+# nodeSelector.
+# This is required because r2egym hardcodes the CPU nodepool name (using
+# Karpenter bigcpu-standby), which does not exist in our GKE cluster. We
+# override it here to match the nodepool configured via the
+# --node_selector_val flag.
 def patch_kubernetes_runtime():
   try:
     from r2egym.agenthub.runtime.docker import DockerRuntime
@@ -676,6 +687,8 @@ total_devices = len(devices)
 # Each explicitly-provided dim becomes an axis in the mesh; unspecified dims are
 # dropped (not defaulted to 1), so passing only --rollout_mesh_fsdp yields a 1D mesh.
 # If nothing is provided, fall back to the split-fraction heuristic (2D: fsdp+tp).
+tp_axis_name = "tensor" if MODEL_SOURCE == "maxtext" else "tp"
+
 rollout_fsdp = args.rollout_mesh_fsdp
 rollout_tp = args.rollout_mesh_tp
 if rollout_fsdp is not None or rollout_tp is not None:
@@ -683,12 +696,12 @@ if rollout_fsdp is not None or rollout_tp is not None:
   if rollout_fsdp is not None:
     rollout_dims.append(("fsdp", rollout_fsdp))
   if rollout_tp is not None:
-    rollout_dims.append(("tp", rollout_tp))
+    rollout_dims.append((tp_axis_name, rollout_tp))
 else:
   num_rollout_devices = int(total_devices * args.rollout_split_fraction)
   rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
   rollout_fsdp = num_rollout_devices // rollout_tp
-  rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+  rollout_dims = [("fsdp", rollout_fsdp), (tp_axis_name, rollout_tp)]
 num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 
 # 2. Resolve Train Mesh Dimensions
@@ -703,14 +716,14 @@ if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
   train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
   if train_sp is not None:
     train_dims.append(("sp", train_sp))
-  train_dims.append(("tp", train_tp if train_tp is not None else 1))
+  train_dims.append((tp_axis_name, train_tp if train_tp is not None else 1))
 else:
   num_train_devices = total_devices - num_rollout_devices
   train_fsdp = int(
       np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
   )
   train_tp = num_train_devices // train_fsdp
-  train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+  train_dims = [("fsdp", train_fsdp), (tp_axis_name, train_tp)]
 num_train_devices = int(np.prod([d for _, d in train_dims]))
 
 # 3. Sanity Check
@@ -855,13 +868,15 @@ sglang_jax_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
+    "rollout_vllm_model_version": (
+        tokenizer_path if MODEL_SOURCE == "maxtext" else MODEL_PATH
+    ),
     "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
     "rollout_vllm_reshard_chunk_size": VLLM_RESHARD_CHUNK_SIZE,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
-    "tensor_parallel_size": rollout_mesh.shape.get("tp", 1),
+    "tensor_parallel_size": rollout_mesh.shape.get(tp_axis_name, 1),
     "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
@@ -869,6 +884,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": True,
+        "tokenizer": tokenizer_path,
     },
 }
 
@@ -892,12 +908,27 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
+role_to_logical_axis_rule = None
+logical_rules = getattr(
+    getattr(getattr(qwen_reference, "base", None), "config", None),
+    "logical_axis_rules",
+    None,
+)
+if logical_rules:
+  print(f"Configuring role_to_logical_axis_rule with: {logical_rules}")
+  role_to_logical_axis_rule = {
+      rl_cluster_lib.Role.ACTOR: logical_rules,
+      rl_cluster_lib.Role.REFERENCE: logical_rules,
+      rl_cluster_lib.Role.ROLLOUT: logical_rules,
+  }
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: train_mesh,
         rl_cluster_lib.Role.REFERENCE: train_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
+    role_to_logical_axis_rule=role_to_logical_axis_rule,
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
@@ -917,12 +948,17 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
-rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen_actor,
-    reference=qwen_reference,
-    tokenizer=tokenizer,
-    cluster_config=cluster_config,
-)
+try:
+  rl_cluster = rl_cluster_lib.RLCluster(
+      actor=qwen_actor,
+      reference=qwen_reference,
+      tokenizer=tokenizer,
+      cluster_config=cluster_config,
+  )
+except ValidationError as e:
+  print("Failed to initialize RLCluster due to ValidationError:", flush=True)
+  pprint.pprint(e.errors())
+  raise
 
 
 # %%
@@ -961,12 +997,11 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
+        "verbose": True,
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
-
-
 
 
 try:
