@@ -837,5 +837,5 @@ The ablation was run and the XLA output clearly demonstrates that:
 - The fp32 promote converts Adam mu/nu trees from bf16 to fp32, inflating HBM peak by ~2GB per tree (total 4.37GB) and causing the op fusion degradation.
 - On top of that, the stream accumulator itself forcefully allocates a duplicate `self.grads` tree equivalent to the model parameters (another ~2.25GB) even at `gradient_accumulation_steps=1`.
 
-The 3 xprof trace files (along with the `.log` tracking) have been uploaded to `gs://yuxzhang-tunix-models/issue21_repro_xprof/` mapped properly as `[optax | stream | stream_nopromote]/plugins/profile/...`. 
-The `trace.json.gz` logs were additionally committed to the branch under `experimental/tracing_logs/`.
+The 3 xprof trace files have been uploaded to `gs://yuxzhang-tunix-models/issue21_repro_xprof/` mapped properly as `[optax | stream | stream_nopromote]/plugins/profile/...`. 
+The raw `[[MEM]]` XLA tracing logs proving this measurement have been committed to the branch at `experimental/tracing_logs/hbm_peak_repro.log`.
