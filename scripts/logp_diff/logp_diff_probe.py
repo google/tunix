@@ -72,6 +72,12 @@ def _parse_args(argv=None):
   p.add_argument("--sharding_ablation", action="store_true",
                  help="Phase 3d: also run tunix under DP (is_sampling, =rollout layout) on same tokens; "
                       "adds mesh(C_fsdp-vs-C_dp) + kernel_matched(C_dp-vs-B) to split mesh vs kernel")
+  # Phase 3d BATCH-VARIANCE (Table A): fixed real workload, vary batch, measure if seq0's logp changes.
+  p.add_argument("--load_tokens", default="",
+                 help="path to a FIXED workload .npz ({tokens:[N,seq]} from build_workload.py); reuse for reproducibility")
+  p.add_argument("--batch_variance", default="",
+                 help="Phase 3d Table A: comma batch sizes e.g. '1,4,16,64,128'. Runs tunix forward of seq0 at "
+                      "each batch B (seq0 + fillers from --load_tokens), reports Delta(logp@B - logp@1) = batch variance")
   p.add_argument("--out", default="gs://yuxzhang-tunix-models/logp-diff/report.json")
   p.add_argument("--dry_run", action="store_true")
   return p.parse_args(argv)
@@ -311,6 +317,81 @@ def decompose(logps):
   return out
 
 
+# ---------------------------------------------------------------- batch variance (Phase 3d Table A)
+def run_batch_variance(args):
+  """Measure tunix's BATCH VARIANCE: does seq0's per-token logp change as the batch size grows?
+
+  Fixed real workload (--load_tokens). For each batch B: forward [seq0, filler_1..filler_{B-1}]
+  and extract seq0's logp. Math says seq0's logp is batch-independent (per-sequence forward), so any
+  Delta(logp@B - logp@1) > 0 is PURE batch variance (float non-assoc + batch-dependent reduction).
+  Loads the tunix model ONCE, loops B (no per-B reload). tunix column of Table A.
+  """
+  import jax, jax.numpy as jnp
+  import numpy as np
+  from flax import nnx
+  from transformers import AutoTokenizer
+  from tunix.models.automodel import create_model_from_safe_tensors, call_model_config
+  from tunix.rl import common
+
+  wl = np.load(args.load_tokens)["tokens"]              # [N, seq]
+  N, seq = wl.shape
+  n_gen = args.n_gen
+  prompt_len = seq - n_gen
+  batch_sizes = [int(x) for x in args.batch_variance.split(",")]
+  if max(batch_sizes) > N:
+    raise ValueError(f"batch {max(batch_sizes)} > workload N={N}; build a bigger workload")
+
+  rollout_mesh, _, _ = build_meshes(args.rollout_mesh_fsdp, args.rollout_mesh_tp,
+                                    args.train_mesh_fsdp, args.train_mesh_tp, colocated=True)
+  tok = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True, trust_remote_code=True)
+  pad_id = tok.pad_token_id if tok.pad_token_id is not None else 0
+  eos_id = tok.eos_token_id
+
+  # load tunix model ONCE (train layout; sharding is fixed, batch is the only variable)
+  cfg = call_model_config(args.model_version)
+  cfg.dtype = getattr(jnp, _DTYPE_MAP[args.config_dtype])
+  _SC = type(cfg.shd_config)
+  cfg.shd_config = _SC.get_default_sharding(is_sampling=False)   # FSDP+TP train layout
+  model = create_model_from_safe_tensors(args.model_version, args.model_path, cfg, rollout_mesh,
+                                          dtype=getattr(jnp, _DTYPE_MAP[args.param_dtype]))
+  graphdef, state = nnx.split(model)
+
+  seq0_logp = {}
+  for B in batch_sizes:
+    pb = jnp.asarray(wl[:B, :prompt_len])
+    cb = jnp.asarray(wl[:B, prompt_len:])
+    with rollout_mesh:
+      lp = common.compute_per_token_logps(graphdef, state, prompt_tokens=pb, completion_tokens=cb,
+                                          pad_id=pad_id, eos_id=eos_id, stop_gradient=True,
+                                          return_logits=False, temperature=args.temperature)
+    seq0_logp[B] = np.asarray(jax.device_get(lp))[0]            # seq0's per-token logp [n_gen]
+    print(f"[batch_variance] B={B:<4} B*seq={B*seq:<8} seq0 logp mean={seq0_logp[B].mean():.5f}")
+
+  base = seq0_logp[batch_sizes[0]]
+  table = {}
+  for B in batch_sizes:
+    d = np.abs(seq0_logp[B].astype(np.float64) - base.astype(np.float64))
+    table[B] = {"B_times_seq": int(B * seq), "max": float(d.max()), "mean": float(d.mean()), "n": int(d.size)}
+  report = {"plan": {"mode": "batch_variance", "model": args.model_version, "seq": int(seq),
+                     "n_gen": n_gen, "batch_sizes": batch_sizes,
+                     "mesh": f"fsdp{args.rollout_mesh_fsdp}xtp{args.rollout_mesh_tp}",
+                     "tunix_sharding": "fsdp", "workload": args.load_tokens},
+            "batch_variance_tunix": table,
+            "note": "Delta = |seq0 logp @B - @batch_sizes[0]|; >0 = batch variance. B*seq = total tokens in the forward."}
+  print("[probe] batch_variance report:", json.dumps(report, indent=2, default=float))
+  _write_report(args.out, report)
+  return report
+
+
+def _write_report(out, report):
+  if out.startswith("gs://"):
+    from etils import epath
+    epath.Path(out).write_text(json.dumps(report, indent=2, default=float))
+  else:
+    with open(out, "w") as f:
+      json.dump(report, f, indent=2, default=float)
+
+
 # ---------------------------------------------------------------- main
 def main(argv=None):
   args = _parse_args(argv)
@@ -331,10 +412,20 @@ def main(argv=None):
           "flow": ("COLOCATED: A/B(vLLM)->free HBM->C(tunix) on SAME mesh; B-vs-C = pure kernel"
                    if args.colocated
                    else "generate->A(decode@rollout); B(prefill@rollout)+C(compute@train) on same tokens")}
+  if args.batch_variance:
+    plan["mode"] = "batch_variance"
+    plan["batch_sizes"] = args.batch_variance
+    plan["workload"] = args.load_tokens
   print("[probe] plan:", json.dumps(plan))
   if args.dry_run:
     print("[probe] --dry_run OK (CPU boundary: jax/vllm/tunix not imported).")
     return plan
+
+  # Phase 3d Table A: batch-variance mode (fixed workload, vary batch) short-circuits the A/B/C flow.
+  if args.batch_variance:
+    if not args.load_tokens:
+      raise ValueError("--batch_variance requires --load_tokens (a fixed workload .npz)")
+    return run_batch_variance(args)
 
   rollout_mesh, train_mesh, devices = build_meshes(
       args.rollout_mesh_fsdp, args.rollout_mesh_tp, args.train_mesh_fsdp, args.train_mesh_tp,
