@@ -13,7 +13,7 @@
 # limitations under the License.
 """Common RL helper classes and functions."""
 
-import functools
+from functools import partial  # pylint: disable=g-importing-member
 import inspect
 from typing import Any, Iterable
 
@@ -79,8 +79,8 @@ class RepeatIterable(Iterable[Any]):
 
     # Slice the rollout batch into mini-batches.
     for i in range(num_mini_batches):
-      start = i * self._mini_batch_size  # pyrefly: ignore[unsupported-operation]
-      end = start + self._mini_batch_size  # pyrefly: ignore[unsupported-operation]
+      start = i * self._mini_batch_size
+      end = start + self._mini_batch_size
       batch_indices = shuffled_indices[start:end]
 
       mini_batch = jtu.tree_map(
@@ -213,7 +213,7 @@ def get_per_token_logps(
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@functools.partial(jax.jit, static_argnames=("pad_id", "eos_id"))
+@partial(jax.jit, static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
@@ -274,28 +274,7 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask, input_seg_ids
 
 
-@functools.cache
-def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
-  """Determines if a class' call function contains a target argument and caches the result."""
-
-  try:
-    sig = inspect.signature(target_cls.__call__)
-    return (target_arg in sig.parameters) or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-  except Exception:
-    return False
-
-
-def model_call_contains(model, target_arg: str) -> bool:
-  """Determines if a model's call function contains a target argument"""
-
-  target_obj = model.transformer if hasattr(model, "transformer") else model
-
-  return _call_contains_by_type(type(target_obj), target_arg)
-
-
-@functools.partial(
+@partial(
     jax.jit,
     static_argnames=(
         "pad_id",
@@ -387,7 +366,15 @@ def compute_per_token_logps(
   # precedence; otherwise we pass the per-position non-pad mask derived in
   # ``process_ids`` so flash-attention variants that lack a separate
   # padding-mask input still skip pad positions.
-  if model_call_contains(model, "segment_ids"):
+  try:
+    sig = inspect.signature(model.__call__)
+    has_segment_ids = ("segment_ids" in sig.parameters) or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+  except Exception:
+    has_segment_ids = False
+
+  if has_segment_ids:
     if segment_ids is not None:
       model_kwargs["segment_ids"] = segment_ids
     elif input_seg_ids is not None:
@@ -428,16 +415,16 @@ def compute_per_token_logps(
       )
       if return_entropy:
         per_token_entropy = jnp.pad(
-            per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0  # pyrefly: ignore[unbound-name]
+            per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0
         )
 
     if stop_gradient:
       per_token_logps = jax.lax.stop_gradient(per_token_logps)
       if return_entropy:
-        per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
+        per_token_entropy = jax.lax.stop_gradient(per_token_entropy)
 
     if return_entropy:
-      return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
+      return per_token_logps, per_token_entropy
     return per_token_logps
   else:
     logits = outputs[:, -logits_to_keep - 1 : -1, :]
@@ -553,6 +540,9 @@ def compute_chunked_logps(
     return per_token_logps
 
 
+
+
+
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_score(
     model,
@@ -579,13 +569,12 @@ def compute_score(
       segment_positions,
   )
 
-  has_segment_ids = model_call_contains(model, "segment_ids")
   model_kwargs = {"positions": calculated_positions, "cache": None}
-  if has_segment_ids and segment_ids is not None:
+  if segment_ids is not None:
     model_kwargs["segment_ids"] = segment_ids
   else:
     model_kwargs["attention_mask"] = attn_mask
-    if has_segment_ids and input_seg_ids is not None:
+    if input_seg_ids is not None:
       model_kwargs["segment_ids"] = input_seg_ids
 
   out = model(prompt_completion_ids, **model_kwargs)
@@ -701,6 +690,8 @@ def aggregate_loss(
   """
 
   per_token_loss = per_token_loss.astype(jnp.float32)
+  seq_mask = completion_mask.sum(axis=-1)
+  non_zero_rows = jnp.clip((seq_mask > 0).sum(), min=1)
 
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
@@ -864,8 +855,8 @@ def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
 
 
 def _check_get_norm(
-  arguments: dict[str, Any], default: float | int
-) -> float:
+    arguments: dict[str, Any], default: float | int | jax.Array
+) -> float | jax.Array:
   """Get custom normalization factor from kwargs with a default value.
 
   Args:
@@ -878,9 +869,16 @@ def _check_get_norm(
   Raises:
       ValueError: If the 'norm' key is present but has an invalid value or type.
   """
-  norm = arguments.get("norm", float(default))
-  if not isinstance(norm, (int, float)) or norm <= 0:
-    raise ValueError(
-        f"Invalid 'norm' value: {norm}. Must be a positive number."
-    )
-  return norm  # pyrefly: ignore[bad-return]
+  norm = arguments.get("norm", default)
+  if isinstance(norm, (int, float, jax.Array, np.ndarray)):
+    if isinstance(norm, (int, float)):
+      if norm <= 0:
+        raise ValueError(
+            f"Invalid 'norm' value: {norm}. Must be a positive number."
+        )
+    return norm
+
+  raise ValueError(
+      f"Invalid 'norm' value: {norm}. Must be a positive number (int, float,"
+      " or jax.Array)."
+  )

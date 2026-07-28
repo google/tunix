@@ -62,6 +62,7 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...]
   vision_proj: Tuple[str | None, ...]
   vision_soft_emb_norm_weight: Tuple[str | None, ...]
   siglip: vision.SigLIPShardingConfig | None

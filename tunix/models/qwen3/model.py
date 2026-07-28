@@ -104,6 +104,7 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...]
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
   score_weight_d1: Tuple[str | None, ...] | None = None
