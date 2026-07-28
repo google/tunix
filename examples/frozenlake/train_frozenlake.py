@@ -142,6 +142,14 @@ arg_parser.add_argument("--max_response_length", type=int, default=2048)
 # is reachable within it (env.py:33,174-175), so every map is solvable in about
 # this many moves.
 arg_parser.add_argument("--env_max_steps", type=int, default=8)
+# Which model to train. Gemma4-E2B stays the default and its path is unchanged.
+# Qwen3-8B is here because it is the only model this recipe has been observed to
+# converge on, while Gemma4-E2B produced solve_ratio 0 at every episode budget
+# tried. Everything model-specific in this file keys off this one flag.
+arg_parser.add_argument(
+    "--model", type=str, default="gemma4_e2b",
+    choices=["gemma4_e2b", "qwen3_8b"],
+)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 # No top_p / top_k filter at rollout time. The processed_logprobs returned by
 # the rollout engine apply log_softmax over the filtered logit set; if filters
@@ -189,6 +197,13 @@ arg_parser.add_argument(
     "--rollout_vllm_hbm_utilization", type=float, default=0.2
 )
 args, _ = arg_parser.parse_known_args()
+
+# Rebind the model modules when a non-default model is asked for. The import
+# block runs before argparse, so the dispatch has to live here; the default
+# leaves the gemma4 bindings from the top of the file untouched.
+if args.model == "qwen3_8b":
+  from tunix.models.qwen3 import params as params_lib  # pylint: disable=g-import-not-at-top,reimported
+  from tunix.models.qwen3 import model as model_lib  # pylint: disable=g-import-not-at-top,reimported
 
 TRAIN_FRACTION = 1.0
 SEED = args.seed
@@ -283,7 +298,10 @@ MAX_TO_KEEP = 50
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 
 # ====== Paths (env-driven so the same image runs anywhere) ======
-MODEL_VERSION = "google/gemma-4-E2B-it"
+MODEL_VERSION = {
+    "gemma4_e2b": "google/gemma-4-E2B-it",
+    "qwen3_8b": "Qwen/Qwen3-8B",
+}[args.model]
 MODEL_DOWNLOAD_DIR = huggingface_hub.snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
 # Holds train.parquet / test.parquet. Override to a local directory (see
 # examples/frozenlake/data.py, which generates the same schema) when the
@@ -373,7 +391,10 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 # step-by-step reasoning; with thinking enabled the model writes hundreds of
 # ``<|channel>..<channel|>`` tokens per turn and exhausts the response budget
 # before producing an action.
-chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
+chat_parser = {
+    "gemma4_e2b": parser.Gemma4ChatTemplateParser,
+    "qwen3_8b": parser.QwenChatTemplateParser,
+}[args.model](tokenizer, enable_thinking=False)
 
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
@@ -396,13 +417,16 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
 
-config = model_lib.ModelConfig.gemma4_e2b()
+config = getattr(model_lib.ModelConfig, args.model)()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
-  config.use_sliding_window_kv_cache = False
+  # Gemma4 only. qwen3's ModelConfig is a slots dataclass without this field, so
+  # assigning it unconditionally raises AttributeError.
+  if hasattr(config, "use_sliding_window_kv_cache"):
+    config.use_sliding_window_kv_cache = False
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
@@ -499,18 +523,23 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
-        "hf_overrides": {
-            "final_logit_softcapping": 30.0,
-            "text_config": {
-                "final_logit_softcapping": 30.0,
-            },
-            "architectures": ["Gemma4ForCausalLM"],
-        },
     },
     "rollout_vllm_sampling_kwargs": {
         "skip_special_tokens": False,
     },
 }
+
+if args.model == "gemma4_e2b":
+  # Gemma4 alone needs its logit softcapping and architecture declared to vLLM.
+  # Both are meaningless for qwen3 and passing them would misdescribe the model
+  # to the loader.
+  vllm_rollout_dict["rollout_vllm_kwargs"]["hf_overrides"] = {
+      "final_logit_softcapping": 30.0,
+      "text_config": {
+          "final_logit_softcapping": 30.0,
+      },
+      "architectures": ["Gemma4ForCausalLM"],
+  }
 
 if ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(

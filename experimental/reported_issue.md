@@ -751,6 +751,31 @@ Any deviation from those versions is the signal that the lock did not take effec
 - `ROLLOUT_HBM` defaults to 0.2 and **that is correct for Gemma4-E2B**: a measured run peaked at
   35.75 of 95.74 GB. The "0.2 will not start" note earlier in this document is about **Qwen3-8B**;
   do not carry it over to this recipe.
+- `MODEL` picks the model: `gemma4_e2b` (default) or `qwen3_8b`. One flag switches everything that
+  is model-specific -- the weight loader, `MODEL_VERSION`, the `ModelConfig` factory, the chat
+  template parser, and the vLLM `hf_overrides` (Gemma4 declares a logit softcapping and its
+  architecture; passing those for qwen3 would misdescribe the model). Gemma4-E2B's path is
+  unchanged by the switch: with `MODEL=gemma4_e2b` the assembled command differs from before the
+  flag existed only by `--model gemma4_e2b` itself.
+
+  **Which to use.** Gemma4-E2B is the default but has produced `solve_ratio=0.000` on every episode
+  budget tried here (2048+2048 and 4096+4096, all 300 groups). Qwen3-8B is the only model this
+  recipe has been *observed* to converge on. If you are chasing convergence rather than testing the
+  packing machinery, start from qwen3_8b:
+
+  ```bash
+  MODEL=qwen3_8b MAX_PROMPT=2048 MAX_RESPONSE=2048 ROLLOUT_HBM=0.4 \
+    RUN_TAG=fl_qwen8b bash experimental/train_frozenlake_v5p_1host_docker.sh
+  ```
+
+  **`ROLLOUT_HBM` must move with the model.** 0.2 is right for the 2B and too small for the 8B:
+  qwen3_8b is ~8.19B parameters, so on 4 chips the resident trainer state alone is ~41 GB/chip
+  (actor fp32 8.2 + Adam 16.4 + reference bf16 4.1 + gradient accumulator 8.2 + rollout weights
+  4.1), leaving ~54 GB for KV cache and activations. 0.4 gives vLLM 38.3 GB/chip, which is its own
+  budget rather than a total ceiling -- a measured Gemma run allocated 8.3 GB of KV at 0.2 while
+  27.5 GB was already resident, which only makes sense under the former reading. Use 0.4 for the
+  8B; 0.5 is the practical ceiling.
+
 - `MAX_PROMPT` / `MAX_RESPONSE` (default 4096 each) and `ENV_MAX_STEPS` (default 8) set the episode
   length. **`MAX_RESPONSE` is the budget for the whole episode, not for one turn** -- the collector
   ends a trajectory once its *cumulative* response tokens reach it

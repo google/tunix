@@ -61,6 +61,11 @@ MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # empty = budget-derived
 # a GRPO group whose rewards are all equal has zero advantage, so the run had no
 # gradient signal at all. 4096+4096 gives ~512 tokens per turn; lowering
 # ENV_MAX_STEPS is the other lever on the same ratio.
+# Gemma4-E2B is the default; qwen3_8b is the only model this recipe has been
+# observed to converge on. Switching model also switches the parser, the vLLM
+# overrides and the memory profile -- ROLLOUT_HBM 0.2 is enough for the 2B but
+# not for the 8B, whose resident trainer state alone is ~37GB/chip.
+MODEL="${MODEL:-gemma4_e2b}"
 MAX_PROMPT="${MAX_PROMPT:-4096}"
 MAX_RESPONSE="${MAX_RESPONSE:-4096}"
 ENV_MAX_STEPS="${ENV_MAX_STEPS:-8}"
@@ -123,7 +128,7 @@ if [ "${MAX_TOKEN_PER_TPU}" != "0" ]; then
 fi
 
 log="$LOG_DIR/${RUN_TAG}.log"
-echo "===== FROZENLAKE[gemma4-e2b] packing=${MAX_TOKEN_PER_TPU} "\
+echo "===== FROZENLAKE[${MODEL}] packing=${MAX_TOKEN_PER_TPU} "\
 "len=${MAX_PROMPT}+${MAX_RESPONSE} turns=${ENV_MAX_STEPS} "\
 "batch=${BATCH}/${MINI} num_gen=${NUM_GEN} num_batches=${NUM_BATCHES} "\
 "(log: $log) ====="
@@ -133,6 +138,7 @@ cmd=(python3 -X faulthandler -u examples/frozenlake/train_frozenlake.py
      --num_generations "$NUM_GEN" --num_batches "$NUM_BATCHES"
      --max_prompt_length "$MAX_PROMPT" --max_response_length "$MAX_RESPONSE"
      --env_max_steps "$ENV_MAX_STEPS"
+     --model "$MODEL"
      --rollout_vllm_hbm_utilization "$ROLLOUT_HBM"
      "${pack_args[@]}")
 
