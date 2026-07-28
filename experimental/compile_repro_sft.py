@@ -158,6 +158,24 @@ def main():
       flush=True,
   )
 
+  # Independent HBM cross-check for the xprof memory profile: the XLA
+  # allocator's own peak counter. Only meaningful with
+  # XLA_PYTHON_CLIENT_PREALLOCATE=false (otherwise it reports the pool size).
+  gib = float(2**30)
+  for d in jax.local_devices():
+    try:
+      s = d.memory_stats()
+      print(
+          f"[[MEM]] grad_accum={args.grad_accum} "
+          f"promote={os.environ.get('PROMOTE_FP32', '1')} device={d.id} "
+          f"peak_hbm_gb={s.get('peak_bytes_in_use', 0) / gib:.2f} "
+          f"current_hbm_gb={s.get('bytes_in_use', 0) / gib:.2f} "
+          f"limit_gb={s.get('bytes_limit', 0) / gib:.2f}",
+          flush=True,
+      )
+    except Exception as e:  # pylint: disable=broad-except
+      print(f"[[MEM]] memory_stats unavailable on {d}: {e}", flush=True)
+
 
 if __name__ == "__main__":
   main()

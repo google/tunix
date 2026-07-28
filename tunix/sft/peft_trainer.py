@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import functools
+import os
 import time
 from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
@@ -330,7 +331,11 @@ class PeftTrainer:
       # Promote floating-point leaves to float32 in-place to match the dtype of
       # the optimizer update function branch (which is float32 due to
       # `optax.inject_hyperparams`).
-      _promote_opt_state_floats_to_float32(self.optimizer)
+      # ABLATION (perf-regression-wip): PROMOTE_FP32=0 skips the promote so the
+      # optimizer state stays bf16 — used to isolate the fp32-state runtime/HBM
+      # cost. Default "1" preserves production behavior.
+      if os.environ.get("PROMOTE_FP32", "1") == "1":
+        _promote_opt_state_floats_to_float32(self.optimizer)
       self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
 
     self.loss_fn = _default_loss_fn

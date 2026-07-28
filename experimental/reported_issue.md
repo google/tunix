@@ -757,6 +757,79 @@ Any deviation from those versions is the signal that the lock did not take effec
 `vllm/v1/engine/llm_engine.py:441`, which expects a torch `nn.Module` and gets the JAX model. It
 happens during teardown and does not affect the exit code.
 
-**Not yet judged.** A 2-batch smoke run shows `solve_ratio=0.000` throughout and many
-`MAX_CONTEXT_LIMIT_REACHED` warnings. Two batches of an untrained model prove nothing either way and
-there is no baseline for this recipe; convergence is phase8's gate, on the new machine.
+### The episode-length defaults cannot produce a gradient
+
+The first smoke run scored `solve_ratio=0.000` on **every one of 300 groups**, with
+`reward_max=0.000` and `solve_all=0 solve_none=1` throughout. That is not a slow start; it is a
+recipe that cannot learn, and the cause is a parameter interaction rather than the model.
+
+The task itself is solvable. `FrozenLakeEnv.__init__` assigns its `max_steps` to a module-level
+global *before* generating the map (`examples/frozenlake/env.py:174-175`), and `generate_random_map`
+redraws until `is_valid` succeeds -- a DFS that prunes at exactly that global (`env.py:33`). Every
+map therefore has a goal reachable in about that many moves.
+
+What ends the episodes is the response budget. `max_response_length` is the budget for the **whole
+episode**, not for one turn: the collector stops a trajectory once its *cumulative* response tokens
+reach it (`tunix/rl/agentic/trajectory/trajectory_collect_engine.py:472-478`). At the script's
+2048 shared across 8 turns, a model averaging more than 256 tokens per turn runs out before it can
+reach the goal -- and 3872 trajectories in that run ended exactly that way.
+
+The consequence is structural. GRPO normalises advantage within a group, `A_i = (r_i - mean(r)) /
+std(r)`. When all eight generations in a group score 0, every advantage is 0, so the gradient is
+zero. With 300 of 300 groups scoring zero there was no learning signal at all, which is why the run
+completed cleanly (exit 0, 192 train steps, no NaN) and still could not converge.
+
+**The wrapper therefore defaults to `MAX_PROMPT=4096 MAX_RESPONSE=4096`**, about 512 tokens per
+turn, and exposes `ENV_MAX_STEPS` as the other lever on the same ratio -- fewer turns divides the
+same budget into larger shares. Both are env knobs, so the ratio can be swept without editing code:
+
+```bash
+MAX_RESPONSE=8192 RUN_TAG=fl_len8k  bash experimental/train_frozenlake_v5p_1host_docker.sh
+ENV_MAX_STEPS=4   RUN_TAG=fl_turns4 bash experimental/train_frozenlake_v5p_1host_docker.sh
+```
+
+Two things move with the lengths. The packing budget must stay at or above one maximal sequence,
+`MAX_PROMPT + MAX_RESPONSE`, which is also its optimum -- 8192 at the new defaults, so
+`MAX_TOKEN_PER_TPU=8192` remains right but now means one maximal sequence per row rather than two.
+And memory: the largest term, full-vocabulary logits, is already bounded by
+`compute_logps_chunk_size=2048` (`train_frozenlake.py:562`) and does not grow with sequence length,
+so the increase is mostly activations. The measured peak at 2048+2048 was 35.75 of 95.74 GB, leaving
+room; if a longer setting does OOM, lower `train_micro_batch_size` (`:557`) before touching batch.
+
+**Still unverified**: whether the longer budget actually produces `solve_ratio > 0`. That check is a
+2-batch run, and if it stays at zero for every group the next suspect is action parsing or the
+prompt format rather than the budget. Worth asking whoever reported this recipe converging what
+their `max_response_length` and `env_max_steps` were, and when `solve_ratio` began to climb.
+
+## 21. ACTION REQUEST: HBM peak (12→16GB) + optimizer-update op regression — 3-arm fp32-promote ablation
+**Type:** Runnable task for the TPU-VM side (single-host v5p, tunix_base_image, same setup as issues 14/15/17).
+**Branch:** `yuxzhang/perf-regression-wip` (the docker wrapper fetches the branch tip). **Prereq:** MODEL_PATH `/mnt/workspace/models/google/gemma-4-e2b-it` present.
+
+**Purpose:** The streaming `GradientAccumulator` path shows two runtime/memory regressions vs the optax baseline (both were measured in xprof, not compile time):
+1. **HBM peak 12GB → 16GB.**
+2. **Optimizer-update op fusion: multiply-add → add-convert** (per-step a touch slower).
+
+Hypothesis: both come from `_promote_opt_state_floats_to_float32` (Adam mu/nu promoted to fp32; peft_trainer.py:333, stream path only). fp32 state forces the bf16 grad to be up-converted inside the Adam update (the convert fuses into the add → "add-convert"), and doubles the two moment trees (the HBM). NOT from the compile-time fix, and NOT a grad upcast (the update receives bf16 grads; the only fp32-on-grads is the transient copy inside `global_norm` for the metric).
+
+**THE run (one command, three arms):**
+```bash
+bash experimental/mem_repro_v5p_docker.sh
+```
+This runs, each under xprof with `XLA_PYTHON_CLIENT_PREALLOCATE=false` and `MAX_STEPS=5`:
+- **optax** (`GRAD_ACCUM=optax`) — baseline, expect ~12GB peak + multiply-add.
+- **stream** (`GRAD_ACCUM=stream`) — the regression, expect ~16GB + add-convert.
+- **stream_nopromote** (`GRAD_ACCUM=stream PROMOTE_FP32=0`) — isolation arm.
+
+Outputs land in `/mnt/workspace/mem_repro_xprof/{optax,stream,stream_nopromote}/` (xprof trace + `<arm>.log`).
+
+**Two independent HBM measurements (this is the point — cross-check "is 16GB real"):**
+- **xprof** memory_viewer → HBM peak; trace_viewer → the update-op fusion.
+- **log** → the last line `[[MEM]] grad_accum=<x> promote=<0/1> device=<id> peak_hbm_gb=<> current_hbm_gb=<> limit_gb=<>` (the XLA allocator's own `peak_bytes_in_use`, meaningful because PREALLOCATE=false).
+If the two agree, 16GB is real. If they diverge, it is a measurement-caliber issue (like the old `show_hbm_usage()` which reads `bytes_in_use` BEFORE training) — fix the caliber before attributing.
+
+**Report back (this is the P1.2 gate):** for each of the three arms — the `[[MEM]] peak_hbm_gb`, and the update-op fusion from trace_viewer (multiply-add vs add-convert). Verdict:
+- `stream_nopromote ≈ optax` (peak drops to ~12GB AND op back to multiply-add) → **fp32 promote is the cause of both**.
+- `stream_nopromote ≈ stream` (still ~16GB / still add-convert) → NOT promote → next suspect is the always-allocated stream accumulator grad tree (depth-1 never uses it) → we fix by not allocating it at depth-1.
+- Commit the three `.log` files (and, if convenient, the xprof traces) back to the branch.
+
+Once the arm the regression tracks is known (with numbers), Phase 2 (fix) picks the path — see tasks/hbm_regression/{plan,phase1}.md.
