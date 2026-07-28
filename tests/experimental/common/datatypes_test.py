@@ -40,6 +40,7 @@ def _sample_response() -> datatypes.RolloutResponse:
       ],
       env_reward=1.25,
       policy_version=7,
+      metadata={"response_time": 0.5},
   )
 
 
@@ -50,6 +51,7 @@ def _sample_dto() -> datatypes.SamplingResponse:
       token_ids=np.array([101, 102, 103], dtype=np.int32),
       logprobs=np.array([-0.1, -0.2, -0.05], dtype=np.float32),
       finish_reason="stop",
+      metadata={"cached": True},
   )
 
 
@@ -58,15 +60,18 @@ def _sampling_request_dto() -> datatypes.SamplingRequest:
       prompt="Solve 2+2",
       request_id="req-sample-42",
       sampling_params=datatypes.SamplingParams(max_tokens=64, temperature=0.7),
+      metadata={"priority": "high"},
   )
 
 
 def _weight_sync_request_dto() -> datatypes.WeightSyncRequest:
   return datatypes.WeightSyncRequest(
+      request_id="sync-req-1",
       controller_id="raiden-ctrl-0",
       policy_version=14,
       source_metadata={"mesh": "2x4"},
       extra_config={"timeout": 30.0},
+      metadata={"trigger": "cron"},
   )
 
 
@@ -90,10 +95,12 @@ class WireSerializationTest(absltest.TestCase):
 
     restored = cloudpickle.loads(cloudpickle.dumps(original))
 
+    self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.controller_id, original.controller_id)
     self.assertEqual(restored.policy_version, original.policy_version)
     self.assertEqual(restored.source_metadata, original.source_metadata)
     self.assertEqual(restored.extra_config, original.extra_config)
+    self.assertEqual(restored.metadata, original.metadata)
 
   def test_rollout_request_round_trips_through_cloudpickle(self):
     original = _rollout_request_dto()
@@ -118,6 +125,7 @@ class WireSerializationTest(absltest.TestCase):
 
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.prompt, original.prompt)
+    self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNotNone(restored.sampling_params)
     self.assertEqual(
         restored.sampling_params.max_tokens, original.sampling_params.max_tokens
@@ -136,6 +144,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.status, original.status)
     self.assertEqual(restored.env_reward, original.env_reward)
     self.assertEqual(restored.policy_version, original.policy_version)
+    self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNone(restored.error)
     np.testing.assert_array_equal(
         restored.prompt_tokens, original.prompt_tokens
@@ -246,6 +255,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.text, original.text)
     self.assertEqual(restored.finish_reason, original.finish_reason)
+    self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNone(restored.error)
     np.testing.assert_array_equal(restored.token_ids, original.token_ids)
     np.testing.assert_allclose(restored.logprobs, original.logprobs)
