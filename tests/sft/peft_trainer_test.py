@@ -134,6 +134,38 @@ class PeftTrainerTest(parameterized.TestCase):
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
 
+  def test_compile_once_on_cond_path(self):
+    """Depth>1 (accumulator + nnx.cond path) also traces exactly once.
+
+    Guards the moment-dtype change (bf16 by default on the cond path) against
+    re-tracing: the cond path must still compile just once.
+    """
+    class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
+
+      def _train_step(
+          self, model, optimizer, grad_accumulator, inputs, is_update_step
+      ):
+        global global_counter
+        global_counter += 1
+        return super()._train_step(
+            model, optimizer, grad_accumulator, inputs, is_update_step
+        )
+
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2, max_steps=100, gradient_accumulation_steps=2
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.get_lora_model(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs), mesh=self.mesh
+    )
+    trainer = CountCompiledTimesTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    global global_counter
+    global_counter = 0
+    with self.mesh:
+      trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(global_counter, 1)
+
   @parameterized.named_parameters(
       ('cache_nnx_graph', True),
       ('no_cache_nnx_graph', False),
@@ -1331,13 +1363,12 @@ class GradientAccumulatorTest(parameterized.TestCase):
     for d in float_dtypes:
       self.assertEqual(d, jnp.bfloat16)
 
-  def test_peft_trainer_promotes_bf16_opt_state_floats_to_float32(self):
-    """`PeftTrainer.__init__` casts float opt_state leaves to float32.
+  def test_peft_trainer_keeps_bf16_moments_on_cond_path(self):
+    """Default None keeps bf16 moments on the cond path, even with an fp32
 
-    `optax.adam` / `optax.adamw` promote their floating-point moments
-    (`mu`, `nu`) to float32 inside `update` whenever the learning rate is
-    a float32 tracer (as produced by `optax.inject_hyperparams`). This test
-    verifies that the trainer casts these to float32 in-place during init.
+    inject_hyperparams learning rate. Depth>1 (and packing) take the `nnx.cond`
+    path; bf16 moments trace fine there, so nothing is promoted to float32. Set
+    `optimizer_state_dtype=jnp.float32` to force fp32 moments.
     """
     rngs = nnx.Rngs(0)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
@@ -1352,7 +1383,9 @@ class GradientAccumulatorTest(parameterized.TestCase):
     tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
         learning_rate=1e-3
     )
-    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1, gradient_accumulation_steps=2
+    )  # depth>1 -> cond path; moments stay bf16 (param dtype)
     trainer = peft_trainer.PeftTrainer(model, tx, config)
 
     opt_state_dtypes = jax.tree_util.tree_leaves(
@@ -1362,12 +1395,13 @@ class GradientAccumulatorTest(parameterized.TestCase):
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
     )
-    float_dtypes = [
-        d for d in opt_state_dtypes if jnp.issubdtype(d, jnp.floating)
-    ]
-    self.assertNotEmpty(float_dtypes)
-    for d in float_dtypes:
-      self.assertEqual(d, jnp.float32)
+    float_dtypes = {
+        str(d) for d in opt_state_dtypes if jnp.issubdtype(d, jnp.floating)
+    }
+    # Moments (mu/nu, the bulk of opt-state) stay bf16 — not promoted to fp32.
+    # The only fp32 float leaf is the injected learning rate (hyperparam_dtype).
+    self.assertIn('bfloat16', float_dtypes)
+    self.assertEqual(float_dtypes - {'bfloat16'}, {'float32'})
 
 
 class Depth1FastPathTest(parameterized.TestCase):
@@ -1548,6 +1582,90 @@ class Depth1FastPathTest(parameterized.TestCase):
         _unwrap(trainer.grad_accumulator.grads),
     )
     np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
+
+
+class OptimizerMemoryTest(parameterized.TestCase):
+  """Optimizer-state HBM knobs: moment dtype + depth-1 accumulator skip."""
+
+  def _bf16_model(self):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    state = nnx.state(model, nnx.Param)
+    state = jax.tree.map(
+        lambda v: v.astype(jnp.bfloat16)
+        if jnp.issubdtype(v.dtype, jnp.floating)
+        else v,
+        state,
+    )
+    nnx.update(model, state)
+    return model
+
+  def _moment_float_dtypes(self, trainer):
+    st = nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+    return {
+        str(x.dtype)
+        for x in jax.tree_util.tree_leaves(st)
+        if hasattr(x, 'dtype') and jnp.issubdtype(x.dtype, jnp.floating)
+    }
+
+  @parameterized.named_parameters(
+      ('float32', jnp.float32, 'float32'),
+      ('bfloat16', jnp.bfloat16, 'bfloat16'),
+  )
+  def test_optimizer_state_dtype_casts_moments(self, dtype, expected):
+    """`optimizer_state_dtype` casts the Adam moment trees to that dtype."""
+    model = self._bf16_model()
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1, optimizer_state_dtype=dtype
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    self.assertEqual(self._moment_float_dtypes(trainer), {expected})
+
+  def test_optimizer_state_dtype_none_keeps_param_dtype_on_fast_path(self):
+    """Default None + depth-1 keeps moments at the param dtype (no forced fp32)."""
+    model = self._bf16_model()  # bf16 params
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    # bf16 params -> bf16 moments (matching optax), NOT promoted to fp32.
+    self.assertEqual(self._moment_float_dtypes(trainer), {'bfloat16'})
+
+  def test_optimizer_state_dtype_none_keeps_param_dtype_on_cond_path(self):
+    """Default None + depth>1 keeps moments at the param dtype (no forced fp32)."""
+    model = self._bf16_model()  # bf16 params
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1, gradient_accumulation_steps=2
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    # bf16 params -> bf16 moments on the cond path too (set fp32 to override).
+    self.assertEqual(self._moment_float_dtypes(trainer), {'bfloat16'})
+
+  def test_accumulator_grads_skipped_at_depth1(self):
+    """At depth-1 (non-packing) the accumulator grad tree is not allocated."""
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1
+    )  # gradient_accumulation_steps=None -> depth 1
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    self.assertEmpty(
+        jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
+    )
+
+  @parameterized.named_parameters(
+      ('depth2', 2, None),
+      ('packing', None, 16),
+  )
+  def test_accumulator_grads_allocated_when_used(self, steps, max_seq_token):
+    """Depth>1 or packing keeps the accumulator grad tree allocated."""
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=steps,
+        max_seq_token_per_tpu=max_seq_token,
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    self.assertNotEmpty(
+        jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
+    )
 
 
 if __name__ == '__main__':

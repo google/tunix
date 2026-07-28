@@ -29,6 +29,7 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 from tunix.perf import metrics as perf_metrics
@@ -88,6 +89,10 @@ class TrainingConfig:
 
   # Sequence packing configuration.
   max_seq_token_per_tpu: int | None = None
+
+  # Adam moment dtype. None (default) follows the param dtype (optax inits
+  # moments as zeros_like(params)); set e.g. jnp.float32 to force fp32.
+  optimizer_state_dtype: DTypeLike | None = None
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -189,9 +194,21 @@ class GradientAccumulator(nnx.Module):
     sizes.
   """
 
-  def __init__(self, model: nnx.Module, wrt: type[nnx.Variable]):
+  def __init__(
+      self,
+      model: nnx.Module,
+      wrt: type[nnx.Variable],
+      *,
+      allocate_grads: bool = True,
+  ):
     state = nnx.state(model, wrt)
-    self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    if allocate_grads:
+      self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    else:
+      # Fast path never reads the accumulator: skip the model-sized grad-tree
+      # allocation. Empty grads keep it a valid tiny jit arg (signature and
+      # compilation unchanged).
+      self.grads = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
   def add(self, grads: Any, denom: jax.Array | None = None):
@@ -237,12 +254,10 @@ class GradientAccumulator(nnx.Module):
     self.denom.set_value(jnp.zeros_like(self.denom[...]))
 
 
-def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
-  """Cast the optimizer state's floating-point leaves to float32 in-place.
-
-  Args:
-    optimizer: The nnx.Optimizer instance whose state will be modified.
-  """
+def _cast_opt_state_floats(
+    optimizer: nnx.Optimizer, dtype: jnp.dtype
+) -> None:
+  """Cast the optimizer state's floating-point leaves to `dtype` in-place."""
 
   def _cast(v):
     if isinstance(v, nnx.Variable):
@@ -250,9 +265,9 @@ def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
       if (
           hasattr(val, "dtype")
           and jnp.issubdtype(val.dtype, jnp.floating)
-          and val.dtype != jnp.float32
+          and val.dtype != dtype
       ):
-        v.value = val.astype(jnp.float32)
+        v.value = val.astype(dtype)
 
   opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
   jax.tree_util.tree_map(
@@ -309,11 +324,20 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    # Promote floating-point leaves to float32 in-place to match the dtype of
-    # the optimizer update function branch (which is float32 due to
-    # `optax.inject_hyperparams`).
-    _promote_opt_state_floats_to_float32(self.optimizer)
-    self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
+    # Adam moments follow the param dtype by default (optax inits them as
+    # zeros_like(params)). Set optimizer_state_dtype to override, e.g.
+    # jnp.float32.
+    if self.config.optimizer_state_dtype is not None:
+      _cast_opt_state_floats(self.optimizer, self.config.optimizer_state_dtype)
+    # Depth-1 non-packing fast path never reads the accumulator; skip its
+    # model-sized grad-tree allocation there.
+    _uses_cond_path = not (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_token_per_tpu is None
+    )
+    self.grad_accumulator = GradientAccumulator(
+        self.model, wrt_target, allocate_grads=_uses_cond_path
+    )
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
