@@ -38,6 +38,7 @@ import asyncio
 import inspect
 import threading
 import traceback as traceback_lib
+import uuid
 from typing import (
     Any,
     AsyncIterator,
@@ -93,6 +94,29 @@ def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
     return None
 
 
+def _derive_request_id(
+    args: Sequence[Any], kwargs: Dict[str, Any]
+) -> Optional[str]:
+  """Returns the request_id carried by a domain DTO argument, if any.
+
+  Domain requests (`datatypes.Request` and its subclasses) already carry a
+  `request_id` that the matching response echoes. Reusing it as the transport id
+  keeps a single correlation id end to end, instead of one id for the RPC and
+  another for the payload.
+  """
+  for value in (*args, *kwargs.values()):
+    candidate = getattr(value, "request_id", None)
+    if isinstance(candidate, str) and candidate:
+      return candidate
+  return None
+
+
+def new_request_id() -> str:
+  """Mints a unique transport-level request id."""
+  # The "task_" prefix is retained from the original ack ids.
+  return f"task_{uuid.uuid4().hex}"
+
+
 class ExecutionRequest:
   """Universal execution request payload wrapping method name, args, and kwargs."""
 
@@ -101,14 +125,22 @@ class ExecutionRequest:
       method_name: Optional[str] = None,
       args: Optional[Sequence[Any]] = None,
       kwargs: Optional[Dict[str, Any]] = None,
+      request_id: Optional[str] = None,
   ):
     self.method_name = method_name or "__call__"
     self.args: Tuple[Any, ...] = tuple(args or ())
     self.kwargs: Dict[str, Any] = dict(kwargs or {})
+    self.request_id: str = (
+        request_id
+        or _derive_request_id(self.args, self.kwargs)
+        or new_request_id()
+    )
 
   def serialize(self) -> bytes:
     """Serializes request to bytes using cloudpickle."""
-    return cloudpickle.dumps((self.method_name, self.args, self.kwargs))
+    return cloudpickle.dumps(
+        (self.method_name, self.args, self.kwargs, self.request_id)
+    )
 
   @classmethod
   def deserialize(cls, payload: bytes) -> "ExecutionRequest":
@@ -118,8 +150,13 @@ class ExecutionRequest:
     # identity or cryptographic HMAC signatures before calling cloudpickle.loads(). Where
     # dynamic function shipping is not needed, use `pickle.Unpickler` (`find_class`) to
     # whitelist only trusted domain data types (`int`, `str`, `dict`, `list`, `data_types.*`).
-    method_name, args, kwargs = cloudpickle.loads(payload)
-    return cls(method_name=method_name, args=args, kwargs=kwargs)
+    method_name, args, kwargs, request_id = cloudpickle.loads(payload)
+    return cls(
+        method_name=method_name,
+        args=args,
+        kwargs=kwargs,
+        request_id=request_id,
+    )
 
 
 class ExecutionResponse:
@@ -132,22 +169,30 @@ class ExecutionResponse:
       error_type: Optional[str] = None,
       traceback: Optional[str] = None,
       retryable: bool = False,
+      request_id: str = "",
   ):
     self.result = result
     self.error_message = error_message
     self.error_type = error_type
     self.traceback = traceback
     self.retryable = retryable
+    # Echoes the originating ExecutionRequest so callers can correlate a
+    # response with the request that produced it.
+    self.request_id = request_id
+
+  def _payload(self) -> Tuple[Any, ...]:
+    return (
+        self.result,
+        self.error_message,
+        self.error_type,
+        self.traceback,
+        self.retryable,
+        self.request_id,
+    )
 
   def serialize(self) -> bytes:
     try:
-      return cloudpickle.dumps((
-          self.result,
-          self.error_message,
-          self.error_type,
-          self.traceback,
-          self.retryable,
-      ))
+      return cloudpickle.dumps(self._payload())
     except Exception as e:  # pylint: disable=broad-exception-caught
       err_msg = (
           f"failed to serialize result of type {type(self.result).__name__}: {e}"
@@ -157,26 +202,23 @@ class ExecutionResponse:
       self.error_type = "ExecutionResponseSerializationError"
       self.traceback = traceback_lib.format_exc()
       self.retryable = False
-      return cloudpickle.dumps((
-          self.result,
-          self.error_message,
-          self.error_type,
-          self.traceback,
-          self.retryable,
-      ))
+      return cloudpickle.dumps(self._payload())
 
   @classmethod
   def deserialize(cls, payload: bytes) -> "ExecutionResponse":
     # SECURITY WARNING: cloudpickle.loads executes arbitrary code during unpickling. Ensure
     # payload authenticity over trusted channels before deserialization, or use custom
     # `pickle.Unpickler` (`find_class`) to whitelist only trusted domain data types.
-    result, err_msg, err_type, tb, retryable = cloudpickle.loads(payload)
+    result, err_msg, err_type, tb, retryable, request_id = cloudpickle.loads(
+        payload
+    )
     return cls(
         result=result,
         error_message=err_msg,
         error_type=err_type,
         traceback=tb,
         retryable=retryable,
+        request_id=request_id,
     )
 
   def unwrap(self) -> Any:
@@ -197,8 +239,10 @@ class RemoteExecutionServer(abc.ABC):
   def __init__(self, instance: Optional[Any] = None):
     self._instance: Optional[Any] = instance
     self._response_queue: Optional[asyncio.Queue[ExecutionResponse]] = None
-    self._task_counter: int = 0  # TODO(tsbao): bind to the request ID.
     self._background_tasks: set[asyncio.Task[Any]] = set()
+    # Responses that arrived while a caller was polling for a *different*
+    # request id, keyed by their own request id so they are not dropped.
+    self._parked: Dict[str, ExecutionResponse] = {}
 
   def _get_response_queue(self) -> asyncio.Queue[ExecutionResponse]:
     if self._response_queue is None:
@@ -206,30 +250,59 @@ class RemoteExecutionServer(abc.ABC):
     return self._response_queue
 
   async def dispatch_task(self, request: ExecutionRequest) -> str:
-    """Dispatches task execution asynchronously on server and returns task ACK ID."""
-    self._task_counter += 1
-    task_id = f"task_{self._task_counter}"
+    """Dispatches the task asynchronously and acks with the request id.
+
+    The ack is the request's own id, which the eventual response echoes, so a
+    fire-and-forget caller can match the two.
+    """
     task = asyncio.create_task(self._run_and_enqueue(request))
     self._background_tasks.add(task)
     task.add_done_callback(self._background_tasks.discard)
-    return task_id
+    return request.request_id
 
   async def _run_and_enqueue(self, request: ExecutionRequest) -> None:
     response = await self.execute_request(request)
+    response.request_id = request.request_id
     await self._get_response_queue().put(response)
 
   async def poll_response(
-      self, timeout_s: float = 10.0
+      self, timeout_s: float = 10.0, request_id: Optional[str] = None
   ) -> Optional[ExecutionResponse]:
-    """Long-polls server-side response queue for completed task results."""
-    try:
-      if timeout_s == 0.0:
-        return self._get_response_queue().get_nowait()
-      return await asyncio.wait_for(
-          self._get_response_queue().get(), timeout=timeout_s
-      )
-    except (asyncio.TimeoutError, asyncio.QueueEmpty):
-      return None
+    """Long-polls the response queue for a completed task result.
+
+    Args:
+      timeout_s: How long to wait. 0.0 drains without blocking.
+      request_id: When given, returns only the response for that request;
+        responses for other requests are parked (keyed by their own id) so a
+        concurrent caller can still collect them. When None, returns the next
+        response off the queue (FIFO), preserving the original behavior.
+
+    Returns:
+      The matching response, or None if none arrived before the timeout.
+    """
+    if request_id is not None:
+      parked = self._parked.pop(request_id, None)
+      if parked is not None:
+        return parked
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_s
+    queue = self._get_response_queue()
+    while True:
+      try:
+        if timeout_s == 0.0:
+          response = queue.get_nowait()
+        else:
+          remaining = deadline - loop.time()
+          if remaining <= 0:
+            return None
+          response = await asyncio.wait_for(queue.get(), timeout=remaining)
+      except (asyncio.TimeoutError, asyncio.QueueEmpty):
+        return None
+
+      if request_id is None or response.request_id == request_id:
+        return response
+      self._parked[response.request_id] = response
 
   def register_instance(self, instance: Any) -> None:
     """Binds a local Python object (e.g., RolloutWorkerService, TrainerWorker) to the server."""
@@ -249,10 +322,12 @@ class RemoteExecutionServer(abc.ABC):
       self, request: ExecutionRequest
   ) -> ExecutionResponse:
     """Dynamically resolves and executes synchronous method on the bound instance."""
+    rid = request.request_id
     if self._instance is None:
       return ExecutionResponse(
           error_message="RemoteExecutionServer has no registered instance.",
           error_type="InstanceNotBoundError",
+          request_id=rid,
       )
 
     target_name = request.method_name or "__call__"
@@ -261,6 +336,7 @@ class RemoteExecutionServer(abc.ABC):
       return ExecutionResponse(
           error_message=f"Method '{target_name}' not found on bound instance.",
           error_type="AttributeError",
+          request_id=rid,
       )
 
     if inspect.iscoroutinefunction(method):
@@ -269,26 +345,30 @@ class RemoteExecutionServer(abc.ABC):
               f"Method '{target_name}' is a coroutine function; use asubmit()."
           ),
           error_type="RuntimeError",
+          request_id=rid,
       )
 
     try:
       result = method(*request.args, **request.kwargs)
-      return ExecutionResponse(result=result)
+      return ExecutionResponse(result=result, request_id=rid)
     except Exception as e:  # pylint: disable=broad-exception-caught
       return ExecutionResponse(
           error_message=str(e),
           error_type=type(e).__name__,
           traceback=traceback_lib.format_exc(),
+          request_id=rid,
       )
 
   async def execute_request(
       self, request: ExecutionRequest
   ) -> ExecutionResponse:
     """Dynamically resolves and executes method on the bound instance."""
+    rid = request.request_id
     if self._instance is None:
       return ExecutionResponse(
           error_message="RemoteExecutionServer has no registered instance.",
           error_type="InstanceNotBoundError",
+          request_id=rid,
       )
 
     target_name = request.method_name or "__call__"
@@ -297,6 +377,7 @@ class RemoteExecutionServer(abc.ABC):
       return ExecutionResponse(
           error_message=f"Method '{target_name}' not found on bound instance.",
           error_type="AttributeError",
+          request_id=rid,
       )
 
     try:
@@ -304,12 +385,13 @@ class RemoteExecutionServer(abc.ABC):
         result = await method(*request.args, **request.kwargs)
       else:
         result = method(*request.args, **request.kwargs)
-      return ExecutionResponse(result=result)
+      return ExecutionResponse(result=result, request_id=rid)
     except Exception as e:  # pylint: disable=broad-exception-caught
       return ExecutionResponse(
           error_message=str(e),
           error_type=type(e).__name__,
           traceback=traceback_lib.format_exc(),
+          request_id=rid,
       )
 
 
@@ -349,8 +431,14 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
 
   async def _handle_poll_responses(self, request_bytes: bytes, context: Any) -> bytes:
     del context
-    timeout_s = cloudpickle.loads(request_bytes) if request_bytes else 10.0
-    response = await self.poll_response(timeout_s=timeout_s)
+    payload = cloudpickle.loads(request_bytes) if request_bytes else 10.0
+    if isinstance(payload, tuple):
+      timeout_s, request_id = payload
+    else:  # back-compat: a bare timeout
+      timeout_s, request_id = payload, None
+    response = await self.poll_response(
+        timeout_s=timeout_s, request_id=request_id
+    )
     if response is None:
       return b""
     return response.serialize()
@@ -454,9 +542,9 @@ class ActorHandle(abc.ABC):
 
   @abc.abstractmethod
   async def poll_responses(
-      self, timeout_s: float = 10.0
+      self, timeout_s: float = 10.0, request_id: Optional[str] = None
   ) -> Optional[ExecutionResponse]:
-    """Long-polls remote server response queue for completed result."""
+    """Long-polls the remote response queue, optionally for one request id."""
     pass
 
 
@@ -489,9 +577,9 @@ class RemoteActorHandle(ActorHandle):
     )
 
   async def poll_responses(
-      self, timeout_s: float = 10.0
+      self, timeout_s: float = 10.0, request_id: Optional[str] = None
   ) -> Optional[ExecutionResponse]:
-    del timeout_s
+    del timeout_s, request_id
     raise NotImplementedError(
         f"Remote execution over {self.target_address} not initialized."
     )
@@ -625,14 +713,14 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     return await rpc(request, timeout=10.0)
 
   async def poll_responses(
-      self, timeout_s: float = 10.0
+      self, timeout_s: float = 10.0, request_id: Optional[str] = None
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed task results."""
     if self._channel is None:
       self._get_rpc()
     assert self._channel is not None
     rpc = self._make_poll_responses_rpc(self._channel)
-    resp_bytes = await rpc(timeout_s, timeout=timeout_s + 5.0)
+    resp_bytes = await rpc((timeout_s, request_id), timeout=timeout_s + 5.0)
     if not resp_bytes:
       return None
     return ExecutionResponse.deserialize(resp_bytes)
@@ -715,10 +803,12 @@ class InProcessActorHandle(ActorHandle):
     return await self.server.dispatch_task(request)
 
   async def poll_responses(
-      self, timeout_s: float = 10.0
+      self, timeout_s: float = 10.0, request_id: Optional[str] = None
   ) -> Optional[ExecutionResponse]:
     """Long-polls bound server's response queue for completed results."""
-    return await self.server.poll_response(timeout_s=timeout_s)
+    return await self.server.poll_response(
+        timeout_s=timeout_s, request_id=request_id
+    )
 
   async def _run_async(self, request: ExecutionRequest) -> Any:
     response = await self.server.execute_request(request)
