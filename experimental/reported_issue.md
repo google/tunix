@@ -751,6 +751,33 @@ Any deviation from those versions is the signal that the lock did not take effec
 - `ROLLOUT_HBM` defaults to 0.2 and **that is correct for Gemma4-E2B**: a measured run peaked at
   35.75 of 95.74 GB. The "0.2 will not start" note earlier in this document is about **Qwen3-8B**;
   do not carry it over to this recipe.
+- `MAX_PROMPT` / `MAX_RESPONSE` (default 4096 each) and `ENV_MAX_STEPS` (default 8) set the episode
+  length. **`MAX_RESPONSE` is the budget for the whole episode, not for one turn** -- the collector
+  ends a trajectory once its *cumulative* response tokens reach it
+  (`tunix/rl/agentic/trajectory/trajectory_collect_engine.py:472-478`) -- so it is divided by
+  `ENV_MAX_STEPS`. The script's own 2048 over 8 turns left ~256 tokens per turn, and a measured
+  2-batch run ended 3872 trajectories on that budget rather than at the goal. Every group then
+  scored 0, and a GRPO group whose rewards are all equal has zero advantage, so that run had no
+  gradient signal at all despite finishing cleanly. The two knobs are opposite ends of the same
+  ratio; sweep either:
+
+  ```bash
+  MAX_RESPONSE=8192 RUN_TAG=fl_len8k  bash experimental/train_frozenlake_v5p_1host_docker.sh
+  ENV_MAX_STEPS=4   RUN_TAG=fl_turns4 bash experimental/train_frozenlake_v5p_1host_docker.sh
+  ```
+
+  Read one thing from the result: whether any group reports `solve_ratio > 0`. If it does, the
+  budget was the constraint and it is worth raising further. If every group still scores zero, stop
+  raising it -- the next suspect is action parsing or the prompt format.
+
+  Two things move with the lengths. **The packing budget must follow**: a packed row has to hold one
+  maximal sequence, `MAX_PROMPT + MAX_RESPONSE`, and that lower bound is also its optimum, so
+  `MAX_TOKEN_PER_TPU=8192` is right at the 4096+4096 default but now means one maximal sequence per
+  row instead of two. **Memory mostly does not**: the largest term, full-vocabulary logits, is
+  already capped by `compute_logps_chunk_size=2048`
+  (`examples/frozenlake/train_frozenlake.py:562`) and does not grow with sequence length, so the
+  increase is activations. If a longer setting does OOM, lower `train_micro_batch_size` (`:557`)
+  before touching batch size.
 
 **Known harmless noise.** After `exit=0`, a weakref finalizer raises
 `AttributeError: 'Gemma4ForCausalLM' object has no attribute 'modules'` from
