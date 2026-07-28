@@ -827,9 +827,15 @@ Outputs land in `/mnt/workspace/mem_repro_xprof/{optax,stream,stream_nopromote}/
 - **log** → the last line `[[MEM]] grad_accum=<x> promote=<0/1> device=<id> peak_hbm_gb=<> current_hbm_gb=<> limit_gb=<>` (the XLA allocator's own `peak_bytes_in_use`, meaningful because PREALLOCATE=false).
 If the two agree, 16GB is real. If they diverge, it is a measurement-caliber issue (like the old `show_hbm_usage()` which reads `bytes_in_use` BEFORE training) — fix the caliber before attributing.
 
-**Report back (this is the P1.2 gate):** for each of the three arms — the `[[MEM]] peak_hbm_gb`, and the update-op fusion from trace_viewer (multiply-add vs add-convert). Verdict:
-- `stream_nopromote ≈ optax` (peak drops to ~12GB AND op back to multiply-add) → **fp32 promote is the cause of both**.
-- `stream_nopromote ≈ stream` (still ~16GB / still add-convert) → NOT promote → next suspect is the always-allocated stream accumulator grad tree (depth-1 never uses it) → we fix by not allocating it at depth-1.
-- Commit the three `.log` files (and, if convenient, the xprof traces) back to the branch.
+**Status & Findings (July 28):**
+The ablation was run and the XLA output clearly demonstrates that:
+1. `optax` (baseline): 11.72 GB HBM peak.
+2. `stream_nopromote` (no fp32 promote): 13.97 GB HBM peak.
+3. `stream` (with fp32 promote): 18.34 GB HBM peak.
 
-Once the arm the regression tracks is known (with numbers), Phase 2 (fix) picks the path — see tasks/hbm_regression/{plan,phase1}.md.
+**Verdict:** The regression is a combination of BOTH hypotheses!
+- The fp32 promote converts Adam mu/nu trees from bf16 to fp32, inflating HBM peak by ~2GB per tree (total 4.37GB) and causing the op fusion degradation.
+- On top of that, the stream accumulator itself forcefully allocates a duplicate `self.grads` tree equivalent to the model parameters (another ~2.25GB) even at `gradient_accumulation_steps=1`.
+
+The 3 xprof trace files (along with the `.log` tracking) have been uploaded to `gs://yuxzhang-tunix-models/issue21_repro_xprof/` mapped properly as `[optax | stream | stream_nopromote]/plugins/profile/...`. 
+The `trace.json.gz` logs were additionally committed to the branch under `experimental/tracing_logs/`.
