@@ -131,7 +131,8 @@ def create_in_process_handle(
 
 @contextlib.asynccontextmanager
 async def running_grpc_server(
-    engine: Any, default_timeout_s: Optional[float] = remote_lib.DEFAULT_TIMEOUT_S
+    engine: Any,
+    rpc_timeout_s: Optional[float] = remote_lib.RPC_TIMEOUT_S,
 ):
   """Async context manager managing lifecycle of a GrpcRemoteExecutionServer and handle."""
   port = portpicker.pick_unused_port()
@@ -139,7 +140,7 @@ async def running_grpc_server(
   await server.start_serving_async(port=port)
   handle = remote_lib.GrpcRemoteActorHandle(
       target_address=f"grpc://localhost:{port}",
-      default_timeout_s=default_timeout_s,
+      rpc_timeout_s=rpc_timeout_s,
   )
   try:
     yield server, handle
@@ -775,7 +776,7 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_grpc_asubmit_times_out_on_slow_worker(self):
     async def _run():
       engine = StubWorkerEngine("slow_worker", latency=2.0)
-      async with running_grpc_server(engine, default_timeout_s=0.3) as (
+      async with running_grpc_server(engine, rpc_timeout_s=0.3) as (
           _,
           handle,
       ):
@@ -834,6 +835,171 @@ class RemoteExecutionTest(absltest.TestCase):
             server.stop_serving(), serve_loop
         ).result(timeout=5)
       thread.join(timeout=5)
+
+  def test_pool_execution_session_dynamic_enqueuing_and_fault_isolation(self):
+    """Verifies bulk submission, dynamic task enqueuing, and fault isolation in PoolExecutionSession."""
+
+    class DynamicWorker:
+
+      def __init__(self, name: str):
+        self.name = name
+
+      def process(self, val: int) -> int:
+        if val < 0:
+          raise ValueError(f"Negative value {val} not allowed on {self.name}")
+        return val * 10
+
+    async def _run():
+      w1 = create_in_process_handle(DynamicWorker("w1"))
+      w2 = create_in_process_handle(DynamicWorker("w2"))
+      pool = remote_lib.RoutingActorPool([w1, w2])
+
+      results = []
+      errors = []
+
+      # 1. Client calls execution_session for an initial bulk of tasks
+      initial_tasks = [
+          ("process", (5,), {}),
+          ("process", (-10,), {}),  # This task will throw an exception!
+          ("process", (15,), {}),
+      ]
+      async with pool.execution_session(initial_tasks) as session:
+        # 2. Client waits for tasks to finish
+        async for result, exc in session.as_completed():
+          if exc is not None:
+            # 4. If any task throws an exception, it does not affect receiving responses from other tasks
+            errors.append(str(exc))
+            continue
+
+          results.append(result)
+          # 3. Whenever a task is finished, client tries to enqueue a new task
+          if result == 50:
+            await session.submit("process", 2)  # will produce 20
+          elif result == 150:
+            await session.submit("process", 3)  # will produce 30
+
+      self.assertLen(errors, 1)
+      self.assertIn("Negative value -10 not allowed", errors[0])
+      self.assertCountEqual(results, [50, 150, 20, 30])
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_no_double_decrement_on_dispatch_failure(self):
+    """Verifies that dispatch failures in submit() do not double-decrement _in_flight."""
+
+    class FailingDispatchHandle(remote_lib.ActorHandle):
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(self, method_name: str, *args, **kwargs) -> str:
+        raise ConnectionError("Network error during dispatch")
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        raise ConnectionError("Network error during polling")
+
+    async def _run():
+      handle = FailingDispatchHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      with self.assertRaises(ConnectionError):
+        await session.submit("process", 1)
+
+      # Verify that _in_flight is properly 0 and not negative/corrupted
+      self.assertEqual(session._in_flight, 0)
+      self.assertEmpty(session._dispatched_tasks.get(handle, set()))
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_deadlock_when_loop_dies_during_second_dispatch(
+      self,
+  ):
+    """Verifies as_completed() does not hang if polling loop dies while dispatch_task is awaiting."""
+
+    class DropDuringSecondDispatchHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.poll1_started = asyncio.Event()
+        self.task2_dispatch_pause = asyncio.Event()
+        self.trigger_connection_drop = asyncio.Event()
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(self, method_name: str, *args, **kwargs) -> str:
+        if method_name == "task1":
+          return "task_1"
+        # Task 2 dispatch: pause while poll1 is active
+        await self.task2_dispatch_pause.wait()
+        return "task_2"
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        # First call: long poll for task1
+        if not self.poll1_started.is_set():
+          self.poll1_started.set()
+          await self.trigger_connection_drop.wait()
+          raise ConnectionError("Connection dropped during task1 poll")
+        # Subsequent calls (for restarted loop)
+        raise ConnectionError("Worker dead on second loop poll")
+
+    async def _run():
+      handle = DropDuringSecondDispatchHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      # 1. Dispatch task1 (returns task_1, polling loop starts long-poll for task1)
+      await session.submit("task1")
+      await handle.poll1_started.wait()
+
+      # 2. Start task2 dispatch in background (pauses in dispatch_task)
+      task2_fut = asyncio.create_task(session.submit("task2"))
+      await asyncio.sleep(0.01)
+
+      # 3. Connection drops while task1 is polling and task2 is dispatching!
+      handle.trigger_connection_drop.set()
+      await asyncio.sleep(0.01)
+
+      # 4. Now allow task2 dispatch_task to finish
+      handle.task2_dispatch_pause.set()
+      await task2_fut
+
+      # 5. Consume as_completed stream; both task1 and task2 errors must be yielded
+      results = []
+
+      async def _consume():
+        async for item in session.as_completed():
+          results.append(item)
+
+      await asyncio.wait_for(_consume(), timeout=1.0)
+      await session.close()
+
+      self.assertLen(results, 2)
+      self.assertIsNotNone(results[0][1])
+      self.assertIsInstance(results[0][1], ConnectionError)
+      self.assertIsNotNone(results[1][1])
+      self.assertIsInstance(results[1][1], ConnectionError)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
