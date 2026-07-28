@@ -547,7 +547,105 @@ USE_ROLLOUT_LOGPS = args.use_rollout_logps
 
 # %%
 # ==========================================
-# 5. JAX Device & Mesh Setup
+# 5. Tokenizer & Dataset Preparation (No JAX)
+# ==========================================
+tokenizer_path = MODEL_PATH
+local_files_only = True
+if MODEL_SOURCE == "maxtext" and MODEL_PATH.startswith("gs://"):
+  tokenizer_path = f"Qwen/{MODEL_VERSION}"
+  local_files_only = False
+  print(f"Loading tokenizer from HF Hub: {tokenizer_path}")
+
+tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer_path, local_files_only=local_files_only, trust_remote_code=True
+)
+
+chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
+
+print("Loading Dataset...")
+
+if args.dataset_path:
+  dataset = datasets_lib.load_from_disk(args.dataset_path)
+  if isinstance(dataset, datasets_lib.DatasetDict):
+    dataset = dataset["train"]
+else:
+  dataset = datasets_lib.load_dataset(
+      "R2E-Gym/R2E-Gym-Subset",
+      split="train",
+      cache_dir=DATASET_CACHE,
+      trust_remote_code=True,
+  )
+
+
+def transform(entry):
+  for k, v in entry.items():
+    if isinstance(v, list):
+      entry[k] = json.dumps(v)
+  return entry
+
+
+dataset = dataset.map(
+    transform,
+    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
+)
+
+dataset = dataset.shuffle(seed=SEED)
+grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
+
+
+def mixed_type_batch_fn(elements):
+  """elements: A list of dicts."""
+  batched_data = {}
+  str_set = {
+      "repo_name",
+      "docker_image",
+      "commit_hash",
+      "parsed_commit_content",
+      "execution_result_content",
+  }
+  dict_set = {"modified_files", "relevant_files", "modified_entity_summaries"}
+  int_set = {
+      "num_non_test_files",
+      "num_non_test_func_methods",
+      "num_non_test_lines",
+      "prompt",
+      "problem_statement",
+      "expected_output_json",
+  }
+  keys = elements[0].keys()
+
+  for key in keys:
+    if key in str_set or key in dict_set:
+      # Keep these as standard Python lists
+      batched_data[key] = [item[key] for item in elements]
+
+    elif key in int_set:
+      # Convert these to NumPy arrays.
+      # np.array() safely handles both single integers and lists of integers.
+      batched_data[key] = np.array([item[key] for item in elements])
+
+    else:
+      # Fallback for any unexpected keys (defaulting to lists is usually safest)
+      batched_data[key] = [item[key] for item in elements]
+
+  return batched_data
+
+train_dataset, _ = data_lib.post_init_dataset(
+    grain_dataset,
+    tokenizer,
+    batch_size=BATCH_SIZE,
+    num_batches=None,
+    max_prompt_length=MAX_PROMPT_LENGTH,
+    fraction=TRAIN_FRACTION,
+    num_epochs=NUM_EPOCHS,
+    prompt_key="problem_statement",
+    custom_batch_fn=mixed_type_batch_fn,
+)
+
+
+# %%
+# ==========================================
+# 6. JAX Device & Mesh Setup
 # ==========================================
 import jax
 import jax.numpy as jnp
@@ -649,7 +747,7 @@ if train_sp is not None:
 
 # %%
 # ==========================================
-# 6. Model Initialization
+# 7. Model Initialization
 # ==========================================
 
 if MODEL_SOURCE == "maxtext":
@@ -701,50 +799,10 @@ else:
 sft_utils.show_hbm_usage()
 
 # %%
-# ==========================================
-# 7. Tokenizer & Parser
-# ==========================================
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH, local_files_only=True, trust_remote_code=True
-)
-
-chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
-
 
 # %%
 # ==========================================
-# 8. Data Loading
-# ==========================================
-print("Loading Dataset...")
-
-if args.dataset_path:
-  dataset = datasets_lib.load_from_disk(args.dataset_path)
-  if isinstance(dataset, datasets_lib.DatasetDict):
-    dataset = dataset["train"]
-else:
-  dataset = datasets_lib.load_dataset(
-      "R2E-Gym/R2E-Gym-Subset",
-      split="train",
-      cache_dir=DATASET_CACHE,
-      trust_remote_code=True,
-  )
-
-
-def transform(entry):
-  for k, v in entry.items():
-    if isinstance(v, list):
-      entry[k] = json.dumps(v)
-  return entry
-
-
-dataset = dataset.map(
-    transform,
-    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
-)
-
-# %%
-# ==========================================
-# 9. Optimizer & Checkpointing
+# 8. Optimizer & Checkpointing
 # ==========================================
 if CKPT_DIR:
   checkpointing_options = ocp.CheckpointManagerOptions(
@@ -771,7 +829,7 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # ==========================================
-# 10. RL Cluster Setup
+# 9. RL Cluster Setup
 # ==========================================
 
 base_rollout_dict = {
@@ -869,7 +927,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 
 # %%
 # ==========================================
-# 11. Learner & Agent Setup
+# 10. Learner & Agent Setup
 # ==========================================
 
 config_kwargs = {
@@ -909,51 +967,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 )
 
 
-# %%
-# ==========================================
-# 11. process dataset and start training
-# ==========================================
 
-dataset = dataset.shuffle(seed=SEED)
-grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
-
-
-def mixed_type_batch_fn(elements):
-  """elements: A list of dicts."""
-  batched_data = {}
-  str_set = {
-      "repo_name",
-      "docker_image",
-      "commit_hash",
-      "parsed_commit_content",
-      "execution_result_content",
-  }
-  dict_set = {"modified_files", "relevant_files", "modified_entity_summaries"}
-  int_set = {
-      "num_non_test_files",
-      "num_non_test_func_methods",
-      "num_non_test_lines",
-      "prompt",
-      "problem_statement",
-      "expected_output_json",
-  }
-  keys = elements[0].keys()
-
-  for key in keys:
-    if key in str_set or key in dict_set:
-      # Keep these as standard Python lists
-      batched_data[key] = [item[key] for item in elements]
-
-    elif key in int_set:
-      # Convert these to NumPy arrays.
-      # np.array() safely handles both single integers and lists of integers.
-      batched_data[key] = np.array([item[key] for item in elements])
-
-    else:
-      # Fallback for any unexpected keys (defaulting to lists is usually safest)
-      batched_data[key] = [item[key] for item in elements]
-
-  return batched_data
 
 try:
   import datetime
@@ -989,20 +1003,7 @@ except Exception as e:
   print(f"W&B initialization failed with error: {e}")
 
 
-train_dataset, _ = data_lib.post_init_dataset(
-    grain_dataset,
-    tokenizer,
-    batch_size=BATCH_SIZE,
-    num_batches=None,
-    max_prompt_length=MAX_PROMPT_LENGTH,
-    fraction=TRAIN_FRACTION,
-    num_epochs=NUM_EPOCHS,
-    prompt_key="problem_statement",
-    custom_batch_fn=mixed_type_batch_fn,
-)
-
-
-print("Starting training...")
+print("Starting training...", flush=True)
 agentic_grpo_learner.train(train_dataset=train_dataset)
 
 
