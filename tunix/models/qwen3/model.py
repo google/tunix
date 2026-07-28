@@ -553,6 +553,18 @@ class Attention(nnx.Module):
       )
 
       shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
+      # shard_map rejects a batch that the fsdp axis does not divide, which a
+      # micro-batch smaller than the mesh produces (2 rows over 4 chips) and
+      # packing can produce whenever the row count is not a multiple. Fall back
+      # to replicating the batch instead of failing; gemma4/model.py:1000 does
+      # the same and is why the identical configuration runs there.
+      if (
+          mesh is not None
+          and shd_b is not None
+          and shd_b in mesh.shape
+          and b % mesh.shape[shd_b] != 0
+      ):
+        shd_b = None
       head_shards = (
           mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
       )
