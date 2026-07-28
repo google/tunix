@@ -31,6 +31,7 @@ from typing import Any, Protocol, runtime_checkable
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import function_registry
+from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -59,6 +60,23 @@ class AlgorithmAdapter(Protocol):
 
   def configure_trainer(self, cluster: Any) -> None:
     """Wires the algorithm's loss + model-input adapter onto the cluster trainer."""
+    ...
+
+  def postprocess_group(
+      self,
+      orchestrator: Any,
+      trajectories: Any,
+      *,
+      compute_rewards: Any,
+      mode: Any,
+      expected_step: int | None = None,
+  ) -> Any:
+    """Turns a group of raw trajectories into train example(s).
+
+    The algorithm's whole postprocess, expressed on the orchestrator primitives
+    (scoring, metrics) + the shared registries -- the new-API form of the agentic
+    `_process_results`.
+    """
     ...
 
 
@@ -164,3 +182,158 @@ class GRPOAdapter:
         lambda x: {"train_example": x, "algo_config": algo_config}
     )
     cluster.actor_trainer.is_managed_externally = True
+
+  def postprocess_group(
+      self,
+      orchestrator: Any,
+      trajectories: Any,
+      *,
+      compute_rewards: Any,
+      mode: Any,
+      expected_step: int | None = None,
+  ) -> list[agentic_rl_learner.TrainExample]:
+    """GRPO postprocess re-expressed on the orchestrator primitives.
+
+    The new-API form of `GRPOLearner._process_results` for the on-policy path:
+    extract -> pad/mask -> score (reference/actor via orchestrator primitives) ->
+    reward (caller-supplied) -> advantage (shared estimator) -> assemble. Reuses
+    the same padding helpers and registries, so it stays faithful to the agentic
+    learner. (The extensive diagnostic metrics and the sampler-IS/off-policy paths
+    of `_process_results` are omitted here; those layer on next.)
+    """
+    algo = self._algo_config
+    pad_value = orchestrator.rollout.pad_id()
+    eos_value = orchestrator.rollout.eos_id()
+    rollout_config = orchestrator.get_rollout_config(mode)
+    max_prompt_length = rollout_config.max_prompt_length
+    max_response_length = algo.max_response_length
+    micro_batch_size = (
+        orchestrator.cluster_config.training_config.compute_logps_micro_batch_size
+    )
+
+    completion_texts = []
+    prompt_tokens_list = []
+    completion_tokens_list = []
+    completion_masks_list = []
+    old_logprobs_list = []
+    policy_versions_list = []
+    trajectory_rewards_list = []
+    original_inputs_list = []
+    for item in trajectories:
+      traj = item.traj
+      conversation = traj.get("conversation_text") or []
+      assistant_text = next(
+          (m["content"] for m in conversation if m["role"] == "assistant"), ""
+      )
+      completion_texts.append(assistant_text)
+      prompt_tokens_list.append(traj.get("prompt_tokens"))
+      completion_tokens_list.append(traj.get("conversation_tokens"))
+      completion_masks_list.append(traj.get("conversation_masks"))
+      old_logprobs_list.append(traj.get("old_logprobs"))
+      policy_version = traj.get("policy_version")
+      if policy_version is None:
+        raise ValueError("policy_version is missing from trajectory task.")
+      policy_versions_list.append(policy_version)
+      trajectory_rewards_list.append(traj.get("trajectory_reward"))
+      original_inputs_list.append(traj["original_input"])
+
+    padded_prompt_ids = []
+    padded_completion_ids = []
+    padded_completion_masks = []
+    padded_old_logprobs = []
+    for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
+        prompt_tokens_list,
+        completion_tokens_list,
+        completion_masks_list,
+        old_logprobs_list,
+    ):
+      padded_prompt, padded_completion, _ = (
+          agentic_utils.pad_prompt_and_completion(
+              prompt_tokens,
+              completion_tokens,
+              max_prompt_length,
+              max_response_length,
+              pad_value,
+          )
+      )
+      padded_prompt_ids.append(padded_prompt)
+      padded_completion_ids.append(padded_completion[:max_response_length])
+      padded_completion_masks.append(
+          agentic_utils.right_pad(completion_mask, max_response_length, 0)[
+              :max_response_length
+          ]
+      )
+      if algo.use_rollout_logps:
+        if old_logprobs is not None:
+          padded_old_logprobs.append(
+              agentic_utils.right_pad(
+                  old_logprobs,
+                  length=max_response_length,
+                  pad=0.0,
+                  dtype=old_logprobs.dtype,
+              )[:max_response_length]
+          )
+        else:
+          padded_old_logprobs.append(
+              np.zeros(max_response_length, dtype=np.float32)
+          )
+
+    prompt_ids = jnp.asarray(padded_prompt_ids)
+    prompt_mask = prompt_ids != pad_value
+    completion_ids = jnp.asarray(padded_completion_ids)
+    completion_mask = jnp.asarray(padded_completion_masks)
+
+    if algo.use_rollout_logps and padded_old_logprobs:
+      old_per_token_logps = jnp.asarray(padded_old_logprobs)
+    elif algo.use_rollout_logps:
+      old_per_token_logps = None
+    else:
+      old_per_token_logps = orchestrator.actor_logps(
+          prompt_ids, completion_ids, pad_value, eos_value, micro_batch_size
+      )
+
+    if algo.force_compute_kl or algo.beta != 0.0:
+      ref_per_token_logps = orchestrator.reference_logps(
+          prompt_ids, completion_ids, pad_value, eos_value, micro_batch_size
+      )
+    else:
+      ref_per_token_logps = None
+
+    original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
+    reward_kwargs = {
+        key: value for key, value in original_inputs.items() if key != "prompts"
+    }
+    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
+    rewards = compute_rewards(
+        prompts=original_inputs["prompts"],
+        completions=completion_texts,
+        mode=mode,
+        expected_step=expected_step,
+        **reward_kwargs,
+    )
+    advantages = self.compute_advantages(
+        rewards, num_generations=algo.num_generations
+    )
+
+    orchestrator.buffer_metrics_async(
+        {
+            "rewards/advantage/mean": (np.mean(advantages), np.mean),
+            "rewards/advantage/max": (np.max(advantages), np.max),
+            "rewards/advantage/min": (np.min(advantages), np.min),
+        },
+        mode=mode,
+        step=expected_step,
+    )
+
+    return [
+        agentic_rl_learner.TrainExample(
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+            completion_ids=completion_ids,
+            completion_mask=completion_mask,
+            ref_per_token_logps=ref_per_token_logps,
+            advantages=advantages,
+            old_per_token_logps=old_per_token_logps,
+            policy_version=np.array(policy_versions_list, dtype=np.int32),
+        )
+    ]
