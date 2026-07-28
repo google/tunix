@@ -35,9 +35,40 @@ def main():
   a = p.parse_args()
 
   from transformers import AutoTokenizer
-  from datasets import load_dataset
   tok = AutoTokenizer.from_pretrained(a.model_path, local_files_only=True, trust_remote_code=True)
-  ds = load_dataset(a.dataset, streaming=True)
+
+  # LOCAL mode: --dataset "local:/path/**/trajectory.json" -> read real trajectory.json files
+  # (their 'messages'), chat-template + tokenize, concat, chop into seq_len chunks. No HF/network.
+  if a.dataset.startswith("local:"):
+    import glob, json, itertools
+    files = sorted(glob.glob(a.dataset[len("local:"):], recursive=True))
+    parts = []
+    for f in files:
+      try:
+        row = json.load(open(f))
+      except Exception:
+        continue
+      t = _row_to_text(row, tok)
+      if t:
+        parts.append(t)
+    if not parts:
+      raise SystemExit(f"no usable trajectory.json for glob {a.dataset[6:]}")
+    ids = tok("\n\n".join(parts), return_tensors=None)["input_ids"]
+    chunks = [ids[i:i + a.seq_len] for i in range(0, len(ids) - a.seq_len + 1, a.seq_len)]
+    if not chunks:
+      raise SystemExit(f"only {len(ids)} tokens total from {len(files)} files; < seq_len {a.seq_len}")
+    if len(chunks) < a.n:
+      print(f"[build_workload] {len(chunks)} real {a.seq_len}-tok chunks from {len(files)} traj; cycling to {a.n}")
+      chunks = list(itertools.islice(itertools.cycle(chunks), a.n))
+    arr = np.asarray(chunks[:a.n], dtype=np.int32)
+    np.savez(a.out, tokens=arr)
+    print(f"[build_workload] LOCAL saved {arr.shape} -> {a.out} ({len(files)} trajectory files, {len(ids)} total tokens)")
+    return
+
+  from datasets import load_dataset
+  # NON-streaming: uses the LOCAL cache (fast). streaming=True re-fetches from the hub -> slow when
+  # unauthenticated. The dataset is already cached under HF_HOME on this machine.
+  ds = load_dataset(a.dataset)
   split = "train" if "train" in ds else list(ds.keys())[0]
 
   seqs, scanned, short = [], 0, 0
@@ -51,9 +82,15 @@ def main():
     if len(seqs) >= a.n or scanned >= a.max_scan:
       break
 
+  if not seqs:
+    raise SystemExit(f"no trajectory >= {a.seq_len} tokens in {scanned} scanned. Lower --seq_len.")
   if len(seqs) < a.n:
-    raise SystemExit(f"only {len(seqs)} trajectories >= {a.seq_len} tokens in {scanned} scanned "
-                     f"({short} too short). Lower --seq_len or --n, or raise --max_scan.")
+    # Not enough distinct long trajectories -> CYCLE the real ones to fill the batch. For a
+    # batch-variance test the fillers only need to occupy batch slots (per-sequence-independent
+    # forward); seq0 stays a real trajectory and only the BATCH SIZE varies.
+    import itertools
+    print(f"[build_workload] only {len(seqs)} distinct >= {a.seq_len} tok; cycling to {a.n}")
+    seqs = list(itertools.islice(itertools.cycle(seqs), a.n))
   arr = np.asarray(seqs, dtype=np.int32)     # [n, seq_len]
   np.savez(a.out, tokens=arr)
   print(f"[build_workload] saved {arr.shape} -> {a.out} "
