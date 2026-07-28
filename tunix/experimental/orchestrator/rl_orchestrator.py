@@ -153,6 +153,45 @@ class RLOrchestrator:
     """Wires the algorithm's loss/model-input adapter onto the cluster trainer."""
     self._algorithm.configure_trainer(self._cluster)
 
+  # --- Metrics --------------------------------------------------------------
+
+  def buffer_metrics(self, metrics: Any, **kwargs) -> None:
+    self._cluster.buffer_metrics(metrics, **kwargs)
+
+  def buffer_metrics_async(self, metrics: Any, **kwargs) -> None:
+    self._cluster.buffer_metrics_async(metrics, **kwargs)
+
+  # --- Cluster accessors (config, topology, sub-engines) --------------------
+  # Convenience pass-throughs so a learner loop can be built entirely on the
+  # orchestrator; the underlying cluster stays available via `.cluster`.
+
+  @property
+  def cluster_config(self) -> Any:
+    return self._cluster.cluster_config
+
+  @property
+  def perf_v2(self) -> Any:
+    return self._cluster.perf_v2
+
+  @property
+  def rollout(self) -> Any:
+    return self._cluster.rollout
+
+  @property
+  def actor_trainer(self) -> Any:
+    return self._cluster.actor_trainer
+
+  @property
+  def tokenizer(self) -> Any:
+    return self._cluster.tokenizer
+
+  @property
+  def r2m(self) -> Any:
+    return self._cluster.r2m
+
+  def get_rollout_config(self, mode: Any) -> Any:
+    return self._cluster.get_rollout_config(mode)
+
   # --- Shared state ---------------------------------------------------------
 
   @property

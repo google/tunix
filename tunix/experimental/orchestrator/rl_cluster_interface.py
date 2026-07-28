@@ -12,22 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The primitive-API surface an RL learning loop drives.
+"""The RL cluster surface a learning loop drives.
 
 `RLCluster` (in-process) and `OrchestratorRLCluster` (worker-backed) are two
-implementations of the same surface: a learner (`AgenticRLLearner` and friends)
-builds its loop entirely out of these calls and is agnostic to whether the work
-runs in-process or is dispatched to remote workers. Swapping the implementation
-is what turns a single-process run into a distributed one -- the loop code does
-not change.
+implementations of the same surface: a learner builds its loop out of these calls
+and is agnostic to whether the work runs in-process or is dispatched to workers.
+Swapping the implementation turns a single-process run into a distributed one --
+the loop code does not change.
 
-This Protocol documents the load-bearing subset of that surface -- the compute
-primitives plus the shared bookkeeping the loop reads/writes. It is intentionally
-structural: `RLCluster` already satisfies it without inheriting anything, and
-`OrchestratorRLCluster` satisfies it by routing the primitives to workers and
-delegating the rest. Concrete clusters expose more than this (e.g. `rollout`,
-`actor_trainer`, `cluster_config`, `perf_v2`); those accessors are provided by
-both implementations but are not part of the minimal contract enumerated here.
+This Protocol is the faithful contract, derived from the members the agentic
+learners (`AgenticRLLearner` / `GRPOLearner`) actually touch. It is grouped into:
+
+  * compute primitives (generate / train / sync / score),
+  * shared bookkeeping (step counter, metrics, tokenizer, teardown),
+  * config & topology (cluster_config, role->mesh, rollout config), and
+  * sub-engine accessors (rollout, actor_trainer, critic_trainer, perf tracer).
+
+The Protocol is structural: `RLCluster` satisfies it as-is, and
+`OrchestratorRLCluster` satisfies it by routing the compute primitives to workers
+and delegating the rest. Sub-engines are typed `Any` here (their own surfaces --
+`rollout.pad_id()/eos_id()/model()`, `actor_trainer.with_loss_fn(...)`, etc. --
+are large and worker-implementation-specific); the members exercised by the loop
+are noted in comments.
 """
 
 from typing import Any, Mapping, Protocol, runtime_checkable
@@ -35,13 +41,26 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 @runtime_checkable
 class AbstractRLCluster(Protocol):
-  """Structural interface for the RL primitives a learning loop drives."""
+  """Structural interface for the RL cluster surface a learning loop drives."""
 
   # --- Shared bookkeeping ---------------------------------------------------
-  global_steps: int  # step counter / weight version, read and written by the loop.
+  # Step counter / weight version, read and written by the loop.
+  global_steps: int
+  # Tokenizer adapter used for chat templating / (de)tokenization.
+  tokenizer: Any
 
-  def buffer_metrics(self, metrics: Mapping[str, Any], **kwargs) -> None:
-    """Buffers metrics to be flushed on the next step boundary."""
+  def buffer_metrics(self, metrics: Mapping[str, Any], mode: Any = ...) -> None:
+    """Buffers metrics, flushed on the next step boundary."""
+    ...
+
+  def buffer_metrics_async(
+      self, metrics: Mapping[str, Any], mode: Any = ..., step: int = ...
+  ) -> None:
+    """Buffers metrics for a specific step (async producer path)."""
+    ...
+
+  def close(self) -> None:
+    """Releases cluster resources at end of run."""
     ...
 
   # --- Generation (rollout) -------------------------------------------------
@@ -63,7 +82,7 @@ class AbstractRLCluster(Protocol):
     ...
 
   def update_critic(self, train_ds: Any, eval_ds: Any, skip_jit: bool = False) -> None:
-    """Runs the critic trainer (PPO); a no-op for critic-free algorithms."""
+    """Runs the critic trainer (PPO); absent/no-op for critic-free algorithms."""
     ...
 
   # --- Scoring (feeds advantage / IS math) ----------------------------------
@@ -93,3 +112,26 @@ class AbstractRLCluster(Protocol):
   def sync_weights(self) -> None:
     """Publishes the trainer's weights to the rollout/inference replicas."""
     ...
+
+  # --- Config & topology ----------------------------------------------------
+  # ClusterConfig: training_config (+ micro-batch sizes, chunk sizes, metrics
+  # options), rollout_config, rollout_engine, role_to_mesh.
+  cluster_config: Any
+  # Role -> Mesh mapping (aka cluster_config.role_to_mesh); `.devices`/`.empty`.
+  r2m: Any
+
+  def get_rollout_config(self, mode: Any) -> Any:
+    """Returns the effective rollout config for the given mode."""
+    ...
+
+  # --- Sub-engine accessors (surfaces the loop reaches into) -----------------
+  # rollout: `.pad_id()`, `.eos_id()`, `.model()`.
+  rollout: Any
+  # actor_trainer: `.with_loss_fn(...)`, `.with_gen_model_input_fn(...)`,
+  # `.with_rl_metrics_to_log(...)`, `.is_managed_externally`,
+  # `.restored_global_step()`, `.iter_steps`, `.train_steps`, `.model`.
+  actor_trainer: Any
+  # critic_trainer: present only for actor-critic algorithms (PPO). Guard with
+  # hasattr(cluster, "critic_trainer") before use.
+  # perf_v2: `.span(...)`, `.all_devices`, `.export()`.
+  perf_v2: Any

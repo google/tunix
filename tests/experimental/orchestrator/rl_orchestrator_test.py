@@ -35,6 +35,23 @@ class _FakeCluster:
   def __init__(self):
     self.global_steps = 0
     self.calls = {}
+    self.buffered = []
+    self.buffered_async = []
+    self.cluster_config = "CFG"
+    self.perf_v2 = "PERF"
+    self.rollout = "ROLLOUT"
+    self.actor_trainer = "ACTOR_TRAINER"
+    self.tokenizer = "TOK"
+    self.r2m = "R2M"
+
+  def buffer_metrics(self, metrics, **kwargs):
+    self.buffered.append((metrics, kwargs))
+
+  def buffer_metrics_async(self, metrics, **kwargs):
+    self.buffered_async.append((metrics, kwargs))
+
+  def get_rollout_config(self, mode):
+    return ("ROLLOUT_CONFIG", mode)
 
   def generate(self, *args):
     self.calls["generate"] = args
@@ -114,6 +131,20 @@ class RlOrchestratorTest(absltest.TestCase):
     )
     np.testing.assert_allclose(np.asarray(out), np.asarray(expected))
     self.assertEqual(np.asarray(out).shape, (4,))
+
+  def test_metrics_and_accessors_delegate_to_cluster(self):
+    orch, cluster = _make()
+    orch.buffer_metrics({"a": 1}, mode="train")
+    orch.buffer_metrics_async({"b": 2}, step=3)
+    self.assertEqual(cluster.buffered, [({"a": 1}, {"mode": "train"})])
+    self.assertEqual(cluster.buffered_async, [({"b": 2}, {"step": 3})])
+    self.assertEqual(orch.cluster_config, "CFG")
+    self.assertEqual(orch.perf_v2, "PERF")
+    self.assertEqual(orch.rollout, "ROLLOUT")
+    self.assertEqual(orch.actor_trainer, "ACTOR_TRAINER")
+    self.assertEqual(orch.tokenizer, "TOK")
+    self.assertEqual(orch.r2m, "R2M")
+    self.assertEqual(orch.get_rollout_config("train"), ("ROLLOUT_CONFIG", "train"))
 
   def test_exposes_cluster_and_algorithm(self):
     cluster = _FakeCluster()
