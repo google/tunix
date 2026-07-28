@@ -536,10 +536,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # when active: one extra trainer forward pass per training step.
     actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
-    rollout_per_token_logps = None
+    # ALWAYS capture the raw sampler (inference) logp for the diagnostic metrics,
+    # regardless of whether training USES it -- decouples measuring the true
+    # inference-vs-training mismatch from which logp source the PPO ratio uses.
+    # (Without this, use_rollout_logps=False leaves rollout_per_token_logps=None
+    # and the sampler_trainer/logp_diff metric goes dark.)
+    rollout_per_token_logps = (
+        jnp.asarray(padded_old_logprobs) if padded_old_logprobs else None
+    )
     trainer_per_token_logps = None
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
-      rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
       old_per_token_logps = rollout_per_token_logps
       # The diagnostic pass (and the sampler-IS ``token`` path, which needs the
       # trainer's recomputed logp as ``old_per_token_logps``) requires a real
@@ -779,6 +785,33 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           trainer_per_token_logps=trainer_per_token_logps,
           completion_texts=completion_texts,
       )
+
+    # Effective (used) diff = |old_used - trainer|: what actually enters the PPO
+    # ratio. ~0 when old==trainer (use_rollout_logps=False or sampler_is="token");
+    # equals the true TIM when old==rollout. Side-by-side with sampler_trainer/*
+    # this shows whether a flag cleaned the RATIO (this -> 0) while the real
+    # inference-vs-training mismatch (sampler_trainer/logp_diff) persists.
+    if (
+        old_per_token_logps is not None
+        and trainer_per_token_logps is not None
+    ):
+      m = completion_mask.astype(jnp.float32)
+      msum = jnp.maximum(m.sum(), 1.0)
+      eff = jnp.abs(old_per_token_logps - trainer_per_token_logps)
+      eff_pdiff = jnp.abs(
+          jnp.exp(old_per_token_logps) - jnp.exp(trainer_per_token_logps)
+      )
+      metrics_to_log.update({
+          "effective_old/logp_diff_mean": (
+              float((eff * m).sum() / msum), np.mean),
+          "effective_old/logp_diff_max": (
+              float(jnp.where(m > 0, eff, 0.0).max()), np.max),
+          "effective_old/prob_diff_mean": (
+              float((eff_pdiff * m).sum() / msum), np.mean),
+          "effective_old/prob_diff_max": (
+              float(jnp.where(m > 0, eff_pdiff, 0.0).max()), np.max),
+      })
+
     # Truncated importance-sampling (TIS) correction weights.
     # Compute per-token TIS weights from the trainer-vs-sampler log-ratio,
     # mask to assistant tokens only (we dampen offending model-emitted

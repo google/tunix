@@ -39,10 +39,13 @@ batch_size="${batch_size:-1}"
 mini_batch_size="${mini_batch_size:-1}"
 train_micro_batch_size="${train_micro_batch_size:-1}"
 rollout_micro_batch_size="${rollout_micro_batch_size:-1}"
-compute_logps_micro_batch_size="${compute_logps_micro_batch_size:-$train_micro_batch_size}"
 
 num_generations="${num_generations:-2}"
 max_response_length="${max_response_length:-8192}"
+# Route 1 / on-policy ratio fix: false => old_logp = trainer recompute (PPO ratio -> 1);
+# true (default) => old_logp = raw vLLM sampler logp (baseline). The sampler_trainer/* and
+# effective_old/* metrics track the true TIM and the effective ratio diff regardless.
+use_rollout_logps="${use_rollout_logps:-true}"
 #TODO(b/510820709) - find the optimal mesh configuration.
 total_tpus="${total_tpus:-32}"
 trainer_mesh="${trainer_mesh:-(8,2)}"
@@ -167,6 +170,7 @@ python -m tunix.cli.grpo_main \
   agentic_grpo_config.epsilon=0.2 \
   agentic_grpo_config.epsilon_high=0.28 \
   agentic_grpo_config.off_policy_steps=0 \
+  agentic_grpo_config.use_rollout_logps="$use_rollout_logps" \
   agentic_grpo_config.loss_agg_mode="seq-mean-token-mean" \
   agentic_grpo_config.kl_loss_mode="low_var_kl" \
   \
@@ -187,10 +191,10 @@ python -m tunix.cli.grpo_main \
   `# ── RL training ──────────────────────────────────────────────────────` \
   rl_training_config.eval_every_n_steps=10 \
   rl_training_config.max_steps="$max_steps" \
-  rl_training_config.mini_batch_size="$mini_batch_size" \
-  rl_training_config.train_micro_batch_size="$train_micro_batch_size" \
-  rl_training_config.rollout_micro_batch_size="$rollout_micro_batch_size" \
-  rl_training_config.compute_logps_micro_batch_size="$compute_logps_micro_batch_size" \
+  rl_training_config.mini_batch_size=8 \
+  rl_training_config.train_micro_batch_size=1 \
+  rl_training_config.rollout_micro_batch_size=1 \
+  rl_training_config.compute_logps_micro_batch_size=1 \
   rl_training_config.checkpoint_root_directory="$checkpoint_dir" \
   rl_training_config.checkpointing_options.save_interval_steps=100 \
   rl_training_config.checkpointing_options.max_to_keep=4 \
