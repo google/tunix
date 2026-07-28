@@ -853,7 +853,7 @@ The two contributors reconcile exactly with the model size. Gemma4-E2B text_only
 | activations/workspace | – | ~2.4W | 2.4W | 2.4W | 2.4W | 2.4W |
 | **total** | | | **5.4W** | **8.4W** | **6.4W** | **5.4W** |
 | **predicted GB** (×2.16) | | | 11.7 | 18.1 | 13.8 | 11.7 |
-| **measured GB** | | | 11.72 | 18.34 | 13.97 | (this run) |
+| **measured GB** | | | 11.72 | 18.34 | 13.97 | **11.72** |
 
 So the regression vs optax is **3W ≈ 6.6 GB** = accumulator (1W) + fp32 promote (2W). Two fixes each reclaim their part:
 - **Fix A — don't allocate the accumulator at depth-1** (behavior-preserving; the fast path never reads it — CPU-verified bit-identical depth-1 weights): −1W.
