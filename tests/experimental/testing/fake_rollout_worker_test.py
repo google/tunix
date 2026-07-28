@@ -36,7 +36,7 @@ class FakeRolloutWorkerTest(absltest.TestCase):
     return datatypes.RolloutRequest(
         request_id=request_id,
         prompt_id="p0",
-        prompt_text="hi",
+        prompt="hi",
         sampling_params=datatypes.SamplingParams(max_tokens=8),
     )
 

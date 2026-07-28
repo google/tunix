@@ -16,7 +16,7 @@
 
 Grouping and lineage metadata (group_id, sample_index, incarnation) live here in
 an orchestrator-internal `RequestRecord` rather than on the lean wire DTOs; the
-ledger correlates each returned `RolloutResult` back to its record by
+ledger correlates each returned `RolloutResponse` back to its record by
 `request_id`. It is the single place that enforces two intake invariants:
 
   * incarnation gate -- results whose record predates the current incarnation are
@@ -86,7 +86,7 @@ class RequestLedger:
     self._records: dict[str, RequestRecord] = {}
     self._group_samples: dict[str, set[int]] = collections.defaultdict(set)
     self._group_request_ids: dict[str, set[str]] = collections.defaultdict(set)
-    self._slot_result: dict[tuple[str, int, int], datatypes.RolloutResult] = {}
+    self._slot_result: dict[tuple[str, int, int], datatypes.RolloutResponse] = {}
 
   @property
   def incarnation(self) -> int:
@@ -115,7 +115,7 @@ class RequestLedger:
       self._group_samples[record.group_id].add(record.sample_index)
       self._group_request_ids[record.group_id].add(record.request_id)
 
-  def admit(self, result: datatypes.RolloutResult) -> Admission:
+  def admit(self, result: datatypes.RolloutResponse) -> Admission:
     """Offers a result to the ledger, applying the incarnation gate and dedup.
 
     Args:
@@ -150,7 +150,7 @@ class RequestLedger:
 
   def group_pairs(
       self, group_id: str
-  ) -> list[tuple[RequestRecord, datatypes.RolloutResult]]:
+  ) -> list[tuple[RequestRecord, datatypes.RolloutResponse]]:
     """Returns (record, result) pairs for a complete group, ordered by sample.
 
     Each result is paired with the record that actually produced it (by

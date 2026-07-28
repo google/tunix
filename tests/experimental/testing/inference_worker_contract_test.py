@@ -25,12 +25,13 @@ class InferenceWorkerContractTest(
     inference_worker_contract.InferenceWorkerContractSuite, absltest.TestCase
 ):
 
-  def make_worker(self):
+  def make_worker(self, **kwargs):
     return inference_worker.InferenceWorker(
         inference_worker_contract.StubReferenceScoringCore(),
         pad_id=0,
         eos_id=1,
         model_version=3,
+        **kwargs,
     )
 
   def test_wrapper_returns_temperature_scaled_core_output(self):
@@ -38,7 +39,7 @@ class InferenceWorkerContractTest(
     # applies the request temperature without mangling the core's output.
     worker = self.make_worker()
     request = self._logprobs_request(batch=2, temperature=2.0)
-    result = worker.compute_logprobs(request)
+    result = worker.compute_logps(request)
     np.testing.assert_allclose(
         result.per_token_logps,
         request.completion_tokens.astype(np.float32) * 2.0,

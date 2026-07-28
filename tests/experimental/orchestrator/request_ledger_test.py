@@ -23,7 +23,7 @@ def _request(request_id: str) -> datatypes.RolloutRequest:
   return datatypes.RolloutRequest(
       request_id=request_id,
       prompt_id="p",
-      prompt_text="hi",
+      prompt="hi",
       sampling_params=datatypes.SamplingParams(max_tokens=4),
   )
 
@@ -39,7 +39,7 @@ def _record(group_id, sample_index, *, request_id=None, incarnation=0):
 
 
 def _result(request_id, *, policy_version=0, status="COMPLETED"):
-  return datatypes.RolloutResult(
+  return datatypes.RolloutResponse(
       request_id=request_id, prompt_id="p", status=status,
       policy_version=policy_version,
   )

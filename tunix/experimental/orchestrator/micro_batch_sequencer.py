@@ -45,12 +45,12 @@ class MicroStep:
 
   accum_id: str
   micro_index: int
-  payload: datatypes.TrainerPayload
+  payload: datatypes.RLTrainerPayload
   loss_scale: float
 
 
 def micro_batch_denominator(
-    payload: datatypes.TrainerPayload, loss_agg_mode: str
+    payload: datatypes.RLTrainerPayload, loss_agg_mode: str
 ) -> float:
   """Returns a micro-batch's normalization denominator for the aggregation mode.
 
@@ -71,7 +71,7 @@ def micro_batch_denominator(
 
 
 def plan_micro_steps(
-    micro_batches: list[datatypes.TrainerPayload],
+    micro_batches: list[datatypes.RLTrainerPayload],
     *,
     accum_id: str,
     loss_agg_mode: str = "token-mean",

@@ -18,7 +18,7 @@ Implements the RolloutWorker interface as it currently stands in main (a batched
 `generate` with an optional `on_complete` callback) plus the extended Worker
 lifecycle/health/info, so the orchestrator can register and drive a rollout role
 without a real sampler. The real RolloutWorker interface is owned by its sibling
-plan; this fake deliberately tracks main and returns wire `RolloutResult`s.
+plan; this fake deliberately tracks main and returns wire `RolloutResponse`s.
 """
 
 from typing import Callable, Sequence
@@ -63,8 +63,8 @@ class FakeRolloutWorker(rollout_worker.RolloutWorker):
   async def generate(
       self,
       requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
-      on_complete: Callable[[datatypes.RolloutResult], None] | None = None,
-  ) -> datatypes.RolloutResult | Sequence[datatypes.RolloutResult]:
+      on_complete: Callable[[datatypes.RolloutResponse], None] | None = None,
+  ) -> datatypes.RolloutResponse | Sequence[datatypes.RolloutResponse]:
     single = isinstance(requests, datatypes.RolloutRequest)
     reqs = [requests] if single else list(requests)
     results = [self._golden_result(r) for r in reqs]
@@ -85,14 +85,14 @@ class FakeRolloutWorker(rollout_worker.RolloutWorker):
 
   def _golden_result(
       self, req: datatypes.RolloutRequest
-  ) -> datatypes.RolloutResult:
+  ) -> datatypes.RolloutResponse:
     completion = np.array([3, 4, 5], dtype=np.int32)
     segment = datatypes.TokenSegment(
         source="assistant",
         tokens=completion,
         loss_mask=np.ones_like(completion),
     )
-    return datatypes.RolloutResult(
+    return datatypes.RolloutResponse(
         request_id=req.request_id,
         prompt_id=req.prompt_id,
         status="COMPLETED",

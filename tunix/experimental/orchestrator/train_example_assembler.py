@@ -29,7 +29,7 @@ their owners; their outputs (advantages now, ref-logps later) are layered on
 around it.
 
 Each caller first normalizes its own representation into `SampleTokens` (the
-existing learner from its Token-dicts, the orchestrator from RolloutResult
+existing learner from its Token-dicts, the orchestrator from RolloutResponse
 segments).
 """
 

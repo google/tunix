@@ -37,7 +37,7 @@ def _make_records(group_id, group_size):
     request = datatypes.RolloutRequest(
         request_id=f"{group_id}:{sample_index}",
         prompt_id=group_id,
-        prompt_text="hi",
+        prompt="hi",
         sampling_params=datatypes.SamplingParams(max_tokens=4),
     )
     records.append(

@@ -14,23 +14,24 @@
 
 """Universal Actor Model abstraction layer (`RemoteExecutionServer`, `ActorHandle`, `ActorPool`).
 
-Eliminates RPC boilerplate (`rpc_generate`, `rpc_sync_weights`, etc.) across worker
-types by serializing arbitrary method invocations (`submit`, `asubmit`) over a universal
-execution protocol (`ExecutionRequest`).
+Eliminates RPC boilerplate (`rpc_generate`, `rpc_sync_weights`, etc.) across
+worker types by serializing arbitrary method invocations (`submit`, `asubmit`)
+over a universal execution protocol (`ExecutionRequest`).
 
 Security Notes / Trust Boundaries:
-  This module uses `cloudpickle` to serialize and deserialize dynamic execution requests
-  and responses (`ExecutionRequest`, `ExecutionResponse`). Because `cloudpickle.loads()`
-  executes arbitrary Python code via `__reduce__` gadgets during unpickling, this protocol
-  must NEVER be exposed to unauthenticated or untrusted network traffic.
-  For production deployment across trust boundaries (e.g. multi-tenant Borg jobs or external
-  networks), ensure payloads are authenticated and encrypted via ALTS / mTLS channels (`secure_channel`
-  / `secure_server_credentials`) or signed via shared HMAC-SHA256 signatures before unpickling.
+  This module uses `cloudpickle` to serialize and deserialize dynamic execution
+  requests and responses (`ExecutionRequest`, `ExecutionResponse`). Because
+  `cloudpickle.loads()` executes arbitrary Python code via `__reduce__` gadgets
+  during unpickling, this protocol must NEVER be exposed to unauthenticated or
+  untrusted network traffic.
+  For production deployment across trust boundaries (e.g. multi-tenant Borg jobs
+  or external networks), ensure payloads are authenticated and encrypted via
+  ALTS / mTLS channels (`secure_channel` / `secure_server_credentials`) or
+  signed via shared HMAC-SHA256 signatures before unpickling.
   Where dynamic function shipping is not required, use a custom
   `pickle.Unpickler` (`find_class`) to whitelist only trusted domain data types
   (`int`, `str`, `dict`, `list`, `numpy.ndarray`, `data_types.*`).
 """
-
 
 import abc
 import asyncio
@@ -49,11 +50,13 @@ from typing import (
     Union,
 )
 
+from absl import logging
 import cloudpickle
 
 try:
   import grpc as _grpc_lib
   import grpc.aio as _grpc_aio_lib
+
   _GRPC_AVAILABLE = True
 except ImportError:
   _grpc_lib = None
@@ -103,7 +106,6 @@ class ExecutionRequest:
     self.args: Tuple[Any, ...] = tuple(args or ())
     self.kwargs: Dict[str, Any] = dict(kwargs or {})
 
-
   def serialize(self) -> bytes:
     """Serializes request to bytes using cloudpickle."""
     return cloudpickle.dumps((self.method_name, self.args, self.kwargs))
@@ -138,13 +140,30 @@ class ExecutionResponse:
     self.retryable = retryable
 
   def serialize(self) -> bytes:
-    return cloudpickle.dumps((
-        self.result,
-        self.error_message,
-        self.error_type,
-        self.traceback,
-        self.retryable,
-    ))
+    try:
+      return cloudpickle.dumps((
+          self.result,
+          self.error_message,
+          self.error_type,
+          self.traceback,
+          self.retryable,
+      ))
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      err_msg = (
+          f"failed to serialize result of type {type(self.result).__name__}: {e}"
+      )
+      self.result = None
+      self.error_message = err_msg
+      self.error_type = "ExecutionResponseSerializationError"
+      self.traceback = traceback_lib.format_exc()
+      self.retryable = False
+      return cloudpickle.dumps((
+          self.result,
+          self.error_message,
+          self.error_type,
+          self.traceback,
+          self.retryable,
+      ))
 
   @classmethod
   def deserialize(cls, payload: bytes) -> "ExecutionResponse":
@@ -163,7 +182,9 @@ class ExecutionResponse:
   def unwrap(self) -> Any:
     """Returns the result, or raises RuntimeError if the remote call failed."""
     if self.error_message is not None:
-      message = f"RemoteExecutionError [{self.error_type}]: {self.error_message}"
+      message = (
+          f"RemoteExecutionError [{self.error_type}]: {self.error_message}"
+      )
       if self.traceback:
         message = f"{message}\nRemote traceback:\n{self.traceback}"
       raise RuntimeError(message)
@@ -175,6 +196,40 @@ class RemoteExecutionServer(abc.ABC):
 
   def __init__(self, instance: Optional[Any] = None):
     self._instance: Optional[Any] = instance
+    self._response_queue: Optional[asyncio.Queue[ExecutionResponse]] = None
+    self._task_counter: int = 0  # TODO(tsbao): bind to the request ID.
+    self._background_tasks: set[asyncio.Task[Any]] = set()
+
+  def _get_response_queue(self) -> asyncio.Queue[ExecutionResponse]:
+    if self._response_queue is None:
+      self._response_queue = asyncio.Queue()
+    return self._response_queue
+
+  async def dispatch_task(self, request: ExecutionRequest) -> str:
+    """Dispatches task execution asynchronously on server and returns task ACK ID."""
+    self._task_counter += 1
+    task_id = f"task_{self._task_counter}"
+    task = asyncio.create_task(self._run_and_enqueue(request))
+    self._background_tasks.add(task)
+    task.add_done_callback(self._background_tasks.discard)
+    return task_id
+
+  async def _run_and_enqueue(self, request: ExecutionRequest) -> None:
+    response = await self.execute_request(request)
+    await self._get_response_queue().put(response)
+
+  async def poll_response(
+      self, timeout_s: float = 10.0
+  ) -> Optional[ExecutionResponse]:
+    """Long-polls server-side response queue for completed task results."""
+    try:
+      if timeout_s == 0.0:
+        return self._get_response_queue().get_nowait()
+      return await asyncio.wait_for(
+          self._get_response_queue().get(), timeout=timeout_s
+      )
+    except (asyncio.TimeoutError, asyncio.QueueEmpty):
+      return None
 
   def register_instance(self, instance: Any) -> None:
     """Binds a local Python object (e.g., RolloutWorkerService, TrainerWorker) to the server."""
@@ -190,7 +245,9 @@ class RemoteExecutionServer(abc.ABC):
     """Starts network event loop listening on the specified port."""
     pass
 
-  def execute_sync_request(self, request: ExecutionRequest) -> ExecutionResponse:
+  def execute_sync_request(
+      self, request: ExecutionRequest
+  ) -> ExecutionResponse:
     """Dynamically resolves and executes synchronous method on the bound instance."""
     if self._instance is None:
       return ExecutionResponse(
@@ -209,8 +266,7 @@ class RemoteExecutionServer(abc.ABC):
     if inspect.iscoroutinefunction(method):
       return ExecutionResponse(
           error_message=(
-              f"Method '{target_name}' is a coroutine function; "
-              "use asubmit()."
+              f"Method '{target_name}' is a coroutine function; use asubmit()."
           ),
           error_type="RuntimeError",
       )
@@ -225,7 +281,9 @@ class RemoteExecutionServer(abc.ABC):
           traceback=traceback_lib.format_exc(),
       )
 
-  async def execute_request(self, request: ExecutionRequest) -> ExecutionResponse:
+  async def execute_request(
+      self, request: ExecutionRequest
+  ) -> ExecutionResponse:
     """Dynamically resolves and executes method on the bound instance."""
     if self._instance is None:
       return ExecutionResponse(
@@ -237,12 +295,9 @@ class RemoteExecutionServer(abc.ABC):
     method = getattr(self._instance, target_name, None)
     if method is None or not callable(method):
       return ExecutionResponse(
-          error_message=(
-              f"Method '{target_name}' not found on bound instance."
-          ),
+          error_message=f"Method '{target_name}' not found on bound instance.",
           error_type="AttributeError",
       )
-
 
     try:
       if inspect.iscoroutinefunction(method):
@@ -284,20 +339,21 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
           error_type=type(e).__name__,
           traceback=traceback_lib.format_exc(),
       )
-    try:
-      return response.serialize()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      # The result itself is not serializable; return a structured error rather
-      # than letting the RPC handler crash with an opaque failure.
-      fallback = ExecutionResponse(
-          error_message=(
-              "failed to serialize result of type "
-              f"{type(response.result).__name__}: {e}"
-          ),
-          error_type="ResultSerializationError",
-          traceback=traceback_lib.format_exc(),
-      )
-      return fallback.serialize()
+    return response.serialize()
+
+  async def _handle_dispatch_task(self, request_bytes: bytes, context: Any) -> bytes:
+    del context
+    request = ExecutionRequest.deserialize(request_bytes)
+    task_id = await self.dispatch_task(request)
+    return cloudpickle.dumps(task_id)
+
+  async def _handle_poll_responses(self, request_bytes: bytes, context: Any) -> bytes:
+    del context
+    timeout_s = cloudpickle.loads(request_bytes) if request_bytes else 10.0
+    response = await self.poll_response(timeout_s=timeout_s)
+    if response is None:
+      return b""
+    return response.serialize()
 
   async def start_serving_async(self, port: int = 50051) -> Any:
     """Starts an asynchronous gRPC server listening on [::]:port."""
@@ -312,7 +368,17 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
                 self._handle_execute,
                 request_deserializer=lambda b: b,
                 response_serializer=lambda b: b,
-            )
+            ),
+            "DispatchTask": _grpc_lib.unary_unary_rpc_method_handler(
+                self._handle_dispatch_task,
+                request_deserializer=lambda b: b,
+                response_serializer=lambda b: b,
+            ),
+            "PollResponses": _grpc_lib.unary_unary_rpc_method_handler(
+                self._handle_poll_responses,
+                request_deserializer=lambda b: b,
+                response_serializer=lambda b: b,
+            ),
         },
     )
     self._server.add_generic_rpc_handlers((handler,))
@@ -322,7 +388,6 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     await self._server.start()
     return self._server
 
-
   @property
   def serve_loop(self) -> Optional[Any]:
     """The event loop running the blocking start_serving(), or None."""
@@ -331,11 +396,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
   def start_serving(self, port: int = 50051) -> None:
     """Blocking: starts the gRPC server and serves until it is stopped.
 
-    Runs an event loop for the server's lifetime. The previous implementation
-    returned immediately after start(), so `asyncio.run` closed the loop and
-    tore the server down before it could serve any request. To stop a server
-    started this way, schedule stop_serving() on `serve_loop` from another
-    thread.
+    Runs an event loop for the server's lifetime.
     """
     if _running_loop() is not None:
       raise RuntimeError(
@@ -348,7 +409,9 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     try:
       asyncio.set_event_loop(loop)
       loop.run_until_complete(self.start_serving_async(port))
-      loop.run_until_complete(self._server.wait_for_termination())
+      if self._server is not None:
+        loop.run_until_complete(self._server.wait_for_termination())
+        loop.run_until_complete(asyncio.sleep(0.1))
     finally:
       self._serve_loop = None
       asyncio.set_event_loop(None)
@@ -382,6 +445,20 @@ class ActorHandle(abc.ABC):
     """Asynchronous coroutine returning the completed result or raising exception."""
     pass
 
+  @abc.abstractmethod
+  async def dispatch_task(
+      self, method_name: Optional[str] = None, *args, **kwargs
+  ) -> str:
+    """Dispatches task asynchronously on remote server and receives task ACK ID."""
+    pass
+
+  @abc.abstractmethod
+  async def poll_responses(
+      self, timeout_s: float = 10.0
+  ) -> Optional[ExecutionResponse]:
+    """Long-polls remote server response queue for completed result."""
+    pass
+
 
 class RemoteActorHandle(ActorHandle):
   """ActorHandle targeting a remote network worker address over gRPC/Stubby."""
@@ -399,6 +476,22 @@ class RemoteActorHandle(ActorHandle):
       self, method_name: Optional[str] = None, *args, **kwargs
   ) -> Any:
     del method_name, args, kwargs
+    raise NotImplementedError(
+        f"Remote execution over {self.target_address} not initialized."
+    )
+
+  async def dispatch_task(
+      self, method_name: Optional[str] = None, *args, **kwargs
+  ) -> str:
+    del method_name, args, kwargs
+    raise NotImplementedError(
+        f"Remote execution over {self.target_address} not initialized."
+    )
+
+  async def poll_responses(
+      self, timeout_s: float = 10.0
+  ) -> Optional[ExecutionResponse]:
+    del timeout_s
     raise NotImplementedError(
         f"Remote execution over {self.target_address} not initialized."
     )
@@ -455,8 +548,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     """
     if _running_loop() is not None:
       raise RuntimeError(
-          "GrpcRemoteActorHandle.submit() is blocking and cannot be called from "
-          "a running event loop; use asubmit() instead."
+          "GrpcRemoteActorHandle.submit() is blocking and cannot be called from"
+          " a running event loop; use asubmit() instead."
       )
     loop = self._ensure_sync_loop()
     future = asyncio.run_coroutine_threadsafe(
@@ -506,6 +599,44 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
     return response.unwrap()
 
+  def _make_dispatch_task_rpc(self, channel: Any) -> Any:
+    return channel.unary_unary(
+        "/tunix.ExecutionService/DispatchTask",
+        request_serializer=lambda req: req.serialize(),
+        response_deserializer=lambda b: cloudpickle.loads(b),
+    )
+
+  def _make_poll_responses_rpc(self, channel: Any) -> Any:
+    return channel.unary_unary(
+        "/tunix.ExecutionService/PollResponses",
+        request_serializer=lambda b: cloudpickle.dumps(b),
+        response_deserializer=lambda b: b,
+    )
+
+  async def dispatch_task(
+      self, method_name: Optional[str] = None, *args, **kwargs
+  ) -> str:
+    """Asynchronously dispatches task request on remote server, returning task ACK ID."""
+    if self._channel is None:
+      self._get_rpc()
+    assert self._channel is not None
+    rpc = self._make_dispatch_task_rpc(self._channel)
+    request = ExecutionRequest(method_name, args, kwargs)
+    return await rpc(request, timeout=10.0)
+
+  async def poll_responses(
+      self, timeout_s: float = 10.0
+  ) -> Optional[ExecutionResponse]:
+    """Long-polls remote server response queue for completed task results."""
+    if self._channel is None:
+      self._get_rpc()
+    assert self._channel is not None
+    rpc = self._make_poll_responses_rpc(self._channel)
+    resp_bytes = await rpc(timeout_s, timeout=timeout_s + 5.0)
+    if not resp_bytes:
+      return None
+    return ExecutionResponse.deserialize(resp_bytes)
+
   async def close(self) -> None:
     if self._channel is not None:
       await self._channel.close()
@@ -529,6 +660,12 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         await asyncio.get_running_loop().run_in_executor(
             None, self._sync_thread.join, 5
         )
+        if self._sync_thread.is_alive():
+          logging.warning(
+              "Background sync thread '%s' failed to join within 5 seconds. "
+              "This may lead to leaked thread resources.",
+              self._sync_thread.name,
+          )
       self._sync_loop = None
       self._sync_thread = None
       self._sync_channel = None
@@ -570,10 +707,22 @@ class InProcessActorHandle(ActorHandle):
     request = ExecutionRequest(method_name, args, kwargs)
     return await self._run_async(request)
 
+  async def dispatch_task(
+      self, method_name: Optional[str] = None, *args, **kwargs
+  ) -> str:
+    """Dispatches task execution asynchronously on bound server and returns task ACK ID."""
+    request = ExecutionRequest(method_name, args, kwargs)
+    return await self.server.dispatch_task(request)
+
+  async def poll_responses(
+      self, timeout_s: float = 10.0
+  ) -> Optional[ExecutionResponse]:
+    """Long-polls bound server's response queue for completed results."""
+    return await self.server.poll_response(timeout_s=timeout_s)
+
   async def _run_async(self, request: ExecutionRequest) -> Any:
     response = await self.server.execute_request(request)
     return response.unwrap()
-
 
 
 class ActorPool(abc.ABC):
@@ -604,19 +753,16 @@ class ActorPool(abc.ABC):
     raise NotImplementedError
 
 
-
-
 class RoutingActorPool(ActorPool):
   """ActorPool with smart task routing (`route_key affinity, round-robin fallback`).
 
   Args:
     actors: Initial sequence of worker actor handles or string URI targets.
-    router: Optional custom routing callable
-      `(actors, method_name, args, kwargs) -> ActorHandle` or router
-      module/object providing per-method handlers matching `method_name` with
-      signature `(actors, args, kwargs) -> ActorHandle`.
+    router: Optional custom routing callable `(actors, method_name, args,
+      kwargs) -> ActorHandle` or router module/object providing per-method
+      handlers matching `method_name` with signature `(actors, args, kwargs) ->
+      ActorHandle`.
   """
-
 
   def __init__(
       self,
@@ -629,7 +775,6 @@ class RoutingActorPool(ActorPool):
       self.add_actor(a)
     self._idx = 0
     self.router = router
-
 
   def add_actor(self, actor: Union[str, ActorHandle]) -> None:
     if isinstance(actor, str):
@@ -663,12 +808,16 @@ class RoutingActorPool(ActorPool):
 
     if not self._actors:
 
-      raise RuntimeError("RoutingActorPool contains no registered ActorHandles.")
+      raise RuntimeError(
+          "RoutingActorPool contains no registered ActorHandles."
+      )
 
     kwargs = kwargs or {}
     if self.router is not None:
-      if method_name and hasattr(self.router, method_name) and callable(
-          getattr(self.router, method_name)
+      if (
+          method_name
+          and hasattr(self.router, method_name)
+          and callable(getattr(self.router, method_name))
       ):
         return getattr(self.router, method_name)(self._actors, args, kwargs)
       elif callable(self.router):
@@ -679,16 +828,12 @@ class RoutingActorPool(ActorPool):
             f"'{method_name}' or be callable."
         )
 
-
-
-
     # Check for sticky routing key (e.g. route_key for KV-cache locality)
     route_key = kwargs.get("route_key")
 
     if route_key is not None:
       # Stable hash routing ensures identical route_keys consistently hit the same endpoint
       return self._actors[hash(route_key) % len(self._actors)]
-
 
     # Default fallback: round-robin load balancing across all endpoints
     actor = self._actors[self._idx % len(self._actors)]
@@ -707,26 +852,54 @@ class RoutingActorPool(ActorPool):
     kwargs.pop("route_key", None)
     return await actor.asubmit(method_name, *args, **kwargs)
 
-
   async def as_completed_stream(
       self, tasks: Sequence[Tuple[str, Sequence[Any], Dict[str, Any]]]
   ) -> AsyncIterator[Any]:
-    """Dispatches batch across pool workers and yields results out-of-order as they finish."""
+    """Dispatches batch across pool workers and long-polls server-side response queues for results out-of-order."""
     if not self._actors:
-      raise RuntimeError("RoutingActorPool contains no registered ActorHandles.")
+      raise RuntimeError(
+          "RoutingActorPool contains no registered ActorHandles."
+      )
 
-    futures = []
+    if not tasks:
+      return
+
+    actor_task_counts: Dict[ActorHandle, int] = {}
     for method_name, args, kwargs in tasks:
       actor = self._get_next_actor(method_name, args, kwargs)
+      actor_task_counts[actor] = actor_task_counts.get(actor, 0) + 1
       task_kwargs = dict(kwargs)
       task_kwargs.pop("route_key", None)
-      fut = asyncio.create_task(
-          actor.asubmit(method_name, *args, **task_kwargs)
-      )
-      futures.append(fut)
+      await actor.dispatch_task(method_name, *args, **task_kwargs)
 
-    for completed_fut in asyncio.as_completed(futures):
-      yield await completed_fut
+    response_queue: asyncio.Queue[Tuple[Optional[Any], Optional[Exception]]] = (
+        asyncio.Queue()
+    )
+
+    async def _poll_worker_loop(actor: ActorHandle, count: int) -> None:
+      received = 0
+      while received < count:
+        try:
+          response = await actor.poll_responses(timeout_s=10.0)
+          if isinstance(response, ExecutionResponse):
+            received += 1
+            res = response.unwrap()
+            await response_queue.put((res, None))
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          await response_queue.put((None, exc))
+          break
+
+    poll_tasks: set[asyncio.Task[Any]] = set()
+    for actor, count in actor_task_counts.items():
+      task = asyncio.create_task(_poll_worker_loop(actor, count))
+      poll_tasks.add(task)
+      task.add_done_callback(poll_tasks.discard)
+
+    for _ in range(len(tasks)):
+      result, exc = await response_queue.get()
+      if exc is not None:
+        raise exc
+      yield result
 
 
 def remote(
@@ -780,8 +953,6 @@ def remote(
     handle = DynamicWorker.remote(address="grpc://allocated-pod-42:50051")
   """
 
-
-
   if isinstance(cls_or_func, str):
     address = cls_or_func
     cls_or_func = None
@@ -822,11 +993,14 @@ def remote(
 
       def remote_func(*args, **kwargs) -> Any:
         if inspect.iscoroutinefunction(target):
+
           class _FunctionContainer:
 
             async def execute(self, *f_args, **f_kwargs):
               return await target(*f_args, **f_kwargs)
+
         else:
+
           class _FunctionContainer:
 
             def execute(self, *f_args, **f_kwargs):

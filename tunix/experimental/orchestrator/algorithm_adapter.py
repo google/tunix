@@ -116,7 +116,7 @@ class AgenticGRPOAdapter:
         request = datatypes.RolloutRequest(
             request_id=f"{group_id}:{sample_index}",
             prompt_id=str(row.get("prompt_id", row_index)),
-            prompt_text=row["prompt_text"],
+            prompt=row["prompt_text"],
             sampling_params=self._sampling_params,
         )
         records.append(
@@ -166,16 +166,16 @@ class AgenticGRPOAdapter:
   def _result_to_sample(
       self,
       record: request_ledger.RequestRecord,
-      result: datatypes.RolloutResult,
+      result: datatypes.RolloutResponse,
   ) -> train_example_assembler.SampleTokens:
     completion_tokens = _concat_int([seg.tokens for seg in result.segments])
     completion_mask = _concat_int([seg.loss_mask for seg in result.segments])
     old_logprobs = None
     if result.segments and all(
-        seg.logprobs is not None for seg in result.segments
+        seg.logps is not None for seg in result.segments
     ):
       old_logprobs = np.concatenate(
-          [np.asarray(seg.logprobs) for seg in result.segments]
+          [np.asarray(seg.logps) for seg in result.segments]
       )
     del record  # Correlation only; the result carries the tokens.
     return train_example_assembler.SampleTokens(

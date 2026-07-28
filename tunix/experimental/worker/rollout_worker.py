@@ -34,63 +34,66 @@ class RolloutWorker(abstract_worker.Worker):
     """Returns the unique worker ID."""
     return self.worker_id
 
-  def initialize(self) -> None:
-    pass
+  def initialize(self) -> datatypes.Response:
+    return datatypes.Response()
 
-  def compile(self, dummy_data: Any) -> None:
-    pass
+  def compile(self, dummy_data: Any) -> datatypes.Response:
+    return datatypes.Response()
 
-  def start(self) -> None:
-    pass
+  def start(self) -> datatypes.Response:
+    return datatypes.Response()
 
-  def stop(self) -> None:
-    pass
+  def stop(self) -> datatypes.Response:
+    return datatypes.Response()
 
-  def pause(self) -> None:
+  def pause(self) -> datatypes.Response:
     raise NotImplementedError()
 
-  def resume(self) -> None:
+  def resume(self) -> datatypes.Response:
     raise NotImplementedError()
 
   async def generate(
       self,
       requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
-      on_complete: Callable[[datatypes.Trajectory], None] | None = None,
-  ) -> datatypes.Trajectory | Sequence[datatypes.Trajectory]:
+      on_complete: Callable[[datatypes.RolloutResponse], None] | None = None,
+  ) -> datatypes.RolloutResponse | Sequence[datatypes.RolloutResponse]:
     """Coroutine method for single or batched generate requests.
 
     Args:
-      requests: A single TrajectoryRequest or a sequence of them to process.
+      requests: A single RolloutRequest or a sequence of them to process.
       on_complete: An optional callback invoked immediately as each individual
-        Trajectory is successfully generated. This allows the caller to stream
-        results asynchronously without waiting for the entire batch to finish.
+        RolloutResponse is successfully generated. This allows the caller to
+        stream results asynchronously without waiting for the entire batch to
+        finish.
 
     Returns:
-      A single Trajectory (if a single request was provided) or a sequence of
-      completed Trajectories corresponding to the batch of requests.
+      A single RolloutResponse (if a single request was provided) or a sequence of
+      completed RolloutResponses corresponding to the batch of requests.
     """
     raise NotImplementedError()
 
-  async def pop_next_completed(self) -> datatypes.Trajectory:
+  async def pop_next_completed(self) -> datatypes.RolloutResponse:
     """Pull-based stream: yields whichever trajectory finishes first out-of-order.
 
     This provides an alternative to the `on_complete` callback for consumers
     who prefer to actively await the next available trajectory from the worker.
 
     Returns:
-      The next completed Trajectory.
+      The next completed RolloutResponse.
     """
     raise NotImplementedError()
 
-  def as_completed_stream(self) -> AsyncIterator[datatypes.Trajectory]:
+  def as_completed_stream(self) -> AsyncIterator[datatypes.RolloutResponse]:
     """Async stream yielding completed trajectories or errors strictly out-of-order.
 
     Yields:
-      Completed Trajectory objects as they finish generation.
+      Completed RolloutResponse objects as they finish generation.
     """
+    # Convert `datatypes.Trajectory` to a `RolloutResponse` using
+    # `datatypes.RolloutResponse.from_trajectory()` before yielding
     raise NotImplementedError()
 
-  def prepare_weight_sync(self, metadata: Any) -> None:
+  def prepare_weight_sync(self, metadata: Any) -> datatypes.Response:
     """Prepares the worker for an upcoming weight synchronization step.
 
     This is used to fence off state or pause ongoing execution to ensure

@@ -151,6 +151,50 @@ class UtilsTest(absltest.TestCase):
     out, _ = critic_model(x, positions, None, attn_mask)
     self.assertEqual(out.shape, (2, 3, 1))
 
+  def test_create_critic_model_with_qwix_path(self):
+    actor_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    setattr(actor_model, 'qwix_path', 'ex_qwix_path')
+    critic_model = utils.create_critic_model(actor_model)
+
+    x = jnp.array([[1, 2, 3], [4, 5, 6]])
+    positions = jnp.arange(x.shape[1])
+    attn_mask = common.make_causal_attn_mask(jnp.ones_like(x))
+    out, _ = critic_model(x, positions, None, attn_mask)
+    self.assertEqual(out.shape, (2, 3, 1))
+    self.assertTrue(hasattr(critic_model, 'qwix_path'))
+    self.assertEqual(critic_model.qwix_path, 'ex_qwix_path')
+
+  def test_transformer_with_score_head_forward_pass(self):
+    class DummyShardingConfig:
+      score_weight_d1: tuple[str, str] = ('hidden', 'data')
+
+    rngs = nnx.Rngs(0)
+
+    config = tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize())
+    config.shd_config = DummyShardingConfig
+
+    actor_model = tc.ToyTransformer(
+        config=config,
+        rngs=rngs,
+    )
+    num_heads = 1
+    actor_model.embed_dim = actor_model.config.head_dim * num_heads
+
+    critic_model = utils.TransformerWithScoreHead(
+        transformer=actor_model,
+        rngs=rngs,
+    )
+
+    x = jnp.array([[1, 2, 3], [4, 5, 6]])
+    positions = jnp.arange(x.shape[1])
+    attn_mask = common.make_causal_attn_mask(jnp.ones_like(x))
+
+    out = critic_model(x, positions, None, attn_mask)
+    self.assertEqual(out.shape, (2, 3, 1))
+
   def test_put_params_on_memory_kind(self):
     # Test valid memory kind
     params = {'a': jnp.array([1.0, 2.0]), 'b': jnp.array([3.0])}
@@ -303,6 +347,53 @@ class UtilsTest(absltest.TestCase):
     self.assertLen(packed, 2)
     for batch in packed:
       self.assertTrue(bool(np.asarray(batch[0].is_update_step)))
+
+
+class IsPositiveIntegerTest(absltest.TestCase):
+  """Tests for `utils.is_positive_integer`."""
+
+  def test_accepts_python_int(self):
+    utils.is_positive_integer(1, 'x')
+    utils.is_positive_integer(100, 'x')
+
+  def test_accepts_numpy_int(self):
+    utils.is_positive_integer(np.int32(5), 'x')
+    utils.is_positive_integer(np.int64(5), 'x')
+    utils.is_positive_integer(np.uint8(5), 'x')
+
+  def test_accepts_none(self):
+    utils.is_positive_integer(None, 'x')
+
+  def test_rejects_zero(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(0, 'x')
+
+  def test_rejects_negative(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(-1, 'x')
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(np.int64(-5), 'x')
+
+  def test_rejects_bool(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(True, 'x')
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(False, 'x')
+
+  def test_rejects_float(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(1.0, 'x')
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer(1.5, 'x')
+
+  def test_rejects_string(self):
+    with self.assertRaises(ValueError):
+      utils.is_positive_integer('5', 'x')
+
+  def test_error_message_includes_name(self):
+    with self.assertRaises(ValueError) as ctx:
+      utils.is_positive_integer(-1, 'max_steps')
+    self.assertIn('max_steps', str(ctx.exception))
 
 
 if __name__ == '__main__':

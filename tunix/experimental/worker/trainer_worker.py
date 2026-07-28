@@ -49,24 +49,28 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._is_running = False
 
-  def initialize(self) -> None:
+  def initialize(self) -> datatypes.Response:
     """Constructs the underlying trainer (deferred from __init__)."""
     if self._trainer is None:
       self._trainer = self._trainer_factory()
+    return datatypes.Response()
 
-  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
-    """Triggers JIT compilation using the provided shape hints."""
-    self._trainer.compile(shape_config)
+  def compile(self, dummy_data: Any) -> datatypes.Response:
+    """Triggers JIT compilation using the provided warmup input/shape hints."""
+    self._trainer.compile(dummy_data)
+    return datatypes.Response()
 
-  def start(self) -> None:
+  def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
     self._is_running = True
+    return datatypes.Response()
 
-  def stop(self) -> None:
+  def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     self._is_running = False
     if self._trainer is not None:
       self._trainer.close()
+    return datatypes.Response()
 
   def health(self) -> datatypes.HealthReport:
     """Returns a liveness/status snapshot."""
@@ -97,7 +101,11 @@ class TrainerWorker(abstract_worker.Worker):
   def fwd_bwd(
       self, payload: datatypes.TrainerPayload, **kwargs
   ) -> datatypes.StepReceipt:
-    """Executes forward and backward passes."""
+    """Executes forward and backward passes.
+
+    Returns the trainer's step receipt so the caller can drive gradient
+    accumulation (micro-step position, loss, denominator).
+    """
     return self._trainer.fwd_bwd(payload, **kwargs)
 
   def update(self, **kwargs) -> datatypes.UpdateResult:
@@ -110,9 +118,12 @@ class TrainerWorker(abstract_worker.Worker):
     """Executes one evaluation step on the given payload."""
     return self._trainer.eval_step(payload, **kwargs)
 
-  def save_checkpoint(self, metadata: dict[str, Any], **kwargs) -> None:
+  def save_checkpoint(
+      self, metadata: dict[str, Any], **kwargs
+  ) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._trainer.save_checkpoint(metadata, **kwargs)
+    return datatypes.Response()
 
   def restore_checkpoint(self, **kwargs) -> dict[str, Any]:
     """Restore state from latest checkpoint and return the metadata pytree."""

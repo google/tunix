@@ -32,6 +32,9 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.experimental.common import datatypes
+from tunix.experimental.metrics import metrics as exp_metrics
+from tunix.experimental.train import abstract_trainer
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -44,8 +47,9 @@ from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
+from typing_extensions import override
 
-_ModelInputT = Dict[str, ArrayLike]
+_ModelInputT = dict[str, Any]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
@@ -164,7 +168,102 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-class PeftTrainer:
+class GradientAccumulator(nnx.Module):
+  """Accumulates gradients over multiple micro-steps.
+
+  Unifies standard (unweighted) micro-batch averaging with sequence packing
+  (weighted, denom-aware) accumulation.
+
+  Averaging behavior (optax.MultiSteps semantics):
+    When `add(grads)` is called without a denom, each micro-step implicitly
+    adds 1.0 to the denominator. `get()` computes `Σ_grads / Σ_1`, which
+    is the exact mean of the micro-step gradients. This is mathematically
+    equivalent to a single optimization step on a batch of size `B =
+    micro_batch_size * grad_acc_steps` when the loss is a mean-reduction
+    (e.g., standard cross-entropy).
+
+  Packing-aware behavior (Sum of Grads / Sum of Sizes):
+    Under sequence packing, each yielded micro-batch contains a varying
+    number of valid target tokens or training examples. The loss is
+    computed as an *unreduced sum* over the packed batch. Callers pass the
+    true size of the pack via `add(grads, denom=size)`. `get()` computes
+    `Σ_grad(sum_loss_i) / Σ_size_i`, recovering the true global mean
+    gradient across all items in the accumulated batch, avoiding the bias
+    introduced by averaging pre-scaled micro-batch gradients of unequal
+    sizes.
+  """
+
+  def __init__(self, model: nnx.Module, wrt: type[nnx.Variable]):
+    state = nnx.state(model, wrt)
+    self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
+
+  def add(self, grads: Any, denom: jax.Array | None = None):
+    def _add(acc_var, g_var):
+      g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
+      # set_value (no index) avoids the indexed __setitem__ "slow" path, whose
+      # `.sharding` check on tracers triggers a per-leaf provenance scan that
+      # dominates trace time; the stored value is identical.
+      acc_var.set_value(acc_var[...] + g)
+
+    jax.tree_util.tree_map(
+        _add,
+        self.grads,
+        grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+    if denom is None:
+      denom_val = jnp.asarray(1.0, dtype=jnp.float32)
+    else:
+      denom_val = denom.astype(jnp.float32)
+    self.denom[...] = self.denom[...] + denom_val
+
+  def get(self):
+    scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
+
+    return jax.tree_util.tree_map(
+        lambda v: type(v)(v[...] * scale.astype(v[...].dtype)),
+        self.grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+  def reset(self):
+    def _zero_in_place(v):
+      v[...] = jnp.zeros_like(v[...])
+
+    jax.tree_util.tree_map(
+        _zero_in_place,
+        self.grads,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    self.denom[...] = jnp.zeros_like(self.denom[...])
+
+
+def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
+  """Cast the optimizer state's floating-point leaves to float32 in-place.
+
+  Args:
+    optimizer: The nnx.Optimizer instance whose state will be modified.
+  """
+
+  def _cast(v):
+    if isinstance(v, nnx.Variable):
+      val = v.value
+      if (
+          hasattr(val, "dtype")
+          and jnp.issubdtype(val.dtype, jnp.floating)
+          and val.dtype != jnp.float32
+      ):
+        v.value = val.astype(jnp.float32)
+
+  opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
+  jax.tree_util.tree_map(
+      _cast, opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
+
+
+class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
   Attributes:
@@ -174,6 +273,8 @@ class PeftTrainer:
       use `optax.schedules.inject_hyperparams` to inject learning rate as a
       hyperparameter. For example: ``optimizer =
       optax.schedules.inject_hyperparams(optax.sgd)(learning_rate=learning_rate_schedule)``
+    grad_accumulator: The gradient accumulator to use for accumulating gradients
+      over multiple micro-steps.
     loss_fn: The loss function to use.
     eval_loss_fn: The loss function to use for evaluation.
     gen_model_input_fn: The function to generate model input from training
@@ -186,7 +287,7 @@ class PeftTrainer:
     data_hooks: The data hooks to use.
   """
 
-  supports_sequence_packing = False
+  supports_sequence_packing = True
 
   def __init__(
       self,
@@ -209,14 +310,13 @@ class PeftTrainer:
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
-    if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(  # pyrefly: ignore[bad-assignment]
-          optimizer, training_config.gradient_accumulation_steps
-      )
-    if self._lora_enabled:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
-    else:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+    # Promote floating-point leaves to float32 in-place to match the dtype of
+    # the optimizer update function branch (which is float32 due to
+    # `optax.inject_hyperparams`).
+    _promote_opt_state_floats_to_float32(self.optimizer)
+    self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -261,7 +361,8 @@ class PeftTrainer:
         "gradient_accumulation_steps", 1
     )
 
-    self._jitted_train_step_fn = None
+    self._jitted_fwd_bwd_step_fn = None
+    self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     max_step = None
     if self.config.max_steps is not None:
@@ -276,6 +377,12 @@ class PeftTrainer:
     self._buffered_train_metrics: MetricsBuffer | None = None
     self._prev_buffered_train_metrics: MetricsBuffer | None = None
     self._buffered_eval_metrics: MetricsBuffer | None = None
+    # TODO(b/532722958): mitigation for current metrics logging implementations.
+    # Buffered_train[eval]_metrics will be None after metrics are logged. For
+    # get_metrics to retrieve metrics from trainer, we need to write metrics to
+    # a buffer. We should delete this once the metrics logging implementations
+    # are updated according to the new design.
+    self._written_metrics: exp_metrics.MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -293,25 +400,29 @@ class PeftTrainer:
     This function should be called when the trainer is being reused after
     overriding the training related states, for example, the loss function.
     """
-    self._jitted_train_step_fn = None
+    self._jitted_fwd_bwd_step_fn = None
+    self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
 
+  @override
   def with_loss_fn(
       self,
       loss_fn: Callable[
-          Concatenate[nnx.Module, P], ArrayLike | Tuple[ArrayLike, Any]
+          Concatenate[nnx.Module, P],
+          ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
-  ):
+  ) -> "PeftTrainer":
     self.clear_jit_cache()
     self.loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
     self.eval_loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
     self._has_aux = has_aux
     return self
 
+  @override
   def with_gen_model_input_fn(
-      self, gen_model_input_fn: Callable[[Any], _ModelInputT]
-  ):
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ) -> "PeftTrainer":
     """Generates model input from training input.
 
     NB: output of this function will be passed to the loss function, so the args
@@ -328,69 +439,128 @@ class PeftTrainer:
     self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
     return self
 
-  def _train_step(
-      self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
-  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
-    """Main body for one train step.
+  def _fwd_bwd_step(
+      self,
+      model: nnx.Module,
+      grad_accumulator: GradientAccumulator,
+      inputs: Any,
+  ) -> Tuple[ArrayLike, Any | None]:
+    """Forward and backward passes through grad_fn.
+
+    Args:
+      model: The model to train.
+      grad_accumulator: The gradient accumulator to use.
+      inputs: The training input.
+
+    Returns:
+      A tuple containing the loss, and auxiliary data (or None if has_aux is
+      False).
+    """
+    inputs = self.gen_model_input_fn(inputs)
+
+    @functools.wraps(self.loss_fn)
+    def diff_fn(model, *args, **kwargs):
+      out = self.loss_fn(model, *args, **kwargs)
+      if isinstance(out, utils.LossOutput):
+        return out.primary_loss.unreduced_sum, out
+      elif self._has_aux:
+        return out[0], out[1]
+      else:
+        return out, None
+
+    grad_fn = nnx.value_and_grad(
+        diff_fn,
+        argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
+        has_aux=True,
+    )
+    (loss_val, aux), grads = grad_fn(model, **inputs)
+
+    if isinstance(aux, utils.LossOutput):
+      # Scale the unreduced gradients using the metric's scale computation
+      scale = aux.primary_loss.compute_scale()
+      grads = jax.tree.map(lambda g: g * scale, grads)
+
+      # Compute exactly equivalent legacy loss val
+      loss_val = aux.primary_loss.compute()
+
+    # TODO(b/491970038): update denom for sequence packing.
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+
+    if isinstance(aux, utils.LossOutput):
+      return loss_val, aux.aux_metrics
+    elif self._has_aux:
+      return loss_val, aux
+    else:
+      return loss_val, None
+
+  def _update_step(
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer,
+      grad_accumulator: GradientAccumulator,
+  ) -> ArrayLike:
+    """Updates the model weights.
 
     Args:
       model: The model to train.
       optimizer: The optimizer to use.
-      inputs: The training input.
+      grad_accumulator: The gradient accumulator to use.
 
     Returns:
-      A tuple containing the loss, auxiliary data (or None if has_aux is False),
-      and the gradient norm.
+      The gradient norm.
     """
-    inputs = self.gen_model_input_fn(inputs)
-
-    grad_fn = nnx.value_and_grad(
-        self.loss_fn,
-        argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
-        has_aux=self._has_aux,
+    acc_grads = grad_accumulator.get()
+    # Compute the norm in float32. For production-size models the sum-of-squares
+    # over bf16 grads quickly exhausts bf16, and float32 is needed for numerical
+    # stability.
+    norm = optax.global_norm(
+        jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
     )
-    out, grads = grad_fn(model, **inputs)
-    grad_norm = optax.global_norm(grads)
-    optimizer.update(model, grads)
-    if self._has_aux:
-      loss, aux = out
-      return loss, aux, grad_norm
-    else:
-      return out, None, grad_norm
+    optimizer.update(model, acc_grads)
+    grad_accumulator.reset()
+    return norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
-    if self._has_aux:
+    if isinstance(out, utils.LossOutput):
+      return out.primary_loss.compute(), out.aux_metrics
+    elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
     else:
       return out, None
 
-  def create_train_step_fn(
+  def create_fwd_bwd_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
-    """Creates the train step function."""
-    return self._train_step
+  ) -> Callable[..., Tuple[ArrayLike, Any | None]]:
+    """Creates the forward and backward step function."""
+    return self._fwd_bwd_step
 
-  def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
+  def create_update_step_fn(
+      self,
+  ) -> Callable[..., ArrayLike]:
+    """Creates the update step function."""
+    return self._update_step
+
+  def create_eval_step_fn(
+      self,
+  ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
     """Creates the eval step function."""
     return self._eval_step  # pyrefly: ignore[bad-return]
 
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
     """Optimizer states should be sharded before calling the jit function.
 
-    If not, the _train_step will be compiled 2 times.
+    If not, the update step will be compiled 2 times.
 
     Args:
       mesh: The mesh used for sharding.
     """
     if mesh.empty:
       return
-    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
-    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
     def _shard(x, p):
       if not isinstance(x, (jax.Array, np.ndarray)):
@@ -405,12 +575,26 @@ class PeftTrainer:
           return jax.device_put(x, sharding)
       return x
 
+    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
     optimizer_sharded_state = jax.tree.map(
         _shard, optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-  def jit_train_and_eval_step(
+    # Partition Gradients similar to the model
+    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
+    self.grad_accumulator.grads = jax.tree.map(
+        _shard, self.grad_accumulator.grads, grad_pspecs
+    )
+
+    # Denominator is a scalar — replicate across all devices
+    self.grad_accumulator.denom[...] = jax.device_put(
+        self.grad_accumulator.denom[...],
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+    )
+
+  def jit_fwd_bwd_update_and_eval_step(
       self, skip_jit: bool = False, cache_nnx_graph: bool = False
   ):
     """Creates and returns the train and eval step functions.
@@ -422,17 +606,21 @@ class PeftTrainer:
       cache_nnx_graph: If True, the nnx graph will be cached.
 
     Returns:
-      A tuple of train and eval step functions.
+      A tuple of fwd_bwd, update, and eval step functions.
     """
-    train_step = self.create_train_step_fn()
+    fwd_bwd_step = self.create_fwd_bwd_step_fn()
+    update_step = self.create_update_step_fn()
     eval_step = self.create_eval_step_fn()
     if skip_jit:
-      return train_step, eval_step
+      return fwd_bwd_step, update_step, eval_step
 
-    if self._jitted_train_step_fn is None:
+    if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      self._jitted_train_step_fn = nnx.jit(
-          train_step, donate_argnames=("optimizer",)
+      self._jitted_fwd_bwd_step_fn = nnx.jit(
+          fwd_bwd_step, donate_argnames=("grad_accumulator",)
+      )
+      self._jitted_update_step_fn = nnx.jit(
+          update_step, donate_argnames=("optimizer", "grad_accumulator")
       )
       self._jitted_eval_step_fn = nnx.jit(eval_step)
 
@@ -443,13 +631,25 @@ class PeftTrainer:
         else:
           return functools.partial(f, *args)
 
-      self._jitted_train_step_fn = maybe_cache_and_partial(
-          self._jitted_train_step_fn, self.model, self.optimizer
+      self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
+          self._jitted_fwd_bwd_step_fn,
+          self.model,
+          self.grad_accumulator,
+      )
+      self._jitted_update_step_fn = maybe_cache_and_partial(
+          self._jitted_update_step_fn,
+          self.model,
+          self.optimizer,
+          self.grad_accumulator,
       )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
           self._jitted_eval_step_fn, self.model
       )
-    return self._jitted_train_step_fn, self._jitted_eval_step_fn
+    return (
+        self._jitted_fwd_bwd_step_fn,
+        self._jitted_update_step_fn,
+        self._jitted_eval_step_fn,
+    )
 
   def _prepare_inputs(self, input_data: Any) -> Any:
     """Override this function for additional input preparation."""
@@ -560,16 +760,28 @@ class PeftTrainer:
         return [_to_np_array(x) for x in v]
       return v
 
+    loss = metrics_buffer.loss
+    additional_metrics = {
+        k: op(_to_np_array(v))
+        for k, (v, op) in metrics_buffer.additional_metrics.items()
+    }
     self._log_metrics(
-        loss=metrics_buffer.loss,
+        loss=loss,
         step=metrics_buffer.step,
-        additional_metrics={
-            k: op(_to_np_array(v))
-            for k, (
-                v,
-                op,
-            ) in metrics_buffer.additional_metrics.items()
-        },
+        additional_metrics=additional_metrics,
+    )
+    weighted_metrics = {}
+    scalar_metrics = {"loss": loss}
+    for k, val in additional_metrics.items():
+      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+        weighted_metrics[k] = val
+      else:
+        scalar_metrics[k] = val
+    self._written_metrics = exp_metrics.MetricsBuffer(
+        id=metrics_buffer.step,
+        weighted_metrics=weighted_metrics,
+        scalar_metrics=scalar_metrics,
+        mode=self._mode.value,
     )
 
   @contextlib.contextmanager
@@ -599,6 +811,129 @@ class PeftTrainer:
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
       self.training_hooks.on_train_step_end(self, step, loss)
 
+  @override
+  def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
+    """Executes forward and backward passes."""
+    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
+    payload = self._prepare_inputs(payload)
+    payload = sharding_utils.shard_input(
+        payload, self.config.data_sharding_axis
+    )
+    train_loss, aux = fwd_bwd_step(payload)
+    self._buffered_train_metrics = self._buffer_metrics(
+        self._buffered_train_metrics,
+        loss=train_loss,
+        step=self._train_steps,
+    )
+    self._post_process_train_step(aux)
+
+  @override
+  def update(self, **kwargs) -> int:
+    """Applies the accumulated gradients."""
+    _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step()
+    grad_norm = update_step()
+    if self._buffered_train_metrics is not None:
+      if "grad_norm" not in self._buffered_train_metrics.additional_metrics:
+        self._buffered_train_metrics.additional_metrics["grad_norm"] = (
+            [grad_norm],
+            np.mean,
+        )
+      else:
+        self._buffered_train_metrics.additional_metrics["grad_norm"][0].append(
+            grad_norm
+        )
+    self._train_steps += 1
+    self._write_train_metrics()
+    return self._train_steps
+
+  @override
+  def compile(self, dummy_data: Any) -> None:
+    pass
+
+  @override
+  def eval_step(
+      self, payload: datatypes.TrainerPayload | Any, **kwargs
+  ) -> None:
+    """Executes one eval micro-batch step.
+
+    Prepares inputs, runs the (cached) jitted eval step function, buffers
+    eval metrics, and calls _post_process_eval_step.  Callers should bracket
+    a sequence of eval_step calls with eval_context() so that the metrics
+    mode is set to EVAL and buffered metrics are written on exit.
+    """
+    _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step()
+    payload = self._prepare_inputs(payload)
+    payload = sharding_utils.shard_input(
+        payload, self.config.data_sharding_axis
+    )
+    loss, aux = eval_step_fn(payload)
+    loss = jax.lax.stop_gradient(loss)
+    self._buffered_eval_metrics = self._buffer_metrics(
+        self._buffered_eval_metrics,
+        loss=loss,
+        step=self._train_steps,
+    )
+    self._post_process_eval_step(aux)
+
+  @contextlib.contextmanager
+  def eval_context(self):
+    """Context manager for bracketing eval sessions.
+
+    Switches metrics mode to EVAL and writes buffered eval metrics on exit.
+    Usage:
+
+        with trainer.eval_context():
+            for micro_batch in eval_ds:
+                trainer.eval_step(micro_batch)
+    """
+    logging.info("Running evaluation on train step %d.", self._train_steps)
+    with self._switch_mode(sft_metrics_logger.Mode.EVAL):
+      try:
+        yield
+      finally:
+        if self._buffered_eval_metrics is not None:
+          self._write_metrics(self._buffered_eval_metrics)
+          self._buffered_eval_metrics = None
+
+  @override
+  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+    """Saves a checkpoint of the trainer state (model + optimizer).
+
+    Vanilla implementation of save_checkpoint on a train_steps. Sub-batch
+    checkpointing will be added later once it is supported in the checkpoint
+    manager.
+    """
+    step = kwargs.pop("step", self._train_steps)
+    if metadata is None:
+      metadata = self.custom_checkpoint_metadata()
+    save_only_lora_params = kwargs.pop(
+        "save_only_lora_params", self._lora_enabled
+    )
+    self.checkpoint_manager.save(
+        step,
+        self.model,
+        self.optimizer,
+        save_only_lora_params=save_only_lora_params,
+        custom_metadata=metadata,
+        **kwargs,
+    )
+
+  @override
+  def restore_checkpoint(self, **kwargs) -> Any:
+    return {}
+
+  @override
+  def prepare_weight_sync(self, **kwargs) -> None:
+    pass
+
+  @override
+  def get_metrics(self) -> exp_metrics.MetricsBuffer:
+    if self._written_metrics is None:
+      return exp_metrics.MetricsBuffer(id=-1)
+    ret = self._written_metrics
+    self._written_metrics = None
+    return ret
+
   def train(
       self,
       train_ds: Iterable[Any],
@@ -613,20 +948,20 @@ class PeftTrainer:
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
         1,
     )
-    train_step, eval_step = self.jit_train_and_eval_step(
+    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
     if not skip_jit:
-      cache_size = train_step.func.jitted_fn._cache_size()  # pylint: disable=protected-access  # pytype: disable=attribute-error
+      cache_size = fwd_bwd_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
       logging.log_if(
           logging.INFO,
-          f"Compiled train_step cache size: {cache_size}",
+          f"Compiled fwd_bwd_step cache size: {cache_size}",
           condition=cache_size not in self._jit_cache,
       )
       self._jit_cache.add(cache_size)
 
     if eval_ds:
-      self._run_eval(eval_ds, eval_step)
+      self._run_eval(eval_ds)
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
@@ -674,11 +1009,6 @@ class PeftTrainer:
         ):
           break
 
-        train_example = self._prepare_inputs(train_example)
-        train_example = sharding_utils.shard_input(
-            train_example, self.config.data_sharding_axis
-        )
-
         self._throttler.wait_for_next()
         if self.training_hooks:
           self.training_hooks.on_train_step_start(self)
@@ -709,6 +1039,28 @@ class PeftTrainer:
             perf_constants.MINI_BATCH: mini_batch,
         }
 
+        self._iter_steps += 1
+
+        is_update_step_val = None
+        if (
+            isinstance(train_example, dict)
+            and "is_update_step" in train_example
+        ):
+          val = train_example["is_update_step"]
+          if val is not None:
+            is_update_step_val = bool(np.asarray(val).item())
+        elif hasattr(train_example, "is_update_step"):
+          val = train_example.is_update_step
+          if val is not None:
+            is_update_step_val = bool(np.asarray(val).item())
+
+        if is_update_step_val is None:
+          is_update_step_val = (
+              self._iter_steps
+              % self.config.get_with_default("gradient_accumulation_steps", 1)
+              == 0
+          )
+
         with self._perf_tracer.span(
             "peft_train_step",
             pxla.thread_resources.env.physical_mesh.devices,
@@ -717,43 +1069,23 @@ class PeftTrainer:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          train_loss, aux, grad_norm = train_step(train_example)
+          self.fwd_bwd(train_example)
+          assert self._buffered_train_metrics is not None
+          train_loss = self._buffered_train_metrics.losses[-1]
+          if is_update_step_val:
+            self.update()
+
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 
         self._throttler.add_computation(train_loss)
-        self._buffered_train_metrics = self._buffer_metrics(
-            self._buffered_train_metrics,
-            loss=train_loss,
-            step=self._train_steps,
-            additional_metrics={"grad_norm": (grad_norm, np.mean)},
-        )
-        # NB: put this after self._buffer_metrics is important
-        self._post_process_train_step(aux)
-        self._iter_steps += 1
-
-        if (
-            self._iter_steps
-            % self.config.get_with_default("gradient_accumulation_steps", 1)
-            == 0
-        ):
-          self._train_steps += 1
-          self._write_train_metrics()
-
-          # Checkpoint frequency is configured by checkpointing_options.
-          self.checkpoint_manager.save(
-              self._train_steps,
-              self.model,
-              self.optimizer,
-              save_only_lora_params=self._lora_enabled,
-              custom_metadata=self.custom_checkpoint_metadata(),
-          )
-
+        if is_update_step_val:
+          self.save_checkpoint()
           if (
               eval_ds
               and self._train_steps % self.config.eval_every_n_steps == 0
           ):
-            self._run_eval(eval_ds, eval_step)
+            self._run_eval(eval_ds)
 
       self._prof.maybe_deactivate(self._iter_steps)
 
@@ -809,12 +1141,10 @@ class PeftTrainer:
   def _run_eval(
       self,
       eval_ds: Iterable[Any],
-      eval_step_fn: Callable[..., Any],
   ) -> None:
     """Runs evaluation loop."""
-    logging.info("Running evaluation on train step %d.", self._train_steps)
     eval_iterator = iter(eval_ds)
-    with self._switch_mode(sft_metrics_logger.Mode.EVAL):
+    with self.eval_context():
       eval_loss, eval_steps = 0, 0
       while True:
         if self.data_hooks:
@@ -826,39 +1156,26 @@ class PeftTrainer:
             eval_example = None
         if eval_example is None:
           break
-        eval_example = self._prepare_inputs(eval_example)
-        eval_example = sharding_utils.shard_input(
-            eval_example, self.config.data_sharding_axis
-        )
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
-        loss, aux = eval_step_fn(eval_example)
-        loss = jax.lax.stop_gradient(loss)
-        self._buffered_eval_metrics = self._buffer_metrics(
-            self._buffered_eval_metrics,
-            loss=loss,
-            step=self._train_steps,
-        )
-        self._post_process_eval_step(aux)
-        eval_loss += loss
+        self.eval_step(eval_example)
+        assert self._buffered_eval_metrics is not None
+        eval_loss += self._buffered_eval_metrics.losses[-1]
         eval_steps += 1
 
       if eval_steps == 0:
         logging.warning(
             "No eval examples found. Skipping eval metrics logging."
         )
+        # Clear so eval_context doesn't attempt to write empty metrics.
+        self._buffered_eval_metrics = None
         return
 
-      self._write_metrics(self._buffered_eval_metrics)  # pyrefly: ignore[bad-argument-type]
       logging.info(
-          "Train step %d eval loss: %f - eval perplexity: %f",
+          "Train step %d eval loss: %f",
           self._train_steps,
-          self.metrics_logger.get_metric(self.metrics_prefix, "loss", "eval"),  # pyrefly: ignore[missing-attribute]
-          self.metrics_logger.get_metric(  # pyrefly: ignore[missing-attribute]
-              self.metrics_prefix, "perplexity", "eval"
-          ),
+          eval_loss / eval_steps,
       )
-      self._buffered_eval_metrics = None
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
 
@@ -870,7 +1187,7 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> ArrayLike:
+) -> utils.LossOutput | ArrayLike:
   """Default loss function for PEFT training."""
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}
@@ -888,8 +1205,12 @@ def _default_loss_fn(
   one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
 
   # Define the normalization factor.
-  norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
+  denominator = jnp.sum(target_mask)
 
   # Return the negative log likelihood (NLL) loss.
   # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
-  return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+  unreduced_loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot)
+  return utils.LossOutput(
+      primary_loss=utils.WeightedMetric(unreduced_loss, denominator, eps=1e-8),
+      aux_metrics={},
+  )

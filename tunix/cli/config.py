@@ -247,10 +247,11 @@ class HyperParameters:
     current_model_config = self.config.get("model_config", {})
     for config_key in [
         "actor_model_config",
+        "critic_model_config",
         "reference_model_config",
         "rollout_model_config",
     ]:
-      if config_key in self.config:
+      if config_key in self.config and self.config[config_key] is not None:
         for k, v in current_model_config.items():
           if k not in self.config[config_key] or self.config[config_key][
               k
@@ -479,8 +480,8 @@ class HyperParameters:
     supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
-    # TODO: support gcs, internal and maxtext for gemma4.
-    supported_sources["gemma4"] = ["kaggle", "huggingface"]
+    # TODO: support maxtext for gemma4.
+    supported_sources["gemma4"] = ["kaggle", "huggingface", "gcs", "internal"]
 
     if model_name.startswith(("gemma4", "gemma-4")):
       model_family = "gemma4"

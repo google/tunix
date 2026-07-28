@@ -16,16 +16,17 @@
 
 Adapts a reference/reward inference core (e.g.
 ``tunix.rl.inference.inference_worker.InferenceWorker``) to the numpy wire DTOs:
-requests arrive as host arrays, are converted to device arrays and scored in
-worker-internal micro-batches, and results are returned as host numpy. This
-version hosts frozen weights only; there is no weight sync.
+requests arrive as host arrays, are converted to device arrays and scored,
+and results are returned as host numpy. This version hosts frozen weights only;
+there is no weight sync.
 """
 
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
+import jax
 import jax.numpy as jnp
 import numpy as np
-
+from tunix.experimental.common import batch_utils
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 
@@ -35,30 +36,32 @@ class ReferenceScoringCore(Protocol):
 
   def get_ref_per_token_logps(
       self,
-      prompt_tokens: Any,
-      completion_tokens: Any,
+      prompt_tokens: jax.typing.ArrayLike,
+      completion_tokens: jax.typing.ArrayLike,
       pad_id: int,
       eos_id: int,
       temperature: float = 1.0,
-  ) -> Any:
+  ) -> jax.Array:
     ...
 
   def get_rewards(
       self,
-      prompt_tokens: Any,
-      completion_tokens: Any,
+      prompt_tokens: jax.typing.ArrayLike,
+      completion_tokens: jax.typing.ArrayLike,
       pad_id: int,
       eos_id: int,
-  ) -> Any:
+  ) -> jax.Array:
     ...
 
 
 class InferenceWorker(abstract_worker.Worker):
   """Worker exposing frozen-model scoring to the orchestrator.
 
-  Hosts frozen weights (a reference model and, optionally, a reward model) and
-  answers scoring requests. It never trains and takes no weight sync in this
-  version; versioned policy recompute is a later addition.
+  This class wraps an already-initialized inference core (provided via the
+  `core` argument) which is responsible for loading and materializing the
+  frozen weights (e.g. a reference model and, optionally, a reward model).
+  It answers scoring requests by routing them to the core. It never trains and
+  only runs inference.
   """
 
   def __init__(
@@ -68,115 +71,132 @@ class InferenceWorker(abstract_worker.Worker):
       pad_id: int,
       eos_id: int,
       model_version: int = 0,
+      chunk_size: int | None = None,
       worker_id: str = "inference",
   ):
     """Initializes the worker.
 
     Args:
-      core: The frozen inference core to score against.
+      core: An already-initialized inference core holding the frozen weights.
+        The core is responsible for model materialization.
       pad_id: Padding token id used in the request arrays.
       eos_id: End-of-sequence token id.
       model_version: Version tag for the hosted weights; constant while frozen.
-      worker_id: Unique id reported via `info()`.
+      chunk_size: Optional maximum batch size for scoring to reduce peak memory.
+      worker_id: Unique id reported via `info()` for orchestrator registration.
     """
     self._core = core
     self._pad_id = pad_id
     self._eos_id = eos_id
     self._model_version = model_version
+    self._chunk_size = chunk_size
     self._worker_id = worker_id
     self._is_running = False
 
-  def initialize(self) -> None:
-    pass
+  def initialize(self) -> datatypes.Response:
+    return datatypes.Response()
 
-  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
-    del shape_config
+  def compile(self, dummy_data: Any) -> datatypes.Response:
+    del dummy_data
+    return datatypes.Response()
 
-  def start(self) -> None:
+  def start(self) -> datatypes.Response:
     self._is_running = True
+    return datatypes.Response()
 
-  def stop(self) -> None:
+  def stop(self) -> datatypes.Response:
     self._is_running = False
+    return datatypes.Response()
 
   def health(self) -> datatypes.HealthReport:
-    """Returns a liveness/status snapshot."""
+    """Returns a liveness/status snapshot for the orchestrator health monitor."""
     return datatypes.HealthReport(
         state="READY" if self._is_running else "STOPPED",
         policy_version=self._model_version,
     )
 
   def info(self) -> datatypes.WorkerInfo:
-    """Returns the worker's static description."""
+    """Returns the worker's static description for registration/scheduling."""
     return datatypes.WorkerInfo(
         worker_id=self._worker_id, roles=frozenset({"inference"})
     )
 
-  def compute_logprobs(
+  def compute_logps(
       self, req: datatypes.LogprobsRequest
-  ) -> datatypes.LogprobsResult:
+  ) -> datatypes.LogprobsResponse:
     """Scores per-token log-probs for a batch under the frozen reference model."""
-    if req.model_role != "reference":
-      raise NotImplementedError(
-          "compute_logprobs hosts the frozen reference model only; got "
-          f"model_role={req.model_role!r} (versioned policy recompute is a "
-          "later addition)."
+    try:
+      if req.model_role != "reference":
+        raise NotImplementedError(
+            "compute_logprobs hosts the frozen reference model only; got "
+            f"model_role={req.model_role!r} (versioned policy recompute is a "
+            "later addition)."
+        )
+
+      if req.temperature <= 1e-5:
+        raise ValueError("Temperature must be strictly positive.")
+
+      def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
+        return self._core.get_ref_per_token_logps(
+            prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
+            completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),
+            pad_id=self._pad_id,
+            eos_id=self._eos_id,
+            temperature=req.temperature,
+        )
+
+      logps = batch_utils.apply_chunked(
+          _score, self._chunk_size, req.prompt_tokens, req.completion_tokens
+      )
+      return datatypes.LogprobsResponse(
+          request_id=req.request_id,
+          per_token_logps=np.asarray(logps, dtype=np.float32),
+          model_version=self._model_version,
+      )
+    except Exception as e:
+      return datatypes.LogprobsResponse(
+          request_id=req.request_id,
+          per_token_logps=np.zeros((0, 0), dtype=np.float32),
+          model_version=self._model_version,
+          error=datatypes.ErrorInfo(
+              error_type=type(e).__name__, message=str(e), traceback=repr(e)
+          ),
       )
 
-    def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
-      return self._core.get_ref_per_token_logps(
-          prompt_tokens=jnp.asarray(prompt_chunk),
-          completion_tokens=jnp.asarray(completion_chunk),
-          pad_id=self._pad_id,
-          eos_id=self._eos_id,
-          temperature=req.temperature,
-      )
-
-    logps = self._run_microbatched(
-        req.prompt_tokens, req.completion_tokens, req.micro_batch_size, _score
-    )
-    return datatypes.LogprobsResult(
-        request_id=req.request_id,
-        per_token_logps=np.asarray(logps, dtype=np.float32),
-        model_version=self._model_version,
-    )
-
-  def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResult:
+  def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResponse:
     """Scores one scalar per row under a hosted (frozen) reward model."""
+    try:
+      if req.model_role != "reward":
+        raise NotImplementedError(
+            "score hosts the frozen reward model only; got "
+            f"model_role={req.model_role!r}."
+        )
 
-    def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
-      return self._core.get_rewards(
-          prompt_tokens=jnp.asarray(prompt_chunk),
-          completion_tokens=jnp.asarray(completion_chunk),
-          pad_id=self._pad_id,
-          eos_id=self._eos_id,
+      def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
+        return self._core.get_rewards(
+            prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
+            completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),
+            pad_id=self._pad_id,
+            eos_id=self._eos_id,
+        )
+
+      scores = batch_utils.apply_chunked(
+          _score, self._chunk_size, req.prompt_tokens, req.completion_tokens
       )
-
-    scores = self._run_microbatched(
-        req.prompt_tokens, req.completion_tokens, req.micro_batch_size, _score
-    )
-    return datatypes.ScoreResult(
-        request_id=req.request_id,
-        scores=np.asarray(scores, dtype=np.float32),
-        model_version=self._model_version,
-    )
-
-  def _run_microbatched(
-      self,
-      prompt_tokens: np.ndarray,
-      completion_tokens: np.ndarray,
-      micro_batch_size: int | None,
-      fn: Callable[[np.ndarray, np.ndarray], Any],
-  ) -> Any:
-    """Applies `fn` over the batch, splitting into micro-batches when requested.
-
-    Splitting is over the batch (axis 0) only, so each micro-batch is scored
-    independently and the concatenation is identical to a single pass.
-    """
-    batch_size = prompt_tokens.shape[0]
-    if not micro_batch_size or micro_batch_size >= batch_size:
-      return fn(prompt_tokens, completion_tokens)
-    chunks = []
-    for start in range(0, batch_size, micro_batch_size):
-      end = start + micro_batch_size
-      chunks.append(fn(prompt_tokens[start:end], completion_tokens[start:end]))
-    return jnp.concatenate(chunks, axis=0)
+      scores_array = np.asarray(scores, dtype=np.float32)
+      if scores_array.ndim == 2:
+        scores_array = np.squeeze(scores_array, axis=-1)
+      return datatypes.ScoreResponse(
+          request_id=req.request_id,
+          scores=scores_array,
+          model_version=self._model_version,
+      )
+    except Exception as e:
+      return datatypes.ScoreResponse(
+          request_id=req.request_id,
+          scores=np.zeros((0,), dtype=np.float32),
+          model_version=self._model_version,
+          error=datatypes.ErrorInfo(
+              error_type=type(e).__name__, message=str(e), traceback=repr(e)
+          ),
+      )

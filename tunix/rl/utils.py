@@ -41,8 +41,17 @@ _OPTIONAL_PER_TOKEN_KEYS = (
 
 
 def is_positive_integer(value: int | None, name: str):
-  """Checks if the value is positive."""
-  if value is not None and (not isinstance(value, int) or value <= 0):
+  """Checks if the value is a positive integer.
+
+  Accepts Python ``int`` and numpy integer scalars (e.g. ``np.int64``).
+  Explicitly rejects ``bool``, which is a subclass of ``int`` in Python but
+  is not semantically an integer in this context.
+  """
+  if value is None:
+    return
+  if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+    raise ValueError(f"{name} must be a positive integer. Got: {value}")
+  if value <= 0:
     raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 
@@ -238,11 +247,14 @@ def put_params_on_memory_kind(
   logging.debug("params_on_memory_kind shardings: %s", shardings)
   return params_on_memory_kind
 
-
 def create_critic_model(
-    actor_model: nnx.Module, seed: int = 0, lm_head_to_replace: str = "lm_head"
+    actor_model: nnx.Module, seed: int = 0, rngs: nnx.Rngs = None, lm_head_to_replace: str = "lm_head"
 ) -> nnx.Module:
   """Creates a critic model from an actor model."""
+
+  if rngs is None:
+    rngs=nnx.Rngs(seed)
+
   g, state = nnx.split(actor_model)
   # TODO(tsbao): if actor model is a LoRA model, then we can potentially share
   # backbone of base weights with critic model. Do it later as an optimization.
@@ -252,17 +264,59 @@ def create_critic_model(
   hidden_dim = (
       lm_head.shape[0] if hasattr(lm_head, "shape") else lm_head.in_features
   )
-  setattr(
-      critic_model,
-      lm_head_to_replace,
-      nnx.Linear(
+  new_head = nnx.Linear(
           in_features=hidden_dim,
           out_features=1,
           use_bias=False,
-          rngs=nnx.Rngs(seed),
-      ),
+          rngs=rngs,
+      )
+
+  # If Qwix is active for the model, also assign qwix_path for the new head
+  if hasattr(critic_model, "qwix_path"):
+    new_head.qwix_path = getattr(lm_head, "qwix_path", (lm_head_to_replace,))
+  setattr(
+      critic_model,
+      lm_head_to_replace,
+      new_head
   )
+
   return critic_model
+
+
+class TransformerWithScoreHead(nnx.Module):
+  def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
+    """Initializes the transformer with a score head.
+
+    Args:
+      transformer: The transformer backbone.
+      rngs: The random number generator.
+    """
+    if hasattr(transformer, 'embed_dim'):
+      embed_dim = transformer.embed_dim
+    elif hasattr(transformer.config, 'embed_dim'):
+      embed_dim = transformer.config.embed_dim
+    else:
+      raise ValueError("Could not determine embed dim for the transformer.")
+
+    self.transformer = transformer
+    self.score = nnx.Linear(
+        in_features=embed_dim,
+        out_features=1,
+        use_bias=False,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.normal(),
+            transformer.config.shd_config.score_weight_d1,
+        ),
+        rngs=rngs,
+    )
+
+  def __call__(self, *args, **kwargs):
+    self.transformer(*args, **kwargs, output_hidden_states=True)
+    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
+        'all_hidden_states'
+    ].value[-1]
+    score = self.score(hidden_states)
+    return score
 
 
 def get_partition_spec(
@@ -490,6 +544,5 @@ def pack_sequences(
     if target_items_per_update and accumulated_items % target_items_per_update != 0:
       raise ValueError("pack_sequences stream ended mid-mini-batch.")
     yield _flush_buffer(is_update=True)
-
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"

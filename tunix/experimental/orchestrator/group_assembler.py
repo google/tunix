@@ -38,12 +38,12 @@ class AssembledGroup:
   """A complete group: ordered (record, result) pairs sharing a group_id."""
 
   group_id: str
-  members: list[tuple[request_ledger.RequestRecord, datatypes.RolloutResult]]
+  members: list[tuple[request_ledger.RequestRecord, datatypes.RolloutResponse]]
 
   def __len__(self) -> int:
     return len(self.members)
 
-  def results(self) -> list[datatypes.RolloutResult]:
+  def results(self) -> list[datatypes.RolloutResponse]:
     return [result for _, result in self.members]
 
   def policy_version(self) -> int:
@@ -89,7 +89,7 @@ class GroupAssembler:
     """Registers the requests of a newly dispatched group."""
     self._ledger.register(records)
 
-  def admit(self, result: datatypes.RolloutResult) -> request_ledger.Admission:
+  def admit(self, result: datatypes.RolloutResponse) -> request_ledger.Admission:
     """Offers a result to the underlying ledger (incarnation gate + dedup)."""
     return self._ledger.admit(result)
 

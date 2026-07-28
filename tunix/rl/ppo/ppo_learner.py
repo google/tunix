@@ -132,7 +132,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
-      ppo_config: PPOConfig,
+      algo_config: PPOConfig,
       reward_fns: RewardFn | List[RewardFn] | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
@@ -158,7 +158,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     """
     super().__init__(
         rl_cluster=rl_cluster,
-        algo_config=ppo_config,
+        algo_config=algo_config,
         reward_fns=reward_fns,  # pyrefly: ignore[bad-argument-type]
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,

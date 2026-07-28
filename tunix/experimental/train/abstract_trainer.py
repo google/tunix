@@ -66,13 +66,14 @@ class AbstractTrainer(abc.ABC):
   ) -> "AbstractTrainer":
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs.
 
-    This is what lets the trainer accept an arbitrary payload type: `fwd_bwd`
-    and `eval_step` call `gen_model_input_fn(payload)` and splat the result into
-    the loss/eval function. It is the seam that lets one trainer serve SFT, RL,
-    and custom payloads. The adapter is a callable held in-process and is never
-    sent over the wire; a remote worker rebuilds it from serialized config.
+    This adapter enables the trainer to accept arbitrary payloads (SFT, RL,
+    etc.) by transforming them into kwargs for the loss function via
+    `gen_model_input_fn(payload)`. The adapter is a callable held in-process and
+    is never sent over the wire; a remote worker rebuilds it from serialized
+    config.
     Args:
       gen_model_input_fn: Maps a payload to a dict of loss-fn keyword arguments.
+
     Returns:
       self, for chaining.
     """
@@ -81,16 +82,16 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
+  def compile(self, dummy_data: Any) -> None:
     """Triggers JAX compilation. `with_loss_fn` must be called first.
 
     Idempotent; safe to call multiple times. Under JAX jit semantics, XLA
     compilation itself still happens on the first call per input shape; this
     method constructs the jitted callables and applies optimizer sharding so
-    the first step avoids double compilation. The trainer synthesizes its own
-    warmup dummies from `shape_config`. Does NOT restore checkpoints.
+    the first step avoids double compilation. Does NOT restore checkpoints.
     Args:
-      shape_config: Batch/sequence shape hints for synthesizing warmup dummies.
+      dummy_data: Warmup input (or shape hints, e.g. `datatypes.ShapeConfig`)
+        the trainer uses to synthesize its warmup batch.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement compile."

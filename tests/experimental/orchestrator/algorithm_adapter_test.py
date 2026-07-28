@@ -32,7 +32,7 @@ def _record(group_id, sample_index, request_id):
       request=datatypes.RolloutRequest(
           request_id=request_id,
           prompt_id="p",
-          prompt_text="hi",
+          prompt="hi",
           sampling_params=datatypes.SamplingParams(max_tokens=4),
       ),
       group_id=group_id,
@@ -47,7 +47,7 @@ def _result(request_id, env_reward, completion, *, policy_version=0):
       tokens=completion,
       loss_mask=np.ones_like(completion),
   )
-  return datatypes.RolloutResult(
+  return datatypes.RolloutResponse(
       request_id=request_id,
       prompt_id="p",
       status="COMPLETED",

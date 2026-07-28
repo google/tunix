@@ -48,7 +48,8 @@ class StubReferenceScoringCore:
 class InferenceWorkerContractSuite:
   """Contract tests shared across InferenceWorker implementations."""
 
-  def make_worker(self):
+  def make_worker(self, **kwargs):
+    """Builds the worker under test; kwargs are forwarded to its constructor."""
     raise NotImplementedError("Subclasses must provide make_worker().")
 
   def _logprobs_request(
@@ -74,22 +75,24 @@ class InferenceWorkerContractSuite:
 
   def test_compute_logprobs_shape_and_echo(self):
     worker = self.make_worker()
-    result = worker.compute_logprobs(self._logprobs_request(batch=4))
+    result = worker.compute_logps(self._logprobs_request(batch=4))
     self.assertEqual(result.request_id, "req-lp")
     self.assertEqual(result.per_token_logps.shape, (4, 3))
     self.assertEqual(result.per_token_logps.dtype, np.float32)
 
   def test_compute_logprobs_rejects_non_reference_role(self):
+    # Failures are reported as a response carrying `error`, never as a dropped
+    # response or a raised exception across the worker boundary.
     worker = self.make_worker()
-    with self.assertRaises(NotImplementedError):
-      worker.compute_logprobs(self._logprobs_request(model_role="policy"))
+    result = worker.compute_logps(self._logprobs_request(model_role="policy"))
+    self.assertIsNotNone(result.error)
 
   def test_compute_logprobs_honors_temperature(self):
     worker = self.make_worker()
-    at_one = worker.compute_logprobs(
+    at_one = worker.compute_logps(
         self._logprobs_request(batch=2, temperature=1.0)
     )
-    at_two = worker.compute_logprobs(
+    at_two = worker.compute_logps(
         self._logprobs_request(batch=2, temperature=2.0)
     )
     self.assertFalse(
@@ -97,10 +100,10 @@ class InferenceWorkerContractSuite:
     )
 
   def test_microbatching_matches_single_pass(self):
-    worker = self.make_worker()
-    single = worker.compute_logprobs(self._logprobs_request(batch=6))
-    chunked = worker.compute_logprobs(
-        self._logprobs_request(batch=6, micro_batch_size=2)
+    # Internal chunking must not change the numbers, only peak memory.
+    single = self.make_worker().compute_logps(self._logprobs_request(batch=6))
+    chunked = self.make_worker(chunk_size=2).compute_logps(
+        self._logprobs_request(batch=6)
     )
     np.testing.assert_array_equal(
         single.per_token_logps, chunked.per_token_logps
@@ -120,7 +123,7 @@ class InferenceWorkerContractSuite:
 
   def test_result_is_wire_safe_and_round_trips(self):
     worker = self.make_worker()
-    result = worker.compute_logprobs(self._logprobs_request(batch=2))
+    result = worker.compute_logps(self._logprobs_request(batch=2))
     rpc_utils.validate_wire_safe(result)
     restored = cloudpickle.loads(cloudpickle.dumps(result))
     np.testing.assert_array_equal(

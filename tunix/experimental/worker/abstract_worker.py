@@ -20,6 +20,7 @@ pipeline (e.g. TrainerWorker is a wrapper around the Trainer).
 """
 
 import abc
+from typing import Any
 
 from tunix.experimental.common import datatypes
 
@@ -28,7 +29,7 @@ class Worker(abc.ABC):
   """Base interface for all Workers."""
 
   @abc.abstractmethod
-  def initialize(self) -> None:
+  def initialize(self) -> datatypes.Response:
     """Initializes the worker.
 
     Allocates memory, loads model weights, and sets up mesh/sharding
@@ -37,34 +38,37 @@ class Worker(abc.ABC):
     pass
 
   @abc.abstractmethod
-  def compile(self, shape_config: datatypes.ShapeConfig) -> None:
-    """Triggers JIT compilation.
-
-    Role-specific and worker-driven: the worker synthesizes its own warmup
-    dummies from `shape_config` (plus its tokenizer/geometry), since the
-    orchestrator cannot fabricate engine-private warmup shapes.
-    """
+  def compile(self, dummy_data: Any) -> datatypes.Response:
+    """Triggers JIT compilation using the provided dummy_data."""
     pass
 
   @abc.abstractmethod
-  def start(self) -> None:
+  def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
     pass
 
   @abc.abstractmethod
-  def stop(self) -> None:
+  def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     pass
 
-  @abc.abstractmethod
   def health(self) -> datatypes.HealthReport:
-    """Returns a liveness/status snapshot for the orchestrator health monitor."""
-    pass
+    """Returns a liveness/status snapshot for the orchestrator health monitor.
 
-  @abc.abstractmethod
+    Capability-gated: workers that participate in health monitoring override
+    this. The default keeps existing workers concrete.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not support health()."
+    )
+
   def info(self) -> datatypes.WorkerInfo:
-    """Returns the worker's static description (roles, capabilities, resources)."""
-    pass
+    """Returns the worker's static description (roles, capabilities, resources).
+
+    Capability-gated: workers that register with the orchestrator override this.
+    The default keeps existing workers concrete.
+    """
+    raise NotImplementedError(f"{type(self).__name__} does not support info().")
 
   def pause(self) -> None:
     """Stops admitting new work (capability-gated; default: unsupported)."""

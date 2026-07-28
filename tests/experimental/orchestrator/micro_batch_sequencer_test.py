@@ -21,8 +21,15 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import micro_batch_sequencer as seq
 
 
-def _mb(loss_mask) -> datatypes.TrainerPayload:
-  return datatypes.TrainerPayload(loss_mask=np.asarray(loss_mask, dtype=np.int32))
+def _mb(loss_mask) -> datatypes.RLTrainerPayload:
+  # The sequencer only reads `loss_mask`; the rest is filler to satisfy the DTO.
+  mask = np.asarray(loss_mask, dtype=np.int32)
+  return datatypes.RLTrainerPayload(
+      token_ids=np.zeros_like(mask),
+      token_mask=np.ones_like(mask),
+      loss_mask=mask,
+      advantages=np.zeros(mask.shape[0], dtype=np.float32),
+  )
 
 
 class MicroBatchSequencerTest(absltest.TestCase):
