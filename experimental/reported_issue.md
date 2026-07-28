@@ -839,3 +839,35 @@ The ablation was run and the XLA output clearly demonstrates that:
 
 The 3 xprof trace files have been uploaded to `gs://yuxzhang-tunix-models/issue21_repro_xprof/` mapped properly as `[optax | stream | stream_nopromote]/plugins/profile/...`. 
 The raw `[[MEM]]` XLA tracing logs proving this measurement have been committed to the branch at `experimental/tracing_logs/hbm_peak_repro.log`.
+
+**Follow-up (July 28, cont.): quantitative model + a 4th arm to confirm BOTH fixes at once.**
+
+The two contributors reconcile exactly with the model size. Gemma4-E2B text_only = **4.647 B** trainable params; one bf16 weight tree = 8.66 GB total, sharded over the (fsdp=2, tp=2) 4-chip mesh = **W ≈ 2.16 GB per chip**. fp32 = 2× bf16, so an fp32 moment tree = 2W. Per-chip accounting (unit W):
+
+| component | dtype | size | optax | stream | stream_nopromote | stream_lean |
+|---|---|---|---:|---:|---:|---:|
+| params | bf16 | 1W | 1W | 1W | 1W | 1W |
+| mu | bf16/fp32 | 1W/2W | 1W | 2W | 1W | 1W |
+| nu | bf16/fp32 | 1W/2W | 1W | 2W | 1W | 1W |
+| accumulator | bf16 | 1W | – | 1W | 1W | – |
+| activations/workspace | – | ~2.4W | 2.4W | 2.4W | 2.4W | 2.4W |
+| **total** | | | **5.4W** | **8.4W** | **6.4W** | **5.4W** |
+| **predicted GB** (×2.16) | | | 11.7 | 18.1 | 13.8 | 11.7 |
+| **measured GB** | | | 11.72 | 18.34 | 13.97 | (this run) |
+
+So the regression vs optax is **3W ≈ 6.6 GB** = accumulator (1W) + fp32 promote (2W). Two fixes each reclaim their part:
+- **Fix A — don't allocate the accumulator at depth-1** (behavior-preserving; the fast path never reads it — CPU-verified bit-identical depth-1 weights): −1W.
+- **Fix B — bf16 moments** (= optax's default; the promote was added only to satisfy the removed `nnx.cond` dtype-match, not for numerics): −2W, and this is what should revert the op fusion.
+
+**THE run is now four arms** (same command; env toggles `PROMOTE_FP32` and `ALLOC_ACCUM` per arm):
+```bash
+bash experimental/mem_repro_v5p_docker.sh
+```
+- optax / stream / stream_nopromote (as before)
+- **stream_lean** = `PROMOTE_FP32=0 ALLOC_ACCUM=0` = **both fixes** → predicted **~11.7 GB = optax**.
+
+**What to confirm in xprof (one run answers two questions):**
+1. **Memory** — `stream_lean` peak ≈ optax (~11.7 GB) → the two fixes together return the full 3W, i.e. depth-1 stream == optax on HBM.
+2. **Op fusion** — the update kernel in `stream_nopromote` and `stream_lean`: does it revert from **add-convert** to **multiply-add** (like optax)? If yes, the op change is confirmed to be the fp32 moment dtype (and both fixes reproduce optax's kernel). Note: a CPU HLO check did NOT reproduce the convert difference — CPU has no bf16 vector unit, so only the TPU xprof op view is authoritative here.
+
+Report back per arm: `[[MEM]] peak_hbm_gb` + the update-op fusion from trace_viewer, for all four arms (commit the four `.log` files under experimental/tracing_logs/).
