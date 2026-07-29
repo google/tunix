@@ -813,10 +813,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # Safely gather all unique sub-keys (e.g., 'reset_latency') across all trajectories
       for sub_key in {k for d in time_dicts for k in d.keys()}:
         vals = [d.get(sub_key, 0.0) for d in time_dicts]
+        flat_vals = []
+        for v in vals:
+          if isinstance(v, (list, tuple, np.ndarray)):
+            flat_vals.extend(v)
+          elif v is not None:
+            flat_vals.append(v)
+        if not flat_vals:
+          flat_vals = [0.0]
         metrics_to_log.update({
-            f"{prefix}/{sub_key}/mean": (np.mean(vals), np.mean),
-            f"{prefix}/{sub_key}/max": (np.max(vals), np.max),
-            f"{prefix}/{sub_key}/min": (np.min(vals), np.min),
+            f"{prefix}/{sub_key}/mean": (np.mean(flat_vals), np.mean),
+            f"{prefix}/{sub_key}/max": (np.max(flat_vals), np.max),
+            f"{prefix}/{sub_key}/min": (np.min(flat_vals), np.min),
         })
         self.rl_cluster.buffer_metrics_async(
             metrics_to_log,  # pyrefly: ignore[bad-argument-type]

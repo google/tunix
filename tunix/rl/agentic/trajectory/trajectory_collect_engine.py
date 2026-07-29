@@ -124,7 +124,8 @@ class TrajectoryCollectEngine:
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
     self.env_time = {
         "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
-        "step_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
+        "step_latency": [],  # List of per-step wall-clock times, ordered by step index
+        "close_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
     }
     self.reward_time = {
         "reward_latency": (
@@ -584,7 +585,7 @@ class TrajectoryCollectEngine:
           cur_step.done = True
         return True
 
-      self.env_time["step_latency"] += wall_time
+      self.env_time["step_latency"].append(wall_time)
 
       logging.debug(
           "%s Env Observation (Rew: %s, Done: %s):\n%s",
@@ -723,22 +724,20 @@ class TrajectoryCollectEngine:
     connections, file handles, or external processes.
     """
     logging.debug("%s Closing environment.", self._debug_prefix)
-    for k, v in self.env_time.items():
-      logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
-    for k, v in self.reward_time.items():
-      logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
-
     try:
-      await asyncio.wait_for(
-          asyncio.get_event_loop().run_in_executor(
-              None, self.env.close
-          ),
-          timeout=150.0,
+      _, wall_time = await self._run_with_timing(
+          self.env.close, timeout=150.0
       )
+      self.env_time["close_latency"] += wall_time
     except asyncio.TimeoutError:
       logging.error(
           "%s env.close() timed out after 150s — executor thread may be"
           " leaked. This will starve the thread pool over time.",
           self._debug_prefix,
       )
+    finally:
+      for k, v in self.env_time.items():
+        logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
+      for k, v in self.reward_time.items():
+        logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
     logging.debug("%s Environment closed.", self._debug_prefix)
