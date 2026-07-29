@@ -67,7 +67,7 @@ MAX_SEGMENTS_PER_ROW="${MAX_SEGMENTS_PER_ROW:-}"  # empty = budget-derived
 # not for the 8B, whose resident trainer state alone is ~37GB/chip.
 MODEL="${MODEL:-gemma4_e2b}"
 MAX_PROMPT="${MAX_PROMPT:-4096}"
-MAX_RESPONSE="${MAX_RESPONSE:-4096}"
+MAX_RESPONSE="${MAX_RESPONSE:-2048}"
 ENV_MAX_STEPS="${ENV_MAX_STEPS:-8}"
 BATCH="${BATCH:-64}"
 MINI="${MINI:-64}"
