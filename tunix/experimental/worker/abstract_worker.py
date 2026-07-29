@@ -51,3 +51,8 @@ class Worker(abc.ABC):
   def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     pass
+
+  @abc.abstractmethod
+  def info(self) -> datatypes.WorkerInfo:
+    """Returns the worker's identification and roles."""
+    pass

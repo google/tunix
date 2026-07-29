@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Test doubles for orchestrator components."""
+"""A unified fake worker for orchestrator tests."""
 
+import collections
 from typing import Any
 
 from tunix.experimental.common import datatypes
@@ -21,16 +22,23 @@ from tunix.experimental.worker import abstract_worker
 
 
 class FakeWorker(abstract_worker.Worker):
-  """A unified test double for all worker types."""
+  """A unified fake worker for orchestrator tests."""
 
-  def __init__(self):
-    self.call_counts = {
-        "initialize": 0,
-        "compile": 0,
-        "start": 0,
-        "stop": 0,
-    }
-    self.state = "CREATED"
+  def __init__(
+      self,
+      worker_id: str,
+      roles: set[str] | frozenset[str],
+      resources: dict[str, Any] | None = None,
+  ):
+    self._info = datatypes.WorkerInfo(
+        worker_id=worker_id, roles=frozenset(roles), resources=resources or {}
+    )
+    self.state = "PENDING"
+    # Tracks how many times each method was called
+    self.call_counts = collections.Counter()
+
+  def info(self) -> datatypes.WorkerInfo:
+    return self._info
 
   def initialize(self) -> datatypes.Response:
     self.call_counts["initialize"] += 1

@@ -30,15 +30,20 @@ class TrainerWorker(abstract_worker.Worker):
   """
 
   def __init__(
-      self, trainer_factory: Callable[[], abstract_trainer.AbstractTrainer]
+      self,
+      trainer_factory: Callable[[], abstract_trainer.AbstractTrainer],
+      *,
+      worker_id: str = "trainer_worker",
   ):
     """Initializes the TrainerWorker.
 
     Args:
       trainer_factory: A callable that returns an instantiated AbstractTrainer.
+      worker_id: Unique identifier for this worker.
     """
     self._trainer = trainer_factory()
     self._is_running = False
+    self._worker_id = worker_id
 
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
@@ -59,6 +64,11 @@ class TrainerWorker(abstract_worker.Worker):
     self._is_running = False
     self._trainer.close()
     return datatypes.Response()
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self._worker_id, roles=frozenset({"trainer"})
+    )
 
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False

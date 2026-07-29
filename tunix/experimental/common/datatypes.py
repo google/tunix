@@ -84,6 +84,26 @@ class Response:
 
 
 @dataclasses.dataclass(kw_only=True)
+class WorkerInfo:
+  """Static metadata describing a worker's identity and capabilities.
+
+  Attributes:
+    worker_id: The unique identifier for this worker.
+    roles: The orchestrator roles this worker can serve (e.g., "trainer",
+      "rollout").
+    resources: Unstructured dictionary of hardware or configuration details
+      (e.g., tokenizer_hash, fsdp_size) used during startup validation.
+  """
+
+  worker_id: str
+  roles: frozenset[str] = frozenset()
+  resources: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+##### Rollout DTOs #####
+
+
+@dataclasses.dataclass(kw_only=True)
 class SamplingParams:
   """Engine-neutral sampling configuration for a generation request.
 
@@ -146,25 +166,6 @@ class SamplingResponse(Response):
 
 
 @dataclasses.dataclass(kw_only=True)
-class WeightSyncRequest(Request):
-  """Configuration and routing metadata for synchronizing policy model weights.
-
-  Attributes:
-    controller_id: Optional identifier for transport controllers (e.g., TPU
-      Raiden).
-    policy_version: Target policy version identifier of the weights to sync.
-    source_metadata: Optional transport/layout metadata describing source
-      weights.
-    extra_config: Optional backend-specific configuration parameters.
-  """
-
-  controller_id: str = ""
-  policy_version: int = 0
-  source_metadata: Any = None
-  extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-
-@dataclasses.dataclass(kw_only=True)
 class RolloutRequest(Request):
   """Request to generate a rollout from a given prompt.
 
@@ -200,8 +201,8 @@ class TokenSegment:
     source: Origin of the span, e.g. "assistant" (model-emitted) or "env".
     tokens: Array of token ids for this span.
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
-    logps: Array of per-token log-probabilities under the sampling
-      distribution, or None for spans the model did not emit (e.g. env tokens).
+    logps: Array of per-token log-probabilities under the sampling distribution,
+      or None for spans the model did not emit (e.g. env tokens).
   """
 
   source: str
@@ -217,8 +218,7 @@ class TokenSegment:
       )
     if self.logps is not None and self.logps.shape != self.tokens.shape:
       raise ValueError(
-          f"logps shape {self.logps.shape} != tokens shape"
-          f" {self.tokens.shape}"
+          f"logps shape {self.logps.shape} != tokens shape {self.tokens.shape}"
       )
 
 
@@ -322,6 +322,31 @@ class TrainerPayload:
   segment_ids: ArrayLike | None = None
 
 
+##### Weight Sync DTOs #####
+
+
+@dataclasses.dataclass(kw_only=True)
+class WeightSyncRequest(Request):
+  """Configuration and routing metadata for synchronizing policy model weights.
+
+  Attributes:
+    controller_id: Optional identifier for transport controllers (e.g., TPU
+      Raiden).
+    policy_version: Target policy version identifier of the weights to sync.
+    source_metadata: Optional transport/layout metadata describing source
+      weights.
+    extra_config: Optional backend-specific configuration parameters.
+  """
+
+  controller_id: str = ""
+  policy_version: int = 0
+  source_metadata: Any = None
+  extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+##### Training DTOs #####
+
+
 @dataclasses.dataclass(kw_only=True)
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
@@ -358,6 +383,9 @@ class LogprobsRequest(Request):
   completion_tokens: np.ndarray
   temperature: float
   model_role: str = "reference"
+
+
+##### Inference DTOs #####
 
 
 @dataclasses.dataclass(kw_only=True)

@@ -68,6 +68,7 @@ class InferenceWorker(abstract_worker.Worker):
       self,
       core: ReferenceScoringCore,
       *,
+      worker_id: str,
       pad_id: int,
       eos_id: int,
       model_version: int = 0,
@@ -78,16 +79,23 @@ class InferenceWorker(abstract_worker.Worker):
     Args:
       core: An already-initialized inference core holding the frozen weights.
         The core is responsible for model materialization.
+      worker_id: The unique identifier for this worker.
       pad_id: Padding token id used in the request arrays.
       eos_id: End-of-sequence token id.
       model_version: Version tag for the hosted weights; constant while frozen.
       chunk_size: Optional maximum batch size for scoring to reduce peak memory.
     """
+    self._worker_id = worker_id
     self._core = core
     self._pad_id = pad_id
     self._eos_id = eos_id
     self._model_version = model_version
     self._chunk_size = chunk_size
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self._worker_id, roles=frozenset({"inference"})
+    )
 
   def initialize(self) -> datatypes.Response:
     return datatypes.Response()
