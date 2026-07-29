@@ -4,6 +4,53 @@ This document records the exact error logs, architectural root causes, and diagn
 
 ---
 
+## ★★ CORRECTION (2026-07-29) — sections 1-4 below misread the evidence
+
+**Root cause found and fixed: `TO_HF_MAPPINGS` targeted the wrong namespace, so
+*zero* weights were ever transferred. vLLM ran on random init weights.**
+
+Fix: `tunix/models/gemma4/mapping_vllm_jax.py`, all 29 target names
+`model.*` → `language_model.*`. Ground truth: `tpu_inference` 0.25.0's
+`Gemma4ForCausalLM.__init__` assigns the decoder to `self.language_model`
+(`models/jax/gemma4.py:1035`), so nnx attribute paths — which is what
+`build_flat_dict` matches against — start with `language_model.`, never `model.`.
+The `model.` string in checkpoint names is stripped by `load_weights`
+(`gemma4.py:1052`, `WeightsMapper(orig_to_new_prefix={"model.": ""})`); it is not
+part of the attribute path. `origin/main` already carried this fix
+(`71eef52c`); the sync from `origin/gemma4_mapping_update` (`953e3edc`) reverted
+it while adding the (correct, keep-them) fused `qkv_fused`/`gate_up_fused`
+entries.
+
+Where sections 1-4 went wrong:
+
+- **§1-2 "layers 0-5 map, 6+ fail" is false.** The pasted excerpt is a window
+  that happens to start at `layers.6`. In the full logs `layers.0` … `layers.34`
+  are *all* present in the failure list. `/tmp/train_frozenlake_logs/fl_mem8k.log`
+  contains exactly **495** `No mapping` lines = 35 layers × 14 keys + 5 non-layer
+  keys = **one sync in which every single source param failed**;
+  `fl_smoke.log` has 3465 = 495 × 7, i.e. seven syncs, each 100% failing.
+  Verified independently: instantiating the real 35-layer E2B structure yields
+  **495 source params, of which 0 are unmapped after the fix**.
+  ⟹ There is no layer-count / shared-layer discrepancy to chase.
+- **§3 "100% numerically aligned" is backwards.** `prob_diff≈1e-5` is trivially
+  satisfied when *both* engines are near-uniform over a 262144-token vocab; it
+  does not show agreement. The load-bearing numbers in the same log line are
+  `logp_diff_mean ≈ 9.0` nats (a ~9000× probability ratio) and
+  `probs_pearson_corr = 0.00000` — **zero** correlation, the signature of one
+  side being noise.
+- **§4's response budget is a symptom, not the cause.** A random-weight model
+  babbles, so it hits `MAX_CONTEXT_LIMIT_REACHED` at any budget. This is why
+  `4096+4096` was *also* all-zero. Re-measure the budget question only after a
+  run whose weight sync actually lands.
+
+Also added so this class of bug can never be silent again:
+`transfer_state_with_mappings(..., strict_mapping=True)` now raises
+`MappingError` naming the unmapped keys, instead of logging one `ERROR` per key
+and letting the caller report `"Weights synced"`
+(`tunix/generate/utils.py`; gates in `tests/generate/utils_test.py`).
+
+---
+
 ## 1. Error Log: `No mapping for source key: layers.6...`
 
 When running state transfer between JAX (`Gemma4`) and vLLM (`Gemma4ForCausalLM`), logs show that layers 0 through 5 map without issues, but starting from layer 6, `No mapping for source key` errors occur:

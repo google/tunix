@@ -492,16 +492,16 @@ class UtilsTest(parameterized.TestCase):
     # (4*8=32), K (2*8=16) and V (2*8=16) into a single (16, 64) kernel;
     # gate_up_proj fuses gate/up (32 each) into a (16, 64) kernel.
     dst_params = {
-        "model.layers.0.self_attn.qkv_proj.weight": MockParam(
+        "language_model.layers.0.self_attn.qkv_proj.weight": MockParam(
             jnp.zeros((16, 64), dtype=jnp.float32)
         ),
-        "model.layers.0.mlp.gate_up_proj.weight": MockParam(
+        "language_model.layers.0.mlp.gate_up_proj.weight": MockParam(
             jnp.zeros((16, 64), dtype=jnp.float32)
         ),
-        "model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
+        "language_model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
             jnp.zeros((4, 2, 8, 16), dtype=jnp.float32)
         ),
-        "model.layers.0.experts.kernel_down_proj_EFD": MockParam(
+        "language_model.layers.0.experts.kernel_down_proj_EFD": MockParam(
             jnp.zeros((4, 16, 8), dtype=jnp.float32)
         ),
     }
@@ -529,7 +529,9 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.qkv_proj.weight"],
+            new_tgt_state.params[
+                "language_model.layers.0.self_attn.qkv_proj.weight"
+            ],
             expected_qkv,
         )
     )
@@ -537,21 +539,27 @@ class UtilsTest(parameterized.TestCase):
     expected_gate_up = jnp.concatenate([gate_val, up_val], axis=-1)
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.mlp.gate_up_proj.weight"],
+            new_tgt_state.params[
+                "language_model.layers.0.mlp.gate_up_proj.weight"
+            ],
             expected_gate_up,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.experts.kernel_gating_upproj_EDF"],
+            new_tgt_state.params[
+                "language_model.layers.0.experts.kernel_gating_upproj_EDF"
+            ],
             src_params["layers.0.moe.gating_einsum"].value,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.experts.kernel_down_proj_EFD"],
+            new_tgt_state.params[
+                "language_model.layers.0.experts.kernel_down_proj_EFD"
+            ],
             src_params["layers.0.moe.linear"].value,
         )
     )
@@ -614,10 +622,10 @@ class UtilsTest(parameterized.TestCase):
         "layers.0.attn.k_einsum.w": MockParam(k_val),
     })
     dst_state = MockState({
-        "model.layers.0.self_attn.q_proj.weight": MockParam(
+        "language_model.layers.0.self_attn.q_proj.weight": MockParam(
             jnp.zeros((16, 4, 8), dtype=jnp.float32)
         ),
-        "model.layers.0.self_attn.k_proj.weight": MockParam(
+        "language_model.layers.0.self_attn.k_proj.weight": MockParam(
             jnp.zeros((16, 2, 8), dtype=jnp.float32)
         ),
     })
@@ -638,14 +646,81 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.q_proj.weight"],
+            new_tgt_state.params[
+                "language_model.layers.0.self_attn.q_proj.weight"
+            ],
             jnp.transpose(q_val, (1, 0, 2)),
         )
     )
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.k_proj.weight"],
+            new_tgt_state.params[
+                "language_model.layers.0.self_attn.k_proj.weight"
+            ],
             jnp.transpose(k_val, (1, 0, 2)),
+        )
+    )
+
+  def test_gemma4_mapping_targets_language_model_namespace(self):
+    """tpu_inference nests the whole decoder under `self.language_model`."""
+    from tunix.models.gemma4.mapping_vllm_jax import TO_HF_MAPPINGS
+
+    wrong_namespace = [
+        tgt
+        for tgt, _ in TO_HF_MAPPINGS.values()
+        if not tgt.startswith("language_model.")
+    ]
+    self.assertEmpty(wrong_namespace)
+
+  def test_transfer_state_with_mappings_raises_on_unmapped_source(self):
+    """A target name matching nothing must fail, not silently transfer 0."""
+    src = MockState(
+        {"layers.0.attn.q_einsum.w": MockParam(jnp.ones((2, 4, 8)))}
+    )
+    dst = MockState({
+        "language_model.layers.0.self_attn.q_proj.weight": MockParam(
+            jnp.zeros((4, 16))
+        )
+    })
+    # Stale namespace: tpu_inference exposes no top-level `model` attribute, so
+    # this entry matches no target param and nothing is ever written.
+    mappings = {
+        "layers.*.attn.q_einsum.w": (
+            "model.layers.*.self_attn.q_proj.weight",
+            None,
+        )
+    }
+
+    with self.assertRaisesRegex(
+        utils.MappingError, "no entry in the mapping table"
+    ):
+      utils.transfer_state_with_mappings(src, dst, mappings)
+
+  def test_transfer_state_with_mappings_skips_unmapped_when_not_strict(self):
+    """`strict_mapping=False` keeps the previous log-and-continue behavior."""
+    src = MockState(
+        {"layers.0.attn.q_einsum.w": MockParam(jnp.ones((2, 4, 8)))}
+    )
+    dst = MockState({
+        "language_model.layers.0.self_attn.q_proj.weight": MockParam(
+            jnp.zeros((4, 16))
+        )
+    })
+    mappings = {
+        "layers.*.attn.q_einsum.w": (
+            "model.layers.*.self_attn.q_proj.weight",
+            None,
+        )
+    }
+
+    result = utils.transfer_state_with_mappings(
+        src, dst, mappings, strict_mapping=False
+    )
+
+    self.assertTrue(
+        jnp.array_equal(
+            result.params["language_model.layers.0.self_attn.q_proj.weight"],
+            jnp.zeros((4, 16)),
         )
     )
 

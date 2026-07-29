@@ -464,6 +464,7 @@ def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
 def _unroll_scanned_layers(
     src_state: Any,
     src_to_tgt_map: Dict,
+    unmapped_src_keys: Optional[List[str]] = None,
 ) -> Dict[Tuple[str, str], Tuple[Any, Any]]:
   """Unroll scanned layers from source state and map to target keys.
 
@@ -471,6 +472,8 @@ def _unroll_scanned_layers(
       src_state: Source state to unroll.
       src_to_tgt_map: Mapping from flat source keys to (target_param,
         target_path, sharding_spec).
+      unmapped_src_keys: If given, source keys with no target are appended to it
+        so the caller can fail on them instead of only logging.
 
   Returns:
       Dictionary mapping (src_key, tgt_key) to (value, target_param).
@@ -489,6 +492,8 @@ def _unroll_scanned_layers(
     # Validate mapping exists
     if src_key not in src_to_tgt_map:
       logging.error('No mapping for source key: %s', src_key)
+      if unmapped_src_keys is not None:
+        unmapped_src_keys.append(src_key)
       continue
 
     tgt_param, tgt_path, sharding_spec = src_to_tgt_map[src_key]
@@ -811,6 +816,7 @@ def transfer_state_with_mappings(
     transpose_keys=None,
     reshard_fn=None,
     rollout_engine=None,
+    strict_mapping=True,
     **kwargs,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
@@ -828,6 +834,11 @@ def transfer_state_with_mappings(
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
     rollout_engine: The name of the rollout engine being used.
+    strict_mapping: Raise if any source param has no entry in `key_mappings`.
+      Such a param is never written, so the target silently keeps whatever it
+      already holds — for a rollout engine initialized with random weights that
+      means training against garbage. Pass False only when the caller knowingly
+      transfers a subset of the source state.
     **kwargs: Additional keyword arguments.
 
   Returns:
@@ -853,7 +864,19 @@ def transfer_state_with_mappings(
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
   # Unroll scanned layers and flatten source state
-  unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  unmapped_src_keys = []
+  unscanned_src_to_tgt_flat = _unroll_scanned_layers(
+      src_state, src_to_tgt_map, unmapped_src_keys
+  )
+  if strict_mapping and unmapped_src_keys:
+    raise MappingError(
+        f'{len(unmapped_src_keys)} source params have no entry in the mapping'
+        ' table, so they were never written and the target keeps whatever it'
+        ' already holds (random weights, for a freshly initialized rollout'
+        f' engine). First unmapped: {unmapped_src_keys[:5]}. Target names in'
+        " the mapping table must be attribute paths in the rollout engine's"
+        ' model, not checkpoint names.'
+    )
   transferred_target_keys = set()
 
   # Transfer values with transformations

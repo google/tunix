@@ -25,124 +25,131 @@ Sharding = Tuple[str | None, ...]
 MappingEntry = Tuple[str, Sharding]
 
 
+# Target names are attribute paths in tpu_inference's `Gemma4ForCausalLM`,
+# which nests the decoder under `self.language_model` (gemma4.py:1035). They are
+# NOT checkpoint names: `load_weights` strips the `model.` prefix off those
+# before resolving them against this same attribute path.
 TO_HF_MAPPINGS = {
-    'embedder.input_embedding': ('model.embed_tokens.weight', ('model', None)),
+    'embedder.input_embedding': (
+        'language_model.embed_tokens.weight',
+        ('model', None),
+    ),
     'layers.*.pre_attention_norm.scale': (
-        'model.layers.*.input_layernorm.weight',
+        'language_model.layers.*.input_layernorm.weight',
         (None,),
     ),
     # GLOBAL layers with `attention_k_eq_v` keep separate (unfused) Q/K
     # kernels (no V; V==K); `preprocess_src_state` leaves those layers'
     # q_einsum/k_einsum untouched, so these two entries only ever match them.
     'layers.*.attn.q_einsum.w': (
-        'model.layers.*.self_attn.q_proj.weight',
+        'language_model.layers.*.self_attn.q_proj.weight',
         (None, 'model', None),
     ),
     'layers.*.attn.k_einsum.w': (
-        'model.layers.*.self_attn.k_proj.weight',
+        'language_model.layers.*.self_attn.k_proj.weight',
         (None, 'model', None),
     ),
     # Every other layer fuses Q, K, V into a single qkv_proj kernel.
     # `preprocess_src_state` combines that layer's q_einsum + kv_einsum into
     # this synthetic, already TP-interleaved `qkv_fused` entry.
     'layers.*.attn.qkv_fused.w': (
-        'model.layers.*.self_attn.qkv_proj.weight',
+        'language_model.layers.*.self_attn.qkv_proj.weight',
         (None, 'model'),
     ),
     'layers.*.attn._query_norm.scale': (
-        'model.layers.*.self_attn.q_norm.weight',
+        'language_model.layers.*.self_attn.q_norm.weight',
         (None,),
     ),
     'layers.*.attn._key_norm.scale': (
-        'model.layers.*.self_attn.k_norm.weight',
+        'language_model.layers.*.self_attn.k_norm.weight',
         (None,),
     ),
     'layers.*.attn.attn_vec_einsum.w': (
-        'model.layers.*.self_attn.o_proj.weight',
+        'language_model.layers.*.self_attn.o_proj.weight',
         ('model', None, None),
     ),
     'layers.*.post_attention_norm.scale': (
-        'model.layers.*.post_attention_layernorm.weight',
+        'language_model.layers.*.post_attention_layernorm.weight',
         (None,),
     ),
     'layers.*.pre_ffw_norm.scale': (
-        'model.layers.*.pre_feedforward_layernorm.weight',
+        'language_model.layers.*.pre_feedforward_layernorm.weight',
         (None,),
     ),
     # Gemma4MLP always fuses gate_proj/up_proj into one gate_up_proj kernel;
     # `preprocess_src_state` combines them into this synthetic,
     # TP-interleaved `gate_up_fused` entry.
     'layers.*.mlp.gate_up_fused.kernel': (
-        'model.layers.*.mlp.gate_up_proj.weight',
+        'language_model.layers.*.mlp.gate_up_proj.weight',
         (None, 'model'),
     ),
     'layers.*.mlp.down_proj.kernel': (
-        'model.layers.*.mlp.down_proj.weight',
+        'language_model.layers.*.mlp.down_proj.weight',
         ('model', None),
     ),
     'layers.*.post_ffw_norm.scale': (
-        'model.layers.*.post_feedforward_layernorm.weight',
+        'language_model.layers.*.post_feedforward_layernorm.weight',
         (None,),
     ),
     'layers.*.skip_scale': (
-        'model.layers.*.layer_scalar',
+        'language_model.layers.*.layer_scalar',
         (None,),
     ),
-    'final_norm.scale': ('model.norm.weight', (None,)),
+    'final_norm.scale': ('language_model.norm.weight', (None,)),
     'layers.*.moe_pre_ffw_norm.scale': (
-        'model.layers.*.pre_feedforward_layernorm_2.weight',
+        'language_model.layers.*.pre_feedforward_layernorm_2.weight',
         (None,),
     ),
     'layers.*.moe.router_logits': (
-        'model.layers.*.router.proj.weight',
+        'language_model.layers.*.router.proj.weight',
         (None, 'model'),
     ),
     'layers.*.moe.router_scale': (
-        'model.layers.*.router.scale',
+        'language_model.layers.*.router.scale',
         (None,),
     ),
     'layers.*.moe.per_expert_scale': (
-        'model.layers.*.router.per_expert_scale',
+        'language_model.layers.*.router.per_expert_scale',
         (None,),
     ),
     'layers.*.moe.gating_einsum': (
-        'model.layers.*.experts.kernel_gating_upproj_EDF',
+        'language_model.layers.*.experts.kernel_gating_upproj_EDF',
         (None, None, 'model'),
     ),
     'layers.*.moe.linear': (
-        'model.layers.*.experts.kernel_down_proj_EFD',
+        'language_model.layers.*.experts.kernel_down_proj_EFD',
         ('model', None, None),
     ),
     'layers.*.dense_post_ffw_norm.scale': (
-        'model.layers.*.post_feedforward_layernorm_1.weight',
+        'language_model.layers.*.post_feedforward_layernorm_1.weight',
         (None,),
     ),
     'layers.*.moe_post_ffw_norm.scale': (
-        'model.layers.*.post_feedforward_layernorm_2.weight',
+        'language_model.layers.*.post_feedforward_layernorm_2.weight',
         (None,),
     ),
     'embedder.per_layer_input_embedding': (
-        'model.embed_tokens_per_layer.weight',
+        'language_model.embed_tokens_per_layer.weight',
         ('model', None),
     ),
     'embedder.per_layer_model_projection.w': (
-        'model.per_layer_model_projection.weight',
+        'language_model.per_layer_model_projection.weight',
         (None, 'model'),
     ),
     'embedder.per_layer_projection_norm.scale': (
-        'model.per_layer_projection_norm.weight',
+        'language_model.per_layer_projection_norm.weight',
         (None,),
     ),
     'layers.*.per_layer_input_gate.w': (
-        'model.layers.*.per_layer_input_gate.weight',
+        'language_model.layers.*.per_layer_input_gate.weight',
         (None, 'model'),
     ),
     'layers.*.per_layer_projection.w': (
-        'model.layers.*.per_layer_projection.weight',
+        'language_model.layers.*.per_layer_projection.weight',
         ('model', None),
     ),
     'layers.*.post_per_layer_input_norm.scale': (
-        'model.layers.*.post_per_layer_input_norm.weight',
+        'language_model.layers.*.post_per_layer_input_norm.weight',
         (None,),
     ),
 }
