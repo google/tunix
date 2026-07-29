@@ -625,6 +625,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         self.rl_cluster.cluster_config.training_config.max_seq_token_per_tpu
         is not None
     )
+
+    configured_compute_logps = self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+    compute_logps_micro_batch_size = (
+        configured_compute_logps * self.algo_config.num_generations
+        if configured_compute_logps
+        else len(trajectories)
+    )
+
     rollout_per_token_logps = None
     trainer_per_token_logps = None
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
@@ -644,7 +652,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=compute_logps_micro_batch_size,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -666,7 +674,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+          micro_batch_size=compute_logps_micro_batch_size,
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -702,7 +710,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=compute_logps_micro_batch_size,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
