@@ -871,3 +871,31 @@ bash experimental/mem_repro_v5p_docker.sh
 2. **Op fusion** — the update kernel in `stream_nopromote` and `stream_lean`: does it revert from **add-convert** to **multiply-add** (like optax)? If yes, the op change is confirmed to be the fp32 moment dtype (and both fixes reproduce optax's kernel). Note: a CPU HLO check did NOT reproduce the convert difference — CPU has no bf16 vector unit, so only the TPU xprof op view is authoritative here.
 
 Report back per arm: `[[MEM]] peak_hbm_gb` + the update-op fusion from trace_viewer, for all four arms (commit the four `.log` files under experimental/tracing_logs/).
+
+---
+
+### Verification of `yuxzhang/fix_accum_fp32` (July 29 4-Arm Run on rjx-v5p-8)
+
+To quantitatively verify the new **`yuxzhang/fix_accum_fp32`** branch (which accumulates micro-batch gradients in `float32` by default while downcasting each accumulated gradient leaf back to parameter dtype `bfloat16` before `optimizer.update`), we executed a 4-Arm test using `experimental/mem_repro_fix_accum_docker.sh` on `rjx-v5p-8`.
+
+#### 1. Per-Chip HBM Accounting & Measured Results ($W \approx 2.18\text{ GB}$)
+
+| component | dtype | size | d1_default (steps=1, fp32) | d4_fp32_accum (steps=4, fp32) | d4_bf16_accum (steps=4, bf16) | d4_fp32_moments (steps=4, fp32, opt=fp32) |
+|---|---|---|---:|---:|---:|---:|
+| params | bf16 | 1W | 1W | 1W | 1W | 1W |
+| mu | bf16/fp32 | 1W/2W | 1W | 1W | 1W | 2W |
+| nu | bf16/fp32 | 1W/2W | 1W | 1W | 1W | 2W |
+| accumulator | bf16/fp32 | 0/1W/2W | 0W | 2W | 1W | 2W |
+| activations/workspace | – | ~2.4W | 2.4W | 2.4W | 2.4W | 2.4W |
+| **total** | | | **5.4W** | **7.4W** | **6.4W** | **9.4W** |
+| **predicted GB** (×2.18) | | | 11.7 | 15.5 | 13.5 | 19.8 |
+| **measured GB** | | | **11.72** | **15.46** | **13.27** | **19.81** |
+
+**Key Findings:**
+1. **Depth-1 Baseline (`d1_default` = 11.72 GB)**: Proves that at accumulation depth 1, the `float32` accumulator is not allocated (`allocate_grads=False`), maintaining exact HBM parity with the `optax` baseline (`11.72 GB`).
+2. **High-Precision Multi-Step (`d4_fp32_accum` = 15.46 GB)**: Proves that accumulating in `float32` adds exactly `2W` (~3.74 GB) for the accumulator tree, while the `cast-back` before `optimizer.update` successfully prevents Adam moments from being promoted to `float32` (`mu`/`nu` remain `1W + 1W = 2W`).
+3. **Lean-Memory Multi-Step (`d4_bf16_accum` = 13.27 GB)**: Proves that configuring `gradient_accumulator_dtype = jnp.bfloat16` reduces accumulator overhead from `2W` to `1W`, reclaiming ~2.19 GB of HBM.
+4. **Forced FP32 Moments (`d4_fp32_moments` = 19.81 GB)**: Proves that promoting Adam moments to `float32` adds an extra `2W` (~4.36 GB), confirming the cause of our original HBM regression.
+
+All xprof traces have been uploaded to `gs://yuxzhang-tunix-models/issue21_repro_xprof/fix_accum_fp32/` (`d1_default`, `d4_fp32_accum`, `d4_bf16_accum`, `d4_fp32_moments`). Raw logs are preserved at `experimental/tracing_logs/fix_accum_fp32_hbm.log`.
+

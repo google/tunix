@@ -1,5 +1,5 @@
 # Plan — fix_accum_fp32
-Status: IN-PROGRESS (Scaffolded & Approved). Approved: yes.
+Status: DONE (Verified on TPU rjx-v5p-8). Approved: yes.
 
 ## Workstream: 验证 `yuxzhang/fix_accum_fp32` 分支的核心机制（fp32 累加器精度与 bf16 动量降转 cast-back 的显存/算子/时长表现）
 
