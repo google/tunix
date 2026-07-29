@@ -127,7 +127,7 @@ class CacheConfig:
   def max_num_pages_per_seq_per_shard(self) -> int:
     return cdiv(self.max_num_pages_per_seq, self.num_shards)
 
-
+@jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PageManager:
   """Page state and data blocks for a batch of sequences."""
@@ -136,12 +136,23 @@ class PageManager:
   available_page_indices: jax.Array  # i32[total_num_pages_per_shard]
   num_available_pages: jax.Array  # i32 scalar
   seq_lens: jax.Array # i32[batch_size]
-  page_size: int = 8
-  max_seq_len: int = 1028
-  num_shards: int = 1
-  window_size: int | None = None
-  max_num_pages_per_seq_per_shard: int = 2048
-
+  
+  page_size: int = dataclasses.field(
+      metadata={'static': True}
+  )
+  max_seq_len: int = dataclasses.field(
+      metadata={'static': True}
+  )
+  num_shards: int = dataclasses.field(
+      metadata={'static': True}
+  )
+  window_size: int | None = dataclasses.field(
+      metadata={'static': True}
+  )
+  max_num_pages_per_seq_per_shard: int = dataclasses.field(
+      metadata={'static': True}
+  )
+  
   @property
   def batch_size(self) -> int:
     return self.seq_lens.shape[0]
@@ -337,7 +348,7 @@ class PageManager:
     packed_tokens = self.pages[block_id][phys_page_ids, page_offsets]
     return packed_tokens
 
-
+"""
 jax.tree_util.register_dataclass(
     PageManager,
     data_fields=[
@@ -355,6 +366,7 @@ jax.tree_util.register_dataclass(
         'max_num_pages_per_seq_per_shard',
     ],
 )
+"""
 
 Cache = PageManager
 
@@ -753,7 +765,7 @@ class Sampler(base_sampler.BaseSampler):
     logging.debug('Using sampling mode: %s', sampling_mode[0])
 
     return _SamplingState(
-        decoding_step=num_input_tokens - 1,
+        decoding_step=jnp.array(lens, dtype=jnp.int32) - 1,
         num_input_tokens=jnp.array(num_input_tokens, dtype=jnp.int32),
         total_num_input_tokens=jnp.array(total_num_input_tokens, dtype=jnp.int32),
         positions=None,
@@ -795,6 +807,7 @@ class Sampler(base_sampler.BaseSampler):
     beam_search_state = sampler_state.beam_search_sampling_state
     if sampler_state.forbidden_token_ids:
       logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
+    
 
     if sampler_state.sampling_mode == 'beam_search':
       beam_search_state, updated_args = beam_search_lib.beam_search_step(
@@ -818,7 +831,8 @@ class Sampler(base_sampler.BaseSampler):
             logits, return_logprobs=(logprobs_buffer is not None)
         )
       elif sampler_state.sampling_mode == 'top_p':
-        key = jax.random.fold_in(sampler_state.seed, decoding_step)
+        # key = jax.random.fold_in(sampler_state.seed, decoding_step)
+        key = jax.random.fold_in(sampler_state.seed, jnp.max(decoding_step))
         next_token_candidate, logp = sample_top_p(
             logits,
             key,
@@ -833,9 +847,13 @@ class Sampler(base_sampler.BaseSampler):
         )
       cache = cache.append_tokens(next_token_candidate)
       if logprobs_buffer is not None:
-        logprobs_buffer = logprobs_buffer.at[:, decoding_step + 1].set(logp)
+        logprobs_buffer = logprobs_buffer.at[
+            jnp.arange(logprobs_buffer.shape[0]), decoding_step + 1
+        ].set(logp)
 
     latest_tokens = cache.get_token_at(decoding_step + 1)
+    print("Latest tokens: ", latest_tokens)
+
     done = done | jnp.isin(latest_tokens, eos)
     return _SamplingState(
         decoding_step=sampler_state.decoding_step + 1,
@@ -866,6 +884,7 @@ class Sampler(base_sampler.BaseSampler):
     """Performs prefill."""
     batch_size = sampler_state.cache.batch_size
 
+     
     if sampler_state.positions is not None:
       step_positions = sampler_state.positions[
           :, : sampler_state.num_input_tokens
@@ -947,8 +966,13 @@ class Sampler(base_sampler.BaseSampler):
         sampling_mode=sampler_state.sampling_mode,
         beam_search_sampling_state=beam_search_sampling_state,
     )
+
+    last_token_indices = jnp.cumsum(sampler_state.cache.seq_lens) - 1
+    last_token_logits = logits[last_token_indices]
+    last_token_logits = jnp.expand_dims(last_token_logits, axis=1)  
+
     updated_sampler_state = self._sample(
-        logits=logits,
+        logits=last_token_logits,
         cache=cache,
         eos=self.eos_ids,
         sampler_state=updated_sampling_state,
@@ -966,9 +990,15 @@ class Sampler(base_sampler.BaseSampler):
       return self._sample_step(params, sampler_state)
 
     def cond_fn(sampler_state: _SamplingState):
+      return jnp.any(
+        (sampler_state.decoding_step < sampler_state.total_sampling_steps - 1)
+        & jnp.logical_not(sampler_state.done)
+      )
+      """
       return (
           sampler_state.decoding_step < sampler_state.total_sampling_steps - 1
       ) & jnp.any(jnp.logical_not(sampler_state.done))
+      """
 
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
 
@@ -982,10 +1012,10 @@ class Sampler(base_sampler.BaseSampler):
     last_token = sampler_state.cache.get_token_at(decoding_step)[:, None].reshape(-1)
     if sampler_state.positions is not None:
       step_positions = jnp.expand_dims(
-          sampler_state.positions[:, decoding_step], -1
+          sampler_state.positions[jnp.arange(batch_size), decoding_step], -1
       )
     else:
-      step_positions = jnp.full((batch_size, 1), decoding_step, dtype=jnp.int32)
+      step_positions = decoding_step[:, None].astype(jnp.int32)
 
     transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
     logits, cache = transformer(
@@ -995,7 +1025,8 @@ class Sampler(base_sampler.BaseSampler):
         seq_lens=sampler_state.cache.seq_lens,
     )
     logits = jnp.expand_dims(logits, axis=1)
-
+    
+    
     updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
@@ -1132,7 +1163,7 @@ class Sampler(base_sampler.BaseSampler):
     sampling_state = self._compiled_decode_fn(
         self._flattened_transformer_state, sampling_state
     )
-    ragged_token_buffer = sampling_state.cache.to_array(total_sampling_steps)
+    ragged_token_buffer = sampling_state.cache.to_array(len(tokens) * total_sampling_steps)
     ragged_token_buffer = jax.device_get(ragged_token_buffer)
     seq_lens = jax.device_get(sampling_state.cache.seq_lens)
     logits_buffers = sampling_state.logits_buffer
@@ -1140,15 +1171,20 @@ class Sampler(base_sampler.BaseSampler):
     batch_size = len(tokens)
     start_indices = jnp.pad(jnp.cumsum(seq_lens)[:-1], (1, 0))
 
-    def unpack_left_padded_seq(start_idx, length):
+    def unpack_left_padded_seq(start_idx, length, prompt_length):
       raw_slice = jax.lax.dynamic_slice(ragged_token_buffer, (start_idx,), (total_sampling_steps,))
       valid_mask = jnp.arange(total_sampling_steps) < length
       right_padded = jnp.where(valid_mask, raw_slice, self.tokenizer.pad_id())
-      shift_amount = total_sampling_steps - length
+      # shift_amount = total_sampling_steps - length
+      shift_amount = max_prompt_length - prompt_length
       left_padded = jnp.roll(right_padded, shift_amount)
       return left_padded
 
-    token_buffers = jax.vmap(unpack_left_padded_seq)(start_indices, seq_lens)
+    token_buffers = jax.vmap(unpack_left_padded_seq)(
+        start_indices, 
+        seq_lens,
+        jnp.array(lens)
+    )
     
     all_input_ids = np.array([
         utils.pad_to_length(

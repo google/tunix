@@ -362,11 +362,23 @@ def apply_rope(
 
   fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
   timescale = max_wavelength**fraction
-
+  
+  """
   sinusoid_inp = (
       positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
   )
   sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
+  """
+
+  if positions.ndim == 1:                                                                                                          
+    sinusoid_inp = positions[:, None] / timescale[None, :]                                                                                                         
+    sinusoid_inp = sinusoid_inp[:, None, :]
+  else:
+    sinusoid_inp = (
+      positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
+    )
+    sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
+
   sin = jnp.sin(sinusoid_inp)
   cos = jnp.cos(sinusoid_inp)
 
@@ -508,8 +520,8 @@ class Attention(nnx.Module):
       num_seqs = jnp.array([cache.batch_size], dtype=jnp.int32)
       mesh = pxla.thread_resources.env.physical_mesh
 
-      data_axis = self.shd_config.act_btnh[0]  # 'fsdp'
-      tp_axis   = self.shd_config.act_btnh[2]  # 'tp'
+      dp = self.shd_config.act_btnh[0] 
+      tp_axis   = self.shd_config.act_btnh[2] 
       in_specs = (
           shd.PartitionSpec(None, tp_axis, None),       # q: (total_tokens, num_heads, head_dim)
           shd.PartitionSpec(None, tp_axis, None),       # k: (total_tokens, num_heads, head_dim)
