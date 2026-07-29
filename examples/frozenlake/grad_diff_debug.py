@@ -1,15 +1,21 @@
 # Compare v1 and v2 weight difference
+<<<<<<< HEAD
 from shutil import copy
+=======
+>>>>>>> ef1cdcbb (grads_diff)
 from typing import Any, List
 import numpy as np
 import jax
 import gc
+<<<<<<< HEAD
 import warnings
 
 # JAX reports failed buffer donation as "Some donated buffers were not usable",
 # once per location. Python dedupes repeated warnings by default, so a warning
 # raised during the first step would be invisible if you only skim later output.
 warnings.simplefilter("always")
+=======
+>>>>>>> ef1cdcbb (grads_diff)
 
 
 import os
@@ -22,10 +28,17 @@ from tunix.sft import peft_trainer
 from tunix.experimental.train import peft_trainer_v2
 from tunix.tests import test_common as tc
 
+<<<<<<< HEAD
 # # Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
 # os.environ['XLA_FLAGS'] = (
 #     os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
 # ).strip()
+=======
+# Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
+os.environ['XLA_FLAGS'] = (
+    os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
+).strip()
+>>>>>>> ef1cdcbb (grads_diff)
 
 import jax
 import jax.numpy as jnp
@@ -83,13 +96,21 @@ def _make_dataset(
 
 dataset = _make_dataset(
     peft_trainer.TrainingInput,
+<<<<<<< HEAD
     num_steps=10,
+=======
+    num_steps=8,
+>>>>>>> ef1cdcbb (grads_diff)
     batch_size=_BATCH_SIZE,
     seq_len=_SEQ_LEN,
     )
 
 if len(jax.devices()) == 8:
+<<<<<<< HEAD
   mesh = jax.make_mesh((1, 2), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:2])
+=======
+  mesh = jax.make_mesh((1, 1), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:1])
+>>>>>>> ef1cdcbb (grads_diff)
 else:
   mesh = jax.make_mesh((1,), ('fsdp',), axis_types=(jax.sharding.AxisType.Auto,))
 
@@ -112,6 +133,7 @@ def create_sharded_model(config, rngs, mesh):
 
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
+<<<<<<< HEAD
 config.num_layers = 12
 # CONCLUSION: v1 and v2 are numerically equivalent. The residual difference sits
 # at the floor of float32 reduction-order reproducibility and does not depend on
@@ -254,10 +276,14 @@ config.num_layers = 12
 #
 # config.param_dtype = jnp.bfloat16
 # config.dtype = jnp.bfloat16
+=======
+config.num_layers = 5
+>>>>>>> ef1cdcbb (grads_diff)
 
 rngs = nnx.Rngs(0)
 gemma = create_sharded_model(config, rngs, mesh)
 
+<<<<<<< HEAD
 # HBM hygiene: v2 must start from exactly the weights v1 started from, but a
 # second device-resident copy must NOT be alive while v1 is being profiled --
 # otherwise v1's peak carries a full parameter tree that has nothing to do with
@@ -814,6 +840,58 @@ with mesh:
   opt_state_v2 = nnx.state(trainer_v2.optimizer)
   # loss_v2 = trainer_v2.metrics_logger.get_metric("", "loss", "train")
   del gemma_v2, trainer_v2, optimizer_v2
+=======
+with mesh:
+  # v1
+  model_v1 = create_sharded_model(config, rngs, mesh) 
+  optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
+      learning_rate=optax.constant_schedule(_LEARNING_RATE)
+  )
+  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+  trainer_v1 = peft_trainer.PeftTrainer(model_v1, optimizer_v1, config_v1)
+  trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
+  trainer_v1.train(dataset, skip_jit=False)
+  jax.effects_barrier()
+
+  model_state_v1 = nnx.state(model_v1)
+  opt_state_v1 = nnx.state(trainer_v1.optimizer)
+  loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
+  del model_v1, optimizer_v1
+  gc.collect()
+
+with mesh:
+  # v2
+  model_v2 = create_sharded_model(config, rngs, mesh)
+  optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
+      learning_rate=optax.constant_schedule(_LEARNING_RATE)
+  )
+  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+  trainer_v2 = peft_trainer_v2.PeftTrainer(model_v2, optimizer_v2, config_v2)
+  trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
+  trainer_v2.fwd_bwd(dataset[0])
+  jax.effects_barrier()
+  print("compare grads between v1 and v2.fwd_bwd: ")
+  jax.tree.map_with_path(
+    lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
+    trainer_v1.grad_accumulator.grads,
+    trainer_v2.grad_accumulator.grads,
+  )
+  trainer_v2.update()
+  jax.effects_barrier()
+  print("compare grads between v1 and v2.update: ")
+  jax.tree.map_with_path(
+    lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
+    trainer_v1.grad_accumulator.grads,
+    trainer_v2.grad_accumulator.grads,
+  )
+  # trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
+  jax.effects_barrier()
+
+  model_state_v2 = nnx.state(model_v2)
+  opt_state_v2 = nnx.state(trainer_v2.optimizer)
+  loss_v2 = trainer_v2.metrics_logger.get_metric("", "loss", "train")
+  del model_v2, trainer_v2, optimizer_v2
+>>>>>>> ef1cdcbb (grads_diff)
   gc.collect()
 
 # # Tolerate typical bfloat16 XLA computation graph re-association on TPUs
@@ -824,6 +902,7 @@ with mesh:
 # jax.tree.map_with_path(assert_fn, model_state_v1, model_state_v2)
 # jax.tree.map_with_path(assert_fn, opt_state_v1, opt_state_v2)
 # np.testing.assert_allclose(loss_v1, loss_v2, rtol=1e-5, atol=1e-5)
+<<<<<<< HEAD
 # print(f"Loss: {loss_v1}, {loss_v2}")
 
 
@@ -1026,3 +1105,6 @@ compare grads between v1 and v2.update:
 
 
 
+=======
+# print(f"Loss: {loss_v1}, {loss_v2}")
+>>>>>>> ef1cdcbb (grads_diff)
