@@ -77,7 +77,12 @@ def make_optimizer(model, arm, k):
     tx = base  # no MultiSteps -> no accumulator (matches d1_default)
   else:
     accdt = jnp.bfloat16 if arm == "optax_d4_bf16_accum" else jnp.float32
-    tx = optax.MultiSteps(base, every_k_schedule=k, accumulator_dtype=accdt)
+    import inspect
+    sig = inspect.signature(optax.MultiSteps.__init__)
+    if "accumulator_dtype" in sig.parameters:
+      tx = optax.MultiSteps(base, every_k_schedule=k, accumulator_dtype=accdt)
+    else:
+      tx = optax.MultiSteps(base, every_k_schedule=k)
   opt = nnx.Optimizer(model, tx, wrt=nnx.Param)
   if arm == "optax_d4_fp32_moments":
     # optax's adamw can only set mu's dtype (nu is always param dtype), so cast
@@ -97,7 +102,7 @@ def main():
   opt = make_optimizer(m, args.arm_name, args.grad_accum_steps)
   accdt = "bfloat16" if args.arm_name == "optax_d4_bf16_accum" else "float32"
 
-  @nnx.jit
+  @nnx.jit(donate_argnums=(0, 1))
   def train_step(model, optimizer, inputs):
     def loss_fn(model):
       out = peft_trainer._default_loss_fn(model, **inputs)
@@ -119,14 +124,15 @@ def main():
       f"mesh={args.mesh_fsdp}x{args.mesh_tp} train_wall_s={wall:.1f}",
       flush=True,
   )
+  gib = float(2**30)
   for d in jax.local_devices():
     s = d.memory_stats() or {}
     print(
         f"[[MEM]] arm={args.arm_name} steps={args.grad_accum_steps} "
         f"dtype={accdt} device={d.id} "
-        f"peak_hbm_gb={s.get('peak_bytes_in_use', 0) / 1e9:.2f} "
-        f"current_hbm_gb={s.get('bytes_in_use', 0) / 1e9:.2f} "
-        f"limit_gb={s.get('bytes_limit', 0) / 1e9:.2f}",
+        f"peak_hbm_gb={s.get('peak_bytes_in_use', 0) / gib:.2f} "
+        f"current_hbm_gb={s.get('bytes_in_use', 0) / gib:.2f} "
+        f"limit_gb={s.get('bytes_limit', 0) / gib:.2f}",
         flush=True,
     )
 
