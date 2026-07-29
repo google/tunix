@@ -11,6 +11,7 @@ import enum
 from typing import Any, Final, Literal, get_args
 
 import pydantic
+from tunix.experimental.common import datatypes
 
 
 class Source(enum.StrEnum):
@@ -222,6 +223,10 @@ class Step(pydantic.BaseModel):
       default=None,
       description="Environment feedback resulting from the step's actions.",
   )
+  reward: float | None = pydantic.Field(
+      default=None,
+      description="Immediate environment reward signal for this step.",
+  )
   metrics: Metrics | None = pydantic.Field(
       default=None,
       description="LLM operational and confidence metrics for this step.",
@@ -266,6 +271,67 @@ class Step(pydantic.BaseModel):
         )
     return self
 
+  def to_datatypes_step(self) -> datatypes.Step:
+    """Converts this ATIF Step into a datatypes.Step DTO."""
+    kwargs: dict[str, Any] = {}
+    if self.reward is not None:
+      kwargs["reward"] = self.reward
+    if self.source == Source.AGENT:
+      return datatypes.Step(
+          thought=self.reasoning_content or "",
+          model_response=self.message,
+          **kwargs,
+      )
+    elif self.source == Source.USER:
+      dt_observation = self.message
+      if self.observation and self.observation.results:
+        dt_observation = self.observation.results[0].content or self.message
+      return datatypes.Step(
+          observation=dt_observation,
+          **kwargs,
+      )
+    return datatypes.Step(
+        model_response=self.message,
+        **kwargs,
+    )
+
+  @classmethod
+  def from_datatypes_step(
+      cls, dt_step: datatypes.Step, start_step_id: int = 1
+  ) -> list[Step]:
+    """Constructs ATIF Step object(s) from a datatypes.Step DTO."""
+    steps: list[Step] = []
+    curr_step_id = start_step_id
+    dt_reward = dt_step.reward
+
+    if dt_step.model_response or dt_step.thought:
+      steps.append(
+          cls(
+              step_id=curr_step_id,
+              source=Source.AGENT,
+              message=dt_step.model_response or "",
+              reasoning_content=dt_step.thought or None,
+              reward=dt_reward,
+          )
+      )
+      curr_step_id += 1
+
+    if dt_step.observation is not None:
+      obs_obj = Observation(
+          results=[ObservationResult(content=str(dt_step.observation))]
+      )
+      steps.append(
+          cls(
+              step_id=curr_step_id,
+              source=Source.USER,
+              message=str(dt_step.observation),
+              observation=obs_obj,
+              reward=dt_reward if not steps else None,
+          )
+      )
+
+    return steps
+
 
 class Agent(pydantic.BaseModel):
   """Basic agent metadata."""
@@ -305,8 +371,17 @@ class Trajectory(pydantic.BaseModel):
       default=None,
       description="Canonical unique identifier for this trajectory document.",
   )
-  agent: Agent = pydantic.Field(
+  agent: Agent | None = pydantic.Field(
+      default=None,
       description="Metadata describing the execution agent.",
+  )
+  status: datatypes.TrajectoryStatus | None = pydantic.Field(
+      default=None,
+      description="Execution status.",
+  )
+  reward: float | None = pydantic.Field(
+      default=None,
+      description="Scalar environment reward.",
   )
   steps: list[Step] = pydantic.Field(
       default_factory=list,
@@ -373,6 +448,7 @@ class Trajectory(pydantic.BaseModel):
       reasoning_content: str | None = None,
       tool_calls: list[ToolCall] | None = None,
       observation: Observation | None = None,
+      reward: float | None = None,
       metrics: Metrics | None = None,
       model_name: str | None = None,
       reasoning_effort: str | float | None = None,
@@ -390,6 +466,7 @@ class Trajectory(pydantic.BaseModel):
         reasoning_content=reasoning_content,
         tool_calls=tool_calls,
         observation=observation,
+        reward=reward,
         metrics=metrics,
         model_name=model_name,
         reasoning_effort=reasoning_effort,
@@ -408,3 +485,34 @@ class Trajectory(pydantic.BaseModel):
   def from_json_dict(cls, data: dict[str, Any]) -> Trajectory:
     """Deserializes a dictionary into a Trajectory object."""
     return cls.model_validate(data)
+
+  def to_datatypes_trajectory(self) -> datatypes.Trajectory:
+    """Converts this ATIF storage Trajectory into a datatypes.Trajectory DTO."""
+    dt_steps = [step.to_datatypes_step() for step in self.steps]
+    kwargs: dict[str, Any] = {}
+    if self.reward is not None:
+      kwargs["reward"] = self.reward
+    if self.status is not None:
+      kwargs["status"] = self.status
+    return datatypes.Trajectory(steps=dt_steps, **kwargs)
+
+  @classmethod
+  def from_datatypes_trajectory(
+      cls,
+      dt_traj: datatypes.Trajectory,
+      trajectory_id: str | None = None,
+  ) -> Trajectory:
+    """Constructs an ATIF storage Trajectory from a datatypes.Trajectory DTO."""
+    traj = cls(
+        trajectory_id=trajectory_id,
+        status=dt_traj.status,
+        reward=dt_traj.reward,
+    )
+
+    for dt_step in dt_traj.steps:
+      new_steps = Step.from_datatypes_step(
+          dt_step, start_step_id=len(traj.steps) + 1
+      )
+      traj.steps.extend(new_steps)
+
+    return traj
