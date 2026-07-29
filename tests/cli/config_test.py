@@ -699,6 +699,52 @@ class ConfigTest(parameterized.TestCase):
     got = list(config._dict_to_cli_args(d))
     self.assertEqual(expected, got)
 
+  def test_obtain_training_config_dict_checkpointing(self):
+    hp = self.initialize_config([])
+
+    # Valid options
+    hp.config["training_config"] = {
+        "checkpointing_options": {
+            "save_interval_steps": 10,
+            "max_to_keep": 5,
+            "enable_async_checkpointing": True,
+            "timeout_secs": 60,
+        }
+    }
+    result = hp.obtain_training_config_dict("training_config")
+    self.assertIn("checkpointing_options", result)
+    opts = result["checkpointing_options"]
+    self.assertEqual(opts.enable_async_checkpointing, True)
+    self.assertEqual(opts.async_options.timeout_secs, 60)
+    self.assertIsNotNone(opts.save_decision_policy)
+    self.assertIsNotNone(opts.preservation_policy)
+
+  def test_obtain_training_config_dict_checkpointing_invalid_options(self):
+    hp = self.initialize_config([])
+    hp.config["training_config"] = {
+        "checkpointing_options": "not a dict"
+    }
+    with self.assertRaisesRegex(
+        ValueError, "Expected dictionary for checkpointing_options"
+    ):
+      hp.obtain_training_config_dict("training_config")
+
+    hp.config["training_config"] = {
+        "checkpointing_options": {
+            "invalid_key": 10,
+        }
+    }
+    with self.assertRaisesRegex(ValueError, "Invalid checkpointing options"):
+      hp.obtain_training_config_dict("training_config")
+
+    hp.config["training_config"] = {
+        "checkpointing_options": ["save_interval_steps"]
+    }
+    with self.assertRaisesRegex(
+        ValueError, "Expected dictionary for checkpointing_options"
+    ):
+      hp.obtain_training_config_dict("training_config")
+
 
 if __name__ == "__main__":
   if "HF_TOKEN" not in os.environ:
