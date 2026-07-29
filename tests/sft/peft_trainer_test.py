@@ -1300,7 +1300,11 @@ class GradientAccumulatorTest(parameterized.TestCase):
     model = nnx.Linear(
         in_features=4, out_features=2, rngs=rngs, param_dtype=dtype
     )
-    acc = peft_trainer.GradientAccumulator(model, nnx.Param)
+    # get() emits the configured accumulator dtype (here matched to the param
+    # dtype); the trainer casts back to the param dtype before the update.
+    acc = peft_trainer.GradientAccumulator(
+        model, nnx.Param, accumulator_dtype=dtype
+    )
 
     grads = jax.tree_util.tree_map(
         lambda v: type(v)(jnp.ones_like(v[...])),
@@ -1316,52 +1320,55 @@ class GradientAccumulatorTest(parameterized.TestCase):
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
-  def test_cond_apply_vs_skip_branches_have_matching_dtypes_in_bf16(self):
+  def test_cond_path_keeps_bf16_moments_after_update(self):
+    """A depth>1 adam step keeps moments bf16 through the fp32 accumulator.
+
+    The accumulator sums in float32, but `apply_updates` casts back to the param
+    dtype before `optimizer.update`; otherwise the bf16 moments would promote to
+    float32 and the two nnx.cond branches would mismatch (raising at trace time).
+    Runs the production `_train_step` for one skip + one update micro-step.
+    """
     rngs = nnx.Rngs(0)
-    model = nnx.Linear(
-        in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    bf16_state = jax.tree.map(
+        lambda x: x.astype(jnp.bfloat16)
+        if jnp.issubdtype(x.dtype, jnp.floating)
+        else x,
+        nnx.state(model, nnx.Param),
     )
-    optimizer = nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)
-    acc = peft_trainer.GradientAccumulator(model, nnx.Param)
-
-    x = jnp.ones((2, 4), dtype=jnp.bfloat16)
-    y = jnp.ones((2, 2), dtype=jnp.bfloat16)
-    _, grads = nnx.value_and_grad(lambda m, x, y: jnp.sum((m(x) - y) ** 2))(
-        model, x, y
+    nnx.update(model, bf16_state)
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=2, gradient_accumulation_steps=2
     )
-    acc.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.adamw(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+    # Accumulator grads live in float32 (default), but moments stay bf16.
+    acc_float_dtypes = {
+        str(x.dtype)
+        for x in jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
+        if hasattr(x, 'dtype') and jnp.issubdtype(x.dtype, jnp.floating)
+    }
+    self.assertEqual(acc_float_dtypes, {'float32'})
 
-    def apply_updates(model, optimizer, acc):
-      acc_grads = acc.get()
-      optimizer.update(model, acc_grads)
-      acc.reset()
-      return jnp.asarray(0.0, dtype=jnp.float32)
-
-    def skip_updates(model, optimizer, acc):
-      return jnp.asarray(0.0, dtype=jnp.float32)
-
-    @nnx.jit
-    def step(model, optimizer, acc, is_update_step):
-      return nnx.cond(
-          is_update_step, apply_updates, skip_updates, model, optimizer, acc
+    ds = dummy_datasets(batch_size=4)
+    for flag in (jnp.array(False), jnp.array(True)):  # accumulate, then apply
+      trainer._train_step(
+          trainer.model,
+          trainer.optimizer,
+          trainer.grad_accumulator,
+          ds[0],
+          flag,
       )
 
-    step(model, optimizer, acc, jnp.asarray(False))
-    step(model, optimizer, acc, jnp.asarray(True))
-
-    opt_state_dtypes = jax.tree_util.tree_leaves(
-        jax.tree_util.tree_map(
-            lambda v: v[...].dtype,
-            nnx.state(optimizer, nnx.optimizer.OptState),
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
+    moment_dtypes = {
+        str(x.dtype)
+        for x in jax.tree_util.tree_leaves(
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState)
         )
-    )
-    float_dtypes = [
-        d for d in opt_state_dtypes if jnp.issubdtype(d, jnp.floating)
-    ]
-    self.assertNotEmpty(float_dtypes)
-    for d in float_dtypes:
-      self.assertEqual(d, jnp.bfloat16)
+        if hasattr(x, 'dtype') and jnp.issubdtype(x.dtype, jnp.floating)
+    }
+    self.assertEqual(moment_dtypes, {'bfloat16'})
 
   def test_peft_trainer_keeps_bf16_moments_on_cond_path(self):
     """Default None keeps bf16 moments on the cond path, even with an fp32

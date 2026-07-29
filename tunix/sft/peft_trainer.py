@@ -94,6 +94,11 @@ class TrainingConfig:
   # moments as zeros_like(params)); set e.g. jnp.float32 to force fp32.
   optimizer_state_dtype: DTypeLike | None = None
 
+  # Gradient-accumulator dtype (separate from the Adam moments). None (default)
+  # uses float32 like optax MultiSteps; set jnp.bfloat16 to trade precision for
+  # HBM on the accumulation path.
+  gradient_accumulator_dtype: DTypeLike | None = None
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -200,10 +205,17 @@ class GradientAccumulator(nnx.Module):
       wrt: type[nnx.Variable],
       *,
       allocate_grads: bool = True,
+      accumulator_dtype: DTypeLike = jnp.float32,
   ):
     state = nnx.state(model, wrt)
     if allocate_grads:
-      self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+      # Accumulate in float32 by default (like optax MultiSteps): summing bf16
+      # grads over microbatches loses small contributions (swamping).
+      self.grads = nnx.data(
+          jax.tree_util.tree_map(
+              lambda x: jnp.zeros_like(x, dtype=accumulator_dtype), state
+          )
+      )
     else:
       # Fast path never reads the accumulator: skip the model-sized grad-tree
       # allocation. Empty grads keep it a valid tiny jit arg (signature and
@@ -335,8 +347,14 @@ class PeftTrainer:
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
         and self.config.max_seq_token_per_tpu is None
     )
+    accumulator_dtype = self.config.gradient_accumulator_dtype
+    if accumulator_dtype is None:
+      accumulator_dtype = jnp.float32
     self.grad_accumulator = GradientAccumulator(
-        self.model, wrt_target, allocate_grads=_uses_cond_path
+        self.model,
+        wrt_target,
+        allocate_grads=_uses_cond_path,
+        accumulator_dtype=accumulator_dtype,
     )
 
     self.loss_fn = _default_loss_fn
@@ -506,6 +524,17 @@ class PeftTrainer:
       # quickly exhausts bf16 and float32 is needed for numerical stability.
       norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
+      )
+      # The accumulator sums in float32; cast each leaf back to the current
+      # grad's dtype (the param dtype) before the update so the (param-dtype)
+      # moments aren't promoted, which would break the nnx.cond dtype match.
+      # Mirrors optax MultiSteps' cast_like. Flatten to raw arrays so we don't
+      # zip the two Variable trees (their sharding metadata differs).
+      acc_leaves, acc_treedef = jax.tree_util.tree_flatten(acc_grads)
+      grad_dtypes = [g.dtype for g in jax.tree_util.tree_leaves(grads)]
+      acc_grads = jax.tree_util.tree_unflatten(
+          acc_treedef,
+          [a.astype(d) for a, d in zip(acc_leaves, grad_dtypes)],
       )
       optimizer.update(model, acc_grads)
       grad_accumulator.reset()
