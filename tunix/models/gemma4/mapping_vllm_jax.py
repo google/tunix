@@ -17,8 +17,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple
-
 from flax import nnx
+import jax
 import jax.numpy as jnp
 
 Sharding = Tuple[str | None, ...]
@@ -26,114 +26,123 @@ MappingEntry = Tuple[str, Sharding]
 
 
 TO_HF_MAPPINGS = {
-    'embedder.input_embedding': ('language_model.embed_tokens.weight', ('model', None)),
+    'embedder.input_embedding': ('model.embed_tokens.weight', ('model', None)),
     'layers.*.pre_attention_norm.scale': (
-        'language_model.layers.*.input_layernorm.weight',
+        'model.layers.*.input_layernorm.weight',
         (None,),
     ),
+    # GLOBAL layers with `attention_k_eq_v` keep separate (unfused) Q/K
+    # kernels (no V; V==K); `preprocess_src_state` leaves those layers'
+    # q_einsum/k_einsum untouched, so these two entries only ever match them.
     'layers.*.attn.q_einsum.w': (
-        'language_model.layers.*.self_attn.q_proj.weight',
+        'model.layers.*.self_attn.q_proj.weight',
         (None, 'model', None),
     ),
     'layers.*.attn.k_einsum.w': (
-        'language_model.layers.*.self_attn.k_proj.weight',
+        'model.layers.*.self_attn.k_proj.weight',
         (None, 'model', None),
     ),
-    'layers.*.attn.qkv_einsum.w': (
-        'language_model.layers.*.self_attn.qkv_proj.weight',
+    # Every other layer fuses Q, K, V into a single qkv_proj kernel.
+    # `preprocess_src_state` combines that layer's q_einsum + kv_einsum into
+    # this synthetic, already TP-interleaved `qkv_fused` entry.
+    'layers.*.attn.qkv_fused.w': (
+        'model.layers.*.self_attn.qkv_proj.weight',
         (None, 'model'),
     ),
     'layers.*.attn._query_norm.scale': (
-        'language_model.layers.*.self_attn.q_norm.weight',
+        'model.layers.*.self_attn.q_norm.weight',
         (None,),
     ),
     'layers.*.attn._key_norm.scale': (
-        'language_model.layers.*.self_attn.k_norm.weight',
+        'model.layers.*.self_attn.k_norm.weight',
         (None,),
     ),
     'layers.*.attn.attn_vec_einsum.w': (
-        'language_model.layers.*.self_attn.o_proj.weight',
+        'model.layers.*.self_attn.o_proj.weight',
         ('model', None, None),
     ),
     'layers.*.post_attention_norm.scale': (
-        'language_model.layers.*.post_attention_layernorm.weight',
+        'model.layers.*.post_attention_layernorm.weight',
         (None,),
     ),
     'layers.*.pre_ffw_norm.scale': (
-        'language_model.layers.*.pre_feedforward_layernorm.weight',
+        'model.layers.*.pre_feedforward_layernorm.weight',
         (None,),
     ),
-    'layers.*.mlp.gate_up_proj.kernel': (
-        'language_model.layers.*.mlp.gate_up_proj.weight',
+    # Gemma4MLP always fuses gate_proj/up_proj into one gate_up_proj kernel;
+    # `preprocess_src_state` combines them into this synthetic,
+    # TP-interleaved `gate_up_fused` entry.
+    'layers.*.mlp.gate_up_fused.kernel': (
+        'model.layers.*.mlp.gate_up_proj.weight',
         (None, 'model'),
     ),
     'layers.*.mlp.down_proj.kernel': (
-        'language_model.layers.*.mlp.down_proj.weight',
+        'model.layers.*.mlp.down_proj.weight',
         ('model', None),
     ),
     'layers.*.post_ffw_norm.scale': (
-        'language_model.layers.*.post_feedforward_layernorm.weight',
+        'model.layers.*.post_feedforward_layernorm.weight',
         (None,),
     ),
     'layers.*.skip_scale': (
-        'language_model.layers.*.layer_scalar',
+        'model.layers.*.layer_scalar',
         (None,),
     ),
-    'final_norm.scale': ('language_model.norm.weight', (None,)),
+    'final_norm.scale': ('model.norm.weight', (None,)),
     'layers.*.moe_pre_ffw_norm.scale': (
-        'language_model.layers.*.pre_feedforward_layernorm_2.weight',
+        'model.layers.*.pre_feedforward_layernorm_2.weight',
         (None,),
     ),
     'layers.*.moe.router_logits': (
-        'language_model.layers.*.router.proj.weight',
+        'model.layers.*.router.proj.weight',
         (None, 'model'),
     ),
     'layers.*.moe.router_scale': (
-        'language_model.layers.*.router.scale',
+        'model.layers.*.router.scale',
         (None,),
     ),
     'layers.*.moe.per_expert_scale': (
-        'language_model.layers.*.router.per_expert_scale',
+        'model.layers.*.router.per_expert_scale',
         (None,),
     ),
     'layers.*.moe.gating_einsum': (
-        'language_model.layers.*.experts.kernel_gating_upproj_EDF',
+        'model.layers.*.experts.kernel_gating_upproj_EDF',
         (None, None, 'model'),
     ),
     'layers.*.moe.linear': (
-        'language_model.layers.*.experts.kernel_down_proj_EFD',
+        'model.layers.*.experts.kernel_down_proj_EFD',
         ('model', None, None),
     ),
     'layers.*.dense_post_ffw_norm.scale': (
-        'language_model.layers.*.post_feedforward_layernorm_1.weight',
+        'model.layers.*.post_feedforward_layernorm_1.weight',
         (None,),
     ),
     'layers.*.moe_post_ffw_norm.scale': (
-        'language_model.layers.*.post_feedforward_layernorm_2.weight',
+        'model.layers.*.post_feedforward_layernorm_2.weight',
         (None,),
     ),
     'embedder.per_layer_input_embedding': (
-        'language_model.embed_tokens_per_layer.weight',
+        'model.embed_tokens_per_layer.weight',
         ('model', None),
     ),
     'embedder.per_layer_model_projection.w': (
-        'language_model.per_layer_model_projection.weight',
+        'model.per_layer_model_projection.weight',
         (None, 'model'),
     ),
     'embedder.per_layer_projection_norm.scale': (
-        'language_model.per_layer_projection_norm.weight',
+        'model.per_layer_projection_norm.weight',
         (None,),
     ),
     'layers.*.per_layer_input_gate.w': (
-        'language_model.layers.*.per_layer_input_gate.weight',
+        'model.layers.*.per_layer_input_gate.weight',
         (None, 'model'),
     ),
     'layers.*.per_layer_projection.w': (
-        'language_model.layers.*.per_layer_projection.weight',
+        'model.layers.*.per_layer_projection.weight',
         ('model', None),
     ),
     'layers.*.post_per_layer_input_norm.scale': (
-        'language_model.layers.*.post_per_layer_input_norm.weight',
+        'model.layers.*.post_per_layer_input_norm.weight',
         (None,),
     ),
 }
@@ -146,109 +155,103 @@ TO_HF_TRANSPOSE_KEYS = {
 }
 
 
-def preprocess_src_state(src_state: Any) -> Any:
-  """Fuses Q/K/V and MLP gate/up projections in the source state."""
-  if hasattr(src_state, 'flat_state'):
-    flat_state = list(src_state.flat_state())
-    new_flat_state = []
+def _reorder_for_tp_sharding(concatenated, split_sizes, tp_size):
+  """Reorders parts concatenated on the last axis into a per-shard layout.
 
-    layers_q = {}
-    layers_k = {}
-    layers_kv = {}
-    layers_gate = {}
-    layers_up = {}
+  `concatenated` holds `split_sizes` parts back to back on its last axis
+  (`[part0, part1, ...]`). This reorders it so each of the `tp_size` equal
+  contiguous chunks of the last axis holds a slice of every part
+  (`[part0_shard_i, part1_shard_i, ...]`), which is the on-device layout
+  tpu_inference's fused linear layers (`JaxQKVParallelLinear`,
+  `JaxMergedColumnParallelLinear`) expect from their kernel. Mirrors
+  `tpu_inference.layers.common.utils.reorder_concatenated_tensor_for_sharding`.
+  """
+  if tp_size <= 1:
+    return concatenated
+  lead_shape = concatenated.shape[:-1]
+  parts = []
+  offset = 0
+  for size in split_sizes:
+    if size % tp_size != 0:
+      raise ValueError(f'Part size {size} is not divisible by tp_size {tp_size}.')
+    part = jax.lax.slice_in_dim(concatenated, offset, offset + size, axis=-1)
+    parts.append(part.reshape(lead_shape + (tp_size, size // tp_size)))
+    offset += size
+  reordered = jnp.concatenate(parts, axis=-1)
+  return reordered.reshape(lead_shape + (sum(split_sizes),))
 
-    for keys, param in flat_state:
-      src_key = '.'.join(str(k) for k in keys)
-      if 'attn.q_einsum.w' in src_key:
-        layer_idx = keys[1]
-        layers_q[layer_idx] = (keys, param)
-      elif 'attn.k_einsum.w' in src_key:
-        layer_idx = keys[1]
-        layers_k[layer_idx] = (keys, param)
-      elif 'attn.kv_einsum.w' in src_key:
-        layer_idx = keys[1]
-        layers_kv[layer_idx] = (keys, param)
-      elif 'mlp.gate_proj.kernel' in src_key:
-        layer_idx = keys[1]
-        layers_gate[layer_idx] = (keys, param)
-      elif 'mlp.up_proj.kernel' in src_key:
-        layer_idx = keys[1]
-        layers_up[layer_idx] = (keys, param)
-      else:
-        new_flat_state.append((keys, param))
 
-    sample_kv_val = None
-    if layers_kv:
-      sample_kv_val = next(iter(layers_kv.values()))[1]
-      if hasattr(sample_kv_val, 'value'):
-        sample_kv_val = sample_kv_val.value
+def preprocess_src_state(src_state: Any, tp_size: int = 1) -> Any:
+  """Fuses Q/K/V and gate/up projections to match tpu_inference's kernels.
 
-    for layer_idx in layers_q:
-      q_keys, q_param = layers_q[layer_idx]
-      q_val = q_param.value if hasattr(q_param, 'value') else q_param
-      hidden_size = q_val.shape[1]
-      q_val_t = jnp.reshape(jnp.transpose(q_val, (1, 0, 2)), (hidden_size, -1))
+  tpu_inference's Gemma4Attention fuses Q, K, V into a single `qkv_proj`
+  kernel on every layer except GLOBAL layers with `attention_k_eq_v` (which
+  keep separate `q_proj`/`k_proj`; V is not materialized, V==K).
+  Gemma4MLP always fuses `gate_proj`/`up_proj` into a single `gate_up_proj`
+  kernel. This combines the corresponding tunix-native params
+  (`q_einsum`+`kv_einsum`, `gate_proj`+`up_proj`) into synthetic
+  `qkv_fused`/`gate_up_fused` entries that TO_HF_MAPPINGS targets 1:1, and
+  TP-interleaves them into the layout the fused kernel expects on-device.
+  """
+  if not hasattr(src_state, 'flat_state'):
+    return src_state
 
-      if layer_idx in layers_kv:
-        _, kv_param = layers_kv[layer_idx]
-        kv_val = kv_param.value if hasattr(kv_param, 'value') else kv_param
-        k_val = kv_val[0]
-        v_val = kv_val[1]
+  by_key = {
+      '.'.join(str(k) for k in keys): (keys, param)
+      for keys, param in src_state.flat_state()
+  }
 
-        k_val_t = jnp.reshape(
-            jnp.transpose(k_val, (1, 0, 2)), (hidden_size, -1)
-        )
-        v_val_t = jnp.reshape(
-            jnp.transpose(v_val, (1, 0, 2)), (hidden_size, -1)
-        )
+  def value_of(param):
+    return param.value if hasattr(param, 'value') else param
 
-        qkv_val = jnp.concatenate([q_val_t, k_val_t, v_val_t], axis=-1)
-        qkv_keys = q_keys[:-2] + ('qkv_einsum', 'w')
-        if hasattr(q_param, 'value'):
-          new_flat_state.append((qkv_keys, nnx.Param(qkv_val)))
-        else:
-          new_flat_state.append((qkv_keys, qkv_val))
-      elif layer_idx in layers_k:
-        k_keys, k_param = layers_k[layer_idx]
-        new_flat_state.append((q_keys, q_param))
-        new_flat_state.append((k_keys, k_param))
-      else:
-        # KV-shared layer
-        k_val = jnp.zeros_like(sample_kv_val[0])
-        v_val = jnp.zeros_like(sample_kv_val[1])
-        k_val_t = jnp.reshape(
-            jnp.transpose(k_val, (1, 0, 2)), (hidden_size, -1)
-        )
-        v_val_t = jnp.reshape(
-            jnp.transpose(v_val, (1, 0, 2)), (hidden_size, -1)
-        )
+  def wrap_like(param, val):
+    return nnx.Param(val) if hasattr(param, 'value') else val
 
-        qkv_val = jnp.concatenate([q_val_t, k_val_t, v_val_t], axis=-1)
-        qkv_keys = q_keys[:-2] + ('qkv_einsum', 'w')
-        if hasattr(q_param, 'value'):
-          new_flat_state.append((qkv_keys, nnx.Param(qkv_val)))
-        else:
-          new_flat_state.append((qkv_keys, qkv_val))
+  consumed = set()
+  fused_entries = []
 
-    for layer_idx in layers_gate:
-      gate_keys, gate_param = layers_gate[layer_idx]
-      _, up_param = layers_up[layer_idx]
-
-      gate_val = (
-          gate_param.value if hasattr(gate_param, 'value') else gate_param
+  for src_key, (keys, param) in by_key.items():
+    if src_key.endswith('attn.kv_einsum.w'):
+      q_key = src_key[: -len('kv_einsum.w')] + 'q_einsum.w'
+      if q_key not in by_key:
+        raise ValueError(f'Missing {q_key} to fuse with {src_key}.')
+      q_val = value_of(by_key[q_key][1])
+      kv_val = value_of(param)
+      k_val, v_val = kv_val[0], kv_val[1]
+      # (N,D,H) -> (D,N,H) -> (D,N*H); same for K/V with num_kv_heads.
+      q_t = jnp.transpose(q_val, (1, 0, 2)).reshape(q_val.shape[1], -1)
+      k_t = jnp.transpose(k_val, (1, 0, 2)).reshape(k_val.shape[1], -1)
+      v_t = jnp.transpose(v_val, (1, 0, 2)).reshape(v_val.shape[1], -1)
+      concatenated = jnp.concatenate([q_t, k_t, v_t], axis=-1)
+      fused_val = _reorder_for_tp_sharding(
+          concatenated, [q_t.shape[-1], k_t.shape[-1], v_t.shape[-1]], tp_size
       )
-      up_val = up_param.value if hasattr(up_param, 'value') else up_param
+      fused_keys = keys[:-2] + ('qkv_fused', 'w')
+      fused_entries.append((fused_keys, wrap_like(param, fused_val)))
+      consumed.add(src_key)
+      consumed.add(q_key)
+    elif src_key.endswith('mlp.gate_proj.kernel'):
+      up_key = src_key[: -len('gate_proj.kernel')] + 'up_proj.kernel'
+      if up_key not in by_key:
+        raise ValueError(f'Missing {up_key} to fuse with {src_key}.')
+      gate_val = value_of(param)
+      up_val = value_of(by_key[up_key][1])
+      concatenated = jnp.concatenate([gate_val, up_val], axis=-1)
+      fused_val = _reorder_for_tp_sharding(
+          concatenated, [gate_val.shape[-1], up_val.shape[-1]], tp_size
+      )
+      fused_keys = keys[:-2] + ('gate_up_fused', 'kernel')
+      fused_entries.append((fused_keys, wrap_like(param, fused_val)))
+      consumed.add(src_key)
+      consumed.add(up_key)
 
-      gate_up_val = jnp.concatenate([gate_val, up_val], axis=-1)
+  new_flat_state = [
+      (keys, param)
+      for src_key, (keys, param) in by_key.items()
+      if src_key not in consumed
+  ] + fused_entries
 
-      gate_up_keys = gate_keys[:-2] + ('gate_up_proj', 'kernel')
-      if hasattr(gate_param, 'value'):
-        new_flat_state.append((gate_up_keys, nnx.Param(gate_up_val)))
-      else:
-        new_flat_state.append((gate_up_keys, gate_up_val))
-    src_state = src_state.from_flat_path(new_flat_state)
-  return src_state
+  return src_state.from_flat_path(new_flat_state)
 
 
 VLLM_JAX_MAPPING: Dict[str, Any] = {
