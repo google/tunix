@@ -104,6 +104,26 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     self._training_config = self.rl_cluster.cluster_config.training_config
 
+    if self._training_config.max_seq_token_per_tpu is not None:
+      # Fail now rather than mid-run: a maximal sequence must fit one packed
+      # row. `max_response_length` lives on the algo config for agentic
+      # learners and on the rollout config elsewhere.
+      rollout_config = self.rl_cluster.cluster_config.rollout_config
+
+      if isinstance(rollout_config, dict):
+        r_config = rollout_config.get(rl_cluster_lib.Mode.TRAIN) or next(
+            iter(rollout_config.values())
+        )
+      else:
+        r_config = rollout_config
+
+      rl_utils.validate_packing_budget(
+          self._training_config.max_seq_token_per_tpu,
+          getattr(r_config, "max_prompt_length", 1000000),
+          getattr(algo_config, "max_response_length", None)
+          or r_config.max_tokens_to_generate,
+      )
+
     self.rl_cluster.global_steps = (
         self.rl_cluster.actor_trainer.restored_global_step()
     )
@@ -647,6 +667,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       with self.rl_cluster.perf.span_group("mini_batch_step"):
         self._run_mini_batch_step(
             initial_steps,
+            mini_batch_size,
             service_target_batch_size,
             grad_acc_steps,
             train_iterator,
@@ -662,6 +683,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
   def _run_mini_batch_step(
       self,
       initial_steps: int,
+      mini_batch_size: int,
       service_target_batch_size: int,
       grad_acc_steps: int,
       train_iterator: Iterator[TrainingInputT],
@@ -672,6 +694,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     with self.rl_cluster.perf.span_group("micro_batch_steps"):
       self._run_all_micro_batch_steps(
           initial_steps,
+          mini_batch_size,
           service_target_batch_size,
           grad_acc_steps,
           train_iterator,
@@ -682,6 +705,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
   def _run_all_micro_batch_steps(
       self,
       initial_steps: int,
+      mini_batch_size: int,
       service_target_batch_size: int,
       grad_acc_steps: int,
       train_iterator: Iterator[TrainingInputT],
@@ -719,14 +743,29 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_gen = queue_iterator()
     if self._training_config.max_seq_token_per_tpu is not None:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh[
+          rl_cluster_lib.Role.ACTOR
+      ]
+      # The packed batch size must be a multiple of the FSDP and DP mesh axis
+      # sizes.
+      pack_size = rl_utils.compute_pack_size(mesh)
+
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d",
+          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          " pack_size: %d",
           self._training_config.max_seq_token_per_tpu,
+          pack_size,
       )
+      # Update boundary in sequences (mini-batch semantics): packing is
+      # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
           self._training_config.max_seq_token_per_tpu,
-          target_items_per_update=grad_acc_steps,
+          sequences_per_update=mini_batch_size * self._num_generations(),
+          pack_size=pack_size,
+          max_segments_per_packed_row=getattr(
+              self._training_config, "max_segments_per_packed_row", None
+          ),
       )
 
     curr_eval_ds = None
