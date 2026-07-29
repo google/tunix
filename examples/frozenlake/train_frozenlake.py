@@ -141,7 +141,7 @@ arg_parser.add_argument("--max_response_length", type=int, default=2048)
 # as a module global before generating, and the map is re-drawn until the goal
 # is reachable within it (env.py:33,174-175), so every map is solvable in about
 # this many moves.
-arg_parser.add_argument("--env_max_steps", type=int, default=8)
+arg_parser.add_argument("--env_max_steps", type=int, default=5)
 # Which model to train. Gemma4-E2B stays the default and its path is unchanged.
 # Qwen3-8B is here because it is the only model this recipe has been observed to
 # converge on, while Gemma4-E2B produced solve_ratio 0 at every episode budget
