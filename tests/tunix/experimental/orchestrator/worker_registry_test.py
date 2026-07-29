@@ -15,7 +15,7 @@
 """Tests for the WorkerRegistry and WorkerGroup."""
 
 from absl.testing import absltest
-from tunix.tunix.experimental.orchestrator import fake_worker
+from tunix.experimental.worker import mock_worker
 from tunix.tunix.experimental.orchestrator import worker_registry
 
 
@@ -23,9 +23,9 @@ class WorkerRegistryTest(absltest.TestCase):
 
   def test_register_and_group_by_role(self):
     registry = worker_registry.WorkerRegistry()
-    rollout = fake_worker.FakeWorker(worker_id="r0", roles={"rollout"})
-    trainer0 = fake_worker.FakeWorker(worker_id="t0", roles={"trainer"})
-    trainer1 = fake_worker.FakeWorker(worker_id="t1", roles={"trainer"})
+    rollout = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    trainer0 = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
+    trainer1 = mock_worker.MockWorker(worker_id="t1", roles={"trainer"})
     registry.register(rollout)
     registry.register(trainer0)
     registry.register(trainer1)
@@ -48,9 +48,9 @@ class WorkerRegistryTest(absltest.TestCase):
 
   def test_worker_group_properties(self):
     registry = worker_registry.WorkerRegistry()
-    registry.register(fake_worker.FakeWorker("r0", {"rollout"}))
-    registry.register(fake_worker.FakeWorker("t0", {"trainer"}))
-    registry.register(fake_worker.FakeWorker("t1", {"trainer"}))
+    registry.register(mock_worker.MockWorker("r0", {"rollout"}))
+    registry.register(mock_worker.MockWorker("t0", {"trainer"}))
+    registry.register(mock_worker.MockWorker("t1", {"trainer"}))
 
     rollout_group = registry.group("rollout")
     trainer_group = registry.group("trainer")
@@ -73,7 +73,7 @@ class WorkerRegistryTest(absltest.TestCase):
 
   def test_fused_worker_joins_every_role(self):
     registry = worker_registry.WorkerRegistry()
-    fused = fake_worker.FakeWorker("f0", {"trainer", "inference"})
+    fused = mock_worker.MockWorker("f0", {"trainer", "inference"})
     registry.register(fused)
 
     self.assertEqual(registry.group("trainer").members(), [fused])
@@ -82,28 +82,28 @@ class WorkerRegistryTest(absltest.TestCase):
   def test_duplicate_worker_id_raises(self):
     registry = worker_registry.WorkerRegistry()
     registry.register(
-        fake_worker.FakeWorker(worker_id="dup", roles={"trainer"})
+        mock_worker.MockWorker(worker_id="dup", roles={"trainer"})
     )
     with self.assertRaises(ValueError):
       registry.register(
-          fake_worker.FakeWorker(worker_id="dup", roles={"rollout"})
+          mock_worker.MockWorker(worker_id="dup", roles={"rollout"})
       )
 
   def test_worker_without_roles_raises(self):
     registry = worker_registry.WorkerRegistry()
     with self.assertRaises(ValueError):
-      registry.register(fake_worker.FakeWorker("no-roles", set()))
+      registry.register(mock_worker.MockWorker("no-roles", set()))
 
   def test_unknown_role_returns_empty_group(self):
     registry = worker_registry.WorkerRegistry()
-    registry.register(fake_worker.FakeWorker(worker_id="t0", roles={"trainer"}))
+    registry.register(mock_worker.MockWorker(worker_id="t0", roles={"trainer"}))
     group = registry.group("inference")
     self.assertTrue(group.is_empty())
     self.assertEmpty(group.members())
 
   def test_unregister_removes_from_registry_and_groups(self):
     registry = worker_registry.WorkerRegistry()
-    registry.register(fake_worker.FakeWorker(worker_id="t0", roles={"trainer"}))
+    registry.register(mock_worker.MockWorker(worker_id="t0", roles={"trainer"}))
     registry.unregister("t0")
     self.assertNotIn("t0", registry)
     self.assertTrue(registry.group("trainer").is_empty())
@@ -113,8 +113,8 @@ class WorkerRegistryTest(absltest.TestCase):
 
   def test_unregister_retains_role_if_members_remain(self):
     registry = worker_registry.WorkerRegistry()
-    registry.register(fake_worker.FakeWorker(worker_id="t0", roles={"trainer"}))
-    t1 = fake_worker.FakeWorker(worker_id="t1", roles={"trainer"})
+    registry.register(mock_worker.MockWorker(worker_id="t0", roles={"trainer"}))
+    t1 = mock_worker.MockWorker(worker_id="t1", roles={"trainer"})
     registry.register(t1)
     registry.unregister("t0")
     self.assertIn("trainer", registry.roles())
@@ -122,8 +122,8 @@ class WorkerRegistryTest(absltest.TestCase):
 
   def test_registry_retrieval_methods(self):
     registry = worker_registry.WorkerRegistry()
-    r0 = fake_worker.FakeWorker(worker_id="r0", roles={"rollout"})
-    t0 = fake_worker.FakeWorker(worker_id="t0", roles={"trainer"})
+    r0 = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    t0 = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
     registry.register(t0)
     registry.register(r0)
 
