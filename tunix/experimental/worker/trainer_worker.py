@@ -80,6 +80,9 @@ class TrainerWorker(abstract_worker.Worker):
         worker_id=self._worker_id, roles=frozenset({"trainer"})
     )
 
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=self._state)
+
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> "TrainerWorker":

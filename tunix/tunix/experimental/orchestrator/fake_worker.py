@@ -63,6 +63,9 @@ class FakeWorker(abstract_worker.Worker):
   def info(self) -> datatypes.WorkerInfo:
     return self._info
 
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=self.state)
+
   def initialize(self) -> datatypes.Response:
     self.call_counts["initialize"] += 1
     self.state = "INITIALIZED"

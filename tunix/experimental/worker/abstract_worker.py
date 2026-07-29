@@ -56,3 +56,8 @@ class Worker(abc.ABC):
   def info(self) -> datatypes.WorkerInfo:
     """Returns the worker's identification and roles."""
     pass
+
+  @abc.abstractmethod
+  def heartbeat(self) -> datatypes.HealthReport:
+    """Returns the current health status of the worker."""
+    pass
