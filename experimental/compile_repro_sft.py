@@ -47,10 +47,9 @@ def parse_args():
       "--mesh_tp", type=int, default=int(os.environ.get("MESH_TP", "2"))
   )
   p.add_argument(
-      "--grad_accum",
-      choices=["optax", "stream"],
-      default=os.environ.get("GRAD_ACCUM", "stream"),
-      help="TrainingConfig.grad_accum: the only knob that differs per variant.",
+      "--arm_name",
+      default=os.environ.get("ARM_NAME", "stream_d1"),
+      help="Arm identifier for logging.",
   )
   p.add_argument(
       "--grad_accum_steps",
@@ -70,6 +69,12 @@ def parse_args():
       choices=["float32", "bfloat16"],
       default=os.environ.get("GRAD_ACCUM_DTYPE", "float32"),
       help="TrainingConfig.gradient_accumulator_dtype",
+  )
+  p.add_argument(
+      "--optimizer_state_dtype",
+      choices=["float32", "bfloat16", "none"],
+      default=os.environ.get("OPT_STATE_DTYPE", "none"),
+      help="TrainingConfig.optimizer_state_dtype",
   )
   p.add_argument(
       "--max_steps", type=int, default=int(os.environ.get("MAX_STEPS", "3"))
@@ -125,12 +130,18 @@ def main():
       if args.gradient_accumulator_dtype == "float32"
       else jnp.bfloat16
   )
+  opt_dtype = None
+  if args.optimizer_state_dtype == "float32":
+    opt_dtype = jnp.float32
+  elif args.optimizer_state_dtype == "bfloat16":
+    opt_dtype = jnp.bfloat16
+
   training_config = peft_trainer.TrainingConfig(
       eval_every_n_steps=10,
       max_steps=args.max_steps,
-      grad_accum=args.grad_accum,
       gradient_accumulation_steps=args.grad_accum_steps,
       gradient_accumulator_dtype=accum_dtype,
+      optimizer_state_dtype=opt_dtype,
   )
   trainer = peft_trainer.PeftTrainer(
       m, optax.adamw(1e-5), training_config
@@ -164,7 +175,7 @@ def main():
     with mesh:
       trainer.train(ds, None)
   print(
-      f"[[COMPILE_REPRO]] grad_accum={args.grad_accum} "
+      f"[[COMPILE_REPRO]] arm={args.arm_name} "
       f"mesh={args.mesh_fsdp}x{args.mesh_tp} "
       f"train_wall_s={time.perf_counter() - t0:.1f}",
       flush=True,
@@ -178,7 +189,7 @@ def main():
     try:
       s = d.memory_stats()
       print(
-          f"[[MEM]] grad_accum={args.grad_accum} "
+          f"[[MEM]] arm={args.arm_name} "
           f"steps={args.grad_accum_steps} dtype={args.gradient_accumulator_dtype} "
           f"device={d.id} "
           f"peak_hbm_gb={s.get('peak_bytes_in_use', 0) / gib:.2f} "
