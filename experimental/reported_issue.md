@@ -899,3 +899,41 @@ To quantitatively verify the new **`yuxzhang/fix_accum_fp32`** branch (which acc
 
 All xprof traces have been uploaded to `gs://yuxzhang-tunix-models/issue21_repro_xprof/fix_accum_fp32/` (`d1_default`, `d4_fp32_accum`, `d4_bf16_accum`, `d4_fp32_moments`). Raw logs are preserved at `experimental/tracing_logs/fix_accum_fp32_hbm.log`.
 
+---
+
+### ACTION REQUEST: optax.MultiSteps native-accumulation parity (completes the fix_accum_fp32 verification)
+
+The 4-Arm run above is entirely OUR custom `GradientAccumulator`. We aligned optax's **design** (fp32 accumulator + cast-back to the param dtype before the update; verified from optax source `optax/transforms/_accumulation.py:268/327/367`) and **numerics** (a CPU golden test compares our fp32 sum vs an fp32 Welford running-mean = optax's own algorithm — both ~1e-7 relative error vs bf16 ~1e-2). What is NOT yet measured is **HBM/speed parity against optax's own `optax.MultiSteps`**. This run closes that gap.
+
+**4 optax arms** (mirror the custom-accumulator arms), via a new bench that bypasses PeftTrainer and drives `nnx.Optimizer(model, optax.MultiSteps(...))` directly:
+
+| optax arm | construction | mirrors (custom, measured) |
+|---|---|---|
+| `optax_d1` | `optax.adamw` (no MultiSteps → no accumulator) | d1_default (11.72) |
+| `optax_d4_fp32_accum` | `MultiSteps(adamw, 4, accumulator_dtype=float32)` | d4_fp32_accum (15.46) |
+| `optax_d4_bf16_accum` | `MultiSteps(adamw, 4, accumulator_dtype=bfloat16)` | d4_bf16_accum (13.27) |
+| `optax_d4_fp32_moments` | `MultiSteps(..., accumulator_dtype=float32)` + moments cast fp32 | d4_fp32_moments (19.81) |
+
+**Command:**
+```bash
+MODEL_PATH=/mnt/workspace/tianshu/models/Gemma4-E2B-it \
+  bash experimental/mem_repro_optax_4arm.sh
+```
+
+**Already CPU-validated (agent):** `nnx.Optimizer + optax.MultiSteps` works — variable-cadence emit is correct (params update only every k steps) and the 4 arms give the expected opt-state dtypes (fp32_accum = fp32 accumulator + bf16 moments; fp32_moments = all fp32, confirming `_cast_opt_state_floats` reaches MultiSteps' inner moments). The bench runs end-to-end in `--model toy` mode; py_compile / bash -n pass.
+
+**Gate (fill in after the TPU run):**
+1. `optax_d4_fp32_accum` peak ≈ custom `d4_fp32_accum` (15.46 GB) → our custom accumulator is HBM-equivalent to optax's native accumulation. A mismatch means hidden overhead (cond structure / cast-back temporaries / extra buffers).
+2. `optax_d1` peak > custom `d1_default` (11.72 GB) → optax `MultiSteps` allocates an accumulator even at k=1, whereas our depth-1 fast path skips it (a point where OUR implementation is leaner than optax's).
+
+| arm | measured peak_hbm_gb | wall_s | expectation |
+|---|---|---|---|
+| optax_d1 | _TBD_ | _TBD_ | > 11.72 (MultiSteps allocates accum at k=1) |
+| optax_d4_fp32_accum | _TBD_ | _TBD_ | ≈ 15.46 (parity with custom) |
+| optax_d4_bf16_accum | _TBD_ | _TBD_ | ≈ 13.27 |
+| optax_d4_fp32_moments | _TBD_ | _TBD_ | ≈ 19.81 |
+
+**New artifacts:** `experimental/optax_multistep_bench.py`, `experimental/mem_repro_optax_4arm.sh`; `experimental/compile_repro_sft.py` refactored to share `build_model_and_mesh()`.
+
+**CPU regression tests (in `tests/sft/peft_trainer_test.py`):** `test_fp32_accumulation_closer_to_golden_than_bf16` (fp32 ≥50× closer to the full-batch golden than bf16 — locks in the numerics) and `test_weighted_get_is_sum_of_grads_over_sum_of_denoms` (Σg/Σdenom weighted mean). Policy: correctness + compile-COUNT + dtype are CPU unit tests; tracing-time / op-time / real HBM stay in these benchmark harnesses (timing assertions in unit tests would be flaky).
+

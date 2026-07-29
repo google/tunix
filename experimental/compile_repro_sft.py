@@ -95,6 +95,28 @@ def gen_model_input_fn(x: peft_trainer.TrainingInput):
   }
 
 
+def build_model_and_mesh(model_path, mesh_fsdp=2, mesh_tp=2):
+  """Build the Gemma4-E2B model + (fsdp, tp) mesh.
+
+  Shared with experimental/optax_multistep_bench.py so both harnesses measure
+  the exact same model / sharding.
+  """
+  mesh_shape = [(mesh_fsdp, mesh_tp), ("fsdp", "tp")]
+  mesh = jax.make_mesh(
+      *mesh_shape, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape[0])
+  )
+  # E2B config: verbatim from sampling_example.ipynb cell-1 ("e2b" branch).
+  config = model.ModelConfig.gemma4_e2b()
+  config.vision_encoder.output_length = 70
+  config.use_flash_attention = True
+  config.flash_attention_block_size = 256
+  config.remat_config = model.RematConfig.BLOCK
+  m = params_safetensors.create_model_from_safe_tensors(
+      model_path, config, mesh, dtype=jnp.bfloat16, text_only=True
+  )
+  return m, mesh
+
+
 def main():
   args = parse_args()
   # The measurement lines (first-step elapsed, "Compiled train_step cache
@@ -110,20 +132,7 @@ def main():
       flush=True,
   )
 
-  mesh_shape = [(args.mesh_fsdp, args.mesh_tp), ("fsdp", "tp")]
-  mesh = jax.make_mesh(
-      *mesh_shape, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape[0])
-  )
-
-  # E2B config: verbatim from sampling_example.ipynb cell-1 ("e2b" branch).
-  config = model.ModelConfig.gemma4_e2b()
-  config.vision_encoder.output_length = 70
-  config.use_flash_attention = True
-  config.flash_attention_block_size = 256
-  config.remat_config = model.RematConfig.BLOCK
-  m = params_safetensors.create_model_from_safe_tensors(
-      args.model_path, config, mesh, dtype=jnp.bfloat16, text_only=True
-  )
+  m, mesh = build_model_and_mesh(args.model_path, args.mesh_fsdp, args.mesh_tp)
 
   accum_dtype = (
       jnp.float32

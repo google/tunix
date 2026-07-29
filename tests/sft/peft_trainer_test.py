@@ -1320,6 +1320,85 @@ class GradientAccumulatorTest(parameterized.TestCase):
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
+  def test_weighted_get_is_sum_of_grads_over_sum_of_denoms(self):
+    """get() == (Σ grads) / (Σ denom): the weighted mean for variable packs."""
+    isvar = lambda x: isinstance(x, nnx.Variable)
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(8, 8, rngs=rngs, param_dtype=jnp.float32)
+
+    def const_grads(c):
+      return jax.tree_util.tree_map(
+          lambda v: type(v)(jnp.full_like(v[...], c)),
+          nnx.state(model, nnx.Param),
+          is_leaf=isvar,
+      )
+
+    acc = peft_trainer.GradientAccumulator(model, nnx.Param)  # fp32 default
+    acc.add(const_grads(1.0), denom=jnp.asarray(3.0, jnp.float32))
+    acc.add(const_grads(2.0), denom=jnp.asarray(1.0, jnp.float32))
+    out = acc.get()  # (1 + 2) / (3 + 1) = 0.75
+
+    jax.tree_util.tree_map(
+        lambda v: np.testing.assert_allclose(
+            np.asarray(v[...]), 0.75, rtol=1e-6
+        ),
+        out,
+        is_leaf=isvar,
+    )
+
+  def test_fp32_accumulation_closer_to_golden_than_bf16(self):
+    """fp32 accumulator is far closer to the full-batch golden than bf16.
+
+    Locks in the P2.0 finding: summing bf16 grads over many microbatches loses
+    small contributions (swamping), while fp32 accumulation stays near-exact.
+    Uses an fp32 golden (no x64): the fp32 accumulator should match it, the
+    bf16 accumulator should not.
+    """
+    isvar = lambda x: isinstance(x, nnx.Variable)
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(64, 64, rngs=rngs, param_dtype=jnp.bfloat16)
+
+    def micro(seed):
+      return jax.tree_util.tree_map(
+          lambda v: type(v)(
+              jax.random.normal(jax.random.PRNGKey(seed), v.shape, jnp.bfloat16)
+          ),
+          nnx.state(model, nnx.Param),
+          is_leaf=isvar,
+      )
+
+    grads = [micro(s) for s in range(32)]
+
+    def accumulate(dtype):
+      acc = peft_trainer.GradientAccumulator(
+          model, nnx.Param, accumulator_dtype=dtype
+      )
+      for g in grads:
+        acc.add(g, denom=jnp.asarray(1.0, jnp.float32))
+      return acc.get()
+
+    golden = jax.tree_util.tree_map(  # fp32 mean of the bf16 grads
+        lambda *gs: type(gs[0])(
+            sum(g[...].astype(jnp.float32) for g in gs) / len(gs)
+        ),
+        *grads,
+        is_leaf=isvar,
+    )
+
+    def rel_err(out):
+      gl = jax.tree_util.tree_leaves(golden, is_leaf=isvar)
+      ol = jax.tree_util.tree_leaves(out, is_leaf=isvar)
+      num = sum(
+          float(jnp.sum((o[...].astype(jnp.float32) - g[...]) ** 2))
+          for o, g in zip(ol, gl)
+      )
+      den = sum(float(jnp.sum(g[...] ** 2)) for g in gl)
+      return (num**0.5) / (den**0.5)
+
+    err_bf16 = rel_err(accumulate(jnp.bfloat16))
+    err_fp32 = rel_err(accumulate(jnp.float32))
+    self.assertLess(err_fp32 * 50, err_bf16)  # fp32 at least 50x closer
+
   def test_cond_path_keeps_bf16_moments_after_update(self):
     """A depth>1 adam step keeps moments bf16 through the fp32 accumulator.
 
