@@ -44,15 +44,24 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer = trainer_factory()
     self._is_running = False
     self._worker_id = worker_id
+    self._state = "READY"
 
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
-    return datatypes.Response()
+    self._state = "INITIALIZING"
+    try:
+      return datatypes.Response()
+    finally:
+      self._state = "READY"
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
-    self._trainer.compile(dummy_data)
-    return datatypes.Response()
+    self._state = "COMPILING"
+    try:
+      self._trainer.compile(dummy_data)
+      return datatypes.Response()
+    finally:
+      self._state = "READY"
 
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
@@ -62,6 +71,7 @@ class TrainerWorker(abstract_worker.Worker):
   def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     self._is_running = False
+    self._state = "STOPPED"
     self._trainer.close()
     return datatypes.Response()
 
@@ -115,8 +125,12 @@ class TrainerWorker(abstract_worker.Worker):
 
   def prepare_weight_sync(self, **kwargs) -> datatypes.Response:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
-    self._trainer.prepare_weight_sync(**kwargs)
-    return datatypes.Response()
+    self._state = "SYNCING"
+    try:
+      self._trainer.prepare_weight_sync(**kwargs)
+      return datatypes.Response()
+    finally:
+      self._state = "READY"
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""

@@ -91,6 +91,7 @@ class InferenceWorker(abstract_worker.Worker):
     self._eos_id = eos_id
     self._model_version = model_version
     self._chunk_size = chunk_size
+    self._state = "READY"
 
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
@@ -98,16 +99,25 @@ class InferenceWorker(abstract_worker.Worker):
     )
 
   def initialize(self) -> datatypes.Response:
-    return datatypes.Response()
+    self._state = "INITIALIZING"
+    try:
+      return datatypes.Response()
+    finally:
+      self._state = "READY"
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
     del dummy_data
-    return datatypes.Response()
+    self._state = "COMPILING"
+    try:
+      return datatypes.Response()
+    finally:
+      self._state = "READY"
 
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
   def stop(self) -> datatypes.Response:
+    self._state = "STOPPED"
     return datatypes.Response()
 
   def compute_logps(
