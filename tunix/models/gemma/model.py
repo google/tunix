@@ -22,18 +22,26 @@ from typing import Any, Callable, Tuple
 import flax
 from flax import nnx
 import jax
+try:
+  from tpu_inference.kernels.ragged_paged_attention.v3 import kernel as rag_kernel
+except ImportError:
+  try:
+    from jax.experimental.pallas.ops.tpu.ragged_paged_attention import kernel as rag_kernel
+  except ImportError:
+    rag_kernel = None
 from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.generate.sampler import Cache, cdiv
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
-
-
+from jax.experimental.shard_map import shard_map
+import functools
 LayerCache = dict[str, jaxtyping.Array]
-Cache = dict[str, LayerCache]
+#Cache = dict[str, LayerCache]
 
 
 env_utils.setup_sharding_environment()
@@ -212,11 +220,27 @@ class ModelConfig:
   def gemma2_9b_it(cls):
     return cls.gemma2_9b()
 
-
+"""
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
     return x
+  return jax.lax.with_sharding_constraint(
+      x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
+  )
+"""
+
+def shard(x: jnp.ndarray, s: Tuple[str | None, ...]):
+  mesh = pxla.thread_resources.env.physical_mesh
+  if mesh.empty or jax.devices()[0].platform == 'cpu':
+    return x
+
+  if x.ndim < len(s):
+    non_none = [sp for sp in s if sp is not None]
+    if len(non_none) == x.ndim:
+      s = tuple(non_none)
+    else:
+      s = s[:x.ndim]
   return jax.lax.with_sharding_constraint(
       x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
   )
@@ -258,6 +282,28 @@ class Embedder(nnx.Module):
   def num_embed(self):
     return self.input_embedding.value.shape[0]
 
+"""
+class Einsum(nnx.Module):
+  Einsum is a convenience module for parameterized tensor multiplication.
+
+  def __init__(
+      self,
+      einsum_str: str,
+      shape: flax.typing.Shape,
+      *,
+      rngs: nnx.Rngs,
+      sharding: Tuple[str | None, ...],
+  ):
+    self.einsum_str = einsum_str
+    self.shape = shape
+    self.w = nnx.Param(
+        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+    )
+
+  @jax.named_scope('einsum')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    return jnp.einsum(self.einsum_str, x, self.w.value)
+"""
 
 class Einsum(nnx.Module):
   """Einsum is a convenience module for parameterized tensor multiplication."""
@@ -278,7 +324,29 @@ class Einsum(nnx.Module):
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
+    einsum_str = self.einsum_str
+    in_sub, out_sub = einsum_str.split('->')
+    op0_sub = in_sub.split(',')[0]
+    
+    # If operand 0 has 1 fewer dimension (unpadded 1D token stream), adapt subscripts
+    if x.ndim == len(op0_sub) - 1 and op0_sub.startswith('B'):
+      in_sub = (
+          in_sub.replace('BTD', 'TD')
+          .replace('BSD', 'SD')
+          .replace('BTNH', 'TNH')
+      )
+      out_sub = (
+          out_sub.replace('BTD', 'TD')
+          .replace('BSD', 'SD')
+          .replace('BTNH', 'TNH')
+      )
+      einsum_str = f'{in_sub}->{out_sub}'
+
+    return jnp.einsum(einsum_str, x, self.w.value)
+
+
+
+
 
 
 @jax.named_scope('rope')
@@ -289,6 +357,9 @@ def apply_rope(
     max_wavelength: int = 10_000,
 ) -> jaxtyping.Array:
   """Applies RoPE."""
+  if inputs.ndim == 3 and positions.ndim == 2:
+    positions = positions.reshape(-1)
+
   fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
   timescale = max_wavelength**fraction
 
@@ -398,9 +469,11 @@ class Attention(nnx.Module):
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+      cache: Cache | None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
+      seq_lens: jaxtyping.Array | None = None,
+  ) -> tuple[Cache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
 
     if self.use_qkv_einsum:
@@ -426,17 +499,81 @@ class Attention(nnx.Module):
     )
 
     # Cache is left aligned.
+    # Update cache
     if cache is not None:
-      end_index = cache['end_index'][0]
-      slice_indices = (0, end_index % cache['v'].shape[1], 0, 0)
-      value_proj = jax.lax.dynamic_update_slice(
-          cache['v'],
-          value_proj,
-          slice_indices,
+      q = query_scaled.reshape(-1, self.num_heads, self.head_dim)
+      k = key_proj.reshape(-1, self.num_kv_heads, self.head_dim)
+      v = value_proj.reshape(-1, self.num_kv_heads, self.head_dim)
+
+      num_seqs = jnp.array([cache.batch_size], dtype=jnp.int32)
+      mesh = pxla.thread_resources.env.physical_mesh
+
+      data_axis = self.shd_config.act_btnh[0]  # 'fsdp'
+      tp_axis   = self.shd_config.act_btnh[2]  # 'tp'
+      in_specs = (
+          shd.PartitionSpec(None, tp_axis, None),       # q: (total_tokens, num_heads, head_dim)
+          shd.PartitionSpec(None, tp_axis, None),       # k: (total_tokens, num_heads, head_dim)
+          shd.PartitionSpec(None, tp_axis, None),       # v: (total_tokens, num_heads, head_dim)
+          shd.PartitionSpec(None, None, tp_axis, None, None),  # pages: (max_pages, tokens_per_page,
+          shd.PartitionSpec(),                       # kv_lens: (batch_size,)
+          shd.PartitionSpec(),                 # page_indices: (batch_size, max_pages_per_seq)
+          shd.PartitionSpec(),                       # q_lens
       )
-      key_proj = jax.lax.dynamic_update_slice(
-          cache['k'], key_proj, slice_indices
+      out_specs = (
+          shd.PartitionSpec(None, tp_axis, None),
+          shd.PartitionSpec(None, None, tp_axis, None, None)
       )
+
+      @functools.partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=in_specs,
+          out_specs=out_specs,
+          check_rep=False,
+      )
+      def sharded_rpa(q_in, k_in, v_in, pages_in, kv_lens_in, page_idxs_in, q_lens_in):
+        local_num_seqs = q_lens_in.shape[0]
+
+        is_decode = (q_in.shape[0] == local_num_seqs)
+        actual_q_lens = jax.lax.cond(
+            is_decode,
+            lambda: jnp.ones_like(q_lens_in),
+            lambda: q_lens_in,
+        )
+        cu_q_lens_in = jnp.pad(jnp.cumsum(actual_q_lens), (1, 0))
+        local_distribution = jax.lax.cond(
+            is_decode,
+            lambda: jnp.array([local_num_seqs, local_num_seqs, local_num_seqs], dtype=jnp.int32),
+            lambda: jnp.array([0, 0, local_num_seqs], dtype=jnp.int32),
+        ) 
+
+        return rag_kernel.ragged_paged_attention(
+            q_in,
+            k_in,
+            v_in,
+            pages_in,
+            kv_lens_in,
+            page_idxs_in,
+            cu_q_lens_in,
+            local_distribution,
+            soft_cap=self.attn_logits_soft_cap,
+        )
+
+      attn_output, updated_pages = sharded_rpa(
+          q,
+          k,
+          v,
+          cache.pages[layer_name],
+          cache.kv_lens,
+          cache.page_indices.reshape(-1),
+          seq_lens,
+      )
+      
+      attn_output = self.attn_vec_einsum(attn_output)
+      attn_output = shard(attn_output, self.shd_config.act_btd)
+
+      cache.pages[layer_name] = updated_pages
+      return cache, attn_output
 
     if self.use_gqa:
       # Reshape matrices to enable einsums over groups.
@@ -456,17 +593,7 @@ class Attention(nnx.Module):
       logits = jnp.tanh(logits / self.attn_logits_soft_cap)
       logits = logits * self.attn_logits_soft_cap
 
-    if self.attn_type == AttentionType.LOCAL_SLIDING:
-      sliding_mask = _create_sliding_mask(
-          segment_pos,
-          cache_len=attn_mask.shape[-1],
-          sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
-      )
-      attn_mask = sliding_mask * attn_mask
-
-    padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
-
-    probs = jax.nn.softmax(padded_logits, axis=-1).astype(key_proj.dtype)
+    probs = jax.nn.softmax(logits, axis=-1).astype(key_proj.dtype)
 
     if self.use_gqa:
       # Reshape matrices to enable einsums over groups.
@@ -484,24 +611,17 @@ class Attention(nnx.Module):
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
-    if cache is not None:
-      new_cache = {
-          'v': value_proj,
-          'k': key_proj,
-          'end_index': cache['end_index'] + seq_len,
-      }
-    else:
-      new_cache = None
-
-    return new_cache, attn_output
+    return None, attn_output
 
   @jax.named_scope('attention')
   def __call__(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
+      cache: Cache | None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
+      seq_lens: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if (
         self.remat_config == RematConfig.BLOCK
@@ -510,10 +630,10 @@ class Attention(nnx.Module):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
       return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+          self, x, segment_pos, cache, layer_name, attention_mask, seq_lens 
       )
     else:
-      return self.block(x, segment_pos, cache, attn_mask)
+      return self.block(x, segment_pos, cache, layer_name, attention_mask, seq_lens)
 
   @property
   def head_dim(self):
@@ -649,15 +769,19 @@ class DecoderLayer(nnx.Module):
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
+      page_manager: Cache | None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
+      seq_lens: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     inputs_normalized = self.pre_attention_norm(x)
     cache, attn_output = self.attn(
         inputs_normalized,
         segment_pos,
-        cache,
-        attn_mask,
+        page_manager,
+        layer_name,
+        attention_mask,
+        seq_lens,
     )
 
     if self.config.use_post_attn_norm:
@@ -678,15 +802,17 @@ class DecoderLayer(nnx.Module):
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+      cache: Cache | None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
+      seq_lens: jaxtyping.Array | None = None,
+  ) -> tuple[Cache | None, jaxtyping.Array]:
     if self.config.remat_config == RematConfig.DECODER:
       return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+          self, x, segment_pos, cache, layer_name, attention_mask, seq_lens 
       )
     else:
-      return self.block(x, segment_pos, cache, attn_mask)
+      return self.block(x, segment_pos, cache, layer_name, attention_mask, seq_lens)
 
 
 class RMSNorm(nnx.Module):
@@ -895,7 +1021,8 @@ class Gemma(BackendMappingMixin, nnx.Module):
       last_tokens: jaxtyping.Array,  # [B, L]
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
-      attention_mask: jaxtyping.Array,  # [B, L, L']
+      attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
+      seq_lens: jaxtyping.Array | None = None,
       output_hidden_states: bool = False,
       skip_lm_head: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
@@ -916,31 +1043,29 @@ class Gemma(BackendMappingMixin, nnx.Module):
       predicted_logits, new_cache
 
       predicted_logits: output logits predicted by the model
-      new_cache: updated cache if the input cache is not None, None elsewhere.
+      new_cache: updated cache (same object modified in place) if passed, else None.
     """
-    new_cache = None if cache is None else {}
     x = self.embedder.encode(last_tokens)
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
-      layer_cache = cache[layer_name] if cache else None
-      layer_cache, x = layer(
+      cache, x = layer(
           x,
           positions,
-          layer_cache,
+          cache,
+          layer_name,
           attention_mask,
+          seq_lens, 
       )
-      if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
 
     if skip_lm_head:
-      return x, new_cache
+      return x, cache
 
     logits = self.compute_final_logits(x)
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, cache
 
   def compute_final_logits(
       self,
