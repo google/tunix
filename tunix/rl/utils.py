@@ -16,7 +16,7 @@
 
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, Iterator, List, Optional
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from absl import logging
 from flax import nnx
@@ -171,7 +171,7 @@ def get_batch_slice(tree: Any, batch_slice: slice) -> Any:
   )
 
 
-def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
+def merge_micro_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
   """Merges micro-batch dictionaries into a single batch.
 
   Concatenates values from a list of micro-batch dicts. Values are concatenated
@@ -187,11 +187,12 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
   merged = {}
-
-  for key in batches[0].keys():
+  first_batch, *_ = batches
+  for key in first_batch.keys():
     all_values = [item[key] for item in batches]
+    first_value, *_ = all_values
 
-    if isinstance(all_values[0], list):
+    if isinstance(first_value, list):
       merged[key] = list(chain.from_iterable(all_values))
     else:
       merged[key] = tree_util.tree_map(
@@ -368,6 +369,9 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
     p_len = int(np.sum(p_mask[i]))
     c_len = int(np.sum(c_mask[i]))
 
+    # `policy_version` is per-row: row `i` of the input maps to scalar
+    # `policy_version_np[i]`. We slice with `i:i+1` to keep a 1-D shape so that
+    # `pack_sequences` can stack scalars from multiple items unambiguously.
     item = {
         "prompt_ids": p_ids[i, -p_len:] if p_len > 0 else p_ids[i, :0],
         "prompt_mask": p_mask[i, -p_len:] if p_len > 0 else p_mask[i, :0],
@@ -375,52 +379,202 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "completion_mask": c_mask[i, :c_len],
         "advantages": adv[i, :c_len] if adv_is_per_token else adv[i],
         "adv_is_per_token": adv_is_per_token,
-        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,  # pyrefly: ignore[unbound-name]
-        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,  # pyrefly: ignore[unbound-name]
-        "returns": returns_np[i, :c_len] if has_returns else None,  # pyrefly: ignore[unbound-name]
-        "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
-        "policy_version": policy_version_np if has_policy_version else None,  # pyrefly: ignore[unbound-name]
+        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,
+        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,
+        "returns": returns_np[i, :c_len] if has_returns else None,
+        "old_values": old_values_np[i, :c_len] if has_old_values else None,
+        "policy_version": (
+            policy_version_np[i : i + 1] if has_policy_version else None
+        ),
     }
     res.append(item)
   return res
 
 
-def pack_sequences(
-    item_iterator: Iterator[list[common.TrainExample]],
+def compute_pack_size(mesh: jax.sharding.Mesh) -> int:
+  """Packed rows per batch = product of the "fsdp"/"dp" mesh axes (1 if neither)."""
+  if "fsdp" not in mesh.shape and "dp" not in mesh.shape:
+    logging.warning(
+        "Sequence packing: mesh has no 'fsdp'/'dp' axis; pack_size=1."
+        " Axes: %s.",
+        dict(mesh.shape),
+    )
+  return mesh.shape.get("fsdp", 1) * mesh.shape.get("dp", 1)
+
+
+def validate_packing_budget(
     max_token_budget: int,
-    pad_id: int = 0,
-    target_items_per_update: int | None = None,
-) -> Iterator[list[common.TrainExample]]:
-  """Packs a stream of TrainExamples into 1D sequences up to a token budget.
+    max_prompt_length: int,
+    max_response_length: int,
+) -> None:
+  """Fails at learner init if a maximal sequence cannot fit one packed row.
 
-  TODO(yuxzhang): update boundary uses a fixed grad_acc_steps (mini // micro);
-  packing-native would use dynamic micro-batches + global token norm (b/491970038).
+  Sequences are truncated to `max_prompt_length + max_response_length`, so that
+  sum is the longest row `pack_sequences` can ever be handed. A smaller budget
+  is not a degraded mode -- it raises mid-run the first time a maximal sequence
+  shows up, which can be hours in. Check it up front instead.
+
+  Args:
+    max_token_budget: The configured `max_seq_token_per_tpu`.
+    max_prompt_length: Rollout's prompt cap.
+    max_response_length: Rollout's generation cap.
+
+  Raises:
+    ValueError: if the budget cannot hold one maximal sequence.
   """
-  buffer = []
-  current_tokens = 0
-  example_cls = common.TrainExample
-  accumulated_items = 0
+  longest = max_prompt_length + max_response_length
+  if max_token_budget < longest:
+    raise ValueError(
+        f"max_seq_token_per_tpu={max_token_budget} is smaller than the longest"
+        f" possible sequence (max_prompt_length {max_prompt_length} +"
+        f" max_response_length {max_response_length} = {longest}); packing"
+        " would fail once a maximal sequence appears. Set"
+        f" max_seq_token_per_tpu >= {longest}."
+    )
 
-  def _flush_buffer(is_update: bool = False) -> list[common.TrainExample]:
-    """Flushes the buffer into a list of TrainExamples."""
-    nonlocal buffer, current_tokens
-    if not buffer:
-      if is_update:
-        # An update boundary (is_update=True) with an empty buffer would yield
-        # nothing, silently dropping the optimizer update for this mini-batch
-        # (its accumulated gradients would leak into the next update). This
-        # usually means an empty or all-skipped input batch arrived at a
-        # mini-batch boundary. Fail loudly instead of corrupting training.
-        raise ValueError(
-            "pack_sequences reached an update boundary (is_update=True) with an "
-            "empty buffer; no packed example would be produced, dropping a "
-            "gradient-accumulation update."
-        )
-      return []
 
-    # TODO(noghabi): Pad to the next power of 2 instead of user defined
-    # max_token_budget if the seq is short. This will incur an additional
-    # compilation on trainer side, but also will result in faster compute.
+def _ceildiv(a: int, b: int) -> int:
+  return -(-a // b)
+
+
+def _item_tokens(item: Mapping[str, Any]) -> int:
+  return len(item["prompt_ids"]) + len(item["completion_ids"])
+
+
+def _fill_one_chunk(
+    items: Sequence[Mapping[str, Any]],
+    pack_size: int,
+    budget: int,
+    max_segments: int,
+) -> tuple[list[list[Mapping[str, Any]]], list[Mapping[str, Any]]]:
+  """Fills ONE chunk of `pack_size` fixed-capacity bins, first-fit-decreasing.
+
+  Sorts the items by token length descending and greedily places each into the
+  first bin with room, where a bin has room only if it stays within both the
+  token `budget` AND `max_segments` sequences (so the loss's static
+  `num_segments = max_segments + 1` buckets never overflow). Items that fit no
+  bin are returned as `leftover` (in their original order) for a later chunk.
+
+  Returns (bins, leftover): `bins` is exactly `pack_size` lists (some may be
+  empty); `leftover` are the items that did not fit.
+  """
+  bins: list[list[Mapping[str, Any]]] = [[] for _ in range(pack_size)]
+  loads = [0] * pack_size
+  leftover: list[Mapping[str, Any]] = []
+  for item in sorted(items, key=_item_tokens, reverse=True):
+    n = _item_tokens(item)
+    for b in range(pack_size):
+      if loads[b] + n <= budget and len(bins[b]) < max_segments:
+        bins[b].append(item)
+        loads[b] += n
+        break
+    else:
+      leftover.append(item)
+  return bins, leftover
+
+
+def pack_sequences(
+    item_iterator: Iterator[Sequence[common.TrainExample]],
+    max_token_budget: int,
+    sequences_per_update: int,
+    pad_id: int = 0,
+    pack_size: int = 1,
+    max_segments_per_packed_row: int | None = None,
+) -> Iterator[list[common.TrainExample]]:
+  """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
+
+  A chunk is emitted as soon as buffered sequences fill it (so training can
+  overlap rollout); a mini-batch's last chunk has is_update_step=True.
+  Colocated producers enqueue a whole mini-batch at once, so packing sees the
+  full set (~global FFD); under streaming, chunk composition follows arrival
+  order.
+
+  Args:
+    item_iterator: Stream of lists of TrainExamples (any granularity).
+    max_token_budget: Max tokens per packed row (= max_seq_token_per_tpu).
+    sequences_per_update: Sequences per mini-batch/update (= mini_batch_size *
+      num_generations). Required: the update boundary is a mini-batch property,
+      and the producer's list granularity does not carry it (a colocated
+      producer enqueues a whole mini-batch, a streaming one a micro-batch), so
+      it cannot be inferred from the input stream.
+    pad_id: Padding vocabulary id.
+    pack_size: Rows per chunk (= fsdp * dp); each chunk is [pack_size,
+      max_token_budget].
+
+  Yields:
+    Single-element lists, each one [pack_size, max_token_budget] TrainExample.
+
+  Raises:
+    ValueError: empty mini-batch at an update boundary, a sequence longer than
+      max_token_budget, a mid-mini-batch stream end, or a boundary inside an
+      input example.
+  """
+
+  # Real segments per row are bounded by the token budget (each segment >= 1
+  # token). `None` uses that safe bound so `num_segments = budget + 1` never
+  # overflows; a smaller override shrinks the loss buckets and is enforced by
+  # the raise in `_flush_pack`.
+  effective_max_segments = (
+      max_segments_per_packed_row
+      if max_segments_per_packed_row is not None
+      else max_token_budget
+  )
+
+  def _flush_pack(pack_items, example_cls, first_item) -> common.TrainExample:
+    first_item = first_item or {}
+    has_policy_version = first_item.get("policy_version") is not None
+    kwargs = {}
+    tracked_per_token_keys = []
+
+    if first_item.get("ref_per_token_logps") is not None:
+      tracked_per_token_keys.append("ref_per_token_logps")
+    if first_item.get("old_per_token_logps") is not None:
+      tracked_per_token_keys.append("old_per_token_logps")
+    if first_item.get("returns") is not None:
+      tracked_per_token_keys.append("returns")
+    if first_item.get("old_values") is not None:
+      tracked_per_token_keys.append("old_values")
+
+    if not pack_items:
+      p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+      p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+      c_ids_arr = jnp.full((1, max_token_budget), pad_id, dtype=jnp.int32)
+      c_mask_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+      adv_arr = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
+      seg_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+      pos_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+
+      kwargs.update(
+          prompt_ids=p_ids_arr,
+          prompt_mask=p_mask_arr,
+          completion_ids=c_ids_arr,
+          completion_mask=c_mask_arr,
+          advantages=adv_arr,
+          ref_per_token_logps=None,
+          old_per_token_logps=None,
+          segment_ids=seg_arr,
+          segment_positions=pos_arr,
+      )
+      for k in tracked_per_token_keys:
+        kwargs[k] = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
+      if has_policy_version:
+        kwargs["policy_version"] = first_item["policy_version"]
+      return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
+
+    # `len(pack_items)` is the real segment count of this row. It cannot exceed
+    # the token budget (each segment >= 1 token), so the default bound never
+    # trips; a too-small `max_segments_per_packed_row` override does, and we
+    # fail loud rather than let `segment_sum` silently drop the overflow.
+    if len(pack_items) > effective_max_segments:
+      raise ValueError(
+          f"pack_sequences: a packed row has {len(pack_items)} segments, "
+          f"exceeding max_segments_per_packed_row={effective_max_segments}; "
+          "increase it (or leave it None for the budget-derived safe default)."
+      )
+
+    current_tokens = sum(
+        len(it["prompt_ids"]) + len(it["completion_ids"]) for it in pack_items
+    )
     pad_len = max_token_budget - current_tokens
 
     packed_c_ids = []
@@ -429,13 +583,9 @@ def pack_sequences(
     packed_segment_ids = []
     packed_positions = []
 
-    tracked_per_token_keys = [
-        k for k in _OPTIONAL_PER_TOKEN_KEYS if buffer[0].get(k) is not None
-    ]
     per_token_feature_buffers = {k: [] for k in tracked_per_token_keys}
-    has_policy_version = buffer[0].get("policy_version") is not None
 
-    for i, item in enumerate(buffer, start=1):
+    for i, item in enumerate(pack_items, start=1):
       p_ids = item["prompt_ids"]
       c_ids = item["completion_ids"]
       seq_len = len(p_ids) + len(c_ids)
@@ -443,7 +593,6 @@ def pack_sequences(
       packed_c_ids.extend([p_ids, c_ids])
       packed_c_mask.extend([np.zeros_like(p_ids), item["completion_mask"]])
 
-      # Expand advantage to shape [c_len] to match completion length
       if item["adv_is_per_token"]:
         packed_adv.extend([
             np.zeros_like(p_ids, dtype=np.float32),
@@ -468,11 +617,9 @@ def pack_sequences(
       arr = np.concatenate(arr_list) if arr_list else np.array([])
       return np.pad(arr, (0, length), constant_values=val)
 
-    # Empty prompt arrays
     p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
     p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
 
-    # Pad all lists by pad_len
     c_ids_arr = jnp.array(_pad(packed_c_ids, pad_id, pad_len))[None, :]
     c_mask_arr = jnp.array(_pad(packed_c_mask, 0, pad_len))[None, :]
     adv_arr = jnp.array(_pad(packed_adv, 0.0, pad_len))[None, :]
@@ -491,58 +638,111 @@ def pack_sequences(
         completion_ids=c_ids_arr,
         completion_mask=c_mask_arr,
         advantages=adv_arr,
-        ref_per_token_logps=None,  # Will be overridden if present in tracked_per_token_keys.
-        old_per_token_logps=None,  # Will be overridden if present in tracked_per_token_keys.
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
         segment_ids=seg_arr,
         segment_positions=pos_arr,
     )
     for k in tracked_per_token_keys:
       kwargs[k] = per_token_features[k]
+
     if has_policy_version:
-      kwargs["policy_version"] = buffer[0]["policy_version"]
+      kwargs["policy_version"] = pack_items[0]["policy_version"]
 
-    kwargs["is_update_step"] = jnp.array(is_update, dtype=jnp.bool_)
+    return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
 
-    packed_example = example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
+  chunk_capacity = pack_size * max_token_budget
 
-    buffer.clear()
-    current_tokens = 0
-    return [packed_example]
+  def _emit(chunk):
+    """Merges one chunk (pack_size bins) into a [pack_size, budget] example."""
+    chunk_examples = [
+        _flush_pack(bin_items, example_cls, first_item_for_dummy)
+        for bin_items in chunk
+    ]
+    return jax.tree.map(
+        lambda first_x, *rest_xs: None
+        if first_x is None
+        else jnp.concatenate((first_x, *rest_xs), axis=0),
+        *chunk_examples,
+    )
+
+  def _mark(merged, is_update):
+    # `num_segments = effective_max_segments + 1` (+1 = padding bucket) is a
+    # static upper bound, fixed every step so the segment-aware loss compiles
+    # once. Set here (not per bin) so every emitted chunk carries it.
+    kwargs = dict(is_update_step=jnp.array([is_update], dtype=jnp.bool_))
+    if hasattr(merged, "num_segments"):
+      kwargs["num_segments"] = effective_max_segments + 1
+    return [merged.replace(**kwargs)]
+
+  # See the docstring: buffer sequences, emit a chunk once it holds a chunk's
+  # worth of tokens, and mark the mini-batch's last chunk as the update.
+  buffered = []  # unpacked sequences
+  received = 0  # sequences received this mini-batch (incl. emitted)
+  tokens_in_mini = 0  # for the dummy_ratio log
+  chunks_in_mini = 0
+  example_cls = common.TrainExample
+  first_item_for_dummy = None
+
+  def _final_flush():
+    nonlocal buffered, received, tokens_in_mini, chunks_in_mini
+    if not buffered and chunks_in_mini == 0:
+      raise ValueError(
+          "pack_sequences reached an update boundary with an empty mini-batch;"
+          " no packed example would be produced, dropping a gradient update."
+      )
+    while buffered:
+      chunk, buffered = _fill_one_chunk(
+          buffered, pack_size, max_token_budget, effective_max_segments
+      )
+      chunks_in_mini += 1
+      yield _mark(_emit(chunk), not buffered)  # last chunk (empty leftover).
+    total_cap = chunks_in_mini * chunk_capacity
+    logging.info(
+        "pack_sequences: %d seqs -> %d chunks, dummy_ratio=%.3f",
+        received,
+        chunks_in_mini,
+        1.0 - tokens_in_mini / total_cap if total_cap else 0.0,
+    )
+    received = 0
+    tokens_in_mini = 0
+    chunks_in_mini = 0
 
   for item_list in item_iterator:
-    accumulated_items += 1
     for example in item_list:
       example_cls = type(example)
-      unpadded_items = unpad_train_example(example)
-      for item in unpadded_items:
-        tokens = len(item["prompt_ids"]) + len(item["completion_ids"])
-
-        # If a single item is strictly larger than budget, we skip or truncate.
-        # Ideally, budget > max_prompt_length + max_response_length.
-        if tokens > max_token_budget:
-          logging.warning(
-              "Skipping single sequence with length %d exceeding budget %d",
-              tokens,
-              max_token_budget,
+      for item in unpad_train_example(example):
+        n = _item_tokens(item)
+        if n > max_token_budget:
+          raise ValueError(
+              f"pack_sequences: a single sequence has {n} tokens, exceeding"
+              f" max_token_budget {max_token_budget}; increase the budget."
           )
-          continue
+        if first_item_for_dummy is None:
+          first_item_for_dummy = item
+        buffered.append(item)
+        received += 1
+        tokens_in_mini += n
 
-        if current_tokens + tokens > max_token_budget:
-          # Flush normally. The final batch logic below will trigger is_update=True.
-          yield _flush_buffer(is_update=False)
+    if received > sequences_per_update:
+      raise ValueError(
+          "pack_sequences: mini-batch boundary falls inside an input example"
+          f" (received {received} sequences, expected {sequences_per_update}"
+          " per update)."
+      )
+    if received == sequences_per_update:
+      yield from _final_flush()
+    else:
+      # Not the boundary yet: emit whole chunks eagerly, keep the remainder.
+      while sum(_item_tokens(it) for it in buffered) >= chunk_capacity:
+        chunk, buffered = _fill_one_chunk(
+            buffered, pack_size, max_token_budget, effective_max_segments
+        )
+        chunks_in_mini += 1
+        yield _mark(_emit(chunk), False)
 
-        buffer.append(item)
-        current_tokens += tokens
+  if buffered or received:
+    raise ValueError("pack_sequences stream ended mid-mini-batch.")
 
-    if target_items_per_update and accumulated_items >= target_items_per_update:
-      yield _flush_buffer(is_update=True)
-      accumulated_items = 0
-
-  if buffer:
-    # Leftover at end-of-stream = stream ended mid-mini-batch; forcing is_update
-    # here would update on a partial mini-batch. Require ending on a boundary.
-    if target_items_per_update and accumulated_items % target_items_per_update != 0:
-      raise ValueError("pack_sequences stream ended mid-mini-batch.")
-    yield _flush_buffer(is_update=True)
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"
