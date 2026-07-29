@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for fake_worker."""
+"""Tests for mock_worker."""
 
 from absl.testing import absltest
-from tunix.tunix.experimental.orchestrator import fake_worker
+from tunix.experimental.worker import mock_worker
 
 
-class FakeWorkerTest(absltest.TestCase):
+class MockWorkerTest(absltest.TestCase):
 
   def test_initial_state(self):
-    worker = fake_worker.FakeWorker("test_id", {"trainer"})
+    worker = mock_worker.MockWorker("test_id", {"trainer"})
     self.assertEqual(worker.state, "PENDING")
     self.assertEqual(worker.call_counts["initialize"], 0)
     self.assertEqual(worker.call_counts["compile"], 0)
@@ -29,31 +29,31 @@ class FakeWorkerTest(absltest.TestCase):
     self.assertEqual(worker.call_counts["stop"], 0)
 
   def test_initialize(self):
-    worker = fake_worker.FakeWorker("test_id", {"trainer"})
+    worker = mock_worker.MockWorker("test_id", {"trainer"})
     worker.initialize()
     self.assertEqual(worker.state, "INITIALIZED")
     self.assertEqual(worker.call_counts["initialize"], 1)
 
   def test_compile(self):
-    worker = fake_worker.FakeWorker("test_id", {"trainer"})
+    worker = mock_worker.MockWorker("test_id", {"trainer"})
     worker.compile()
     self.assertEqual(worker.state, "COMPILED")
     self.assertEqual(worker.call_counts["compile"], 1)
 
   def test_start(self):
-    worker = fake_worker.FakeWorker("test_id", {"trainer"})
+    worker = mock_worker.MockWorker("test_id", {"trainer"})
     worker.start()
     self.assertEqual(worker.state, "READY")
     self.assertEqual(worker.call_counts["start"], 1)
 
   def test_stop(self):
-    worker = fake_worker.FakeWorker("test_id", {"trainer"})
+    worker = mock_worker.MockWorker("test_id", {"trainer"})
     worker.stop()
     self.assertEqual(worker.state, "STOPPED")
     self.assertEqual(worker.call_counts["stop"], 1)
 
   def test_heartbeat_reports_current_state(self):
-    worker = fake_worker.FakeWorker("test_id", {"trainer"})
+    worker = mock_worker.MockWorker("test_id", {"trainer"})
     worker.state = "COMPILING"
     self.assertEqual(worker.heartbeat().state, "COMPILING")
 

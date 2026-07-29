@@ -15,7 +15,7 @@
 """Tests for the LifecycleDriver."""
 
 from absl.testing import absltest
-from tunix.tunix.experimental.orchestrator import fake_worker
+from tunix.experimental.worker import mock_worker
 from tunix.tunix.experimental.orchestrator import lifecycle
 from tunix.tunix.experimental.orchestrator import worker_registry
 
@@ -27,8 +27,8 @@ class LifecycleDriverTest(absltest.TestCase):
 
   def test_bring_up_transitions_fakes_to_ready(self):
     registry = worker_registry.WorkerRegistry()
-    rollout = fake_worker.FakeWorker(worker_id="r0", roles={"rollout"})
-    trainer = fake_worker.FakeWorker(worker_id="t0", roles={"trainer"})
+    rollout = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    trainer = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
     registry.register(rollout)
     registry.register(trainer)
 
@@ -39,7 +39,7 @@ class LifecycleDriverTest(absltest.TestCase):
 
   def test_shutdown_transitions_fakes_to_stopped(self):
     registry = worker_registry.WorkerRegistry()
-    trainer = fake_worker.FakeWorker(worker_id="t0", roles={"trainer"})
+    trainer = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
     registry.register(trainer)
     driver = lifecycle.LifecycleDriver(registry)
     driver.bring_up(_DUMMY_DATA)
@@ -51,8 +51,8 @@ class LifecycleDriverTest(absltest.TestCase):
   def test_bring_up_runs_phase_by_phase(self):
     registry = worker_registry.WorkerRegistry()
     log: list[str] = []
-    registry.register(fake_worker.FakeWorker("a", roles={"trainer"}, log=log))
-    registry.register(fake_worker.FakeWorker("b", roles={"trainer"}, log=log))
+    registry.register(mock_worker.MockWorker("a", roles={"trainer"}, log=log))
+    registry.register(mock_worker.MockWorker("b", roles={"trainer"}, log=log))
 
     lifecycle.LifecycleDriver(registry).bring_up(_DUMMY_DATA)
 
@@ -66,11 +66,11 @@ class LifecycleDriverTest(absltest.TestCase):
   def test_shutdown_is_best_effort_and_aggregates_failures(self):
     registry = worker_registry.WorkerRegistry()
     log: list[str] = []
-    registry.register(fake_worker.FakeWorker("a", roles={"trainer"}, log=log))
+    registry.register(mock_worker.MockWorker("a", roles={"trainer"}, log=log))
     registry.register(
-        fake_worker.FakeWorker("b", roles={"trainer"}, log=log, fail_stop=True)
+        mock_worker.MockWorker("b", roles={"trainer"}, log=log, fail_stop=True)
     )
-    registry.register(fake_worker.FakeWorker("c", roles={"trainer"}, log=log))
+    registry.register(mock_worker.MockWorker("c", roles={"trainer"}, log=log))
     driver = lifecycle.LifecycleDriver(registry)
 
     with self.assertRaises(lifecycle.LifecycleError) as ctx:

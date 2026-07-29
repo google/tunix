@@ -15,7 +15,7 @@
 """Tests for the HealthMonitor per-state deadline policy."""
 
 from absl.testing import absltest
-from tunix.tunix.experimental.orchestrator import fake_worker
+from tunix.experimental.worker import mock_worker
 from tunix.tunix.experimental.orchestrator import health_monitor
 from tunix.tunix.experimental.orchestrator import worker_registry
 
@@ -37,7 +37,7 @@ class HealthMonitorTest(absltest.TestCase):
     return registry
 
   def test_poll_returns_current_reports(self):
-    worker = fake_worker.FakeWorker("w0", roles={"trainer"})
+    worker = mock_worker.MockWorker("w0", roles={"trainer"})
     worker.state = "READY"
     monitor = health_monitor.HealthMonitor(self._registry(worker))
     reports = monitor.poll()
@@ -45,7 +45,7 @@ class HealthMonitorTest(absltest.TestCase):
     self.assertEmpty(monitor.overdue())
 
   def test_worker_overdue_past_state_deadline(self):
-    worker = fake_worker.FakeWorker("w0", roles={"trainer"})
+    worker = mock_worker.MockWorker("w0", roles={"trainer"})
     worker.state = "COMPILING"
     clock = _FakeClock()
     monitor = health_monitor.HealthMonitor(
@@ -63,7 +63,7 @@ class HealthMonitorTest(absltest.TestCase):
     self.assertEqual(overdue[0].state, "COMPILING")
 
   def test_steady_state_is_never_overdue(self):
-    worker = fake_worker.FakeWorker("w0", roles={"trainer"})
+    worker = mock_worker.MockWorker("w0", roles={"trainer"})
     worker.state = "READY"
     clock = _FakeClock()
     monitor = health_monitor.HealthMonitor(self._registry(worker), clock=clock)
@@ -72,7 +72,7 @@ class HealthMonitorTest(absltest.TestCase):
     self.assertEmpty(monitor.overdue())
 
   def test_state_change_resets_the_deadline_timer(self):
-    worker = fake_worker.FakeWorker("w0", roles={"trainer"})
+    worker = mock_worker.MockWorker("w0", roles={"trainer"})
     worker.state = "COMPILING"
     clock = _FakeClock()
     monitor = health_monitor.HealthMonitor(

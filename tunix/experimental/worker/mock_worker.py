@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A unified fake worker for orchestrator tests."""
+"""A unified mock worker for orchestrator tests."""
 
 import collections
 from typing import Any
@@ -21,8 +21,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 
 
-class FakeWorker(abstract_worker.Worker):
-  """A unified fake worker for orchestrator tests.
+class MockWorker(abstract_worker.Worker):
+  """A unified mock worker for orchestrator tests.
 
   This mock worker allows tests to track the lifecycle states and call counts
   of its methods. It optionally supports appending lifecycle events to a shared
@@ -38,7 +38,7 @@ class FakeWorker(abstract_worker.Worker):
       log: list[str] | None = None,
       fail_stop: bool = False,
   ):
-    """Initializes the fake worker.
+    """Initializes the mock worker.
 
     Args:
       worker_id: The unique identifier for this worker.
