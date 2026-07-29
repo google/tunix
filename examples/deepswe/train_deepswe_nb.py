@@ -140,6 +140,12 @@ parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
 parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--max_concurrency", type=int, default=200)
+parser.add_argument(
+    "--use_agent_sandbox",
+    type=bool,
+    default=False,
+    help="Whether to use Kubernetes Agent Sandbox runtime instead of local Docker socket.",
+)
 
 parser.add_argument(
     "--overlong_filter",
@@ -404,6 +410,35 @@ try:
 except Exception as e:
   print(f"Warning: Kubernetes config loading failed: {e}")
 
+# Initialize SandboxFleet if USE_AGENT_SANDBOX is True
+fleet = None
+if USE_AGENT_SANDBOX:
+  try:
+    from agent_sandbox_rl import (
+        ClusterConfig,
+        FleetConfig,
+        SandboxFleet,
+        TemplateSpec,
+    )
+    fleet_ns = os.getenv("NAMESPACE", "rl-tunix-swebench")
+    node_sel = (
+        {os.environ["NODE_SELECTOR_KEY"]: os.environ["NODE_SELECTOR_VAL"]}
+        if os.environ.get("NODE_SELECTOR_KEY")
+        else None
+    )
+    fleet_cfg = FleetConfig(
+        clusters=[ClusterConfig(name="default", namespace=fleet_ns, node_selector=node_sel)],
+        max_concurrent=MAX_CONCURRENCY,
+        max_warmpool_size=16,
+        warm_per_task=True,
+        template=TemplateSpec(colocate_replicas=True),
+    )
+    fleet = SandboxFleet(fleet_cfg)
+    print(f"[SandboxFleet] Initializing warm pools in namespace={fleet_ns}...")
+    fleet.setup()
+  except Exception as e:
+    print(f"[SandboxFleet] Setup failed: {e}")
+
 
 # %%
 # ==========================================
@@ -501,6 +536,7 @@ PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
 EPISODE_TIMEOUT_SECS = args.episode_timeout_secs
 STEP_TIMEOUT_SECS = args.step_timeout_secs
 REWARD_TIMEOUT_SECS = args.reward_timeout_secs
+USE_AGENT_SANDBOX = args.use_agent_sandbox
 
 MAX_CONCURRENCY = args.max_concurrency
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
@@ -985,6 +1021,8 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
+        "use_agent_sandbox": USE_AGENT_SANDBOX,
+        "fleet": fleet,
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
@@ -1026,7 +1064,15 @@ except Exception as e:
 
 
 print("Starting training...", flush=True)
-agentic_grpo_learner.train(train_dataset=train_dataset)
+try:
+  agentic_grpo_learner.train(train_dataset=train_dataset)
+finally:
+  if fleet is not None:
+    print("[SandboxFleet] Tearing down warm pools...", flush=True)
+    try:
+      fleet.teardown()
+    except Exception as e:
+      print(f"[SandboxFleet] Teardown note: {e}")
 
 
 # %%

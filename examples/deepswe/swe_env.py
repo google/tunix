@@ -1,3 +1,4 @@
+from absl import logging
 import json
 import os
 from typing import Any, Optional, cast
@@ -14,6 +15,14 @@ except ImportError:
   Action = cast(Any, None)
 
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
+
+try:
+  from third_party.py.tunix.oss.examples.deepswe.sandbox_runtime import AgentSandboxRuntime
+except ImportError:
+  try:
+    from examples.deepswe.sandbox_runtime import AgentSandboxRuntime
+  except ImportError:
+    AgentSandboxRuntime = None
 
 
 if r2egym:
@@ -67,6 +76,8 @@ class SWEEnv(BaseTaskEnv):
       verbose: bool = False,
       scaffold: str = "r2egym",
       max_steps: int = 1,
+      use_agent_sandbox: bool = False,
+      fleet: Optional[Any] = None,
   ):
     """Initialize the SWE environment.
 
@@ -78,6 +89,11 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout: Timeout for reward computation in seconds.
         backend: Backend to use for the environment.
         delete_image: Whether to delete the Docker image after closing.
+        verbose: Verbose output toggle.
+        scaffold: Scaffold tool set ('r2egym' or 'sweagent').
+        max_steps: Maximum interaction steps.
+        use_agent_sandbox: If True, strictly forces AgentSandboxRuntime with SandboxFleet.
+        fleet: Optional `agent_sandbox_rl.SandboxFleet` instance.
     """
     self.entry = _unpack_entry(entry)
     self.step_timeout = step_timeout
@@ -86,8 +102,12 @@ class SWEEnv(BaseTaskEnv):
     self.delete_image = delete_image
     self.backend = backend
     self.env = None
+    self.handle = None
     self.verbose = verbose
     self.scaffold = scaffold
+    self.use_agent_sandbox = use_agent_sandbox
+    self.fleet = fleet
+
     assert scaffold in [
         "r2egym",
         "sweagent",
@@ -102,17 +122,38 @@ class SWEEnv(BaseTaskEnv):
 
   def _initial_observation(self) -> Any:
     if not self.env:
-      # Initialize environment if not created yet.
-      env_args = EnvArgs(ds=self.entry)
-      self.env = RepoEnv(
-          env_args,
-          backend=self.backend,
-          step_timeout=self.step_timeout,
-          reward_timeout=self.reward_timeout,
-          verbose=self.verbose,
-      )
+      if self.use_agent_sandbox:
+        if self.fleet is None:
+          raise RuntimeError(
+              "use_agent_sandbox=True requires a valid SandboxFleet instance"
+              " passed via fleet."
+          )
+        from agent_sandbox_rl.adapters.r2egym import (
+            make_fleet_repo_env,
+            r2egym_command_files,
+        )
+
+        logging.info(
+            "[SWEEnv] Acquiring SandboxHandle from SandboxFleet and constructing"
+            " FleetRepoEnv!"
+        )
+        self.handle = self.fleet.acquire(self.entry)
+        self.env = make_fleet_repo_env(
+            self.handle, command_files=r2egym_command_files()
+        )
+      else:
+        # Initialize standard local Docker RepoEnv
+        env_args = EnvArgs(ds=self.entry)
+        self.env = RepoEnv(
+            env_args,
+            backend=self.backend,
+            step_timeout=self.step_timeout,
+            reward_timeout=self.reward_timeout,
+            verbose=self.verbose,
+        )
     else:
       self.env.reset()
+
     self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
@@ -145,12 +186,18 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
+    if hasattr(self, "handle") and self.handle is not None and self.fleet is not None:
+      logging.info("[SWEEnv] Releasing SandboxHandle back to SandboxFleet.")
+      self.fleet.release(self.handle)
+      self.handle = None
+
     if self.env is not None:
       self.env.close()
 
-    if self.delete_image and self.env:
-      docker_image = self.env.runtime.docker_image
-      os.system(f"docker rmi {docker_image}")
+    if self.delete_image and self.env and hasattr(self.env, "runtime"):
+      docker_image = getattr(self.env.runtime, "docker_image", None)
+      if docker_image:
+        os.system(f"docker rmi {docker_image}")
 
   @staticmethod
   def from_dict(extra_info: dict | str) -> "SWEEnv":  # pyrefly: ignore[bad-override]
