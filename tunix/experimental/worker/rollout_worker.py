@@ -34,6 +34,11 @@ class RolloutWorker(abstract_worker.Worker):
     """Returns the unique worker ID."""
     return self.worker_id
 
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self.worker_id, roles=frozenset({"rollout"})
+    )
+
   def initialize(self) -> datatypes.Response:
     return datatypes.Response()
 

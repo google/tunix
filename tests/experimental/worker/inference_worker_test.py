@@ -45,6 +45,7 @@ class _StubCore:
 def _worker(core=None, chunk_size=None):
   return inference_lib.InferenceWorker(
       core if core is not None else _StubCore(),
+      worker_id="test_worker_1",
       pad_id=0,
       eos_id=1,
       model_version=3,
