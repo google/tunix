@@ -285,6 +285,184 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         else None,
     ])
 
+  def _have_actor_mesh(self) -> bool:
+    """Whether a real actor mesh exists (the recompute needs one)."""
+    actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
+    return actor_mesh is not None and not actor_mesh.empty
+
+  def _sampler_trainer_agreement(
+      self,
+      rollout_per_token_logps,
+      trainer_per_token_logps,
+      completion_mask,
+  ):
+    """Sampler-vs-trainer agreement metrics and the TIS weights built from them.
+
+    Shared by the unpacked and packed paths, which differ only in which
+    representation the two logp tensors come from.
+    """
+    metrics = {}
+    sampler_is_weights = None
+    if rollout_per_token_logps is None or trainer_per_token_logps is None:
+      return metrics, sampler_is_weights
+
+    # ``completion_mask`` is the assistant-vs-env mask built upstream (1 for
+    # assistant-generated tokens, 0 for env-injected tokens), and already
+    # correctly scopes the comparison to model-emitted positions. We
+    # deliberately do NOT additionally drop positions where the rollout logprob
+    # equals exactly 0.0 -- that value can legitimately occur for near-certain
+    # tokens and excluding them removes the most consistent positions from the
+    # statistic, inflating the per-position mean.
+    mask = completion_mask.astype(jnp.bool_)
+    mask_f = mask.astype(jnp.float32)
+    mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+    diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
+    diff_mean = float((diff * mask_f).sum() / mask_sum)
+    diff_max = float(jnp.where(mask, diff, 0.0).max())
+    # Probability-space diff is more representative than logp_diff for
+    # confidence agreement: logp can diverge arbitrarily for very
+    # low-probability tokens whose contribution to the ratio is negligible.
+    rp = jnp.exp(rollout_per_token_logps)
+    tp = jnp.exp(trainer_per_token_logps)
+    prob_diff = jnp.abs(rp - tp)
+    prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+    prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
+    rp_flat, tp_flat, mf = rp.reshape(-1), tp.reshape(-1), mask_f.reshape(-1)
+    rp_mean = (rp_flat * mf).sum() / mask_sum
+    tp_mean = (tp_flat * mf).sum() / mask_sum
+    rp_d = (rp_flat - rp_mean) * mf
+    tp_d = (tp_flat - tp_mean) * mf
+    cov = (rp_d * tp_d).sum() / mask_sum
+    rp_var = (rp_d * rp_d).sum() / mask_sum
+    tp_var = (tp_d * tp_d).sum() / mask_sum
+    pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+    metrics.update({
+        "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
+        "sampler_trainer/logp_diff_max": (diff_max, np.max),
+        "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
+        "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
+        "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
+    })
+    logging.info(
+        "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
+        " pearson=%.5f",
+        diff_mean,
+        diff_max,
+        prob_diff_mean,
+        prob_diff_max,
+        pearson,
+    )
+
+    # Truncated importance-sampling weights: per-token trainer-vs-sampler log
+    # ratio, masked to assistant tokens, clamped at the threshold, detached.
+    # The policy loss picks these up via ``train_example.sampler_is_weights``.
+    if self.algo_config.sampler_is == "token":
+      asst_mask_f = completion_mask.astype(jnp.float32)
+      log_ratio = trainer_per_token_logps - rollout_per_token_logps
+      log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
+      sampler_is_weights = jax.lax.stop_gradient(
+          jnp.minimum(jnp.exp(log_ratio), self.algo_config.sampler_is_threshold)
+          * asst_mask_f
+      )
+      is_mask_sum = jnp.maximum(asst_mask_f.sum(), 1.0)
+      is_mean = float((sampler_is_weights * asst_mask_f).sum() / is_mask_sum)
+      is_max = float(jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max())
+      frac_clipped = float(
+          (
+              (jnp.exp(log_ratio) > self.algo_config.sampler_is_threshold)
+              & (asst_mask_f > 0)
+          )
+          .astype(jnp.float32)
+          .sum()
+          / is_mask_sum
+      )
+      metrics.update({
+          "sampler_is/weight_mean": (is_mean, np.mean),
+          "sampler_is/weight_max": (is_max, np.max),
+          "sampler_is/frac_clipped_at_threshold": (frac_clipped, np.mean),
+      })
+      logging.info(
+          "sampler_is: weight_mean=%.4f weight_max=%.4f frac_clipped=%.4f"
+          " (threshold=%.2f)",
+          is_mean,
+          is_max,
+          frac_clipped,
+          self.algo_config.sampler_is_threshold,
+      )
+    return metrics, sampler_is_weights
+
+  def _compute_packed_logps(self, example: TrainExample) -> TrainExample:
+    # pack-first: old/ref logp were deferred in _process_results (left None);
+    # compute them here on the packed buffer via the segment-aware forward.
+    pad_value = self.rl_cluster.rollout.pad_id()
+    eos_value = self.rl_cluster.rollout.eos_id()
+    micro = (
+        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+    )
+    updates = {}
+    if (
+        example.old_per_token_logps is None
+        and not self.algo_config.use_rollout_logps
+    ):
+      updates["old_per_token_logps"] = (
+          self.rl_cluster.get_actor_per_token_logps(
+              prompt_tokens=example.prompt_ids,
+              completion_tokens=example.completion_ids,
+              pad_id=pad_value,
+              eos_id=eos_value,
+              micro_batch_size=micro,
+              segment_ids=example.segment_ids,
+              segment_positions=example.segment_positions,
+          )
+      )
+    if example.ref_per_token_logps is None and (
+        self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
+    ):
+      updates["ref_per_token_logps"] = self.rl_cluster.get_ref_per_token_logps(
+          prompt_tokens=example.prompt_ids,
+          completion_tokens=example.completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=micro,
+          segment_ids=example.segment_ids,
+          segment_positions=example.segment_positions,
+      )
+    # The rollout-logps path defers its trainer recompute here too. Not just
+    # diagnostics: sampler_is="token" consumes it as old_per_token_logps.
+    need_trainer_logps = (
+        self.algo_config.use_rollout_logps
+        and example.old_per_token_logps is not None
+        and (self._have_actor_mesh() or self.algo_config.sampler_is == "token")
+    )
+    if need_trainer_logps:
+      rollout_logps = example.old_per_token_logps
+      trainer_logps = self.rl_cluster.get_actor_per_token_logps(
+          prompt_tokens=example.prompt_ids,
+          completion_tokens=example.completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=micro,
+          segment_ids=example.segment_ids,
+          segment_positions=example.segment_positions,
+      )
+      metrics, sampler_is_weights = self._sampler_trainer_agreement(
+          rollout_logps, trainer_logps, example.completion_mask
+      )
+      if metrics:
+        self.rl_cluster.buffer_metrics_async(
+            metrics,
+            mode=rl_cluster_lib.Mode.TRAIN,
+            step=self.rl_cluster.global_steps,
+        )
+      if sampler_is_weights is not None:
+        updates["sampler_is_weights"] = sampler_is_weights
+      if self.algo_config.sampler_is == "token":
+        updates["old_per_token_logps"] = trainer_logps
+
+    if updates:
+      example = example.replace(**updates)
+    return example
+
   def _process_results(
       self,
       trajectories: List[Any],
@@ -441,6 +619,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # when active: one extra trainer forward pass per training step.
     actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
+    # pack-first: defer old/ref logp to the packed buffer (computed after
+    # pack_sequences in the consumer). Leave the non-packed path untouched.
+    is_packed = (
+        self.rl_cluster.cluster_config.training_config.max_seq_token_per_tpu
+        is not None
+    )
     rollout_per_token_logps = None
     trainer_per_token_logps = None
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
@@ -452,7 +636,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       need_trainer_logps = (
           have_actor_mesh or self.algo_config.sampler_is == "token"
       )
-      if need_trainer_logps:
+      # Deferred to _compute_packed_logps under packing: here it would run on
+      # the unpacked sequences. Consumers below all guard on `is not None`.
+      if need_trainer_logps and not is_packed:
         trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=completion_ids,
@@ -471,6 +657,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       ):
         old_per_token_logps = trainer_per_token_logps
     elif self.algo_config.use_rollout_logps:
+      old_per_token_logps = None
+    elif is_packed:
       old_per_token_logps = None
     else:
       trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
@@ -501,7 +689,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if group_id is not None:
       perf_tags[perf_constants.GROUP_ID] = group_id
 
-    if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0:
+    if (
+        self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
+    ) and not is_packed:
       with self.rl_cluster.perf_v2.span(
           perf_constants.REFERENCE_INFERENCE,
           devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
@@ -608,114 +798,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "rewards/advantage/std": (np.std(advantages), np.mean),
     }
 
-    # Per-token sampler-vs-trainer log-probability agreement diagnostic. When
-    # this diverges from zero, importance ratios used in the policy update
-    # are biased and gradient quality degrades. A mean per-token diff well
-    # under 0.01 nat indicates the trainer and rollout sampler are computing
-    # log-probabilities consistently.
-    if (
-        rollout_per_token_logps is not None
-        and trainer_per_token_logps is not None
-    ):
-      # ``completion_mask`` is the assistant-vs-env mask built upstream
-      # (1 for assistant-generated tokens, 0 for env-injected tokens), and
-      # already correctly scopes the comparison to model-emitted positions.
-      # We deliberately do NOT additionally drop positions where the rollout
-      # logprob equals exactly 0.0 — that value can legitimately occur for
-      # near-certain tokens (e.g. format chars after a structured response)
-      # and excluding them removes the most consistent positions from the
-      # statistic, inflating the per-position mean.
-      mask = completion_mask.astype(jnp.bool_)
-      mask_f = mask.astype(jnp.float32)
-      mask_sum = jnp.maximum(mask_f.sum(), 1.0)
-      diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
-      diff_mean = float((diff * mask_f).sum() / mask_sum)
-      diff_max = float(jnp.where(mask, diff, 0.0).max())
-      # Per-position probability-space diff |exp(rollout) - exp(trainer)|.
-      # More representative than logp_diff for confidence agreement: logp can
-      # diverge arbitrarily for very low-probability tokens while their
-      # contribution to the importance ratio is negligible. prob_diff weights
-      # each position by its actual probability mass.
-      rp = jnp.exp(rollout_per_token_logps)
-      tp = jnp.exp(trainer_per_token_logps)
-      prob_diff = jnp.abs(rp - tp)
-      prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
-      prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
-      # Pearson correlation between exp(logp) at masked positions.
-      rp_flat = rp.reshape(-1)
-      tp_flat = tp.reshape(-1)
-      mf = mask_f.reshape(-1)
-      rp_mean = (rp_flat * mf).sum() / mask_sum
-      tp_mean = (tp_flat * mf).sum() / mask_sum
-      rp_d = (rp_flat - rp_mean) * mf
-      tp_d = (tp_flat - tp_mean) * mf
-      cov = (rp_d * tp_d).sum() / mask_sum
-      rp_var = (rp_d * rp_d).sum() / mask_sum
-      tp_var = (tp_d * tp_d).sum() / mask_sum
-      pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
-      metrics_to_log.update({
-          "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
-          "sampler_trainer/logp_diff_max": (diff_max, np.max),
-          "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
-          "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
-          "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
-      })
-      logging.info(
-          "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
-          " pearson=%.5f",
-          diff_mean,
-          diff_max,
-          prob_diff_mean,
-          prob_diff_max,
-          pearson,
-      )
-    # Truncated importance-sampling (TIS) correction weights.
-    # Compute per-token TIS weights from the trainer-vs-sampler log-ratio,
-    # mask to assistant tokens only (we dampen offending model-emitted
-    # positions, not env tokens), clamp at the configured threshold, and
-    # detach. The policy loss picks these up via
-    # ``train_example.sampler_is_weights``.
-    sampler_is_weights = None
-    if (
-        self.algo_config.sampler_is == "token"
-        and rollout_per_token_logps is not None
-        and trainer_per_token_logps is not None
-    ):
-      asst_mask_f = completion_mask.astype(jnp.float32)
-      log_ratio = trainer_per_token_logps - rollout_per_token_logps
-      log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
-      sampler_is_weights = jax.lax.stop_gradient(
-          jnp.minimum(
-              jnp.exp(log_ratio),
-              self.algo_config.sampler_is_threshold,
-          )
-          * asst_mask_f
-      )
-      mask_sum = jnp.maximum(asst_mask_f.sum(), 1.0)
-      is_mean = float((sampler_is_weights * asst_mask_f).sum() / mask_sum)
-      is_max = float(jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max())
-      frac_clipped = float(
-          (
-              (
-                  (jnp.exp(log_ratio) > self.algo_config.sampler_is_threshold)
-                  & (asst_mask_f > 0)
-              ).astype(jnp.float32)
-          ).sum()
-          / mask_sum
-      )
-      metrics_to_log.update({
-          "sampler_is/weight_mean": (is_mean, np.mean),
-          "sampler_is/weight_max": (is_max, np.max),
-          "sampler_is/frac_clipped_at_threshold": (frac_clipped, np.mean),
-      })
-      logging.info(
-          "sampler_is: weight_mean=%.4f weight_max=%.4f frac_clipped=%.4f"
-          " (threshold=%.2f)",
-          is_mean,
-          is_max,
-          frac_clipped,
-          self.algo_config.sampler_is_threshold,
-      )
+    # None-safe: under packing the trainer logps stay None here and this same
+    # call runs in _compute_packed_logps instead.
+    agreement_metrics, sampler_is_weights = self._sampler_trainer_agreement(
+        rollout_per_token_logps, trainer_per_token_logps, completion_mask
+    )
+    metrics_to_log.update(agreement_metrics)
 
     # Extract time metrics (env_time and reward_time)
     for time_key in ["env_time", "reward_time"]:
