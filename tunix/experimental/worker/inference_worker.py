@@ -120,6 +120,9 @@ class InferenceWorker(abstract_worker.Worker):
     self._state = "STOPPED"
     return datatypes.Response()
 
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=self._state)
+
   def compute_logps(
       self, req: datatypes.LogprobsRequest
   ) -> datatypes.LogprobsResponse:

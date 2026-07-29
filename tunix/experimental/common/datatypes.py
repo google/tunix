@@ -20,6 +20,7 @@ This module centralizes type aliases and dataclasses used for:
 """
 
 import dataclasses
+import time
 from typing import Any
 
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
@@ -81,6 +82,28 @@ class Response:
   request_id: str = ""
   error: ErrorInfo | None = None
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(kw_only=True)
+class HealthReport:
+  """A snapshot of a worker's health and readiness state.
+
+  Attributes:
+    state: The current lifecycle state (e.g., "INITIALIZING", "READY",
+      "FAILED").
+    inflight: Number of active requests currently being processed.
+    queue_depth: Number of pending requests queued by the worker.
+    policy_version: The version of the weights currently loaded.
+    last_error: A string summarizing the most recent error, if any.
+    heartbeat_unix_s: The unix timestamp when this report was generated.
+  """
+
+  state: str
+  inflight: int = 0
+  queue_depth: int = 0
+  policy_version: int = 0
+  last_error: str | None = None
+  heartbeat_unix_s: float = dataclasses.field(default_factory=time.time)
 
 
 @dataclasses.dataclass(kw_only=True)

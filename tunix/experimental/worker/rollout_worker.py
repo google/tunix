@@ -67,6 +67,9 @@ class RolloutWorker(abstract_worker.Worker):
   def resume(self) -> datatypes.Response:
     raise NotImplementedError()
 
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=self._state)
+
   async def generate(
       self,
       requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],

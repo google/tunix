@@ -14,6 +14,8 @@
 
 """Serialization-discipline tests for the common wire DTOs."""
 
+import time
+
 from absl.testing import absltest
 import cloudpickle
 import numpy as np
@@ -268,6 +270,13 @@ class WireSerializationTest(absltest.TestCase):
           token_ids=np.array([1, 2, 3]),
           logprobs=np.array([-0.1, -0.2]),
       )
+
+  def test_health_report_defaults_heartbeat_unix_s_to_current_time(self):
+    before = time.time()
+    report = datatypes.HealthReport(state="READY")
+    after = time.time()
+    self.assertGreaterEqual(report.heartbeat_unix_s, before)
+    self.assertLessEqual(report.heartbeat_unix_s, after)
 
 
 if __name__ == "__main__":

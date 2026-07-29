@@ -52,6 +52,11 @@ class FakeWorkerTest(absltest.TestCase):
     self.assertEqual(worker.state, "STOPPED")
     self.assertEqual(worker.call_counts["stop"], 1)
 
+  def test_heartbeat_reports_current_state(self):
+    worker = fake_worker.FakeWorker("test_id", {"trainer"})
+    worker.state = "COMPILING"
+    self.assertEqual(worker.heartbeat().state, "COMPILING")
+
 
 if __name__ == "__main__":
   absltest.main()

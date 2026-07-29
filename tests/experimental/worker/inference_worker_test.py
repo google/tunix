@@ -162,6 +162,12 @@ class InferenceWorkerTest(absltest.TestCase):
         restored.per_token_logps, result.per_token_logps
     )
 
+  def test_heartbeat_reports_current_state(self):
+    worker = _worker()
+    worker._state = "COMPILING"
+    self.assertEqual(worker.heartbeat().state, "COMPILING")
+
+
 
 if __name__ == "__main__":
   absltest.main()
