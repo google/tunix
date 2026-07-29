@@ -29,6 +29,7 @@ class RolloutWorker(abstract_worker.Worker):
   def __init__(self, worker_id: str, **kwargs):
     del kwargs
     self.worker_id = worker_id
+    self._state = "READY"
 
   def get_worker_id(self) -> str:
     """Returns the unique worker ID."""
@@ -40,15 +41,24 @@ class RolloutWorker(abstract_worker.Worker):
     )
 
   def initialize(self) -> datatypes.Response:
-    return datatypes.Response()
+    self._state = "INITIALIZING"
+    try:
+      return datatypes.Response()
+    finally:
+      self._state = "READY"
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
-    return datatypes.Response()
+    self._state = "COMPILING"
+    try:
+      return datatypes.Response()
+    finally:
+      self._state = "READY"
 
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
   def stop(self) -> datatypes.Response:
+    self._state = "STOPPED"
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
@@ -107,7 +117,12 @@ class RolloutWorker(abstract_worker.Worker):
     Args:
       metadata: Any metadata required to prepare the sync (e.g. sync IDs).
     """
-    raise NotImplementedError()
+    self._state = "SYNCING"
+    del metadata
+    try:
+      raise NotImplementedError()
+    finally:
+      self._state = "READY"
 
   def sync_weights(self, metadata: Any) -> int:
     """Synchronizes the worker's internal model weights.
@@ -118,4 +133,9 @@ class RolloutWorker(abstract_worker.Worker):
     Returns:
       The version identifier (policy version) of the newly synced weights.
     """
-    raise NotImplementedError()
+    self._state = "SYNCING"
+    del metadata
+    try:
+      raise NotImplementedError()
+    finally:
+      self._state = "READY"
