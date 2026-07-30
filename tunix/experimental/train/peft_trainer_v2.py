@@ -204,22 +204,51 @@ class GradientAccumulator(nnx.Module):
     sizes.
   """
 
-  def __init__(self, model: nnx.Module, wrt: type[nnx.Variable]):
-    state = nnx.state(model, wrt)
-    self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+  def __init__(
+      self,
+      model: nnx.Module,
+      wrt: type[nnx.Variable],
+      *,
+      allocate: bool = True,
+  ):
+    # Static (non-array) attribute: decides whether the buffer is a long-lived
+    # accumulation target that must be zeroed between updates, or a scratch slot
+    # that `set()` overwrites wholesale and `reset()` can simply drop.
+    self.persistent = allocate
+    if allocate:
+      state = nnx.state(model, wrt)
+      self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    else:
+      # When every update consumes exactly one micro-batch, `set()` overwrites
+      # the whole tree before anything reads it, so the initial zeros are dead
+      # on arrival. Skipping them avoids writing a full copy of the parameter
+      # tree (~3.5 GiB per device for gemma4-e2b at 12 layers in fp32).
+      self.grads = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
+
+  @property
+  def allocated(self) -> bool:
+    """Whether a parameter-sized gradient buffer is currently held."""
+    return bool(jax.tree_util.tree_leaves(self.grads))
 
   def set(self, grads: Any, denom: jax.Array | None = None):
     def _set(acc_var, g_var):
       g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
       acc_var.set_value(g)
 
-    jax.tree_util.tree_map(
-        _set,
-        self.grads,
-        grads,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
-    )
+    if self.allocated:
+      jax.tree_util.tree_map(
+          _set,
+          self.grads,
+          grads,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+    else:
+      # No buffer held: either it was never allocated, or a non-persistent
+      # `reset()` released it. Adopt the incoming tree rather than allocating a
+      # zero tree first and immediately overwriting it. `set()` replaces the
+      # whole tree by definition, so nothing is lost.
+      self.grads = nnx.data(grads)
     if denom is None:
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
     else:
@@ -257,14 +286,30 @@ class GradientAccumulator(nnx.Module):
     )
 
   def reset(self):
-    def _zero_in_place(v):
-      v.set_value(jnp.zeros_like(v[...]))
+    """Clears the accumulator, either by zeroing the buffer or by dropping it.
 
-    jax.tree_util.tree_map(
-        _zero_in_place,
-        self.grads,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
-    )
+    Which one is right depends on how the buffer is used, so the choice is made
+    from `self.persistent` rather than at the call site:
+
+    * persistent (accumulating across micro-steps): the next `add()` reads the
+      current value, so the buffer must survive and be zeroed in place.
+    * non-persistent (one micro-batch per update): the next `set()` overwrites
+      the whole tree, so zeroing would write a full parameter-sized copy that is
+      never read. Drop the reference instead and let the memory go; `set()`
+      re-adopts the incoming gradients.
+    """
+    if self.persistent:
+
+      def _zero_in_place(v):
+        v.set_value(jnp.zeros_like(v[...]))
+
+      jax.tree_util.tree_map(
+          _zero_in_place,
+          self.grads,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+    else:
+      self.grads = nnx.data({})
     self.denom.set_value(jnp.zeros_like(self.denom[...]))
 
 
@@ -344,7 +389,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # the optimizer update function branch (which is float32 due to
     # `optax.inject_hyperparams`).
     _promote_opt_state_floats_to_float32(self.optimizer)
-    self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
+    self.grad_accumulator = GradientAccumulator(
+        self.model, wrt_target, allocate=not self._is_single_microstep()
+    )
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -471,13 +518,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """True when each update consumes exactly one `fwd_bwd` micro-batch.
 
     In that regime `_fwd_bwd_step` overwrites the accumulator with `set()` and
-    `_update_step` reads `.grads` directly, so the accumulator never has to be
-    zeroed -- calling `reset()` would allocate and write a full zero copy of the
-    gradient tree that the next `set()` discards unread. Outside that regime
-    `add()`/`get()` are used and `reset()` is required for correctness.
+    `_update_step` reads `.grads` directly, so the buffer is pure hand-off
+    storage: it never needs pre-zeroing at construction, and `reset()` drops it
+    rather than writing a zero tree. Outside it, `add()`/`get()` accumulate
+    across micro-steps and the buffer must persist and be zeroed.
 
-    Keep this as the single source of truth: the predicate is consulted from
-    three places that must agree.
+    Keep this as the single source of truth: the predicate decides the
+    accumulator's `allocate`/`persistent` mode and the branch taken in both step
+    bodies, which must agree.
     """
     return (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
@@ -499,7 +547,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     Returns:
       A tuple containing the loss, and auxiliary data (or None if has_aux is
-      False).
+      False). Gradients are left in `grad_accumulator`.
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -594,13 +642,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # print(f"DEBUG v2: Grad Norm in update_step: {jax.device_get(norm)}")
     # jax.debug.print("DEBUG v2: Norm in update_step: {x}", x=norm)
     optimizer.update(model, acc_grads)
-    if not self._is_single_microstep():
-      # Only accumulating runs need the zeroing. Doing it unconditionally costs a
-      # full zero copy of the gradient tree per step -- and because its lifetime
-      # overlaps `acc_grads` (still being read by `optimizer.update`) XLA cannot
-      # alias it onto the donated accumulator buffer, so the steady state has to
-      # hold two accumulators at once.
-      grad_accumulator.reset()
+    # Unconditional: `reset()` itself decides between zeroing the buffer and
+    # dropping it, based on whether the accumulator is persistent. Zeroing an
+    # overwrite-only buffer would write a full parameter-sized copy per step
+    # whose lifetime overlaps `acc_grads` (still being read by
+    # `optimizer.update`), so XLA could not even alias it onto the donated
+    # input and the steady state would carry two gradient trees.
+    grad_accumulator.reset()
     return norm
 
   def _eval_step(
@@ -665,11 +713,15 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-    # Partition Gradients similar to the model
-    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
-    self.grad_accumulator.grads = jax.tree.map(
-        _shard, self.grad_accumulator.grads, grad_pspecs
-    )
+    # Partition Gradients similar to the model. Skipped when the accumulator was
+    # not allocated: there is nothing to shard, and the gradients that flow
+    # `fwd_bwd` -> `update` are jit outputs whose sharding XLA derives from the
+    # parameters.
+    if self.grad_accumulator.allocated:
+      grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
+      self.grad_accumulator.grads = jax.tree.map(
+          _shard, self.grad_accumulator.grads, grad_pspecs
+      )
 
     # Denominator is a scalar — replicate across all devices
     self.grad_accumulator.denom[...] = jax.device_put(
@@ -695,14 +747,25 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     update_step = self.create_update_step_fn()
     eval_step = self.create_eval_step_fn()
     if skip_jit:
-      return fwd_bwd_step, update_step, eval_step
+      # Bind the same leading arguments the jitted path binds, so callers such
+      # as `fwd_bwd()`/`update()` can invoke both paths identically.
+      return (
+          functools.partial(fwd_bwd_step, self.model, self.grad_accumulator),
+          functools.partial(
+              update_step, self.model, self.optimizer, self.grad_accumulator
+          ),
+          functools.partial(eval_step, self.model),
+      )
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
       self._jitted_fwd_bwd_step_fn = nnx.jit(
           fwd_bwd_step, donate_argnames=("grad_accumulator",)
-
       )
+      # Donating `grad_accumulator` is sound again now that `reset()` always
+      # writes it: the donated input has a matching output to alias onto. In the
+      # non-persistent case that output is the empty tree, i.e. the buffer is
+      # released rather than rewritten.
       self._jitted_update_step_fn = nnx.jit(
           update_step, donate_argnames=("optimizer", "grad_accumulator")
       )

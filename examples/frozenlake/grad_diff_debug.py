@@ -4,6 +4,12 @@ from typing import Any, List
 import numpy as np
 import jax
 import gc
+import warnings
+
+# JAX reports failed buffer donation as "Some donated buffers were not usable",
+# once per location. Python dedupes repeated warnings by default, so a warning
+# raised during the first step would be invisible if you only skim later output.
+warnings.simplefilter("always")
 
 
 import os
@@ -167,6 +173,39 @@ def _restore_to_device(host_value, sharding):
   return host_value if sharding is None else jax.device_put(host_value, sharding)
 
 
+def report_memory_analysis(tag, partial_fn, *extra_args):
+  """Prints XLA's own memory accounting for an already-jitted step function.
+
+  `alias_size_in_bytes` is the decisive number for the donation question: it is
+  the volume of input buffers XLA actually managed to alias onto outputs. If a
+  step declares `donate_argnames` for a gradient-tree-sized argument and this
+  comes back ~0, donation silently degraded into a copy and the peak carries two
+  trees instead of one.
+
+  The argument/output/temp split also maps onto the profiler's heap-vs-stack
+  view: arguments and outputs are the heap-resident part, temp is the scratch
+  that XLA can overlap with activations.
+
+  Best effort only -- lowering a jitted nnx function is version-sensitive, and a
+  failure here must not take the benchmark down with it.
+  """
+  try:
+    jitted = getattr(partial_fn, "func", partial_fn)
+    bound = getattr(partial_fn, "args", ())
+    compiled = jitted.lower(*bound, *extra_args).compile()
+    m = compiled.memory_analysis()
+    g = 2**30
+    print(
+        f"[mem] {tag}: "
+        f"args={m.argument_size_in_bytes / g:.2f} "
+        f"out={m.output_size_in_bytes / g:.2f} "
+        f"temp={m.temp_size_in_bytes / g:.2f} "
+        f"alias={m.alias_size_in_bytes / g:.2f} GiB"
+    )
+  except Exception as e:  # pylint: disable=broad-except
+    print(f"[mem] {tag}: memory_analysis unavailable ({type(e).__name__}: {e})")
+
+
 def _live_device_gib():
   # nbytes is the *global* (all-shard) size, so this is the unsharded-equivalent
   # total, not the per-device figure the profiler reports. Divide by the number
@@ -198,6 +237,14 @@ with mesh:
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
     trainer_v1.train(dataset, skip_jit=False)
     jax.effects_barrier()
+
+  # Executables exist only after the first step has compiled them.
+  report_memory_analysis(
+      "v1 train_step",
+      trainer_v1._jitted_train_step_fn,  # pylint: disable=protected-access
+      gen_model_input_fn(dataset[0]),
+      jnp.array(True, dtype=jnp.bool_),
+  )
 
   model_state_v1 = nnx.state(gemma)
   opt_state_v1 = nnx.state(trainer_v1.optimizer)
@@ -250,25 +297,44 @@ with mesh:
   # # reach for a larger atol instead, which cannot express this bound.
   # _MAX_ULP = 0
 
-  # def compare_grads(tag):
-  #   ck1 = tc.tree_bit_checksum(trainer_v1.grad_accumulator.grads)
-  #   ck2 = tc.tree_bit_checksum(trainer_v2.grad_accumulator.grads)
+  # NOTE: v2 still parks gradients in `grad_accumulator.grads`, but only between
+  # fwd_bwd and update -- a non-persistent `reset()` drops them at the end of
+  # update, so read them BEFORE calling update. v1's depth-1 fast path never
+  # touches its accumulator at all, so it has no equivalent hook: to compare
+  # gradients again, set gradient_accumulation_steps=2 so both trainers take the
+  # accumulating path.
+  # def compare_grads(tag, g1, g2):
+  #   ck1, ck2 = tc.tree_bit_checksum(g1), tc.tree_bit_checksum(g2)
   #   print(f"compare grads between v1 and v2.{tag}: "
   #         f"XOR v1={ck1} v2={ck2} {'identical' if ck1 == ck2 else 'DIFFER'}")
   #   jax.tree.map_with_path(
-  #       lambda path, g1, g2: tc.assert_close_ulp(path, g1, g2, max_ulp=_MAX_ULP),
-  #       trainer_v1.grad_accumulator.grads,
-  #       trainer_v2.grad_accumulator.grads,
+  #       lambda path, a, b: tc.assert_close_ulp(path, a, b, max_ulp=_MAX_ULP),
+  #       g1, g2,
   #   )
 
-  # compare_grads("fwd_bwd")
+  # compare_grads("fwd_bwd", v1_grads, trainer_v2.grad_accumulator.grads)
   # trainer_v2.update()
   # jax.effects_barrier()
-  # compare_grads("update")
   
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
     trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
     jax.effects_barrier()
+
+  # In the single-microstep regime the accumulator holds gradients only between
+  # fwd_bwd and update: nothing is pre-allocated, and update's `reset()` drops
+  # the buffer instead of zeroing it. So fwd_bwd's `args` should be ~one
+  # parameter tree (the model; the accumulator arrives empty) and update's
+  # `alias` should be ~one parameter tree (the donated accumulator reused for
+  # the updated parameters). An `alias` of ~0 means donation degraded to a copy.
+  report_memory_analysis(
+      "v2 fwd_bwd",
+      trainer_v2._jitted_fwd_bwd_step_fn,  # pylint: disable=protected-access
+      gen_model_input_fn(dataset[0]),
+  )
+  report_memory_analysis(
+      "v2 update",
+      trainer_v2._jitted_update_step_fn,  # pylint: disable=protected-access
+  )
 
   model_state_v2 = nnx.state(gemma_v2)
   opt_state_v2 = nnx.state(trainer_v2.optimizer)

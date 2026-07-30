@@ -1446,15 +1446,29 @@ class Depth1FastPathTest(parameterized.TestCase):
         _unwrap(nnx.state(model_b, nnx.Param)),
     )
 
-  def test_depth1_accumulator_untouched(self):
-    """Depth-1 training must not write the accumulator (keeps shardings stable)."""
+  def test_depth1_accumulator_not_allocated(self):
+    """Depth-1 training must not allocate the accumulator at all.
+
+    The fast path applies `grads` straight to the optimizer, so a
+    parameter-sized accumulator buffer would sit in HBM for the whole run
+    without ever being read. Asserting "allocated but still zero" would pass
+    vacuously once the allocation is skipped, so assert the absence instead.
+    """
     trainer = self._make_trainer(accum_steps=None)
+    self.assertFalse(trainer.grad_accumulator.allocated)
+    self.assertEmpty(jax.tree_util.tree_leaves(trainer.grad_accumulator.grads))
     trainer.train(dummy_datasets(batch_size=4))
+    self.assertFalse(trainer.grad_accumulator.allocated)
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
+
+  def test_depth_gt1_accumulator_is_allocated(self):
+    """Outside the fast path the buffer is still required."""
+    trainer = self._make_trainer(accum_steps=2)
+    self.assertTrue(trainer.grad_accumulator.allocated)
     jax.tree_util.tree_map(
         lambda v: np.testing.assert_array_equal(v, jnp.zeros_like(v)),
         _unwrap(trainer.grad_accumulator.grads),
     )
-    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
 
   def test_depth1_jaxpr_has_no_cond(self):
     """Sentinel: the depth-1 step jaxpr must contain no `cond` primitive."""
