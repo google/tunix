@@ -100,10 +100,9 @@ class CacheConfig:
   num_kv_heads: int
   head_dim: int
 
-  max_seq_len: int = 1028
+  max_seq_len: int = 1024
   max_num_pages: int = 2048 
   page_size: int = 8
-  num_shards: int = 1
   window_size: int | None = None
 
   kv_packing: int = 2
@@ -123,17 +122,13 @@ class CacheConfig:
     window_upper_bound = cdiv(self.window_size, self.page_size)
     return min(upper_bound, window_upper_bound + 1)
 
-  @property
-  def max_num_pages_per_seq_per_shard(self) -> int:
-    return cdiv(self.max_num_pages_per_seq, self.num_shards)
-
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PageManager:
   """Page state and data blocks for a batch of sequences."""
   pages: dict[str, jax.Array]
-  page_indices: jax.Array  # i32[batch_size, max_num_pages_per_seq_per_shard]
-  available_page_indices: jax.Array  # i32[total_num_pages_per_shard]
+  page_indices: jax.Array  # i32[batch_size, max_num_pages_per_seq]
+  available_page_indices: jax.Array  # i32[total_num_pages]
   num_available_pages: jax.Array  # i32 scalar
   seq_lens: jax.Array # i32[batch_size]
   
@@ -143,13 +138,15 @@ class PageManager:
   max_seq_len: int = dataclasses.field(
       metadata={'static': True}
   )
+  """
   num_shards: int = dataclasses.field(
       metadata={'static': True}
   )
+  """
   window_size: int | None = dataclasses.field(
       metadata={'static': True}
   )
-  max_num_pages_per_seq_per_shard: int = dataclasses.field(
+  max_num_pages_per_seq: int = dataclasses.field(
       metadata={'static': True}
   )
   
@@ -158,7 +155,7 @@ class PageManager:
     return self.seq_lens.shape[0]
 
   @property
-  def total_num_pages_per_shard(self) -> int:
+  def total_num_pages(self) -> int:
     return self.available_page_indices.shape[0]
 
   @property
@@ -170,23 +167,22 @@ class PageManager:
     return self.seq_lens
 
   @functools.cached_property
-  def num_local_pages(self) -> jax.Array:
-    return cdiv(cdiv(self.seq_lens, self.page_size), self.num_shards)
+  def num_pages(self) -> jax.Array:
+    return cdiv(self.seq_lens, self.page_size)
 
   @jax.named_call
   def allocate(self, q_lens: jax.Array) -> "PageManager":
     """Allocates pages for new tokens."""
-    total_pages_required = cdiv(self.seq_lens + q_lens, self.page_size)
-    local_pages_required = cdiv(total_pages_required, self.num_shards)
+    pages_required = cdiv(self.seq_lens + q_lens, self.page_size)
 
-    num_pages_to_allocate = local_pages_required - self.num_local_pages
+    num_pages_to_allocate = pages_required - self.num_pages
 
     page_indices_to_allocate = RaggedArray(
         data=self.available_page_indices, lens=num_pages_to_allocate
     )
     page_indices_rows = page_indices_to_allocate.row_idxs
     page_indices_cols = (
-        self.num_local_pages[page_indices_rows]
+        self.num_pages[page_indices_rows]
         + page_indices_to_allocate.intra_offsets
     )
 
@@ -215,14 +211,14 @@ class PageManager:
     updated_lens = jnp.where(should_release, 0, self.seq_lens)
 
     page_indices_to_release = RaggedArray(
-        data=jax.lax.empty((self.total_num_pages_per_shard,), dtype=jnp.int32),
-        lens=jnp.where(should_release, self.num_local_pages, 0),
+        data=jax.lax.empty((self.total_num_pages,), dtype=jnp.int32),
+        lens=jnp.where(should_release, self.num_pages, 0),
     )
     page_indices_irows = page_indices_to_release.row_idxs
     page_indices_icols = page_indices_to_release.intra_offsets
 
     updated_available_page_indices = self.available_page_indices.at[
-        jnp.arange(self.total_num_pages_per_shard) + self.num_available_pages
+        jnp.arange(self.total_num_pages) + self.num_available_pages
     ].set(self.page_indices[page_indices_irows, page_indices_icols])
 
     updated_num_available_pages = (
@@ -241,30 +237,28 @@ class PageManager:
     if self.window_size is None:
       return self
 
-    num_pages_to_release_per_shard = (
+    num_pages_to_release = (
         jnp.maximum(self.seq_lens - self.window_size, 0)
         // self.page_size
-        // self.num_shards
     )
     page_indices_irows = jnp.arange(self.batch_size)[:, None]
     page_indices_icols = (
-        jnp.arange(self.max_num_pages_per_seq_per_shard)
-        + num_pages_to_release_per_shard[:, None]
+        jnp.arange(self.max_num_pages_per_seq)
+        + num_pages_to_release[:, None]
     )
     updated_page_indices = self.page_indices[
         page_indices_irows, page_indices_icols
     ]
     release_helper = RaggedArray(
-        data=jax.lax.empty((self.total_num_pages_per_shard,), dtype=jnp.int32),
-        lens=num_pages_to_release_per_shard,
+        data=jax.lax.empty((self.total_num_pages,), dtype=jnp.int32),
+        lens=num_pages_to_release,
     )
     released_page_indices = self.page_indices[
         release_helper.row_idxs, release_helper.intra_offsets
     ]
     updated_available_page_indices = self.available_page_indices.at[
-        jnp.arange(self.total_num_pages_per_shard) + self.num_available_pages
+        jnp.arange(self.total_num_pages) + self.num_available_pages
     ].set(released_page_indices, mode='drop')
-    num_pages_to_release = num_pages_to_release_per_shard * self.num_shards
     return dataclasses.replace(
         self,
         page_indices=updated_page_indices,
@@ -282,7 +276,7 @@ class PageManager:
     seq_idxs = token_ragged.row_idxs
     token_offsets = token_ragged.intra_offsets
 
-    local_page_cols = (token_offsets // self.page_size) // self.num_shards
+    local_page_cols = (token_offsets // self.page_size) 
     page_offsets = token_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
@@ -298,7 +292,7 @@ class PageManager:
     pm = self.allocate(jnp.ones(self.batch_size, dtype=jnp.int32))
 
     token_offsets = pm.seq_lens - 1  # position of new token
-    local_page_cols = (token_offsets // pm.page_size) // pm.num_shards
+    local_page_cols = (token_offsets // pm.page_size)
     page_offsets = token_offsets % pm.page_size
     seq_idxs = jnp.arange(pm.batch_size)
     phys_page_ids = pm.page_indices[seq_idxs, local_page_cols]
@@ -309,7 +303,7 @@ class PageManager:
   def get_token_at(self, pos: int | jax.Array, key: str = "token_buffer") -> jax.Array:
     """Directly looks up token IDs at sequence position `pos` using page_indices and modulo."""
     seq_idxs = jnp.arange(self.batch_size)
-    local_page_col = (pos // self.page_size) // self.num_shards
+    local_page_col = (pos // self.page_size) 
     page_offset = pos % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_col]
     return self.pages[key][phys_page_ids, page_offset]
@@ -319,10 +313,10 @@ class PageManager:
     seq_grid = jnp.arange(self.batch_size)[:, None]
     pos_grid = start + jnp.arange(length)[None, :]
 
-    local_page_cols = (pos_grid // self.page_size) // self.num_shards
+    local_page_cols = (pos_grid // self.page_size) 
     page_offsets = pos_grid % self.page_size
     safe_cols = jnp.clip(
-        local_page_cols, 0, self.max_num_pages_per_seq_per_shard - 1
+        local_page_cols, 0, self.max_num_pages_per_seq - 1
     )
     phys_page_ids = self.page_indices[seq_grid, safe_cols]
     return self.pages[key][phys_page_ids, page_offsets]
@@ -340,7 +334,7 @@ class PageManager:
     seq_idxs = token_ragged.row_idxs
     token_offsets = token_ragged.intra_offsets
 
-    local_page_cols = (token_offsets // self.page_size) // self.num_shards
+    local_page_cols = (token_offsets // self.page_size)
     page_offsets = token_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
@@ -494,12 +488,12 @@ def _init_page_manager(
     pad_id: int,
     dtype: jnp.dtype,
 ) -> PageManager:
-  num_pages_per_shard = cache_config.max_num_pages // cache_config.num_shards
+  num_pages = cache_config.max_num_pages
   page_indices = jnp.zeros(
-      (batch_size, cache_config.max_num_pages_per_seq_per_shard), dtype=jnp.int32
+      (batch_size, cache_config.max_num_pages_per_seq), dtype=jnp.int32
   )
-  available_page_indices = jnp.arange(num_pages_per_shard, dtype=jnp.int32)
-  num_available_pages = jnp.array(num_pages_per_shard, dtype=jnp.int32)
+  available_page_indices = jnp.arange(num_pages, dtype=jnp.int32)
+  num_available_pages = jnp.array(num_pages, dtype=jnp.int32)
   
   blocks = {}
 
@@ -530,9 +524,8 @@ def _init_page_manager(
       seq_lens=jnp.zeros(batch_size, dtype=jnp.int32),
       page_size=cache_config.page_size,
       max_seq_len=cache_config.max_seq_len,
-      num_shards=cache_config.num_shards,
       window_size=cache_config.window_size,
-      max_num_pages_per_seq_per_shard=cache_config.max_num_pages_per_seq_per_shard,
+      max_num_pages_per_seq=cache_config.max_num_pages_per_seq,
   )
 
 
@@ -545,14 +538,18 @@ def _init_cache(
     dtype: jnp.dtype,
 ) -> Cache:
   """Create KV cache for the transformer."""
+  max_seq_len=1024
+  page_size=8
+  num_pages=0.6 * max_seq_len / page_size * batch_size
+
   config = CacheConfig(
       cache_size=cache_size,
       num_layers=n_layers,
       num_kv_heads=num_kv_heads,
       head_dim=head_dim,
-      num_shards=2,
-      page_size=8,
-      max_seq_len=max(cache_size, 1028),
+      max_num_pages=num_pages,
+      page_size=page_size,
+      max_seq_len=max_seq_len,
   )
   return _init_page_manager(config, batch_size, 0, dtype)
 
