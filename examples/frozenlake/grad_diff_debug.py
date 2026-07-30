@@ -107,9 +107,8 @@ def create_sharded_model(config, rngs, mesh):
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
 config.num_layers = 12
-# Findings so far (gemma4_e2b, num_layers=12; full logs at the bottom of this
-# file). "matched" below means bit-for-bit identical, verified via the
-# whole-tree XOR checksum, not via grad_norm -- see the caveat further down.
+# Findings so far (gemma4_e2b, num_layers=12; full logs at the bottom of this file). 
+# "matched" below means bit-for-bit identical, verified via the whole-tree XOR checksum, not via grad_norm -- see the caveat further down.
 #
 #   fp32, excess_precision=false, 2 dev : loss + grad_norm + grads all matched
 #   fp32, excess_precision=true,  2 dev : loss + grad_norm + grads all matched
@@ -122,15 +121,11 @@ config.num_layers = 12
 #                                         divergence is independent of the
 #                                         device count
 #
-# Reading: v1 and v2 are algorithmically equivalent -- fp32 is bit-identical
-# unconditionally. In bf16, --xla_allow_excess_precision=false is both
-# necessary and sufficient for bit-identity. With excess precision allowed
-# (the default) XLA may keep intermediates in fp32 and skip convert(bf16)
-# nodes; how much it keeps depends on fusion, and v1 compiles fwd+bwd+
-# optimizer.update into one module while v2 splits it into two. Different
-# module => different fusion => different rounding points. That is a legal XLA
-# freedom, not a v2 bug, so bf16 without the flag can only be compared to a
-# ULP tolerance.
+# v1 and v2 are algorithmically equivalent -- fp32 is bit-identical unconditionally. 
+# In bf16, --xla_allow_excess_precision=false is both necessary and sufficient for bit-identity.
+# With excess precision allowed (the default) XLA may keep intermediates in fp32 and skip convert(bf16) nodes; how much it keeps depends on fusion,
+# Different module => different fusion => different rounding points.
+# So bf16 without the flag can only be compared to a ULP tolerance.
 #
 # CAVEAT 1: grad_norm is not a valid pass/fail gate. optax.global_norm sums
 # ~4e8 squares in fp32, and XLA picks a different reduction tree per module,
