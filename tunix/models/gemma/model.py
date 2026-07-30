@@ -234,13 +234,11 @@ def shard(x: jnp.ndarray, s: Tuple[str | None, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
     return x
-
+  
+  # Handle the cases where x is missing the batch dimension 
   if x.ndim < len(s):
-    non_none = [sp for sp in s if sp is not None]
-    if len(non_none) == x.ndim:
-      s = tuple(non_none)
-    else:
-      s = s[:x.ndim]
+    s = s[-x.ndim:]
+  
   return jax.lax.with_sharding_constraint(
       x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
   )
@@ -328,8 +326,8 @@ class Einsum(nnx.Module):
     in_sub, out_sub = einsum_str.split('->')
     op0_sub = in_sub.split(',')[0]
     
-    # If operand 0 has 1 fewer dimension (unpadded 1D token stream), adapt subscripts
-    if x.ndim == len(op0_sub) - 1 and op0_sub.startswith('B'):
+    # Handle Missing B dim 
+    if x.ndim < len(op0_sub):
       in_sub = (
           in_sub.replace('BTD', 'TD')
           .replace('BSD', 'SD')
@@ -345,40 +343,34 @@ class Einsum(nnx.Module):
     return jnp.einsum(einsum_str, x, self.w.value)
 
 
-
-
-
-
 @jax.named_scope('rope')
 def apply_rope(
-    inputs: jaxtyping.Array,  # [B, L]
-    positions: jaxtyping.Array,  # [B, L]
+    inputs: jaxtyping.Array,  # [B, L] or [N]
+    positions: jaxtyping.Array,  # [B, L] or [N]
     head_dim: int,
     max_wavelength: int = 10_000,
 ) -> jaxtyping.Array:
   """Applies RoPE."""
-  if inputs.ndim == 3 and positions.ndim == 2:
-    positions = positions.reshape(-1)
-
   fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
   timescale = max_wavelength**fraction
   
-  """
-  sinusoid_inp = (
-      positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
-  )
-  sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
-  """
-
-  if positions.ndim == 1:                                                                                                          
-    sinusoid_inp = positions[:, None] / timescale[None, :]                                                                                                         
-    sinusoid_inp = sinusoid_inp[:, None, :]
+  # Handle missing B dim
+  # TODO: Handle this with broadcasting?
+  if positions.ndim == 1:
+    # (i,j) = (p_i / t_j) 
+    sinusoid_inp = positions[:, jnp.newaxis] / timescale[jnp.newaxis, :] # (N, 1) / (N, D) -> (N, D)
+    # (i,0,k) = (p_i/t_k)
+    sinusoid_inp = sinusoid_inp[:, jnp.newaxis, :] # (N, D) -> (N, 1, D)
   else:
+    # (i,j,k) = p_{i,j} / t_k
     sinusoid_inp = (
       positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
     )
+    # (i,j,0,x) = p_{i,j} / t_x
     sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
-
+  
+  # (i,0,k) = sin(p_i/t_k)
+  # or (i,j,0,x) = sin(p_{i,j} / t_x)
   sin = jnp.sin(sinusoid_inp)
   cos = jnp.cos(sinusoid_inp)
 
