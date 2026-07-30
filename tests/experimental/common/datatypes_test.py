@@ -21,6 +21,9 @@ import cloudpickle
 import numpy as np
 from tunix.experimental.common import datatypes
 
+WorkerState = datatypes.WorkerState
+
+
 
 def _sample_response() -> datatypes.RolloutResponse:
   return datatypes.RolloutResponse(
@@ -273,7 +276,7 @@ class WireSerializationTest(absltest.TestCase):
 
   def test_health_report_defaults_heartbeat_unix_s_to_current_time(self):
     before = time.time()
-    report = datatypes.HealthReport(state="READY")
+    report = datatypes.HealthReport(state=WorkerState.READY)
     after = time.time()
     self.assertGreaterEqual(report.heartbeat_unix_s, before)
     self.assertLessEqual(report.heartbeat_unix_s, after)

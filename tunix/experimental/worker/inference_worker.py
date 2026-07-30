@@ -30,6 +30,8 @@ from tunix.experimental.common import batch_utils
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 
+WorkerState = datatypes.WorkerState
+
 
 class ReferenceScoringCore(Protocol):
   """Structural type of the frozen inference core an InferenceWorker wraps."""
@@ -91,7 +93,6 @@ class InferenceWorker(abstract_worker.Worker):
     self._eos_id = eos_id
     self._model_version = model_version
     self._chunk_size = chunk_size
-    self._state = "READY"
 
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
@@ -99,29 +100,29 @@ class InferenceWorker(abstract_worker.Worker):
     )
 
   def initialize(self) -> datatypes.Response:
-    self._state = "INITIALIZING"
+    self.state = WorkerState.INITIALIZING
     try:
       return datatypes.Response()
     finally:
-      self._state = "READY"
+      self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
     del dummy_data
-    self._state = "COMPILING"
+    self.state = WorkerState.COMPILING
     try:
       return datatypes.Response()
     finally:
-      self._state = "READY"
+      self.state = WorkerState.READY
 
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
   def stop(self) -> datatypes.Response:
-    self._state = "STOPPED"
+    self.state = WorkerState.STOPPED
     return datatypes.Response()
 
   def heartbeat(self) -> datatypes.HealthReport:
-    return datatypes.HealthReport(state=self._state)
+    return datatypes.HealthReport(state=self.state)
 
   def compute_logps(
       self, req: datatypes.LogprobsRequest

@@ -15,9 +15,12 @@
 """Tests for the HealthMonitor per-state deadline policy."""
 
 from absl.testing import absltest
+from tunix.experimental.common import datatypes
 from tunix.experimental.worker import mock_worker
 from tunix.tunix.experimental.orchestrator import health_monitor
 from tunix.tunix.experimental.orchestrator import worker_registry
+
+WorkerState = datatypes.WorkerState
 
 
 class _FakeClock:
@@ -38,19 +41,19 @@ class HealthMonitorTest(absltest.TestCase):
 
   def test_poll_returns_current_reports(self):
     worker = mock_worker.MockWorker("w0", roles={"trainer"})
-    worker.state = "READY"
+    worker._state = WorkerState.READY
     monitor = health_monitor.HealthMonitor(self._registry(worker))
     reports = monitor.poll()
-    self.assertEqual(reports["w0"].state, "READY")
+    self.assertEqual(reports["w0"].state, WorkerState.READY)
     self.assertEmpty(monitor.overdue())
 
   def test_worker_overdue_past_state_deadline(self):
     worker = mock_worker.MockWorker("w0", roles={"trainer"})
-    worker.state = "COMPILING"
+    worker._state = WorkerState.COMPILING
     clock = _FakeClock()
     monitor = health_monitor.HealthMonitor(
         self._registry(worker),
-        state_deadlines_s={"COMPILING": 100.0},
+        state_deadlines_s={WorkerState.COMPILING: 100.0},
         clock=clock,
     )
     monitor.poll()  # Enters COMPILING at t=0.
@@ -60,11 +63,11 @@ class HealthMonitorTest(absltest.TestCase):
     overdue = monitor.overdue()
     self.assertLen(overdue, 1)
     self.assertEqual(overdue[0].worker_id, "w0")
-    self.assertEqual(overdue[0].state, "COMPILING")
+    self.assertEqual(overdue[0].state, WorkerState.COMPILING)
 
   def test_steady_state_is_never_overdue(self):
     worker = mock_worker.MockWorker("w0", roles={"trainer"})
-    worker.state = "READY"
+    worker._state = WorkerState.READY
     clock = _FakeClock()
     monitor = health_monitor.HealthMonitor(self._registry(worker), clock=clock)
     monitor.poll()
@@ -73,16 +76,16 @@ class HealthMonitorTest(absltest.TestCase):
 
   def test_state_change_resets_the_deadline_timer(self):
     worker = mock_worker.MockWorker("w0", roles={"trainer"})
-    worker.state = "COMPILING"
+    worker._state = WorkerState.COMPILING
     clock = _FakeClock()
     monitor = health_monitor.HealthMonitor(
         self._registry(worker),
-        state_deadlines_s={"COMPILING": 100.0},
+        state_deadlines_s={WorkerState.COMPILING: 100.0},
         clock=clock,
     )
     monitor.poll()  # COMPILING since t=0.
     clock.t = 90.0
-    worker.state = "READY"
+    worker._state = WorkerState.READY
     monitor.poll()  # Transitions to READY at t=90.
     clock.t = (
         200.0  # Well past the COMPILING deadline, but no longer COMPILING.
