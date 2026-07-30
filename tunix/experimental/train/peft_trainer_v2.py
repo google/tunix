@@ -231,29 +231,6 @@ class GradientAccumulator(nnx.Module):
     """Whether a parameter-sized gradient buffer is currently held."""
     return bool(jax.tree_util.tree_leaves(self.grads))
 
-  def set(self, grads: Any, denom: jax.Array | None = None):
-    def _set(acc_var, g_var):
-      g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
-      acc_var.set_value(g)
-
-    if self.allocated:
-      jax.tree_util.tree_map(
-          _set,
-          self.grads,
-          grads,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
-    else:
-      # No buffer held: either it was never allocated, or a non-persistent
-      # `reset()` released it. Adopt the incoming tree rather than allocating a
-      # zero tree first and immediately overwriting it. `set()` replaces the
-      # whole tree by definition, so nothing is lost.
-      self.grads = nnx.data(grads)
-    if denom is None:
-      denom_val = jnp.asarray(1.0, dtype=jnp.float32)
-    else:
-      denom_val = denom.astype(jnp.float32)
-    self.denom.set_value(denom_val)
 
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
@@ -263,12 +240,19 @@ class GradientAccumulator(nnx.Module):
       # dominates trace time; the stored value is identical.
       acc_var.set_value(acc_var[...] + g)
 
-    jax.tree_util.tree_map(
+    if self.allocated:
+      jax.tree_util.tree_map(
         _add,
         self.grads,
         grads,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
-    )
+      )
+    else:
+      # No buffer held: either it was never allocated, or a non-persistent
+      # `reset()` released it. Adopt the incoming tree rather than allocating a
+      # zero tree first and immediately overwriting it. `set()` replaces the
+      # whole tree by definition, so nothing is lost.
+      self.grads = nnx.data(grads)
 
     if denom is None:
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
@@ -390,7 +374,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # `optax.inject_hyperparams`).
     _promote_opt_state_floats_to_float32(self.optimizer)
     self.grad_accumulator = GradientAccumulator(
-        self.model, wrt_target, allocate=not self._is_single_microstep()
+        # self.model, wrt_target, allocate=not self._is_single_microstep()
+        self.model, wrt_target, allocate=True
     )
 
     self.loss_fn = _default_loss_fn
@@ -588,11 +573,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # print(f"DEBUG v2: Raw Grad Norm in fwd_bwd: {jax.device_get(raw_norm)}")
     # jax.debug.print("DEBUG v2: Raw Grad Norm in fwd_bwd: {x}", x=raw_norm)
 
-    if self._is_single_microstep():
-      grad_accumulator.set(grads)
-    else:
-      # TODO(b/491970038): update denom for sequence packing.
-      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    # TODO(b/491970038): update denom for sequence packing.
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     # norm_after_set = optax.global_norm(
     #     jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grad_accumulator.grads)
@@ -834,19 +816,20 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # structurally comparable and switching between them cannot change
       # numerics. Compilation is lazy, so building the wrapper here costs
       # nothing if the fused path is never called.
-      self._jitted_fused_step_fn = (
-          maybe_cache_and_partial(
-              nnx.jit(
-                  self.create_fused_step_fn(),
-                  donate_argnames=("optimizer", "grad_accumulator"),
-              ),
-              self.model,
-              self.optimizer,
-              self.grad_accumulator,
-          )
-          if self._is_single_microstep()
-          else None
-      )
+      # self._jitted_fused_step_fn = (
+      #     maybe_cache_and_partial(
+      #         nnx.jit(
+      #             self.create_fused_step_fn(),
+      #             donate_argnames=("optimizer", "grad_accumulator"),
+      #         ),
+      #         self.model,
+      #         self.optimizer,
+      #         self.grad_accumulator,
+      #     )
+      #     if self._is_single_microstep()
+      #     else None
+      # )
+      self._jitted_fused_step_fn = None
     return (
         self._jitted_fwd_bwd_step_fn,
         self._jitted_update_step_fn,

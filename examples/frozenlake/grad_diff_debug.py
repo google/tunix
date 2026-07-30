@@ -22,10 +22,10 @@ from tunix.sft import peft_trainer
 from tunix.experimental.train import peft_trainer_v2
 from tunix.tests import test_common as tc
 
-# # Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
-# os.environ['XLA_FLAGS'] = (
-#     os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
-# ).strip()
+# Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
+os.environ['XLA_FLAGS'] = (
+    os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
+).strip()
 
 import jax
 import jax.numpy as jnp
@@ -231,7 +231,7 @@ with mesh:
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=10)
+  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
   trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
   trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
@@ -283,19 +283,17 @@ with mesh:
   optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=10)
+  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
   trainer_v2 = peft_trainer_v2.PeftTrainer(gemma_v2, optimizer_v2, config_v2)
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
-  # trainer_v2.fwd_bwd(dataset[0])
-  # jax.effects_barrier()
 
-  # # Expected max_ulp:
-  # #   0 for fp32 (any flag), and for bf16 with
-  # #     --xla_allow_excess_precision=false
-  # #   1..2 for bf16 with excess precision allowed (the default)
-  # # Raise it only if you have decided the extra rounding is acceptable; do not
-  # # reach for a larger atol instead, which cannot express this bound.
-  # _MAX_ULP = 0
+  # Expected max_ulp:
+  #   0 for fp32 (any flag), and for bf16 with
+  #     --xla_allow_excess_precision=false
+  #   1..2 for bf16 with excess precision allowed (the default)
+  # Raise it only if you have decided the extra rounding is acceptable; do not
+  # reach for a larger atol instead, which cannot express this bound.
+  _MAX_ULP = 0
 
   # NOTE: v2 still parks gradients in `grad_accumulator.grads`, but only between
   # fwd_bwd and update -- a non-persistent `reset()` drops them at the end of
@@ -303,22 +301,24 @@ with mesh:
   # touches its accumulator at all, so it has no equivalent hook: to compare
   # gradients again, set gradient_accumulation_steps=2 so both trainers take the
   # accumulating path.
-  # def compare_grads(tag, g1, g2):
-  #   ck1, ck2 = tc.tree_bit_checksum(g1), tc.tree_bit_checksum(g2)
-  #   print(f"compare grads between v1 and v2.{tag}: "
-  #         f"XOR v1={ck1} v2={ck2} {'identical' if ck1 == ck2 else 'DIFFER'}")
-  #   jax.tree.map_with_path(
-  #       lambda path, a, b: tc.assert_close_ulp(path, a, b, max_ulp=_MAX_ULP),
-  #       g1, g2,
-  #   )
 
-  # compare_grads("fwd_bwd", v1_grads, trainer_v2.grad_accumulator.grads)
-  # trainer_v2.update()
-  # jax.effects_barrier()
   
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
+    trainer_v2.train(dataset, skip_jit=False)
+    # trainer_v2.fwd_bwd(dataset[0])
+    # trainer_v2.update()
     jax.effects_barrier()
+
+  def compare_grads(tag, g1, g2):
+    ck1, ck2 = tc.tree_bit_checksum(g1), tc.tree_bit_checksum(g2)
+    print(f"compare grads between v1 and v2.{tag}: "
+          f"XOR v1={ck1} v2={ck2} {'identical' if ck1 == ck2 else 'DIFFER'}")
+    jax.tree.map_with_path(
+        lambda path, a, b: tc.assert_close_ulp(path, a, b, max_ulp=_MAX_ULP),
+        g1, g2,
+    )
+  # compare_grads("fwd_bwd", v1_grads, trainer_v2.grad_accumulator.grads)
+  compare_grads("update", model_state_v1_host, jax.device_get(nnx.state(gemma_v2)))
 
   # In the single-microstep regime the accumulator holds gradients only between
   # fwd_bwd and update: nothing is pre-allocated, and update's `reset()` drops
