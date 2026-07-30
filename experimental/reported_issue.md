@@ -576,6 +576,31 @@ before touching the packing switch. What to watch on the first run:
    it with `ROLLOUT_HBM=0.3` if it fails to allocate;
 3. `rewards/solve_ratio`, logged every 10 steps against the held-out set -- it must climb.
 
+**Reading `grad_norm` across the two arms (fixed 2026-07-30 — older runs need a correction).**
+`grad_norm` used to be buffered once per micro-step and reduced with `np.mean`. On a non-update
+micro-step `skip_updates` returns a placeholder `0.0` (`nnx.cond` needs both branches to return the
+same dtype) — "no norm here", not a measurement — so a window held `[0, …, 0, norm]` and the logged
+value was `norm / micro_steps_per_update`. That divisor differs between the arms:
+
+| arm | micro-steps per update | source |
+|---|---|---|
+| unpack | `mini_batch_size // train_micro_batch_size` = `64 // 2` = **32** | fixed, `rl_cluster.py` |
+| pack | `ceil(sequences_per_update / (pack_size * sequences_per_row))` = `ceil(512 / (4 * s))` | data-driven, `pack_sequences` |
+
+`sequences_per_update = mini_batch_size * num_generations = 64 * 8 = 512`; `pack_size = fsdp * dp`
+= **4** (ACTOR mesh `(fsdp 4, tp 1)`). At the budget's worst case `s = 2` (two maximal 4096-token
+sequences per 8192-token row) that is 64 micro-steps, i.e. the packed arm logged **half** the
+unpacked arm's `grad_norm` while applying the identical gradient. The reduction is `np.max` now
+(exactly one real value per window), so the two arms are directly comparable, and the depth is
+logged as **`grad_accum/micro_steps_per_update`** instead of having to be inferred. Reproduced and
+pinned by `peft_trainer_test.py::test_grad_norm_does_not_scale_with_accumulation_depth` (on the old
+code depth 1 logged `2.933295` and depth 2 logged `1.466647` for the same applied gradient — a
+clean 2x). To compare against a run from before this fix, multiply its `grad_norm` by that arm's
+micro-steps-per-update. Unaffected: the gradient itself, the loss, and everything else — this was
+only how the number reached wandb. One caveat: under `grad_accum="optax"` every micro-step reports
+a real per-micro-batch norm (no placeholders), so there the key now means the max over the window
+rather than the mean it meant before.
+
 **Success criteria per recipe (wandb / the run SUMMARY):**
 - `loss` and `reward` curves of pack vs unpack overlap within noise -> the segment-aware loss is
   correct and packing is convergence-neutral. Tight tracking, not just "similar trend".
@@ -585,6 +610,12 @@ before touching the packing switch. What to watch on the first run:
   under packing the two diverge by design -- the unpacked arm's micro-batches all carry the same
   denominator, so there mean-of-means and the weighted mean coincide.
 - `packing/dummy_ratio` << 1 in the packed arm; absent in unpack.
+- `grad_norm` curves overlap between the arms. New as of the fix above — a residual gap here is now
+  a real gradient difference worth chasing, not a reporting artifact.
+- `grad_accum/micro_steps_per_update`: **32** in the unpacked arm (assert this; anything else means
+  `mini_batch_size`/`train_micro_batch_size` moved and the whole comparison rebaselines) and
+  whatever the packer actually produced in the packed arm. Record both — the packed number is the
+  realized packing density (`sequences_per_row = 512 / (4 * this)`) and was previously invisible.
 - No NaN / divergence in any of the four.
 
 **Prereqs:** `gcloud auth configure-docker europe-west4-docker.pkg.dev` one-time; `/mnt/workspace`

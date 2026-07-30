@@ -514,6 +514,41 @@ class PeftTrainerTest(parameterized.TestCase):
         rtol=1e-5,
     )
 
+  def test_grad_norm_does_not_scale_with_accumulation_depth(self):
+    # Same effective batch at depth 1 vs depth 2 applies the same gradient
+    # (test_gradient_accumulation pins the params), so `grad_norm` must match.
+    # Non-update micro-steps buffer `skip_updates`' placeholder 0.0; averaging
+    # that in reported `norm / depth`, which is why an unpacked run and a
+    # packed run of the same mini-batch disagreed by exactly their depth ratio.
+    def train(train_ds, gradient_accumulation_steps):
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=100,
+          gradient_accumulation_steps=gradient_accumulation_steps,
+      )
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      trainer = peft_trainer.PeftTrainer(
+          model, optax.sgd(TEST_LEARNING_RATE), config
+      )
+      trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+      trainer.train(train_ds, self.eval_ds)
+      return trainer
+
+    depth1 = train(dummy_datasets(batch_size=4, repeat=4), None)
+    depth2 = train(dummy_datasets(batch_size=2, repeat=4), 2)
+
+    np.testing.assert_allclose(
+        depth1.metrics_logger.get_metric('', 'grad_norm', 'train'),
+        depth2.metrics_logger.get_metric('', 'grad_norm', 'train'),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    # The depth itself is logged, so a packed run's data-driven depth is
+    # visible next to the norm instead of having to be inferred from it.
+    key = 'grad_accum/micro_steps_per_update'
+    self.assertEqual(depth1.metrics_logger.get_metric('', key, 'train'), 1)
+    self.assertEqual(depth2.metrics_logger.get_metric('', key, 'train'), 2)
+
   @parameterized.named_parameters(
       dict(
           testcase_name='without_grad_accu',

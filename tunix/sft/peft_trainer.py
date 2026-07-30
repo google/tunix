@@ -1059,7 +1059,22 @@ class PeftTrainer:
             self._buffered_train_metrics,
             loss=train_loss,
             step=self._train_steps,
-            additional_metrics={"grad_norm": (grad_norm, np.mean)},
+            additional_metrics={
+                # One value per optimizer update, not per micro-step. A
+                # non-update micro-step returns `skip_updates`' placeholder 0.0
+                # (nnx.cond needs matching dtypes) -- "no norm here", not a
+                # measurement -- so `np.max` picks out the single real norm.
+                # `np.mean` averaged it with the placeholders and reported
+                # `norm / micro_steps_per_update`, which rescaled with the
+                # accumulation depth and made packed and unpacked runs
+                # incomparable. Under `grad_accum="optax"` there are no
+                # placeholders, so this is the max over per-micro-batch norms.
+                "grad_norm": (grad_norm, np.max),
+                # Accumulation depth realized for this update: fixed at
+                # `mini_batch_size // train_micro_batch_size` unpacked, but
+                # data-driven under packing. Logged to keep the two comparable.
+                "grad_accum/micro_steps_per_update": (1.0, np.sum),
+            },
         )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
