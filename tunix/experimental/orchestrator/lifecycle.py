@@ -24,7 +24,7 @@ raised, and the collected failures are reported together.
 
 from typing import Any
 
-from tunix.tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.orchestrator import worker_registry
 
 
 class LifecycleError(RuntimeError):
