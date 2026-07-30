@@ -1,3 +1,4 @@
+INIT weight checksum: 2250560790
 DEBUG v1: norm from grads=2094.206787109375 from accumulator=2094.206787109375
 [grads] v1: leaves=197 nonzero=123 finite=197 max|g|=21.2833 norm=2094.206739 expected~2094.206787 rel=2.309e-08
 live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
@@ -10,15 +11,17 @@ Mismatch at path: (DictKey(key='layers'), DictKey(key=4), DictKey(key='attn'), D
   max ULP      : 6283232 (allowed 0)
   violating    : 4933451/6291456 (78.4151%)
   ULP histogram: 0:1358005, 1:1757627, 2:1174304, 3:486904, 4:395788, 5:165007, 6:167585, 7:74959, >=8:711277
-[diag] ['layers'][4]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536) dtype=float32
-        elementwise: max ULP=6283232 violating=4933451/6291456
-        sorted contents bit-identical: False   -> values genuinely differ
-[diag] ['layers'][9]['attn']['q_einsum']['w'].value: shape=(8, 1536, 512) dtype=float32
-        elementwise: max ULP=5263441 violating=5028483/6291456
-        sorted contents bit-identical: False   -> values genuinely differ
-[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
-        elementwise: max ULP=0 violating=0/402653184
-        sorted contents bit-identical: True   -> SAME VALUES, DIFFERENT ORDER (layout/sharding, not numerics)
+[diag] ['layers'][4]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536)
+        max ULP=6283232 violating=4933451/6291456  sorted-identical=False
+        tensor scale max|g|=0.00552446
+        max |x-y|=1.16415e-09  (= 2.107e-07 of scale)  at |x|=0.00235309
+        largest |x| among differing entries=0.00552446  (= 1.000e+00 of scale)
+[diag] ['layers'][9]['attn']['q_einsum']['w'].value: shape=(8, 1536, 512)
+        max ULP=5263441 violating=5028483/6291456  sorted-identical=False
+        tensor scale max|g|=0.00346231
+        max |x-y|=6.98492e-10  (= 2.017e-07 of scale)  at |x|=0.0022082
+        largest |x| among differing entries=0.00284293  (= 8.211e-01 of scale)
+[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) -> bit-identical
 [cmp] weights after 1 step: XOR v1=2292529351 v2=2292529609 DIFFER
 [cmp] weights after 1 step: EXCEEDS 4 ULP
 Mismatch at path: (DictKey(key='layers'), DictKey(key=9), DictKey(key='attn'), DictKey(key='q_einsum'), DictKey(key='w'), GetAttrKey(name='value'))
@@ -26,13 +29,15 @@ Mismatch at path: (DictKey(key='layers'), DictKey(key=9), DictKey(key='attn'), D
   max ULP      : 24 (allowed 4)
   violating    : 1/6291456 (0.0000%)
   ULP histogram: 0:6291402, 1:49, 2:2, 4:2, >=8:1
-[diag] ['layers'][9]['attn']['q_einsum']['w'].value: shape=(8, 1536, 512) dtype=float32
-        elementwise: max ULP=24 violating=54/6291456
-        sorted contents bit-identical: False   -> values genuinely differ
-[diag] ['layers'][4]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536) dtype=float32
-        elementwise: max ULP=4 violating=87/6291456
-        sorted contents bit-identical: False   -> values genuinely differ
-[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
-        elementwise: max ULP=0 violating=0/402653184
-        sorted contents bit-identical: True   -> SAME VALUES, DIFFERENT ORDER (layout/sharding, not numerics)
+[diag] ['layers'][9]['attn']['q_einsum']['w'].value: shape=(8, 1536, 512)
+        max ULP=24 violating=54/6291456  sorted-identical=False
+        tensor scale max|g|=0.0522011
+        max |x-y|=9.31323e-10  (= 1.784e-08 of scale)  at |x|=0.0122086
+        largest |x| among differing entries=0.015523  (= 2.974e-01 of scale)
+[diag] ['layers'][4]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536)
+        max ULP=4 violating=87/6291456  sorted-identical=False
+        tensor scale max|g|=0.0512469
+        max |x-y|=9.31323e-10  (= 1.817e-08 of scale)  at |x|=0.00904165
+        largest |x| among differing entries=0.00904165  (= 1.764e-01 of scale)
+[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) -> bit-identical
 sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
