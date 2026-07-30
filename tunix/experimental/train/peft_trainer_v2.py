@@ -291,30 +291,6 @@ class GradientAccumulator(nnx.Module):
     """Whether a parameter-sized gradient buffer is currently held."""
     return bool(jax.tree_util.tree_leaves(self.grads))
 
-  def set(self, grads: Any, denom: jax.Array | None = None):
-    def _set(acc_var, g_var):
-      g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
-      acc_var.set_value(g)
-
-    if self.allocated:
-      jax.tree_util.tree_map(
-          _set,
-          self.grads,
-          grads,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
-    else:
-      # No buffer held: either it was never allocated, or a non-persistent
-      # `reset()` released it. Adopt the incoming tree rather than allocating a
-      # zero tree first and immediately overwriting it. `set()` replaces the
-      # whole tree by definition, so nothing is lost.
-      self.grads = nnx.data(grads)
-    if denom is None:
-      denom_val = jnp.asarray(1.0, dtype=jnp.float32)
-    else:
-      denom_val = denom.astype(jnp.float32)
-    self.denom.set_value(denom_val)
->>>>>>> ef1cdcbb (grads_diff)
 
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
@@ -640,11 +616,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # # print(f"DEBUG v2: Raw Grad Norm in fwd_bwd: {jax.device_get(raw_norm)}")
     # jax.debug.print("DEBUG v2: Raw Grad Norm in fwd_bwd: {x}", x=raw_norm)
 
-    if self._is_single_microstep():
-      grad_accumulator.set(grads)
-    else:
-      # TODO(b/491970038): update denom for sequence packing.
-      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    # TODO(b/491970038): update denom for sequence packing.
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     # norm_after_set = optax.global_norm(
     #     jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grad_accumulator.grads)
@@ -1393,13 +1366,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         ) as span_v2:
           if self._jitted_train_step_fn is not None and is_update_step_val:
             self.train_step(train_example)
-<<<<<<< HEAD
-=======
-            # No `_buffered_train_metrics` assertion here: `train_step` runs the
-            # update bookkeeping too, and `_write_train_metrics` clears the
-            # buffer on the way out. The split branch below can still assert
-            # because it reads the buffer between the two halves.
->>>>>>> 1417f8a0 (snapsht)
             computation_to_track = self._last_update_grad_norm
           else:
             self.fwd_bwd(train_example)

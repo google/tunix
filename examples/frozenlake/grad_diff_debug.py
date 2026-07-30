@@ -22,10 +22,10 @@ from tunix.sft import peft_trainer
 from tunix.experimental.train import peft_trainer_v2
 from tunix.tests import test_common as tc
 
-# # Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
-# os.environ['XLA_FLAGS'] = (
-#     os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
-# ).strip()
+# Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
+os.environ['XLA_FLAGS'] = (
+    os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
+).strip()
 
 import jax
 import jax.numpy as jnp
