@@ -467,6 +467,23 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
     return self
 
+  def _is_single_microstep(self) -> bool:
+    """True when each update consumes exactly one `fwd_bwd` micro-batch.
+
+    In that regime `_fwd_bwd_step` overwrites the accumulator with `set()` and
+    `_update_step` reads `.grads` directly, so the accumulator never has to be
+    zeroed -- calling `reset()` would allocate and write a full zero copy of the
+    gradient tree that the next `set()` discards unread. Outside that regime
+    `add()`/`get()` are used and `reset()` is required for correctness.
+
+    Keep this as the single source of truth: the predicate is consulted from
+    three places that must agree.
+    """
+    return (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_token_per_tpu is None
+    )
+
   def _fwd_bwd_step(
       self,
       model: nnx.Module,
@@ -521,10 +538,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # print(f"DEBUG v2: Raw Grad Norm in fwd_bwd: {jax.device_get(raw_norm)}")
     # jax.debug.print("DEBUG v2: Raw Grad Norm in fwd_bwd: {x}", x=raw_norm)
 
-    if (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
-    ):
+    if self._is_single_microstep():
       grad_accumulator.set(grads)
     else:
       # TODO(b/491970038): update denom for sequence packing.
@@ -562,10 +576,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     Returns:
       The gradient norm.
     """
-    if (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
-    ):
+    if self._is_single_microstep():
       acc_grads = grad_accumulator.grads
     else:
       acc_grads = grad_accumulator.get()
@@ -583,11 +594,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # print(f"DEBUG v2: Grad Norm in update_step: {jax.device_get(norm)}")
     # jax.debug.print("DEBUG v2: Norm in update_step: {x}", x=norm)
     optimizer.update(model, acc_grads)
-    # if (
-    #     not self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-    #     and self.config.max_seq_token_per_tpu
-    # ):
-    grad_accumulator.reset()
+    if not self._is_single_microstep():
+      # Only accumulating runs need the zeroing. Doing it unconditionally costs a
+      # full zero copy of the gradient tree per step -- and because its lifetime
+      # overlaps `acc_grads` (still being read by `optimizer.update`) XLA cannot
+      # alias it onto the donated accumulator buffer, so the steady state has to
+      # hold two accumulators at once.
+      grad_accumulator.reset()
     return norm
 
   def _eval_step(

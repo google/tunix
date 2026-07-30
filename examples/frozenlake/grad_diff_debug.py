@@ -151,21 +151,41 @@ config.num_layers = 12
 rngs = nnx.Rngs(0)
 gemma = create_sharded_model(config, rngs, mesh)
 
-graph, state = nnx.split(gemma)
-gemma_v2 = nnx.merge(
-      graph,
-      jax.tree.map(jnp.copy, state),
-  )
+# HBM hygiene: v2 must start from exactly the weights v1 started from, but a
+# second device-resident copy must NOT be alive while v1 is being profiled --
+# otherwise v1's peak carries a full parameter tree that has nothing to do with
+# v1. So snapshot the initial weights to host memory (numpy) instead, remember
+# each leaf's sharding, and rebuild the device arrays only after v1 is done.
+# Host cost is one unsharded fp32 copy of the tree (~7 GiB here), which is
+# cheap on a TPU host; device cost during v1 is zero.
+def _snapshot_sharding(x):
+  # Non-array leaves (if any) have no sharding to restore.
+  return getattr(x, "sharding", None)
+
+
+def _restore_to_device(host_value, sharding):
+  return host_value if sharding is None else jax.device_put(host_value, sharding)
+
+
+def _live_device_gib():
+  # nbytes is the *global* (all-shard) size, so this is the unsharded-equivalent
+  # total, not the per-device figure the profiler reports. Divide by the number
+  # of devices the arrays are sharded over for a per-device estimate.
+  return sum(a.nbytes for a in jax.live_arrays()) / 2**30
+
+
+graph, _init_state = nnx.split(gemma)
+_init_shardings = jax.tree.map(_snapshot_sharding, _init_state)
+_init_state_host = jax.device_get(_init_state)
+del _init_state
+gc.collect()
 
 # Bit-exact fingerprint of the weights the two trainers start from. Print this
 # in every run: if it changes between two runs you are comparing two different
 # models, and any grad_norm difference between those runs says nothing about
-# v1-vs-v2 (see CAVEAT 2 above). The two values below must always be equal --
-# they assert that jnp.copy really produced an independent, identical copy.
-_init_ck_v1 = tc.tree_bit_checksum(nnx.state(gemma))
-_init_ck_v2 = tc.tree_bit_checksum(nnx.state(gemma_v2))
-print(f"INIT weight checksum: v1={_init_ck_v1} v2={_init_ck_v2} "
-      f"{'OK' if _init_ck_v1 == _init_ck_v2 else 'MISMATCH -- v2 is not a faithful copy!'}")
+# v1-vs-v2 (see CAVEAT 2 above).
+_init_ck = tc.tree_bit_checksum(_init_state_host)
+print(f"INIT weight checksum: {_init_ck}")
 
 with mesh:
   # v1
@@ -184,6 +204,32 @@ with mesh:
   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
   del gemma, trainer_v1, optimizer_v1
   gc.collect()
+
+# `nnx.state()` returns a pytree that holds the device buffers themselves, so
+# `del gemma` above frees nothing while model_state_v1 is alive -- v1's whole
+# parameter tree would stay resident for all of v2's run and show up in v2's
+# peak. Snapshot to host if the post-v1 weights are still wanted, then drop the
+# device copies before v2 allocates anything.
+model_state_v1_host = jax.device_get(model_state_v1)
+opt_state_v1_host = jax.device_get(opt_state_v1)
+del model_state_v1, opt_state_v1
+gc.collect()
+
+print(f"live device arrays after v1 teardown: {_live_device_gib():.2f} GiB "
+      "(global, unsharded-equivalent)")
+
+with mesh:
+  # Rebuild v2's model on device from the host snapshot, restoring the original
+  # per-leaf sharding. Identical bits to what v1 started from -- asserted below.
+  gemma_v2 = nnx.merge(
+      graph,
+      jax.tree.map(_restore_to_device, _init_state_host, _init_shardings),
+  )
+  _ck_v2 = tc.tree_bit_checksum(nnx.state(gemma_v2))
+  assert _ck_v2 == _init_ck, (
+      f"v2 start weights differ from v1's: {_ck_v2} != {_init_ck}"
+  )
+  print(f"v2 start weight checksum: {_ck_v2} OK")
 
 with mesh:
   # v2
