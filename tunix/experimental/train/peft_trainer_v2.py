@@ -1393,6 +1393,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         ) as span_v2:
           if self._jitted_train_step_fn is not None and is_update_step_val:
             self.train_step(train_example)
+<<<<<<< HEAD
+=======
+            # No `_buffered_train_metrics` assertion here: `train_step` runs the
+            # update bookkeeping too, and `_write_train_metrics` clears the
+            # buffer on the way out. The split branch below can still assert
+            # because it reads the buffer between the two halves.
+>>>>>>> 1417f8a0 (snapsht)
             computation_to_track = self._last_update_grad_norm
           else:
             self.fwd_bwd(train_example)
