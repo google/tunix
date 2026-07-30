@@ -173,42 +173,13 @@ def _restore_to_device(host_value, sharding):
   return host_value if sharding is None else jax.device_put(host_value, sharding)
 
 
-def report_memory_analysis(tag, partial_fn, *extra_args):
-  """Prints XLA's own memory accounting for an already-jitted step function.
-
-  `alias_size_in_bytes` is the decisive number for the donation question: it is
-  the volume of input buffers XLA actually managed to alias onto outputs. If a
-  step declares `donate_argnames` for a gradient-tree-sized argument and this
-  comes back ~0, donation silently degraded into a copy and the peak carries two
-  trees instead of one.
-
-  The argument/output/temp split also maps onto the profiler's heap-vs-stack
-  view: arguments and outputs are the heap-resident part, temp is the scratch
-  that XLA can overlap with activations.
-
-  Best effort only -- lowering a jitted nnx function is version-sensitive, and a
-  failure here must not take the benchmark down with it.
-  """
-  try:
-    # The trainers store `functools.partial(nnx.jit(step), *bound_args)`. The
-    # partial's `.func` is nnx's wrapper, which does not expose `.lower`; the
-    # underlying jax.jit callable hangs off `.jitted_fn` (the same path `train()`
-    # uses to read `_cache_size()`).
-    wrapper = getattr(partial_fn, "func", partial_fn)
-    jitted = getattr(wrapper, "jitted_fn", wrapper)
-    bound = getattr(partial_fn, "args", ())
-    compiled = jitted.lower(*bound, *extra_args).compile()
-    m = compiled.memory_analysis()
-    g = 2**30
-    print(
-        f"[mem] {tag}: "
-        f"args={m.argument_size_in_bytes / g:.2f} "
-        f"out={m.output_size_in_bytes / g:.2f} "
-        f"temp={m.temp_size_in_bytes / g:.2f} "
-        f"alias={m.alias_size_in_bytes / g:.2f} GiB"
-    )
-  except Exception as e:  # pylint: disable=broad-except
-    print(f"[mem] {tag}: memory_analysis unavailable ({type(e).__name__}: {e})")
+# NOTE: an earlier version of this script tried to print XLA's own
+# argument/output/temp/alias accounting by lowering the jitted step functions
+# (`compiled.memory_analysis()`). That does not work for `nnx.jit`: the wrapper
+# has no `.lower`, and reaching the inner `jax.jit` bypasses nnx's update
+# context ("No update context found for tag <JitWrapped ...>"). Read the same
+# breakdown from the xprof Memory Viewer instead -- arguments and outputs are
+# the heap-resident part, temp is the scratch XLA can overlap with activations.
 
 
 def _live_device_gib():
@@ -270,6 +241,35 @@ def compare(tag, a, b, max_ulp):
     print(f"[cmp] {tag}: EXCEEDS {max_ulp} ULP\n{e}")
 
 
+def describe_grads(tag, grads_host, expected_norm=None):
+  """Host-side sanity check on a gradient tree read out of an accumulator.
+
+  Deliberately independent of XOR checksums and of any assumption about how nnx
+  round-trips module state: it just adds up the numbers that actually came back.
+  Compare `norm` against the grad_norm the trainer printed. If they agree, the
+  accumulator really holds the step's gradients; if `norm` is absurd or the
+  nonzero-leaf count is short, what came back is not the gradients and any
+  comparison built on it is meaningless.
+  """
+  leaves = [np.asarray(l) for l in jax.tree_util.tree_leaves(grads_host)]
+  nonzero = sum(1 for l in leaves if np.any(l != 0))
+  finite = sum(1 for l in leaves if np.all(np.isfinite(l)))
+  # float64 accumulation so the check itself cannot be the thing that is wrong.
+  norm = float(np.sqrt(sum(float(np.sum(l.astype(np.float64) ** 2)) for l in leaves)))
+  biggest = max((float(np.abs(l).max()) for l in leaves if l.size), default=0.0)
+  print(
+      f"[grads] {tag}: leaves={len(leaves)} nonzero={nonzero} finite={finite} "
+      f"max|g|={biggest:.6g} norm={norm:.6f}"
+      + (
+          f" expected~{float(expected_norm):.6f}"
+          f" rel={abs(norm - float(expected_norm)) / float(expected_norm):.3e}"
+          if expected_norm is not None
+          else ""
+      )
+  )
+  return norm
+
+
 with mesh:
   # v1
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
@@ -282,18 +282,20 @@ with mesh:
     trainer_v1.train(dataset, skip_jit=False)
     jax.effects_barrier()
 
-  # Executables exist only after the first step has compiled them.
-  report_memory_analysis(
-      "v1 train_step",
-      trainer_v1._jitted_train_step_fn,  # pylint: disable=protected-access
-      gen_model_input_fn(dataset[0]),
-      jnp.array(True, dtype=jnp.bool_),
-  )
-
   model_state_v1 = nnx.state(gemma)
   opt_state_v1 = nnx.state(trainer_v1.optimizer)
-  # v1's fast path never resets, so the gradients are still there after train().
+  # v1's depth-1 branch never calls reset() -- the only reset() in this file is
+  # inside `apply_updates`, which only runs on the accumulating (nnx.cond) path.
+  # So the gradients are still sitting in the accumulator after train().
   grads_v1_host = jax.device_get(trainer_v1.grad_accumulator.grads)
+  # `_write_train_metrics` buffers the first step and only flushes it on the
+  # next one, so at max_steps=1 the metric may never be recorded. Not having it
+  # is fine -- the norm printed below still stands on its own.
+  try:
+    grad_norm_v1 = trainer_v1.metrics_logger.get_metric("", "grad_norm", "train")
+  except Exception:  # pylint: disable=broad-except
+    grad_norm_v1 = None
+  describe_grads("v1", grads_v1_host, grad_norm_v1)
   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
   del gemma, trainer_v1, optimizer_v1
   gc.collect()
@@ -344,6 +346,13 @@ with mesh:
     trainer_v2.update()
     jax.effects_barrier()
 
+  # Same host-side sanity check on v2. `_last_update_grad_norm` is computed
+  # inside `_update_step` from the very tree we just read, so if these two norms
+  # agree then what came back really is the gradients.
+  describe_grads(
+      "v2", grads_v2_host, getattr(trainer_v2, "_last_update_grad_norm", None)
+  )
+
   # Upstream: did the two backward passes produce the same gradients?
   compare("grads", grads_v1_host, grads_v2_host, _GRAD_MAX_ULP)
   # Downstream: the amplified view. Only meaningful once the line above is read.
@@ -360,15 +369,6 @@ with mesh:
   # parameter tree (the model; the accumulator arrives empty) and update's
   # `alias` should be ~one parameter tree (the donated accumulator reused for
   # the updated parameters). An `alias` of ~0 means donation degraded to a copy.
-  report_memory_analysis(
-      "v2 fwd_bwd",
-      trainer_v2._jitted_fwd_bwd_step_fn,  # pylint: disable=protected-access
-      gen_model_input_fn(dataset[0]),
-  )
-  report_memory_analysis(
-      "v2 update",
-      trainer_v2._jitted_update_step_fn,  # pylint: disable=protected-access
-  )
 
   model_state_v2 = nnx.state(gemma_v2)
   opt_state_v2 = nnx.state(trainer_v2.optimizer)
