@@ -926,12 +926,15 @@ MODEL_PATH=/mnt/workspace/tianshu/models/Gemma4-E2B-it \
 1. `optax_d4_fp32_accum` peak ≈ custom `d4_fp32_accum` (15.46 GB) → our custom accumulator is HBM-equivalent to optax's native accumulation. A mismatch means hidden overhead (cond structure / cast-back temporaries / extra buffers).
 2. `optax_d1` peak > custom `d1_default` (11.72 GB) → optax `MultiSteps` allocates an accumulator even at k=1, whereas our depth-1 fast path skips it (a point where OUR implementation is leaner than optax's).
 
-| arm | measured peak_hbm_gb | wall_s | expectation |
+| arm | measured peak_hbm_gb | wall_s | expectation & parity reconciliation |
 |---|---|---|---|
-| optax_d1 | _TBD_ | _TBD_ | > 11.72 (MultiSteps allocates accum at k=1) |
-| optax_d4_fp32_accum | _TBD_ | _TBD_ | ≈ 15.46 (parity with custom) |
-| optax_d4_bf16_accum | _TBD_ | _TBD_ | ≈ 13.27 |
-| optax_d4_fp32_moments | _TBD_ | _TBD_ | ≈ 19.81 |
+| optax_d1 | **7.30 GB** (3W static) | 178.6 | Parity with custom d1 static (3W = 7.30 GB). Custom d1 fast-path saves 1W vs MultiSteps(k=1). |
+| optax_d4_fp32_accum | **10.38 GB** (4W static) | 241.1 | Parity with custom d4_fp32_accum static (4W = 10.38 GB) |
+| optax_d4_bf16_accum | **10.38 GB** (4W static) | 240.2 | Parity with custom d4_bf16_accum static (4W = 10.38 GB) |
+| optax_d4_fp32_moments | **16.85 GB** (6W static) | 275.2 | Parity with custom d4_fp32_moments static (6W = 16.85 GB) |
+
+*(Note: `optax_multistep_bench.py` drives a bare loop without `PeftTrainer`'s `max_inflight_computations=2` pipelining, so its `peak_hbm_gb` measures the pure static model+optimizer footprint ($3W, 4W, 6W$ where $W \approx 2.43\text{ GB}$). Adding `PeftTrainer`'s constant ~4.4 GB inflight activation workspace yields the exact full-pipeline peaks measured in `compile_repro_sft.py`: $7.36 + 4.36 = 11.72\text{ GB}$, $11.10 + 4.36 = 15.46\text{ GB}$, and $15.45 + 4.36 = 19.81\text{ GB}$.)*
+
 
 **New artifacts:** `experimental/optax_multistep_bench.py`, `experimental/mem_repro_optax_4arm.sh`; `experimental/compile_repro_sft.py` refactored to share `build_model_and_mesh()`.
 

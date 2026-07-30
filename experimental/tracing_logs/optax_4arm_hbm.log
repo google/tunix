@@ -1,0 +1,30 @@
+# HBM Peak & Parity measurements for official optax.MultiSteps on Gemma4-E2B (fsdp=2, tp=2)
+# 4 Arms: Mirroring custom GradientAccumulator arms from fix_accum_fp32_hbm.log
+
+# 1. optax_d1 (Plain adamw, no MultiSteps -> 3W static memory: 1W params + 2W bf16 moments)
+[[COMPILE_REPRO]] arm=optax_d1 mesh=2x2 train_wall_s=178.6
+[[MEM]] arm=optax_d1 steps=1 dtype=float32 device=0 peak_hbm_gb=7.30 current_hbm_gb=7.30 limit_gb=95.74
+[[MEM]] arm=optax_d1 steps=1 dtype=float32 device=1 peak_hbm_gb=7.30 current_hbm_gb=7.30 limit_gb=95.74
+[[MEM]] arm=optax_d1 steps=1 dtype=float32 device=2 peak_hbm_gb=7.30 current_hbm_gb=7.30 limit_gb=95.74
+[[MEM]] arm=optax_d1 steps=1 dtype=float32 device=3 peak_hbm_gb=7.30 current_hbm_gb=7.30 limit_gb=95.74
+
+# 2. optax_d4_bf16_accum (MultiSteps k=4 -> +1W bf16 accumulator tree, total 4W static memory)
+[[COMPILE_REPRO]] arm=optax_d4_bf16_accum mesh=2x2 train_wall_s=240.2
+[[MEM]] arm=optax_d4_bf16_accum steps=4 dtype=bfloat16 device=0 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+[[MEM]] arm=optax_d4_bf16_accum steps=4 dtype=bfloat16 device=1 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+[[MEM]] arm=optax_d4_bf16_accum steps=4 dtype=bfloat16 device=2 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+[[MEM]] arm=optax_d4_bf16_accum steps=4 dtype=bfloat16 device=3 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+
+# 3. optax_d4_fp32_accum (MultiSteps k=4 in optax 0.2.6 default bf16 accum -> identical 4W static memory)
+[[COMPILE_REPRO]] arm=optax_d4_fp32_accum mesh=2x2 train_wall_s=241.1
+[[MEM]] arm=optax_d4_fp32_accum steps=4 dtype=float32 device=0 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+[[MEM]] arm=optax_d4_fp32_accum steps=4 dtype=float32 device=1 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+[[MEM]] arm=optax_d4_fp32_accum steps=4 dtype=float32 device=2 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+[[MEM]] arm=optax_d4_fp32_accum steps=4 dtype=float32 device=3 peak_hbm_gb=10.38 current_hbm_gb=10.38 limit_gb=95.74
+
+# 4. optax_d4_fp32_moments (MultiSteps k=4 + forced fp32 Adam moments -> +2W moment overhead, total 6W static memory)
+[[COMPILE_REPRO]] arm=optax_d4_fp32_moments mesh=2x2 train_wall_s=275.2
+[[MEM]] arm=optax_d4_fp32_moments steps=4 dtype=float32 device=0 peak_hbm_gb=16.85 current_hbm_gb=16.85 limit_gb=95.74
+[[MEM]] arm=optax_d4_fp32_moments steps=4 dtype=float32 device=1 peak_hbm_gb=16.83 current_hbm_gb=16.83 limit_gb=95.74
+[[MEM]] arm=optax_d4_fp32_moments steps=4 dtype=float32 device=2 peak_hbm_gb=16.83 current_hbm_gb=16.83 limit_gb=95.74
+[[MEM]] arm=optax_d4_fp32_moments steps=4 dtype=float32 device=3 peak_hbm_gb=16.83 current_hbm_gb=16.83 limit_gb=95.74
