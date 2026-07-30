@@ -16,7 +16,7 @@ from tunix.sft import peft_trainer
 from tunix.experimental.train import peft_trainer_v2
 from tunix.tests import test_common as tc
 
-# Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
+# # Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
 # os.environ['XLA_FLAGS'] = (
 #     os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
 # ).strip()
@@ -83,7 +83,7 @@ dataset = _make_dataset(
     )
 
 if len(jax.devices()) == 8:
-  mesh = jax.make_mesh((1, 1), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:1])
+  mesh = jax.make_mesh((1, 2), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:2])
 else:
   mesh = jax.make_mesh((1,), ('fsdp',), axis_types=(jax.sharding.AxisType.Auto,))
 
@@ -107,11 +107,11 @@ def create_sharded_model(config, rngs, mesh):
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
 config.num_layers = 12
-# default fp32 with xla_allow_excess_precision=false: ???
+# default fp32 with xla_allow_excess_precision=false: loss matched grad_norm  matched, grads after fwd_bwd and in update all matched with v1
 # dtype bf16 with xla_allow_excess_precision=false: loss matched grad_norm  matched, grads after fwd_bwd and in update all matched with v1
-# default fp32 with xla_allow_excess_precision=true: grad_norm  ???
-# dtype bf16 with xla_allow_excess_precision=true: grad_norm ???
-config.param_dtype = jnp.bfloat16
+# default fp32 with xla_allow_excess_precision=true: loss matched, grad_norm not matched, grads after in update not matched with v1
+# dtype bf16 with xla_allow_excess_precision=true: loss matched grad_norm  matched, grads after fwd_bwd and in update all matched with v1
+# config.param_dtype = jnp.bfloat16
 
 rngs = nnx.Rngs(0)
 gemma = create_sharded_model(config, rngs, mesh)
@@ -185,7 +185,7 @@ with mesh:
 ##debug log: 
 """
 
-bf16 with xla_allow_excess_precision=false:
+bf16 with xla_allow_excess_precision=false, single-device execution:
 Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype(bfloat16)}
 DEBUG v1: Grad Norm in train_step: 1939.4212646484375
 Debug: train_loss:  12.531497 grad_norm:  1939.4213
@@ -206,7 +206,7 @@ compare grads between v1 and v2.update:
 """
 
 """
-bf16 with xla_allow_excess_precision=true:
+bf16 with xla_allow_excess_precision=true single-device execution:
 Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype(bfloat16)}
 DEBUG v1: Grad Norm in train_step: 1995.14892578125
 Debug: train_loss:  12.536115 grad_norm:  1995.1489
@@ -258,3 +258,126 @@ Max relative difference among violations: 0.00775146
          -0.0737305],
         [-0.188477, -0.121582, -0.178711, ..., -0.15332, 0.097168,...
 """
+
+"""
+bf16 with xla_allow_excess_precision=true, 2-device execution:
+Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype(bfloat16)}
+DEBUG v1: Grad Norm in train_step: 1842.9820556640625
+Debug: train_loss:  12.536715 grad_norm:  1842.982
+Training: 100%|███████████████████████████████████████████████████████████████████████████████████| 1/1 [00:22<00:00, 22.33s/step, _train_loss=12.5, _train_perplexity=2.78e+5, _train_learning_rate=0]
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:141: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+JIT TRACE v2 [fwd_bwd] value_and_grad output dtypes:  {dtype(bfloat16)}
+JIT TRACE v2 [fwd_bwd] grad_accumulator.grads output dtypes:  {dtype(bfloat16)}
+DEBUG v2: Raw Grad Norm in fwd_bwd: 1842.7333984375
+DEBUG v2: Norm AFTER set inside fwd_bwd: 1842.7333984375
+DEBUG v2 fwd_bwd Whole-Tree XOR: 16781
+Debug: train_loss:  12.536715
+JIT TRACE v2 [update_step] acc_grads output dtypes: {dtype(bfloat16)}
+DEBUG v2 update slice: [0.308594 -0.322266 0.550781 0.404297 -0.243164]
+DEBUG v2: Norm in update_step: 1842.734130859375
+DEBUG v2 update Whole-Tree XOR: 16781
+compare grads between v1 and v2.update: 
+Traceback (most recent call last):
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 160, in <module>
+    jax.tree.map_with_path(
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree.py", line 425, in map_with_path
+    return tree_util.tree_map_with_path(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree_util.py", line 1258, in tree_map_with_path
+    return treedef.unflatten(f(*xs) for xs in zip(*all_keypath_leaves))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree_util.py", line 1258, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_keypath_leaves))
+                             ^^^^^^
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 161, in <lambda>
+    lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/tunix/tunix/tests/test_common.py", line 69, in assert_close
+    np.testing.assert_allclose(
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/numpy/testing/_private/utils.py", line 1711, in assert_allclose
+    assert_array_compare(compare, actual, desired, err_msg=str(err_msg),
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/numpy/testing/_private/utils.py", line 919, in assert_array_compare
+    raise AssertionError(msg)
+AssertionError: 
+Not equal to tolerance rtol=1e-05, atol=1e-05
+Mismatch at path: (DictKey(key='layers'), DictKey(key=1), DictKey(key='attn'), DictKey(key='kv_einsum'), DictKey(key='w'), GetAttrKey(name='value'))
+Mismatched elements: 194083 / 786432 (24.7%)
+Max absolute difference among violations: 0.0078125
+Max relative difference among violations: 0.00775146
+ ACTUAL: array([[[[0.165039, 0.263672, 0.123535, ..., 0.359375, 0.0878906,
+          0.107422],
+         [-0.28125, 0.484375, -0.219727, ..., 0.289062, 0.235352,...
+ DESIRED: array([[[[0.165039, 0.263672, 0.123535, ..., 0.361328, 0.0883789,
+          0.107422],
+         [-0.283203, 0.484375, -0.21875, ..., 0.289062, 0.235352,...
+         
+The result doesn't match with single-device execution.
+"""
+
+"""
+bf16 with xla_allow_excess_precision=false, 2-device execution:
+Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype(bfloat16)}
+DEBUG v1: Grad Norm in train_step: 1814.9761962890625
+Debug: train_loss:  12.530317 grad_norm:  1814.9762
+Training: 100%|███████████████████████████████████████████████████████████████████████████████████| 1/1 [00:22<00:00, 22.44s/step, _train_loss=12.5, _train_perplexity=2.77e+5, _train_learning_rate=0]
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:141: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+JIT TRACE v2 [fwd_bwd] value_and_grad output dtypes:  {dtype(bfloat16)}
+JIT TRACE v2 [fwd_bwd] grad_accumulator.grads output dtypes:  {dtype(bfloat16)}
+DEBUG v2: Raw Grad Norm in fwd_bwd: 1814.97607421875
+DEBUG v2: Norm AFTER set inside fwd_bwd: 1814.97607421875
+DEBUG v2 fwd_bwd Whole-Tree XOR: 29441
+Debug: train_loss:  12.530317
+JIT TRACE v2 [update_step] acc_grads output dtypes: {dtype(bfloat16)}
+DEBUG v2 update slice: [1.66406 -0.417969 -1.11719 1.16406 0.314453]
+DEBUG v2: Norm in update_step: 1814.97607421875
+DEBUG v2 update Whole-Tree XOR: 29441
+compare grads between v1 and v2.update: 
+"""
+
+"""
+fp32 with xla_allow_excess_precision=false, 2-device execution:
+Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype('float32')}
+DEBUG v1: Grad Norm in train_step: 2094.20654296875
+Debug: train_loss:  12.544204 grad_norm:  2094.2065
+Training: 100%|████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:20<00:00, 20.94s/step, _train_loss=12.5, _train_perplexity=2.8e+5, _train_learning_rate=0]
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:141: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+JIT TRACE v2 [fwd_bwd] value_and_grad output dtypes:  {dtype('float32')}
+JIT TRACE v2 [fwd_bwd] grad_accumulator.grads output dtypes:  {dtype('float32')}
+DEBUG v2: Raw Grad Norm in fwd_bwd: 2094.20654296875
+DEBUG v2: Norm AFTER set inside fwd_bwd: 2094.20654296875
+DEBUG v2 fwd_bwd Whole-Tree XOR: 1000145275
+Debug: train_loss:  12.544204
+JIT TRACE v2 [update_step] acc_grads output dtypes: {dtype('float32')}
+DEBUG v2 update Whole-Tree XOR: 1000145275
+DEBUG v2 update slice: [-0.00412249  0.467074    0.9625872  -0.02641185  0.47519204]
+DEBUG v2: Norm in update_step: 2094.20654296875
+compare grads between v1 and v2.update: 
+"""
+"""
+fp32 with xla_allow_excess_precision=true, 2-device execution:
+Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype('float32')}
+DEBUG v1: Grad Norm in train_step: 2094.20654296875
+Debug: train_loss:  12.544204 grad_norm:  2094.2065
+Training: 100%|████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:21<00:00, 21.71s/step, _train_loss=12.5, _train_perplexity=2.8e+5, _train_learning_rate=0]
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:141: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+JIT TRACE v2 [fwd_bwd] value_and_grad output dtypes:  {dtype('float32')}
+JIT TRACE v2 [fwd_bwd] grad_accumulator.grads output dtypes:  {dtype('float32')}
+DEBUG v2: Raw Grad Norm in fwd_bwd: 2094.20654296875
+DEBUG v2: Norm AFTER set inside fwd_bwd: 2094.20654296875
+DEBUG v2 fwd_bwd Whole-Tree XOR: 1000145275
+Debug: train_loss:  12.544204
+JIT TRACE v2 [update_step] acc_grads output dtypes: {dtype('float32')}
+DEBUG v2 update Whole-Tree XOR: 1000145275
+DEBUG v2 update slice: [-0.00412249  0.467074    0.9625872  -0.02641185  0.47519204]
+DEBUG v2: Norm in update_step: 2094.20654296875
+compare grads between v1 and v2.update: 
+"""
+
+
+
+
+
