@@ -79,7 +79,7 @@ def _get_named_sharding(
   )
 
 
-def _fix_sharding(state: Any) -> Any:
+def fix_sharding(state: Any) -> Any:
   """Replicates scalar values in optimizer states that are SingleDeviceSharding.
 
   Scalar values in optimizer states like step and count is initialized as
@@ -121,8 +121,8 @@ def _fix_sharding(state: Any) -> Any:
   )
 
 
-class CheckpointManager:
-  """Checkpoint manager for PEFT."""
+class BaseCheckpointManager:
+  """Base checkpoint manager."""
 
   def __init__(
       self,
@@ -190,6 +190,7 @@ class CheckpointManager:
       checkpointables: dict[str, Any],
       force: bool,
       custom_metadata: Mapping[str, Any] | None,
+      overwrite: bool = False,
   ) -> bool:
     """Internal helper to dispatch and report whether a save happened."""
     if self._checkpointer is None:
@@ -201,6 +202,7 @@ class CheckpointManager:
           step,
           checkpointables,
           force=force,
+          overwrite=overwrite,
           custom_metadata=custom_metadata,  # pyrefly: ignore[bad-argument-type]
       )
       return response is not None
@@ -208,6 +210,7 @@ class CheckpointManager:
         step,
         checkpointables,
         force=force,
+        overwrite=overwrite,
         custom_metadata=custom_metadata,  # pyrefly: ignore[bad-argument-type]
     )
 
@@ -216,6 +219,21 @@ class CheckpointManager:
     if self._checkpointer is None or self._checkpointer.latest is None:
       return None
     return self._checkpointer.latest.step
+
+  def wait(self) -> None:
+    """Blocks until all pending (async) saves are durable."""
+    if self._checkpointer is not None:
+      self._checkpointer.wait()
+
+  def close(self) -> None:
+    """Closes the checkpoint manager."""
+    if self._checkpointer is None:
+      return
+    self._checkpointer.close()
+
+
+class CheckpointManager(BaseCheckpointManager):
+  """Checkpoint manager for PEFT (model weights + optimizer state)."""
 
   def save(
       self,
@@ -319,7 +337,7 @@ class CheckpointManager:
         and 'optimizer_state' in metadata.metadata
     ):
       optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
-      abstract_checkpointables['optimizer_state'] = _fix_sharding(
+      abstract_checkpointables['optimizer_state'] = fix_sharding(
           optimizer_state
       )
 
@@ -350,9 +368,3 @@ class CheckpointManager:
     )
     custom_metadata = metadata.custom_metadata if metadata else {}
     return step, custom_metadata
-
-  def close(self) -> None:
-    """Closes the checkpoint manager."""
-    if self._checkpointer is None:
-      return
-    self._checkpointer.close()
