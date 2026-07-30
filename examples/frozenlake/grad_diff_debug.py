@@ -1,15 +1,8 @@
 # Compare v1 and v2 weight difference
-from shutil import copy
 from typing import Any, List
 import numpy as np
 import jax
 import gc
-import warnings
-
-# JAX reports failed buffer donation as "Some donated buffers were not usable",
-# once per location. Python dedupes repeated warnings by default, so a warning
-# raised during the first step would be invisible if you only skim later output.
-warnings.simplefilter("always")
 
 
 import os
@@ -22,10 +15,10 @@ from tunix.sft import peft_trainer
 from tunix.experimental.train import peft_trainer_v2
 from tunix.tests import test_common as tc
 
-# Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
-os.environ['XLA_FLAGS'] = (
-    os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
-).strip()
+# # Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
+# os.environ['XLA_FLAGS'] = (
+#     os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
+# ).strip()
 
 import jax
 import jax.numpy as jnp
@@ -83,13 +76,13 @@ def _make_dataset(
 
 dataset = _make_dataset(
     peft_trainer.TrainingInput,
-    num_steps=10,
+    num_steps=8,
     batch_size=_BATCH_SIZE,
     seq_len=_SEQ_LEN,
     )
 
 if len(jax.devices()) == 8:
-  mesh = jax.make_mesh((1, 2), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:2])
+  mesh = jax.make_mesh((1, 1), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:1])
 else:
   mesh = jax.make_mesh((1,), ('fsdp',), axis_types=(jax.sharding.AxisType.Auto,))
 
@@ -112,148 +105,7 @@ def create_sharded_model(config, rngs, mesh):
 
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
-config.num_layers = 12
-# CONCLUSION: v1 and v2 are numerically equivalent. The residual difference sits
-# at the floor of float32 reduction-order reproducibility and does not depend on
-# --xla_allow_excess_precision.
-#
-# Findings (gemma4_e2b, num_layers=12, 2 devices; logs at the bottom of this
-# file). "identical" means bit-for-bit, checked with tc.tree_bit_checksum.
-# fp32 eps = 1.19e-7 throughout.
-#
-#   GRADIENTS -- _MODE="grads", accum=8, 7 micro-batches, no update, no
-#   instrumentation of any kind:
-#       norms identical to every printed digit (5289.807278 both), max|g|
-#       identical (47.1573 both), and elementwise <= 2.25 fp32 eps:
-#           embedder.input_embedding      4.045e-08 of scale = 0.34 eps
-#           layers.9 attn_vec_einsum.w    1.489e-07           = 1.25 eps
-#           layers.0 _key_norm.scale      2.679e-07           = 2.25 eps
-#       Measured with excess_precision at its DEFAULT (true), so the flag is not
-#       what keeps fp32 gradients in line.
-#
-#   WEIGHTS after exactly ONE update -- _MODE="weights", accum=8:
-#       max|dw|/max|w| = 4.46e-09 = 0.037 eps, 3 elements out of 6.3M differing
-#       by 1 ULP, 0/197 leaves over the 1e-6 gate. The largest tensor
-#       (per_layer_input_embedding, 262144x3072) is bit-identical.
-#       The depth-1 equivalent was 1.82e-08 = 0.15 eps, 87/6.3M.
-#
-#   WEIGHTS after TWO updates -- accum=4, max_steps=8:
-#       9.69e-06 = 81 eps, 195727 elements. One extra update multiplies the
-#       divergence ~2000x. See CAVEAT 5.
-#
-#   bf16, excess_precision=false, 1 and 2 dev : identical.
-#   bf16, excess_precision=true,  1 and 2 dev : grads differ by 1-2 bf16 ULP on
-#         ~24.7% of elements; grad_norm differs 1.35e-4 rel. Independent of the
-#         device count.
-#
-# Also settled along the way: v1's `reset()` inside `nnx.cond` DOES propagate
-# (after one update the accumulator reads back all-zero with denom=0), so the
-# accumulating path does not carry stale gradients into the next update.
-#
-# Two separate mechanisms, and one flag only fixes one of them:
-#
-#   Excess precision. With --xla_allow_excess_precision=true (the default) XLA
-#   may keep intermediates in fp32 and skip convert(bf16) nodes; how much it
-#   keeps depends on fusion, and v1 (one module) fuses differently from v2's
-#   split path (two modules). Setting the flag to false removes this class.
-#   It is necessary for bf16 bit-identity.
-#
-#   Reduction order. The flag does NOT constrain summation trees, collective
-#   algorithms, or the scheduling of a multi-term accumulation. That is what
-#   remains in fp32, and its location is the tell: the leaves that differ most
-#   are the GLOBAL attention layers (index % 5 == 4 for this config) and, with
-#   num_unshared = int(12 - 12*20/35) = 5, exactly the KV-sharing
-#   origin/consumer pair. Their gradients accumulate their own attention path
-#   plus the one flowing back through the shared KV -- two contributions from
-#   different depths, which XLA schedules differently when the backward is
-#   compiled alone versus together with the update. Layers with a purely local
-#   gradient path come out identical.
-#
-# So the flag is necessary but NOT sufficient. Only the fused path guarantees
-# bit-identity, because it makes the two HLO modules identical and leaves XLA no
-# choice. On the split path, compare with a relative tolerance -- roughly
-# max|x-y| / max|x| < 1e-6 -- not with a ULP gate (see CAVEAT 4).
-#
-# HOW TO RUN THIS FILE: pick `_MODE` below. Each mode isolates one quantity;
-# a single run cannot give both, and trying was what produced the phase
-# mismatch described in CAVEAT 5.
-#   "grads"   -- feeds ACCUM-1 micro-batches so the update never fires and both
-#                accumulators end holding the same batches (denom == ACCUM-1).
-#                The only hook-free way to compare gradients.
-#   "weights" -- feeds exactly ACCUM so exactly one update fires. Gradients are
-#                reset and unobservable; the weights are clean.
-# `[phase]` prints denom / micro-steps / updates for both sides, and the
-# gradient comparison refuses to run unless the two phases agree.
-#
-# CAVEAT 1: grad_norm is not a valid pass/fail gate. optax.global_norm sums
-# ~4e8 squares in fp32, and XLA picks a different reduction tree per module,
-# so the norm can differ while the arrays are bit-identical. Observed noise
-# floor with identical grads: 1 to 6 fp32 ULP (6.7e-8 to 3.8e-7 rel). The real
-# divergence above is 1.35e-4 rel, ~1000x higher, so the two are cleanly
-# separable -- but use tc.assert_close_ulp / tc.tree_bit_checksum to decide.
-#
-# CAVEAT 2: numbers are NOT comparable across configurations. The norms range
-# over 1815 / 1939 / 1843 / 1995 / 2094 and the losses differ too, because the
-# initial weights differ between runs: param_dtype is passed straight into
-# nnx.initializers.normal(dtype=...), and jax.random.normal consumes a
-# different number of random bits for bf16 than for fp32 -- it draws a
-# different set of numbers, not a rounded version of the same one. Changing the
-# device count also changed the loss (12.531497 on 1 dev vs 12.530317 on 2 dev
-# at bf16/false), which is far above fp32 reduction noise and so likewise
-# implies different weights. Only within-run v1-vs-v2 comparisons are
-# meaningful. To compare across configurations, initialize once, checkpoint,
-# and restore the same weights everywhere.
-#
-# CAVEAT 3: observing the gradients changes them. Gradients are an internal
-# temporary of the traced step; the only way to see them from Python is to make
-# them a program output, which forces materialization and changes the fusion,
-# scheduling and buffer assignment of the very backward pass being measured.
-# Every hook added during this investigation moved the numbers:
-#   - v2's original jax.debug.print / pytree_xor_checksum calls inhibited fusion.
-#     They are why an earlier version of this comment claimed fp32 was
-#     "bit-identical unconditionally" -- that result was an artifact of the
-#     instrumentation, not a property of the trainers.
-#   - A hook that parked v1's depth-1 gradients in the accumulator changed v1's
-#     XOR from 1000145275 to 508432006.
-#   - Forcing v2's accumulator to be preallocated changed v2's from 1000145275
-#     to 295270455: it pins the gradient sharding to the parameter partition
-#     spec, which changes the collective and hence the summation order.
-# Both hooks have since been removed rather than left behind a flag, because a
-# knob that silently changes the numbers is worse than no knob at all.
-# Both hooks moved their side, and by different amounts, so an instrumented run
-# compares two programs that neither matches the uninstrumented one. Draw
-# conclusions only from quantities observable without a hook: the loss, the
-# grad_norm the step already returns, and the weights after the step.
-#
-# CAVEAT 4: ULP distance is the wrong metric for gradients. It is scale-free,
-# which is right for a tensor whose entries share a magnitude and wrong for one
-# spanning tens of orders of magnitude: two entries that are both numerically
-# zero (1e-38 vs 1.5e-38) sit millions of ULP apart while contributing nothing
-# to the norm or to the update. The fp32 divergence above reported max ULP
-# 6.3e6 on 78% of elements and was, in absolute terms, 2.1e-7 of the tensor
-# scale. Use ULP for weights and activations; use max|x-y| / max|x| for
-# gradients.
-#
-# CAVEAT 5: only a SINGLE update is a valid equivalence test. Training is
-# chaotic: the sub-ULP weight difference left by one update changes what the
-# next forward pass sees, so the next gradients differ by more, and so on.
-# Measured here, all else equal:
-#     1 update  -> 4.46e-09 of scale (0.037 eps),      3 elements
-#     2 updates -> 9.69e-06 of scale (81 eps),    195727 elements
-# i.e. one extra update multiplied the divergence by ~2000x. A multi-step
-# comparison therefore says nothing about whether two implementations agree --
-# it measures how long it takes the same arithmetic to decorrelate, which for
-# any two non-bit-identical programs is "quickly". Over a real run the two will
-# reach O(1) relative differences and that is expected, not a defect; compare
-# loss curves statistically instead.
-#
-# Corollary: the accumulator must be read at a known phase. Two accumulators
-# holding different micro-batches produce similar norms with 100%-different
-# elements, which reads exactly like a catastrophic divergence. `[phase]` and
-# the denom gate exist to make that impossible to miss.
-#
-# config.param_dtype = jnp.bfloat16
-# config.dtype = jnp.bfloat16
+config.num_layers = 5
 
 rngs = nnx.Rngs(0)
 gemma = create_sharded_model(config, rngs, mesh)
@@ -670,6 +522,7 @@ def phase_of(trainer, tag):
 
 with mesh:
   # v1
+  model_v1 = create_sharded_model(config, rngs, mesh) 
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
@@ -683,14 +536,6 @@ with mesh:
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
     trainer_v1.train(_run_dataset, skip_jit=False)
     jax.effects_barrier()
-
-  # Executables exist only after the first step has compiled them.
-  report_memory_analysis(
-      "v1 train_step",
-      trainer_v1._jitted_train_step_fn,  # pylint: disable=protected-access
-      gen_model_input_fn(dataset[0]),
-      jnp.array(True, dtype=jnp.bool_),
-  )
 
   model_state_v1 = nnx.state(gemma)
   opt_state_v1 = nnx.state(trainer_v1.optimizer)
@@ -706,34 +551,9 @@ with mesh:
   del gemma, trainer_v1, optimizer_v1
   gc.collect()
 
-# `nnx.state()` returns a pytree that holds the device buffers themselves, so
-# `del gemma` above frees nothing while model_state_v1 is alive -- v1's whole
-# parameter tree would stay resident for all of v2's run and show up in v2's
-# peak. Snapshot to host if the post-v1 weights are still wanted, then drop the
-# device copies before v2 allocates anything.
-model_state_v1_host = jax.device_get(model_state_v1)
-opt_state_v1_host = jax.device_get(opt_state_v1)
-del model_state_v1, opt_state_v1
-gc.collect()
-
-print(f"live device arrays after v1 teardown: {_live_device_gib():.2f} GiB "
-      "(global, unsharded-equivalent)")
-
-with mesh:
-  # Rebuild v2's model on device from the host snapshot, restoring the original
-  # per-leaf sharding. Identical bits to what v1 started from -- asserted below.
-  gemma_v2 = nnx.merge(
-      graph,
-      jax.tree.map(_restore_to_device, _init_state_host, _init_shardings),
-  )
-  _ck_v2 = tc.tree_bit_checksum(nnx.state(gemma_v2))
-  assert _ck_v2 == _init_ck, (
-      f"v2 start weights differ from v1's: {_ck_v2} != {_init_ck}"
-  )
-  print(f"v2 start weight checksum: {_ck_v2} OK")
-
 with mesh:
   # v2
+  model_v2 = create_sharded_model(config, rngs, mesh)
   optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
@@ -818,10 +638,10 @@ with mesh:
       denom=denom_v1 if denom_v1 == denom_v2 else None,
   )
 
-  model_state_v2 = nnx.state(gemma_v2)
+  model_state_v2 = nnx.state(model_v2)
   opt_state_v2 = nnx.state(trainer_v2.optimizer)
-  # loss_v2 = trainer_v2.metrics_logger.get_metric("", "loss", "train")
-  del gemma_v2, trainer_v2, optimizer_v2
+  loss_v2 = trainer_v2.metrics_logger.get_metric("", "loss", "train")
+  del model_v2, trainer_v2, optimizer_v2
   gc.collect()
 
 # # Tolerate typical bfloat16 XLA computation graph re-association on TPUs

@@ -451,9 +451,11 @@ class PeftTrainer:
     # the optimizer update function branch (which is float32 due to
     # `optax.inject_hyperparams`).
     _promote_opt_state_floats_to_float32(self.optimizer)
+    # Exposing depth-1 gradients requires a real buffer: `add()` would otherwise
+    # have to adopt the tree from inside the traced step, which is a structural
+    # mutation of a jit argument and does not survive the round trip.
     self.grad_accumulator = GradientAccumulator(
         self.model, wrt_target, allocate=not self._is_single_microstep()
->>>>>>> 539bc31a (snapshot)
     )
 
     self.loss_fn = _default_loss_fn
@@ -696,7 +698,22 @@ class PeftTrainer:
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
-      # jax.debug.print("DEBUG v1: Grad Norm in train_step: {x}", x=grad_norm)
+      if _EXPOSE_DEPTH1_GRADS:
+        # Same norm, but read back out of the accumulator instead of from
+        # `grads`. This separates the two ways the exposed gradients can be
+        # wrong: if these two lines disagree, the accumulator was written with
+        # the wrong values; if they agree here but the host-side readback is
+        # garbage, the values were fine and it is nnx's state round-trip out of
+        # jit that lost them.
+        jax.debug.print(
+            "DEBUG v1: norm from grads={x} from accumulator={y}",
+            x=grad_norm,
+            y=optax.global_norm(
+                jax.tree_util.tree_map(
+                    lambda x: x.astype(jnp.float32), grad_accumulator.grads
+                )
+            ),
+        )
       optimizer.update(model, grads)
     else:
       if isinstance(aux, utils.LossOutput):
