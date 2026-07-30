@@ -1308,7 +1308,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             # so the gradient tree stays an internal temporary. Identical
             # arithmetic to the branch below.
             self.train_step(train_example)
-            assert self._buffered_train_metrics is not None
+            # No `_buffered_train_metrics` assertion here: `train_step` runs the
+            # update bookkeeping too, and `_write_train_metrics` clears the
+            # buffer on the way out. The split branch below can still assert
+            # because it reads the buffer between the two halves.
             computation_to_track = self._last_update_grad_norm
           else:
             self.fwd_bwd(train_example)
