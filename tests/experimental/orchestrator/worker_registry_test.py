@@ -15,8 +15,8 @@
 """Tests for the WorkerRegistry and WorkerGroup."""
 
 from absl.testing import absltest
+from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import mock_worker
-from tunix.tunix.experimental.orchestrator import worker_registry
 
 
 class WorkerRegistryTest(absltest.TestCase):

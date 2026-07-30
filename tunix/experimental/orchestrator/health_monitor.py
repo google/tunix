@@ -27,8 +27,7 @@ import dataclasses
 import time
 
 from tunix.experimental.common import datatypes
-
-from tunix.tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.orchestrator import worker_registry
 
 WorkerState = datatypes.WorkerState
 

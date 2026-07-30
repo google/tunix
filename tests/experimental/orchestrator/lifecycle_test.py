@@ -16,9 +16,9 @@
 
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import lifecycle
+from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import mock_worker
-from tunix.tunix.experimental.orchestrator import lifecycle
-from tunix.tunix.experimental.orchestrator import worker_registry
 
 WorkerState = datatypes.WorkerState
 
