@@ -374,8 +374,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # `optax.inject_hyperparams`).
     _promote_opt_state_floats_to_float32(self.optimizer)
     self.grad_accumulator = GradientAccumulator(
-        # self.model, wrt_target, allocate=not self._is_single_microstep()
-        self.model, wrt_target, allocate=True
+        self.model, wrt_target, allocate=not self._is_single_microstep()
     )
 
     self.loss_fn = _default_loss_fn

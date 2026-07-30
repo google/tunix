@@ -164,6 +164,20 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+# Debug hook. At depth 1 the fast path feeds `grads` straight into the optimizer
+# inside one traced function, so the gradients are an internal temporary and are
+# never observable from Python. Setting this makes the step park them in the
+# accumulator so they can be diffed against another trainer.
+#
+# This is NOT free and must be off when measuring HBM: it turns the gradient
+# tree from a module-internal temporary (which XLA can overlap with backward
+# scratch) into a program output, which costs one full parameter-tree-sized
+# buffer -- the very asymmetry the split-vs-fused investigation is about. In
+# other words, you cannot observe v1's gradients without changing v1's memory
+# profile, so run the numerical comparison and the memory benchmark separately.
+_EXPOSE_DEPTH1_GRADS = False
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -226,12 +240,21 @@ class GradientAccumulator(nnx.Module):
       # dominates trace time; the stored value is identical.
       acc_var.set_value(acc_var[...] + g)
 
-    jax.tree_util.tree_map(
-        _add,
-        self.grads,
-        grads,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
-    )
+    if self.allocated:
+      jax.tree_util.tree_map(
+          _add,
+          self.grads,
+          grads,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+    else:
+      # No buffer held: either it was never allocated, or a non-persistent
+      # `reset()` released it. Adopt the incoming tree -- adding to an implicit
+      # zero tree is exactly the incoming value, and this avoids allocating a
+      # zero copy of the parameter tree just to add to it. Without this branch
+      # the tree_map above would iterate an empty tree and silently drop the
+      # gradients.
+      self.grads = nnx.data(grads)
 
     if denom is None:
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
@@ -563,7 +586,8 @@ class PeftTrainer:
       #     "JIT TRACE v1 [train_step] value_and_grad output dtypes:",
       #     raw_dtypes,
       # )
-      # grad_accumulator.add(grads)
+      if _EXPOSE_DEPTH1_GRADS:
+        grad_accumulator.add(grads)
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )

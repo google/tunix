@@ -190,7 +190,12 @@ def report_memory_analysis(tag, partial_fn, *extra_args):
   failure here must not take the benchmark down with it.
   """
   try:
-    jitted = getattr(partial_fn, "func", partial_fn)
+    # The trainers store `functools.partial(nnx.jit(step), *bound_args)`. The
+    # partial's `.func` is nnx's wrapper, which does not expose `.lower`; the
+    # underlying jax.jit callable hangs off `.jitted_fn` (the same path `train()`
+    # uses to read `_cache_size()`).
+    wrapper = getattr(partial_fn, "func", partial_fn)
+    jitted = getattr(wrapper, "jitted_fn", wrapper)
     bound = getattr(partial_fn, "args", ())
     compiled = jitted.lower(*bound, *extra_args).compile()
     m = compiled.memory_analysis()
@@ -226,6 +231,45 @@ gc.collect()
 _init_ck = tc.tree_bit_checksum(_init_state_host)
 print(f"INIT weight checksum: {_init_ck}")
 
+# Two comparisons with very different sensitivities, so they get different
+# gates:
+#
+#   gradients -- what the two trainers are supposed to compute identically.
+#     Anything above 0 ULP is a real divergence in the compiled backward.
+#
+#   weights after one SGD step -- `w - lr*g` with lr=1e-5 discards roughly all
+#     but ~9 bits of the update (update/ULP(w) ~ 500 at these magnitudes), and
+#     rounding is a threshold operation, so an arbitrarily small difference in
+#     `g` flips the result by a full ULP whenever the exact value sits near a
+#     tie. A handful of 1-ULP weight differences is therefore consistent with
+#     gradients that agree to well under one ULP -- it is an amplifier, not an
+#     independent signal. Compare it, but do not gate on 0.
+_GRAD_MAX_ULP = 0
+_WEIGHT_MAX_ULP = 4
+
+# v1's depth-1 fast path keeps gradients as an internal temporary, so they are
+# invisible from Python unless this is on. It costs one parameter-tree-sized
+# buffer in HBM, so turn it off before re-running the memory benchmark.
+peft_trainer._EXPOSE_DEPTH1_GRADS = True
+
+
+def compare(tag, a, b, max_ulp):
+  ck_a, ck_b = tc.tree_bit_checksum(a), tc.tree_bit_checksum(b)
+  status = "identical" if ck_a == ck_b else "DIFFER"
+  print(f"[cmp] {tag}: XOR v1={ck_a} v2={ck_b} {status}")
+  if ck_a == ck_b:
+    return
+  try:
+    jax.tree.map_with_path(
+        lambda path, x, y: tc.assert_close_ulp(path, x, y, max_ulp=max_ulp),
+        a,
+        b,
+    )
+    print(f"[cmp] {tag}: within {max_ulp} ULP")
+  except AssertionError as e:
+    print(f"[cmp] {tag}: EXCEEDS {max_ulp} ULP\n{e}")
+
+
 with mesh:
   # v1
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
@@ -248,6 +292,8 @@ with mesh:
 
   model_state_v1 = nnx.state(gemma)
   opt_state_v1 = nnx.state(trainer_v1.optimizer)
+  # v1's fast path never resets, so the gradients are still there after train().
+  grads_v1_host = jax.device_get(trainer_v1.grad_accumulator.grads)
   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
   del gemma, trainer_v1, optimizer_v1
   gc.collect()
@@ -287,38 +333,26 @@ with mesh:
   trainer_v2 = peft_trainer_v2.PeftTrainer(gemma_v2, optimizer_v2, config_v2)
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
 
-  # Expected max_ulp:
-  #   0 for fp32 (any flag), and for bf16 with
-  #     --xla_allow_excess_precision=false
-  #   1..2 for bf16 with excess precision allowed (the default)
-  # Raise it only if you have decided the extra rounding is acceptable; do not
-  # reach for a larger atol instead, which cannot express this bound.
-  _MAX_ULP = 0
-
-  # NOTE: v2 still parks gradients in `grad_accumulator.grads`, but only between
-  # fwd_bwd and update -- a non-persistent `reset()` drops them at the end of
-  # update, so read them BEFORE calling update. v1's depth-1 fast path never
-  # touches its accumulator at all, so it has no equivalent hook: to compare
-  # gradients again, set gradient_accumulation_steps=2 so both trainers take the
-  # accumulating path.
-
-  
+  # Explicit two-call form rather than train(): `_update_step` resets the
+  # accumulator, so the gradients have to be read between the halves. (train()
+  # is the right call for the memory benchmark -- at depth 1 it routes through
+  # the fused step, which is what we want to measure there.)
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v2.train(dataset, skip_jit=False)
-    # trainer_v2.fwd_bwd(dataset[0])
-    # trainer_v2.update()
+    trainer_v2.fwd_bwd(dataset[0])
+    jax.effects_barrier()
+    grads_v2_host = jax.device_get(trainer_v2.grad_accumulator.grads)
+    trainer_v2.update()
     jax.effects_barrier()
 
-  def compare_grads(tag, g1, g2):
-    ck1, ck2 = tc.tree_bit_checksum(g1), tc.tree_bit_checksum(g2)
-    print(f"compare grads between v1 and v2.{tag}: "
-          f"XOR v1={ck1} v2={ck2} {'identical' if ck1 == ck2 else 'DIFFER'}")
-    jax.tree.map_with_path(
-        lambda path, a, b: tc.assert_close_ulp(path, a, b, max_ulp=_MAX_ULP),
-        g1, g2,
-    )
-  # compare_grads("fwd_bwd", v1_grads, trainer_v2.grad_accumulator.grads)
-  compare_grads("update", model_state_v1_host, jax.device_get(nnx.state(gemma_v2)))
+  # Upstream: did the two backward passes produce the same gradients?
+  compare("grads", grads_v1_host, grads_v2_host, _GRAD_MAX_ULP)
+  # Downstream: the amplified view. Only meaningful once the line above is read.
+  compare(
+      "weights after 1 step",
+      model_state_v1_host,
+      jax.device_get(nnx.state(gemma_v2)),
+      _WEIGHT_MAX_ULP,
+  )
 
   # In the single-microstep regime the accumulator holds gradients only between
   # fwd_bwd and update: nothing is pre-allocated, and update's `reset()` drops
