@@ -300,12 +300,21 @@ class GradientAccumulator(nnx.Module):
       # dominates trace time; the stored value is identical.
       acc_var.set_value(acc_var[...] + g)
 
-    jax.tree_util.tree_map(
-        _add,
-        self.grads,
-        grads,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
-    )
+    if self.allocated:
+      jax.tree_util.tree_map(
+          _add,
+          self.grads,
+          grads,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+    else:
+      # No buffer held: either it was never allocated, or a non-persistent
+      # `reset()` released it. Adopt the incoming tree -- adding to an implicit
+      # zero tree is exactly the incoming value, and this avoids allocating a
+      # zero copy of the parameter tree just to add to it. Without this branch
+      # the tree_map above would iterate an empty tree and silently drop the
+      # gradients.
+      self.grads = nnx.data(grads)
 
     if denom is None:
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
