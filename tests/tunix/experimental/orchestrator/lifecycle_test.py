@@ -15,9 +15,12 @@
 """Tests for the LifecycleDriver."""
 
 from absl.testing import absltest
+from tunix.experimental.common import datatypes
 from tunix.experimental.worker import mock_worker
 from tunix.tunix.experimental.orchestrator import lifecycle
 from tunix.tunix.experimental.orchestrator import worker_registry
+
+WorkerState = datatypes.WorkerState
 
 
 _DUMMY_DATA = {"max_prompt_length": 4, "max_response_tokens": 8}
@@ -25,7 +28,7 @@ _DUMMY_DATA = {"max_prompt_length": 4, "max_response_tokens": 8}
 
 class LifecycleDriverTest(absltest.TestCase):
 
-  def test_bring_up_transitions_fakes_to_ready(self):
+  def test_bring_up_transitions_mocks_to_ready(self):
     registry = worker_registry.WorkerRegistry()
     rollout = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
     trainer = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
@@ -34,10 +37,10 @@ class LifecycleDriverTest(absltest.TestCase):
 
     lifecycle.LifecycleDriver(registry).bring_up(_DUMMY_DATA)
 
-    self.assertEqual(rollout.state, "READY")
-    self.assertEqual(trainer.state, "READY")
+    self.assertEqual(rollout.state, WorkerState.READY)
+    self.assertEqual(trainer.state, WorkerState.READY)
 
-  def test_shutdown_transitions_fakes_to_stopped(self):
+  def test_shutdown_transitions_mocks_to_stopped(self):
     registry = worker_registry.WorkerRegistry()
     trainer = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
     registry.register(trainer)
@@ -46,7 +49,7 @@ class LifecycleDriverTest(absltest.TestCase):
 
     driver.shutdown()
 
-    self.assertEqual(trainer.state, "STOPPED")
+    self.assertEqual(trainer.state, WorkerState.STOPPED)
 
   def test_bring_up_runs_phase_by_phase(self):
     registry = worker_registry.WorkerRegistry()

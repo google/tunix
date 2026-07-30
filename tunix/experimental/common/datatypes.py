@@ -20,6 +20,7 @@ This module centralizes type aliases and dataclasses used for:
 """
 
 import dataclasses
+import enum
 import time
 from typing import Any
 
@@ -84,13 +85,74 @@ class Response:
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+class WorkerState(str, enum.Enum):
+  """Worker lifecycle states.
+
+  Attributes:
+    PENDING: Worker is created but not yet initialized.
+    INITIALIZING: Worker is currently allocating resources and running setup.
+    COMPILING: Worker is compiling models or graphs for execution.
+    READY: Worker is fully initialized and ready to accept requests.
+    SYNCING: Worker is synchronizing model weights or policies.
+    DRAINING: Worker is gracefully shutting down and finishing pending requests.
+    STOPPED: Worker is stopped and no longer accepting requests.
+    ERROR: Worker encountered an unrecoverable error.
+  """
+
+  PENDING = "PENDING"
+  INITIALIZING = "INITIALIZING"
+  COMPILING = "COMPILING"
+  READY = "READY"
+  SYNCING = "SYNCING"
+  DRAINING = "DRAINING"
+  STOPPED = "STOPPED"
+  ERROR = "ERROR"
+
+  def can_transition_to(self, new_state: "WorkerState") -> bool:
+    """Checks if the transition to the new state is valid."""
+    return new_state in _ALLOWED_TRANSITIONS.get(self, set())
+
+
+_ALLOWED_TRANSITIONS: dict[WorkerState, set[WorkerState]] = {
+    WorkerState.PENDING: {
+        WorkerState.INITIALIZING,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.INITIALIZING: {
+        WorkerState.READY,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.COMPILING: {
+        WorkerState.READY,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.READY: {
+        WorkerState.COMPILING,
+        WorkerState.SYNCING,
+        WorkerState.DRAINING,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.SYNCING: {
+        WorkerState.READY,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.DRAINING: {WorkerState.STOPPED, WorkerState.ERROR},
+    WorkerState.STOPPED: set(),
+    WorkerState.ERROR: {WorkerState.STOPPED},
+}
+
+
 @dataclasses.dataclass(kw_only=True)
 class HealthReport:
   """A snapshot of a worker's health and readiness state.
 
   Attributes:
-    state: The current lifecycle state (e.g., "INITIALIZING", "READY",
-      "FAILED").
+    state: The current lifecycle state (e.g., WorkerState.READY).
     inflight: Number of active requests currently being processed.
     queue_depth: Number of pending requests queued by the worker.
     policy_version: The version of the weights currently loaded.
@@ -98,7 +160,7 @@ class HealthReport:
     heartbeat_unix_s: The unix timestamp when this report was generated.
   """
 
-  state: str
+  state: WorkerState
   inflight: int = 0
   queue_depth: int = 0
   policy_version: int = 0

@@ -27,14 +27,17 @@ import dataclasses
 import time
 
 from tunix.experimental.common import datatypes
+
 from tunix.tunix.experimental.orchestrator import worker_registry
+
+WorkerState = datatypes.WorkerState
 
 # Default max seconds a worker may dwell in a transient state before it is
 # considered overdue. States absent here (e.g. "READY", "STOPPED") are untimed.
-DEFAULT_STATE_DEADLINES_S: dict[str, float] = {
-    "COMPILING": 30 * 60.0,
-    "SYNCING": 10 * 60.0,
-    "DRAINING": 5 * 60.0,
+DEFAULT_STATE_DEADLINES_S: dict[WorkerState, float] = {
+    WorkerState.COMPILING: 30 * 60.0,
+    WorkerState.SYNCING: 10 * 60.0,
+    WorkerState.DRAINING: 5 * 60.0,
 }
 
 
@@ -62,7 +65,7 @@ class HealthMonitor:
       self,
       registry: worker_registry.WorkerRegistry,
       *,
-      state_deadlines_s: dict[str, float] | None = None,
+      state_deadlines_s: dict[WorkerState, float] | None = None,
       clock: Callable[[], float] = time.monotonic,
   ):
     self._registry = registry

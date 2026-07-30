@@ -22,6 +22,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import rpc_utils
 from tunix.experimental.worker import inference_worker as inference_lib
 
+WorkerState = datatypes.WorkerState
+
 
 class _StubCore:
   """Deterministic, row-independent stand-in for the real inference core."""
@@ -164,9 +166,10 @@ class InferenceWorkerTest(absltest.TestCase):
 
   def test_heartbeat_reports_current_state(self):
     worker = _worker()
-    worker._state = "COMPILING"
+    worker.state = WorkerState.INITIALIZING
+    worker.state = WorkerState.READY
+    worker.state = WorkerState.COMPILING
     self.assertEqual(worker.heartbeat().state, "COMPILING")
-
 
 
 if __name__ == "__main__":
