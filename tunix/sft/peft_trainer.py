@@ -245,6 +245,7 @@ class GradientAccumulator(nnx.Module):
       model: nnx.Module,
       wrt: type[nnx.Variable],
       *,
+<<<<<<< HEAD
       allocate_grads: bool = True,
       accumulator_dtype: DTypeLike = jnp.float32,
   ):
@@ -285,7 +286,31 @@ class GradientAccumulator(nnx.Module):
       # compilation unchanged).
       self.grads = nnx.data({})
       self._param_dtypes = nnx.data({})
+=======
+      allocate: bool = True,
+  ):
+    # Static (non-array) attribute: decides whether the buffer is a long-lived
+    # accumulation target that must be zeroed between updates, or a scratch slot
+    # that `set()` overwrites wholesale and `reset()` can simply drop.
+    self.persistent = allocate
+    if allocate:
+      state = nnx.state(model, wrt)
+      self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    else:
+      # When every update consumes exactly one micro-batch, `_train_step`
+      # applies `grads` directly and never touches the accumulator -- `add`,
+      # `get` and `reset` all live on the accumulating branch. Allocating the
+      # buffer anyway costs a full zero copy of the parameter tree (~3.5 GiB per
+      # device for gemma4-e2b at 12 layers in fp32) that is resident for the
+      # whole run and never read.
+      self.grads = nnx.data({})
+>>>>>>> 539bc31a (snapshot)
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
+
+  @property
+  def allocated(self) -> bool:
+    """Whether a parameter-sized gradient buffer is currently held."""
+    return bool(jax.tree_util.tree_leaves(self.grads))
 
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
@@ -323,6 +348,22 @@ class GradientAccumulator(nnx.Module):
     )
 
   def reset(self):
+    """Clears the accumulator, either by zeroing the buffer or by dropping it.
+
+    Which one is right depends on how the buffer is used, so the choice is made
+    from `self.persistent` rather than at the call site:
+
+    * persistent (accumulating across micro-steps): the next `add()` reads the
+      current value, so the buffer must survive and be zeroed in place.
+    * non-persistent (one micro-batch per update): nothing reads the buffer
+      before it is next written wholesale, so zeroing would write a full
+      parameter-sized copy for nothing. Drop the reference and let the memory go.
+    """
+    if not self.persistent:
+      self.grads = nnx.data({})
+      self.denom.set_value(jnp.zeros_like(self.denom[...]))
+      return
+
     def _zero_in_place(v):
       # set_value (no index); see `add` for why.
       v.set_value(jnp.zeros_like(v[...]))
@@ -384,6 +425,7 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+<<<<<<< HEAD
     self._align_opt_state_dtypes(wrt_target)
     # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
@@ -395,6 +437,14 @@ class PeftTrainer:
     )
     self.grad_accumulator = GradientAccumulator(
         self.model, wrt_target, allocate_grads=_uses_cond_path
+=======
+    # Promote floating-point leaves to float32 in-place to match the dtype of
+    # the optimizer update function branch (which is float32 due to
+    # `optax.inject_hyperparams`).
+    _promote_opt_state_floats_to_float32(self.optimizer)
+    self.grad_accumulator = GradientAccumulator(
+        self.model, wrt_target, allocate=not self._is_single_microstep()
+>>>>>>> 539bc31a (snapshot)
     )
 
     self.loss_fn = _default_loss_fn
@@ -541,6 +591,22 @@ class PeftTrainer:
     self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
     return self
 
+  def _is_single_microstep(self) -> bool:
+    """True when each update consumes exactly one micro-batch.
+
+    In that regime `_train_step` applies `grads` directly to the optimizer and
+    the gradient accumulator is bypassed entirely, so no parameter-sized
+    accumulator buffer is allocated. Outside it, `add()`/`get()`/`reset()` are
+    used and the buffer is required.
+
+    Keep this as the single source of truth: the predicate decides both the
+    accumulator allocation and the branch taken in `_train_step`.
+    """
+    return (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_token_per_tpu is None
+    )
+
   def _train_step(
       self,
       model: nnx.Module,
@@ -606,6 +672,7 @@ class PeftTrainer:
     # True, so update directly from `grads` (no per-leaf accumulator writes,
     # no XLA Conditional, accumulator shardings untouched); sequence packing
     # keeps the cond path since its cadence comes from `is_update_step`.
+<<<<<<< HEAD
     if (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
         and self.config.max_seq_token_per_tpu is None
@@ -616,6 +683,20 @@ class PeftTrainer:
         grads = jax.tree_util.tree_map(
             lambda x: x * scale.astype(x.dtype), grads
         )
+=======
+    if self._is_single_microstep():
+      # 1. Print the precision generated by nnx.value_and_grad:
+      # raw_dtypes = set(
+      #     jax.tree_util.tree_leaves(
+      #         jax.tree.map(lambda x: getattr(x, "dtype", type(x)), grads)
+      #     )
+      # )
+      # print(
+      #     "JIT TRACE v1 [train_step] value_and_grad output dtypes:",
+      #     raw_dtypes,
+      # )
+      # grad_accumulator.add(grads)
+>>>>>>> 539bc31a (snapshot)
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
@@ -713,11 +794,13 @@ class PeftTrainer:
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-    # Partition Gradients same as the model
-    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
-    self.grad_accumulator.grads = jax.tree.map(
-        _shard, self.grad_accumulator.grads, grad_pspecs
-    )
+    # Partition Gradients same as the model. Nothing to do when the accumulator
+    # was not allocated (single-microstep regime).
+    if self.grad_accumulator.allocated:
+      grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
+      self.grad_accumulator.grads = jax.tree.map(
+          _shard, self.grad_accumulator.grads, grad_pspecs
+      )
 
     # Denominator is a scalar — replicate across all devices
     self.grad_accumulator.denom[...] = jax.device_put(
