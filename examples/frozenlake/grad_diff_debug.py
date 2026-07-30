@@ -474,6 +474,35 @@ def compare(tag, a, b, *, max_ulp=None, max_rel=None):
     print(f"[cmp] {tag}: EXCEEDS {max_ulp} ULP\n{e}")
 
 
+def describe_grads(tag, grads_host, expected_norm=None):
+  """Host-side sanity check on a gradient tree read out of an accumulator.
+
+  Deliberately independent of XOR checksums and of any assumption about how nnx
+  round-trips module state: it just adds up the numbers that actually came back.
+  Compare `norm` against the grad_norm the trainer printed. If they agree, the
+  accumulator really holds the step's gradients; if `norm` is absurd or the
+  nonzero-leaf count is short, what came back is not the gradients and any
+  comparison built on it is meaningless.
+  """
+  leaves = [np.asarray(l) for l in jax.tree_util.tree_leaves(grads_host)]
+  nonzero = sum(1 for l in leaves if np.any(l != 0))
+  finite = sum(1 for l in leaves if np.all(np.isfinite(l)))
+  # float64 accumulation so the check itself cannot be the thing that is wrong.
+  norm = float(np.sqrt(sum(float(np.sum(l.astype(np.float64) ** 2)) for l in leaves)))
+  biggest = max((float(np.abs(l).max()) for l in leaves if l.size), default=0.0)
+  print(
+      f"[grads] {tag}: leaves={len(leaves)} nonzero={nonzero} finite={finite} "
+      f"max|g|={biggest:.6g} norm={norm:.6f}"
+      + (
+          f" expected~{float(expected_norm):.6f}"
+          f" rel={abs(norm - float(expected_norm)) / float(expected_norm):.3e}"
+          if expected_norm is not None
+          else ""
+      )
+  )
+  return norm
+
+
 with mesh:
   # v1
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
