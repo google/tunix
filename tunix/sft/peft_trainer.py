@@ -631,7 +631,22 @@ class PeftTrainer:
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
-      # jax.debug.print("DEBUG v1: Grad Norm in train_step: {x}", x=grad_norm)
+      if _EXPOSE_DEPTH1_GRADS:
+        # Same norm, but read back out of the accumulator instead of from
+        # `grads`. This separates the two ways the exposed gradients can be
+        # wrong: if these two lines disagree, the accumulator was written with
+        # the wrong values; if they agree here but the host-side readback is
+        # garbage, the values were fine and it is nnx's state round-trip out of
+        # jit that lost them.
+        jax.debug.print(
+            "DEBUG v1: norm from grads={x} from accumulator={y}",
+            x=grad_norm,
+            y=optax.global_norm(
+                jax.tree_util.tree_map(
+                    lambda x: x.astype(jnp.float32), grad_accumulator.grads
+                )
+            ),
+        )
       optimizer.update(model, grads)
     else:
       if isinstance(aux, utils.LossOutput):
