@@ -66,13 +66,133 @@ def assert_not_equal(path, x, y):
 
 
 def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
+  # NOTE: `atol`/`rtol` must be passed by keyword. `np.testing.assert_allclose`
+  # has signature (actual, desired, rtol, atol), so passing them positionally
+  # silently swaps the two.
   np.testing.assert_allclose(
       _convert_to_nparray(x),
       _convert_to_nparray(y),
-      atol,
-      rtol,
+      rtol=rtol,
+      atol=atol,
       err_msg=f'Mismatch at path: {path}',
   )
+
+
+# Number of ULPs two independently-compiled computations are allowed to differ
+# by. A single rounding of the same real value can land on adjacent
+# representable floats, so 1 ULP is the floor; 2 leaves room for one extra
+# rounding in the chain.
+_DEFAULT_MAX_ULP = 2
+
+
+def ulp_dist(x, y):
+  """Elementwise ULP distance between two float arrays of the same dtype.
+
+  Floats are reinterpreted as sign-magnitude integers and remapped so that the
+  integer ordering matches the float ordering. The result is therefore exact,
+  scale-free, and well-defined next to zero (where relative error is
+  meaningless because it diverges) and across the sign boundary (`+0.0` and
+  `-0.0` are 0 ULP apart).
+
+  Args:
+    x: Array-like of floats. bfloat16, float16, float32 and float64 supported.
+    y: Array-like of the same dtype and broadcastable shape.
+
+  Returns:
+    An integer array of ULP distances.
+  """
+  x = np.asarray(_convert_leaf_to_nparray(x))
+  y = np.asarray(_convert_leaf_to_nparray(y))
+  if x.dtype != y.dtype:
+    raise ValueError(
+        f'ulp_dist requires matching dtypes, got {x.dtype} and {y.dtype}. '
+        'Compare in the storage dtype rather than upcasting, otherwise the '
+        'ULP scale is not the one the computation actually used.'
+    )
+  int_dtype = {1: np.int8, 2: np.int16, 4: np.int32, 8: np.int64}.get(
+      x.dtype.itemsize
+  )
+  if int_dtype is None:
+    raise ValueError(f'Unsupported float width for ulp_dist: {x.dtype}')
+  wide = np.int64
+
+  def _to_ordered_int(a):
+    i = a.view(int_dtype).astype(wide)
+    # Sign-magnitude -> monotonic: negatives are mirrored below zero.
+    return np.where(i < 0, wide(-(2 ** (8 * a.dtype.itemsize - 1))) - i, i)
+
+  return np.abs(_to_ordered_int(x) - _to_ordered_int(y))
+
+
+def assert_close_ulp(path, x, y, max_ulp=_DEFAULT_MAX_ULP):
+  """Asserts two float arrays agree to within `max_ulp` ULPs.
+
+  Preferred over `assert_close` for comparing outputs of two independently
+  compiled programs (e.g. two `jax.jit` boundaries) in low precision. A fixed
+  `atol` cannot work there: gradient tensors span many magnitudes, and entries
+  produced by cancellation are near zero with an absolute error set by the
+  magnitude of the cancelling terms, so any `atol` tight enough to be
+  meaningful for the large entries rejects the small ones.
+
+  Args:
+    path: Pytree key path, used in the failure message.
+    x: Array-like of floats.
+    y: Array-like of the same dtype.
+    max_ulp: Maximum tolerated ULP distance, inclusive.
+  """
+  d = ulp_dist(x, y)
+  violations = int(np.count_nonzero(d > max_ulp))
+  if not violations:
+    return
+  hist = np.bincount(np.minimum(d, 8).ravel(), minlength=9)
+  np.testing.assert_(
+      False,
+      msg=(
+          f'Mismatch at path: {path}\n'
+          f'  dtype        : {np.asarray(_convert_leaf_to_nparray(x)).dtype}\n'
+          f'  max ULP      : {int(d.max())} (allowed {max_ulp})\n'
+          f'  violating    : {violations}/{d.size}'
+          f' ({100.0 * violations / d.size:.4f}%)\n'
+          f'  ULP histogram: '
+          + ', '.join(
+              f'{k if k < 8 else ">=8"}:{int(v)}'
+              for k, v in enumerate(hist)
+              if v
+          )
+      ),
+  )
+
+
+def assert_bitwise_equal(path, x, y):
+  """Asserts two float arrays are bit-for-bit identical.
+
+  This is the right gate for float32 equivalence between two implementations
+  that are supposed to perform the same arithmetic: unlike a norm comparison it
+  cannot be masked by a differing reduction order downstream.
+  """
+  assert_close_ulp(path, x, y, max_ulp=0)
+
+
+def tree_bit_checksum(tree):
+  """Order-independent XOR checksum over the raw bits of a pytree's leaves.
+
+  Computed on the host, so it adds no operations to any traced graph. Embedding
+  a checksum inside a `jax.jit` region makes every leaf an extra graph output,
+  which changes XLA's fusion decisions and can itself perturb the numerics
+  being measured.
+  """
+  acc = 0
+  for leaf in jax.tree_util.tree_leaves(tree):
+    a = np.asarray(_convert_leaf_to_nparray(leaf))
+    if not np.issubdtype(a.dtype, np.number):
+      continue
+    view = {1: np.uint8, 2: np.uint16, 4: np.uint32, 8: np.uint64}.get(
+        a.dtype.itemsize
+    )
+    if view is None:
+      continue
+    acc ^= int(np.bitwise_xor.reduce(a.view(view).ravel()))
+  return acc
 
 
 class Decoder(nnx.Module):

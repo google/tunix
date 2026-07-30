@@ -107,10 +107,50 @@ def create_sharded_model(config, rngs, mesh):
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
 config.num_layers = 12
-# default fp32 with xla_allow_excess_precision=false: loss matched grad_norm  matched, grads after fwd_bwd and in update all matched with v1
-# dtype bf16 with xla_allow_excess_precision=false: loss matched grad_norm  matched, grads after fwd_bwd and in update all matched with v1
-# default fp32 with xla_allow_excess_precision=true: loss matched, grad_norm not matched, grads after in update not matched with v1
-# dtype bf16 with xla_allow_excess_precision=true: loss matched grad_norm  matched, grads after fwd_bwd and in update all matched with v1
+# Findings so far (gemma4_e2b, num_layers=12; full logs at the bottom of this
+# file). "matched" below means bit-for-bit identical, verified via the
+# whole-tree XOR checksum, not via grad_norm -- see the caveat further down.
+#
+#   fp32, excess_precision=false, 2 dev : loss + grad_norm + grads all matched
+#   fp32, excess_precision=true,  2 dev : loss + grad_norm + grads all matched
+#   bf16, excess_precision=false, 1 dev : loss + grad_norm + grads all matched
+#   bf16, excess_precision=false, 2 dev : loss + grad_norm + grads all matched
+#   bf16, excess_precision=true,  1 dev : loss matched; grad_norm differs
+#                                         1.4e-4 rel; grads differ by 1 bf16
+#                                         ULP on 24.7% of elements
+#   bf16, excess_precision=true,  2 dev : same as above (1.35e-4 rel), so the
+#                                         divergence is independent of the
+#                                         device count
+#
+# Reading: v1 and v2 are algorithmically equivalent -- fp32 is bit-identical
+# unconditionally. In bf16, --xla_allow_excess_precision=false is both
+# necessary and sufficient for bit-identity. With excess precision allowed
+# (the default) XLA may keep intermediates in fp32 and skip convert(bf16)
+# nodes; how much it keeps depends on fusion, and v1 compiles fwd+bwd+
+# optimizer.update into one module while v2 splits it into two. Different
+# module => different fusion => different rounding points. That is a legal XLA
+# freedom, not a v2 bug, so bf16 without the flag can only be compared to a
+# ULP tolerance.
+#
+# CAVEAT 1: grad_norm is not a valid pass/fail gate. optax.global_norm sums
+# ~4e8 squares in fp32, and XLA picks a different reduction tree per module,
+# so the norm can differ while the arrays are bit-identical. Observed noise
+# floor with identical grads: 1 to 6 fp32 ULP (6.7e-8 to 3.8e-7 rel). The real
+# divergence above is 1.35e-4 rel, ~1000x higher, so the two are cleanly
+# separable -- but use tc.assert_close_ulp / tc.tree_bit_checksum to decide.
+#
+# CAVEAT 2: numbers are NOT comparable across configurations. The norms range
+# over 1815 / 1939 / 1843 / 1995 / 2094 and the losses differ too, because the
+# initial weights differ between runs: param_dtype is passed straight into
+# nnx.initializers.normal(dtype=...), and jax.random.normal consumes a
+# different number of random bits for bf16 than for fp32 -- it draws a
+# different set of numbers, not a rounded version of the same one. Changing the
+# device count also changed the loss (12.531497 on 1 dev vs 12.530317 on 2 dev
+# at bf16/false), which is far above fp32 reduction noise and so likewise
+# implies different weights. Only within-run v1-vs-v2 comparisons are
+# meaningful. To compare across configurations, initialize once, checkpoint,
+# and restore the same weights everywhere.
+#
 # config.param_dtype = jnp.bfloat16
 
 rngs = nnx.Rngs(0)
@@ -121,6 +161,17 @@ gemma_v2 = nnx.merge(
       graph,
       jax.tree.map(jnp.copy, state),
   )
+
+# Bit-exact fingerprint of the weights the two trainers start from. Print this
+# in every run: if it changes between two runs you are comparing two different
+# models, and any grad_norm difference between those runs says nothing about
+# v1-vs-v2 (see CAVEAT 2 above). The two values below must always be equal --
+# they assert that jnp.copy really produced an independent, identical copy.
+_init_ck_v1 = tc.tree_bit_checksum(nnx.state(gemma))
+_init_ck_v2 = tc.tree_bit_checksum(nnx.state(gemma_v2))
+print(f"INIT weight checksum: v1={_init_ck_v1} v2={_init_ck_v2} "
+      f"{'OK' if _init_ck_v1 == _init_ck_v2 else 'MISMATCH -- v2 is not a faithful copy!'}")
+
 with mesh:
   # v1
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
@@ -148,20 +199,30 @@ with mesh:
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
   trainer_v2.fwd_bwd(dataset[0])
   jax.effects_barrier()
-  # print("compare grads between v1 and v2.fwd_bwd: ")
-  # jax.tree.map_with_path(
-  #   lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
-  #   trainer_v1.grad_accumulator.grads,
-  #   trainer_v2.grad_accumulator.grads,
-  # )
+
+  # Expected max_ulp:
+  #   0 for fp32 (any flag), and for bf16 with
+  #     --xla_allow_excess_precision=false
+  #   1..2 for bf16 with excess precision allowed (the default)
+  # Raise it only if you have decided the extra rounding is acceptable; do not
+  # reach for a larger atol instead, which cannot express this bound.
+  _MAX_ULP = 0
+
+  def compare_grads(tag):
+    ck1 = tc.tree_bit_checksum(trainer_v1.grad_accumulator.grads)
+    ck2 = tc.tree_bit_checksum(trainer_v2.grad_accumulator.grads)
+    print(f"compare grads between v1 and v2.{tag}: "
+          f"XOR v1={ck1} v2={ck2} {'identical' if ck1 == ck2 else 'DIFFER'}")
+    jax.tree.map_with_path(
+        lambda path, g1, g2: tc.assert_close_ulp(path, g1, g2, max_ulp=_MAX_ULP),
+        trainer_v1.grad_accumulator.grads,
+        trainer_v2.grad_accumulator.grads,
+    )
+
+  compare_grads("fwd_bwd")
   trainer_v2.update()
   jax.effects_barrier()
-  print("compare grads between v1 and v2.update: ")
-  jax.tree.map_with_path(
-    lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
-    trainer_v1.grad_accumulator.grads,
-    trainer_v2.grad_accumulator.grads,
-  )
+  compare_grads("update")
   # trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
   jax.effects_barrier()
 
