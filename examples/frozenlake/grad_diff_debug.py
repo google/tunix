@@ -17,9 +17,9 @@ from tunix.experimental.train import peft_trainer_v2
 from tunix.tests import test_common as tc
 
 # Set XLA flag to disable excess precision (run this BEFORE jax initializes devices)
-os.environ['XLA_FLAGS'] = (
-    os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
-).strip()
+# os.environ['XLA_FLAGS'] = (
+#     os.environ.get('XLA_FLAGS', '') + ' --xla_allow_excess_precision=false'
+# ).strip()
 
 import jax
 import jax.numpy as jnp
@@ -83,7 +83,7 @@ dataset = _make_dataset(
     )
 
 if len(jax.devices()) == 8:
-  mesh = jax.make_mesh((1, 8), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:8])
+  mesh = jax.make_mesh((1, 1), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:1])
 else:
   mesh = jax.make_mesh((1,), ('fsdp',), axis_types=(jax.sharding.AxisType.Auto,))
 
@@ -105,12 +105,12 @@ def create_sharded_model(config, rngs, mesh):
 
 
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
-config = g4_model.ModelConfig.gemma4_12b()
-config.num_layers = 4
-# default fp32 with xla_allow_excess_precision: grad_norm matched, grads after fwd_bwd and in update all matched with v1
-# dtype bf16 with xla_allow_excess_precision: grad_norm matched, grads not matched after fwd_bwd with v1.
-# default fp32 with xla_allow_excess_precision=false: grad_norm  ???
-# dtype bf16 with xla_allow_excess_precision=false: grad_norm ???
+config = g4_model.ModelConfig.gemma4_e2b()
+config.num_layers = 12
+# default fp32 with xla_allow_excess_precision=false: ???
+# dtype bf16 with xla_allow_excess_precision=false: loss matched grad_norm  matched, grads after fwd_bwd and in update all matched with v1
+# default fp32 with xla_allow_excess_precision=true: grad_norm  ???
+# dtype bf16 with xla_allow_excess_precision=true: grad_norm ???
 config.param_dtype = jnp.bfloat16
 
 rngs = nnx.Rngs(0)
@@ -148,12 +148,12 @@ with mesh:
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
   trainer_v2.fwd_bwd(dataset[0])
   jax.effects_barrier()
-  print("compare grads between v1 and v2.fwd_bwd: ")
-  jax.tree.map_with_path(
-    lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
-    trainer_v1.grad_accumulator.grads,
-    trainer_v2.grad_accumulator.grads,
-  )
+  # print("compare grads between v1 and v2.fwd_bwd: ")
+  # jax.tree.map_with_path(
+  #   lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
+  #   trainer_v1.grad_accumulator.grads,
+  #   trainer_v2.grad_accumulator.grads,
+  # )
   trainer_v2.update()
   jax.effects_barrier()
   print("compare grads between v1 and v2.update: ")
@@ -184,21 +184,48 @@ with mesh:
 
 ##debug log: 
 """
+
+bf16 with xla_allow_excess_precision=false:
 Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype(bfloat16)}
-DEBUG v1: Grad Norm in train_step: 209.81997680664062
-Debug: train_loss:  12.773499 grad_norm:  209.81998
-Training: 100%|███████████████████████████████████████████████████████████████████████████████████| 1/1 [00:09<00:00,  9.05s/step, _train_loss=12.8, _train_perplexity=3.53e+5, _train_learning_rate=0]
+DEBUG v1: Grad Norm in train_step: 1939.4212646484375
+Debug: train_loss:  12.531497 grad_norm:  1939.4213
+Training: 100%|███████████████████████████████████████████████████████████████████████████████████| 1/1 [00:21<00:00, 21.32s/step, _train_loss=12.5, _train_perplexity=2.77e+5, _train_learning_rate=0]
 /home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:141: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
   with mesh:
 JIT TRACE v2 [fwd_bwd] value_and_grad output dtypes:  {dtype(bfloat16)}
 JIT TRACE v2 [fwd_bwd] grad_accumulator.grads output dtypes:  {dtype(bfloat16)}
-DEBUG v2: Raw Grad Norm in fwd_bwd: 209.81668090820312
-DEBUG v2: Norm AFTER set inside fwd_bwd: 209.81668090820312
-DEBUG v2 fwd_bwd Whole-Tree XOR: 44418
-Debug: train_loss:  12.773499
-compare grads between v1 and v2.fwd_bwd: 
+DEBUG v2: Raw Grad Norm in fwd_bwd: 1939.4212646484375
+DEBUG v2: Norm AFTER set inside fwd_bwd: 1939.4212646484375
+DEBUG v2 fwd_bwd Whole-Tree XOR: 11706
+Debug: train_loss:  12.531497
+JIT TRACE v2 [update_step] acc_grads output dtypes: {dtype(bfloat16)}
+DEBUG v2 update slice: [2.5 0.255859 -2.76562 2.07812 2.45312]
+DEBUG v2 update Whole-Tree XOR: 11706
+DEBUG v2: Norm in update_step: 1939.4205322265625
+compare grads between v1 and v2.update: 
+"""
+
+"""
+bf16 with xla_allow_excess_precision=true:
+Training:   0%|                                                                                                                                                                | 0/1 [00:00<?, ?step/s]JIT TRACE v1 [train_step] value_and_grad output dtypes: {dtype(bfloat16)}
+DEBUG v1: Grad Norm in train_step: 1995.14892578125
+Debug: train_loss:  12.536115 grad_norm:  1995.1489
+Training: 100%|███████████████████████████████████████████████████████████████████████████████████| 1/1 [00:21<00:00, 21.04s/step, _train_loss=12.5, _train_perplexity=2.78e+5, _train_learning_rate=0]
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:141: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+JIT TRACE v2 [fwd_bwd] value_and_grad output dtypes:  {dtype(bfloat16)}
+JIT TRACE v2 [fwd_bwd] grad_accumulator.grads output dtypes:  {dtype(bfloat16)}
+DEBUG v2: Raw Grad Norm in fwd_bwd: 1994.87353515625
+DEBUG v2: Norm AFTER set inside fwd_bwd: 1994.87353515625
+DEBUG v2 fwd_bwd Whole-Tree XOR: 27483
+Debug: train_loss:  12.536115
+JIT TRACE v2 [update_step] acc_grads output dtypes: {dtype(bfloat16)}
+DEBUG v2 update slice: [-1.14062 -0.644531 1.35156 -0.464844 -1.54688]
+DEBUG v2 update Whole-Tree XOR: 27483
+DEBUG v2: Norm in update_step: 1994.87158203125
+compare grads between v1 and v2.update: 
 Traceback (most recent call last):
-  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 152, in <module>
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 160, in <module>
     jax.tree.map_with_path(
   File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree.py", line 425, in map_with_path
     return tree_util.tree_map_with_path(
@@ -209,7 +236,7 @@ Traceback (most recent call last):
   File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree_util.py", line 1258, in <genexpr>
     return treedef.unflatten(f(*xs) for xs in zip(*all_keypath_leaves))
                              ^^^^^^
-  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 153, in <lambda>
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 161, in <lambda>
     lambda path, g1, g2: tc.assert_close(path, g1, g2, atol=1e-5, rtol=1e-5),
                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/home/linchai_google_com/tunix/tunix/tests/test_common.py", line 69, in assert_close
@@ -220,14 +247,14 @@ Traceback (most recent call last):
     raise AssertionError(msg)
 AssertionError: 
 Not equal to tolerance rtol=1e-05, atol=1e-05
-Mismatch at path: (DictKey(key='embedder'), DictKey(key='input_embedding'), GetAttrKey(name='value'))
-Mismatched elements: 243132 / 1006632960 (0.0242%)
-Max absolute difference among violations: 0.015625
-Max relative difference among violations: 112
- ACTUAL: array([[-0.0288086, 0.0617676, 0.00190735, ..., -0.0395508, -0.0664062,
-        0.0280762],
-       [0.337891, 0.237305, 0.324219, ..., 0.118164, -0.0371094,...
- DESIRED: array([[-0.0288086, 0.0617676, 0.00190735, ..., -0.0395508, -0.0664062,
-        0.0280762],
-       [0.337891, 0.237305, 0.324219, ..., 0.120117, -0.0375977,...
+Mismatch at path: (DictKey(key='layers'), DictKey(key=0), DictKey(key='attn'), DictKey(key='attn_vec_einsum'), DictKey(key='w'), GetAttrKey(name='value'))
+Mismatched elements: 776927 / 3145728 (24.7%)
+Max absolute difference among violations: 0.00390625
+Max relative difference among violations: 0.00775146
+ ACTUAL: array([[[0.202148, -0.131836, -0.166016, ..., 0.211914, -0.0776367,
+         -0.0737305],
+        [-0.189453, -0.121582, -0.178711, ..., -0.15332, 0.097168,...
+ DESIRED: array([[[0.201172, -0.131836, -0.166016, ..., 0.210938, -0.0776367,
+         -0.0737305],
+        [-0.188477, -0.121582, -0.178711, ..., -0.15332, 0.097168,...
 """
