@@ -286,23 +286,29 @@ class GradientAccumulator(nnx.Module):
       self._param_dtypes = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
-<<<<<<< HEAD
   @property
   def allocated(self) -> bool:
     """Whether a parameter-sized gradient buffer is currently held."""
     return bool(jax.tree_util.tree_leaves(self.grads))
-=======
+
   def set(self, grads: Any, denom: jax.Array | None = None):
     def _set(acc_var, g_var):
       g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
       acc_var.set_value(g)
 
-    jax.tree_util.tree_map(
-        _set,
-        self.grads,
-        grads,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
-    )
+    if self.allocated:
+      jax.tree_util.tree_map(
+          _set,
+          self.grads,
+          grads,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+    else:
+      # No buffer held: either it was never allocated, or a non-persistent
+      # `reset()` released it. Adopt the incoming tree rather than allocating a
+      # zero tree first and immediately overwriting it. `set()` replaces the
+      # whole tree by definition, so nothing is lost.
+      self.grads = nnx.data(grads)
     if denom is None:
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
     else:
@@ -692,13 +698,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # print(f"DEBUG v2: Grad Norm in update_step: {jax.device_get(norm)}")
     # jax.debug.print("DEBUG v2: Norm in update_step: {x}", x=norm)
     optimizer.update(model, acc_grads)
-    if not self._is_single_microstep():
-      # Only accumulating runs need the zeroing. Doing it unconditionally costs a
-      # full zero copy of the gradient tree per step -- and because its lifetime
-      # overlaps `acc_grads` (still being read by `optimizer.update`) XLA cannot
-      # alias it onto the donated accumulator buffer, so the steady state has to
-      # hold two accumulators at once.
-      grad_accumulator.reset()
+    # Unconditional: `reset()` itself decides between zeroing the buffer and
+    # dropping it, based on whether the accumulator is persistent. Zeroing an
+    # overwrite-only buffer would write a full parameter-sized copy per step
+    # whose lifetime overlaps `acc_grads` (still being read by
+    # `optimizer.update`), so XLA could not even alias it onto the donated
+    # input and the steady state would carry two gradient trees.
+    grad_accumulator.reset()
     return norm
 
   def _train_step(

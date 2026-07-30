@@ -287,6 +287,11 @@ class GradientAccumulator(nnx.Module):
       self._param_dtypes = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
+  @property
+  def allocated(self) -> bool:
+    """Whether a parameter-sized gradient buffer is currently held."""
+    return bool(jax.tree_util.tree_leaves(self.grads))
+
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
       g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
@@ -323,6 +328,22 @@ class GradientAccumulator(nnx.Module):
     )
 
   def reset(self):
+    """Clears the accumulator, either by zeroing the buffer or by dropping it.
+
+    Which one is right depends on how the buffer is used, so the choice is made
+    from `self.persistent` rather than at the call site:
+
+    * persistent (accumulating across micro-steps): the next `add()` reads the
+      current value, so the buffer must survive and be zeroed in place.
+    * non-persistent (one micro-batch per update): nothing reads the buffer
+      before it is next written wholesale, so zeroing would write a full
+      parameter-sized copy for nothing. Drop the reference and let the memory go.
+    """
+    if not self.persistent:
+      self.grads = nnx.data({})
+      self.denom.set_value(jnp.zeros_like(self.denom[...]))
+      return
+
     def _zero_in_place(v):
       # set_value (no index); see `add` for why.
       v.set_value(jnp.zeros_like(v[...]))
@@ -507,6 +528,22 @@ class PeftTrainer:
     self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
     return self
 
+  def _is_single_microstep(self) -> bool:
+    """True when each update consumes exactly one micro-batch.
+
+    In that regime `_train_step` applies `grads` directly to the optimizer and
+    the gradient accumulator is bypassed entirely, so no parameter-sized
+    accumulator buffer is allocated. Outside it, `add()`/`get()`/`reset()` are
+    used and the buffer is required.
+
+    Keep this as the single source of truth: the predicate decides both the
+    accumulator allocation and the branch taken in `_train_step`.
+    """
+    return (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_token_per_tpu is None
+    )
+
   def _train_step(
       self,
       model: nnx.Module,
@@ -679,11 +716,13 @@ class PeftTrainer:
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-    # Partition Gradients same as the model
-    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
-    self.grad_accumulator.grads = jax.tree.map(
-        _shard, self.grad_accumulator.grads, grad_pspecs
-    )
+    # Partition Gradients same as the model. Nothing to do when the accumulator
+    # was not allocated (single-microstep regime).
+    if self.grad_accumulator.allocated:
+      grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
+      self.grad_accumulator.grads = jax.tree.map(
+          _shard, self.grad_accumulator.grads, grad_pspecs
+      )
 
     # Denominator is a scalar — replicate across all devices
     self.grad_accumulator.denom[...] = jax.device_put(

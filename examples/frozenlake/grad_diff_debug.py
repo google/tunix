@@ -684,6 +684,14 @@ with mesh:
     trainer_v1.train(_run_dataset, skip_jit=False)
     jax.effects_barrier()
 
+  # Executables exist only after the first step has compiled them.
+  report_memory_analysis(
+      "v1 train_step",
+      trainer_v1._jitted_train_step_fn,  # pylint: disable=protected-access
+      gen_model_input_fn(dataset[0]),
+      jnp.array(True, dtype=jnp.bool_),
+  )
+
   model_state_v1 = nnx.state(gemma)
   opt_state_v1 = nnx.state(trainer_v1.optimizer)
   # Empty at depth 1 (the fast path never touches the accumulator); holds the
