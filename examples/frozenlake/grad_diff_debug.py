@@ -77,7 +77,7 @@ def _make_dataset(
 
 dataset = _make_dataset(
     peft_trainer.TrainingInput,
-    num_steps=8,
+    num_steps=10,
     batch_size=_BATCH_SIZE,
     seq_len=_SEQ_LEN,
     )
@@ -172,16 +172,17 @@ with mesh:
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=10)
   trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
   trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
-  trainer_v1.train(dataset, skip_jit=False)
-  jax.effects_barrier()
+  with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
+    trainer_v1.train(dataset, skip_jit=False)
+    jax.effects_barrier()
 
   model_state_v1 = nnx.state(gemma)
   opt_state_v1 = nnx.state(trainer_v1.optimizer)
   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
-  del gemma, optimizer_v1
+  del gemma, trainer_v1, optimizer_v1
   gc.collect()
 
 with mesh:
@@ -189,37 +190,39 @@ with mesh:
   optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=10)
   trainer_v2 = peft_trainer_v2.PeftTrainer(gemma_v2, optimizer_v2, config_v2)
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
-  trainer_v2.fwd_bwd(dataset[0])
-  jax.effects_barrier()
+  # trainer_v2.fwd_bwd(dataset[0])
+  # jax.effects_barrier()
 
-  # Expected max_ulp:
-  #   0 for fp32 (any flag), and for bf16 with
-  #     --xla_allow_excess_precision=false
-  #   1..2 for bf16 with excess precision allowed (the default)
-  # Raise it only if you have decided the extra rounding is acceptable; do not
-  # reach for a larger atol instead, which cannot express this bound.
-  _MAX_ULP = 0
+  # # Expected max_ulp:
+  # #   0 for fp32 (any flag), and for bf16 with
+  # #     --xla_allow_excess_precision=false
+  # #   1..2 for bf16 with excess precision allowed (the default)
+  # # Raise it only if you have decided the extra rounding is acceptable; do not
+  # # reach for a larger atol instead, which cannot express this bound.
+  # _MAX_ULP = 0
 
-  def compare_grads(tag):
-    ck1 = tc.tree_bit_checksum(trainer_v1.grad_accumulator.grads)
-    ck2 = tc.tree_bit_checksum(trainer_v2.grad_accumulator.grads)
-    print(f"compare grads between v1 and v2.{tag}: "
-          f"XOR v1={ck1} v2={ck2} {'identical' if ck1 == ck2 else 'DIFFER'}")
-    jax.tree.map_with_path(
-        lambda path, g1, g2: tc.assert_close_ulp(path, g1, g2, max_ulp=_MAX_ULP),
-        trainer_v1.grad_accumulator.grads,
-        trainer_v2.grad_accumulator.grads,
-    )
+  # def compare_grads(tag):
+  #   ck1 = tc.tree_bit_checksum(trainer_v1.grad_accumulator.grads)
+  #   ck2 = tc.tree_bit_checksum(trainer_v2.grad_accumulator.grads)
+  #   print(f"compare grads between v1 and v2.{tag}: "
+  #         f"XOR v1={ck1} v2={ck2} {'identical' if ck1 == ck2 else 'DIFFER'}")
+  #   jax.tree.map_with_path(
+  #       lambda path, g1, g2: tc.assert_close_ulp(path, g1, g2, max_ulp=_MAX_ULP),
+  #       trainer_v1.grad_accumulator.grads,
+  #       trainer_v2.grad_accumulator.grads,
+  #   )
 
-  compare_grads("fwd_bwd")
-  trainer_v2.update()
-  jax.effects_barrier()
-  compare_grads("update")
-  # trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
-  jax.effects_barrier()
+  # compare_grads("fwd_bwd")
+  # trainer_v2.update()
+  # jax.effects_barrier()
+  # compare_grads("update")
+  
+  with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
+    trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
+    jax.effects_barrier()
 
   model_state_v2 = nnx.state(gemma_v2)
   opt_state_v2 = nnx.state(trainer_v2.optimizer)
