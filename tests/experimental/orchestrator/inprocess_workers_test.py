@@ -37,8 +37,8 @@ class InProcessWorkersTest(absltest.TestCase):
         eval_ds="eval_data",
         skip_jit=True,
     )
-    self.mock_engine.train.assert_called_once_with(
-        datatypes.Role.ACTOR, "chunks_data", "eval_data", True
+    self.mock_engine.update_actor.assert_called_once_with(
+        "chunks_data", "eval_data", True
     )
 
     worker.train(
@@ -47,8 +47,8 @@ class InProcessWorkersTest(absltest.TestCase):
         eval_ds="eval_data",
         skip_jit=False,
     )
-    self.mock_engine.train.assert_called_with(
-        datatypes.Role.CRITIC, "chunks_data", "eval_data", False
+    self.mock_engine.update_critic.assert_called_once_with(
+        "chunks_data", "eval_data", False
     )
 
   def test_trainer_worker_per_token_logps(self):

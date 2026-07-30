@@ -53,7 +53,12 @@ class InProcessTrainerWorker:
       skip_jit: bool = False,
   ) -> None:
     """Runs a training update for the specified role."""
-    self._rl_engine.train(role, train_ds, eval_ds, skip_jit)
+    if role == datatypes.Role.ACTOR:
+      self._rl_engine.update_actor(train_ds, eval_ds, skip_jit)
+    elif role == datatypes.Role.CRITIC:
+      self._rl_engine.update_critic(train_ds, eval_ds, skip_jit)
+    else:
+      raise ValueError(f"Unsupported role for train: {role}")
 
   def per_token_logps(
       self,
