@@ -917,5 +917,96 @@ class V1ParityTest(parameterized.TestCase):
     split.assert_not_called()
 
 
+class FusedStepTest(parameterized.TestCase):
+  """The fused single-executable step must be a pure buffer-assignment change.
+
+  `train_step()` traces `_fwd_bwd_step` and `_update_step` together so that XLA
+  can keep the gradient tree as an internal temporary instead of a program
+  output. The arithmetic is the two existing bodies in the same order, so the
+  results must be bit-identical to running them as separate executables -- if
+  they ever diverge, the fusion changed more than buffer assignment.
+  """
+
+  def _make_trainer(self, model, accum_steps=None):
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=4,
+        gradient_accumulation_steps=accum_steps,
+    )
+    trainer = peft_trainer_v2.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
+    )
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+  def _two_identical_models(self):
+    graphdef, state = nnx.split(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    )
+    return (
+        nnx.merge(graphdef, jax.tree.map(jnp.copy, state)),
+        nnx.merge(graphdef, jax.tree.map(jnp.copy, state)),
+    )
+
+  def test_fused_matches_split_bitwise(self):
+    model_fused, model_split = self._two_identical_models()
+    jax.tree.map_with_path(
+        tc.assert_bitwise_equal,
+        nnx.state(model_fused, nnx.Param),
+        nnx.state(model_split, nnx.Param),
+    )
+
+    trainer_fused = self._make_trainer(model_fused)
+    trainer_split = self._make_trainer(model_split)
+
+    for batch in dummy_datasets(batch_size=4):
+      trainer_fused.train_step(batch)
+      trainer_split.fwd_bwd(batch)
+      trainer_split.update()
+
+    jax.tree.map_with_path(
+        tc.assert_bitwise_equal,
+        nnx.state(model_fused, nnx.Param),
+        nnx.state(model_split, nnx.Param),
+    )
+    jax.tree.map_with_path(
+        tc.assert_bitwise_equal,
+        nnx.state(trainer_fused.optimizer),
+        nnx.state(trainer_split.optimizer),
+    )
+    tc.assert_bitwise_equal(
+        'grad_norm',
+        trainer_fused._last_update_grad_norm,
+        trainer_split._last_update_grad_norm,
+    )
+    self.assertEqual(trainer_fused.train_steps, trainer_split.train_steps)
+
+  def test_fused_unavailable_when_accumulating(self):
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer(model, accum_steps=2)
+    trainer.jit_fwd_bwd_update_and_eval_step()
+    self.assertIsNone(trainer._jitted_fused_step_fn)
+    with self.assertRaisesRegex(ValueError, 'one micro-batch per update'):
+      trainer.train_step(dummy_datasets(batch_size=4)[0])
+
+  def test_fused_available_at_depth1(self):
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer(model)
+    trainer.jit_fwd_bwd_update_and_eval_step()
+    self.assertIsNotNone(trainer._jitted_fused_step_fn)
+
+  def test_train_uses_fused_path_at_depth1(self):
+    """`train()` must route through the fused step, not fwd_bwd + update."""
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer(model)
+    with mock.patch.object(
+        trainer, 'train_step', wraps=trainer.train_step
+    ) as fused, mock.patch.object(
+        trainer, 'update', wraps=trainer.update
+    ) as split:
+      trainer.train(dummy_datasets(batch_size=4))
+    self.assertGreater(fused.call_count, 0)
+    split.assert_not_called()
+
+
 if __name__ == '__main__':
   absltest.main()
