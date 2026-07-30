@@ -439,6 +439,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_fwd_bwd_step_fn = None
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
+    self._jitted_fused_step_fn = None
     max_step = None
     if self.config.max_steps is not None:
       max_step = self.config.max_steps * self.config.get_with_default(
@@ -478,6 +479,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_fwd_bwd_step_fn = None
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
+    self._jitted_fused_step_fn = None
 
   @override
   def with_loss_fn(
@@ -651,6 +653,28 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     grad_accumulator.reset()
     return norm
 
+  def _fused_step(
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer,
+      grad_accumulator: GradientAccumulator,
+      inputs: Any,
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+    """`_fwd_bwd_step` followed by `_update_step`, in one traced function.
+
+    Only valid when `_is_single_microstep()`: there is exactly one micro-batch
+    per update, so nothing needs to happen between the two halves. Tracing them
+    together lets XLA treat the gradient tree as a module-internal temporary --
+    overlappable with backward-pass scratch and dead at the end of the step --
+    instead of a program output that has to survive until a second executable
+    reads it. That is worth roughly one full copy of the parameter tree.
+
+    The bodies are reused verbatim, so the fused and split paths are the same
+    arithmetic in the same order; only XLA's buffer assignment differs.
+    """
+    loss, aux = self._fwd_bwd_step(model, grad_accumulator, inputs)
+    return loss, aux, self._update_step(model, optimizer, grad_accumulator)
+
   def _eval_step(
       self, model: nnx.Module, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
@@ -675,6 +699,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ) -> Callable[..., ArrayLike]:
     """Creates the update step function."""
     return self._update_step
+
+  def create_fused_step_fn(
+      self,
+  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
+    """Creates the fused forward/backward/update step function."""
+    return self._fused_step
 
   def create_eval_step_fn(
       self,
@@ -748,7 +778,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     eval_step = self.create_eval_step_fn()
     if skip_jit:
       # Bind the same leading arguments the jitted path binds, so callers such
-      # as `fwd_bwd()`/`update()` can invoke both paths identically.
+      # as `fwd_bwd()`/`update()` can invoke both paths identically. The fused
+      # step exists only to give XLA a single buffer-assignment scope, so it has
+      # no purpose when tracing is skipped.
+      self._jitted_fused_step_fn = None
       return (
           functools.partial(fwd_bwd_step, self.model, self.grad_accumulator),
           functools.partial(
@@ -793,6 +826,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
           self._jitted_eval_step_fn, self.model
+      )
+
+      # Fused single-executable step, used by `train()` when each update
+      # consumes one micro-batch. Donation deliberately mirrors the split path
+      # (`optimizer` + `grad_accumulator`, model not donated) so the two are
+      # structurally comparable and switching between them cannot change
+      # numerics. Compilation is lazy, so building the wrapper here costs
+      # nothing if the fused path is never called.
+      self._jitted_fused_step_fn = (
+          maybe_cache_and_partial(
+              nnx.jit(
+                  self.create_fused_step_fn(),
+                  donate_argnames=("optimizer", "grad_accumulator"),
+              ),
+              self.model,
+              self.optimizer,
+              self.grad_accumulator,
+          )
+          if self._is_single_microstep()
+          else None
       )
     return (
         self._jitted_fwd_bwd_step_fn,
@@ -960,15 +1013,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
       self.training_hooks.on_train_step_end(self, step, loss)
 
-  @override
-  def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
-    """Executes forward and backward passes."""
-    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
+  def _prepare_payload(self, payload: Any) -> Any:
+    """Applies input preparation and sharding to one training payload."""
     payload = self._prepare_inputs(payload)
-    payload = sharding_utils.shard_input(
-        payload, self.config.data_sharding_axis
-    )
-    train_loss, aux = fwd_bwd_step(payload)
+    return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
+
+  def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
+    """Bookkeeping for one forward/backward pass, independent of how it ran."""
     self._buffered_train_metrics = self._buffer_metrics(
         self._buffered_train_metrics,
         loss=train_loss,
@@ -976,25 +1027,54 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     self._post_process_train_step(aux)
 
+  def _record_update(self, grad_norm: ArrayLike) -> int:
+    """Bookkeeping for one optimizer update, independent of how it ran."""
+    self._last_update_grad_norm = grad_norm
+    if self._buffered_train_metrics is not None:
+      metrics = self._buffered_train_metrics.additional_metrics
+      if "grad_norm" not in metrics:
+        metrics["grad_norm"] = ([grad_norm], np.mean)
+      else:
+        metrics["grad_norm"][0].append(grad_norm)
+    self._train_steps += 1
+    self._write_train_metrics()
+    return self._train_steps
+
+  @override
+  def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
+    """Executes forward and backward passes."""
+    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
+    self._record_fwd_bwd(*fwd_bwd_step(self._prepare_payload(payload)))
+
   @override
   def update(self, **kwargs) -> int:
     """Applies the accumulated gradients."""
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step()
-    grad_norm = update_step()
-    self._last_update_grad_norm = grad_norm
-    if self._buffered_train_metrics is not None:
-      if "grad_norm" not in self._buffered_train_metrics.additional_metrics:
-        self._buffered_train_metrics.additional_metrics["grad_norm"] = (
-            [grad_norm],
-            np.mean,
-        )
-      else:
-        self._buffered_train_metrics.additional_metrics["grad_norm"][0].append(
-            grad_norm
-        )
-    self._train_steps += 1
-    self._write_train_metrics()
-    return self._train_steps
+    return self._record_update(update_step())
+
+  def train_step(
+      self, payload: datatypes.TrainerPayload | Any, **kwargs
+  ) -> int:
+    """Runs forward, backward and update as a single executable.
+
+    Equivalent to `fwd_bwd(payload)` followed by `update()` -- same arithmetic
+    in the same order -- but traced as one function, which lets XLA keep the
+    gradient tree as an internal temporary instead of a program output. Only
+    available in the single-microstep regime; when accumulating there is work
+    between the two halves, so they must stay separate.
+    """
+    self.jit_fwd_bwd_update_and_eval_step()
+    if self._jitted_fused_step_fn is None:
+      raise ValueError(
+          "train_step() requires exactly one micro-batch per update. Use"
+          " fwd_bwd() followed by update() when gradient_accumulation_steps > 1"
+          " or sequence packing is enabled."
+      )
+    train_loss, aux, grad_norm = self._jitted_fused_step_fn(
+        self._prepare_payload(payload)
+    )
+    self._record_fwd_bwd(train_loss, aux)
+    return self._record_update(grad_norm)
 
   @override
   def compile(self, dummy_data: Any) -> None:
@@ -1102,7 +1182,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         skip_jit, cache_nnx_graph
     )
     if not skip_jit:
-      cache_size = fwd_bwd_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
+      # Report the step function this loop will actually drive: in the fused
+      # regime `fwd_bwd_step`'s executable is never compiled, so its cache size
+      # would stay at zero and the log would say nothing.
+      traced_step = self._jitted_fused_step_fn or fwd_bwd_step
+      cache_size = traced_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
       logging.log_if(
           logging.INFO,
           f"Compiled fwd_bwd_step cache size: {cache_size}",
@@ -1219,36 +1303,23 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          self.fwd_bwd(train_example)
-          assert self._buffered_train_metrics is not None
-          train_loss = self._buffered_train_metrics.losses[-1]
-          # Add this Python host check right here:
-          # host_grads = nnx.state(self.grad_accumulator.grads)
-          # host_norm = optax.global_norm(
-          #     jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), host_grads)
-          # )
-          # print(f"DEBUG HOST (Python): Norm after fwd_bwd: {host_norm}")
-          computation_to_track = train_loss
-          # In your training loop, right after fwd_bwd(batch) returns:
-          # grads_after_fwd = jax.tree.map(jnp.copy, self.grad_accumulator.grads)
-          # jax.effects_barrier()
-          if is_update_step_val:
-            self.update()
-            # jax.effects_barrier()
-            computation_to_track = getattr(
-                self, "_last_update_grad_norm", train_loss
-            )
-            # all_leaves_equal = jax.tree_util.tree_all(
-            #     jax.tree.map(
-            #         lambda x, y: jnp.array_equal(x, y),
-            #         grads_after_fwd,
-            #         self.grad_accumulator.grads,
-            #     )
-            # )
-            # print(
-            #     "Whole PyTree 100% identical between fwd_bwd and update:",
-            #     all_leaves_equal,
-            # )
+          if self._jitted_fused_step_fn is not None and is_update_step_val:
+            # Single micro-batch per update: run both halves as one executable
+            # so the gradient tree stays an internal temporary. Identical
+            # arithmetic to the branch below.
+            self.train_step(train_example)
+            assert self._buffered_train_metrics is not None
+            computation_to_track = self._last_update_grad_norm
+          else:
+            self.fwd_bwd(train_example)
+            assert self._buffered_train_metrics is not None
+            train_loss = self._buffered_train_metrics.losses[-1]
+            computation_to_track = train_loss
+            if is_update_step_val:
+              self.update()
+              computation_to_track = getattr(
+                  self, "_last_update_grad_norm", train_loss
+              )
 
           span.device_end([computation_to_track])
           span_v2.async_end([computation_to_track])
