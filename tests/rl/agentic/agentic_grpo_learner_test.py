@@ -860,6 +860,161 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
 
+  def test_compute_packed_logps_uses_the_packed_buffer(self):
+    """Deferred logps must be recomputed against the packed representation."""
+    mesh = pxla.thread_resources.env.physical_mesh
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=32), rngs=nnx.Rngs(0)
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=32), rngs=nnx.Rngs(0)
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=100,
+            max_seq_token_per_tpu=16,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=8, max_tokens_to_generate=8, return_logprobs=True
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=test_common.MockVocab(),
+        cluster_config=cluster_config,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=None,
+        algo_config=agentic_grpo_learner.GRPOConfig(
+            beta=0.1,
+            epsilon=0.2,
+            num_generations=2,
+            loss_algo="grpo",
+            max_response_length=8,
+            use_rollout_logps=False,
+        ),
+        chat_parser=MockChatParser(),
+    )
+
+    segment_ids = jnp.array([[1, 1, 1, 2, 2, 0, 0, 0]])
+    example = agentic_grpo_learner.TrainExample(
+        prompt_ids=jnp.ones((1, 4), jnp.int32),
+        prompt_mask=jnp.ones((1, 4), jnp.int32),
+        completion_ids=jnp.ones((1, 4), jnp.int32),
+        completion_mask=jnp.ones((1, 4), jnp.int32),
+        advantages=jnp.zeros((1,)),
+        old_per_token_logps=None,
+        ref_per_token_logps=None,
+        segment_ids=segment_ids,
+        segment_positions=jnp.arange(8).reshape(1, 8),
+    )
+
+    with (
+        mock.patch.object(
+            rl_cluster,
+            "get_actor_per_token_logps",
+            return_value=jnp.zeros((1, 8)),
+        ) as actor_call,
+        mock.patch.object(
+            rl_cluster,
+            "get_ref_per_token_logps",
+            return_value=jnp.zeros((1, 8)),
+        ) as ref_call,
+    ):
+      out = learner._compute_packed_logps(example)
+
+    for call in (actor_call, ref_call):
+      self.assertTrue(call.called)
+      self.assertIsNotNone(
+          call.call_args.kwargs.get("segment_ids"),
+          "the recompute ran without segment_ids, so it treated the packed row"
+          " as a single sequence",
+      )
+    self.assertIsNotNone(out.old_per_token_logps)
+    self.assertIsNotNone(out.ref_per_token_logps)
+
+  def test_rollout_logps_trainer_recompute_is_packed_too(self):
+    """With rollout logps, the trainer recompute must use the packed row too."""
+    mesh = pxla.thread_resources.env.physical_mesh
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=32), rngs=nnx.Rngs(0)
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=100,
+            max_seq_token_per_tpu=16,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=8, max_tokens_to_generate=8, return_logprobs=True
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=model,
+        tokenizer=test_common.MockVocab(),
+        cluster_config=cluster_config,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=None,
+        algo_config=agentic_grpo_learner.GRPOConfig(
+            beta=0.0,
+            epsilon=0.2,
+            num_generations=2,
+            loss_algo="grpo",
+            max_response_length=8,
+            use_rollout_logps=True,
+            sampler_is="token",
+        ),
+        chat_parser=MockChatParser(),
+    )
+
+    rollout_logps = jnp.full((1, 8), -0.5)
+    example = agentic_grpo_learner.TrainExample(
+        prompt_ids=jnp.ones((1, 4), jnp.int32),
+        prompt_mask=jnp.ones((1, 4), jnp.int32),
+        completion_ids=jnp.ones((1, 4), jnp.int32),
+        completion_mask=jnp.ones((1, 8), jnp.int32),
+        advantages=jnp.zeros((1,)),
+        old_per_token_logps=rollout_logps,
+        ref_per_token_logps=None,
+        segment_ids=jnp.array([[1, 1, 1, 2, 2, 0, 0, 0]]),
+        segment_positions=jnp.arange(8).reshape(1, 8),
+    )
+    trainer_logps = jnp.full((1, 8), -0.25)
+
+    with mock.patch.object(
+        rl_cluster, "get_actor_per_token_logps", return_value=trainer_logps
+    ) as actor_call:
+      out = learner._compute_packed_logps(example)
+
+    self.assertTrue(
+        actor_call.called,
+        "the trainer recompute never ran, so sampler_is has nothing to correct",
+    )
+    self.assertIsNotNone(
+        actor_call.call_args.kwargs.get("segment_ids"),
+        "the recompute ran unpacked, which is the memory cost packing removes",
+    )
+    np.testing.assert_allclose(out.old_per_token_logps, trainer_logps)
+    self.assertIsNotNone(out.sampler_is_weights)
+
   def test_process_results_zero_advantage_group(self):
     class MockTraj:
 

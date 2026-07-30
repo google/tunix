@@ -22,6 +22,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import rpc_utils
 from tunix.experimental.worker import inference_worker as inference_lib
 
+WorkerState = datatypes.WorkerState
+
 
 class _StubCore:
   """Deterministic, row-independent stand-in for the real inference core."""
@@ -45,6 +47,7 @@ class _StubCore:
 def _worker(core=None, chunk_size=None):
   return inference_lib.InferenceWorker(
       core if core is not None else _StubCore(),
+      worker_id="test_worker_1",
       pad_id=0,
       eos_id=1,
       model_version=3,
@@ -160,6 +163,13 @@ class InferenceWorkerTest(absltest.TestCase):
     np.testing.assert_array_equal(
         restored.per_token_logps, result.per_token_logps
     )
+
+  def test_heartbeat_reports_current_state(self):
+    worker = _worker()
+    worker.state = WorkerState.INITIALIZING
+    worker.state = WorkerState.READY
+    worker.state = WorkerState.COMPILING
+    self.assertEqual(worker.heartbeat().state, "COMPILING")
 
 
 if __name__ == "__main__":

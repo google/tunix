@@ -20,6 +20,8 @@ This module centralizes type aliases and dataclasses used for:
 """
 
 import dataclasses
+import enum
+import time
 from typing import Any
 
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
@@ -55,14 +57,135 @@ class ErrorInfo:
 
 
 @dataclasses.dataclass(kw_only=True)
+class Request:
+  """Standard base for generic RPC requests.
+
+  Attributes:
+    request_id: Unique identifier for this request, echoed back on the
+      corresponding response so callers can correlate responses.
+    metadata: Optional free-form data attached to the request.
+  """
+
+  request_id: str = ""
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(kw_only=True)
 class Response:
   """Standard response for generic RPC requests.
 
   Attributes:
+    request_id: Echoes the originating request_id for correlation.
     error: Structured failure details when the operation failed, else None.
+    metadata: Optional free-form data attached to the response.
   """
 
+  request_id: str = ""
   error: ErrorInfo | None = None
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+class WorkerState(str, enum.Enum):
+  """Worker lifecycle states.
+
+  Attributes:
+    PENDING: Worker is created but not yet initialized.
+    INITIALIZING: Worker is currently allocating resources and running setup.
+    COMPILING: Worker is compiling models or graphs for execution.
+    READY: Worker is fully initialized and ready to accept requests.
+    SYNCING: Worker is synchronizing model weights or policies.
+    DRAINING: Worker is gracefully shutting down and finishing pending requests.
+    STOPPED: Worker is stopped and no longer accepting requests.
+    ERROR: Worker encountered an unrecoverable error.
+  """
+
+  PENDING = "PENDING"
+  INITIALIZING = "INITIALIZING"
+  COMPILING = "COMPILING"
+  READY = "READY"
+  SYNCING = "SYNCING"
+  DRAINING = "DRAINING"
+  STOPPED = "STOPPED"
+  ERROR = "ERROR"
+
+  def can_transition_to(self, new_state: "WorkerState") -> bool:
+    """Checks if the transition to the new state is valid."""
+    return new_state in _ALLOWED_TRANSITIONS.get(self, set())
+
+
+_ALLOWED_TRANSITIONS: dict[WorkerState, set[WorkerState]] = {
+    WorkerState.PENDING: {
+        WorkerState.INITIALIZING,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.INITIALIZING: {
+        WorkerState.READY,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.COMPILING: {
+        WorkerState.READY,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.READY: {
+        WorkerState.COMPILING,
+        WorkerState.SYNCING,
+        WorkerState.DRAINING,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.SYNCING: {
+        WorkerState.READY,
+        WorkerState.STOPPED,
+        WorkerState.ERROR,
+    },
+    WorkerState.DRAINING: {WorkerState.STOPPED, WorkerState.ERROR},
+    WorkerState.STOPPED: set(),
+    WorkerState.ERROR: {WorkerState.STOPPED},
+}
+
+
+@dataclasses.dataclass(kw_only=True)
+class HealthReport:
+  """A snapshot of a worker's health and readiness state.
+
+  Attributes:
+    state: The current lifecycle state (e.g., WorkerState.READY).
+    inflight: Number of active requests currently being processed.
+    queue_depth: Number of pending requests queued by the worker.
+    policy_version: The version of the weights currently loaded.
+    last_error: A string summarizing the most recent error, if any.
+    heartbeat_unix_s: The unix timestamp when this report was generated.
+  """
+
+  state: WorkerState
+  inflight: int = 0
+  queue_depth: int = 0
+  policy_version: int = 0
+  last_error: str | None = None
+  heartbeat_unix_s: float = dataclasses.field(default_factory=time.time)
+
+
+@dataclasses.dataclass(kw_only=True)
+class WorkerInfo:
+  """Static metadata describing a worker's identity and capabilities.
+
+  Attributes:
+    worker_id: The unique identifier for this worker.
+    roles: The orchestrator roles this worker can serve (e.g., "trainer",
+      "rollout").
+    resources: Unstructured dictionary of hardware or configuration details
+      (e.g., tokenizer_hash, fsdp_size) used during startup validation.
+  """
+
+  worker_id: str
+  roles: frozenset[str] = frozenset()
+  resources: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+##### Rollout DTOs #####
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -81,19 +204,16 @@ class SamplingParams:
 
 
 @dataclasses.dataclass(kw_only=True)
-class SamplingRequest:
+class SamplingRequest(Request):
   """Request to generate completions for a single prompt from a Sampler.
 
   Attributes:
     prompt: The source prompt to sample from (formatted string, token array, or
       chat dictionary).
-    request_id: Unique identifier for this request, echoed back on the
-      corresponding SamplingResponse so callers can correlate responses.
     sampling_params: Optional per-request sampling configuration.
   """
 
   prompt: Any
-  request_id: str = ""
   sampling_params: SamplingParams | None = None
 
 
@@ -102,8 +222,6 @@ class SamplingResponse(Response):
   """Serializable result of a single sampling/completion request from a Sampler.
 
   Attributes:
-    request_id: Optional identifier for correlating batched or streamed
-      requests.
     text: Detokenized completion text string generated by the model.
     token_ids: Array of generated token IDs (unpadded).
     logprobs: Array of per-token log-probabilities under the sampling policy
@@ -114,7 +232,6 @@ class SamplingResponse(Response):
       None.
   """
 
-  request_id: str = ""
   text: str = ""
   token_ids: np.ndarray = dataclasses.field(
       default_factory=lambda: np.zeros(0, dtype=np.int32)
@@ -134,31 +251,10 @@ class SamplingResponse(Response):
 
 
 @dataclasses.dataclass(kw_only=True)
-class WeightSyncRequest:
-  """Configuration and routing metadata for synchronizing policy model weights.
-
-  Attributes:
-    controller_id: Optional identifier for transport controllers (e.g., TPU
-      Raiden).
-    policy_version: Target policy version identifier of the weights to sync.
-    source_metadata: Optional transport/layout metadata describing source
-      weights.
-    extra_config: Optional backend-specific configuration parameters.
-  """
-
-  controller_id: str = ""
-  policy_version: int = 0
-  source_metadata: Any = None
-  extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-
-@dataclasses.dataclass
-class RolloutRequest:
+class RolloutRequest(Request):
   """Request to generate a rollout from a given prompt.
 
   Attributes:
-    request_id: Unique identifier for this request, echoed back on the
-      corresponding result so callers can correlate and de-duplicate responses.
     prompt: The prompt to generate from (e.g. formatted string, token array, or
       chat dictionary).
     prompt_id: Unique identifier for this prompt within a task or dataset.
@@ -169,18 +265,14 @@ class RolloutRequest:
     max_turns: Maximum number of conversation turns for environment interaction.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
-    metadata: Optional dictionary for storing arbitrary request metadata or
-      tracking information.
   """
 
-  request_id: str = ""
   prompt: Any = ""
   prompt_id: str = "default_prompt"
   group_id: str = ""
   generation_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
   max_turns: int = 10
   target_policy_version: int = 0
-  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -194,8 +286,8 @@ class TokenSegment:
     source: Origin of the span, e.g. "assistant" (model-emitted) or "env".
     tokens: Array of token ids for this span.
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
-    logps: Array of per-token log-probabilities under the sampling
-      distribution, or None for spans the model did not emit (e.g. env tokens).
+    logps: Array of per-token log-probabilities under the sampling distribution,
+      or None for spans the model did not emit (e.g. env tokens).
   """
 
   source: str
@@ -211,8 +303,7 @@ class TokenSegment:
       )
     if self.logps is not None and self.logps.shape != self.tokens.shape:
       raise ValueError(
-          f"logps shape {self.logps.shape} != tokens shape"
-          f" {self.tokens.shape}"
+          f"logps shape {self.logps.shape} != tokens shape {self.tokens.shape}"
       )
 
 
@@ -227,7 +318,6 @@ class RolloutResponse(Response):
   response.
 
   Attributes:
-    request_id: Echoes the originating request, for correlation/de-duplication.
     status: Terminal status name (e.g. a rollout trajectory status, or
       "CANCELLED").
     prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
@@ -239,7 +329,6 @@ class RolloutResponse(Response):
     error: Failure details when the request did not succeed, else None.
   """
 
-  request_id: str
   status: str
   prompt_tokens: np.ndarray = dataclasses.field(
       default_factory=lambda: np.zeros(0, dtype=np.int32)
@@ -318,6 +407,31 @@ class TrainerPayload:
   segment_ids: ArrayLike | None = None
 
 
+##### Weight Sync DTOs #####
+
+
+@dataclasses.dataclass(kw_only=True)
+class WeightSyncRequest(Request):
+  """Configuration and routing metadata for synchronizing policy model weights.
+
+  Attributes:
+    controller_id: Optional identifier for transport controllers (e.g., TPU
+      Raiden).
+    policy_version: Target policy version identifier of the weights to sync.
+    source_metadata: Optional transport/layout metadata describing source
+      weights.
+    extra_config: Optional backend-specific configuration parameters.
+  """
+
+  controller_id: str = ""
+  policy_version: int = 0
+  source_metadata: Any = None
+  extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+##### Training DTOs #####
+
+
 @dataclasses.dataclass(kw_only=True)
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
@@ -338,11 +452,10 @@ class RLTrainerPayload(TrainerPayload):
 
 
 @dataclasses.dataclass(kw_only=True)
-class LogprobsRequest:
+class LogprobsRequest(Request):
   """Request to score per-token log-probabilities under a frozen model.
 
   Attributes:
-    request_id: Unique id for this request; echoed on the result.
     prompt_tokens: [B, P], LEFT-padded.
     completion_tokens: [B, C], RIGHT-padded; the result aligns to these
       completion columns.
@@ -351,11 +464,13 @@ class LogprobsRequest:
     model_role: Which hosted model to score against (v1: "reference").
   """
 
-  request_id: str
   prompt_tokens: np.ndarray
   completion_tokens: np.ndarray
   temperature: float
   model_role: str = "reference"
+
+
+##### Inference DTOs #####
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -363,29 +478,25 @@ class LogprobsResponse(Response):
   """Per-token log-probabilities for a LogprobsRequest.
 
   Attributes:
-    request_id: Echoes the originating request.
     per_token_logps: [B, C], aligned to the request's completion columns.
     model_version: Version of the scoring weights (constant for a frozen model).
     error: Failure details when the request did not succeed, else None.
   """
 
-  request_id: str
   per_token_logps: np.ndarray
   model_version: int = 0
 
 
 @dataclasses.dataclass(kw_only=True)
-class ScoreRequest:
+class ScoreRequest(Request):
   """Request to score scalar rewards/values under a hosted model.
 
   Attributes:
-    request_id: Unique id for this request; echoed on the result.
     prompt_tokens: [B, P], LEFT-padded.
     completion_tokens: [B, C], RIGHT-padded.
     model_role: Which hosted model to score against (e.g. "reward").
   """
 
-  request_id: str
   prompt_tokens: np.ndarray
   completion_tokens: np.ndarray
   model_role: str = "reward"
@@ -396,12 +507,10 @@ class ScoreResponse(Response):
   """Scalar scores for a ScoreRequest.
 
   Attributes:
-    request_id: Echoes the originating request.
     scores: [B], one scalar per row.
     model_version: Version of the scoring weights (constant for a frozen model).
     error: Failure details when the request did not succeed, else None.
   """
 
-  request_id: str
   scores: np.ndarray
   model_version: int = 0

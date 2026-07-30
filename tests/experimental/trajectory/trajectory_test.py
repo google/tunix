@@ -1,6 +1,13 @@
+import json
+import os
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.experimental.trajectory import trajectory
+
+_SAMPLE_ATIF_PATH = os.path.join(
+    os.path.dirname(__file__), "testdata", "sample_atif_v1_7.json"
+)
 
 
 class SubagentTrajectoryRefTest(parameterized.TestCase):
@@ -77,37 +84,27 @@ class StepTest(parameterized.TestCase):
 
 
 class TrajectoryTest(parameterized.TestCase):
+  sample_atif_trajectory: trajectory.Trajectory
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    with open(_SAMPLE_ATIF_PATH, "r", encoding="utf-8") as f:
+      cls.sample_atif_trajectory = trajectory.Trajectory.from_json_dict(
+          json.load(f)
+      )
 
   def test_basic_serialization_and_deserialization(self):
-    data = {
-        "schema_version": "ATIF-v1.7",
-        "session_id": "test-session",
-        "trajectory_id": "root-traj",
-        "agent": {"name": "test-agent", "version": "1.0"},
-        "steps": [
-            {
-                "step_id": 1,
-                "source": "user",
-                "message": "Hello",
-            },
-            {
-                "step_id": 2,
-                "source": "agent",
-                "message": "Hi there!",
-                "reasoning_content": "Replying back",
-            },
-        ],
-    }
-    traj = trajectory.Trajectory.from_json_dict(data)
+    traj = self.sample_atif_trajectory
     self.assertEqual(traj.schema_version, "ATIF-v1.7")
+    self.assertEqual(traj.session_id, "session-123")
+    self.assertEqual(traj.trajectory_id, "traj-456")
     self.assertLen(traj.steps, 2)
-    self.assertEqual(traj.steps[0].message, "Hello")
+    self.assertEqual(traj.steps[0].message, "List directory contents")
 
     serialized = traj.to_json_dict()
-    self.assertEqual(serialized["session_id"], "test-session")
-    self.assertEqual(
-        serialized["steps"][1]["reasoning_content"], "Replying back"
-    )
+    reloaded = trajectory.Trajectory.from_json_dict(serialized)
+    self.assertEqual(reloaded, traj)
 
   def test_dynamic_step_logging(self):
     traj = trajectory.Trajectory(
@@ -314,6 +311,17 @@ class TrajectoryTest(parameterized.TestCase):
     }
     traj = trajectory.Trajectory.from_json_dict(data)
     self.assertLen(traj.subagent_trajectories, 2)
+
+  def test_get_metadata(self):
+    traj = self.sample_atif_trajectory
+    traj.add_step(source=trajectory.Source.USER, message="Hello")
+
+    meta = traj.get_metadata()
+    self.assertIsInstance(meta, trajectory.TrajectoryMetadata)
+    self.assertNotIsInstance(meta, trajectory.Trajectory)
+    self.assertEqual(meta.trajectory_id, "traj-456")
+    self.assertFalse(hasattr(meta, "steps"))
+    self.assertFalse(hasattr(meta, "subagent_trajectories"))
 
 
 if __name__ == "__main__":

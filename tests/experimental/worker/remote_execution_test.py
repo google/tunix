@@ -131,7 +131,8 @@ def create_in_process_handle(
 
 @contextlib.asynccontextmanager
 async def running_grpc_server(
-    engine: Any, default_timeout_s: Optional[float] = remote_lib.DEFAULT_TIMEOUT_S
+    engine: Any,
+    rpc_timeout_s: Optional[float] = remote_lib.RPC_TIMEOUT_S,
 ):
   """Async context manager managing lifecycle of a GrpcRemoteExecutionServer and handle."""
   port = portpicker.pick_unused_port()
@@ -139,7 +140,7 @@ async def running_grpc_server(
   await server.start_serving_async(port=port)
   handle = remote_lib.GrpcRemoteActorHandle(
       target_address=f"grpc://localhost:{port}",
-      default_timeout_s=default_timeout_s,
+      rpc_timeout_s=rpc_timeout_s,
   )
   try:
     yield server, handle
@@ -159,13 +160,23 @@ class RemoteExecutionTest(absltest.TestCase):
 
   def test_execution_request_serialization(self):
     req = remote_lib.ExecutionRequest(
-        "compute_trajectory", args=("prompt_1",), kwargs={"turns": 5}
+        request_id="req_100",
+        method_name="compute_trajectory",
+        args=("prompt_1",),
+        kwargs={"turns": 5},
     )
     payload = req.serialize()
     restored = remote_lib.ExecutionRequest.deserialize(payload)
     self.assertEqual(restored.method_name, "compute_trajectory")
     self.assertEqual(restored.args, ("prompt_1",))
     self.assertEqual(restored.kwargs, {"turns": 5})
+    self.assertEqual(restored.request_id, "req_100")
+
+    with self.assertRaises(ValueError) as ctx:
+      remote_lib.ExecutionRequest(
+          method_name="compute", args=("data",), kwargs={"request_id": "disallowed"}
+      )
+    self.assertIn("reserved framework parameter", str(ctx.exception))
 
   def test_execution_request_default_call(self):
     req = remote_lib.ExecutionRequest()
@@ -236,8 +247,8 @@ class RemoteExecutionTest(absltest.TestCase):
       # Submit batch of tasks across pool and verify out-of-order completion
       # stream
       tasks = [
-          ("compute_trajectory", ("req_slow_on_A",), {"turns": 1}),
-          ("compute_trajectory", ("req_fast_on_B",), {"turns": 1}),
+          ("req_1", "compute_trajectory", ("req_slow_on_A",), {"turns": 1}),
+          ("req_2", "compute_trajectory", ("req_fast_on_B",), {"turns": 1}),
       ]
 
       results = []
@@ -533,16 +544,38 @@ class RemoteExecutionTest(absltest.TestCase):
       handle = create_in_process_handle(engine)
 
       task_id = await handle.dispatch_task(
-          "compute_trajectory", "prompt_async", turns=2
+          None, "compute_trajectory", "prompt_async", turns=2
       )
       self.assertTrue(task_id.startswith("task_"))
 
       # Poll response queue asynchronously
       resp = await handle.poll_responses(timeout_s=1.0)
       self.assertIsNotNone(resp)
+      self.assertEqual(resp.request_id, task_id)
       self.assertEqual(
           resp.unwrap(),
           "[async_worker] Trajectory for prompt prompt_async (2 turns)",
+      )
+
+    asyncio.run(_run())
+
+  def test_dispatch_task_custom_request_id_in_process(self):
+    async def _run():
+      engine = StubWorkerEngine("custom_id_worker", latency=0.01)
+      handle = create_in_process_handle(engine)
+
+      custom_id = "req_rollout_10042"
+      req_id = await handle.dispatch_task(
+          custom_id, "compute_trajectory", "prompt_custom", turns=1
+      )
+      self.assertEqual(req_id, custom_id)
+
+      resp = await handle.poll_responses(timeout_s=1.0)
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.request_id, custom_id)
+      self.assertEqual(
+          resp.unwrap(),
+          "[custom_id_worker] Trajectory for prompt prompt_custom (1 turns)",
       )
 
     asyncio.run(_run())
@@ -554,13 +587,14 @@ class RemoteExecutionTest(absltest.TestCase):
       engine = StubWorkerEngine("grpc_async_worker", latency=0.05)
       async with running_grpc_server(engine) as (_, handle):
         task_id = await handle.dispatch_task(
-            "compute_trajectory", "prompt_grpc_async", turns=3
+            None, "compute_trajectory", "prompt_grpc_async", turns=3
         )
         self.assertTrue(task_id.startswith("task_"))
 
         # Long-poll response queue over gRPC
         resp = await handle.poll_responses(timeout_s=2.0)
         self.assertIsNotNone(resp)
+        self.assertEqual(resp.request_id, task_id)
         self.assertEqual(
             resp.unwrap(),
             "[grpc_async_worker] Trajectory for prompt prompt_grpc_async (3"
@@ -568,6 +602,51 @@ class RemoteExecutionTest(absltest.TestCase):
         )
 
     asyncio.run(_run_test())
+
+  def test_grpc_dispatch_task_custom_request_id(self):
+    """Verifies client-provided request_id correlates with ExecutionResponse over gRPC."""
+
+    async def _run_test():
+      engine = StubWorkerEngine("grpc_custom_worker", latency=0.02)
+      async with running_grpc_server(engine) as (_, handle):
+        custom_id = "rollout_req_grpc_99"
+        req_id = await handle.dispatch_task(
+            custom_id, "compute_trajectory", "prompt_grpc_custom", turns=2
+        )
+        self.assertEqual(req_id, custom_id)
+
+        resp = await handle.poll_responses(timeout_s=2.0)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.request_id, custom_id)
+        self.assertEqual(
+            resp.unwrap(),
+            "[grpc_custom_worker] Trajectory for prompt prompt_grpc_custom (2"
+            " turns)",
+        )
+
+    asyncio.run(_run_test())
+
+  def test_dispatch_task_method_accepting_domain_request_id(self):
+    class WorkerWithRequestIdParam:
+
+      def process(self, data: str, domain_req_id: str) -> str:
+        return f"Processed {data} with domain_id={domain_req_id}"
+
+    async def _run():
+      handle = create_in_process_handle(WorkerWithRequestIdParam())
+      rpc_req_id = await handle.dispatch_task(
+          "rpc_req_55", "process", "my_data", domain_req_id="domain_req_99"
+      )
+      self.assertEqual(rpc_req_id, "rpc_req_55")
+
+      resp = await handle.poll_responses(timeout_s=1.0)
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.request_id, "rpc_req_55")
+      self.assertEqual(
+          resp.unwrap(), "Processed my_data with domain_id=domain_req_99"
+      )
+
+    asyncio.run(_run())
 
   def test_as_completed_stream_with_none_results(self):
     """Verifies as_completed_stream handles tasks returning None without deadlocking."""
@@ -581,7 +660,7 @@ class RemoteExecutionTest(absltest.TestCase):
       handle = create_in_process_handle(NoneWorker())
       pool = remote_lib.RoutingActorPool([handle])
 
-      tasks = [("void_task", (), {}), ("void_task", (), {})]
+      tasks = [("req_1", "void_task", (), {}), ("req_2", "void_task", (), {})]
       results = []
       async for res in pool.as_completed_stream(tasks):
         results.append(res)
@@ -597,13 +676,13 @@ class RemoteExecutionTest(absltest.TestCase):
       engine = StubWorkerEngine("slow_worker", latency=2.0)
       # Test in-process handle (QueueEmpty via get_nowait)
       handle_inproc = create_in_process_handle(engine)
-      await handle_inproc.dispatch_task("compute_trajectory", "p1")
+      await handle_inproc.dispatch_task(None, "compute_trajectory", "p1")
       self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.0))
       self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.01))
 
       # Test over real gRPC TCP channels
       async with running_grpc_server(engine) as (_, handle_grpc):
-        await handle_grpc.dispatch_task("compute_trajectory", "p2")
+        await handle_grpc.dispatch_task(None, "compute_trajectory", "p2")
         self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.0))
         self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.01))
 
@@ -618,7 +697,7 @@ class RemoteExecutionTest(absltest.TestCase):
       handle = create_in_process_handle(engine)
       pool = remote_lib.RoutingActorPool([handle])
 
-      tasks = [("compute_trajectory", ("failing_prompt",), {})]
+      tasks = [("req_1", "compute_trajectory", ("failing_prompt",), {})]
       with self.assertRaisesRegex(RuntimeError, "currently paused"):
         async for _ in pool.as_completed_stream(tasks):
           pass
@@ -654,27 +733,35 @@ class RemoteExecutionTest(absltest.TestCase):
       engine.pause()
       server = remote_lib.InProcessRemoteExecutionServer(engine)
       resp = await server.execute_request(
-          remote_lib.ExecutionRequest("compute_trajectory")
+          remote_lib.ExecutionRequest(
+              request_id="req_tb_1", method_name="compute_trajectory"
+          )
       )
       self.assertEqual(resp.error_type, "RuntimeError")
       self.assertIn("currently paused", resp.error_message)
       self.assertIsNotNone(resp.traceback)
       self.assertIn("compute_trajectory", resp.traceback)
+      self.assertEqual(resp.request_id, "req_tb_1")
 
     asyncio.run(_run())
 
   def test_server_error_no_instance_bound_sync(self):
     server = remote_lib.InProcessRemoteExecutionServer()
-    req = remote_lib.ExecutionRequest("any_method")
+    req = remote_lib.ExecutionRequest(
+        request_id="req_err_1", method_name="any_method"
+    )
     resp1 = server.execute_sync_request(req)
     self.assertEqual(resp1.error_type, "InstanceNotBoundError")
     self.assertEqual(
         resp1.error_message, "RemoteExecutionServer has no registered instance."
     )
+    self.assertEqual(resp1.request_id, "req_err_1")
 
   def test_server_error_no_instance_bound_async(self):
     server = remote_lib.InProcessRemoteExecutionServer()
-    req = remote_lib.ExecutionRequest("any_method")
+    req = remote_lib.ExecutionRequest(
+        request_id="req_err_2", method_name="any_method"
+    )
 
     async def _run_async_err():
       resp6 = await server.execute_request(req)
@@ -683,6 +770,7 @@ class RemoteExecutionTest(absltest.TestCase):
           resp6.error_message,
           "RemoteExecutionServer has no registered instance.",
       )
+      self.assertEqual(resp6.request_id, "req_err_2")
 
     asyncio.run(_run_async_err())
 
@@ -691,13 +779,16 @@ class RemoteExecutionTest(absltest.TestCase):
         StubWorkerEngine("worker_01")
     )
     resp2 = server.execute_sync_request(
-        remote_lib.ExecutionRequest("missing_method")
+        remote_lib.ExecutionRequest(
+            request_id="req_err_3", method_name="missing_method"
+        )
     )
     self.assertEqual(resp2.error_type, "AttributeError")
     self.assertEqual(
         resp2.error_message,
         "Method 'missing_method' not found on bound instance.",
     )
+    self.assertEqual(resp2.request_id, "req_err_3")
 
   def test_server_error_method_not_found_async(self):
     server = remote_lib.InProcessRemoteExecutionServer(
@@ -706,12 +797,15 @@ class RemoteExecutionTest(absltest.TestCase):
 
     async def _run_async_err():
       resp7 = await server.execute_request(
-          remote_lib.ExecutionRequest("missing")
+          remote_lib.ExecutionRequest(
+              request_id="req_err_4", method_name="missing"
+          )
       )
       self.assertEqual(resp7.error_type, "AttributeError")
       self.assertEqual(
           resp7.error_message, "Method 'missing' not found on bound instance."
       )
+      self.assertEqual(resp7.request_id, "req_err_4")
 
     asyncio.run(_run_async_err())
 
@@ -722,20 +816,28 @@ class RemoteExecutionTest(absltest.TestCase):
         raise ValueError("Intentional failure")
 
     server = remote_lib.InProcessRemoteExecutionServer(ThrowingWorker())
-    resp4 = server.execute_sync_request(remote_lib.ExecutionRequest("fail"))
+    resp4 = server.execute_sync_request(
+        remote_lib.ExecutionRequest(
+            request_id="req_err_5", method_name="fail"
+        )
+    )
     self.assertEqual(resp4.error_type, "ValueError")
     self.assertEqual(resp4.error_message, "Intentional failure")
+    self.assertEqual(resp4.request_id, "req_err_5")
 
   def test_handle_execute_returns_error_for_unserializable_result(self):
     async def _run():
       server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
-      request_bytes = remote_lib.ExecutionRequest("get").serialize()
+      request_bytes = remote_lib.ExecutionRequest(
+          request_id="req_err_6", method_name="get"
+      ).serialize()
 
       response_bytes = await server._handle_execute(request_bytes, context=None)
 
       resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
       self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
       self.assertIsNotNone(resp.error_message)
+      self.assertEqual(resp.request_id, "req_err_6")
 
     asyncio.run(_run())
 
@@ -749,7 +851,9 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_handle_poll_responses_returns_error_for_unserializable_result(self):
     async def _run():
       server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
-      request = remote_lib.ExecutionRequest("get")
+      request = remote_lib.ExecutionRequest(
+          request_id="req_err_7", method_name="get"
+      )
       await server.dispatch_task(request)
 
       response_bytes = await server._handle_poll_responses(b"", context=None)
@@ -757,6 +861,7 @@ class RemoteExecutionTest(absltest.TestCase):
       resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
       self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
       self.assertIsNotNone(resp.error_message)
+      self.assertEqual(resp.request_id, "req_err_7")
 
     asyncio.run(_run())
 
@@ -775,7 +880,7 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_grpc_asubmit_times_out_on_slow_worker(self):
     async def _run():
       engine = StubWorkerEngine("slow_worker", latency=2.0)
-      async with running_grpc_server(engine, default_timeout_s=0.3) as (
+      async with running_grpc_server(engine, rpc_timeout_s=0.3) as (
           _,
           handle,
       ):
@@ -834,6 +939,284 @@ class RemoteExecutionTest(absltest.TestCase):
             server.stop_serving(), serve_loop
         ).result(timeout=5)
       thread.join(timeout=5)
+
+  def test_pool_execution_session_dynamic_enqueuing_and_fault_isolation(self):
+    """Verifies bulk submission, dynamic task enqueuing, and fault isolation in PoolExecutionSession."""
+
+    class DynamicWorker:
+
+      def __init__(self, name: str):
+        self.name = name
+
+      def process(self, val: int) -> int:
+        if val < 0:
+          raise ValueError(f"Negative value {val} not allowed on {self.name}")
+        return val * 10
+
+    async def _run():
+      w1 = create_in_process_handle(DynamicWorker("w1"))
+      w2 = create_in_process_handle(DynamicWorker("w2"))
+      pool = remote_lib.RoutingActorPool([w1, w2])
+
+      results = []
+      errors = []
+
+      # 1. Client calls execution_session for an initial bulk of tasks
+      initial_tasks = [
+          ("req_1", "process", (5,), {}),
+          ("req_2", "process", (-10,), {}),  # This task will throw an exception!
+          ("req_3", "process", (15,), {}),
+      ]
+      async with pool.execution_session(initial_tasks) as session:
+        # 2. Client waits for tasks to finish
+        async for result, exc in session.as_completed():
+          if exc is not None:
+            # 4. If any task throws an exception, it does not affect receiving responses from other tasks
+            errors.append(str(exc))
+            continue
+
+          results.append(result)
+          # 3. Whenever a task is finished, client tries to enqueue a new task
+          if result == 50:
+            await session.submit("req_4", "process", 2)  # will produce 20
+          elif result == 150:
+            await session.submit("req_5", "process", 3)  # will produce 30
+
+      self.assertLen(errors, 1)
+      self.assertIn("Negative value -10 not allowed", errors[0])
+      self.assertCountEqual(results, [50, 150, 20, 30])
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_with_explicit_request_ids_in_initial_tasks(
+      self,
+  ):
+    class EchoWorker:
+
+      def process(self, val: int) -> int:
+        return val * 2
+
+    async def _run():
+      w1 = create_in_process_handle(EchoWorker())
+      pool = remote_lib.RoutingActorPool([w1])
+
+      initial_tasks = [
+          ("custom_id_1", "process", (5,), {}),
+          ("custom_id_2", "process", (10,), {}),
+      ]
+      results = []
+      async with pool.execution_session(initial_tasks) as session:
+        async for result, exc in session.as_completed():
+          self.assertIsNone(exc)
+          results.append(result)
+
+      self.assertCountEqual(results, [10, 20])
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_no_double_decrement_on_dispatch_failure(self):
+    """Verifies that dispatch failures in submit() do not double-decrement _in_flight."""
+
+    class FailingDispatchHandle(remote_lib.ActorHandle):
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        raise ConnectionError("Network error during dispatch")
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        raise ConnectionError("Network error during polling")
+
+    async def _run():
+      handle = FailingDispatchHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      with self.assertRaises(ConnectionError):
+        await session.submit("req_fail", "process", 1)
+
+      # Verify that _in_flight is properly 0 and not negative/corrupted
+      self.assertEqual(session._in_flight, 0)
+      self.assertEmpty(session._dispatched_tasks.get(handle, set()))
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_deadlock_when_loop_dies_during_second_dispatch(
+      self,
+  ):
+    """Verifies as_completed() does not hang if polling loop dies while dispatch_task is awaiting."""
+
+    class DropDuringSecondDispatchHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.poll1_started = asyncio.Event()
+        self.task2_dispatch_pause = asyncio.Event()
+        self.trigger_connection_drop = asyncio.Event()
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        if method_name == "task1":
+          return "task_1"
+        # Task 2 dispatch: pause while poll1 is active
+        await self.task2_dispatch_pause.wait()
+        return "task_2"
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        # First call: long poll for task1
+        if not self.poll1_started.is_set():
+          self.poll1_started.set()
+          await self.trigger_connection_drop.wait()
+          raise ConnectionError("Connection dropped during task1 poll")
+        # Subsequent calls (for restarted loop)
+        raise ConnectionError("Worker dead on second loop poll")
+
+    async def _run():
+      handle = DropDuringSecondDispatchHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      # 1. Dispatch task1 (returns task_1, polling loop starts long-poll for task1)
+      await session.submit("req_t1", "task1")
+      await handle.poll1_started.wait()
+
+      # 2. Start task2 dispatch in background (pauses in dispatch_task)
+      task2_fut = asyncio.create_task(session.submit("req_t2", "task2"))
+      await asyncio.sleep(0.01)
+
+      # 3. Connection drops while task1 is polling and task2 is dispatching!
+      handle.trigger_connection_drop.set()
+      await asyncio.sleep(0.01)
+
+      # 4. Now allow task2 dispatch_task to finish
+      handle.task2_dispatch_pause.set()
+      await task2_fut
+
+      # 5. Consume as_completed stream; both task1 and task2 errors must be yielded
+      results = []
+
+      async def _consume():
+        async for item in session.as_completed():
+          results.append(item)
+
+      await asyncio.wait_for(_consume(), timeout=1.0)
+      await session.close()
+
+      self.assertLen(results, 2)
+      self.assertIsNotNone(results[0][1])
+      self.assertIsInstance(results[0][1], ConnectionError)
+      self.assertIsNotNone(results[1][1])
+      self.assertIsInstance(results[1][1], ConnectionError)
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_removes_matching_request_id_from_dispatched_tasks_out_of_order(
+      self,
+  ):
+    """Verifies that response.request_id removes the matching request ID from session._dispatched_tasks."""
+
+    class OutOfOrderHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.poll_event = asyncio.Event()
+        self.responses = [
+            remote_lib.ExecutionResponse(
+                request_id="req_2", result="res_2"
+            ),
+            remote_lib.ExecutionResponse(
+                request_id="req_1", result="res_1"
+            ),
+        ]
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        return request_id
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        await self.poll_event.wait()
+        self.poll_event.clear()
+        if self.responses:
+          return self.responses.pop(0)
+        await asyncio.sleep(100)
+
+    async def _run():
+      handle = OutOfOrderHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      await session.submit("req_1", "method")
+      await session.submit("req_2", "method")
+
+      self.assertEqual(session._dispatched_tasks[handle], {"req_1", "req_2"})
+
+      # Allow first poll: req_2 arrives first (out of order!)
+      handle.poll_event.set()
+      it = session.as_completed()
+      res1, exc1 = await it.__anext__()
+      self.assertEqual(res1, "res_2")
+      # req_2 should be removed from dispatched_tasks, leaving only req_1
+      self.assertEqual(session._dispatched_tasks[handle], {"req_1"})
+
+      # Allow second poll: req_1 arrives next
+      handle.poll_event.set()
+      res2, exc2 = await it.__anext__()
+      self.assertEqual(res2, "res_1")
+      # dispatched_set should now be empty
+      self.assertEqual(session._dispatched_tasks[handle], set())
+
+      await session.close()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

@@ -28,6 +28,29 @@ from tunix.experimental.common import datatypes
 class Worker(abc.ABC):
   """Base interface for all Workers."""
 
+  # Default initial state for a worker
+  _state: datatypes.WorkerState = datatypes.WorkerState.PENDING
+
+  @property
+  def state(self) -> datatypes.WorkerState:
+    """Gets the current lifecycle state of the worker."""
+    return self._state
+
+  @state.setter
+  def state(self, new_state: datatypes.WorkerState) -> None:
+    """Sets a new state, validating the transition."""
+    if self._state == new_state:
+      return
+    if self._state and not self._state.can_transition_to(new_state):
+      current_name = (
+          self._state.name if hasattr(self._state, "name") else self._state
+      )
+      target_name = new_state.name if hasattr(new_state, "name") else new_state
+      raise RuntimeError(
+          f"Invalid transition from {current_name} to {target_name}"
+      )
+    self._state = new_state
+
   @abc.abstractmethod
   def initialize(self) -> datatypes.Response:
     """Initializes the worker.
@@ -50,4 +73,14 @@ class Worker(abc.ABC):
   @abc.abstractmethod
   def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
+    pass
+
+  @abc.abstractmethod
+  def info(self) -> datatypes.WorkerInfo:
+    """Returns the worker's identification and roles."""
+    pass
+
+  @abc.abstractmethod
+  def heartbeat(self) -> datatypes.HealthReport:
+    """Returns the current health status of the worker."""
     pass

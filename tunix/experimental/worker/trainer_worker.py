@@ -20,6 +20,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
 
+WorkerState = datatypes.WorkerState
+
 
 class TrainerWorker(abstract_worker.Worker):
   """Worker wrapper for a Trainer.
@@ -30,24 +32,37 @@ class TrainerWorker(abstract_worker.Worker):
   """
 
   def __init__(
-      self, trainer_factory: Callable[[], abstract_trainer.AbstractTrainer]
+      self,
+      trainer_factory: Callable[[], abstract_trainer.AbstractTrainer],
+      *,
+      worker_id: str = "trainer_worker",
   ):
     """Initializes the TrainerWorker.
 
     Args:
       trainer_factory: A callable that returns an instantiated AbstractTrainer.
+      worker_id: Unique identifier for this worker.
     """
     self._trainer = trainer_factory()
     self._is_running = False
+    self._worker_id = worker_id
 
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
-    return datatypes.Response()
+    self.state = WorkerState.INITIALIZING
+    try:
+      return datatypes.Response()
+    finally:
+      self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
-    self._trainer.compile(dummy_data)
-    return datatypes.Response()
+    self.state = WorkerState.COMPILING
+    try:
+      self._trainer.compile(dummy_data)
+      return datatypes.Response()
+    finally:
+      self.state = WorkerState.READY
 
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
@@ -57,8 +72,17 @@ class TrainerWorker(abstract_worker.Worker):
   def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     self._is_running = False
+    self.state = WorkerState.STOPPED
     self._trainer.close()
     return datatypes.Response()
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self._worker_id, roles=frozenset({"trainer"})
+    )
+
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=self.state)
 
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
@@ -92,9 +116,7 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer.eval_step(payload, **kwargs)
     return datatypes.Response()
 
-  def save_checkpoint(
-      self, metadata: Any, **kwargs
-  ) -> datatypes.Response:
+  def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._trainer.save_checkpoint(metadata, **kwargs)
     return datatypes.Response()
@@ -105,8 +127,12 @@ class TrainerWorker(abstract_worker.Worker):
 
   def prepare_weight_sync(self, **kwargs) -> datatypes.Response:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
-    self._trainer.prepare_weight_sync(**kwargs)
-    return datatypes.Response()
+    self.state = WorkerState.SYNCING
+    try:
+      self._trainer.prepare_weight_sync(**kwargs)
+      return datatypes.Response()
+    finally:
+      self.state = WorkerState.READY
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""

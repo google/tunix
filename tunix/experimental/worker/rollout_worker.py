@@ -19,6 +19,8 @@ from typing import Any, AsyncIterator, Callable, Sequence
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 
+WorkerState = datatypes.WorkerState
+
 
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
@@ -34,16 +36,30 @@ class RolloutWorker(abstract_worker.Worker):
     """Returns the unique worker ID."""
     return self.worker_id
 
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self.worker_id, roles=frozenset({"rollout"})
+    )
+
   def initialize(self) -> datatypes.Response:
-    return datatypes.Response()
+    self.state = WorkerState.INITIALIZING
+    try:
+      return datatypes.Response()
+    finally:
+      self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
-    return datatypes.Response()
+    self.state = WorkerState.COMPILING
+    try:
+      return datatypes.Response()
+    finally:
+      self.state = WorkerState.READY
 
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
   def stop(self) -> datatypes.Response:
+    self.state = WorkerState.STOPPED
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
@@ -51,6 +67,9 @@ class RolloutWorker(abstract_worker.Worker):
 
   def resume(self) -> datatypes.Response:
     raise NotImplementedError()
+
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=self.state)
 
   async def generate(
       self,
@@ -67,7 +86,8 @@ class RolloutWorker(abstract_worker.Worker):
         finish.
 
     Returns:
-      A single RolloutResponse (if a single request was provided) or a sequence of
+      A single RolloutResponse (if a single request was provided) or a sequence
+      of
       completed RolloutResponses corresponding to the batch of requests.
     """
     raise NotImplementedError()
@@ -102,7 +122,12 @@ class RolloutWorker(abstract_worker.Worker):
     Args:
       metadata: Any metadata required to prepare the sync (e.g. sync IDs).
     """
-    raise NotImplementedError()
+    self.state = WorkerState.SYNCING
+    del metadata
+    try:
+      raise NotImplementedError()
+    finally:
+      self.state = WorkerState.READY
 
   def sync_weights(self, metadata: Any) -> int:
     """Synchronizes the worker's internal model weights.
@@ -113,4 +138,9 @@ class RolloutWorker(abstract_worker.Worker):
     Returns:
       The version identifier (policy version) of the newly synced weights.
     """
-    raise NotImplementedError()
+    self.state = WorkerState.SYNCING
+    del metadata
+    try:
+      raise NotImplementedError()
+    finally:
+      self.state = WorkerState.READY
