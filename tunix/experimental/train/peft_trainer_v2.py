@@ -179,6 +179,22 @@ def pytree_xor_checksum(tree):
   leaves = jax.tree_util.tree_leaves(tree)
   return functools.reduce(jnp.bitwise_xor, [leaf_xor(l) for l in leaves])
 
+
+# Debug hook, counterpart to `peft_trainer._EXPOSE_DEPTH1_GRADS`.
+#
+# At depth 1 the accumulator is allocated lazily: `add()` adopts the gradient
+# tree, so its sharding is whatever GSPMD propagated rather than the parameter
+# partition spec that `_shard_optimizer` would have pinned. That is fine on its
+# own, but it makes v2's gradient arrays laid out differently from v1's, and an
+# elementwise diff between the two then compares mismatched positions and
+# reports an enormous difference for arrays that hold identical values.
+#
+# Setting this forces the eager, pre-sharded path so both trainers produce
+# gradients with the same layout and can be compared position by position. It
+# costs one parameter-tree-sized buffer, so leave it off when measuring HBM.
+_FORCE_PREALLOCATED_ACCUMULATOR = False
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -374,7 +390,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # `optax.inject_hyperparams`).
     _promote_opt_state_floats_to_float32(self.optimizer)
     self.grad_accumulator = GradientAccumulator(
-        self.model, wrt_target, allocate=not self._is_single_microstep()
+        self.model,
+        wrt_target,
+        allocate=_FORCE_PREALLOCATED_ACCUMULATOR
+        or not self._is_single_microstep(),
     )
 
     self.loss_fn = _default_loss_fn

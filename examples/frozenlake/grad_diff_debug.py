@@ -218,10 +218,55 @@ print(f"INIT weight checksum: {_init_ck}")
 _GRAD_MAX_ULP = 0
 _WEIGHT_MAX_ULP = 4
 
-# v1's depth-1 fast path keeps gradients as an internal temporary, so they are
-# invisible from Python unless this is on. It costs one parameter-tree-sized
-# buffer in HBM, so turn it off before re-running the memory benchmark.
+# Both flags exist only to make the gradients comparable, and both cost one
+# parameter-tree-sized buffer in HBM. Turn them off before re-running the memory
+# benchmark -- with them on, the peaks measure a different program.
+#
+#   v1: keeps gradients as an internal temporary at depth 1, so they are
+#       invisible from Python unless this is on.
+#   v2: allocates the accumulator lazily at depth 1, so `add()` adopts whatever
+#       sharding GSPMD propagated. v1's is pinned to the parameter partition
+#       spec by `_shard_optimizer`. Two different layouts make an elementwise
+#       diff compare mismatched positions. Forcing both onto the eager,
+#       pre-sharded path removes that difference.
 peft_trainer._EXPOSE_DEPTH1_GRADS = True
+peft_trainer_v2._FORCE_PREALLOCATED_ACCUMULATOR = True
+
+
+def diagnose_leaf(path, x, y):
+  """Distinguishes 'different values' from 'same values, different order'.
+
+  An elementwise comparison silently assumes both sides index the same logical
+  element at the same position. If the two arrays were assembled from device
+  shards under different shardings, that assumption breaks and the comparison
+  reports a huge mismatch even though the arrays hold exactly the same numbers.
+
+  Sorting removes position from the picture: if the sorted contents are
+  bit-identical, the values agree and only the arrangement differs, so the
+  elementwise verdict is meaningless and the sharding is what needs looking at.
+  """
+  x = np.asarray(x)
+  y = np.asarray(y)
+  same_sorted = (
+      x.shape == y.shape
+      and x.dtype == y.dtype
+      and np.array_equal(
+          np.sort(x.ravel()).view(np.int32 if x.itemsize == 4 else np.int16),
+          np.sort(y.ravel()).view(np.int32 if y.itemsize == 4 else np.int16),
+      )
+  )
+  d = tc.ulp_dist(x, y)
+  print(
+      f"[diag] {path}: shape={x.shape} dtype={x.dtype}\n"
+      f"        elementwise: max ULP={int(d.max())} "
+      f"violating={int(np.count_nonzero(d))}/{d.size}\n"
+      f"        sorted contents bit-identical: {same_sorted}"
+      + (
+          "   -> SAME VALUES, DIFFERENT ORDER (layout/sharding, not numerics)"
+          if same_sorted
+          else "   -> values genuinely differ"
+      )
+  )
 
 
 def compare(tag, a, b, max_ulp):
@@ -239,6 +284,22 @@ def compare(tag, a, b, max_ulp):
     print(f"[cmp] {tag}: within {max_ulp} ULP")
   except AssertionError as e:
     print(f"[cmp] {tag}: EXCEEDS {max_ulp} ULP\n{e}")
+    # Report the worst few leaves in a position-independent way.
+    worst = sorted(
+        (
+            (int(tc.ulp_dist(np.asarray(p), np.asarray(q)).max()), path, p, q)
+            for path, p, q in (
+                (pth, l1, l2)
+                for (pth, l1), (_, l2) in zip(
+                    jax.tree_util.tree_flatten_with_path(a)[0],
+                    jax.tree_util.tree_flatten_with_path(b)[0],
+                )
+            )
+        ),
+        key=lambda t: -t[0],
+    )[:3]
+    for _, path, p, q in worst:
+      diagnose_leaf(jax.tree_util.keystr(path), p, q)
 
 
 def describe_grads(tag, grads_host, expected_norm=None):
