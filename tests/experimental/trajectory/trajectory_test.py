@@ -6,7 +6,7 @@ from absl.testing import parameterized
 from tunix.experimental.trajectory import trajectory
 
 _SAMPLE_ATIF_PATH = os.path.join(
-    os.path.dirname(__file__), "testdata", "sample_atif_v1_7.json"
+    os.path.dirname(trajectory.__file__), "testdata", "sample_atif_v1_7.json"
 )
 
 
