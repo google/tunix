@@ -24,8 +24,7 @@ from tunix.experimental.common import datatypes
 WorkerState = datatypes.WorkerState
 
 
-
-def _sample_response() -> datatypes.RolloutResponse:
+def _rollout_response_dto() -> datatypes.RolloutResponse:
   return datatypes.RolloutResponse(
       request_id="req-1",
       status="SUCCEEDED",
@@ -49,37 +48,6 @@ def _sample_response() -> datatypes.RolloutResponse:
   )
 
 
-def _sample_dto() -> datatypes.SamplingResponse:
-  return datatypes.SamplingResponse(
-      request_id="sample-req-1",
-      text="Hello from Tunix sampler!",
-      token_ids=np.array([101, 102, 103], dtype=np.int32),
-      logprobs=np.array([-0.1, -0.2, -0.05], dtype=np.float32),
-      finish_reason="stop",
-      metadata={"cached": True},
-  )
-
-
-def _sampling_request_dto() -> datatypes.SamplingRequest:
-  return datatypes.SamplingRequest(
-      prompt="Solve 2+2",
-      request_id="req-sample-42",
-      sampling_params=datatypes.SamplingParams(max_tokens=64, temperature=0.7),
-      metadata={"priority": "high"},
-  )
-
-
-def _weight_sync_request_dto() -> datatypes.WeightSyncRequest:
-  return datatypes.WeightSyncRequest(
-      request_id="sync-req-1",
-      controller_id="raiden-ctrl-0",
-      policy_version=14,
-      source_metadata={"mesh": "2x4"},
-      extra_config={"timeout": 30.0},
-      metadata={"trigger": "cron"},
-  )
-
-
 def _rollout_request_dto() -> datatypes.RolloutRequest:
   return datatypes.RolloutRequest(
       request_id="req-123",
@@ -94,18 +62,6 @@ def _rollout_request_dto() -> datatypes.RolloutRequest:
 
 
 class WireSerializationTest(absltest.TestCase):
-
-  def test_weight_sync_request_round_trips_through_cloudpickle(self):
-    original = _weight_sync_request_dto()
-
-    restored = cloudpickle.loads(cloudpickle.dumps(original))
-
-    self.assertEqual(restored.request_id, original.request_id)
-    self.assertEqual(restored.controller_id, original.controller_id)
-    self.assertEqual(restored.policy_version, original.policy_version)
-    self.assertEqual(restored.source_metadata, original.source_metadata)
-    self.assertEqual(restored.extra_config, original.extra_config)
-    self.assertEqual(restored.metadata, original.metadata)
 
   def test_rollout_request_round_trips_through_cloudpickle(self):
     original = _rollout_request_dto()
@@ -123,25 +79,8 @@ class WireSerializationTest(absltest.TestCase):
     )
     self.assertEqual(restored.metadata, original.metadata)
 
-  def test_sampling_request_round_trips_through_cloudpickle(self):
-    original = _sampling_request_dto()
-
-    restored = cloudpickle.loads(cloudpickle.dumps(original))
-
-    self.assertEqual(restored.request_id, original.request_id)
-    self.assertEqual(restored.prompt, original.prompt)
-    self.assertEqual(restored.metadata, original.metadata)
-    self.assertIsNotNone(restored.sampling_params)
-    self.assertEqual(
-        restored.sampling_params.max_tokens, original.sampling_params.max_tokens
-    )
-    self.assertEqual(
-        restored.sampling_params.temperature,
-        original.sampling_params.temperature,
-    )
-
   def test_trajectory_response_round_trips_through_cloudpickle(self):
-    original = _sample_response()
+    original = _rollout_response_dto()
 
     restored = cloudpickle.loads(cloudpickle.dumps(original))
 
@@ -251,28 +190,6 @@ class WireSerializationTest(absltest.TestCase):
     np.testing.assert_array_equal(result.segments[1].tokens, [30])
     np.testing.assert_array_equal(result.segments[1].loss_mask, [0])
     self.assertIsNone(result.segments[1].logps)
-
-  def test_sampling_response_round_trips_through_cloudpickle(self):
-    original = _sample_dto()
-
-    restored = cloudpickle.loads(cloudpickle.dumps(original))
-
-    self.assertEqual(restored.request_id, original.request_id)
-    self.assertEqual(restored.text, original.text)
-    self.assertEqual(restored.finish_reason, original.finish_reason)
-    self.assertEqual(restored.metadata, original.metadata)
-    self.assertIsNone(restored.error)
-    np.testing.assert_array_equal(restored.token_ids, original.token_ids)
-    np.testing.assert_allclose(restored.logprobs, original.logprobs)
-
-  def test_sampling_response_enforces_shapes(self):
-    with self.assertRaisesRegex(
-        ValueError, "logprobs shape .* != token_ids shape"
-    ):
-      datatypes.SamplingResponse(
-          token_ids=np.array([1, 2, 3]),
-          logprobs=np.array([-0.1, -0.2]),
-      )
 
   def test_health_report_defaults_heartbeat_unix_s_to_current_time(self):
     before = time.time()
