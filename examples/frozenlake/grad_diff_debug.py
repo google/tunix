@@ -234,38 +234,53 @@ peft_trainer_v2._FORCE_PREALLOCATED_ACCUMULATOR = True
 
 
 def diagnose_leaf(path, x, y):
-  """Distinguishes 'different values' from 'same values, different order'.
+  """Explains *how* two versions of one tensor differ.
 
-  An elementwise comparison silently assumes both sides index the same logical
-  element at the same position. If the two arrays were assembled from device
-  shards under different shardings, that assumption breaks and the comparison
-  reports a huge mismatch even though the arrays hold exactly the same numbers.
+  Three questions, because each one alone can mislead:
 
-  Sorting removes position from the picture: if the sorted contents are
-  bit-identical, the values agree and only the arrangement differs, so the
-  elementwise verdict is meaningless and the sharding is what needs looking at.
+  1. Are they bit-identical? (max ULP == 0)
+  2. If not, is it the same multiset in a different arrangement? Sorting removes
+     position from the picture, which catches the case where the two arrays were
+     assembled from device shards under different shardings -- an elementwise
+     diff then compares mismatched positions and reports an enormous difference
+     for arrays holding exactly the same numbers.
+  3. If the values really differ, *by how much in absolute terms*? ULP distance
+     is scale-free, which is what you want for a tensor whose entries share a
+     magnitude, and exactly what you do not want for a gradient spanning tens of
+     orders of magnitude: two entries that are both numerically zero (say 1e-38
+     vs 1.5e-38) sit millions of ULP apart while contributing nothing to the
+     norm or to the weight update. So report the absolute difference and its
+     size relative to the tensor's own scale, which is what actually decides
+     whether the difference can affect training.
   """
-  x = np.asarray(x)
-  y = np.asarray(y)
-  same_sorted = (
-      x.shape == y.shape
-      and x.dtype == y.dtype
-      and np.array_equal(
-          np.sort(x.ravel()).view(np.int32 if x.itemsize == 4 else np.int16),
-          np.sort(y.ravel()).view(np.int32 if y.itemsize == 4 else np.int16),
-      )
+  x = np.asarray(x).astype(np.float64)
+  y = np.asarray(y).astype(np.float64)
+  d = tc.ulp_dist(np.asarray(x, np.float32), np.asarray(y, np.float32))
+  max_ulp = int(d.max())
+  if max_ulp == 0:
+    print(f"[diag] {path}: shape={x.shape} -> bit-identical")
+    return
+
+  same_sorted = np.array_equal(
+      np.sort(np.asarray(x, np.float32).ravel()).view(np.int32),
+      np.sort(np.asarray(y, np.float32).ravel()).view(np.int32),
   )
-  d = tc.ulp_dist(x, y)
+  scale = float(np.abs(x).max())
+  absdiff = np.abs(x - y)
+  worst = int(np.argmax(absdiff))
+  bad = d > 0
+  # Magnitude of the entries that disagree, versus the tensor's own scale.
+  mag_of_differing = float(np.abs(x).ravel()[bad.ravel()].max()) if bad.any() else 0.0
   print(
-      f"[diag] {path}: shape={x.shape} dtype={x.dtype}\n"
-      f"        elementwise: max ULP={int(d.max())} "
-      f"violating={int(np.count_nonzero(d))}/{d.size}\n"
-      f"        sorted contents bit-identical: {same_sorted}"
-      + (
-          "   -> SAME VALUES, DIFFERENT ORDER (layout/sharding, not numerics)"
-          if same_sorted
-          else "   -> values genuinely differ"
-      )
+      f"[diag] {path}: shape={x.shape}\n"
+      f"        max ULP={max_ulp} violating={int(bad.sum())}/{d.size}"
+      f"  sorted-identical={same_sorted}\n"
+      f"        tensor scale max|g|={scale:.6g}\n"
+      f"        max |x-y|={absdiff.max():.6g}"
+      f"  (= {absdiff.max() / scale:.3e} of scale)"
+      f"  at |x|={abs(float(x.ravel()[worst])):.6g}\n"
+      f"        largest |x| among differing entries={mag_of_differing:.6g}"
+      f"  (= {mag_of_differing / scale:.3e} of scale)"
   )
 
 
