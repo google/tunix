@@ -145,6 +145,15 @@ arg_parser.add_argument("--train_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--max_steps", type=int, default=200)
 arg_parser.add_argument("--max_response_length", type=int, default=1024)
+arg_parser.add_argument(
+    "--num_generations",
+    type=int,
+    default=8,
+    help=(
+        "Rollouts per prompt (GRPO group size). Minimum 2: advantages are"
+        " within-group reward differences, so a group of 1 is always zero."
+    ),
+)
 arg_parser.add_argument("--max_concurrency", type=int, default=None)
 arg_parser.add_argument("--mesh_fsdp", type=int, default=None)
 arg_parser.add_argument("--mesh_tp", type=int, default=None)
@@ -155,7 +164,54 @@ arg_parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
 arg_parser.add_argument(
     "--rollout_vllm_max_num_batched_tokens", type=int, default=None
 )
+# --- Sub-batch checkpointing benchmark (temporary, commit 4) ---
+arg_parser.add_argument(
+    "--sub_batch_checkpointing", action="store_true",
+    help="Enable sub-batch checkpointing (forces per-apply trainer saves).",
+)
+arg_parser.add_argument(
+    "--num_iterations", type=int, default=1,
+    help="Epochs over each rollout batch (mu); >1 exercises replay sweeps.",
+)
+arg_parser.add_argument(
+    "--sb_chaos_prob", type=float, default=0.0,
+    help="Per-micro-batch probability of a simulated hard preemption"
+    " (os._exit); pair with a restart-until-clean wrapper.",
+)
+arg_parser.add_argument(
+    "--enable_remat",
+    action="store_true",
+    help=(
+        "Rematerialize decoder-layer activations in the backward pass."
+        " Required on HBM-tight colocated setups: the non-remat train_step"
+        " reserves ~10.2G/chip, which cannot fit beside vLLM on a v5e-8 at"
+        " any KV-cache utilization."
+    ),
+)
+arg_parser.add_argument(
+    "--skip_eval", action="store_true",
+    help="Disable held-out evaluation entirely (benchmark: the step-0 eval"
+    " costs minutes and RE-FIRES on every restart that restores into the"
+    " first accumulation window, inflating restart overhead in both arms).",
+)
+arg_parser.add_argument(
+    "--bench_baseline", action="store_true",
+    help="Baseline arm of the sub-batch benchmark: identical per-apply"
+    " trainer checkpointing and perf/* metrics, but NO sub-batch stream"
+    " (a preemption falls back to whatever the stock path recovers).",
+)
 args, _ = arg_parser.parse_known_args()
+
+if args.sub_batch_checkpointing and args.bench_baseline:
+  raise ValueError(
+      "--sub_batch_checkpointing and --bench_baseline are the two arms of"
+      " the comparison; pass exactly one."
+  )
+if args.sb_chaos_prob > 0:
+  os.environ["TUNIX_SB_CHAOS_PROB"] = str(args.sb_chaos_prob)
+if args.bench_baseline:
+  # Progress metrics must emit without the sub-batch stream.
+  os.environ["TUNIX_SB_BENCH_METRICS"] = "1"
 
 
 # ====== Recipe Defaults ======
@@ -164,7 +220,9 @@ MODEL_ID = f"Qwen/{MODEL_NAME}"
 SEED = 42
 
 NUM_PROMPTS_PER_STEP = args.batch_size
-NUM_GENERATIONS = 8
+NUM_GENERATIONS = args.num_generations
+if NUM_GENERATIONS < 2:
+  raise ValueError("--num_generations must be >= 2 for GRPO advantages.")
 MINI_BATCH_SIZE = args.mini_batch_size
 TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
 COMPUTE_LOGPS_MICRO_BATCH_SIZE = args.compute_logps_micro_batch_size
@@ -210,7 +268,12 @@ USE_LORA = False
 LORA_RANK = 64
 LORA_ALPHA = 64.0
 ENABLE_CHECKPOINTING = False
-ENABLE_REMAT = False
+if args.sub_batch_checkpointing or args.bench_baseline:
+  # Sub-batch resume reconciles against the trainer's latest durable apply;
+  # without per-apply trainer saves a preemption rewinds to a stale apply
+  # and the benchmark measures nothing.
+  ENABLE_CHECKPOINTING = True
+ENABLE_REMAT = args.enable_remat
 ENABLE_FLASH_ATTENTION = True
 MODEL_DTYPE = jnp.bfloat16
 
@@ -218,8 +281,13 @@ ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_vtc")
 TFDS_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data")
 MODEL_DOWNLOAD_DIR = os.path.join(ARTIFACT_ROOT, "models")
 INTERMEDIATE_CKPT_DIR = os.path.join(ARTIFACT_ROOT, "intermediate_ckpt")
+# Benchmark (temporary): a restarted process must find the SAME checkpoint
+# root or recovery never happens -- the supervisor pins the tag once per
+# experiment arm. Standalone (non-supervised) runs keep the per-launch
+# timestamp behavior.
 CHECKPOINT_ROOT = os.path.join(
-    ARTIFACT_ROOT, "checkpoints", str(int(time.time()))
+    "gs://angelmau-tunix-checkpoints/tunix/checkpoints",
+    os.environ.get("TUNIX_BENCH_CKPT_TAG", str(int(time.time()))),
 )
 TB_LOG_DIR = os.path.join(ARTIFACT_ROOT, "logs")
 
@@ -230,7 +298,7 @@ for path in [
     TB_LOG_DIR,
 ]:
   os.makedirs(path, exist_ok=True)
-if ENABLE_CHECKPOINTING:
+if ENABLE_CHECKPOINTING and not CHECKPOINT_ROOT.startswith("gs://"):
   os.makedirs(CHECKPOINT_ROOT, exist_ok=True)
 
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -326,6 +394,142 @@ def create_datasets() -> tuple[grain.MapDataset, grain.MapDataset]:
 
 
 # ====== Reward + Metrics ======
+def extract_boxed_answer(text: str) -> str | None:
+  answer_blocks = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
+  content = answer_blocks[-1] if answer_blocks else text
+
+  boxed = []
+  stack = []
+  for i, ch in enumerate(content):
+    if ch == "{":
+      stack.append(i)
+    elif ch == "}":
+      if not stack:
+        continue
+      open_idx = stack.pop()
+      if content[:open_idx].endswith(r"\boxed"):
+        boxed.append(content[open_idx + 1 : i].strip())
+  if boxed:
+    return boxed[-1]
+
+  fallback = re.search(r"\\boxed\s*\{?\s*([a-zA-Z0-9\.,\-]+)\s*\}?", content)
+  if fallback:
+    return fallback.group(1).strip()
+  return None
+
+
+def is_vtc_format_correct(text: str) -> bool:
+  has_reasoning = text.count("</reasoning>") == 1
+  has_answer = text.count("<answer>") == 1 and text.count("</answer>") == 1
+  reasoning_end = text.find("</reasoning>")
+  answer_open = text.find("<answer>")
+  answer_close = text.find("</answer>")
+  return (
+      has_reasoning
+      and has_answer
+      and reasoning_end != -1
+      and answer_open != -1
+      and answer_close != -1
+      and reasoning_end < answer_open < answer_close
+  )
+
+
+def normalize_answer(text: str | None) -> str | None:
+  if text is None:
+    return None
+  return str(text).replace(",", "").strip()
+
+
+def _vtc_completion_outcome(
+    completion: str, gold: Any
+) -> tuple[float, bool, bool, bool]:
+  format_ok = is_vtc_format_correct(completion)
+  pred = normalize_answer(extract_boxed_answer(completion))
+  true = normalize_answer(_normalize_example_value(gold))
+  answer_ok = pred is not None and true is not None and pred == true
+  extracted_ok = pred is not None
+
+  if format_ok and answer_ok:
+    score = 1.0
+  elif format_ok and not answer_ok:
+    score = 0.1
+  elif not format_ok and answer_ok:
+    score = 0.5
+  else:
+    score = 0.0
+  return score, format_ok, answer_ok, extracted_ok
+
+
+def vtc_env_reward(task, action):
+  gold = task.get("answer")
+  completion = action.action if hasattr(action, "action") else action
+  score, _, _, _ = _vtc_completion_outcome(completion, gold)
+  return score
+
+
+def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
+  del prompts, completions, advantages, answer, kwargs
+  global _metric_call_idx
+  _metric_call_idx += 1
+
+  rewards = np.asarray(rewards, dtype=np.float32)
+  solve_all = bool(np.all(rewards > 0.1))
+  solve_none = bool(np.all(np.isclose(rewards, 0.0)))
+  solve_partial = (not solve_all) and (not solve_none)
+  solve_ratio = float(np.mean(rewards > 0.1))
+  reward_mean = float(rewards.mean())
+  reward_max = float(rewards.max())
+
+  absl_logging.info(
+      "[rollout-metric] call=%d n=%d solve_ratio=%.3f reward_mean=%.3f"
+      " reward_max=%.3f solve_all=%d solve_none=%d",
+      _metric_call_idx,
+      len(rewards),
+      solve_ratio,
+      reward_mean,
+      reward_max,
+      int(solve_all),
+      int(solve_none),
+  )
+  return {
+      "rewards/solve_all": (1 if solve_all else 0, np.mean),
+      "rewards/solve_none": (1 if solve_none else 0, np.mean),
+      "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
+      "rewards/solve_ratio": (solve_ratio, np.mean),
+  }
+
+
+# ====== Tokenizer / Model ======
+class VTCRawTextParser:
+  """Raw-text prompt parser matching NeMo's vtc_raw_text_processor style."""
+
+  def parse(
+      self,
+      messages,
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    del add_generation_prompt, is_first_msg
+    parts = []
+    for message in messages:
+      role = message.get("role")
+      content = message.get("content", "")
+      if role == "system" and content:
+        parts.append(content)
+      elif role == "user":
+        parts.append(content)
+      elif role == "assistant" and content:
+        parts.append(content)
+    return "\n".join(parts)
+
+  def update_assistant_end_tokens(self, tokens):
+    """Raw-text parsing appends no chat-template end tokens, so the
+    upstream engine's end-token fixup is a no-op here -- (tokens, 0) is the
+    base parser's own default contract, required since the head engine now
+    calls this on every assistant turn."""
+    return tokens, 0
+
+
 class VTCGRPOLearner(GRPOLearner):
   """Demo-local learner that normalizes TFDS string payloads to Python str."""
 
@@ -396,10 +600,18 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
 
 # ====== Checkpoint + Metrics + Optimizer ======
 if ENABLE_CHECKPOINTING:
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=MAX_STEPS,
-      max_to_keep=1,
-  )
+  if args.sub_batch_checkpointing or args.bench_baseline:
+    # Per-apply trainer saves (the sub-batch cadence contract); keep a few
+    # applies of history so retention never outruns a resume.
+    checkpointing_options = ocp.CheckpointManagerOptions(
+        save_interval_steps=1,
+        max_to_keep=2,
+    )
+  else:
+    checkpointing_options = ocp.CheckpointManagerOptions(
+        save_interval_steps=MAX_STEPS,
+        max_to_keep=1,
+    )
 else:
   checkpointing_options = None
 
@@ -412,11 +624,89 @@ wandb_config.update({
     "kl_loss_mode": KL_LOSS_MODE,
     "train_temperature": TRAIN_TEMPERATURE,
 })
+class _MonotoneStepWandbBackend(metrics_logger.WandbBackend):
+  """WandbBackend that survives tunix's two step domains.
+
+  The trainer logs `actor/*` at `train_steps` (applies) while the RL
+  cluster flushes learner metrics (rollout stats, `perf/*`) at
+  `global_steps`. wandb keeps ONE internal step counter and silently
+  DROPS any explicitly-stepped row below its high-water mark, so with
+  per-apply trainer logging every learner-side metric vanished from the
+  run. Clamping incoming steps to the high-water mark records those rows
+  (slightly right on the step axis) instead of deleting them. The
+  benchmark charts never read the step axis anyway: `define_metric`
+  below pins every `perf/train/*` series to its own x
+  (`perf/train/sub_batch_cumulative_time`), which is what the recovery
+  profile is plotted against.
+  """
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    if getattr(self, "_is_active", False) and self.wandb is not None:
+      self.wandb.define_metric(
+          "perf/train/*",
+          step_metric="perf/train/sub_batch_cumulative_time",
+      )
+
+  # Shared across ALL backend instances in the process: tunix builds two
+  # MetricsLoggers from the same options (trainer + RL cluster), and the
+  # RL instance must see the steps the trainer instance already submitted
+  # or it keeps sending stale steps that wandb drops. A per-instance
+  # floor cannot do that, and wandb.run.step cannot be trusted either --
+  # under the 0.28 Rust core it lags rows logged with explicit `step=`
+  # (which is every row here), so flooring against it alone still lets
+  # stale steps through intermittently.
+  _step_floor = 0
+
+  def log_scalar(self, event, value, **kwargs):
+    # Clamp EVERY event, including step-less ones: orbax emits internal
+    # telemetry (/jax/orbax/...) through jax.monitoring with NO step, and
+    # metrax defaults a missing step to 0 -- which wandb drops against
+    # the run counter. Those step-0 submissions were the warning spam.
+    run_step = 0
+    if self.wandb is not None and self.wandb.run is not None:
+      # Best-effort seed for resumed runs; the class floor is the
+      # in-process source of truth.
+      run_step = int(getattr(self.wandb.run, "step", 0) or 0)
+    cls = _MonotoneStepWandbBackend
+    cls._step_floor = max(
+        cls._step_floor, run_step, int(kwargs.get("step") or 0)
+    )
+    kwargs["step"] = cls._step_floor
+    try:
+      super().log_scalar(event, value, **kwargs)
+    except Exception:  # pylint: disable=broad-except
+      pass
+
+
+# One wandb run per experiment across process deaths: honor an explicit
+# WANDB_RUN_ID (the bench supervisor pins one), else fall back to the
+# pinned checkpoint tag so manual kill-and-rerun smoke tests also land in
+# a single resumed run instead of fragmenting per launch.
+_WANDB_RUN_ID = os.environ.get("WANDB_RUN_ID") or os.environ.get(
+    "TUNIX_BENCH_CKPT_TAG"
+)
+
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=TB_LOG_DIR,
     project_name="tunix-gsm8k-vtc",
     flush_every_n_steps=1,
-    backend_kwargs={"wandb": {"config": wandb_config}},
+    backend_kwargs={
+        "custom_backend": [
+            lambda: metrics_logger.TensorboardBackend(
+                log_dir=TB_LOG_DIR, flush_every_n_steps=1
+            ),
+            lambda: _MonotoneStepWandbBackend(
+                project="tunix-gsm8k-vtc",
+                config=wandb_config,
+                **(
+                    {"id": _WANDB_RUN_ID, "resume": "allow"}
+                    if _WANDB_RUN_ID
+                    else {}
+                ),
+            ),
+        ]
+    },
 )
 
 
@@ -570,7 +860,7 @@ def main() -> None:
 
   grpo_config = GRPOConfig(
       num_generations=NUM_GENERATIONS,
-      num_iterations=1,
+      num_iterations=args.num_iterations,
       beta=BETA,
       kl_loss_mode=KL_LOSS_MODE,
       epsilon=EPSILON,
@@ -582,6 +872,7 @@ def main() -> None:
       max_response_length=MAX_RESPONSE_LENGTH,
       max_concurrency=MAX_CONCURRENCY,
       loss_agg_mode="sequence-mean-token-mean",
+      sub_batch_checkpointing=args.sub_batch_checkpointing,
   )
 
   rl_engine = rl_engine_lib.RLEngine(
@@ -625,7 +916,17 @@ def main() -> None:
 
   # ====== Training ======
   try:
-    grpo_trainer.train(train_dataset, eval_dataset=eval_dataset)
+    grpo_trainer.train(
+        train_dataset,
+        eval_dataset=None if args.skip_eval else eval_dataset,
+    )
+    # Benchmark (temporary): exit codes are not trustworthy through the
+    # vLLM/torch shutdown path, so TRUE completion is signaled by a marker
+    # file the supervisor checks -- written only when train() returns.
+    done_file = os.environ.get("TUNIX_BENCH_DONE_FILE")
+    if done_file:
+      with open(done_file, "w") as f:
+        f.write("done\n")
   except Exception:
     rl_engine.close()
     raise

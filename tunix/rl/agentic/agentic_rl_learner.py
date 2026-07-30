@@ -16,8 +16,11 @@
 
 from __future__ import annotations
 import abc
+import json
+import os
 import time
 import asyncio
+import collections
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import copy
@@ -25,9 +28,12 @@ import dataclasses
 import itertools
 import queue
 import threading
+from collections.abc import Hashable
+import typing as typing_lib
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
 
 from absl import logging
+from flax import nnx
 import flax
 import jax
 from jax import typing
@@ -40,8 +46,10 @@ from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
+from tunix.rl import sub_batch_checkpoint
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
@@ -51,12 +59,44 @@ from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward  # pylint: disable=unused-import
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
+from tunix.sft import checkpoint_manager as sft_checkpoint_manager
+from tunix.sft import sharding_utils
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_engine_lib.MetricsT]
+
+
+# Algo-config settings that change the loss or the gradient: recorded in
+# every snapshot (when the config defines them) and required to match at
+# restore, so a resume never mixes two objectives.
+_SB_OBJECTIVE_KEYS = (
+    "use_rollout_logps",
+    "sampler_is",
+    "sampler_is_threshold",
+    "beta",
+    "loss_algo",
+    "loss_agg_mode",
+    "epsilon",
+    "epsilon_high",
+    "force_on_policy_ratio",
+    "temperature",
+)
+
+
+class _SbItem(typing_lib.NamedTuple):
+  """Sub-batch checkpointing item.
+
+  train_data_queue item on the producer-processing path while sub-batch
+  checkpointing is on: one group's TrainExample plus its rows' identities,
+  so data and identity share one queue (lifetime, order, backpressure).
+  The queue's None sentinel is never wrapped, so _sb_unwrap never sees it.
+  """
+
+  example: Any
+  ids: list[tuple[Hashable, int]]
 
 
 @flax.struct.dataclass(frozen=True)
@@ -78,6 +118,34 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
     num_generations: Number of samples per prompt.
     num_iterations: Number of iterations per batch.
     episode_timeout: Timeout for each episode in seconds.
+    sub_batch_checkpointing: Whether to checkpoint the sample rollout components
+      and the live gradient-accumulation buffer at every trainer micro-step, so
+      a preemption mid-global-step resumes without discarding completed rollouts
+      or partially accumulated gradients. Requires 
+      `training_config.checkpoint_root_directory` to be set (there is nothing
+      to reconcile against otherwise) and is incompatible with sequence packing
+      (`training_config.max_seq_token_per_tpu`) at the moment. Objective
+      contract across a mid-step resume: the step's behavior policy is the trainer checkpoint at the
+      step start (`anchor_step`), which the resume pins as the
+      anchor and rollout policy on disaggregated setups (colocated
+      rollouts share the live weights; they are not re-anchored, as
+      upstream never does there). On disaggregated setups the learner pins
+      that checkpoint on the trainer's checkpoint manager while the step
+      runs, so any configured retention policy keeps it (see
+      CheckpointManager.pin_step). Colocated setups cannot re-anchor, so
+      trainer-recomputed old logps (use_rollout_logps=False) and
+      sampler_is='token' are rejected there. Multi-process runs are rejected;
+      single-controller multi-host runs require backend validation.
+      Re-injected groups are reprocessed, so rewards and advantages are
+      recomputed: an exact resume assumes deterministic reward_fns. The
+      loss-shaping settings in _SB_OBJECTIVE_KEYS, the batch geometry and
+      the packing settings are recorded and must match on relaunch.
+    sub_batch_dataset_id: Optional caller-asserted identity of the train
+      dataset (name + version/order). Recorded in every sub-batch snapshot
+      and, when both the snapshot and the relaunch carry one, required to
+      match: the resume fast-forwards `global_steps` batches of the passed
+      iterable and the ledger assumes it yields the same prompt at the same
+      row. Unset on either side skips the check.
   """
 
   system_prompt: str = ""
@@ -93,6 +161,8 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
+  sub_batch_checkpointing: bool = False
+  sub_batch_dataset_id: str | None = None
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -100,6 +170,23 @@ TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
 
 class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   """Base class for Agentic RL Learners using asynchronous rollouts."""
+
+  # Sub-batch checkpointing: inert CLASS-LEVEL defaults. Test subclasses
+  # (e.g. the mock learners in agentic_grpo_learner_test) replace __init__
+  # wholesale without calling super(), then drive producer/consumer paths
+  # that read this state; they must observe the feature OFF, never
+  # AttributeError. __init__ shadows these with instance attributes.
+  _sb_mgr = None
+  _sb_pending_state = None
+  _sb_restored_trainer_state = False
+  _sb_identity_queue = None
+  _sb_preempt_at = frozenset()
+  _bench_event_log = None
+  _sb_chaos_prob = 0.0
+  _bench_metrics = False
+  _bench_anchor_pinned = False
+  _experiment_start_time = 0.0
+  _global_step_start_time = 0.0
 
   class _AsyncQueueIterator:
     """Async iterator that yields items from a sync queue."""
@@ -183,8 +270,133 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.rl_engine.global_steps = (
         self.rl_engine.actor_trainer.restored_global_step()
     )
+
+    # --- Sub-batch checkpointing ---
+    self._sb_mgr: sub_batch_checkpoint.SubBatchCheckpointManager | None = None
+    self._sb_lock = threading.Lock()
+    self._sb_completed: set[Hashable] = set()
+    self._sb_counts: dict[tuple[Hashable, int], int] = {}
+    self._sb_active: list[agent_types.TrajectoryItem] = []
+    self._sb_pending_state: sub_batch_checkpoint.SubBatchState | None = None
+    self._sb_item_fifo: collections.deque = collections.deque()
+    # Same-run snapshot-key monotonicity guard (saves use overwrite=True, so
+    # a cadence wiring bug would otherwise clobber silently). Compares the
+    # encoded sub-batch key, which is globally monotonic by construction.
+    self._sb_last_snapshot_key = -1
+    # The encoded key's two halves, maintained by _sb_snapshot: the window's
+    # parent train_steps and the within-window order counter (resets when the
+    # observed train_steps advances). -1 sentinels force a reset on the first
+    # snapshot of a run and after a geometry rollback.
+    self._sb_window_train_steps = -1
+    self._sb_local = -1
+    # The trainer's micro-step counter at the last snapshot. `local` is
+    # self-incrementing, so key monotonicity alone cannot notice a snapshot
+    # taken without a training call in between; the trainer's own counter
+    # can (it ticks once per trained chunk in both modes).
+    self._sb_last_snapshot_trainer_iter = -1
+    # O(1) producer-side skip membership (mirrors _sb_active's prompt ids).
+    self._sb_active_gids: set = set()
+    # global_step whose step_complete=True snapshot was written, checked at
+    # the boundary so a step that finished unmarked is loud rather than a
+    # phantom step on the next restore. Deliberately a step STAMP, not a
+    # bool: a bool would have to be re-armed inside _sb_step_boundary, so
+    # dropping that call would latch it True and silently disable the guard
+    # for the rest of the run -- the one failure it exists to catch.
+    self._sb_step_complete_for_step: int | None = None
+    # True when the trainer restored ANY weight checkpoint: every such
+    # restart needs the rollout engine refreshed on disaggregated setups,
+    # not just mid-step resumes.
+    self._sb_restored_trainer_state = False
+    # Trainer train_steps at the start of the current global step: the
+    # weight checkpoint that is this step's behavior/anchor policy. Set at
+    # init (fresh start, clean restart, or the snapshot's value on a
+    # mid-step resume) and advanced at every step boundary; recorded in
+    # every snapshot so a mid-step resume can pin it (see
+    # _sb_resync_rollout_weights).
+    self._sb_anchor_step = 0
+    # full_batch_size the restored snapshot was saved under, checked in
+    # train() once the dataset reveals the current value (a mismatch raises
+    # SubBatchGeometryError, like every other geometry change).
+    self._sb_restored_full_batch_size: int | None = None
+    self._sb_restored_geometry: dict[str, Any] | None = None
+    # The train-time-only geometry keys (train_micro_batch_size), set in
+    # train() once the dataset reveals them; recorded in every snapshot
+    # next to the init-known keys of _sb_geometry.
+    self._sb_geo_train: dict[str, Any] | None = None
+    # True while the step seeded from a mid-step snapshot is in progress:
+    # its step-start eval already ran before the crash, so train() must not
+    # run it again on mid-step weights. Cleared at the step boundary.
+    self._sb_resumed_mid_step = False
+    # BENCHMARK instrumentation (temporary, commit 4): fixed wall-clock
+    # anchor for cross-restart cumulative-time metrics. Precedence: the
+    # supervisor-pinned TUNIX_BENCH_START_TIME env (survives every process
+    # death, so BASELINE runs -- no snapshot to carry an anchor -- get
+    # continuous curves too), else the snapshot's anchor on resume, else
+    # now.
+    _bench_anchor = os.environ.get("TUNIX_BENCH_START_TIME")
+    self._bench_anchor_pinned = _bench_anchor is not None
+    self._experiment_start_time = (
+        float(_bench_anchor) if _bench_anchor else time.time()
+    )
+    # Env-gated preemption chaos: probability per consumer micro-batch of a
+    # HARD kill (os._exit), exercising real mid-step resume. 0 disables.
+    # Independent of sub-batch enablement, so baseline runs crash the same
+    # way and recover with whatever the stock path provides.
+    self._sb_chaos_prob = float(os.environ.get("TUNIX_SB_CHAOS_PROB", "0"))
+    # Deterministic preemption for the validation harness: comma-separated
+    # trainer iter_steps values. The process hard-exits right after the
+    # snapshot for that micro-step is DURABLE (see _sb_snapshot), so the
+    # resume provably lands on that exact key -- unlike the probabilistic
+    # chaos above, this can target mid-window micro-steps by name.
+    self._sb_preempt_at = {
+        int(v)
+        for v in os.environ.get("TUNIX_SB_PREEMPT_AT", "").split(",")
+        if v.strip()
+    }
+    # Wandb-independent evidence channel: every snapshot/preempt/resume
+    # appends one JSON line here for the validation report to read.
+    self._bench_event_log = os.environ.get("TUNIX_SB_EVENT_LOG")
+    # Per-APPLY loss series anchor: the trainer's own actor/train/loss
+    # reaches wandb one apply LATE by design (peft_trainer defers each
+    # apply's external write to overlap I/O with the next window), so a
+    # kill permanently loses the final apply's point -- and in sub-batch
+    # mode that apply is never re-executed to backfill it. The bench logs
+    # its own apply-granularity series at the apply itself instead (see
+    # _bench_log_progress); restored applies were logged by the attempts
+    # that performed them, so the dedup anchor starts at the restored
+    # apply count -- a resumed process only emits the applies it performs.
+    self._bench_last_apply_logged = self.rl_engine.actor_trainer.train_steps
+    # Sync weights if the actor model and rollout model are not sharing weights.
+    # Set before sub-batch init, which pins the step-start trainer checkpoint
+    # only when the rollout keeps its own copy of the weights.
+    self.should_sync_weights = not (
+        rl_utils.is_sharing_weights(
+            self.rl_engine.actor_trainer.model,
+            self.rl_engine.rollout.model(),
+        )
+    )
+    self._init_sub_batch_checkpointing()
+    # Emit perf/* progress metrics even with sub-batch DISABLED when the
+    # supervisor asks (the baseline arm of the comparison).
+    self._bench_metrics = (
+        self._sb_enabled or os.environ.get("TUNIX_SB_BENCH_METRICS") == "1"
+    )
+    # --- End sub-batch checkpointing section ---
+
     # Current iter steps for micro-batch based training.
     self._iter_steps = self.rl_engine.actor_trainer.iter_steps
+    if not self._sb_enabled and self._iter_steps > 0:
+      # TEMPORARY (bench): with sub-batch disabled the trainer restore above
+      # is the only recovery path; record where it landed so the two-arm
+      # report can measure re-executed work against the kill point (the
+      # sub-batch arm logs its richer resume event in
+      # _init_sub_batch_checkpointing).
+      self._bench_event(
+          "resume",
+          stock=True,
+          iter_steps=self._iter_steps,
+          global_step=self.rl_engine.global_steps,
+      )
     self._eval_iter_steps = 0
     # Tracks the last train_step value at which evaluation was run. The
     # optimizer is wrapped in ``optax.MultiSteps(grad_accum_steps)``, which
@@ -194,14 +406,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # micro-iteration during an eval boundary, causing the full evaluation
     # rollout to be replayed ``grad_accum_steps`` times for the same step.
     self._last_eval_train_step = -1
-
-    # Sync weights if the actor model and rollout model are not sharing weights.
-    self.should_sync_weights = not (
-        rl_utils.is_sharing_weights(
-            self.rl_engine.actor_trainer.model,
-            self.rl_engine.rollout.model(),
-        )
-    )
 
     # Enable async rollout if trainer and rollout are not on the same mesh.
     # If they do, then doesn't make sense for the interleave because they will
@@ -230,12 +434,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._process_in_consumer: bool = False
 
     loop_queue = queue.Queue()
+    self._executor = ThreadPoolExecutor(
+        max_workers=algo_config.max_concurrency + 1
+    )
 
     def run_loop_forever():
       loop = agentic_utils.get_or_create_loop()
-      loop.set_default_executor(
-          ThreadPoolExecutor(max_workers=algo_config.max_concurrency + 1)
-      )
+      loop.set_default_executor(self._executor)
       loop_queue.put(loop)
       loop.run_forever()
 
@@ -253,6 +458,1229 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._train_rewards_window: List[float] = []
     self._eval_rewards_window: List[float] = []
     self._rewards_window_lock = threading.Lock()
+
+  # --- Sub-batch checkpointing -------------------------------------------
+  @property
+  def _sb_enabled(self) -> bool:
+    return getattr(self, "_sb_mgr", None) is not None
+
+  def _init_sub_batch_checkpointing(self) -> None:
+    """Constructs the sub-batch manager and restores a compatible snapshot.
+
+    Must run right after the trainer's own restore and before the producer
+    exists, so the resume decision is in place before any rollout is made.
+    try_restore raises SubBatchRestoreError / SubBatchGeometryError when the
+    ledger cannot be matched to the restored weights; both propagate out of
+    __init__ (the manager is closed first) so the run never starts on a
+    mismatched (weights, ledger) pair.
+    """
+    if not self.algo_config.sub_batch_checkpointing:
+      return
+    if self._training_config.max_seq_token_per_tpu is not None:
+      raise ValueError(
+          "sub_batch_checkpointing does not support sequence packing"
+          " (max_seq_token_per_tpu) yet."
+      )
+    self._sb_item_fifo = collections.deque()
+    if not self.should_sync_weights and (
+        getattr(self.algo_config, "use_rollout_logps", True) is False
+        or getattr(self.algo_config, "sampler_is", None) == "token"
+    ):
+      raise ValueError(
+          "sub_batch_checkpointing on a colocated setup (rollout shares the"
+          " actor's weights) does not support trainer-recomputed old logps"
+          " (use_rollout_logps=False) or sampler_is='token': the engine's"
+          " old-policy anchor is rebuilt from the restored weights on a"
+          " restart and upstream never re-anchors colocated runs, so the"
+          " objective would change across a resume."
+      )
+    if not self._training_config.checkpoint_root_directory:
+      raise ValueError(
+          "sub_batch_checkpointing requires"
+          " training_config.checkpoint_root_directory to be set: the"
+          " sub-batch ledger is reconciled against the trainer's own weight"
+          " checkpoint (by train_steps), so there must be one to reconcile"
+          " against."
+      )
+    if hasattr(self.rl_engine, "critic_trainer"):
+      raise ValueError(
+          "sub_batch_checkpointing does not currently support a critic trainer:"
+          " snapshots capture only the ACTOR's grad-accum buffer and step"
+          " counters, so a resumed run would silently lose the critic's"
+          " in-flight accumulator and desync its apply schedule."
+      )
+    if self.algo_config.off_policy_steps > 0:
+      raise ValueError(
+          "sub_batch_checkpointing requires off_policy_steps == 0: prompt"
+          " prefetch interleaves groups from different global steps into the"
+          " same micro-batches (completion-order release), which the"
+          " per-step ledger accounting cannot represent. Disable one of the"
+          " two (off_policy_steps={self.algo_config.off_policy_steps})."
+      )
+    if getattr(self.rl_engine.cluster_config, "offload_to_cpu", False):
+      logging.warning(
+          "sub_batch_checkpointing feeds the trainer one chunk per"
+          " update_actor call, and offload_to_cpu round-trips the full model"
+          " between host and device on every call: expect roughly"
+          " gradient_accumulation_steps times more transfers per mini-batch"
+          " than the stock loop. Consider disabling offload_to_cpu with this"
+          " feature."
+      )
+    grad_accum_steps = self._training_config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    # Both sizes may still be None here (resolved from the dataset in
+    # train(), which re-checks with the resolved values).
+    mini_batch_size = self._training_config.mini_batch_size
+    train_micro_batch_size = getattr(
+        self._training_config, "train_micro_batch_size", None
+    )
+    if mini_batch_size is not None and train_micro_batch_size is not None:
+      self._sb_check_accum_geometry(mini_batch_size, train_micro_batch_size)
+    root_directory = os.path.join(
+        self._training_config.checkpoint_root_directory, "sub_batch"
+    )
+    self._sb_mgr = sub_batch_checkpoint.SubBatchCheckpointManager(
+        root_directory=root_directory,
+        # The manager owns its own defaults (per-micro-step saves,
+        # durable-floor retention) and takes what carries over from the run
+        # options (async toggle/timeouts) itself.
+        run_options=self._training_config.checkpointing_options,
+    )
+    self._sb_check_trainer_checkpoint_cadence()
+
+    actor_trainer = self.rl_engine.actor_trainer
+    if actor_trainer.checkpoint_manager.latest_step() is None:
+      # Nothing was ever checkpointed for this run: a genuinely fresh start.
+      # Purge foreign leftovers, then anchor window 0 so it is
+      # resumable like every later window.
+      try:
+        # Check enrollment before deleting anything: an absent trainer store
+        # must not silently reset a run enrolled on other durable weights.
+        self._sb_mgr.mark_enabled()
+        self._sb_mgr.purge_steps_above(-1)
+        self._sb_anchor_initial_weights()
+      except BaseException:
+        self._sb_mgr.close()
+        raise
+      # The anchor waited: W(0) is durable, so the floor is set before the
+      # first save of the run (no window dropped until then).
+      self._sb_mgr.set_durable_train_steps(0)
+      self._sb_set_anchor(actor_trainer.train_steps)
+      return
+
+    # Any restart that restored trainer weights needs the rollout engine
+    # refreshed before generation on disaggregated setups, whether or not a
+    # sub-batch snapshot is usable (see _sb_resync_rollout_weights).
+    self._sb_restored_trainer_state = True
+
+    train_steps = actor_trainer.train_steps
+    try:
+      state = self._sb_mgr.try_restore(
+          train_steps,
+          grad_accum_steps,
+          target_training_state=self._sb_build_abstract_training_state(),
+          num_generations=self._num_generations(),
+          num_iterations=self._num_iterations(),
+          mini_batch_size=self._training_config.mini_batch_size,
+          geometry=self._sb_geometry(),
+      )
+    except BaseException:
+      # Release the orbax checkpointer on the way out of __init__.
+      self._sb_mgr.close()
+      raise
+    # The trainer restored from its latest durable step, so `train_steps`
+    # is durable by construction; set before anything can save.
+    self._sb_mgr.set_durable_train_steps(train_steps)
+    # The restored weights ARE the step start unless a mid-step snapshot
+    # says otherwise below (no save runs in between, so re-pinning there
+    # frees nothing early).
+    self._sb_set_anchor(train_steps)
+    if state is None:
+      # Fresh anchor or first enable on an existing run: nothing to resume,
+      # the trainer's global_steps stamp is the step to start (the manager
+      # logged which).
+      return
+
+    # Tracks the highest key written so far. Restoring this ensures that the
+    # next snapshot overwrites or increments past this point, preventing
+    # accidental regressions or identical duplicate saves.
+    self._sb_last_snapshot_key = state.sub_batch_key
+
+    # Tracks the trainer's exact micro-step iteration count (iter_steps) at
+    # the time of the snapshot. Ensures that we don't save a new snapshot
+    # unless an actual training call ran in between.
+    self._sb_last_snapshot_trainer_iter = state.iter_steps
+    # The trainer's own restore synthesized `_iter_steps = train_steps *
+    # k` (peft_trainer.__init__), which a mid-window snapshot's counter
+    # runs ahead of. The snapshot's counter is the truth at BOTH a
+    # mid-window resume and a clean boundary; restore it before the
+    # completion branch so the next snapshot continues the stream.
+    actor_trainer._iter_steps = state.iter_steps  # pylint: disable=protected-access
+
+    # Derives the parent train_steps (window) and the local micro-step index 
+    # from the mathematical key. This ensures the first snapshot taken after 
+    # resume perfectly continues the numbering sequence (e.g., local + 1).
+    self._sb_window_train_steps, self._sb_local = divmod(
+        state.sub_batch_key, sub_batch_checkpoint.KEY_BASE
+    )
+    # Recorded geometry is checked at train() on BOTH branches: a clean
+    # restart under another full_batch_size would fast-forward a different
+    # prompt partition just as a mid-step one would.
+    self._sb_restored_full_batch_size = state.full_batch_size
+    self._sb_restored_geometry = dict(state.geometry)
+
+    if state.step_complete:
+      # Taken at the step's final apply, so the accumulator was empty.
+      assert state.training_state is None
+      # The previous step finished cleanly before the crash. The snapshot
+      # still carries that step's ENTIRE retained ledger (payloads and
+      # mu-capped counts survive until the in-memory boundary reset, which is
+      # deliberate, see _sb_snapshot), so it must NOT be seeded or
+      # re-injected: re-feeding a finished step's groups would let the
+      # consumer's full-batch accounting fire a boundary after zero training,
+      # producing a phantom global step (global_steps drift, a spurious
+      # weight sync, and a silently skipped dataset batch). Start the next
+      # step fresh: the trainer's restored global_steps stamp (N + 1) is
+      # already correct.
+      logging.info(
+          "Sub-batch resume: previous step %d completed cleanly at"
+          " iter_steps=%d. Starting step %d fresh (trainer iter_steps"
+          " restored to %d).",
+          state.global_step,
+          state.iter_steps,
+          self.rl_engine.global_steps,
+          actor_trainer.iter_steps,
+      )
+      return
+
+    # Temporary holding buffer. We hold this restored state until train() 
+    # initializes the dataloader so we can validate its full_batch_size.
+    # If the batch size matches, we re-inject the active rollouts.
+    self._sb_pending_state = state
+    # BENCHMARK instrumentation (temporary): keep the cumulative clock
+    # continuous across the restart and credit the wall-clock the resumed
+    # step does NOT have to re-spend (rollouts + training already banked in
+    # the snapshot). An estimate by construction -- re-rolling to measure
+    # the true saving would defeat the feature being measured.
+    if state.experiment_start_time > 0 and not self._bench_anchor_pinned:
+      self._experiment_start_time = state.experiment_start_time
+    if state.sub_step_elapsed > 0:
+      logging.info(
+          "Sub-batch resume: ~%.2fs of in-step work restored rather than"
+          " re-done.",
+          state.sub_step_elapsed,
+      )
+      self.rl_engine.buffer_metrics_async(
+          {"perf/sub_batch_time_saved": (state.sub_step_elapsed, np.sum)},
+          mode=rl_engine_lib.Mode.TRAIN,
+          step=self.rl_engine.global_steps,
+      )
+    self._sb_resumed_mid_step = True
+    # The step started at an earlier apply when the crash came after one:
+    # _sb_resync_rollout_weights pins that checkpoint as the behavior
+    # policy.
+    self._sb_set_anchor(state.anchor_step)
+    self._sb_completed = set(state.completed_group_ids)
+    self._sb_counts = dict(state.trained_trajectory_counts)
+    self._sb_active = list(state.active_group_trajectories)
+    self._sb_active_gids = {t.prompt_id for t in self._sb_active}
+    if state.training_state is not None:
+      # None means the snapshot was taken at an apply boundary: the buffer
+      # was provably empty there and the freshly restored optimizer already
+      # has an empty accumulator, so there is nothing to inject.
+      self._sb_inject_training_state(state.training_state)
+
+    # Mid-step crash: the trainer's custom_checkpoint_metadata_fn stamps
+    # `global_steps + 1` (see rl_cluster.py), anticipating the increment
+    # at the step boundary that this process never reached.
+    # Rewind to resume that same step instead of skipping past it.
+    self.rl_engine.global_steps = state.global_step
+    logging.info(
+        "Sub-batch resume @ global_step=%d iter_steps=%d (step started at"
+        " train_steps=%d): %d completed groups, %d active trajectories.",
+        state.global_step,
+        state.iter_steps,
+        state.anchor_step,
+        len(self._sb_completed),
+        len(self._sb_active),
+    )
+    self._bench_event(
+        "resume",
+        key=getattr(state, "sub_batch_key", None),
+        iter_steps=state.iter_steps,
+        global_step=state.global_step,
+        completed_groups=len(self._sb_completed),
+        active_trajectories=len(self._sb_active),
+        had_training_state=state.training_state is not None,
+    )
+
+  def _sb_check_trainer_checkpoint_cadence(self) -> None:
+    """Raises ValueError when the trainer's own weight-checkpoint cadence is
+    coarser than every apply. Reads the manager's RESOLVED options (a v0
+    save_interval_steps maps to a FixedIntervalPolicy there)."""
+    manager = self.rl_engine.actor_trainer.checkpoint_manager
+    options = manager._options  # pylint: disable=protected-access
+    policy = options.save_decision_policy
+    if getattr(policy, "interval", None) != 1:
+      raise ValueError(
+          "sub_batch_checkpointing is enabled but the actor trainer's own"
+          " checkpointing_options.save_decision_policy is not"
+          f" FixedIntervalPolicy(interval=1) (got {policy!r}). Please configure"
+          " the trainer for per-apply saves to coordinate with the sub-batch"
+          " checkpoint cadence."
+      )
+
+  def _sb_anchor_initial_weights(self) -> None:
+    """Writes the trainer's step-0 weight checkpoint on a fresh run.
+
+    The sub-batch key is train_steps * KEY_BASE + local, so snapshots in the
+    very first global step are keyed by 0 * KEY_BASE + local. For them to be
+    resumable, the trainer MUST have a matching step-0 weight checkpoint on
+    disk; without it, a crash during the first global step sees no durable
+    weights at all, declines restore, and discards all window-0 progress.
+    Anchoring step 0 here ensures window 0 is resumable like every later window.
+    """
+    trainer = self.rl_engine.actor_trainer
+    trainer.checkpoint_manager.save(
+        0,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=sft_utils.is_lora_enabled(trainer.model),
+        force=True,
+        custom_metadata={
+            "global_step": self.rl_engine.global_steps,
+            "role": rl_engine_lib.Role.ACTOR.value,
+        },
+    )
+    trainer.checkpoint_manager.wait()
+
+  def _sb_accumulator(self, trainer) -> Any | None:
+    """The trainer's `GradientAccumulator` module, or None if absent."""
+    return getattr(trainer, "grad_accumulator", None)
+
+  def _sb_actor_mesh(self):
+    """The actor's mesh, or None when the engine exposes none (CPU tests)."""
+    try:
+      mesh = self.rl_engine.cluster_config.role_to_mesh[
+          rl_engine_lib.Role.ACTOR
+      ]
+    except (AttributeError, KeyError, TypeError):
+      return None
+    return None if getattr(mesh, "empty", False) else mesh
+
+  def _sb_accumulator_shardings(
+      self, trainer
+  ) -> dict[tuple[Any, ...], Any]:
+    """Each accumulator leaf's FINAL sharding, derived the way the trainer
+    derives it (nnx.get_partition_spec + the actor mesh). The live
+    placement is useless for this: the fresh accumulator is single-device
+    until the first jit. Without a mesh, the leaf's own sharding."""
+    ga_state = nnx.state(self._sb_accumulator(trainer))
+    mesh = self._sb_actor_mesh()
+    if mesh is None:
+      fixed = sft_checkpoint_manager.fix_sharding(ga_state)
+      paths = [path for path, _ in ga_state.flat_state()]
+      leaves = jax.tree_util.tree_leaves(fixed)
+      assert len(paths) == len(leaves)
+      return {path: leaf.sharding for path, leaf in zip(paths, leaves)}
+    out = {}
+    values = dict(ga_state.flat_state())
+    for path, svar in nnx.get_partition_spec(ga_state).flat_state():
+      spec = svar.get_value() if hasattr(svar, "get_value") else svar
+      if not isinstance(spec, jax.sharding.PartitionSpec):
+        spec = jax.sharding.PartitionSpec()
+      out[path] = sharding_utils.get_sharding(values[path][...], mesh, spec)
+    return out
+
+  def _sb_build_abstract_for(
+      self, trainer, diff: dict[tuple[Any, ...], Any]
+  ) -> dict[tuple[Any, ...], Any]:
+    """Builds the sharded abstract target for the trainer's accumulator:
+    shapes/dtypes from the current trainer, shardings the final device
+    placement, so orbax restores each leaf straight onto the mesh."""
+    shardings = self._sb_accumulator_shardings(trainer)
+    return {
+        path: jax.ShapeDtypeStruct(
+            value.shape, value.dtype, sharding=shardings[path]
+        )
+        for path, value in diff.items()
+    }
+
+  def _sb_build_abstract_training_state(
+      self,
+  ) -> dict[tuple[Any, ...], Any] | None:
+    """Builds the abstract restore target mirroring what `save` persisted."""
+    trainer = self.rl_engine.actor_trainer
+    accumulator = self._sb_accumulator(trainer)
+    if accumulator is None:
+      return None
+    # Describing a restore requires no copy of the fresh accumulator's values.
+    leaves = {
+        path: var[...] for path, var in nnx.state(accumulator).flat_state()
+    }
+    return self._sb_build_abstract_for(trainer, leaves)
+
+  def _sb_extract_accumulator(
+      self, trainer
+  ) -> dict[tuple[Any, ...], Any] | None:
+    """The trainer's live accumulator as a flat, tuple-path-keyed dict of
+    host copies: the `('grads', ...)` leaves plus `('denom',)`.
+
+    Each leaf is device_put to the pinned_host memory kind of its own
+    sharding: a per-shard DMA that keeps the leaf a (global, sharded) jax
+    array orbax can write from every process, with no gather to one host
+    and no numpy materialization (a multi-host shard is not addressable
+    from one process; on Pathways it would round-trip the controller). A
+    copy is required: the jitted train step donates the accumulator, so
+    the live buffers die at the next micro-step while the async save may
+    still be reading. Returns None when the trainer has no accumulator.
+    """
+    accumulator = self._sb_accumulator(trainer)
+    if accumulator is None:
+      return None
+    out = {}
+    with jax.transfer_guard("allow"):
+      for path, var in nnx.state(accumulator).flat_state():
+        value = var[...]
+        if isinstance(value, jax.Array):
+          value = jax.device_put(
+              value, value.sharding.with_memory_kind("pinned_host"),
+              may_alias=False,
+          )
+        out[path] = value
+    return out
+
+  def _sb_peek_denom(self) -> float | None:
+    """Cheaply reads the accumulator's scalar `denom` (no parameter-sized
+
+    transfers), or None when the trainer has no accumulator. `denom == 0`
+    means the accumulator was just reset at an apply: the buffer is provably
+    empty and a snapshot omits the parameter-sized payload entirely.
+    """
+    accumulator = self._sb_accumulator(self.rl_engine.actor_trainer)
+    if accumulator is None:
+      return None
+    return float(np.asarray(accumulator.denom[...]))
+
+  def _sb_extract_training_state(self) -> Any | None:
+    """The buffer payload for a snapshot: the actor accumulator's flat state
+
+    (the only trainer in a Phase-1 GRPO run; the critic extension is
+    deferred, see docs/designs/active/002-sub-batch-critic-support.md).
+    """
+    return self._sb_extract_accumulator(self.rl_engine.actor_trainer)
+
+  def _sb_inject_accumulator(
+      self, trainer, diff: dict[tuple[Any, ...], Any], role: str
+  ) -> None:
+    """Injects one restored accumulator payload into one trainer's live
+    `GradientAccumulator`, in place, via the same `flat_state()` mechanism
+    the extract uses. No-ops with a warning if the trainer has no
+    accumulator to inject into (a trainer-stack change across the restart).
+
+    Restored leaves arrive on the sharding _sb_build_abstract_for asked
+    for (the leaf's final mesh placement), so they REPLACE the fresh
+    accumulator's buffers as they are: `set_value`, never the indexed
+    `var[...] =` write (an at[].set scatter that forces co-located compute
+    with the fresh single-device zeros). A leaf that is not already placed
+    (a host array, or a test payload) is device_put to that sharding.
+    """
+    accumulator = self._sb_accumulator(trainer)
+    if accumulator is None:
+      logging.warning(
+          "Sub-batch snapshot carried a %s accumulator buffer but the"
+          " current %s trainer has no GradientAccumulator to inject it into"
+          " (trainer stack changed across the restart?). Discarding the"
+          " buffer; training resumes with a fresh accumulator, re-training"
+          " the in-flight micro-steps from scratch.",
+          role,
+          role,
+      )
+      return
+    ga_state = nnx.state(accumulator)
+    shardings = self._sb_accumulator_shardings(trainer)
+    placements = set()
+    with jax.transfer_guard("allow"):
+      for path, var in ga_state.flat_state():
+        restored = diff[path]
+        target = shardings[path]
+        if (
+            isinstance(restored, jax.Array)
+            and restored.sharding == target
+            and restored.sharding.memory_kind == target.memory_kind
+        ):
+          value = restored
+        else:
+          value = jax.device_put(restored, target)
+        var.set_value(value)
+        placements.add(str(getattr(target, "spec", target)))
+    nnx.update(accumulator, ga_state)
+    logging.info(
+        "Sub-batch %s accumulator inject: leaf placements %s.",
+        role,
+        sorted(placements),
+    )
+
+  def _sb_inject_training_state(self, training_state: Any) -> None:
+    """Injects a restored buffer payload into the actor's accumulator."""
+    self._sb_inject_accumulator(
+        self.rl_engine.actor_trainer, training_state, "actor"
+    )
+
+  def _sb_item_step(self, item: agent_types.TrajectoryItem) -> int:
+    """Which global step an active item belongs to.
+
+    This learner assigns integer prompt ids as
+    ``global_step * full_batch_size + prompt_index``
+    (pairs_stream_generator), so the owning step is recoverable by integer
+    division. Needed because the producer prefetches ``off_policy_steps + 1``
+    prompt batches and can therefore register NEXT-step groups while the
+    consumer is still mid-CURRENT-step: without step scoping those raced-ahead
+    registrations would be serialized into the current step's snapshots (a
+    mid-step resume would then re-inject next-step rollouts into this step and
+    inflate its micro-batch accounting) and wiped by the current step's
+    boundary reset (a later crash would then regenerate groups that already
+    carry trained counts, mixing rollout lineages within a group). Non-int
+    prompt ids (a custom orchestrator group_key_fn) fall back to the current
+    step, which degrades to the unscoped behavior only for configurations
+    this learner does not itself produce.
+    """
+    if isinstance(item.prompt_id, int) and self._full_batch_size > 0:
+      return item.prompt_id // self._full_batch_size
+    return self.rl_engine.global_steps
+
+  def _sb_skip_group(self, group_id: Hashable) -> bool:
+    """Returns True if the group was already generated, so the orchestrator skips regenerating it."""
+    if not self._sb_enabled:
+      return False
+    with self._sb_lock:
+      return group_id in self._sb_completed or group_id in self._sb_active_gids
+
+  def _sb_register(self, batch: list[agent_types.TrajectoryItem]) -> None:
+    """Registers a freshly generated group into the active set."""
+    if not self._sb_enabled:
+      return
+    with self._sb_lock:
+      self._sb_active.extend(batch)
+      self._sb_active_gids.update(item.prompt_id for item in batch)
+
+  def _sb_chunk_epoch(self, identities: list[tuple[Hashable, int]]) -> int:
+    """Returns how many epochs `identities`' rows have already been trained
+
+    (0 if never). Only meaningful when every row shares the same count --
+    `_sb_require_uniform_epoch` enforces that before any chunk is trained,
+    so `min` here is a defensive aggregate over an already-uniform list.
+    """
+    if not self._sb_enabled or not identities:
+      return 0
+    with self._sb_lock:
+      return min(self._sb_counts.get(key, 0) for key in identities)
+
+  def _sb_require_uniform_epoch(
+      self, identities: list[tuple[Hashable, int]]
+  ) -> None:
+    """Raises if a chunk mixes rows at different trained-epoch counts.
+
+    Re-injection replays the crashed run's consumption order, so every
+    chunk's rows share one count by construction. A mixed chunk means that
+    invariant broke; training it would over-train some rows, and splitting
+    it would add a micro-step and desync the apply cadence. Fail loudly.
+    """
+    if not identities:
+      return
+    with self._sb_lock:
+      epochs = {self._sb_counts.get(key, 0) for key in identities}
+    if len(epochs) > 1:
+      raise RuntimeError(
+          "Sub-batch chunk mixes rows at different trained-epoch counts"
+          f" {sorted(epochs)}: re-injection order no longer matches the"
+          " crashed run's consumption order. Refusing to train it."
+      )
+
+  def _bench_event(self, event: str, **fields) -> None:
+    """TEMPORARY (bench): appends one JSON line to TUNIX_SB_EVENT_LOG.
+
+    The validation harness reads this file to prove which micro-steps
+    trained (snapshot events carry key/window/local/denom), where a
+    deterministic preemption landed, and where the resume picked up --
+    independent of wandb availability. Write failures are logged, never
+    raised: evidence capture must not take down training.
+    """
+    if not self._bench_event_log:
+      return
+    fields["event"] = event
+    fields["ts"] = time.time()
+    fields["pid"] = os.getpid()
+    try:
+      with open(self._bench_event_log, "a") as f:
+        f.write(json.dumps(fields) + "\n")
+    except OSError:
+      logging.exception("Sub-batch bench event log write failed.")
+
+  def _bench_read_loss(self, trainer) -> float | None:
+    """TEMPORARY (bench): durable capture of the trainer's own aggregate
+    loss for the window just trained, bypassing the metrics pipeline's
+    EXTERNAL flush (console + wandb), which is one apply BEHIND by design
+    (peft_trainer.train() overlaps that I/O with the next window's compute,
+    see peft_trainer._write_train_metrics) and can lose a loss value to a
+    kill in that lag window. For stock that loss is only DELAYED: a resumed
+    run re-executes the interrupted window and naturally reproduces it. For
+    sub-batch it is PERMANENT: a committed apply is never re-executed, so
+    nothing ever regenerates the lost value. This reads the trainer's
+    internal buffer directly instead, called right after `update_actor`
+    returns (both call sites), before that lag can strike.
+    peft_trainer.train() rolls `_buffered_train_metrics` into
+    `_prev_buffered_train_metrics` at the SAME apply-triggering micro-step
+    that also increments `train_steps` and calls `checkpoint_manager.save`
+    -- all before `update_actor` returns -- so `_prev_buffered_train_metrics
+    .loss` is exact (the full window's mean), not an estimate, at the exact
+    moment this is called for that chunk. Falls back to the live
+    (still-accumulating) buffer for mid-window calls, where the value is a
+    running partial aggregate -- callers needing the per-apply value read
+    it from the boundary-keyed event, not a mid-window one. Returns None on
+    any failure: this is observability, never allowed to affect training.
+    """
+    try:
+      buf = (
+          getattr(trainer, "_buffered_train_metrics", None)
+          or getattr(trainer, "_prev_buffered_train_metrics", None)
+      )
+      if buf is not None and buf.losses:
+        return float(buf.loss)
+    except Exception:  # pylint: disable=broad-except
+      logging.debug("Sub-batch bench: loss read failed.")
+    return None
+
+  def _bench_log_progress(self) -> None:
+    """TEMPORARY (bench): logs one dense per-real-micro-step progress point.
+
+    Called ONLY from the two call sites that correspond to a GENUINELY
+    trained micro-step -- _sb_snapshot (sub-batch) and
+    _bench_stock_iter_hook (stock) -- never from the raw per-consumed-chunk
+    loop, which also walks past count-skipped (already durably trained,
+    near-zero-cost) chunks on a sub-batch resume; that was the bug. Reading
+    `actor_trainer.iter_steps` (not the learner's own `_iter_steps`, which
+    IS skip-inclusive) gives identical semantics in both modes and is
+    naturally continuous across a restart in both: sub-batch fixes it up
+    to the exact resumed position, stock's restore rewinds it to the last
+    apply and it then legitimately re-counts through the re-executed
+    window -- the recovery cost this metric exists to show.
+
+    No explicit `step=` is passed: this fires far more densely than the
+    Tunix pipeline's once-per-apply flushes (keyed on the much smaller
+    global_steps), and passing the larger, faster-advancing iter_steps as
+    wandb's OWN step would permanently strand every later global_steps-
+    keyed call behind it -- reproducing the silently-dropped-metrics bug
+    this instrumentation exists to diagnose, this time self-inflicted.
+    Plot progress_micro_steps as a custom x-axis instead.
+    """
+    if not self._bench_metrics:
+      return
+    try:
+      import wandb  # pylint: disable=g-import-not-at-top
+      if wandb.run is None:
+        return
+      payload = {
+          "perf/sub_batch_cumulative_time": (
+              time.time() - self._experiment_start_time
+          ),
+          "perf/sub_batch_progress_micro_steps": (
+              self.rl_engine.actor_trainer.iter_steps
+          ),
+      }
+      loss = self._bench_read_loss(self.rl_engine.actor_trainer)
+      if loss is not None:
+        payload["perf/sub_batch_loss"] = loss
+      # Apply-granularity series: exactly one point per optimizer apply,
+      # emitted AT the apply (train_steps just advanced, and the metrics
+      # buffer just rolled, so `loss` is the completed window's exact
+      # mean). Plot perf/sub_batch_apply_loss against
+      # perf/sub_batch_apply_step for the per-global-step loss curve,
+      # stitched across attempts.
+      step_now = self.rl_engine.actor_trainer.train_steps
+      if loss is not None and step_now > self._bench_last_apply_logged:
+        payload["perf/sub_batch_apply_loss"] = loss
+        payload["perf/sub_batch_apply_step"] = step_now
+        self._bench_last_apply_logged = step_now
+      wandb.log(payload)
+    except Exception:  # pylint: disable=broad-except
+      logging.debug("Sub-batch bench: progress metric log failed.")
+
+  def _bench_wandb_flush(self) -> None:
+    """TEMPORARY (bench): best-effort wandb flush before a DETERMINISTIC
+    kill. A real preemption grants no such grace (which is why the chaos
+    injector stays brutal), but wandb is observability, not the system
+    under test -- without this the killed attempt's final metric rows,
+    still queued in the client process, are lost with os._exit, and the
+    benchmark reads cleaner with them present. Failures are swallowed:
+    the kill must proceed regardless.
+    """
+    self._bench_log_progress()
+    try:
+      import wandb  # pylint: disable=g-import-not-at-top
+      if wandb.run is not None:
+        wandb.run.finish(exit_code=42)
+    except Exception:  # pylint: disable=broad-except
+      logging.info("Sub-batch bench: wandb flush before kill failed.")
+
+  def _bench_stock_iter_hook(self, n_chunks: int) -> None:
+    """TEMPORARY (bench): stock-baseline twin of _sb_snapshot's bench tail.
+
+    With sub-batch checkpointing disabled there are no per-micro-step
+    snapshots, so the two-arm benchmark gets its per-iter evidence and its
+    deterministic kill point from here instead: one `stock_iter` event per
+    stock training call, and -- when a named preemption target falls inside
+    the iters that call just trained -- a hard exit AFTER the actor
+    checkpoint queue is durable. The wait mirrors the sub-batch arm's
+    durable-snapshot-then-die semantics: both arms die with their last
+    recovery point committed, so the resume delta measures the DESIGN's
+    lost work, not the async save queue's depth at kill time.
+    """
+    if (
+        self._bench_event_log is None
+        and not self._sb_preempt_at
+        and not self._bench_metrics
+    ):
+      return  # inert outside the benchmark harness
+    it = self.rl_engine.actor_trainer.iter_steps
+    self._bench_event(
+        "stock_iter",
+        iter_steps=it,
+        global_step=self.rl_engine.global_steps,
+        chunks=n_chunks,
+        loss=self._bench_read_loss(self.rl_engine.actor_trainer),
+    )
+    self._bench_log_progress()
+    # One stock update call trains n_chunks iters at once; a target strictly
+    # inside that range still fires, just at the call's end (with micro-batch
+    # granularity n_chunks == 1 and the kill lands exactly on the target).
+    fired = self._sb_preempt_at.intersection(range(it - n_chunks + 1, it + 1))
+    if not fired:
+      return
+    self.rl_engine.actor_trainer.checkpoint_manager.wait()
+    for target in sorted(fired):
+      self._bench_event(
+          "preempt",
+          stock=True,
+          iter_steps=target,
+          killed_after_iter=it,
+          global_step=self.rl_engine.global_steps,
+      )
+    logging.info(
+        "SUB-BATCH VALIDATE (stock baseline): deterministic preemption after"
+        " durable actor checkpoints (targets %s, iter_steps=%d,"
+        " global_step=%d); os._exit(42).",
+        sorted(fired),
+        it,
+        self.rl_engine.global_steps,
+    )
+    self._bench_wandb_flush()
+    os._exit(42)
+
+  def _sb_snapshot(
+      self,
+      identities: list[tuple[Hashable, int]],
+      *,
+      step_complete: bool,
+      anticipated_apply: bool = False,
+  ) -> None:
+    """Snapshots the sub-batch state to disk for one trained chunk.
+
+    Records one trained epoch for the (prompt_id, group_index) pairs in
+    `identities`, marks fully trained groups as completed, and persists the
+    ledger and gradient accumulator buffer. Called immediately after
+    `update_actor` so the saved epoch counts match the saved gradient
+    buffer -- except for a chunk whose training triggers the optimizer
+    apply: `anticipated_apply=True` is called BEFORE `update_actor`, keys
+    the snapshot under the post-apply `train_steps + 1` (local 0, no
+    buffer: the apply resets the accumulator), and makes it durable, so the
+    trainer's own apply checkpoint can never be durable ahead of it (see
+    `_sb_train_chunk`). Such a snapshot is only ever selected once that
+    apply is durable, and is purged as dead lineage otherwise.
+
+    Active Set Retention (Deadlock Prevention):
+      Fully trained trajectories are NOT evicted from the active set mid-step.
+      They must be retained and re-injected on a restart because the trainer's
+      step boundary logic blindly counts the number of chunks processed. If
+      finished trajectories were evicted early, the boundary counter would wait
+      for micro-batches that never arrive, causing a resume deadlock. The entire
+      ledger is instead cleared wholesale at `_sb_step_boundary`.
+
+    Buffer Optimization & Apply Boundaries:
+      The gradient buffer payload is massive. At apply boundaries (`denom ==
+      0` after a reset, or an anticipated apply) the buffer is empty and is
+      omitted entirely, and the save blocks until durable.
+    """
+    if not self._sb_enabled:
+      return
+    assert self._sb_mgr is not None
+    actor_trainer = self.rl_engine.actor_trainer
+    # Anticipating an apply: the chunk trains right after this call, so its
+    # counters are the post-training ones.
+    iter_now = actor_trainer.iter_steps + (1 if anticipated_apply else 0)
+    if iter_now <= self._sb_last_snapshot_trainer_iter:
+      raise RuntimeError(
+          "Sub-batch snapshot without an intervening training call: trainer"
+          f" iter_steps {iter_now} <= last snapshot's"
+          f" {self._sb_last_snapshot_trainer_iter}. This is a wiring bug;"
+          " refusing to overwrite a same-run snapshot."
+      )
+    train_steps = actor_trainer.train_steps + (1 if anticipated_apply else 0)
+    if train_steps != self._sb_window_train_steps:
+      # First snapshot of a new window: the chunk just trained contained the
+      # apply (or this is the run's first snapshot), so the local counter
+      # restarts and the key encodes T-dot-0. `local` is pure within-window
+      # ORDER, not a micro-step position -- which is all reconciliation
+      # needs (max local wins).
+      self._sb_window_train_steps = train_steps
+      self._sb_local = 0
+    else:
+      self._sb_local += 1
+    sub_batch_key = train_steps * sub_batch_checkpoint.KEY_BASE + self._sb_local
+    if sub_batch_key <= self._sb_last_snapshot_key:
+      # Saves use overwrite=True (a resumed run legitimately re-produces a
+      # crashed run's keys), so a same-run duplicate would be silently
+      # clobbered instead of surfacing. The encoding is globally monotonic
+      # by construction (a new window's T-dot-0 exceeds the previous
+      # window's last key since local < KEY_BASE), so a non-advancing key
+      # can only mean the snapshot cadence is miswired (e.g. a snapshot
+      # without a training call in between, or the trainer's apply counter
+      # went backwards).
+      raise RuntimeError(
+          "Sub-batch snapshot key did not advance:"
+          f" {sub_batch_key} <= last snapshot key"
+          f" {self._sb_last_snapshot_key}. This is a wiring bug; refusing"
+          " to overwrite a same-run snapshot."
+      )
+    mu = self._num_iterations()
+    pairs_per_group = self._num_generations()
+    step_now = self.rl_engine.global_steps
+    with self._sb_lock:
+      for key in identities:
+        self._sb_counts[key] = min(self._sb_counts.get(key, 0) + 1, mu)
+      for group_id in {gid for gid, _ in identities}:
+        pairs = [(group_id, p) for p in range(pairs_per_group)]
+        if all(self._sb_counts.get(p, 0) >= mu for p in pairs):
+          self._sb_completed.add(group_id)
+      completed_snapshot = list(self._sb_completed)
+      counts_snapshot = dict(self._sb_counts)
+      # Serialize only THIS step's payloads. The producer's prompt prefetch
+      # can have registered next-step groups already (see _sb_item_step);
+      # persisting them here would let a mid-step resume re-inject another
+      # step's rollouts into this one.
+      active_snapshot = [
+          t for t in self._sb_active if self._sb_item_step(t) == step_now
+      ]
+
+    grad_accum_steps = self._training_config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    # Peek the scalar denom BEFORE extracting: at apply boundaries the
+    # accumulator was just reset (denom == 0, which is EVERY snapshot when
+    # k == 1), the buffer is provably empty and omitted, so paying the
+    # parameter-sized host transfer just to discard it would waste
+    # per-micro-step bandwidth.
+    denom = None if anticipated_apply else self._sb_peek_denom()
+    at_apply_boundary = denom is None or denom == 0.0
+    training_state = (
+        None if at_apply_boundary else self._sb_extract_training_state()
+    )
+    if anticipated_apply:
+      # Called by _sb_train_chunk only after trainer.checkpoint_manager.wait()
+      # proved W(train_steps-1) durable; retention may now drop everything
+      # below it. Never raise the floor from a mid-window snapshot: there
+      # the trainer's train_steps already counts an apply whose checkpoint
+      # is still in flight. The floor must move BEFORE this save (orbax
+      # evaluates retention inside it).
+      assert (
+          actor_trainer.checkpoint_manager.latest_step()
+          == actor_trainer.train_steps
+      ), "anticipated snapshot without a durable trainer checkpoint"
+      self._sb_mgr.set_durable_train_steps(actor_trainer.train_steps)
+    self._sb_mgr.save(
+        train_steps,
+        self._sb_local,
+        iter_steps=iter_now,
+        global_step=self.rl_engine.global_steps,
+        grad_accum_steps=grad_accum_steps,
+        step_complete=step_complete,
+        completed_group_ids=completed_snapshot,
+        trained_trajectory_counts=counts_snapshot,
+        active_group_trajectories=active_snapshot,
+        training_state=training_state,
+        num_generations=self._num_generations(),
+        full_batch_size=self._full_batch_size,
+        num_iterations=self._num_iterations(),
+        mini_batch_size=self._training_config.mini_batch_size,
+        sub_step_elapsed=time.time() - self._global_step_start_time,
+        experiment_start_time=self._experiment_start_time,
+        geometry={**self._sb_geometry(), **(self._sb_geo_train or {})},
+        anchor_step=self._sb_anchor_step,
+    )
+    self._sb_last_snapshot_key = sub_batch_key
+    self._sb_last_snapshot_trainer_iter = iter_now
+    if step_complete:
+      self._sb_step_complete_for_step = self.rl_engine.global_steps
+    if at_apply_boundary:
+      # Durable barrier at applies: the sub-batch stream must never be
+      # durably behind the trainer's own checkpoint for the same apply.
+      self._sb_mgr.wait()
+    self._bench_event(
+        "snapshot",
+        key=sub_batch_key,
+        window=train_steps,
+        local=self._sb_local,
+        iter_steps=iter_now,
+        global_step=step_now,
+        denom=denom,
+        step_complete=step_complete,
+        carried_buffer=training_state is not None,
+        loss=self._bench_read_loss(actor_trainer),
+    )
+    self._bench_log_progress()
+    if iter_now in self._sb_preempt_at:
+      # Deterministic validation preemption: make THIS snapshot durable
+      # first, then die. A preemption landing just after a mid-window
+      # commit is the scenario under test, and the explicit wait removes
+      # the race with the async save queue (minutes deep on slow disks) --
+      # the resume is then guaranteed to land on exactly this key.
+      self._sb_mgr.wait()
+      self._bench_event(
+          "preempt",
+          key=sub_batch_key,
+          window=train_steps,
+          local=self._sb_local,
+          iter_steps=iter_now,
+          global_step=step_now,
+      )
+      logging.info(
+          "SUB-BATCH VALIDATE: deterministic preemption after durable"
+          " snapshot key %d (iter_steps=%d, window=%d, local=%d);"
+          " os._exit(42).",
+          sub_batch_key,
+          iter_now,
+          train_steps,
+          self._sb_local,
+      )
+      self._bench_wandb_flush()
+      os._exit(42)
+
+  def _sb_chunk_will_apply(self, chunk: Any) -> bool:
+    """Whether training `chunk` triggers the optimizer apply: the packer's
+    flag when present, else the trainer's own `iter_steps % k` derivation."""
+    flag = getattr(chunk, "is_update_step", None)
+    if flag is not None:
+      return bool(np.asarray(flag).item())
+    k = self._training_config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    return (self.rl_engine.actor_trainer.iter_steps + 1) % k == 0
+
+  def _sb_train_chunk(
+      self,
+      chunk: Any,
+      identities: list[tuple[Hashable, int]],
+      eval_ds: Any,
+      skip_jit: bool,
+      *,
+      step_complete: bool,
+  ) -> None:
+    """Trains one chunk and snapshots it, in the crash-safe order.
+
+    The trainer commits its own per-apply weight checkpoint asynchronously
+    inside `update_actor`. A snapshot written after training could lose that
+    race: a restart would restore weights `T+1` and find no snapshot to
+    resume from, so the rest of the step would be silently skipped. For an
+    apply chunk the boundary snapshot is therefore written and made durable
+    BEFORE training; mid-window chunks snapshot after training as usual (the
+    trainer writes nothing durable there).
+
+    Before that precommit the PREVIOUS apply's weight checkpoint W(T) must
+    be durable: the precommit of (T+1).0 is where retention may drop window
+    T-1, and until W(T) is durable window T-1 is still the pair a crash
+    would restore to. The wait bounds trainer lag to zero at every
+    precommit, so the floor `_sb_snapshot(anticipated_apply=True)` reports
+    is exact. After training, the trainer's apply count must have moved by
+    exactly the predicted amount: an apply the prediction missed keyed the
+    ledger for the wrong window, and a predicted apply that did not happen
+    precommitted a window the weights never reached (there may be no next
+    chunk to notice, e.g. at step completion).
+    """
+    will_apply = self._sb_chunk_will_apply(chunk)
+    trainer = self.rl_engine.actor_trainer
+    t0 = trainer.train_steps
+    i0 = trainer.iter_steps
+    if will_apply:
+      trainer.checkpoint_manager.wait()
+      durable = trainer.checkpoint_manager.latest_step()
+      if durable != t0:
+        raise RuntimeError(
+            f"Sub-batch: trainer's durable checkpoint step is {durable} but"
+            f" train_steps is {t0} at an apply boundary. The trainer must"
+            " checkpoint at every apply for the sub-batch ledger to be"
+            " reconcilable (see _sb_check_trainer_checkpoint_cadence)."
+        )
+      self._sb_snapshot(
+          identities, step_complete=step_complete, anticipated_apply=True
+      )
+    self.rl_engine.update_actor([chunk], eval_ds, skip_jit)
+    if hasattr(self.rl_engine, "critic_trainer"):
+      self.rl_engine.update_critic([chunk], eval_ds, skip_jit)
+    if trainer.iter_steps != i0 + 1:
+      raise RuntimeError(
+          "Sub-batch: update_actor must execute exactly one micro-step;"
+          f" iter_steps went {i0}->{trainer.iter_steps}."
+      )
+    if trainer.train_steps != t0 + int(will_apply):
+      raise RuntimeError(
+          f"Sub-batch: predicted apply={will_apply} for this chunk but"
+          f" train_steps went {t0}->{trainer.train_steps}; the ledger keyed"
+          " for this chunk describes the wrong window."
+      )
+    if not will_apply:
+      self._sb_snapshot(identities, step_complete=step_complete)
+
+  def _sb_reinject(self, train_data_queue) -> None:
+    """Pushes the restored active trajectories back onto the training queue.
+
+    We reinject before any fresh generation starts, so they resume training
+    without being regenerated (`_sb_skip_group` keeps the producer from creating
+    new rollouts for these same groups).
+
+    On the `process_in_consumer=False` path the queue carries processed
+    `TrainExample`s, not raw trajectories, so each restored group is run
+    through `_batch_to_train_example` here -- identical to what the normal
+    producer path does for a freshly generated group -- before queueing.
+
+    Groups are re-fed in ledger (consumption) order, which puts each
+    still-untrained chunk back in its original accumulation window.
+    """
+    if (
+        not self._sb_enabled
+        or not getattr(self, "_sb_pending_state", None)
+        or not getattr(self, "_sb_active", None)
+    ):
+      return
+    groups: dict[Hashable, list[agent_types.TrajectoryItem]] = {}
+    for item in self._sb_active:
+      groups.setdefault(item.prompt_id, []).append(item)
+
+    for _, items in groups.items():
+      if self._process_in_consumer:
+        train_data_queue.put(items)
+      else:
+        train_examples = self._batch_to_train_example(
+            batch_results=items, mode=rl_engine_lib.Mode.TRAIN
+        )
+        ids = [(item.prompt_id, item.group_index) for item in items]
+        for train_example in train_examples:
+          train_data_queue.put(_SbItem(train_example, ids))
+    logging.info("Sub-batch resume: re-injected %d groups.", len(groups))
+
+  def _sb_unwrap(self, batch_gen):
+    """Tensor boundary of the producer-processing path: splits each pulled
+    micro-batch of `_SbItem`s into its TrainExamples (yielded) and its
+    identities (staged on the item FIFO, row order); the consumer loop
+    drains the FIFO per micro-batch. The queue's None sentinel stops
+    `_data_consumer_batch_generator` upstream, so it never gets here.
+    """
+    for batch in batch_gen:
+      # Loud failure here beats a duplicated-identities error at the
+      # consumer's n_total check if the loop ever skips its drain.
+      assert not self._sb_item_fifo, (
+          "Sub-batch identity FIFO not drained before the next micro-batch"
+      )
+      self._sb_item_fifo.extend(i for item in batch for i in item.ids)
+      yield [item.example for item in batch]
+
+  def _sb_load_anchor_params(self, step: int) -> Any:
+    """Step `step`'s params as a fresh pinned-host tree; the live model is
+    untouched (see CheckpointManager.load_model_params). LoRA runs checkpoint
+    only the LoRA params, so the frozen backbone comes from the live model."""
+    trainer = self.rl_engine.actor_trainer
+    lora = sft_utils.is_lora_enabled(trainer.model)
+    params = trainer.checkpoint_manager.load_model_params(
+        step,
+        trainer.model,
+        restore_only_lora_params=lora,
+        memory_kind="pinned_host",
+    )
+    if not lora:
+      return params
+    backbone = rl_utils.put_params_on_memory_kind(
+        nnx.state(trainer.model), "pinned_host"
+    )
+    return nnx.merge_state(backbone, params)
+
+  def _sb_resync_rollout_weights(self) -> None:
+    """Refreshes the rollout engine after a restart that restored weights.
+
+    Disaggregated only: colocated rollouts share the live actor (nothing
+    to push), and upstream never re-anchors there either. A mid-step
+    resume whose step started at an earlier apply (`_sb_anchor_step`
+    below the restored train_steps) pins that step-start checkpoint as the
+    behavior policy: rollout AND anchor get W(T0) while the trainer keeps
+    the restored mid-step weights, so the step's old logps, TIS weights and
+    remaining generations match the uninterrupted run. Every other restart
+    pushes the restored weights through sync_weights, undoing its
+    global_steps increment (no step ended here).
+    """
+    if not self._sb_enabled or not self._sb_restored_trainer_state:
+      return
+    if not self.should_sync_weights:
+      return  # colocated: rollout shares the actor's (restored) weights
+    trainer = self.rl_engine.actor_trainer
+    anchor = self._sb_anchor_step
+    resume = trainer.train_steps
+    if self._sb_pending_state is not None and anchor != resume:
+      if not trainer.checkpoint_manager.has_step(anchor):
+        raise RuntimeError(
+            "Sub-batch mid-step resume needs the step-start weight"
+            f" checkpoint at train_steps={anchor} (resumed at {resume}) to"
+            " restore the behavior policy, but it is no longer on disk. The"
+            " learner pins it while its step runs (see"
+            " CheckpointManager.pin_step), so it was removed outside that"
+            " pin. Restore that checkpoint before continuing."
+        )
+      self.rl_engine.pin_behavior_policy(self._sb_load_anchor_params(anchor))
+      logging.info(
+          "Sub-batch mid-step resume: trainer at train_steps=%d, step %d"
+          " started at train_steps=%d; that checkpoint is pinned as the"
+          " anchor and rollout policy.",
+          resume,
+          self.rl_engine.global_steps,
+          anchor,
+      )
+      return
+    steps_before = self.rl_engine.global_steps
+    self.rl_engine.sync_weights()
+    self.rl_engine.global_steps = steps_before
+    logging.info(
+        "Sub-batch restart: restored actor weights (train_steps=%d) pushed"
+        " to the rollout engine before generation for step %d.",
+        resume,
+        steps_before,
+    )
+
+  def _sb_step_boundary(self) -> None:
+    """Resets the in-memory ledger pillars at the full-batch boundary."""
+    if not self._sb_enabled:
+      return
+    step_now = self.rl_engine.global_steps
+    if self._sb_step_complete_for_step != step_now:
+      # Reaching the boundary means THIS step finished, so one of its
+      # snapshots must have carried step_complete=True. If none did, the next
+      # restore reads the final snapshot as mid-step and re-feeds an
+      # already-trained ledger: a zero-training phantom step (global_steps
+      # drift, spurious weight sync, silently skipped dataset batch).
+      # Comparing stamps rather than clearing a flag keeps this self-arming --
+      # a stale stamp from an earlier step still trips it. Raise BEFORE the
+      # ledger is reset or the dataset advances: the last snapshot on disk is
+      # still a matched recovery pair for this step.
+      raise RuntimeError(
+          f"Sub-batch: global step {step_now} reached its boundary without"
+          " any snapshot marked step_complete (last marked step:"
+          f" {self._sb_step_complete_for_step}). A restart from this step"
+          " would resume it as mid-step and burn a phantom step. This is a"
+          " snapshot-cadence bug (see the step_complete call sites)."
+      )
+    with self._sb_lock:
+      self._sb_completed = set()
+      self._sb_counts = {}
+      self._sb_active = [
+          t for t in self._sb_active if self._sb_item_step(t) > step_now
+      ]
+      self._sb_active_gids = {t.prompt_id for t in self._sb_active}
+    self._sb_resumed_mid_step = False
+    # Right after the step's final apply and before the boundary sync
+    # anchors on it: the next step's behavior policy. Moving the pin frees
+    # the previous step start only at the next trainer save, which runs
+    # after _sb_train_chunk proved this checkpoint durable, so a crash can
+    # no longer resume the previous step by then.
+    self._sb_set_anchor(self.rl_engine.actor_trainer.train_steps)
+
+  def _sb_set_anchor(self, train_steps: int) -> None:
+    """Records the global step's start (its behavior policy) and, on a
+    disaggregated setup, pins that trainer checkpoint so retention keeps it
+    while a mid-step resume could need it (see CheckpointManager.pin_step).
+
+    Colocated rollouts share the live weights and are never re-anchored
+    (_sb_resync_rollout_weights returns early), so nothing would read the
+    pinned checkpoint there. Changing a colocated run to disaggregated
+    across a restart is not guaranteed: its old anchor may have been evicted.
+    """
+    self._sb_anchor_step = train_steps
+    if self.should_sync_weights:
+      self.rl_engine.actor_trainer.checkpoint_manager.pin_step(train_steps)
+
+  def _sb_geometry(self) -> dict[str, Any]:
+    """The init-known resolved run geometry recorded in every snapshot and
+    compared at restore (see SubBatchCheckpointManager.save): the objective
+    settings the algo config defines (absent attribute => key omitted =>
+    skipped) and the caller-asserted dataset id. The train-time keys live
+    in `_sb_geo_train`."""
+    geo: dict[str, Any] = {}
+    for name in _SB_OBJECTIVE_KEYS:
+      if hasattr(self.algo_config, name):
+        geo[name] = getattr(self.algo_config, name)
+    dataset_id = getattr(self.algo_config, "sub_batch_dataset_id", None)
+    if dataset_id is not None:
+      geo["dataset_id"] = dataset_id
+    return geo
+
+  def _sb_check_accum_geometry(
+      self, mini_batch_size: int, train_micro_batch_size: int
+  ) -> None:
+    """Requires mini_batch_size == train_micro_batch_size * k: the apply
+    prediction (_sb_chunk_will_apply) takes the accumulation window to be
+    exactly one mini-batch of micro-batches."""
+    k = self._training_config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    if mini_batch_size != train_micro_batch_size * k:
+      raise ValueError(
+          "sub_batch_checkpointing requires mini_batch_size =="
+          " train_micro_batch_size * gradient_accumulation_steps; got"
+          f" {mini_batch_size} != {train_micro_batch_size} * {k}. The apply"
+          " prediction assumes the accumulation window is exactly one"
+          " mini-batch."
+      )
+
+  def _sb_validate_batch_geometry(
+      self,
+      full_batch_size: int,
+      *,
+      train_micro_batch_size: int | None = None,
+  ) -> None:
+    """Rejects a change of the train-time-resolved geometry after any
+    restore (mid-step or clean boundary): full_batch_size (from the
+    dataset) and train_micro_batch_size both raise."""
+    if not self._sb_enabled or self._sb_restored_geometry is None:
+      return
+    saved = self._sb_restored_full_batch_size
+    if saved is not None and saved != full_batch_size:
+      raise sub_batch_checkpoint.SubBatchGeometryError(
+          f"Sub-batch snapshot was saved with full_batch_size={saved} but the"
+          f" dataset provides {full_batch_size}; the ledger's group-id"
+          " arithmetic is invalid across this change. Relaunch with the"
+          " original configuration, or use a new run root to"
+          " change geometry deliberately (the in-progress step is then"
+          " abandoned)."
+      )
+    saved_micro = self._sb_restored_geometry.get("train_micro_batch_size")
+    if (
+        train_micro_batch_size is not None
+        and saved_micro is not None
+        and saved_micro != train_micro_batch_size
+    ):
+      raise sub_batch_checkpoint.SubBatchGeometryError(
+          "Sub-batch snapshot was saved with"
+          f" train_micro_batch_size={saved_micro} but this run resolves"
+          f" {train_micro_batch_size}. Relaunch with the original"
+          " configuration, or use a new run root to change"
+          " geometry deliberately (the in-progress step is then abandoned)."
+      )
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
@@ -487,6 +1915,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_iterator: Iterable[TrainingInputT] | AsyncIterator[TrainingInputT],
       num_generations: int = 1,
       collect_mode: str = "Token",
+      apply_sub_batch_skip: bool = False,
   ):
     """Generates trajectory groups using the orchestrator pattern.
 
@@ -495,6 +1924,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_iterator: An iterable yielding single `TrainingInputT` examples.
       num_generations: The number of episodes to run per agent-environment pair.
       collect_mode: The mode for trajectory collection (e.g., "Token").
+      apply_sub_batch_skip: Whether to consult the sub-batch ledger to skip
+        pre-crash groups. Must be True ONLY for the training stream. Because 
+        this generator is shared with evaluation, if eval passed True, its
+        independently numbered group IDs could accidentally collide with the
+        training ledger  and cause eval prompts to be silently dropped.
 
     Yields:
       A list of trajectories for a group.
@@ -508,6 +1942,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       group_id = self.rl_engine.global_steps * self._full_batch_size
       if is_async_iterator:
         async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          # Sub-batch resume (train stream only): this group was already
+          # generated pre-crash (fully consumed, or restored and pending
+          # re-injection via _sb_reinject) -- do not regenerate it, just keep
+          # the group_id counter advancing in lockstep with the original run.
+          if apply_sub_batch_skip and self._sb_skip_group(group_id):
+            group_id += 1
+            continue
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -525,6 +1966,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           group_id += 1
       else:
         for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          if apply_sub_batch_skip and self._sb_skip_group(group_id):
+            group_id += 1
+            continue
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
                   None,
@@ -554,7 +1998,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     # Consume full groups and yield them with their original input.
     async_generator = orchestrator.yield_batches(
-        batch_size=self.algo_config.num_generations
+        batch_size=num_generations
     )
     try:
       async with contextlib.aclosing(async_generator) as stream:
@@ -595,7 +2039,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
     if mode == rl_engine_lib.Mode.TRAIN:
-      expected_step = batch_results[0].group_id // self._full_batch_size
+      expected_step = batch_results[0].prompt_id // self._full_batch_size
     else:
       expected_step = self.rl_engine.global_steps
 
@@ -655,13 +2099,38 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     prompt_iterator = _iterate_micro_batches()
     try:
-      async for batch in self._orchestrator_producer(
+      # Push snapshotted rollouts into the queue before generating anything new.
+      # The orchestrator is configured to skip regenerating these groups.
+      self._sb_reinject(train_data_queue)
+      producer_kwargs = dict(
           orchestrator=orchestrator,
           prompt_iterator=prompt_iterator,
           num_generations=self.algo_config.num_generations,
           collect_mode="Token",
-      ):
+      )
+      # `_orchestrator_producer` is an override point (upstream tests and
+      # custom learners replace it) whose original signature predates
+      # `apply_sub_batch_skip`: pass the flag only to implementations that
+      # declare it, so older-signature overrides keep working -- the
+      # sub-batch skip is simply inert for them, which is correct (their
+      # rollouts never enter the ledger either). Instance state cannot
+      # carry this flag instead: the eval producer runs CONCURRENTLY with
+      # this train producer and must not consult the ledger (id-collision
+      # hazard documented on the parameter).
+      if "apply_sub_batch_skip" in inspect.signature(
+          self._orchestrator_producer
+      ).parameters:
+        producer_kwargs["apply_sub_batch_skip"] = True
+      async for batch in self._orchestrator_producer(**producer_kwargs):
         try:
+          # Register freshly generated rollouts in the ledger before they enter
+          # the queue. This is the last point where raw identity exists on
+          # the producer-processing path before _batch_to_train_example
+          # strips it into numeric tensors, so it rides the queue item
+          # (_SbItem) alongside the TrainExample. The process_in_consumer=True
+          # path enqueues the raw trajectories and derives identity in the
+          # consumer's _to_train_examples wrapper instead.
+          self._sb_register(batch)
           if self._process_in_consumer:
             # Put raw batch (list of trajectories) into queue.
             # We put it once, and consumer will handle iterations.
@@ -671,8 +2140,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 batch_results=batch,
                 mode=rl_engine_lib.Mode.TRAIN,
             )
+            if self._sb_enabled and len(train_examples) != 1:
+              raise RuntimeError(
+                  "sub_batch_checkpointing requires _process_results to emit"
+                  " exactly one TrainExample per group on this path; got"
+                  f" {len(train_examples)}."
+              )
+            ids = (
+                [(item.prompt_id, item.group_index) for item in batch]
+                if self._sb_enabled
+                else []
+            )
             for train_example in train_examples:
-              train_data_queue.put(train_example)
+              train_data_queue.put(
+                  _SbItem(train_example, ids)
+                  if self._sb_enabled
+                  else train_example
+              )
         except Exception as e:
           if not isinstance(e, RuntimeError):
             logging.exception(
@@ -704,6 +2188,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
+    try:
+      self._train_impl(train_dataset, eval_dataset, skip_jit)
+    finally:
+      # Whatever ends the loop (completion, an exhausted dataset or an
+      # exception anywhere in it): stop the producer's event loop, release
+      # the executor and the sub-batch manager, then the engine.
+      self.close()
+      self.rl_engine.close()
+
+  def _train_impl(
+      self,
+      train_dataset: Iterable[TrainingInputT],
+      eval_dataset: Iterable[TrainingInputT] | None,
+      skip_jit: bool,
+  ) -> None:
+    """train() body; cleanup lives in train()."""
     full_batch_iterator = iter(train_dataset)
 
     if self.rl_engine.global_steps > 0:
@@ -719,14 +2219,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           next(full_batch_iterator)
         except StopIteration:
           logging.warning("Train dataset exhausted while skipping batches.")
-          self.rl_engine.close()
           return
 
     try:
       first_item = next(full_batch_iterator)
     except StopIteration:
       logging.warning("Training dataset is empty.")
-      self.rl_engine.close()
       return
 
     full_batch_size = len(next(iter(first_item.values())))  # pyrefly: ignore[bad-argument-type]
@@ -754,6 +2252,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f" train_micro_batch_size ({train_micro_batch_size})"
         )
       self._process_in_consumer = True
+
+    if self._sb_enabled:
+      # Train-time-resolved geometry: the accumulation-window check with
+      # the resolved sizes, then the keys every snapshot records and a
+      # restored state is validated against.
+      self._sb_check_accum_geometry(mini_batch_size, train_micro_batch_size)
+      self._sb_geo_train = {
+          "train_micro_batch_size": train_micro_batch_size,
+      }
+      self._sb_validate_batch_geometry(
+          full_batch_size,
+          train_micro_batch_size=train_micro_batch_size,
+      )
 
     for v, n in [
         (self._rollout_micro_batch_size, f"{self._rollout_micro_batch_size=}"),
@@ -787,6 +2298,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
+
     # 1. Start producer thread to generate rollouts and training examples.
     orchestrator = self._build_orchestrator()
 
@@ -801,6 +2313,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       except StopIteration:
         prompt_queue.put(None)
         break
+
+    # Mid-step resume on a disaggregated setup: the rollout engine must get
+    # the restored actor weights before it generates anything (see
+    # _sb_resync_rollout_weights). Must run before the producer starts.
+    self._sb_resync_rollout_weights()
 
     producer_future = asyncio.run_coroutine_threadsafe(
         self._producer(orchestrator, prompt_queue, train_data_queue),
@@ -819,12 +2336,25 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       def _to_train_examples(raw_gen):
         for group_batch in raw_gen:
           all_trajectories = [t for group in group_batch for t in group]
+          if self._sb_enabled:
+            # Consumer-path identity capture: the only point on this path
+            # where raw trajectories still exist (the yielded TrainExamples
+            # drop identity at the merge to tensors). Staged in row order
+            # matching the concatenated example rows; the consumer loop
+            # drains the FIFO per micro-batch.
+            self._sb_item_fifo.extend(
+                (t.prompt_id, t.group_index) for t in all_trajectories
+            )
           yield self._batch_to_train_example(
               batch_results=all_trajectories,
               mode=rl_engine_lib.Mode.TRAIN,
           )
 
       train_data_gen = _to_train_examples(train_data_gen)
+    elif self._sb_enabled:
+      # Producer-processing path: split the _SbItems back into TrainExamples
+      # (identity to the FIFO).
+      train_data_gen = self._sb_unwrap(train_data_gen)
     is_packed = self._training_config.max_seq_token_per_tpu is not None
     if is_packed:
       mesh = self.rl_engine.cluster_config.role_to_mesh[
@@ -854,9 +2384,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     update_steps_since_last_sync = 0
     update_steps_per_full_batch = full_batch_size // mini_batch_size
-    unpacked_micro_step_counter = 0
+    unpacked_micro_step_counter = self.rl_engine.actor_trainer.iter_steps
+    # To detect step boundaries during sub-batching, we count data chunks
+    # consumed rather than model applies. Upon a mid-step resume, earlier
+    # applies are already baked into the restored weights and won't run again.
+    # By counting every data chunk (whether trained or skipped), we guarantee
+    # the step always finishes correctly regardless of where the crash occurred.
+    sb_units_seen = 0
+    sb_units_per_step = max(1, full_batch_size // train_micro_batch_size)
     did_eval_this_global_step = False
     full_batch_chunks = []
+    full_batch_chunk_identities = []
+    # Hold the eval dataset (created at the start of a step) across the entire
+    # global step until we hit a micro-batch that actually trains (isn't
+    # skipped). This ensures evals aren't lost if the first micro-batch is
+    # skipped during a sub-batch resume.
+    pending_eval_dataset = None
     for train_micro_batch in train_data_gen:
       if (
           self._training_config.max_steps
@@ -869,6 +2412,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
         prompt_queue.put(None)
         break
+      # BENCHMARK instrumentation (temporary): random HARD preemption at
+      # micro-batch granularity -- mid-window kills are the case sub-batch
+      # checkpointing exists for, so the injector must be able to land
+      # there, not only at step boundaries. os._exit skips every finally/
+      # atexit, mimicking a real preemption; the supervisor restarts the
+      # process until it exits cleanly.
+      if self._sb_chaos_prob > 0 and np.random.random() < self._sb_chaos_prob:
+        logging.warning(
+            "SUB-BATCH BENCH: simulating hard preemption (os._exit(42)) at"
+            " iter_steps=%d, global_step=%d.",
+            self._iter_steps,
+            self.rl_engine.global_steps,
+        )
+        os._exit(42)
       self._iter_steps += 1
 
       # TODO(tsbao): Re-enable this once off-policy filtering is needed.
@@ -886,8 +2443,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       #  - is_packed: a single packed TrainExample from pack_sequences
       # jax.tree.map(concatenate) over a single-element list is a no-op, so this
       # equals the old `train_examples[0]` for the GRPO consumer path.
+
+      # Merge micro-batches safely by concatenating all their JAX arrays.
+      # Sequence packing introduces a 0-dimensional scalar (`num_segments`)
+      # which crashes `jnp.concatenate` (you can't concatenate 0-d values).
+      # We bypass this by passing scalars through untouched (just taking the
+      # first one, since they are identical across all micro-batches anyway).
       merged_train_micro_batch = jax.tree.map(
-          lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+          lambda *xs: (
+              jnp.concatenate(xs, axis=0) if np.ndim(xs[0]) else xs[0]
+          ),
+          *train_micro_batch,
       )
 
       if is_packed:
@@ -919,6 +2485,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             step=self.rl_engine.global_steps,
         )
 
+      # Identity recovery: this micro-batch's rows, staged on the item FIFO
+      # by _sb_unwrap / _to_train_examples right before the batch was
+      # yielded.
+      if self._sb_enabled:
+        row_identities = list(self._sb_item_fifo)
+        self._sb_item_fifo.clear()
+      else:
+        row_identities = []
+
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the
       # optimizer (which fires every ``gradient_accumulation_steps`` micro-
@@ -931,11 +2506,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           hasattr(merged_train_micro_batch, "segment_ids")
           and getattr(merged_train_micro_batch, "segment_ids") is not None
       )
+      n_total = merged_train_micro_batch.completion_ids.shape[0]
+      if self._sb_enabled and len(row_identities) != n_total:
+        raise RuntimeError(
+            "Sub-batch identity tracking out of sync with the training"
+            f" batch: {len(row_identities)} identities for {n_total} rows."
+        )
       if not is_packed:
         seqs_per_chunk = (
             train_micro_batch_size * self.algo_config.num_generations
         )
-        n_total = merged_train_micro_batch.completion_ids.shape[0]
         if n_total > seqs_per_chunk:
           chunked_train_micro_batch = [
               jax.tree_util.tree_map(
@@ -948,21 +2528,41 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               )
               for i in range(0, n_total, seqs_per_chunk)
           ]
+          # Mirrors the row slicing above exactly (same range/step), so
+          # chunk_identities[c] names the (prompt_id, group_index) pairs in
+          # chunked_train_micro_batch[c].
+          chunk_identities = [
+              row_identities[i : i + seqs_per_chunk]
+              for i in range(0, n_total, seqs_per_chunk)
+          ]
         else:
           chunked_train_micro_batch = [merged_train_micro_batch]
+          chunk_identities = [row_identities]
       else:
         chunked_train_micro_batch = [merged_train_micro_batch]
+        chunk_identities = [row_identities]
+
+      if self._sb_enabled:
+        for ids in chunk_identities:
+          self._sb_require_uniform_epoch(ids)
 
       full_batch_chunks.extend(chunked_train_micro_batch)
+      full_batch_chunk_identities.extend(chunk_identities)
 
       # --- Evaluation Logic on FIRST microbatch ---
       current_eval_dataset = None
-      if update_steps_since_last_sync == 0:
+      if (
+          sb_units_seen if self._sb_enabled else update_steps_since_last_sync
+      ) == 0:
         current_train_step = self.rl_engine.actor_trainer.train_steps
         if (
             all_eval_prompts
             and current_train_step % training_config.eval_every_n_steps == 0
             and current_train_step != self._last_eval_train_step
+            # A mid-step resume implies the step's eval already ran before
+            # the crash (eval precedes the step's first training call);
+            # re-running it here would evaluate mid-step weights twice.
+            and not self._sb_resumed_mid_step
         ):
           self._last_eval_train_step = current_train_step
           self._eval_iter_steps = 0
@@ -995,31 +2595,91 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # microbatches, and #iterations=K, we will:
       #   1. Train on the m * n microbatches once as we get them from rollout.
       #   2. When we get the full batch, repeat K-1 times on the entire batch.
-      self.rl_engine.update_actor(
-          chunked_train_micro_batch, current_eval_dataset, skip_jit
-      )
-      if hasattr(self.rl_engine, "critic_trainer"):
-        self.rl_engine.update_critic(
+      # Determine if this micro-batch is the last one for the current step's
+      # first epoch. `mb_closes_step` is True if we have seen all requested
+      # micro-batch units for the current global step.
+      mb_closes_step = False
+      if self._sb_enabled:
+        mb_closes_step = sb_units_seen + 1 == sb_units_per_step
+        # Ensure eval datasets are delivered even if early chunks are count
+        # skipped. The eval payload attaches to the FIRST chunk actually run
+        # through the TPU in this epoch.
+        if current_eval_dataset is not None:
+          pending_eval_dataset = current_eval_dataset
+      if self._sb_enabled:
+        # To accurately set `step_complete=True` during snapshots, we must
+        # attach it to the LAST chunk that actually runs through the TPU within
+        # this micro-batch (and only if this micro-batch closes the step,
+        # handled by `mb_closes_step`).
+        # We cannot simply use `c == len(chunk_identities) - 1` because the
+        # final chunk(s) might be fully trained (skipped here). If we attach
+        # `step_complete` to a skipped chunk, no snapshot is written, breaking
+        # resume logic.
+        last_trainable = max(
+            (
+                c
+                for c, cids in enumerate(chunk_identities)
+                if self._sb_chunk_epoch(cids) < 1
+            ),
+            default=-1,
+        )
+        for c, sub_chunk in enumerate(chunked_train_micro_batch):
+          ids = chunk_identities[c]
+          if self._sb_chunk_epoch(ids) >= 1:
+            # Already trained in epoch 1 pre-crash (a resumed,
+            # re-injected chunk, or a fresh chunk that was already
+            # processed before the crash); still counted into
+            # full_batch_chunks above for the replay epochs below, just
+            # not re-trained here.
+            continue
+          eval_ds = pending_eval_dataset
+          pending_eval_dataset = None
+          self._sb_train_chunk(
+              sub_chunk,
+              ids,
+              eval_ds,
+              skip_jit,
+              step_complete=(
+                  self._num_iterations() == 1
+                  and c == last_trainable
+                  and mb_closes_step
+              ),
+          )
+      else:
+        self.rl_engine.update_actor(
             chunked_train_micro_batch, current_eval_dataset, skip_jit
         )
+        if hasattr(self.rl_engine, "critic_trainer"):
+          self.rl_engine.update_critic(
+            chunked_train_micro_batch, current_eval_dataset, skip_jit
+        )
+        self._bench_stock_iter_hook(len(chunked_train_micro_batch))
 
       # --- Weight Sync Logic ---
-      if is_packed:
-        # `merged_train_micro_batch.is_update_step` is a 0-d jax scalar set
-        # by `pack_sequences`; pull the host-side value before deciding.
-        is_update = bool(
-            np.asarray(merged_train_micro_batch.is_update_step).item()
-        )
+      if self._sb_enabled:
+        sb_units_seen += 1
       else:
-        # Mirror `peft_trainer._train_step`'s derivation:
-        # `is_update_step` flips True every `grad_acc_steps` micro-batches.
-        unpacked_micro_step_counter += 1
-        is_update = unpacked_micro_step_counter % grad_acc_steps == 0
+        if is_packed:
+          # `merged_train_micro_batch.is_update_step` is a size-1 jax array
+          # set by `pack_sequences`; pull the host-side value.
+          is_update = bool(
+              np.asarray(merged_train_micro_batch.is_update_step).item()
+          )
+        else:
+          # Mirror `peft_trainer._train_step`'s derivation:
+          # `is_update_step` flips True every `grad_acc_steps` micro-batches.
+          unpacked_micro_step_counter += 1
+          is_update = unpacked_micro_step_counter % grad_acc_steps == 0
 
-      if is_update:
-        update_steps_since_last_sync += 1
+        if is_update:
+          update_steps_since_last_sync += 1
 
-      if update_steps_since_last_sync == update_steps_per_full_batch:
+      _step_boundary_reached = (
+          sb_units_seen == sb_units_per_step
+          if self._sb_enabled
+          else update_steps_since_last_sync == update_steps_per_full_batch
+      )
+      if _step_boundary_reached:
         # --- Remaining Iterations Training Step ---
         iterations = self._num_iterations()
 
@@ -1029,10 +2689,53 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
           # TODO(yixuanm): Eval during iteration too. Skipping for now as we
           # will refactor the learner soon.
-          self.rl_engine.update_actor(full_batch_chunks, None, skip_jit)
-          if hasattr(self.rl_engine, "critic_trainer"):
-            self.rl_engine.update_critic(full_batch_chunks, None, skip_jit)
+          if self._sb_enabled:
+            # To accurately set `step_complete=True` during snapshots, we must
+            # attach it to the LAST chunk that actually runs through the TPU in
+            # this mini-batch for the current epoch `i+1`. We cannot simply use
+            # `c == len(full_batch_chunk_identities) - 1` because the final
+            # chunk(s) might be fully trained (skipped here). If we attach
+            # `step_complete` to a skipped chunk, no snapshot is written,
+            # breaking resume logic.
+            last_trainable = max(
+                (
+                    c
+                    for c, cids in enumerate(full_batch_chunk_identities)
+                    if self._sb_chunk_epoch(cids) < i + 1
+                ),
+                default=-1,
+            )
+            for c, sub_chunk in enumerate(full_batch_chunks):
+              ids = full_batch_chunk_identities[c]
+              if self._sb_chunk_epoch(ids) >= i + 1:
+                # This chunk was already trained for epoch `i+1` pre-crash.
+                continue
+
+              # If a resume count-skips every epoch 1 chunk entirely, the step's
+              # eval dataset might be undelivered. Ensure it rides the first
+              # chunk actually trained in the remaining epochs instead of being dropped.
+              eval_ds = pending_eval_dataset
+              pending_eval_dataset = None
+              self._sb_train_chunk(
+                  sub_chunk,
+                  ids,
+                  eval_ds,
+                  skip_jit,
+                  step_complete=(i == iterations - 1 and c == last_trainable),
+              )
+          else:
+            self.rl_engine.update_actor(full_batch_chunks, None, skip_jit)
+            if hasattr(self.rl_engine, "critic_trainer"):
+              self.rl_engine.update_critic(full_batch_chunks, None, skip_jit)
+            self._bench_log_progress()
         full_batch_chunks.clear()
+        full_batch_chunk_identities.clear()
+        self._sb_step_boundary()
+        # A seeded resume always has at least one untrained (chunk, epoch)
+        # (else the snapshot would have been step_complete and never seeded),
+        # so the pending eval must have been delivered by now; cleared anyway
+        # so a violated invariant can never mislabel eval across steps.
+        pending_eval_dataset = None
 
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
@@ -1180,11 +2883,31 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             mode=rl_engine_lib.Mode.TRAIN,
         )
         update_steps_since_last_sync = 0
+        sb_units_seen = 0
         did_eval_this_global_step = False
         self._global_step_start_time = time.time()
 
     _ = producer_future.result()
-    self.rl_engine.close()
+
+  def close(self) -> None:
+    """Cleans up background threads, the event loop and the sub-batch
+    checkpoint manager (waits for its in-flight save)."""
+    if self._sb_mgr is not None:
+      self._sb_mgr.close()
+      self._sb_mgr = None
+    if hasattr(self, "_executor") and self._executor is not None:
+      self._executor.shutdown(wait=False, cancel_futures=True)
+    if hasattr(self, "loop") and self.loop is not None:
+      try:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+      except RuntimeError:
+        pass
+
+  def __del__(self) -> None:
+    try:
+      self.close()
+    except Exception:  # pylint: disable=broad-except
+      pass  # finalizers must not raise
 
   def _put_prompts_to_queue(
       self,
