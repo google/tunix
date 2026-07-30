@@ -79,7 +79,12 @@ class OrchestratedAgenticGrpoLearnerTest(absltest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    chex.set_n_cpu_devices(2)
+    try:
+      chex.set_n_cpu_devices(2)
+    except RuntimeError:
+      # Another test in this process already initialized JAX; reuse whatever
+      # device count it established rather than failing collection.
+      pass
 
   def setUp(self):
     super().setUp()
