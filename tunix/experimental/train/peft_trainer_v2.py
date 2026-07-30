@@ -634,10 +634,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # # print(f"DEBUG v2: Raw Grad Norm in fwd_bwd: {jax.device_get(raw_norm)}")
     # jax.debug.print("DEBUG v2: Raw Grad Norm in fwd_bwd: {x}", x=raw_norm)
 
-    if (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
-    ):
+    if self._is_single_microstep():
       grad_accumulator.set(grads)
     else:
       # TODO(b/491970038): update denom for sequence packing.
@@ -676,13 +673,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     Returns:
       The gradient norm.
     """
-<<<<<<< HEAD
-    acc_grads = grad_accumulator.get()
-=======
-    if (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
-    ):
+    if self._is_single_microstep():
       acc_grads = grad_accumulator.grads
     else:
       acc_grads = grad_accumulator.get()
@@ -701,21 +692,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # print(f"DEBUG v2: Grad Norm in update_step: {jax.device_get(norm)}")
     # jax.debug.print("DEBUG v2: Norm in update_step: {x}", x=norm)
     optimizer.update(model, acc_grads)
-<<<<<<< HEAD
-    # Unconditional: `reset()` itself decides between zeroing the buffer and
-    # dropping it, based on whether the accumulator is persistent. Zeroing an
-    # overwrite-only buffer would write a full parameter-sized copy per step
-    # whose lifetime overlaps `acc_grads` (still being read by
-    # `optimizer.update`), so XLA could not even alias it onto the donated
-    # input and the steady state would carry two gradient trees.
-    grad_accumulator.reset()
-=======
-    # if (
-    #     not self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-    #     and self.config.max_seq_token_per_tpu
-    # ):
-    # grad_accumulator.reset()
->>>>>>> ef1cdcbb (grads_diff)
+    if not self._is_single_microstep():
+      # Only accumulating runs need the zeroing. Doing it unconditionally costs a
+      # full zero copy of the gradient tree per step -- and because its lifetime
+      # overlaps `acc_grads` (still being read by `optimizer.update`) XLA cannot
+      # alias it onto the donated accumulator buffer, so the steady state has to
+      # hold two accumulators at once.
+      grad_accumulator.reset()
     return norm
 
   def _train_step(
