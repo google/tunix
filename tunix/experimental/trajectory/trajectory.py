@@ -290,8 +290,8 @@ class Agent(pydantic.BaseModel):
   )
 
 
-class Trajectory(pydantic.BaseModel):
-  """Root trajectory object containing the interaction history."""
+class TrajectoryMetadata(pydantic.BaseModel):
+  """Metadata for a trajectory (excluding steps and subagents)."""
 
   schema_version: str = pydantic.Field(
       default="ATIF-v1.7",
@@ -307,10 +307,6 @@ class Trajectory(pydantic.BaseModel):
   )
   agent: Agent = pydantic.Field(
       description="Metadata describing the execution agent.",
-  )
-  steps: list[Step] = pydantic.Field(
-      default_factory=list,
-      description="Sequential step history.",
   )
   notes: str | None = pydantic.Field(
       default=None,
@@ -328,30 +324,42 @@ class Trajectory(pydantic.BaseModel):
       default=None,
       description="Custom root-level metadata.",
   )
+
+
+class Trajectory(TrajectoryMetadata):
+  """Root trajectory object containing the interaction history."""
+
+  steps: list[Step] = pydantic.Field(
+      default_factory=list,
+      description="Sequential step history.",
+  )
   subagent_trajectories: list[Trajectory] | None = pydantic.Field(
       default=None,
       description="Array of embedded subagent trajectories.",
   )
 
-  @pydantic.model_validator(mode="after")
-  def validate_step_ids(self) -> Trajectory:
+  @pydantic.field_validator("steps")
+  @classmethod
+  def validate_step_ids(cls, steps: list[Step]) -> list[Step]:
     """Validate that step_ids are sequential starting from 1."""
-    for i, step in enumerate(self.steps):
-      expected_step_id = i + 1
+    for expected_step_id, step in enumerate(steps, start=1):
       if step.step_id != expected_step_id:
         raise ValueError(
-            f"steps[{i}].step_id: expected {expected_step_id} "
-            f"(sequential from 1), got {step.step_id}"
+            f"Expected step_id {expected_step_id} (sequential from 1), got"
+            f" {step.step_id}"
         )
-    return self
+    return steps
 
-  @pydantic.model_validator(mode="after")
-  def validate_embedded_subagent_trajectory_ids(self) -> Trajectory:
+  @pydantic.field_validator("subagent_trajectories")
+  @classmethod
+  def validate_embedded_subagent_trajectory_ids(
+      cls, subagent_trajectories: list[Trajectory] | None
+  ) -> list[Trajectory] | None:
     """Every embedded subagent must carry a unique, non-null trajectory_id."""
-    if not self.subagent_trajectories:
-      return self
+    if not subagent_trajectories:
+      return subagent_trajectories
     seen: set[str] = set()
-    for i, traj in enumerate(self.subagent_trajectories):
+    for i, traj in enumerate(subagent_trajectories):
       if traj.trajectory_id is None:
         raise ValueError(
             f"subagent_trajectories[{i}].trajectory_id is required "
@@ -363,7 +371,7 @@ class Trajectory(pydantic.BaseModel):
             f"'{traj.trajectory_id}'"
         )
       seen.add(traj.trajectory_id)
-    return self
+    return subagent_trajectories
 
   def add_step(
       self,
@@ -399,6 +407,12 @@ class Trajectory(pydantic.BaseModel):
     )
     self.steps.append(new_step)
     return new_step
+
+  def get_metadata(self) -> TrajectoryMetadata:
+    """Returns a metadata-only copy of the trajectory (without steps or subagents)."""
+    return TrajectoryMetadata(
+        **self.model_dump(exclude={"steps", "subagent_trajectories"})
+    )
 
   def to_json_dict(self) -> dict[str, Any]:
     """Serializes the model to a dictionary suitable for JSON, excluding Nones."""
