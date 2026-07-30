@@ -689,11 +689,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # # print(f"DEBUG v2: Raw Grad Norm in fwd_bwd: {jax.device_get(raw_norm)}")
     # jax.debug.print("DEBUG v2: Raw Grad Norm in fwd_bwd: {x}", x=raw_norm)
 
-    if self._is_single_microstep():
-      grad_accumulator.set(grads)
-    else:
-      # TODO(b/491970038): update denom for sequence packing.
-      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    # TODO(b/491970038): update denom for sequence packing.
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     # norm_after_set = optax.global_norm(
     #     jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grad_accumulator.grads)

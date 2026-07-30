@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 v1:
 
 Train step 1 training loss: 4.093186  - training perplexity: 59.930550
@@ -34,3 +35,37 @@ Train step 4 training loss: 1.854100  - training perplexity: 6.385952
 [4] /train/loss=1.8541004657745361
 [4] /train/perplexity=6.385951519012451
 [4] /train/grad_norm=124.44063568115234
+=======
+INIT weight checksum: 2250560790
+[mem] v1 train_step: memory_analysis unavailable (AttributeError: 'function' object has no attribute 'lower')
+live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
+v2 start weight checksum: 2250560790 OK
+compare grads between v1 and v2.update: XOR v1=2292529351 v2=2292529609 DIFFER
+Traceback (most recent call last):
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 321, in <module>
+    compare_grads("update", model_state_v1_host, jax.device_get(nnx.state(gemma_v2)))
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 316, in compare_grads
+    jax.tree.map_with_path(
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree.py", line 425, in map_with_path
+    return tree_util.tree_map_with_path(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree_util.py", line 1258, in tree_map_with_path
+    return treedef.unflatten(f(*xs) for xs in zip(*all_keypath_leaves))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree_util.py", line 1258, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_keypath_leaves))
+                             ^^^^^^
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 317, in <lambda>
+    lambda path, a, b: tc.assert_close_ulp(path, a, b, max_ulp=_MAX_ULP),
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/tunix/tunix/tests/test_common.py", line 148, in assert_close_ulp
+    np.testing.assert_(
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/numpy/testing/_private/utils.py", line 126, in assert_
+    raise AssertionError(smsg)
+AssertionError: Mismatch at path: (DictKey(key='layers'), DictKey(key=4), DictKey(key='attn'), DictKey(key='attn_vec_einsum'), DictKey(key='w'), GetAttrKey(name='value'))
+  dtype        : float32
+  max ULP      : 4 (allowed 0)
+  violating    : 87/6291456 (0.0014%)
+  ULP histogram: 0:6291369, 1:81, 2:3, 4:3
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+>>>>>>> 6d5d6d95 (snapshot)
