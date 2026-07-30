@@ -44,6 +44,7 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import optax
+from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import rl_orchestrator
@@ -165,19 +166,25 @@ def serve_worker(
 
 
 def wait_until_ready(
-    handle: Any, timeout_s: float = 20.0, poll_s: float = 0.1
+    handle: Any, timeout_s: float = 30.0, poll_s: float = 0.1
 ) -> None:
-  """Blocks until the worker behind `handle` answers a heartbeat."""
+  """Blocks until the worker behind `handle` answers a heartbeat.
+
+  A remote handle reports an unreachable worker as an ERROR heartbeat rather
+  than raising (that is what the health monitor wants), so readiness is decided
+  on the reported state, not on the absence of an exception.
+  """
   deadline = time.monotonic() + timeout_s
-  last_error: Optional[Exception] = None
+  last_state = None
   while time.monotonic() < deadline:
-    try:
-      handle.heartbeat()
+    report = handle.heartbeat()
+    last_state = report.state
+    if report.state != datatypes.WorkerState.ERROR:
       return
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      last_error = e
-      time.sleep(poll_s)
-  raise TimeoutError(f"worker never became reachable: {last_error}")
+    time.sleep(poll_s)
+  raise TimeoutError(
+      f"worker never became reachable (last heartbeat: {last_state})"
+  )
 
 
 def run_demo(prompts: Optional[list[str]] = None) -> dict[str, Any]:
