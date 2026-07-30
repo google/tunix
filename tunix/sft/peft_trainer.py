@@ -720,7 +720,7 @@ class PeftTrainer:
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
       self._jitted_train_step_fn = nnx.jit(
-          train_step, donate_argnames=("optimizer", "grad_accumulator")
+          train_step, donate_argnames=("optimizer")
       )
       self._jitted_eval_step_fn = nnx.jit(eval_step)
 
@@ -733,9 +733,6 @@ class PeftTrainer:
 
       self._jitted_train_step_fn = maybe_cache_and_partial(
           self._jitted_train_step_fn,
-          self.model,
-          self.optimizer,
-          self.grad_accumulator,
       )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
           self._jitted_eval_step_fn, self.model
@@ -1054,7 +1051,10 @@ class PeftTrainer:
             tags=tags,
         ) as span_v2:
           train_loss, aux, grad_norm = train_step(
-              train_example,
+              inputs=train_example,
+              model=self.model,
+              optimizer=self.optimizer,
+              grad_accumulator=self.grad_accumulator,
               is_update_step=jnp.array(is_update_step_val, dtype=jnp.bool_),
           )
           # print("Debug: train_loss: ", jax.device_get(train_loss), "grad_norm: ", jax.device_get(grad_norm))
