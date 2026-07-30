@@ -1,16 +1,38 @@
-NIT weight checksum: 2250560790
 DEBUG v1: norm from grads=2094.206787109375 from accumulator=2094.206787109375
 [grads] v1: leaves=197 nonzero=123 finite=197 max|g|=21.2833 norm=2094.206739 expected~2094.206787 rel=2.309e-08
 live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
 v2 start weight checksum: 2250560790 OK
-[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=21.2833 norm=2094.206739 expected~2094.206543 rel=9.350e-08
-[cmp] grads: XOR v1=508432006 v2=1000145275 DIFFER
+[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=21.2833 norm=2094.206739 expected~2094.206543 rel=9.349e-08
+[cmp] grads: XOR v1=508432006 v2=295270455 DIFFER
 [cmp] grads: EXCEEDS 0 ULP
-Mismatch at path: (DictKey(key='embedder'), DictKey(key='input_embedding'), GetAttrKey(name='value'))
+Mismatch at path: (DictKey(key='layers'), DictKey(key=4), DictKey(key='attn'), DictKey(key='attn_vec_einsum'), DictKey(key='w'), GetAttrKey(name='value'))
   dtype        : float32
-  max ULP      : 1338065219 (allowed 0)
-  violating    : 272682415/402653184 (67.7214%)
-  ULP histogram: 0:129970769, 1:148108940, 2:62620840, 3:18251196, 4:12541008, 5:4698934, 6:4814411, 7:1996798, >=8:19650288
-[cmp] weights after 1 step: XOR v1=2292529351 v2=2292529288 DIFFER
-[cmp] weights after 1 step: within 4 ULP
+  max ULP      : 6283232 (allowed 0)
+  violating    : 4933451/6291456 (78.4151%)
+  ULP histogram: 0:1358005, 1:1757627, 2:1174304, 3:486904, 4:395788, 5:165007, 6:167585, 7:74959, >=8:711277
+[diag] ['layers'][4]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536) dtype=float32
+        elementwise: max ULP=6283232 violating=4933451/6291456
+        sorted contents bit-identical: False   -> values genuinely differ
+[diag] ['layers'][9]['attn']['q_einsum']['w'].value: shape=(8, 1536, 512) dtype=float32
+        elementwise: max ULP=5263441 violating=5028483/6291456
+        sorted contents bit-identical: False   -> values genuinely differ
+[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
+        elementwise: max ULP=0 violating=0/402653184
+        sorted contents bit-identical: True   -> SAME VALUES, DIFFERENT ORDER (layout/sharding, not numerics)
+[cmp] weights after 1 step: XOR v1=2292529351 v2=2292529609 DIFFER
+[cmp] weights after 1 step: EXCEEDS 4 ULP
+Mismatch at path: (DictKey(key='layers'), DictKey(key=9), DictKey(key='attn'), DictKey(key='q_einsum'), DictKey(key='w'), GetAttrKey(name='value'))
+  dtype        : float32
+  max ULP      : 24 (allowed 4)
+  violating    : 1/6291456 (0.0000%)
+  ULP histogram: 0:6291402, 1:49, 2:2, 4:2, >=8:1
+[diag] ['layers'][9]['attn']['q_einsum']['w'].value: shape=(8, 1536, 512) dtype=float32
+        elementwise: max ULP=24 violating=54/6291456
+        sorted contents bit-identical: False   -> values genuinely differ
+[diag] ['layers'][4]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536) dtype=float32
+        elementwise: max ULP=4 violating=87/6291456
+        sorted contents bit-identical: False   -> values genuinely differ
+[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
+        elementwise: max ULP=0 violating=0/402653184
+        sorted contents bit-identical: True   -> SAME VALUES, DIFFERENT ORDER (layout/sharding, not numerics)
 sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
