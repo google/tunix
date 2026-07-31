@@ -292,6 +292,22 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
+  @classmethod
+  def qwen3p5_35b_a3b(cls):  # Qwen3.5-35B-A3B
+    return cls(
+        num_layers=40,
+        vocab_size=248320,
+        embed_dim=2048,
+        hidden_dim=512,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10_000_000,
+        num_experts=256,
+        num_experts_per_tok=8,
+    )
+
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
