@@ -36,10 +36,20 @@ WorkerState = datatypes.WorkerState
 # Default max seconds a worker may dwell in a transient state before it is
 # considered overdue. States absent here (e.g. "READY", "STOPPED") are untimed.
 DEFAULT_STATE_DEADLINES_S: dict[WorkerState, float] = {
+    # A worker that never leaves startup is the most common way a fleet hangs:
+    # it answers heartbeats truthfully and simply never becomes useful, so
+    # without a deadline nothing ever notices.
+    WorkerState.PENDING: 5 * 60.0,
+    WorkerState.INITIALIZING: 15 * 60.0,
     WorkerState.COMPILING: 30 * 60.0,
     WorkerState.SYNCING: 10 * 60.0,
     WorkerState.DRAINING: 5 * 60.0,
 }
+
+# How long to wait for one worker's heartbeat before treating it as unhealthy.
+# Short by design: the question being asked is whether the worker can still
+# answer promptly, so a slow answer is itself the answer.
+DEFAULT_HEARTBEAT_TIMEOUT_S = 10.0
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -70,9 +80,11 @@ class HealthMonitor:
       clock: Callable[[], float] = time.monotonic,
       max_workers: int = 32,
       executor: concurrent.futures.ThreadPoolExecutor | None = None,
+      heartbeat_timeout_s: float | None = DEFAULT_HEARTBEAT_TIMEOUT_S,
   ):
     self._registry = registry
     self._max_workers = max_workers
+    self._heartbeat_timeout_s = heartbeat_timeout_s
     self._deadlines = (
         dict(DEFAULT_STATE_DEADLINES_S)
         if state_deadlines_s is None
@@ -105,6 +117,11 @@ class HealthMonitor:
   def poll(self) -> dict[str, datatypes.HealthReport]:
     """Polls every worker once, updating state-entry timestamps.
 
+    A worker that does not answer within the heartbeat timeout is reported as
+    in error rather than waited on. Health polling is what everything else
+    uses to decide whether a worker is usable, so one unresponsive worker must
+    not be able to stop the question being answered about the others.
+
     Returns:
       A mapping of worker_id -> the HealthReport captured this poll.
     """
@@ -122,14 +139,37 @@ class HealthMonitor:
         return wid, None
       return wid, worker.heartbeat()
 
-    futures = [
-        self._executor.submit(_poll_worker, wid) for wid in worker_ids
-    ]
-    for future in concurrent.futures.as_completed(futures):
+    futures = {
+        self._executor.submit(_poll_worker, wid): wid for wid in worker_ids
+    }
+    done, pending = concurrent.futures.wait(
+        futures, timeout=self._heartbeat_timeout_s
+    )
+    for future in done:
       wid, report = future.result()
       if report is None:
         continue
       reports[wid] = report
+
+    for future in pending:
+      # The call is still running and cannot be cancelled; its thread is
+      # occupied until the worker answers or its own transport gives up. What
+      # matters here is that the fleet's health is known now.
+      wid = futures[future]
+      logging.error(
+          "Worker %r did not answer a heartbeat within %ss; treating it as"
+          " unhealthy.",
+          wid,
+          self._heartbeat_timeout_s,
+      )
+      reports[wid] = datatypes.HealthReport(
+          state=WorkerState.ERROR,
+          last_error=(
+              f"heartbeat did not return within {self._heartbeat_timeout_s}s"
+          ),
+      )
+
+    for wid, report in reports.items():
       previous = self._state_since.get(wid)
       if previous is None or previous[0] != report.state:
         self._state_since[wid] = (report.state, self._clock())

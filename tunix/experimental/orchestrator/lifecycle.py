@@ -48,25 +48,106 @@ class LifecycleDriver:
     self._registry = registry
     self._max_workers = max_workers
 
-  def bring_up(self, dummy_data: Any) -> None:
+  def bring_up(
+      self,
+      dummy_data: Any,
+      *,
+      require_all: bool = True,
+      max_attempts: int = 1,
+  ) -> list[str]:
     """Runs initialize -> compile -> start across all workers, phase by phase.
 
-    Each phase runs to completion for every worker before the next phase begins.
-    A phase aborts on the first failure (fail-fast), since a half-initialized
-    fleet should not proceed to compile or serve.
+    Each phase completes for every worker before the next begins, and a worker
+    that fails a phase is dropped from the following ones rather than taking
+    the fleet with it. Which workers failed, and on which phase, is reported
+    together: bringing a fleet up one failure per restart is its own kind of
+    outage.
+
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
+      require_all: Raise unless every worker came up. Turning this off is for
+        fleets that can run degraded -- the caller then has to check what came
+        back.
+      max_attempts: Attempts per worker per phase. A worker whose startup is
+        merely slow or racing a dependency often succeeds on a second try.
+
+    Returns:
+      The ids of workers that completed every phase.
+
+    Raises:
+      LifecycleError: If any worker failed and `require_all` is set.
+      ValueError: If `max_attempts` is not positive.
     """
-    workers = self._registry.workers()
+    if max_attempts < 1:
+      raise ValueError(f"max_attempts must be >= 1, got {max_attempts}.")
+
+    survivors = {w.info().worker_id: w for w in self._registry.workers()}
+    failures: list[tuple[str, BaseException]] = []
+
+    phases = (
+        ("initialize", lambda w: w.initialize()),
+        ("compile", lambda w: w.compile(dummy_data)),
+        ("start", lambda w: w.start()),
+    )
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers
     ) as pool:
-      # TODO(noghabi): Refactor to allow successful workers to proceed to
-      # compile/start and potentially retry failed ones, rather than fail-fast
-      # on the first error.
-      list(pool.map(lambda w: w.initialize(), workers))
-      list(pool.map(lambda w: w.compile(dummy_data), workers))
-      list(pool.map(lambda w: w.start(), workers))
+      for phase, action in phases:
+        if not survivors:
+          break
+        failed = self._run_phase(
+            pool, phase, action, survivors, max_attempts, failures
+        )
+        for worker_id in failed:
+          del survivors[worker_id]
+
+    if failures and require_all:
+      raise LifecycleError("bring_up", failures)
+    if failures:
+      logging.error(
+          "Fleet came up degraded: %d of %d workers failed to start.",
+          len(failures),
+          len(failures) + len(survivors),
+      )
+    return sorted(survivors)
+
+  def _run_phase(
+      self,
+      pool: concurrent.futures.ThreadPoolExecutor,
+      phase: str,
+      action: Any,
+      workers: dict[str, Any],
+      max_attempts: int,
+      failures: list[tuple[str, BaseException]],
+  ) -> list[str]:
+    """Runs one phase across `workers`; returns the ids that failed it."""
+
+    def _attempt(worker_id: str) -> tuple[str, BaseException | None]:
+      last_error: BaseException | None = None
+      for attempt in range(max_attempts):
+        try:
+          action(workers[worker_id])
+          return worker_id, None
+        except Exception as err:  # pylint: disable=broad-except
+          last_error = err
+          logging.warning(
+              "Worker %r failed %s (attempt %d of %d): %r",
+              worker_id,
+              phase,
+              attempt + 1,
+              max_attempts,
+              err,
+          )
+      return worker_id, last_error
+
+    failed: list[str] = []
+    futures = [pool.submit(_attempt, wid) for wid in list(workers)]
+    for future in concurrent.futures.as_completed(futures):
+      worker_id, error = future.result()
+      if error is not None:
+        failures.append((worker_id, error))
+        failed.append(worker_id)
+    return failed
 
   def shutdown(self) -> None:
     """Stops every worker best-effort, then raises if any stop() failed."""
