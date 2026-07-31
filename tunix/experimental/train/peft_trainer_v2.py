@@ -774,8 +774,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+      if not self._is_single_microstep():
+        donate_argnames = ("grad_accumulator",)
+      else:
+        donate_argnames = None
       self._jitted_fwd_bwd_step_fn = nnx.jit(
-          fwd_bwd_step, donate_argnames=("grad_accumulator",)
+          fwd_bwd_step, donate_argnames=donate_argnames,
       )
       # Donating `grad_accumulator` is sound again now that `reset()` always
       # writes it: the donated input has a matching output to alias onto. In the
@@ -795,8 +799,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
       self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
           self._jitted_fwd_bwd_step_fn,
-          self.model,
-          self.grad_accumulator,
 
       )
       self._jitted_update_step_fn = maybe_cache_and_partial(
@@ -816,19 +818,20 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # structurally comparable and switching between them cannot change
       # numerics. Compilation is lazy, so building the wrapper here costs
       # nothing if the fused path is never called.
-      self._jitted_fused_step_fn = (
-          maybe_cache_and_partial(
-              nnx.jit(
-                  self.create_fused_step_fn(),
-                  donate_argnames=("optimizer", "grad_accumulator"),
-              ),
-              self.model,
-              self.optimizer,
-              self.grad_accumulator,
-          )
-          if self._is_single_microstep()
-          else None
-      )
+      # self._jitted_fused_step_fn = (
+      #     maybe_cache_and_partial(
+      #         nnx.jit(
+      #             self.create_fused_step_fn(),
+      #             donate_argnames=("optimizer", "grad_accumulator"),
+      #         ),
+      #         self.model,
+      #         self.optimizer,
+      #         self.grad_accumulator,
+      #     )
+      #     if self._is_single_microstep()
+      #     else None
+      # )
+      self._jitted_fused_step_fn = None
     return (
         self._jitted_fwd_bwd_step_fn,
         self._jitted_update_step_fn,
@@ -1026,7 +1029,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
-    self._record_fwd_bwd(*fwd_bwd_step(self._prepare_payload(payload)))
+    self._record_fwd_bwd(*fwd_bwd_step(inputs=self._prepare_payload(payload), model=self.model, grad_accumulator=self.grad_accumulator))
 
   @override
   def update(self, **kwargs) -> int:
