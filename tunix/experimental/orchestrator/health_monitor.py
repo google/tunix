@@ -23,7 +23,9 @@ testable without sleeping.
 """
 
 from collections.abc import Callable
+import concurrent.futures
 import dataclasses
+import logging
 import time
 
 from tunix.experimental.common import datatypes
@@ -66,8 +68,11 @@ class HealthMonitor:
       *,
       state_deadlines_s: dict[WorkerState, float] | None = None,
       clock: Callable[[], float] = time.monotonic,
+      max_workers: int = 32,
+      executor: concurrent.futures.ThreadPoolExecutor | None = None,
   ):
     self._registry = registry
+    self._max_workers = max_workers
     self._deadlines = (
         dict(DEFAULT_STATE_DEADLINES_S)
         if state_deadlines_s is None
@@ -76,6 +81,26 @@ class HealthMonitor:
     self._clock = clock
     # worker_id -> (state, timestamp it entered that state).
     self._state_since: dict[str, tuple[str, float]] = {}
+    if executor is not None:
+      self._executor = executor
+      self._owns_executor = False
+    else:
+      self._executor = concurrent.futures.ThreadPoolExecutor(
+          max_workers=self._max_workers
+      )
+      self._owns_executor = True
+
+  def close(self) -> None:
+    """Shuts down the thread pool executor if owned by this monitor."""
+    if self._owns_executor:
+      self._executor.shutdown(wait=True)
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, exc_type, exc_val, exc_tb):
+    self.close()
+    return False
 
   def poll(self) -> dict[str, datatypes.HealthReport]:
     """Polls every worker once, updating state-entry timestamps.
@@ -84,17 +109,30 @@ class HealthMonitor:
       A mapping of worker_id -> the HealthReport captured this poll.
     """
     reports: dict[str, datatypes.HealthReport] = {}
-    live_ids = set()
+    worker_ids = self._registry.worker_ids()
+    live_ids = set(worker_ids)
 
-    for worker_id in self._registry.worker_ids():
-      live_ids.add(worker_id)
-      worker = self._registry.get(worker_id)
-      report = worker.heartbeat()
-      reports[worker_id] = report
+    def _poll_worker(wid: str) -> tuple[str, datatypes.HealthReport | None]:
+      try:
+        worker = self._registry.get(wid)
+      except KeyError:
+        logging.warning(
+            "Worker %r unregistered concurrently, skipping poll.", wid
+        )
+        return wid, None
+      return wid, worker.heartbeat()
 
-      previous = self._state_since.get(worker_id)
+    futures = [
+        self._executor.submit(_poll_worker, wid) for wid in worker_ids
+    ]
+    for future in concurrent.futures.as_completed(futures):
+      wid, report = future.result()
+      if report is None:
+        continue
+      reports[wid] = report
+      previous = self._state_since.get(wid)
       if previous is None or previous[0] != report.state:
-        self._state_since[worker_id] = (report.state, self._clock())
+        self._state_since[wid] = (report.state, self._clock())
 
     # Forget workers that have left the registry.
     for worker_id in self._state_since.keys() - live_ids:

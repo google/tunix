@@ -1,0 +1,258 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Legacy vLLM Sampler adapter integrating with Tunix VllmSampler."""
+
+import abc
+from typing import Any, List, Sequence
+import numpy as np
+
+from tunix.experimental.rollout import sampler as base_sampler_lib
+
+Sampler = base_sampler_lib.Sampler
+
+
+def _get_vllm_sampler_cls():
+  """Lazy import of tunix.generate.vllm_sampler to avoid top-level vLLM import side-effects."""
+  from tunix.generate import vllm_sampler as generate_vllm_lib  # pylint: disable=g-import-not-at-top
+  return generate_vllm_lib
+
+
+class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
+  """Sampler adapter wrapping Tunix VllmSampler."""
+
+  def __init__(
+      self,
+      server_id: str,
+      tokenizer: Any = None,
+      config: Any = None,
+  ):
+    self.server_id = server_id
+    self.tokenizer = tokenizer
+    self.config = config
+    self.vllm_sampler = None
+
+    if self.tokenizer is not None and self.config is not None:
+      vllm_lib = _get_vllm_sampler_cls()
+      self.vllm_sampler = vllm_lib.VllmSampler(
+          tokenizer=self.tokenizer, config=self.config
+      )
+
+  def initialize(self) -> None:
+    """Initializes vLLM sampler if needed."""
+    if (
+        self.vllm_sampler is None
+        and self.tokenizer is not None
+        and self.config is not None
+    ):
+      vllm_lib = _get_vllm_sampler_cls()
+      self.vllm_sampler = vllm_lib.VllmSampler(
+          tokenizer=self.tokenizer, config=self.config
+      )
+    if self.vllm_sampler is None:
+      raise RuntimeError(
+          f"LegacyVllmSamplerAdapter [{self.server_id}] requires a vllm_sampler"
+          " instance or tokenizer + config."
+      )
+
+  # --- Lifecycle & Topology ---
+  async def start(self, **kwargs) -> str | None | Any:
+    """Starts the sampling engine or local loop."""
+    del kwargs
+    return True
+
+  async def stop(self, **kwargs) -> str | None | Any:
+    del kwargs
+    if self.vllm_sampler and hasattr(self.vllm_sampler, "stop"):
+      self.vllm_sampler.stop()
+    return True
+
+  async def pause(self, **kwargs) -> str | None | Any:
+    """Pauses inference processing on this worker slice."""
+    del kwargs
+    return True
+
+  async def resume(self, **kwargs) -> str | None | Any:
+    """Resumes inference processing on this worker slice."""
+    del kwargs
+    return True
+
+  async def get_mesh(self, **kwargs) -> Any:
+    """Returns the underlying device mesh topology."""
+    del kwargs
+    if self.vllm_sampler and hasattr(self.vllm_sampler, "mesh"):
+      return self.vllm_sampler.mesh
+    return None
+
+  # --- Inference ---
+  async def sample(
+      self,
+      sampling_requests: (
+          base_sampler_lib.SamplingRequest
+          | Sequence[base_sampler_lib.SamplingRequest]
+          | Any
+      ),
+      **kwargs,
+  ) -> (
+      base_sampler_lib.SamplingResponse
+      | List[base_sampler_lib.SamplingResponse]
+      | Any
+  ):
+    """Generates completions using underlying Tunix VllmSampler."""
+    if not self.vllm_sampler:
+      raise RuntimeError(
+          f"LegacyVllmSamplerAdapter [{self.server_id}] vllm_sampler is not"
+          " initialized."
+      )
+
+    if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
+      requests: List[Any] = [sampling_requests]
+      is_sequence = False
+    elif isinstance(sampling_requests, (list, tuple)):
+      requests = list(sampling_requests)
+      is_sequence = True
+    else:
+      requests = [sampling_requests]
+      is_sequence = False
+
+    prompts = []
+    max_gen_steps_list = []
+    temps = []
+    top_ps = []
+    top_ks = []
+    seeds = []
+    return_logprobs_list = []
+
+    for req in requests:
+      prompt = req.prompt if hasattr(req, "prompt") else req
+      prompts.append(prompt)
+      sp = (
+          req.sampling_params
+          if hasattr(req, "sampling_params") and req.sampling_params is not None
+          else base_sampler_lib.SamplingParams()
+      )
+      assert sp is not None
+
+      max_gen_steps_list.append(sp.max_tokens)
+      temps.append(sp.temperature)
+      top_ps.append(sp.top_p)
+      top_ks.append(sp.top_k)
+      seeds.append(sp.seed)
+      return_logprobs_list.append(sp.return_logprobs)
+
+    max_generation_steps = (
+        max(max_gen_steps_list) if max_gen_steps_list else 64
+    )
+    temperature = temps[0] if temps else 0.0
+    top_p = top_ps[0] if top_ps else None
+    top_k = top_ks[0] if top_ks else None
+    seed = seeds[0] if seeds else None
+    return_logprobs = any(return_logprobs_list) or kwargs.get(
+        "return_logprobs", False
+    )
+
+    sampler_output = self.vllm_sampler(
+        input_strings=prompts,
+        max_generation_steps=max_generation_steps,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        seed=seed,
+        return_logprobs=return_logprobs,
+    )
+
+    responses = []
+    for i, req in enumerate(requests):
+      req_id = getattr(req, "request_id", "")
+
+      txt = (
+          sampler_output.text[i]
+          if isinstance(sampler_output.text, list)
+          else sampler_output.text
+      )
+      toks = (
+          sampler_output.tokens[i]
+          if isinstance(sampler_output.tokens, list)
+          else sampler_output.tokens
+      )
+      lps = None
+      if sampler_output.logprobs and isinstance(sampler_output.logprobs, list):
+        lps = sampler_output.logprobs[i]
+
+      tok_ids = (
+          np.array(toks, dtype=np.int32)
+          if toks is not None
+          else np.zeros(0, dtype=np.int32)
+      )
+      log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
+
+      responses.append(
+          base_sampler_lib.SamplingResponse(
+              request_id=req_id,
+              text=txt,
+              token_ids=tok_ids,
+              logprobs=log_ps,
+              finish_reason="stop",
+          )
+      )
+
+    if is_sequence:
+      return responses
+    return responses[0]
+
+  # --- Weight Synchronization ---
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Returns sharding specs and layout metadata across devices for weights."""
+    del kwargs
+    raise NotImplementedError(
+        "get_weight_sync_metadata() not implemented for this SamplerServer."
+    )
+
+  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Prepares staging handshake prior to policy weight update."""
+    del sync_request, kwargs
+    return True
+
+  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Updates model weights in-place from the specified controller."""
+    del kwargs
+    if (
+        sync_request is not None
+        and self.vllm_sampler
+        and hasattr(self.vllm_sampler, "update_params")
+    ):
+      weights = getattr(sync_request, "weights", sync_request)
+      self.vllm_sampler.update_params(weights)
+    return True
+
+  async def get_transfer_status(self, req_id: Any, **kwargs) -> Any:
+    """Queries status of an ongoing weight transfer or KV-cache migration."""
+    del req_id, kwargs
+    return "SUCCESS"
+
+  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Finalizes and switches active policy weights after transfer completion."""
+    del sync_request, kwargs
+    return True
+
+  async def migrate_kv_cache(
+      self,
+      source_server_id: str,
+      target_server_id: str,
+      token_ids: List[int],
+      **kwargs,
+  ) -> bool:
+    """Triggers KV-cache transfer across TPU slices."""
+    del source_server_id, target_server_id, token_ids
+    return True

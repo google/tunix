@@ -25,6 +25,7 @@ changes.
 
 import collections
 from collections.abc import Iterator
+import threading
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
@@ -62,6 +63,7 @@ class WorkerRegistry:
   """
 
   def __init__(self):
+    self._lock = threading.Lock()
     self._workers: dict[str, abstract_worker.Worker] = {}
     self._infos: dict[str, datatypes.WorkerInfo] = {}
     self._role_to_ids: dict[str, set[str]] = collections.defaultdict(set)
@@ -81,54 +83,63 @@ class WorkerRegistry:
     """
     info = worker.info()
     worker_id = info.worker_id
-    if worker_id in self._workers:
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
-    if not info.roles:
-      raise ValueError(f"worker {worker_id!r} declares no roles")
-    self._workers[worker_id] = worker
-    self._infos[worker_id] = info
-    for role in info.roles:
-      self._role_to_ids[role].add(worker_id)
+    with self._lock:
+      if worker_id in self._workers:
+        raise ValueError(f"duplicate worker_id: {worker_id!r}")
+      if not info.roles:
+        raise ValueError(f"worker {worker_id!r} declares no roles")
+      self._workers[worker_id] = worker
+      self._infos[worker_id] = info
+      for role in info.roles:
+        self._role_to_ids[role].add(worker_id)
     return info
 
   def unregister(self, worker_id: str) -> None:
     """Removes a worker (and its role memberships) from the registry."""
-    if worker_id not in self._workers:
-      raise KeyError(worker_id)
-    info = self._infos.pop(worker_id)
-    del self._workers[worker_id]
-    for role in info.roles:
-      members = self._role_to_ids.get(role)
-      if members is not None:
-        members.discard(worker_id)
-        if not members:
-          del self._role_to_ids[role]
+    with self._lock:
+      info = self._infos.pop(worker_id)
+      del self._workers[worker_id]
+      for role in info.roles:
+        members = self._role_to_ids.get(role)
+        if members is not None:
+          members.discard(worker_id)
+          if not members:
+            del self._role_to_ids[role]
 
   def get(self, worker_id: str) -> abstract_worker.Worker:
-    return self._workers[worker_id]
+    with self._lock:
+      return self._workers[worker_id]
 
   def info(self, worker_id: str) -> datatypes.WorkerInfo:
-    return self._infos[worker_id]
+    with self._lock:
+      return self._infos[worker_id]
 
   def group(self, role: str) -> WorkerGroup:
     """Returns the (possibly empty) group of workers serving `role`."""
-    ids = sorted(self._role_to_ids.get(role, set()))
-    return WorkerGroup(role, [self._workers[i] for i in ids])
+    with self._lock:
+      ids = sorted(self._role_to_ids.get(role, set()))
+      return WorkerGroup(role, [self._workers[i] for i in ids])
 
   def roles(self) -> set[str]:
-    return set(self._role_to_ids)
+    with self._lock:
+      return set(self._role_to_ids)
 
   def worker_ids(self) -> list[str]:
-    return sorted(self._workers)
+    with self._lock:
+      return sorted(self._workers)
 
   def workers(self) -> list[abstract_worker.Worker]:
-    return [self._workers[i] for i in sorted(self._workers)]
+    with self._lock:
+      return [self._workers[i] for i in sorted(self._workers)]
 
   def infos(self) -> list[datatypes.WorkerInfo]:
-    return [self._infos[i] for i in sorted(self._workers)]
+    with self._lock:
+      return [self._infos[i] for i in sorted(self._workers)]
 
   def __len__(self) -> int:
-    return len(self._workers)
+    with self._lock:
+      return len(self._workers)
 
   def __contains__(self, worker_id: str) -> bool:
-    return worker_id in self._workers
+    with self._lock:
+      return worker_id in self._workers

@@ -14,6 +14,7 @@
 
 """Tests for the LifecycleDriver."""
 
+from unittest import mock
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import lifecycle
@@ -65,6 +66,14 @@ class LifecycleDriverTest(absltest.TestCase):
         phases,
         ["initialize", "initialize", "compile", "compile", "start", "start"],
     )
+
+  def test_shutdown_skips_unregistered_worker(self):
+    registry = worker_registry.WorkerRegistry()
+    driver = lifecycle.LifecycleDriver(registry)
+    with mock.patch.object(registry, "worker_ids", return_value=["missing"]):
+      with self.assertLogs(level="WARNING") as logs:
+        driver.shutdown()  # Should not raise LifecycleError
+      self.assertIn("unregistered concurrently", logs.output[0])
 
   def test_shutdown_is_best_effort_and_aggregates_failures(self):
     registry = worker_registry.WorkerRegistry()
