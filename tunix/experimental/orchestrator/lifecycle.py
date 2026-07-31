@@ -51,9 +51,10 @@ class LifecycleDriver:
   def bring_up(self, dummy_data: Any) -> None:
     """Runs initialize -> compile -> start across all workers, phase by phase.
 
-    Each phase runs to completion for every worker before the next phase begins.
-    A phase aborts on the first failure (fail-fast), since a half-initialized
-    fleet should not proceed to compile or serve.
+    Each phase runs across all workers before the next phase begins. If any
+    worker raises an exception during a phase, the exception is re-raised after
+    all workers have attempted the phase, preventing subsequent phases from
+    running.
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
     """
