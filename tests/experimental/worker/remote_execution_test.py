@@ -1088,10 +1088,10 @@ class RemoteExecutionTest(absltest.TestCase):
           **kwargs,
       ) -> str:
         if method_name == "task1":
-          return "task_1"
+          return request_id
         # Task 2 dispatch: pause while poll1 is active
         await self.task2_dispatch_pause.wait()
-        return "task_2"
+        return request_id
 
       async def poll_responses(
           self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
@@ -1284,6 +1284,148 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertEmpty(session._dispatched_tasks[handle])
       self.assertEqual(session._in_flight, 0)
 
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_grpc_handle_refuses_reuse_from_a_second_event_loop(self):
+    """A gRPC aio channel belongs to its creating loop; say so, don't hang."""
+    handle = remote_lib.GrpcRemoteActorHandle(
+        target_address=f"grpc://localhost:{portpicker.pick_unused_port()}"
+    )
+
+    async def _bind_channel():
+      handle._get_rpc()  # pylint: disable=protected-access
+
+    async def _reuse_from_a_new_loop():
+      with self.assertRaisesRegex(RuntimeError, "event loop"):
+        handle._get_rpc()  # pylint: disable=protected-access
+
+    asyncio.run(_bind_channel())
+    asyncio.run(_reuse_from_a_new_loop())
+
+  def test_pool_execution_session_requires_a_caller_supplied_id(self):
+    """A task the session cannot name cannot be matched to its response."""
+
+    class EchoHandle(remote_lib.ActorHandle):
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        return request_id
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        await asyncio.sleep(100)
+
+    async def _run():
+      session = remote_lib.PoolExecutionSession(
+          remote_lib.RoutingActorPool([EchoHandle()])
+      )
+      with self.assertRaises(ValueError):
+        await session.submit("", "method")
+      with self.assertRaises(ValueError):
+        await session.submit(None, "method")
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_rejects_a_worker_that_renames_a_task(self):
+    """The id the caller supplied is the only one the session can match."""
+
+    class RenamingHandle(remote_lib.ActorHandle):
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        del request_id
+        return "some_other_id"
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        await asyncio.sleep(100)
+
+    async def _run():
+      session = remote_lib.PoolExecutionSession(
+          remote_lib.RoutingActorPool([RenamingHandle()])
+      )
+      with self.assertRaises(RuntimeError):
+        await session.submit("req_1", "method")
+      self.assertEqual(session._in_flight, 0)
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_does_not_forward_the_route_key(self):
+    """`route_key` selects a worker; it is not an argument to the method."""
+
+    class RecordingHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.kwargs = None
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        self.kwargs = kwargs
+        return request_id
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        await asyncio.sleep(100)
+
+    async def _run():
+      handle = RecordingHandle()
+      session = remote_lib.PoolExecutionSession(
+          remote_lib.RoutingActorPool([handle])
+      )
+      await session.submit("req_1", "method", prompt="x", route_key="group-7")
+      self.assertEqual(handle.kwargs, {"prompt": "x"})
       await session.close()
 
     asyncio.run(_run())

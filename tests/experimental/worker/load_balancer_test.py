@@ -147,6 +147,32 @@ class BalancedDispatcherTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       lb_lib.BalancedDispatcher([], max_concurrency=1)
 
+  def test_empty_batch_finishes_instead_of_hanging(self):
+    """No task means no completion, and nothing would ever wake the consumer."""
+
+    async def _run():
+      dispatcher = lb_lib.BalancedDispatcher(
+          [FakeRolloutHandle("w0")], max_concurrency=2
+      )
+      results = [item async for item in dispatcher.run([])]
+      self.assertEmpty(results)
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=10.0))
+
+  def test_batch_that_fails_entirely_to_dispatch_finishes(self):
+    async def _run():
+      worker = FakeRolloutHandle("w0")
+      worker.dispatch_error = ConnectionError("worker unreachable")
+      dispatcher = lb_lib.BalancedDispatcher([worker], max_concurrency=2)
+
+      outcomes = [item async for item in dispatcher.run(_tasks(3))]
+
+      self.assertLen(outcomes, 3)
+      self.assertTrue(all(exc is not None for _, _, exc in outcomes))
+      self.assertEqual(dispatcher.router.total_outstanding(), 0)
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=10.0))
+
   def test_primes_max_concurrency_per_worker_before_any_completion(self):
     """The opening burst is max_concurrency on every worker, and no more."""
 

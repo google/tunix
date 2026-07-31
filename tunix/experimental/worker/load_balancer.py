@@ -235,13 +235,22 @@ class BalancedDispatcher:
     ) as session:
       # Prime every worker up to its concurrency limit before consuming any
       # results, so all workers start together rather than serially.
+      accepted_any = False
       while self.router.has_capacity(self._actors):
         submitted = await self._submit_next(session, pending)
         if submitted is None:
           break
         request_id, dispatch_error = submitted
-        if dispatch_error is not None:
+        if dispatch_error is None:
+          accepted_any = True
+        else:
           yield request_id, None, dispatch_error
+
+      if not accepted_any:
+        # Nothing is in flight, so no completion will ever arrive and the
+        # session publishes no end-of-stream marker to wake the consumer.
+        # Awaiting here would hang on an empty or entirely-failed batch.
+        return
 
       async for request_id, result, exc in session.as_completed_with_ids():
         yield request_id, result, exc

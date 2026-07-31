@@ -564,6 +564,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._rpc: Optional[Any] = None
+    self._async_loop: Optional[Any] = None
     self._rpc_timeout_s = rpc_timeout_s
     # Blocking submit() runs on a persistent background event loop so repeated
     # calls reuse one channel. gRPC aio channels are bound to the loop that
@@ -583,12 +584,32 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
 
   def _get_rpc(self) -> Any:
+    """Returns the async stub, binding the channel to the calling loop once.
+
+    Raises:
+      RuntimeError: If reused from a different event loop than the one that
+        created the channel. A gRPC aio channel belongs to its creating loop;
+        using it from another produces failures far from the cause (typically
+        a hang or a "attached to a different loop" error deep in the stack),
+        so it is rejected here instead. Build a handle per loop.
+    """
+    running_loop = _running_loop()
     if self._rpc is None:
       assert _grpc_aio_lib is not None
       self._channel = _grpc_aio_lib.insecure_channel(
           self._host_port, options=_grpc_options()
       )
       self._rpc = self._make_rpc(self._channel)
+      self._async_loop = running_loop
+    elif running_loop is not None and self._async_loop not in (
+        None,
+        running_loop,
+    ):
+      raise RuntimeError(
+          f"This handle's channel to {self.target_address} belongs to the"
+          " event loop that first used it and cannot be shared with another."
+          " Construct a handle per event loop."
+      )
     return self._rpc
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
@@ -1078,10 +1099,38 @@ class PoolExecutionSession:
       *args,
       **kwargs,
   ) -> str:
-    """Dispatches a task to a worker in the pool and tracks its completion."""
+    """Dispatches a task to a worker in the pool and tracks its completion.
+
+    Args:
+      request_id: Caller-chosen, non-empty, unique within this session. It is
+        what completions are matched against, so the session cannot accept
+        responsibility for a task it cannot name.
+      method_name: Method to invoke on the worker's bound instance.
+      *args: Positional arguments for the method.
+      **kwargs: Keyword arguments for the method. `route_key` is consumed for
+        routing and never forwarded to the worker.
+
+    Returns:
+      The id the task is tracked under.
+
+    Raises:
+      RuntimeError: If the session is closed.
+      ValueError: If `request_id` is empty.
+    """
     if self._closed:
       raise RuntimeError("PoolExecutionSession is closed.")
+    if not request_id:
+      # Letting the server mint one opens a window where its response cannot
+      # be attributed to this task: the id is not known here until the ack
+      # returns, and a response arriving first is dropped as unrecognized.
+      raise ValueError(
+          "submit() requires a non-empty request_id: completions are matched"
+          " by id, and a server-minted id is unknown to this session until"
+          " its ack returns."
+      )
     actor = self._pool._get_next_actor(method_name, args, kwargs)
+    # Routing metadata, not a method argument.
+    kwargs.pop("route_key", None)
 
     # Register the id BEFORE dispatching. The worker can finish and enqueue its
     # response while dispatch_task is still awaiting its ack, and the polling
@@ -1098,9 +1147,11 @@ class PoolExecutionSession:
           request_id, method_name, *args, **kwargs
       )
       if req_id != request_id:
-        # The server minted its own id (caller passed none).
-        dispatched_set.discard(request_id)
-        dispatched_set.add(req_id)
+        raise RuntimeError(
+            f"Worker acked request {request_id!r} as {req_id!r}; the session"
+            " tracks tasks by the id it supplied, so a renamed task could"
+            " never be matched to its response."
+        )
       # Re-ensure worker polling is active in case the previous polling loop
       # died due to a transport error while dispatch_task was awaiting.
       self._ensure_worker_polling(actor)
