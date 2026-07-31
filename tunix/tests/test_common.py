@@ -220,6 +220,102 @@ def tree_bit_checksum(tree):
   return acc
 
 
+def live_array_census():
+  """Groups every live device array by (shape, dtype). Host-only.
+
+  Returns:
+    A dict mapping (shape, dtype_name) to (count, total_global_bytes), plus the
+    key `None` mapping to (total_count, total_global_bytes) for the whole set.
+
+  Note the byte figures are *global* -- `jax.Array.nbytes` reports the logical
+  size of the whole array, not the per-device shard. Divide by the number of
+  devices an array is sharded over to compare against a profiler's per-device
+  numbers. Counts are unaffected and are usually the more useful signal.
+  """
+  census = {}
+  total_n = 0
+  total_b = 0
+  for a in jax.live_arrays():
+    key = (tuple(a.shape), a.dtype.name)
+    n, b = census.get(key, (0, 0))
+    census[key] = (n + 1, b + a.nbytes)
+    total_n += 1
+    total_b += a.nbytes
+  census[None] = (total_n, total_b)
+  return census
+
+
+def live_report(tag, top=12, census=None):
+  """Prints a census of live device arrays, biggest aggregate first.
+
+  This is the counterpart to reading a memory profile: the profile tells you how
+  much the *compiled program* declares, this tells you what the *runtime* is
+  still holding. When two programs have identical HLO (same parameters, same
+  outputs, same input_output_alias) but different measured peaks, the difference
+  is by elimination on this side -- a Python reference keeping a buffer alive.
+
+  Deliberately host-only: it touches `jax.live_arrays()` and nothing else, so
+  unlike a hook inside a traced step it cannot change the fusion, scheduling or
+  buffer assignment of the thing being measured.
+
+  Args:
+    tag: Label for the output line.
+    top: How many (shape, dtype) groups to list.
+    census: A census from `live_array_census()`; computed fresh if omitted.
+
+  Returns:
+    The census, so it can be diffed against a later one with `live_diff`.
+  """
+  census = live_array_census() if census is None else census
+  total_n, total_b = census[None]
+  print(f"[live] {tag}: {total_b / 2**30:.2f} GiB global, {total_n} arrays")
+  groups = sorted(
+      ((k, v) for k, v in census.items() if k is not None),
+      key=lambda kv: -kv[1][1],
+  )
+  for (shape, dt), (n, b) in groups[:top]:
+    print(f"        {n:5d} x {str(shape):26s} {dt:9s} = {b / 2**30:7.2f} GiB")
+  if len(groups) > top:
+    rest = sum(b for _, (_, b) in groups[top:])
+    print(f"        ... {len(groups) - top} more groups = {rest / 2**30:.2f} GiB")
+  return census
+
+
+def live_diff(census_a, census_b, label_a="A", label_b="B", top=12):
+  """Reports which (shape, dtype) groups differ in COUNT between two censuses.
+
+  Counts are what matters when hunting a duplicated buffer: one side holding a
+  parameter tensor twice and the other once shows up here as `+1`, naming the
+  exact tensor, without any dependence on sharding or on when each census was
+  taken.
+  """
+  keys = {k for k in census_a if k is not None} | {
+      k for k in census_b if k is not None
+  }
+  rows = []
+  for k in keys:
+    na = census_a.get(k, (0, 0))[0]
+    nb = census_b.get(k, (0, 0))[0]
+    if na != nb:
+      shape, dt = k
+      nbytes = int(np.prod(shape)) * np.dtype(dt).itemsize if shape else 0
+      rows.append((abs(na - nb) * nbytes, na, nb, shape, dt, nbytes))
+  if not rows:
+    print(f"[live-diff] {label_a} vs {label_b}: identical group counts")
+    return
+  rows.sort(reverse=True)
+  total = sum(r[0] for r in rows)
+  print(
+      f"[live-diff] {label_a} vs {label_b}: {len(rows)} groups differ,"
+      f" {total / 2**30:.2f} GiB global"
+  )
+  for _, na, nb, shape, dt, nbytes in rows[:top]:
+    print(
+        f"        {na:5d} -> {nb:<5d} ({nb - na:+d})  {str(shape):26s} {dt:9s}"
+        f"  {(nb - na) * nbytes / 2**30:+7.2f} GiB"
+    )
+
+
 class Decoder(nnx.Module):
   """Toy decoder for testing."""
 

@@ -844,7 +844,22 @@ class PeftTrainer:
       *,
       cache_nnx_graph: bool = True,
   ) -> None:
-    """Training loop."""
+    """Training loop.
+
+    Args:
+      train_ds: Training dataset.
+      eval_ds: Optional evaluation dataset.
+      skip_jit: If True, the step functions are not JITed.
+      cache_nnx_graph: Wrap the step function with `nnx.cached_partial`, which
+        caches the split state of the bound modules so nnx does not re-flatten
+        them on every call. This trades HBM for trace time, and the trade is
+        not small: the cache holds Python references to the parameter and
+        optimizer arrays, which makes those buffers non-donatable, so the
+        updated values cannot alias onto the inputs and both versions stay
+        resident. Measured on gemma-2b (2.506B params, bfloat16, fsdp=2 x tp=2,
+        one parameter tree = 1.17 GiB per device), turning it on cost 2.35 GiB
+        of heap -- exactly two parameter trees. Leave it off when memory-bound.
+    """
     logging.log_first_n(
         logging.INFO,
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",

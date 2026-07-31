@@ -1136,7 +1136,32 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       *,
       cache_nnx_graph: bool = True,
   ) -> None:
-    """Training loop."""
+    """Training loop.
+
+    Args:
+      train_ds: Training dataset.
+      eval_ds: Optional evaluation dataset.
+      skip_jit: If True, the step functions are not JITed.
+      cache_nnx_graph: Wrap the step functions with `nnx.cached_partial`, which
+        caches the split state of the bound modules so nnx does not re-flatten
+        them on every call. Two consequences worth knowing:
+
+        Memory. The cache holds Python references to the parameter and
+        optimizer arrays, which makes those buffers non-donatable, so the
+        updated values cannot alias onto the inputs and both versions stay
+        resident. Measured on gemma-2b (2.506B params, bfloat16, fsdp=2 x tp=2,
+        one parameter tree = 1.17 GiB per device), turning it on cost 2.35 GiB
+        of heap -- exactly two parameter trees. Leave it off when memory-bound.
+
+        Correctness. Because the graphdef is frozen at wrap time, a step that
+        changes a bound module's pytree STRUCTURE cannot hand that change to a
+        later executable: the change is silently discarded. That is why the
+        split path with a lazily-allocated gradient accumulator (`add()` adopts
+        the tree, growing it from `{}`) fails here with "Mismatch custom node
+        data: ('embedder', ...) != (); value: State({})". The fused path is
+        unaffected because the accumulator ends each call with the same
+        structure it started with.
+    """
     logging.log_first_n(
         logging.INFO,
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
