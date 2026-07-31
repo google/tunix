@@ -192,7 +192,7 @@ config.num_layers = 12
 # scale. Use ULP for weights and activations; use max|x-y| / max|x| for
 # gradients.
 #
-config.param_dtype = jnp.bfloat16
+# config.param_dtype = jnp.bfloat16
 
 rngs = nnx.Rngs(0)
 gemma = create_sharded_model(config, rngs, mesh)
