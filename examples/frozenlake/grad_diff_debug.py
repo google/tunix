@@ -459,7 +459,7 @@ with mesh:
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=8)
   trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
   trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
@@ -510,7 +510,7 @@ with mesh:
   optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=8)
   trainer_v2 = peft_trainer_v2.PeftTrainer(gemma_v2, optimizer_v2, config_v2)
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
 

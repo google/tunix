@@ -1267,8 +1267,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          print("is_update_step_val: ", is_update_step_val)
-          print("self._jitted_fused_step_fn: ", self._jitted_fused_step_fn)
           if self._jitted_fused_step_fn is not None and is_update_step_val:
             # Single micro-batch per update: run both halves as one executable
             # so the gradient tree stays an internal temporary. Identical

@@ -1,2 +1,36 @@
-[cmp] weights after training: XOR v1=0 v2=0 identical
-sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+v1:
+
+Train step 1 training loss: 4.093186  - training perplexity: 59.930550
+[1] /train/loss=4.093186378479004
+[1] /train/perplexity=59.93054962158203
+[1] /train/grad_norm=222.35650634765625
+Train step 2 training loss: 2.723777  - training perplexity: 15.237767
+[2] /train/loss=2.7237770557403564
+[2] /train/perplexity=15.237767219543457
+[2] /train/grad_norm=190.40914916992188
+[3] /train/loss=2.5299196243286133
+Train step 3 training loss: 2.529920  - training perplexity: 12.552497
+[3] /train/perplexity=12.552496910095215
+[3] /train/grad_norm=45.529598236083984
+
+v2 fused_step:
+Train step 1 training loss: 4.086659  - training perplexity: 59.540630
+[1] /train/loss=4.086658954620361
+[1] /train/perplexity=59.54063034057617
+[1] /train/grad_norm=222.31106567382812
+Train step 2 training loss: 2.736073  - training perplexity: 15.426291
+[2] /train/loss=2.7360732555389404
+[2] /train/perplexity=15.426290512084961
+[2] /train/grad_norm=190.1228485107422
+is_update_step_val:  True
+self._jitted_fused_step_fn:  functools.partial(<function PeftTrainer._fused_step at 0x320fb7abe8e0>)
+is_update_step_val:  True
+self._jitted_fused_step_fn:  functools.partial(<function PeftTrainer._fused_step at 0x320fb7abe8e0>)
+Train step 3 training loss: 2.530935  - training perplexity: 12.565244
+[3] /train/loss=2.5309345722198486
+[3] /train/perplexity=12.5652437210083
+[3] /train/grad_norm=42.264217376708984
+Train step 4 training loss: 1.854100  - training perplexity: 6.385952
+[4] /train/loss=1.8541004657745361
+[4] /train/perplexity=6.385951519012451
+[4] /train/grad_norm=124.44063568115234
