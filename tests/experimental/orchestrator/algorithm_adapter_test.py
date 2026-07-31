@@ -92,11 +92,10 @@ class StrictRolloutLogpsTest(absltest.TestCase):
 
 class UnsupportedConfigTest(absltest.TestCase):
 
-  def test_sampler_importance_sampling_is_rejected(self):
-    with self.assertRaisesRegex(
-        algorithm_adapter.UnsupportedConfigError, "sampler_is"
-    ):
-      algorithm_adapter.GRPOAdapter(_config(sampler_is="token"))
+  def test_sampler_importance_sampling_is_accepted(self):
+    """Implemented via the same agreement helper the agentic learner uses."""
+    adapter = algorithm_adapter.GRPOAdapter(_config(sampler_is="token"))
+    adapter.check_supported_config(_cluster())
 
   def test_multiple_iterations_per_batch_is_accepted(self):
     """Legal once old log-probabilities are guaranteed to be real."""

@@ -21,6 +21,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import rollout_response_adapter as adapter
+from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic import agentic_grpo_learner
 
 
@@ -161,9 +162,13 @@ class _FakeOrchestrator:
     )
     self.cluster_config = types.SimpleNamespace(
         training_config=types.SimpleNamespace(
-            compute_logps_micro_batch_size=2
+            compute_logps_micro_batch_size=2,
+            max_seq_token_per_tpu=None,
         )
     )
+    # No models here, so no actor mesh: the sampler-vs-trainer diagnostic is
+    # skipped, exactly as it is on a machine without a device topology.
+    self.r2m = {rl_cluster_lib.Role.ACTOR: None}
     self.buffered = []
 
   def get_rollout_config(self, mode):

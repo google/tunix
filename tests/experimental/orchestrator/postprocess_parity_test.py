@@ -380,6 +380,33 @@ class PostprocessParityTest(parameterized.TestCase):
       )
 
   @parameterized.named_parameters(
+      ("no_kl", 0.0),
+      ("with_kl", 0.04),
+  )
+  def test_sampler_importance_sampling_matches_the_reference(self, beta):
+    """The correction weights and the ratio anchor must both match."""
+    algo_config = self._config(sampler_is="token", beta=beta)
+    expected, actual = self._run_both(algo_config, rl_cluster_lib.Mode.TRAIN)
+
+    self.assertIsNotNone(expected[0].sampler_is_weights)
+    self._assert_examples_equal(expected, actual)
+
+  def test_sampler_importance_sampling_anchors_on_the_trainer_recompute(self):
+    """Guards the cell above: with the correction on, old logps change source."""
+    plain, _ = self._run_both(self._config(), rl_cluster_lib.Mode.TRAIN)
+    corrected, _ = self._run_both(
+        self._config(sampler_is="token"), rl_cluster_lib.Mode.TRAIN
+    )
+
+    self.assertIsNone(plain[0].sampler_is_weights)
+    self.assertFalse(
+        np.allclose(
+            np.asarray(plain[0].old_per_token_logps),
+            np.asarray(corrected[0].old_per_token_logps),
+        )
+    )
+
+  @parameterized.named_parameters(
       ("on_policy", True),
       ("recomputed_logps", False),
   )

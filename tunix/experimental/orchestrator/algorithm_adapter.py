@@ -32,6 +32,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import function_registry
 from tunix.rl import utils as rl_utils
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -147,16 +148,7 @@ class GRPOAdapter:
   def _check_supported_algo_config(self) -> None:
     """Rejects algorithm knobs this adapter would otherwise ignore."""
     algo = self._algo_config
-
-    if getattr(algo, "sampler_is", None) is not None:
-      raise UnsupportedConfigError(
-          "sampler_is="
-          f"{algo.sampler_is!r} requests sampler importance-sampling"
-          " correction, which this adapter does not compute: it never fills"
-          " sampler_is_weights, so the policy loss would silently skip the"
-          " correction and train on uncorrected ratios. Unset sampler_is or"
-          " use the agentic GRPO learner."
-      )
+    del algo  # No algorithm knob is refused outright any more.
 
   @property
   def strict_rollout_logps(self) -> bool:
@@ -393,14 +385,28 @@ class GRPOAdapter:
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
 
+    rollout_per_token_logps = None
+    trainer_per_token_logps = None
     if algo.use_rollout_logps and padded_old_logprobs:
-      old_per_token_logps = jnp.asarray(padded_old_logprobs)
+      rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
+      old_per_token_logps = rollout_per_token_logps
+      # The agreement diagnostic (and the sampler-IS path, which anchors the
+      # ratio on the trainer's own recompute) needs a real actor mesh.
+      actor_mesh = orchestrator.r2m[rl_cluster_lib.Role.ACTOR]
+      have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
+      if have_actor_mesh or algo.sampler_is == "token":
+        trainer_per_token_logps = orchestrator.actor_logps(
+            prompt_ids, completion_ids, pad_value, eos_value, micro_batch_size
+        )
+      if algo.sampler_is == "token" and trainer_per_token_logps is not None:
+        old_per_token_logps = trainer_per_token_logps
     elif algo.use_rollout_logps:
       old_per_token_logps = None
     else:
-      old_per_token_logps = orchestrator.actor_logps(
+      trainer_per_token_logps = orchestrator.actor_logps(
           prompt_ids, completion_ids, pad_value, eos_value, micro_batch_size
       )
+      old_per_token_logps = trainer_per_token_logps
 
     if algo.num_iterations > 1 and old_per_token_logps is None:
       raise MissingRolloutLogpsError(
@@ -431,12 +437,23 @@ class GRPOAdapter:
         rewards, num_generations=algo.num_generations
     )
 
+    agreement_metrics, sampler_is_weights = (
+        agentic_grpo_learner.sampler_trainer_agreement(
+            algo,
+            rollout_per_token_logps,
+            trainer_per_token_logps,
+            completion_mask,
+        )
+    )
+
+    metrics_to_log = {
+        "rewards/advantage/mean": (np.mean(advantages), np.mean),
+        "rewards/advantage/max": (np.max(advantages), np.max),
+        "rewards/advantage/min": (np.min(advantages), np.min),
+    }
+    metrics_to_log.update(agreement_metrics)
     orchestrator.buffer_metrics_async(
-        {
-            "rewards/advantage/mean": (np.mean(advantages), np.mean),
-            "rewards/advantage/max": (np.max(advantages), np.max),
-            "rewards/advantage/min": (np.min(advantages), np.min),
-        },
+        metrics_to_log,
         mode=mode,
         step=expected_step,
     )
@@ -451,5 +468,6 @@ class GRPOAdapter:
             advantages=advantages,
             old_per_token_logps=old_per_token_logps,
             policy_version=np.array(policy_versions_list, dtype=np.int32),
+            sampler_is_weights=sampler_is_weights,
         )
     ]
