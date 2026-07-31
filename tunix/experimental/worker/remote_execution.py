@@ -981,6 +981,7 @@ class RoutingActorPool(ActorPool):
       initial_tasks: Optional[
           Sequence[Tuple[str, str, Sequence[Any], Dict[str, Any]]]
       ] = None,
+      on_task_settled: Optional[Callable[["ActorHandle", str], None]] = None,
   ) -> AsyncIterator["PoolExecutionSession"]:
     """Creates a dynamic, fault-isolated execution session over the worker pool.
 
@@ -1003,8 +1004,11 @@ class RoutingActorPool(ActorPool):
           - method_name: Target remote method name to execute on the worker instance.
           - args: Positional arguments sequence passed to the remote method.
           - kwargs: Keyword arguments dictionary passed to the remote method.
+      on_task_settled: Optional `(actor, request_id)` callback invoked once per
+        task when it stops occupying its worker. Load balancers use this to
+        reclaim per-worker capacity.
     """
-    session = PoolExecutionSession(self)
+    session = PoolExecutionSession(self, on_task_settled=on_task_settled)
     try:
       if initial_tasks:
         for request_id, method_name, args, kwargs in initial_tasks:
@@ -1025,8 +1029,22 @@ class PoolExecutionSession:
     failures.
   """
 
-  def __init__(self, pool: RoutingActorPool):
+  def __init__(
+      self,
+      pool: RoutingActorPool,
+      on_task_settled: Optional[Callable[[ActorHandle, str], None]] = None,
+  ):
+    """Initializes the session.
+
+    Args:
+      pool: The pool whose workers this session dispatches to.
+      on_task_settled: Optional callback invoked with `(actor, request_id)`
+        exactly once per task, when it stops occupying the worker -- on
+        completion, on dispatch failure, or when the worker's polling loop
+        gives up. Load balancers use this to reclaim per-worker capacity.
+    """
     self._pool = pool
+    self._on_task_settled = on_task_settled
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
@@ -1039,6 +1057,19 @@ class PoolExecutionSession:
   def _notify_if_zero_flight(self) -> None:
     if self._in_flight == 0:
       self._response_queue.put_nowait(self._sentinel)
+
+  def _settle(self, actor: ActorHandle, request_id: str) -> None:
+    """Reports that `request_id` no longer occupies `actor`."""
+    if self._on_task_settled is None:
+      return
+    try:
+      self._on_task_settled(actor, request_id)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception(
+          "on_task_settled callback failed for request %r; the session"
+          " continues but capacity accounting may now be wrong.",
+          request_id,
+      )
 
   async def submit(
       self,
@@ -1079,6 +1110,7 @@ class PoolExecutionSession:
     except Exception:
       dispatched_set.discard(request_id)
       self._in_flight -= 1
+      self._settle(actor, request_id)
       self._notify_if_zero_flight()
       raise
 
@@ -1117,10 +1149,15 @@ class PoolExecutionSession:
             dispatched_set.discard(response.request_id)
             try:
               res = response.unwrap()
-              self._response_queue.put_nowait((res, None))
+              self._response_queue.put_nowait((response.request_id, res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
-              self._response_queue.put_nowait((None, exc))
+              self._response_queue.put_nowait(
+                  (response.request_id, None, exc)
+              )
             self._in_flight -= 1
+            # Free the worker's slot before publishing zero-flight, so a
+            # refill triggered by this completion sees the capacity.
+            self._settle(actor, response.request_id)
             self._notify_if_zero_flight()
         except asyncio.CancelledError:
           break
@@ -1129,9 +1166,11 @@ class PoolExecutionSession:
           failed_task_ids = self._dispatched_tasks.pop(actor, set())
           failed_count = len(failed_task_ids)
           if failed_count > 0:
-            for _ in range(failed_count):
-              self._response_queue.put_nowait((None, exc))
+            for failed_id in failed_task_ids:
+              self._response_queue.put_nowait((failed_id, None, exc))
             self._in_flight -= failed_count
+            for failed_id in failed_task_ids:
+              self._settle(actor, failed_id)
             self._notify_if_zero_flight()
           break
     finally:
@@ -1141,14 +1180,25 @@ class PoolExecutionSession:
       self,
   ) -> AsyncIterator[Tuple[Any, Optional[Exception]]]:
     """Yields (result, exception) tuples as tasks complete out-of-order."""
+    async for _, result, exc in self.as_completed_with_ids():
+      yield result, exc
+
+  async def as_completed_with_ids(
+      self,
+  ) -> AsyncIterator[Tuple[str, Any, Optional[Exception]]]:
+    """Yields (request_id, result, exception) as tasks complete out-of-order.
+
+    Same stream as `as_completed`, but correlated: callers dispatching a batch
+    across a pool need the id to reassemble results in their original order.
+    """
     while not self._closed:
       item = await self._response_queue.get()
       if item is self._sentinel:
         if self._in_flight == 0 and self._response_queue.empty():
           break
         continue
-      result, exc = item
-      yield result, exc
+      request_id, result, exc = item
+      yield request_id, result, exc
 
   async def close(self) -> None:
     """Closes the session and cancels all background polling tasks."""
