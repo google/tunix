@@ -28,7 +28,6 @@ from typing import Any
 
 from absl.testing import absltest
 from tunix.experimental.orchestrator import algorithm_adapter
-from tunix.experimental.orchestrator import orchestrated_agentic_learner
 from tunix.rl.agentic import agentic_grpo_learner
 
 
@@ -124,17 +123,13 @@ class UnsupportedConfigTest(absltest.TestCase):
           mode=None,
       )
 
-  def test_user_metric_fns_are_rejected(self):
-    def _metric_fn(**kwargs):
-      del kwargs
-      return {}
+  def test_packing_is_still_rejected_when_only_the_cluster_knows(self):
+    """The knob lives on the cluster, so construction alone cannot catch it."""
+    adapter = algorithm_adapter.GRPOAdapter(_config())
+    adapter.check_supported_config(_cluster())  # No packing: fine.
 
-    with self.assertRaisesRegex(
-        algorithm_adapter.UnsupportedConfigError, "metric_fns"
-    ):
-      orchestrated_agentic_learner.OrchestratedAgenticGRPOLearner(
-          orchestrator=None, metric_fns=[_metric_fn]
-      )
+    with self.assertRaises(algorithm_adapter.UnsupportedConfigError):
+      adapter.check_supported_config(_cluster(max_seq_token_per_tpu=1024))
 
 
 if __name__ == "__main__":

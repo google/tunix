@@ -332,6 +332,115 @@ class PostprocessParityTest(parameterized.TestCase):
     self.assertEqual(self.actor_logps_calls[0], self.actor_logps_calls[1])
     self.assertEqual(self.ref_logps_calls[0], self.ref_logps_calls[1])
 
+  def _buffered_keys(self, buffered):
+    keys = set()
+    for entry in buffered:
+      keys.update(entry)
+    return keys
+
+  def test_emits_the_same_diagnostics_as_the_reference(self):
+    """Metric coverage, not values: the two paths must report the same things."""
+    algo_config = self._config()
+    reference = self._reference_learner(algo_config)
+    adapter = algorithm_adapter.GRPOAdapter(algo_config)
+    orchestrator = rl_orchestrator.RLOrchestrator(
+        orchestrator_rl_cluster.OrchestratorRLCluster(self.cluster), adapter
+    )
+
+    reference_buffered = []
+    orchestrated_buffered = []
+
+    def _capture(sink):
+      def _buffer(metrics, **kwargs):
+        del kwargs
+        sink.append(dict(metrics))
+
+      return _buffer
+
+    self.cluster.buffer_metrics_async = _capture(reference_buffered)
+    reference._process_results(  # pylint: disable=protected-access
+        self._items(), mode=rl_cluster_lib.Mode.TRAIN, expected_step=0
+    )
+
+    self.cluster.buffer_metrics_async = _capture(orchestrated_buffered)
+    adapter.postprocess_group(
+        orchestrator,
+        self._items(),
+        compute_rewards=reference._compute_rewards,  # pylint: disable=protected-access
+        mode=rl_cluster_lib.Mode.TRAIN,
+        expected_step=0,
+    )
+
+    reference_keys = self._buffered_keys(reference_buffered)
+    orchestrated_keys = self._buffered_keys(orchestrated_buffered)
+    # The fixtures carry no timing dictionaries, which is exactly the shape
+    # that makes the reference emit nothing at all; the orchestrated path
+    # still reports its batch diagnostics.
+    self.assertEmpty(reference_keys - orchestrated_keys)
+    self.assertContainsSubset(
+        {
+            "generation/prompts/mean_length",
+            "generation/completions/mean_length",
+            "generation/completions/mean_raw_length",
+            "generation/completions/clip_ratio",
+            "rewards/advantage/mean",
+            "rewards/advantage/std",
+        },
+        orchestrated_keys,
+    )
+
+  def test_user_metric_functions_are_invoked(self):
+    algo_config = self._config()
+    reference = self._reference_learner(algo_config)
+    adapter = algorithm_adapter.GRPOAdapter(algo_config)
+    orchestrator = rl_orchestrator.RLOrchestrator(
+        orchestrator_rl_cluster.OrchestratorRLCluster(self.cluster), adapter
+    )
+    seen = []
+
+    def _metric_fn(prompts, completions, advantages, rewards, **kwargs):
+      del completions, advantages, rewards, kwargs
+      seen.append(len(prompts))
+      return {"user/metric": 1.0}
+
+    buffered = []
+    self.cluster.buffer_metrics_async = lambda metrics, **kwargs: buffered.append(
+        dict(metrics)
+    )
+    adapter.postprocess_group(
+        orchestrator,
+        self._items(),
+        compute_rewards=reference._compute_rewards,  # pylint: disable=protected-access
+        mode=rl_cluster_lib.Mode.TRAIN,
+        expected_step=0,
+        metric_fns=[_metric_fn],
+    )
+
+    self.assertLen(seen, 1)
+    self.assertIn("user/metric", self._buffered_keys(buffered))
+
+  def test_trajectories_are_handed_to_the_logger(self):
+    algo_config = self._config()
+    reference = self._reference_learner(algo_config)
+    adapter = algorithm_adapter.GRPOAdapter(algo_config)
+    orchestrator = rl_orchestrator.RLOrchestrator(
+        orchestrator_rl_cluster.OrchestratorRLCluster(self.cluster), adapter
+    )
+    logged = []
+
+    adapter.postprocess_group(
+        orchestrator,
+        self._items(),
+        compute_rewards=reference._compute_rewards,  # pylint: disable=protected-access
+        mode=rl_cluster_lib.Mode.TRAIN,
+        expected_step=0,
+        trajectory_logger=type(
+            "_Logger", (), {"log_item_async": lambda _self, traj: logged.append(traj)}
+        )(),
+    )
+
+    self.assertLen(logged, 2)
+
   def _items_missing_logps(self):
     """A group whose second trajectory came back without log-probabilities."""
     items = self._items()

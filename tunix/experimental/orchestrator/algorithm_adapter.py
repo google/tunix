@@ -71,6 +71,8 @@ class AlgorithmAdapter(Protocol):
       compute_rewards: Any,
       mode: Any,
       expected_step: int | None = None,
+      metric_fns: Any = (),
+      trajectory_logger: Any = None,
   ) -> Any:
     """Turns a group of raw trajectories into train example(s).
 
@@ -110,6 +112,29 @@ def pad_row(
       completion_mask, max_response_length, 0
   )[:max_response_length]
   return padded_prompt, padded_completion[:max_response_length], padded_mask
+
+
+def _trajectory_time_metrics(trajectories: Any) -> dict[str, Any]:
+  """Per-sub-key statistics over the timing dictionaries a group carries."""
+  metrics: dict[str, Any] = {}
+  for time_key in ("env_time", "reward_time"):
+    prefix = f"trajectory/{time_key}"
+    time_dicts = [item.traj.get(time_key, {}) or {} for item in trajectories]
+    for sub_key in {key for d in time_dicts for key in d}:
+      values = []
+      for value in (d.get(sub_key, 0.0) for d in time_dicts):
+        if isinstance(value, (list, tuple, np.ndarray)):
+          values.extend(value)
+        elif value is not None:
+          values.append(value)
+      if not values:
+        values = [0.0]
+      metrics.update({
+          f"{prefix}/{sub_key}/mean": (np.mean(values), np.mean),
+          f"{prefix}/{sub_key}/max": (np.max(values), np.max),
+          f"{prefix}/{sub_key}/min": (np.min(values), np.min),
+      })
+  return metrics
 
 
 class MissingRolloutLogpsError(RuntimeError):
@@ -281,6 +306,8 @@ class GRPOAdapter:
       compute_rewards: Any,
       mode: Any,
       expected_step: int | None = None,
+      metric_fns: Any = (),
+      trajectory_logger: Any = None,
   ) -> list[agentic_rl_learner.TrainExample]:
     """GRPO postprocess re-expressed on the orchestrator primitives.
 
@@ -335,17 +362,33 @@ class GRPOAdapter:
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(traj.get("trajectory_reward"))
       original_inputs_list.append(traj["original_input"])
+      if trajectory_logger is not None:
+        trajectory_logger.log_item_async(traj)
 
     padded_prompt_ids = []
     padded_completion_ids = []
     padded_completion_masks = []
     padded_old_logprobs = []
+    raw_completion_lengths = []
+    clipped_completion_count = 0
     for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
         prompt_tokens_list,
         completion_tokens_list,
         completion_masks_list,
         old_logprobs_list,
     ):
+      raw_completion_lengths.append(
+          min(len(completion_tokens), max_response_length)
+      )
+      # Clipped = ran out of budget without ending on the stop token. The
+      # agentic learner compares the mask's last element to the token id here,
+      # which cannot be right; that is reported separately, not copied.
+      if (
+          len(completion_tokens) >= max_response_length
+          and len(completion_tokens) > 0
+          and completion_tokens[-1] != eos_value
+      ):
+        clipped_completion_count += 1
       padded_prompt, padded_completion, padded_mask = pad_row(
           prompt_tokens,
           completion_tokens,
@@ -422,10 +465,22 @@ class GRPOAdapter:
       ref_per_token_logps = None
 
     original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
-    reward_kwargs = {
+    reward_kwargs_without_trajectory_rewards = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
+    reward_kwargs = dict(reward_kwargs_without_trajectory_rewards)
     reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
+
+    prompt_token_len = len(prompt_tokens_list[0])
+    orchestrator.buffer_metrics_async(
+        {
+            "generation/prompts/mean_length": (prompt_token_len, np.mean),
+            "generation/prompts/max_length": (prompt_token_len, np.max),
+            "generation/prompts/min_length": (prompt_token_len, np.min),
+        },
+        mode=mode,
+        step=expected_step,
+    )
     rewards = compute_rewards(
         prompts=original_inputs["prompts"],
         completions=completion_texts,
@@ -446,17 +501,61 @@ class GRPOAdapter:
         )
     )
 
+    agg_completion_mask = completion_mask.sum(axis=-1)
+    raw_lengths = np.asarray(raw_completion_lengths, dtype=np.int32)
     metrics_to_log = {
+        "generation/completions/mean_length": (
+            np.mean(agg_completion_mask),
+            np.mean,
+        ),
+        "generation/completions/max_length": (
+            np.max(agg_completion_mask),
+            np.max,
+        ),
+        "generation/completions/min_length": (
+            np.min(agg_completion_mask),
+            np.min,
+        ),
+        "generation/completions/mean_raw_length": (
+            np.mean(raw_lengths),
+            np.mean,
+        ),
+        "generation/completions/max_raw_length": (np.max(raw_lengths), np.max),
+        "generation/completions/min_raw_length": (np.min(raw_lengths), np.min),
+        "generation/completions/clip_ratio": (
+            clipped_completion_count / len(trajectories),
+            np.mean,
+        ),
         "rewards/advantage/mean": (np.mean(advantages), np.mean),
         "rewards/advantage/max": (np.max(advantages), np.max),
         "rewards/advantage/min": (np.min(advantages), np.min),
+        "rewards/advantage/std": (np.std(advantages), np.mean),
     }
     metrics_to_log.update(agreement_metrics)
+    metrics_to_log.update(
+        _trajectory_time_metrics(trajectories)
+    )
+    # Buffered once, unconditionally. The agentic learner emits this inside the
+    # per-sub-key time loop, so a group carrying no timing dictionaries -- the
+    # normal case for pooled or fixture-shaped items -- emits nothing at all.
     orchestrator.buffer_metrics_async(
         metrics_to_log,
         mode=mode,
         step=expected_step,
     )
+
+    for metric_fn in metric_fns or ():
+      orchestrator.buffer_metrics_async(
+          metric_fn(
+              prompts=original_inputs["prompts"],
+              completions=completion_texts,
+              advantages=advantages,
+              rewards=rewards,
+              **reward_kwargs_without_trajectory_rewards,
+          ),
+          mode=mode,
+          step=expected_step,
+      )
 
     return [
         agentic_rl_learner.TrainExample(
