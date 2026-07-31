@@ -272,8 +272,16 @@ class GRPOAdapter:
     rollout_config = orchestrator.get_rollout_config(mode)
     max_prompt_length = rollout_config.max_prompt_length
     max_response_length = algo.max_response_length
-    micro_batch_size = (
+    # The configured size counts groups, not rows: a group contributes
+    # num_generations rows. Scoring with the raw value would compile a
+    # different shape than the agentic learner for identical math.
+    configured_micro_batch_size = (
         orchestrator.cluster_config.training_config.compute_logps_micro_batch_size
+    )
+    micro_batch_size = (
+        configured_micro_batch_size * algo.num_generations
+        if configured_micro_batch_size
+        else len(trajectories)
     )
 
     completion_texts = []
