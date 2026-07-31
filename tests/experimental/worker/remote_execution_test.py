@@ -1288,6 +1288,51 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_grpc_call_outliving_the_default_deadline_succeeds_when_configured(
+      self,
+  ):
+    """A long verb must be able to outlive the default blocking deadline."""
+
+    async def _run_test():
+      engine = StubWorkerEngine("slow_worker", latency=0.4)
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+      await server.start_serving_async(port=port)
+      try:
+        # A default far below the work's duration, overridden per method.
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}",
+            rpc_timeout_s=0.05,
+            method_timeouts_s={"compute_trajectory": 30.0},
+        )
+        result = await handle.asubmit("compute_trajectory", "p", turns=1)
+        self.assertIn("slow_worker", result)
+        await handle.close()
+
+        # The same call without a per-method entry still gets the short
+        # default, so the override above is what made the difference.
+        impatient = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}",
+            rpc_timeout_s=0.05,
+        )
+        with self.assertRaises(Exception):
+          await impatient.asubmit("compute_trajectory", "p", turns=1)
+        await impatient.close()
+      finally:
+        await server.stop_serving()
+
+    asyncio.run(_run_test())
+
+  def test_from_address_passes_transport_options_through(self):
+    handle = remote_lib.ActorHandle.from_address(
+        f"grpc://localhost:{portpicker.pick_unused_port()}",
+        rpc_timeout_s=12.0,
+        method_timeouts_s={"train": 900.0},
+    )
+
+    self.assertEqual(handle._timeout_for("train"), 900.0)  # pylint: disable=protected-access
+    self.assertEqual(handle._timeout_for("heartbeat"), 12.0)  # pylint: disable=protected-access
+
   def test_grpc_handle_refuses_reuse_from_a_second_event_loop(self):
     """A gRPC aio channel belongs to its creating loop; say so, don't hang."""
     handle = remote_lib.GrpcRemoteActorHandle(

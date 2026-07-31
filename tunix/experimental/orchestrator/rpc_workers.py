@@ -36,6 +36,22 @@ from tunix.experimental.worker import remote_execution
 
 WorkerState = datatypes.WorkerState
 
+# A blocking call is held open for as long as the work takes, and these verbs
+# differ by orders of magnitude: a training step or a whole-batch generation
+# can run for minutes on a real model, while a heartbeat that does not answer
+# promptly is the signal the control plane is waiting for. One deadline cannot
+# serve both -- too short kills real work, too long makes a hung worker look
+# merely busy.
+DEFAULT_METHOD_TIMEOUTS_S: Mapping[str, Optional[float]] = {
+    "train": 1800.0,
+    "train_critic": 1800.0,
+    "generate": 1800.0,
+    "per_token_logps": 600.0,
+    "sync": 600.0,
+    "heartbeat": 10.0,
+    "info": 10.0,
+}
+
 
 class _RemoteWorker(abstract_worker.Worker):
   """Base for handles that forward to a worker behind an `ActorHandle`."""
@@ -55,10 +71,38 @@ class _RemoteWorker(abstract_worker.Worker):
     )
 
   @classmethod
-  def from_address(cls, target_address: str, *, worker_id: Optional[str] = None):
-    """Builds a handle for the worker served at `target_address`."""
+  def from_address(
+      cls,
+      target_address: str,
+      *,
+      worker_id: Optional[str] = None,
+      rpc_timeout_s: Optional[float] = remote_execution.RPC_TIMEOUT_S,
+      method_timeouts_s: Optional[
+          Mapping[str, Optional[float]]
+      ] = None,
+  ):
+    """Builds a handle for the worker served at `target_address`.
+
+    Args:
+      target_address: URI of the served worker.
+      worker_id: Identifier reported to the control plane.
+      rpc_timeout_s: Deadline for verbs with no per-method entry.
+      method_timeouts_s: Per-method deadlines; defaults to
+        `DEFAULT_METHOD_TIMEOUTS_S`, which keeps heartbeats short while
+        allowing training and generation to run long. Pass a mapping to
+        override, or `{}` to put every verb on `rpc_timeout_s`.
+    """
+    timeouts = (
+        DEFAULT_METHOD_TIMEOUTS_S
+        if method_timeouts_s is None
+        else method_timeouts_s
+    )
     return cls(
-        remote_execution.ActorHandle.from_address(target_address),
+        remote_execution.ActorHandle.from_address(
+            target_address,
+            rpc_timeout_s=rpc_timeout_s,
+            method_timeouts_s=timeouts,
+        ),
         worker_id=worker_id or target_address,
     )
 

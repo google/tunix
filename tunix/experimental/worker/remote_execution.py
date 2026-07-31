@@ -45,6 +45,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -471,10 +472,16 @@ class ActorHandle(abc.ABC):
   """Stateful 1-to-1 routing handle targeting a specific remote worker instance."""
 
   @classmethod
-  def from_address(cls, target_address: str) -> "ActorHandle":
-    """Instantiates a remote actor handle targeting the specified string URI."""
+  def from_address(cls, target_address: str, **kwargs) -> "ActorHandle":
+    """Instantiates a remote actor handle targeting the specified string URI.
+
+    Args:
+      target_address: URI of the served worker.
+      **kwargs: Transport options, e.g. `rpc_timeout_s` and
+        `method_timeouts_s`. Ignored by transports that do not support them.
+    """
     if target_address.startswith("grpc://") and _GRPC_AVAILABLE:
-      return GrpcRemoteActorHandle(target_address=target_address)
+      return GrpcRemoteActorHandle(target_address=target_address, **kwargs)
     return RemoteActorHandle(target_address=target_address)
 
   @abc.abstractmethod
@@ -557,10 +564,25 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       target_address: str,
       *,
       rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
+      method_timeouts_s: Optional[Mapping[str, Optional[float]]] = None,
   ):
+    """Initializes the handle.
+
+    Args:
+      target_address: `grpc://host:port` of the served worker.
+      rpc_timeout_s: Deadline for blocking calls that have no per-method
+        entry. None waits indefinitely.
+      method_timeouts_s: Per-method deadlines, for verbs whose cost differs by
+        orders of magnitude -- a training step against a heartbeat, say. A
+        method absent here uses `rpc_timeout_s`.
+
+    Raises:
+      RuntimeError: If grpc is unavailable.
+    """
     if not _GRPC_AVAILABLE or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
     self.target_address = target_address
+    self._method_timeouts_s = dict(method_timeouts_s or {})
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._rpc: Optional[Any] = None
@@ -659,9 +681,15 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         method_name=method_name, args=args, kwargs=kwargs
     )
     response: ExecutionResponse = await self._sync_rpc(
-        request, timeout=self._rpc_timeout_s
+        request, timeout=self._timeout_for(method_name)
     )
     return response.unwrap()
+
+  def _timeout_for(self, method_name: Optional[str]) -> Optional[float]:
+    """The deadline for one call: per-method if set, else the handle default."""
+    if method_name in self._method_timeouts_s:
+      return self._method_timeouts_s[method_name]
+    return self._rpc_timeout_s
 
   async def asubmit(
       self, method_name: Optional[str] = None, *args, **kwargs
@@ -672,7 +700,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         method_name=method_name, args=args, kwargs=kwargs
     )
     response: ExecutionResponse = await rpc(
-        request, timeout=self._rpc_timeout_s
+        request, timeout=self._timeout_for(method_name)
     )
     return response.unwrap()
 
