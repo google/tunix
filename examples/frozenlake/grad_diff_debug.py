@@ -105,7 +105,94 @@ def create_sharded_model(config, rngs, mesh):
 
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
-config.num_layers = 5
+config.num_layers = 12
+# Findings (gemma4_e2b, num_layers=12, 2 devices; logs at the bottom of this
+# file). "identical" means bit-for-bit, checked with tc.tree_bit_checksum.
+#
+#   fp32, excess_precision=false, SPLIT path : 195/197 leaves identical;
+#         layers 4 and 9 differ by <= 2 fp32 eps (2.1e-7 of tensor scale).
+#         After one SGD step at lr=1e-5, 54-87 weights out of 6.3M move by
+#         ~1 ULP.
+#   fp32, excess_precision=false, FUSED path : identical.
+#   bf16, excess_precision=false, 1 and 2 dev : identical.
+#   bf16, excess_precision=true,  1 and 2 dev : grads differ by 1-2 bf16 ULP on
+#         ~24.7% of elements; grad_norm differs 1.35e-4 rel. Independent of the
+#         device count.
+#
+# Two separate mechanisms, and one flag only fixes one of them:
+#
+#   Excess precision. With --xla_allow_excess_precision=true (the default) XLA
+#   may keep intermediates in fp32 and skip convert(bf16) nodes; how much it
+#   keeps depends on fusion, and v1 (one module) fuses differently from v2's
+#   split path (two modules). Setting the flag to false removes this class.
+#   It is necessary for bf16 bit-identity.
+#
+#   Reduction order. The flag does NOT constrain summation trees, collective
+#   algorithms, or the scheduling of a multi-term accumulation. That is what
+#   remains in fp32, and its location is the tell: the ONLY leaves that differ
+#   are layers 4 and 9, which for this config are the GLOBAL attention layers
+#   (index % 5 == 4) and, with num_unshared = int(12 - 12*20/35) = 5, exactly
+#   the KV-sharing origin/consumer pair. Layer 4's gradient accumulates its own
+#   attention path plus the one flowing back through layer 9's shared KV --
+#   two contributions from different depths, which XLA schedules differently
+#   when the backward is compiled alone versus together with the update. Every
+#   other layer has a purely local gradient path and comes out identical.
+#
+# So the flag is necessary but NOT sufficient. Only the fused path guarantees
+# bit-identity, because it makes the two HLO modules identical and leaves XLA no
+# choice. On the split path, compare with a relative tolerance -- roughly
+# max|x-y| / max|x| < 1e-6 -- not with a ULP gate (see CAVEAT 4).
+#
+# CAVEAT 1: grad_norm is not a valid pass/fail gate. optax.global_norm sums
+# ~4e8 squares in fp32, and XLA picks a different reduction tree per module,
+# so the norm can differ while the arrays are bit-identical. Observed noise
+# floor with identical grads: 1 to 6 fp32 ULP (6.7e-8 to 3.8e-7 rel). The real
+# divergence above is 1.35e-4 rel, ~1000x higher, so the two are cleanly
+# separable -- but use tc.assert_close_ulp / tc.tree_bit_checksum to decide.
+#
+# CAVEAT 2: numbers are NOT comparable across configurations. The norms range
+# over 1815 / 1939 / 1843 / 1995 / 2094 and the losses differ too, because the
+# initial weights differ between runs: param_dtype is passed straight into
+# nnx.initializers.normal(dtype=...), and jax.random.normal consumes a
+# different number of random bits for bf16 than for fp32 -- it draws a
+# different set of numbers, not a rounded version of the same one. Changing the
+# device count also changed the loss (12.531497 on 1 dev vs 12.530317 on 2 dev
+# at bf16/false), which is far above fp32 reduction noise and so likewise
+# implies different weights. Only within-run v1-vs-v2 comparisons are
+# meaningful. To compare across configurations, initialize once, checkpoint,
+# and restore the same weights everywhere.
+#
+# CAVEAT 3: observing the gradients changes them. Gradients are an internal
+# temporary of the traced step; the only way to see them from Python is to make
+# them a program output, which forces materialization and changes the fusion,
+# scheduling and buffer assignment of the very backward pass being measured.
+# Every hook added during this investigation moved the numbers:
+#   - v2's original jax.debug.print / pytree_xor_checksum calls inhibited fusion.
+#     They are why an earlier version of this comment claimed fp32 was
+#     "bit-identical unconditionally" -- that result was an artifact of the
+#     instrumentation, not a property of the trainers.
+#   - A hook that parked v1's depth-1 gradients in the accumulator changed v1's
+#     XOR from 1000145275 to 508432006.
+#   - Forcing v2's accumulator to be preallocated changed v2's from 1000145275
+#     to 295270455: it pins the gradient sharding to the parameter partition
+#     spec, which changes the collective and hence the summation order.
+# Both hooks have since been removed rather than left behind a flag, because a
+# knob that silently changes the numbers is worse than no knob at all.
+# Both hooks moved their side, and by different amounts, so an instrumented run
+# compares two programs that neither matches the uninstrumented one. Draw
+# conclusions only from quantities observable without a hook: the loss, the
+# grad_norm the step already returns, and the weights after the step.
+#
+# CAVEAT 4: ULP distance is the wrong metric for gradients. It is scale-free,
+# which is right for a tensor whose entries share a magnitude and wrong for one
+# spanning tens of orders of magnitude: two entries that are both numerically
+# zero (1e-38 vs 1.5e-38) sit millions of ULP apart while contributing nothing
+# to the norm or to the update. The fp32 divergence above reported max ULP
+# 6.3e6 on 78% of elements and was, in absolute terms, 2.1e-7 of the tensor
+# scale. Use ULP for weights and activations; use max|x-y| / max|x| for
+# gradients.
+#
+config.param_dtype = jnp.bfloat16
 
 rngs = nnx.Rngs(0)
 gemma = create_sharded_model(config, rngs, mesh)
