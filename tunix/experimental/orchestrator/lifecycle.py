@@ -22,6 +22,8 @@ Shutdown is best-effort: every worker gets a `stop()` even if an earlier one
 raised, and the collected failures are reported together.
 """
 
+import concurrent.futures
+import logging
 from typing import Any
 
 from tunix.experimental.orchestrator import worker_registry
@@ -40,8 +42,11 @@ class LifecycleError(RuntimeError):
 class LifecycleDriver:
   """Drives a WorkerRegistry through the worker lifecycle phases."""
 
-  def __init__(self, registry: worker_registry.WorkerRegistry):
+  def __init__(
+      self, registry: worker_registry.WorkerRegistry, max_workers: int = 32
+  ):
     self._registry = registry
+    self._max_workers = max_workers
 
   def bring_up(self, dummy_data: Any) -> None:
     """Runs initialize -> compile -> start across all workers, phase by phase.
@@ -52,20 +57,41 @@ class LifecycleDriver:
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
     """
-    for worker in self._registry.workers():
-      worker.initialize()
-    for worker in self._registry.workers():
-      worker.compile(dummy_data)
-    for worker in self._registry.workers():
-      worker.start()
+    workers = self._registry.workers()
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=self._max_workers
+    ) as pool:
+      # TODO(noghabi): Refactor to allow successful workers to proceed to
+      # compile/start and potentially retry failed ones, rather than fail-fast
+      # on the first error.
+      list(pool.map(lambda w: w.initialize(), workers))
+      list(pool.map(lambda w: w.compile(dummy_data), workers))
+      list(pool.map(lambda w: w.start(), workers))
 
   def shutdown(self) -> None:
     """Stops every worker best-effort, then raises if any stop() failed."""
     failures: list[tuple[str, BaseException]] = []
-    for worker_id in self._registry.worker_ids():
+    worker_ids = self._registry.worker_ids()
+
+    def _stop_worker(wid: str) -> None:
       try:
-        self._registry.get(worker_id).stop()
-      except Exception as err:  # pylint: disable=broad-except
-        failures.append((worker_id, err))
+        worker = self._registry.get(wid)
+      except KeyError:
+        logging.warning(
+            "Worker %r unregistered concurrently, nothing to stop.", wid
+        )
+        return  # Worker unregistered concurrently, nothing to stop.
+      worker.stop()
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=self._max_workers
+    ) as pool:
+      futures = {pool.submit(_stop_worker, wid): wid for wid in worker_ids}
+      for future in concurrent.futures.as_completed(futures):
+        wid = futures[future]
+        try:
+          future.result()
+        except Exception as err:  # pylint: disable=broad-except
+          failures.append((wid, err))
     if failures:
       raise LifecycleError("shutdown", failures)
