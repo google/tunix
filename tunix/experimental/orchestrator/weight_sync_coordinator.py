@@ -229,6 +229,41 @@ class WeightSyncCoordinator:
     )
 
 
+async def run_sync_round(
+    pool: Any,
+    coordinator: WeightSyncCoordinator,
+    version: int,
+) -> SyncOutcome:
+  """Installs `version` across a pool's workers and stops using the stragglers.
+
+  The round runs while the pool is drained, so no request spans the weight
+  change, and any replica that did not reach the version is taken out of
+  rotation immediately. Leaving it in would keep feeding it work whose
+  trajectories are stamped with weights the trainer has moved past, and the
+  version stamp would be the only trace.
+
+  Args:
+    pool: The rollout pool to quiet and then prune.
+    coordinator: Runs the round.
+    version: The version to install.
+
+  Returns:
+    Which replicas reached it and which were quarantined.
+  """
+  async with pool.drained():
+    outcome = coordinator.sync(version)
+
+  for replica in outcome.quarantined:
+    if pool.remove_worker(replica.worker_id):
+      logging.warning(
+          "Removed replica %r from rollout dispatch: it is not on weight"
+          " version %d.",
+          replica.worker_id,
+          version,
+      )
+  return outcome
+
+
 def _worker_id(replica: Any) -> str:
   """The replica's id, however it exposes one."""
   info = getattr(replica, "info", None)

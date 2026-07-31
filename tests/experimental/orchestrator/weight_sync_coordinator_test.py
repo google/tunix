@@ -14,12 +14,41 @@
 
 """A sync round must never be quietly partial."""
 
+import asyncio
 from typing import Any, Optional
 
 from absl.testing import absltest
+import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import hosted_rollout_worker
 from tunix.experimental.orchestrator import inprocess_workers
+from tunix.experimental.orchestrator import rollout_pool
 from tunix.experimental.orchestrator import weight_sync_coordinator
+
+
+class _StubEngine:
+  """A batched generation engine, as the cluster exposes one."""
+
+  def generate(self, prompts, *args, **kwargs):
+    del args, kwargs
+    return _StubOutput(prompts)
+
+
+class _StubOutput:
+
+  def __init__(self, prompts):
+    self.text = [f"completion {p}" for p in prompts]
+    self.tokens = [np.array([1, 2], dtype=np.int32) for _ in prompts]
+    self.logprobs = [np.array([-0.1, -0.2], dtype=np.float32) for _ in prompts]
+    self.left_padded_prompt_tokens = np.array(
+        [[0, 1] for _ in prompts], dtype=np.int32
+    )
+    self.logits = None
+
+
+def _explode(metadata):
+  del metadata
+  raise RuntimeError("weight transfer failed")
 
 
 class _Replica:
@@ -180,6 +209,97 @@ class WeightSyncCoordinatorTest(absltest.TestCase):
   def test_rejects_a_negative_retry_budget(self):
     with self.assertRaises(ValueError):
       weight_sync_coordinator.WeightSyncCoordinator(max_retries=-1)
+
+
+class SyncRoundOverAPoolTest(absltest.TestCase):
+  """A replica that misses a sync must stop receiving work."""
+
+  def _pool(self, workers):
+    return rollout_pool.PooledRolloutWorker.from_workers(
+        workers, max_concurrency=1
+    )
+
+  def _worker(self, worker_id: str, **kwargs):
+    return hosted_rollout_worker.HostedRolloutWorker(
+        _StubEngine(), worker_id=worker_id, **kwargs
+    )
+
+  def test_a_healthy_round_keeps_every_worker_in_rotation(self):
+    async def _run():
+      workers = [self._worker("r0"), self._worker("r1")]
+      pool = self._pool(workers)
+      coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+          replicas=workers
+      )
+
+      outcome = await weight_sync_coordinator.run_sync_round(
+          pool, coordinator, version=1
+      )
+
+      self.assertTrue(outcome.all_synced)
+      self.assertLen(pool.dispatcher.actors, 2)
+      self.assertTrue(all(w.policy_version == 1 for w in workers))
+
+    asyncio.run(_run())
+
+  def test_a_quarantined_worker_stops_receiving_requests(self):
+    async def _run():
+      healthy = self._worker("healthy")
+      broken = self._worker(
+          "broken",
+          install_weights_fn=_explode,
+      )
+      pool = self._pool([healthy, broken])
+      coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+          replicas=[healthy, broken]
+      )
+
+      outcome = await weight_sync_coordinator.run_sync_round(
+          pool, coordinator, version=1
+      )
+
+      self.assertEqual(outcome.quarantined_ids, ["broken"])
+      self.assertLen(pool.dispatcher.actors, 1)
+
+      # Subsequent work goes only to the worker that has the new weights.
+      responses = await asyncio.wait_for(
+          pool.generate(
+              [
+                  datatypes.RolloutRequest(
+                      request_id=f"req-{i}", prompt="p", prompt_id=f"p{i}"
+                  )
+                  for i in range(4)
+              ]
+          ),
+          timeout=10.0,
+      )
+      self.assertTrue(all(r.policy_version == 1 for r in responses))
+
+    asyncio.run(_run())
+
+  def test_the_round_runs_while_the_pool_is_quiet(self):
+    async def _run():
+      worker = self._worker("r0")
+      pool = self._pool([worker])
+      observed = {}
+
+      class _WatchingCoordinator(
+          weight_sync_coordinator.WeightSyncCoordinator
+      ):
+
+        def sync(self, version):
+          observed["outstanding"] = (
+              pool.dispatcher.router.total_outstanding()
+          )
+          return super().sync(version)
+
+      await weight_sync_coordinator.run_sync_round(
+          pool, _WatchingCoordinator(replicas=[worker]), version=1
+      )
+
+      self.assertEqual(observed["outstanding"], 0)
+
+    asyncio.run(_run())
 
 
 class AliasedInProcessReplicaTest(absltest.TestCase):

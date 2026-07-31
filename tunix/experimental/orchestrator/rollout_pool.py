@@ -57,6 +57,17 @@ RequestOrBatch = Union[
 ]
 
 
+def _worker_id(worker: Any) -> str:
+  """The worker's id, however it exposes one."""
+  info = getattr(worker, "info", None)
+  if callable(info):
+    try:
+      return info().worker_id
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+  return str(getattr(worker, "worker_id", id(worker)))
+
+
 class DuplicateRequestIdError(ValueError):
   """Two rollout requests in one batch carried the same id."""
 
@@ -143,7 +154,38 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
       workers: The rollout workers to pool. Must not be empty.
       **kwargs: Forwarded to the constructor.
     """
-    return cls([_as_actor_handle(worker) for worker in workers], **kwargs)
+    pairs = [(worker, _as_actor_handle(worker)) for worker in workers]
+    pool = cls([actor for _, actor in pairs], **kwargs)
+    pool._remember_sources(pairs)  # pylint: disable=protected-access
+    return pool
+
+  def _remember_sources(self, pairs: Sequence[Any]) -> None:
+    """Keeps the worker-to-transport pairing, so a worker can be named later."""
+    self._actor_by_worker_id = {
+        _worker_id(worker): actor for worker, actor in pairs
+    }
+
+  def remove_worker(self, worker: Any) -> bool:
+    """Stops dispatching to a worker, named however the caller knows it.
+
+    Args:
+      worker: The worker object, its actor handle, or its id.
+
+    Returns:
+      Whether it was in the pool.
+    """
+    actor = self._resolve_actor(worker)
+    if actor is None:
+      return False
+    return self._dispatcher.remove_worker(actor)
+
+  def _resolve_actor(self, worker: Any) -> Optional[Any]:
+    if isinstance(worker, remote_execution.ActorHandle):
+      return worker
+    by_id = getattr(self, "_actor_by_worker_id", {})
+    if isinstance(worker, str):
+      return by_id.get(worker)
+    return by_id.get(_worker_id(worker)) or getattr(worker, "actor", None)
 
   @property
   def dispatcher(self) -> load_balancer.BalancedDispatcher:
