@@ -337,6 +337,36 @@ class PostprocessParityTest(parameterized.TestCase):
     with self.assertRaises(algorithm_adapter.UnsupportedConfigError):
       algorithm_adapter.GRPOAdapter(self._config(num_iterations=2))
 
+  def test_single_turn_assembly_pads_like_the_group_postprocess(self):
+    """The two assembly entry points must lay tokens out identically.
+
+    Single-turn assembly and group postprocess build train examples from
+    different inputs but must agree on padding, or a loop that switches
+    between them silently changes the trained layout.
+    """
+    algo_config = self._config()
+    expected, _ = self._run_both(algo_config, rl_cluster_lib.Mode.TRAIN)
+    from_postprocess = expected[0]
+
+    adapter = algorithm_adapter.GRPOAdapter(algo_config)
+    items = self._items()
+    from_assembly = adapter.assemble_train_example(
+        [item.traj["prompt_tokens"] for item in items],
+        [item.traj["conversation_tokens"] for item in items],
+        from_postprocess.advantages,
+        max_prompt_length=TRAIN_MAX_PROMPT_LENGTH,
+        max_response_length=MAX_RESPONSE_LENGTH,
+        pad_id=self.cluster.rollout.pad_id(),
+    )
+
+    for field in ("prompt_ids", "prompt_mask", "completion_ids",
+                  "completion_mask"):
+      np.testing.assert_array_equal(
+          np.asarray(getattr(from_assembly, field)),
+          np.asarray(getattr(from_postprocess, field)),
+          err_msg=f"{field} differs between the two assembly paths",
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

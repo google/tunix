@@ -80,6 +80,37 @@ class AlgorithmAdapter(Protocol):
     ...
 
 
+def pad_row(
+    prompt_tokens: Any,
+    completion_tokens: Any,
+    completion_mask: Any,
+    *,
+    max_prompt_length: int,
+    max_response_length: int,
+    pad_id: int,
+) -> tuple[Any, Any, Any]:
+  """Pads one (prompt, completion, mask) row to the fixed training widths.
+
+  The single place this padding is expressed on the orchestrated path: the
+  prompt is left-padded, the completion and its loss mask are right-padded,
+  and both are clipped to `max_response_length`. Group postprocess and
+  single-turn assembly share it so their layouts cannot drift apart.
+  """
+  padded_prompt, padded_completion, _ = (
+      agentic_utils.pad_prompt_and_completion(
+          prompt_tokens,
+          completion_tokens,
+          max_prompt_length,
+          max_response_length,
+          pad_id,
+      )
+  )
+  padded_mask = agentic_utils.right_pad(
+      completion_mask, max_response_length, 0
+  )[:max_response_length]
+  return padded_prompt, padded_completion[:max_response_length], padded_mask
+
+
 class UnsupportedConfigError(ValueError):
   """A configured behavior this adapter does not implement.
 
@@ -189,19 +220,18 @@ class GRPOAdapter:
     ):
       prompt_tokens = [int(t) for t in prompt_tokens]
       completion_tokens = [int(t) for t in completion_tokens]
-      left_prompt, right_completion, _ = agentic_utils.pad_prompt_and_completion(
+      # Every generated token contributes: there is no environment span to
+      # exclude in the single-turn case.
+      left_prompt, right_completion, mask = pad_row(
           prompt_tokens,
           completion_tokens,
-          max_prompt_length,
-          max_response_length,
-          pad_id,
+          [1] * len(completion_tokens),
+          max_prompt_length=max_prompt_length,
+          max_response_length=max_response_length,
+          pad_id=pad_id,
       )
       padded_prompts.append(left_prompt)
-      padded_completions.append(right_completion[:max_response_length])
-      real_len = min(len(completion_tokens), max_response_length)
-      mask = agentic_utils.right_pad(
-          [1] * real_len, max_response_length, 0
-      )[:max_response_length]
+      padded_completions.append(right_completion)
       completion_masks.append(mask)
 
     prompt_ids = jnp.asarray(np.stack(padded_prompts))
@@ -320,22 +350,17 @@ class GRPOAdapter:
         completion_masks_list,
         old_logprobs_list,
     ):
-      padded_prompt, padded_completion, _ = (
-          agentic_utils.pad_prompt_and_completion(
-              prompt_tokens,
-              completion_tokens,
-              max_prompt_length,
-              max_response_length,
-              pad_value,
-          )
+      padded_prompt, padded_completion, padded_mask = pad_row(
+          prompt_tokens,
+          completion_tokens,
+          completion_mask,
+          max_prompt_length=max_prompt_length,
+          max_response_length=max_response_length,
+          pad_id=pad_value,
       )
       padded_prompt_ids.append(padded_prompt)
-      padded_completion_ids.append(padded_completion[:max_response_length])
-      padded_completion_masks.append(
-          agentic_utils.right_pad(completion_mask, max_response_length, 0)[
-              :max_response_length
-          ]
-      )
+      padded_completion_ids.append(padded_completion)
+      padded_completion_masks.append(padded_mask)
       if algo.use_rollout_logps:
         if old_logprobs is not None:
           padded_old_logprobs.append(
