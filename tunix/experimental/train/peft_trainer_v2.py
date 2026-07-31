@@ -818,20 +818,20 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # structurally comparable and switching between them cannot change
       # numerics. Compilation is lazy, so building the wrapper here costs
       # nothing if the fused path is never called.
-      # self._jitted_fused_step_fn = (
-      #     maybe_cache_and_partial(
-      #         nnx.jit(
-      #             self.create_fused_step_fn(),
-      #             donate_argnames=("optimizer", "grad_accumulator"),
-      #         ),
-      #         self.model,
-      #         self.optimizer,
-      #         self.grad_accumulator,
-      #     )
-      #     if self._is_single_microstep()
-      #     else None
-      # )
-      self._jitted_fused_step_fn = None
+      self._jitted_fused_step_fn = (
+          maybe_cache_and_partial(
+              nnx.jit(
+                  self.create_fused_step_fn(),
+                  donate_argnames=("optimizer", "grad_accumulator"),
+              ),
+              self.model,
+              self.optimizer,
+              self.grad_accumulator,
+          )
+          if self._is_single_microstep()
+          else None
+      )
+      # self._jitted_fused_step_fn = None
     return (
         self._jitted_fwd_bwd_step_fn,
         self._jitted_update_step_fn,
