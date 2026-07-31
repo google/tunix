@@ -34,6 +34,7 @@ thin and pluggable.
 from typing import Any, Mapping
 
 from tunix.experimental.orchestrator import algorithm_adapter as algorithm_adapter_lib
+from tunix.experimental.orchestrator import policy_version
 from tunix.rl import rl_cluster as rl_cluster_lib
 
 
@@ -44,6 +45,8 @@ class RLOrchestrator:
       self,
       cluster: Any,
       algorithm: algorithm_adapter_lib.AlgorithmAdapter,
+      *,
+      initial_policy_version: int = 0,
   ):
     """Initializes the orchestrator.
 
@@ -52,9 +55,14 @@ class RLOrchestrator:
         `OrchestratorRLCluster`). Determines where each primitive runs.
       algorithm: The `AlgorithmAdapter` carrying the algorithm-specific bits
         (advantage estimation today).
+      initial_policy_version: The version the current weights carry before any
+        sync; a resumed run passes what it left off at.
     """
     self._cluster = cluster
     self._algorithm = algorithm
+    self._version_minter = policy_version.PolicyVersionMinter(
+        initial_policy_version
+    )
 
   # --- Generation (rollout) -------------------------------------------------
 
@@ -86,8 +94,27 @@ class RLOrchestrator:
 
   # --- Weight sync ----------------------------------------------------------
 
-  def sync_weights(self) -> None:
+  @property
+  def policy_version(self) -> int:
+    """Which weights the orchestrator considers current.
+
+    Separate from `global_steps` on purpose. The step counter says how much
+    training has happened; this says which weights are in play, which is the
+    only thing a rollout worker can acknowledge installing and the only thing
+    a staleness check can compare. The cluster bumps its own counter on sync
+    for in-process runs; the orchestrated path does not read it.
+    """
+    return self._version_minter.current
+
+  def sync_weights(self) -> int:
+    """Publishes the trainer's weights and returns the version they carry.
+
+    Returns:
+      The newly minted version.
+    """
+    version = self._version_minter.mint()
     self._cluster.sync_weights()
+    return version
 
   # --- Scoring --------------------------------------------------------------
 
