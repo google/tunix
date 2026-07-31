@@ -253,8 +253,17 @@ class GradientAccumulator(nnx.Module):
     else:
       # No buffer held: either it was never allocated, or a non-persistent
       # `reset()` released it. Adopt the incoming tree rather than allocating a
-      # zero tree first and immediately overwriting it. `set()` replaces the
-      # whole tree by definition, so nothing is lost.
+      # zero tree first and immediately overwriting it -- adding to an implicit
+      # zero tree is exactly the incoming value.
+      #
+      # INVARIANT: `grads` and `_param_dtypes` must stay structurally
+      # compatible, because `get()` zips them. This branch deliberately leaves
+      # `_param_dtypes` empty rather than rebuilding it: assigning a tree of
+      # dtype objects from inside a traced step would put non-array leaves into
+      # the module's jit-visible state. `get()` detects the empty dtype map and
+      # skips the cast instead -- which is correct here, since an adopted tree
+      # was never accumulated in a wider dtype and so has nothing to cast back
+      # to.
       self.grads = nnx.data(grads)
 
     if denom is None:
@@ -266,9 +275,35 @@ class GradientAccumulator(nnx.Module):
   def get(self):
     scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
 
+    def _scale(v):
+      return type(v)(v[...] * scale.astype(v[...].dtype))
+
     def _scale_and_cast(v, target_dtype):
       res = v[...] * scale.astype(v[...].dtype)
       return type(v)(res.astype(target_dtype) if target_dtype else res)
+
+    if not jax.tree_util.tree_leaves(self.grads):
+      # Fail here rather than inside optax, where the same problem surfaces as
+      # "Mismatch custom node data: ('embedder', ...) != (); value: State({})".
+      raise ValueError(
+          "The gradient accumulator is empty. Either get() was called without a"
+          " preceding add()/set(), or the gradients written by an earlier"
+          " executable were discarded on the way out of jit -- nnx.cached_partial"
+          " (cache_nnx_graph=True) freezes the bound module's graphdef, so a"
+          " step that changes the accumulator's pytree structure cannot hand it"
+          " to a later executable."
+      )
+
+    if not jax.tree_util.tree_leaves(self._param_dtypes):
+      # `allocate_grads=False`: `__init__` skipped the dtype map along with the
+      # buffer, and `add()` adopted the incoming tree wholesale. Adopted
+      # gradients already carry the parameter dtype -- there was no fp32
+      # accumulation buffer to cast back from -- so scaling is all that is left
+      # to do. Zipping against the empty dtype tree here is what produced
+      # "Custom node type mismatch: expected type: State, value: {}".
+      return jax.tree_util.tree_map(
+          _scale, self.grads, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      )
 
     return jax.tree_util.tree_map(
         _scale_and_cast,
