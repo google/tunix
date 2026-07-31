@@ -407,6 +407,8 @@ class GradientAccumulator(nnx.Module):
     self.denom.set_value(jnp.zeros_like(self.denom[...]))
 
 
+
+
 class PeftTrainer:
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
