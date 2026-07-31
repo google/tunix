@@ -1268,6 +1268,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             tags=tags,
         ) as span_v2:
           if self._jitted_fused_step_fn is not None and is_update_step_val:
+            print("Using fused step function")
             # Single micro-batch per update: run both halves as one executable
             # so the gradient tree stays an internal temporary. Identical
             # arithmetic to the branch below.
