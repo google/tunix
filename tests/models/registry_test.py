@@ -67,6 +67,10 @@ class RegistryTest(absltest.TestCase):
     """Check each item in MODEL_CATALOG maps to a valid config id."""
     module_config_ids = _get_all_model_config_ids_from_modules()
     for model_info in registry.MODEL_CATALOG:
+      if model_info.model_family == 'qwen3p5':
+        # Qwen 3.5 models are only supported via MaxText and don't have native
+        # configs.
+        continue
       self.assertIn(
           model_info.model_config_id,
           module_config_ids,
