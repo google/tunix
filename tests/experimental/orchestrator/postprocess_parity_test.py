@@ -332,10 +332,64 @@ class PostprocessParityTest(parameterized.TestCase):
     self.assertEqual(self.actor_logps_calls[0], self.actor_logps_calls[1])
     self.assertEqual(self.ref_logps_calls[0], self.ref_logps_calls[1])
 
-  def test_multiple_iterations_is_refused_rather_than_diverging(self):
-    """The reference supports it; the orchestrated path must not pretend to."""
-    with self.assertRaises(algorithm_adapter.UnsupportedConfigError):
-      algorithm_adapter.GRPOAdapter(self._config(num_iterations=2))
+  def _items_missing_logps(self):
+    """A group whose second trajectory came back without log-probabilities."""
+    items = self._items()
+    items[1].traj["old_logprobs"] = None
+    return items
+
+  def test_orchestrated_path_rejects_a_trajectory_without_logps(self):
+    """Zero-substitution would anchor the ratio at probability 1, silently."""
+    algo_config = self._config()
+    reference = self._reference_learner(algo_config)
+    adapter = algorithm_adapter.GRPOAdapter(algo_config)
+    orchestrator = rl_orchestrator.RLOrchestrator(
+        orchestrator_rl_cluster.OrchestratorRLCluster(self.cluster), adapter
+    )
+
+    with self.assertRaises(algorithm_adapter.MissingRolloutLogpsError):
+      adapter.postprocess_group(
+          orchestrator,
+          self._items_missing_logps(),
+          compute_rewards=reference._compute_rewards,  # pylint: disable=protected-access
+          mode=rl_cluster_lib.Mode.TRAIN,
+          expected_step=0,
+      )
+
+  def test_reference_substitutes_zeros_unless_asked_to_be_strict(self):
+    """The legacy behavior is unchanged by default, and refusable on request."""
+    permissive = self._reference_learner(self._config())
+    examples = permissive._process_results(  # pylint: disable=protected-access
+        self._items_missing_logps(),
+        mode=rl_cluster_lib.Mode.TRAIN,
+        expected_step=0,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(examples[0].old_per_token_logps[1]),
+        np.zeros(MAX_RESPONSE_LENGTH, dtype=np.float32),
+    )
+
+    strict = self._reference_learner(
+        self._config(strict_rollout_logps=True)
+    )
+    with self.assertRaises(RuntimeError):
+      strict._process_results(  # pylint: disable=protected-access
+          self._items_missing_logps(),
+          mode=rl_cluster_lib.Mode.TRAIN,
+          expected_step=0,
+      )
+
+  @parameterized.named_parameters(
+      ("on_policy", True),
+      ("recomputed_logps", False),
+  )
+  def test_multiple_iterations_matches_the_reference(self, use_rollout_logps):
+    """Legal on both paths once real old log-probabilities are guaranteed."""
+    algo_config = self._config(
+        num_iterations=2, use_rollout_logps=use_rollout_logps
+    )
+    expected, actual = self._run_both(algo_config, rl_cluster_lib.Mode.TRAIN)
+    self._assert_examples_equal(expected, actual)
 
   def test_single_turn_assembly_pads_like_the_group_postprocess(self):
     """The two assembly entry points must lay tokens out identically.

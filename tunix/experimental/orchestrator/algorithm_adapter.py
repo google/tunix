@@ -111,6 +111,10 @@ def pad_row(
   return padded_prompt, padded_completion[:max_response_length], padded_mask
 
 
+class MissingRolloutLogpsError(RuntimeError):
+  """A trajectory arrived without the sampler log-probabilities it needs."""
+
+
 class UnsupportedConfigError(ValueError):
   """A configured behavior this adapter does not implement.
 
@@ -154,16 +158,16 @@ class GRPOAdapter:
           " use the agentic GRPO learner."
       )
 
-    # Redundant with the missing-old-logps check that belongs on the scoring
-    # path, but cheap and catches the config before a step runs.
-    if getattr(algo, "num_iterations", 1) > 1:
-      raise UnsupportedConfigError(
-          f"num_iterations={algo.num_iterations} trains multiple times per"
-          " batch, which requires old per-token logprobs to anchor the ratio"
-          " on every iteration after the first. This adapter does not"
-          " guarantee they are present. Use num_iterations=1 or the agentic"
-          " GRPO learner."
-      )
+  @property
+  def strict_rollout_logps(self) -> bool:
+    """Whether a trajectory without sampler log-probabilities is rejected.
+
+    Defaults to rejecting: substituting zeros reads as probability 1 and
+    silently biases the ratio, and this path has no diagnostic that would
+    surface it. Set the config field explicitly to opt out.
+    """
+    configured = getattr(self._algo_config, "strict_rollout_logps", None)
+    return True if configured is None else bool(configured)
 
   def check_supported_config(self, cluster: Any) -> None:
     """Rejects cluster-level configuration this adapter does not implement.
@@ -371,6 +375,14 @@ class GRPOAdapter:
                   dtype=old_logprobs.dtype,
               )[:max_response_length]
           )
+        elif self.strict_rollout_logps:
+          raise MissingRolloutLogpsError(
+              "A trajectory carries no sampler log-probabilities while"
+              " use_rollout_logps is set. Substituting zeros would anchor its"
+              " importance ratio to probability 1, which is silent and"
+              " unbounded. Enable return_logprobs on the rollout config, or"
+              " set strict_rollout_logps=False to keep the substitution."
+          )
         else:
           padded_old_logprobs.append(
               np.zeros(max_response_length, dtype=np.float32)
@@ -388,6 +400,12 @@ class GRPOAdapter:
     else:
       old_per_token_logps = orchestrator.actor_logps(
           prompt_ids, completion_ids, pad_value, eos_value, micro_batch_size
+      )
+
+    if algo.num_iterations > 1 and old_per_token_logps is None:
+      raise MissingRolloutLogpsError(
+          "old_per_token_logps is not available for off-policy RL. Enable "
+          " `return_logprobs` in RolloutConfig."
       )
 
     if algo.force_compute_kl or algo.beta != 0.0:

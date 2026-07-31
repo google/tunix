@@ -71,6 +71,25 @@ class SupportedConfigTest(absltest.TestCase):
     adapter.check_supported_config(_cluster())
 
 
+class StrictRolloutLogpsTest(absltest.TestCase):
+  """Missing sampler log-probabilities are rejected, not substituted."""
+
+  def test_rejects_by_default(self):
+    self.assertTrue(
+        algorithm_adapter.GRPOAdapter(_config()).strict_rollout_logps
+    )
+
+  def test_opt_out_is_honored(self):
+    adapter = algorithm_adapter.GRPOAdapter(
+        _config(strict_rollout_logps=False)
+    )
+    self.assertFalse(adapter.strict_rollout_logps)
+
+  def test_explicit_opt_in_is_honored(self):
+    adapter = algorithm_adapter.GRPOAdapter(_config(strict_rollout_logps=True))
+    self.assertTrue(adapter.strict_rollout_logps)
+
+
 class UnsupportedConfigTest(absltest.TestCase):
 
   def test_sampler_importance_sampling_is_rejected(self):
@@ -79,11 +98,10 @@ class UnsupportedConfigTest(absltest.TestCase):
     ):
       algorithm_adapter.GRPOAdapter(_config(sampler_is="token"))
 
-  def test_multiple_iterations_per_batch_is_rejected(self):
-    with self.assertRaisesRegex(
-        algorithm_adapter.UnsupportedConfigError, "num_iterations"
-    ):
-      algorithm_adapter.GRPOAdapter(_config(num_iterations=2))
+  def test_multiple_iterations_per_batch_is_accepted(self):
+    """Legal once old log-probabilities are guaranteed to be real."""
+    adapter = algorithm_adapter.GRPOAdapter(_config(num_iterations=2))
+    adapter.check_supported_config(_cluster())
 
   def test_sequence_packing_is_rejected(self):
     adapter = algorithm_adapter.GRPOAdapter(_config())

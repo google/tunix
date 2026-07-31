@@ -125,6 +125,14 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   # tokens, producing large-variance gradient updates.
   sampler_is: str | None = None  # None | "token"
   sampler_is_threshold: float = 2.0
+  # What to do when ``use_rollout_logps`` is set but a trajectory comes back
+  # with no sampler log-probabilities. The tokens are substituted with zeros,
+  # which reads as log-prob 0, i.e. probability 1, so the importance ratio for
+  # that trajectory is silently anchored to a policy that never existed.
+  # ``True`` rejects such a trajectory; ``False`` keeps the substitution and
+  # warns. ``None`` means "caller's default": permissive here, strict on the
+  # orchestrated path.
+  strict_rollout_logps: bool | None = None
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -463,6 +471,34 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       example = example.replace(**updates)
     return example
 
+  def _on_missing_rollout_logps(self) -> None:
+    """Handles a trajectory that carries no sampler log-probabilities.
+
+    Substituting zeros reads as log-prob 0, i.e. probability 1, so the ratio
+    for that trajectory is anchored to a policy that never produced it. That
+    is silent and unbounded, so `strict_rollout_logps` rejects it; the default
+    keeps the historical substitution and says so once per learner.
+
+    Raises:
+      RuntimeError: If `strict_rollout_logps` is set.
+    """
+    if self.algo_config.strict_rollout_logps:
+      raise RuntimeError(
+          "A trajectory carries no sampler log-probabilities while"
+          " use_rollout_logps is set. Substituting zeros would anchor its"
+          " importance ratio to probability 1. Enable return_logprobs on the"
+          " rollout config, or unset strict_rollout_logps to keep the"
+          " substitution."
+      )
+    if not getattr(self, "_warned_missing_rollout_logps", False):
+      self._warned_missing_rollout_logps = True
+      logging.warning(
+          "A trajectory carries no sampler log-probabilities while"
+          " use_rollout_logps is set; substituting zeros, which anchors its"
+          " importance ratio to probability 1. Set strict_rollout_logps=True"
+          " to reject these instead. Logged once per learner."
+      )
+
   def _process_results(
       self,
       trajectories: List[Any],
@@ -594,6 +630,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               )[:max_response_length]
           )
         else:
+          self._on_missing_rollout_logps()
           padded_old_logprobs.append(
               np.zeros(max_response_length, dtype=np.float32)
           )
