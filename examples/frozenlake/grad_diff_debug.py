@@ -113,25 +113,42 @@ def create_sharded_model(config, rngs, mesh):
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
 config.num_layers = 12
-# Findings so far (gemma4_e2b, num_layers=12; full logs at the bottom of this file). 
-# "matched" below means bit-for-bit identical, verified via the whole-tree XOR checksum, not via grad_norm -- see the caveat further down.
+# Findings (gemma4_e2b, num_layers=12, 2 devices; logs at the bottom of this
+# file). "identical" means bit-for-bit, checked with tc.tree_bit_checksum.
 #
-#   fp32, excess_precision=false, 2 dev : loss + grad_norm + grads all matched
-#   fp32, excess_precision=true,  2 dev : loss + grad_norm + grads all matched
-#   bf16, excess_precision=false, 1 dev : loss + grad_norm + grads all matched
-#   bf16, excess_precision=false, 2 dev : loss + grad_norm + grads all matched
-#   bf16, excess_precision=true,  1 dev : loss matched; grad_norm differs
-#                                         1.4e-4 rel; grads differ by 1 bf16
-#                                         ULP on 24.7% of elements
-#   bf16, excess_precision=true,  2 dev : same as above (1.35e-4 rel), so the
-#                                         divergence is independent of the
-#                                         device count
+#   fp32, excess_precision=false, SPLIT path : 195/197 leaves identical;
+#         layers 4 and 9 differ by <= 2 fp32 eps (2.1e-7 of tensor scale).
+#         After one SGD step at lr=1e-5, 54-87 weights out of 6.3M move by
+#         ~1 ULP.
+#   fp32, excess_precision=false, FUSED path : identical.
+#   bf16, excess_precision=false, 1 and 2 dev : identical.
+#   bf16, excess_precision=true,  1 and 2 dev : grads differ by 1-2 bf16 ULP on
+#         ~24.7% of elements; grad_norm differs 1.35e-4 rel. Independent of the
+#         device count.
 #
-# v1 and v2 are algorithmically equivalent -- fp32 is bit-identical unconditionally. 
-# In bf16, --xla_allow_excess_precision=false is both necessary and sufficient for bit-identity.
-# With excess precision allowed (the default) XLA may keep intermediates in fp32 and skip convert(bf16) nodes; how much it keeps depends on fusion,
-# Different module => different fusion => different rounding points.
-# So bf16 without the flag can only be compared to a ULP tolerance.
+# Two separate mechanisms, and one flag only fixes one of them:
+#
+#   Excess precision. With --xla_allow_excess_precision=true (the default) XLA
+#   may keep intermediates in fp32 and skip convert(bf16) nodes; how much it
+#   keeps depends on fusion, and v1 (one module) fuses differently from v2's
+#   split path (two modules). Setting the flag to false removes this class.
+#   It is necessary for bf16 bit-identity.
+#
+#   Reduction order. The flag does NOT constrain summation trees, collective
+#   algorithms, or the scheduling of a multi-term accumulation. That is what
+#   remains in fp32, and its location is the tell: the ONLY leaves that differ
+#   are layers 4 and 9, which for this config are the GLOBAL attention layers
+#   (index % 5 == 4) and, with num_unshared = int(12 - 12*20/35) = 5, exactly
+#   the KV-sharing origin/consumer pair. Layer 4's gradient accumulates its own
+#   attention path plus the one flowing back through layer 9's shared KV --
+#   two contributions from different depths, which XLA schedules differently
+#   when the backward is compiled alone versus together with the update. Every
+#   other layer has a purely local gradient path and comes out identical.
+#
+# So the flag is necessary but NOT sufficient. Only the fused path guarantees
+# bit-identity, because it makes the two HLO modules identical and leaves XLA no
+# choice. On the split path, compare with a relative tolerance -- roughly
+# max|x-y| / max|x| < 1e-6 -- not with a ULP gate (see CAVEAT 4).
 #
 # CAVEAT 1: grad_norm is not a valid pass/fail gate. optax.global_norm sums
 # ~4e8 squares in fp32, and XLA picks a different reduction tree per module,
@@ -151,6 +168,36 @@ config.num_layers = 12
 # implies different weights. Only within-run v1-vs-v2 comparisons are
 # meaningful. To compare across configurations, initialize once, checkpoint,
 # and restore the same weights everywhere.
+#
+# CAVEAT 3: observing the gradients changes them. Gradients are an internal
+# temporary of the traced step; the only way to see them from Python is to make
+# them a program output, which forces materialization and changes the fusion,
+# scheduling and buffer assignment of the very backward pass being measured.
+# Every hook added during this investigation moved the numbers:
+#   - v2's original jax.debug.print / pytree_xor_checksum calls inhibited fusion.
+#     They are why an earlier version of this comment claimed fp32 was
+#     "bit-identical unconditionally" -- that result was an artifact of the
+#     instrumentation, not a property of the trainers.
+#   - A hook that parked v1's depth-1 gradients in the accumulator changed v1's
+#     XOR from 1000145275 to 508432006.
+#   - Forcing v2's accumulator to be preallocated changed v2's from 1000145275
+#     to 295270455: it pins the gradient sharding to the parameter partition
+#     spec, which changes the collective and hence the summation order.
+# Both hooks have since been removed rather than left behind a flag, because a
+# knob that silently changes the numbers is worse than no knob at all.
+# Both hooks moved their side, and by different amounts, so an instrumented run
+# compares two programs that neither matches the uninstrumented one. Draw
+# conclusions only from quantities observable without a hook: the loss, the
+# grad_norm the step already returns, and the weights after the step.
+#
+# CAVEAT 4: ULP distance is the wrong metric for gradients. It is scale-free,
+# which is right for a tensor whose entries share a magnitude and wrong for one
+# spanning tens of orders of magnitude: two entries that are both numerically
+# zero (1e-38 vs 1.5e-38) sit millions of ULP apart while contributing nothing
+# to the norm or to the update. The fp32 divergence above reported max ULP
+# 6.3e6 on 78% of elements and was, in absolute terms, 2.1e-7 of the tensor
+# scale. Use ULP for weights and activations; use max|x-y| / max|x| for
+# gradients.
 #
 # config.param_dtype = jnp.bfloat16
 
@@ -218,19 +265,18 @@ print(f"INIT weight checksum: {_init_ck}")
 _GRAD_MAX_ULP = 0
 _WEIGHT_MAX_ULP = 4
 
-# Both flags exist only to make the gradients comparable, and both cost one
-# parameter-tree-sized buffer in HBM. Turn them off before re-running the memory
-# benchmark -- with them on, the peaks measure a different program.
+# HOW TO COMPARE GRADIENTS: set gradient_accumulation_steps=2 on both configs.
 #
-#   v1: keeps gradients as an internal temporary at depth 1, so they are
-#       invisible from Python unless this is on.
-#   v2: allocates the accumulator lazily at depth 1, so `add()` adopts whatever
-#       sharding GSPMD propagated. v1's is pinned to the parameter partition
-#       spec by `_shard_optimizer`. Two different layouts make an elementwise
-#       diff compare mismatched positions. Forcing both onto the eager,
-#       pre-sharded path removes that difference.
-peft_trainer._EXPOSE_DEPTH1_GRADS = True
-peft_trainer_v2._FORCE_PREALLOCATED_ACCUMULATOR = True
+# At depth 1 gradients are an internal temporary of the traced step and there is
+# deliberately no hook to expose them -- adding one changes the graph being
+# measured and the numbers stop meaning anything (CAVEAT 3). At depth > 1 the
+# accumulator is a genuine part of the algorithm: both trainers write it with
+# `add()` and read it with `get()`, so `trainer.grad_accumulator.grads` can be
+# read after the step with no instrumentation at all, and both sides allocate it
+# eagerly so the layouts match.
+#
+# At depth 1, compare the quantities that are observable without a hook: the
+# loss, the grad_norm the step already returns, and the weights after the step.
 
 
 def diagnose_leaf(path, x, y):
@@ -360,18 +406,13 @@ with mesh:
 
   model_state_v1 = nnx.state(gemma)
   opt_state_v1 = nnx.state(trainer_v1.optimizer)
-  # v1's depth-1 branch never calls reset() -- the only reset() in this file is
-  # inside `apply_updates`, which only runs on the accumulating (nnx.cond) path.
-  # So the gradients are still sitting in the accumulator after train().
+  # Empty at depth 1 (the fast path never touches the accumulator); holds the
+  # accumulated gradients when gradient_accumulation_steps > 1, and v1's depth-1
+  # branch never calls reset() -- the only reset() lives in `apply_updates`,
+  # which runs on the accumulating nnx.cond path.
   grads_v1_host = jax.device_get(trainer_v1.grad_accumulator.grads)
-  # `_write_train_metrics` buffers the first step and only flushes it on the
-  # next one, so at max_steps=1 the metric may never be recorded. Not having it
-  # is fine -- the norm printed below still stands on its own.
-  try:
-    grad_norm_v1 = trainer_v1.metrics_logger.get_metric("", "grad_norm", "train")
-  except Exception:  # pylint: disable=broad-except
-    grad_norm_v1 = None
-  describe_grads("v1", grads_v1_host, grad_norm_v1)
+  if jax.tree_util.tree_leaves(grads_v1_host):
+    describe_grads("v1", grads_v1_host)
   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
   del gemma, trainer_v1, optimizer_v1
   gc.collect()
@@ -411,40 +452,29 @@ with mesh:
   trainer_v2 = peft_trainer_v2.PeftTrainer(gemma_v2, optimizer_v2, config_v2)
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
 
-  # Explicit two-call form rather than train(): `_update_step` resets the
-  # accumulator, so the gradients have to be read between the halves. (train()
-  # is the right call for the memory benchmark -- at depth 1 it routes through
-  # the fused step, which is what we want to measure there.)
+  # Memory-benchmark state: `train()`, which at depth 1 routes through the fused
+  # single-executable step -- the configuration whose HBM profile we want. To
+  # exercise the split path instead, call fwd_bwd(dataset[0]) then update().
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v2.fwd_bwd(dataset[0])
-    jax.effects_barrier()
-    grads_v2_host = jax.device_get(trainer_v2.grad_accumulator.grads)
-    trainer_v2.update()
+    trainer_v2.train(dataset, skip_jit=False)
     jax.effects_barrier()
 
-  # Same host-side sanity check on v2. `_last_update_grad_norm` is computed
-  # inside `_update_step` from the very tree we just read, so if these two norms
-  # agree then what came back really is the gradients.
-  describe_grads(
-      "v2", grads_v2_host, getattr(trainer_v2, "_last_update_grad_norm", None)
-  )
+  # Populated only at gradient_accumulation_steps > 1; see the note above the
+  # comparison helpers for why depth 1 has no gradient hook.
+  grads_v2_host = jax.device_get(trainer_v2.grad_accumulator.grads)
+  if jax.tree_util.tree_leaves(grads_v2_host):
+    describe_grads("v2", grads_v2_host)
+    compare("grads", grads_v1_host, grads_v2_host, _GRAD_MAX_ULP)
 
-  # Upstream: did the two backward passes produce the same gradients?
-  compare("grads", grads_v1_host, grads_v2_host, _GRAD_MAX_ULP)
-  # Downstream: the amplified view. Only meaningful once the line above is read.
+  # Weights are observable without any hook, so this comparison is valid in
+  # memory-benchmark state. Expect a handful of elements at a few ULP in the
+  # KV-sharing layers on the split path, and bit-identity on the fused path.
   compare(
-      "weights after 1 step",
+      "weights after training",
       model_state_v1_host,
       jax.device_get(nnx.state(gemma_v2)),
       _WEIGHT_MAX_ULP,
   )
-
-  # In the single-microstep regime the accumulator holds gradients only between
-  # fwd_bwd and update: nothing is pre-allocated, and update's `reset()` drops
-  # the buffer instead of zeroing it. So fwd_bwd's `args` should be ~one
-  # parameter tree (the model; the accumulator arrives empty) and update's
-  # `alias` should be ~one parameter tree (the donated accumulator reused for
-  # the updated parameters). An `alias` of ~0 means donation degraded to a copy.
 
   model_state_v2 = nnx.state(gemma_v2)
   opt_state_v2 = nnx.state(trainer_v2.optimizer)

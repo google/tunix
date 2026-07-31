@@ -164,26 +164,6 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-# Debug hook. At depth 1 the fast path feeds `grads` straight into the optimizer
-# inside one traced function, so the gradients are an internal temporary and are
-# never observable from Python. Setting this makes the step park them in the
-# accumulator so they can be diffed against another trainer.
-#
-# This is NOT free and must be off when measuring HBM: it turns the gradient
-# tree from a module-internal temporary (which XLA can overlap with backward
-# scratch) into a program output, which costs one full parameter-tree-sized
-# buffer -- the very asymmetry the split-vs-fused investigation is about. In
-# other words, you cannot observe v1's gradients without changing v1's memory
-# profile, so run the numerical comparison and the memory benchmark separately.
-#
-# Turning it on also forces the accumulator to be allocated up front (see
-# __init__): `add()` must write into an existing, already-sharded buffer. The
-# alternative -- adopting the tree from inside the traced step -- is a
-# structural mutation of a jit argument, which does not round-trip and yields
-# garbage rather than gradients.
-_EXPOSE_DEPTH1_GRADS = False
-
-
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -382,13 +362,8 @@ class PeftTrainer:
     # the optimizer update function branch (which is float32 due to
     # `optax.inject_hyperparams`).
     _promote_opt_state_floats_to_float32(self.optimizer)
-    # Exposing depth-1 gradients requires a real buffer: `add()` would otherwise
-    # have to adopt the tree from inside the traced step, which is a structural
-    # mutation of a jit argument and does not survive the round trip.
     self.grad_accumulator = GradientAccumulator(
-        self.model,
-        wrt_target,
-        allocate=_EXPOSE_DEPTH1_GRADS or not self._is_single_microstep(),
+        self.model, wrt_target, allocate=not self._is_single_microstep()
     )
 
     self.loss_fn = _default_loss_fn
@@ -597,27 +572,9 @@ class PeftTrainer:
       #     "JIT TRACE v1 [train_step] value_and_grad output dtypes:",
       #     raw_dtypes,
       # )
-      if _EXPOSE_DEPTH1_GRADS:
-        grad_accumulator.add(grads)
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
-      if _EXPOSE_DEPTH1_GRADS:
-        # Same norm, but read back out of the accumulator instead of from
-        # `grads`. This separates the two ways the exposed gradients can be
-        # wrong: if these two lines disagree, the accumulator was written with
-        # the wrong values; if they agree here but the host-side readback is
-        # garbage, the values were fine and it is nnx's state round-trip out of
-        # jit that lost them.
-        jax.debug.print(
-            "DEBUG v1: norm from grads={x} from accumulator={y}",
-            x=grad_norm,
-            y=optax.global_norm(
-                jax.tree_util.tree_map(
-                    lambda x: x.astype(jnp.float32), grad_accumulator.grads
-                )
-            ),
-        )
       optimizer.update(model, grads)
     else:
       # TODO(b/491970038): update denom for sequence packing.
@@ -745,8 +702,18 @@ class PeftTrainer:
 
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+      # Donate exactly what the step writes. A donated argument with no
+      # corresponding output cannot be aliased, so XLA reports "Some donated
+      # buffers were not usable" and falls back to a copy -- costing a buffer
+      # instead of saving one. At depth 1 the fast path applies `grads` directly
+      # and leaves the accumulator alone, so it must not be donated there.
+      # (Note the trailing comma: `("optimizer")` is a bare string, not a
+      # 1-tuple, and only works by accident of jax accepting `str`.)
+      donated = ["optimizer"]
+      if not self._is_single_microstep():
+        donated.append("grad_accumulator")
       self._jitted_train_step_fn = nnx.jit(
-          train_step, donate_argnames=("optimizer")
+          train_step, donate_argnames=tuple(donated)
       )
       self._jitted_eval_step_fn = nnx.jit(eval_step)
 
