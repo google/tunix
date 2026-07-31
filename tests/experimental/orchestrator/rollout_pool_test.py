@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import types
 from typing import Any, List, Optional, Sequence
 
 from absl.testing import absltest
@@ -324,6 +325,78 @@ class PooledRolloutWorkerTest(absltest.TestCase):
       self.assertEqual(pool.dispatcher.router.total_outstanding(), 0)
 
     asyncio.run(_run())
+
+  def test_duplicate_request_ids_are_rejected(self):
+    """One id for two requests would dispatch one twice and the other never."""
+
+    async def _run():
+      pool = rollout_pool.PooledRolloutWorker(
+          _in_process_handles([SpyRolloutWorker("w0")]), max_concurrency=2
+      )
+      requests = [
+          datatypes.RolloutRequest(
+              prompt="a", prompt_id="p0", request_id="same"
+          ),
+          datatypes.RolloutRequest(
+              prompt="b", prompt_id="p1", request_id="same"
+          ),
+      ]
+
+      with self.assertRaises(rollout_pool.DuplicateRequestIdError):
+        await pool.generate(requests)
+
+    asyncio.run(_run())
+
+  def test_ids_derived_from_prompts_stay_unique_within_a_group(self):
+    """A GRPO group repeats prompt_id, so the fallback id adds the position."""
+
+    async def _run():
+      worker = SpyRolloutWorker("w0")
+      pool = rollout_pool.PooledRolloutWorker(
+          _in_process_handles([worker]), max_concurrency=2
+      )
+      group = [
+          datatypes.RolloutRequest(prompt="a", prompt_id="shared")
+          for _ in range(3)
+      ]
+
+      responses = await asyncio.wait_for(pool.generate(group), timeout=5.0)
+
+      self.assertEqual(
+          [r.request_id for r in responses],
+          ["shared:0", "shared:1", "shared:2"],
+      )
+
+    asyncio.run(_run())
+
+  def test_a_request_that_never_answers_becomes_a_failed_response(self):
+    """The batch keeps its shape even if a result goes missing."""
+    pool = rollout_pool.PooledRolloutWorker(
+        _in_process_handles([SpyRolloutWorker("w0")]), max_concurrency=1
+    )
+
+    response = pool._missing_response("req-7")  # pylint: disable=protected-access
+
+    self.assertEqual(response.request_id, "req-7")
+    self.assertEqual(response.status, "FAILED")
+    self.assertIsNotNone(response.error)
+    self.assertIn("req-7", response.error.message)
+
+  def test_pool_accepts_handles_that_wrap_an_actor(self):
+    """The fleet's RPC handles expose their transport as `.actor`."""
+    server = remote_lib.InProcessRemoteExecutionServer(
+        instance=SpyRolloutWorker("w0")
+    )
+    actor = remote_lib.InProcessActorHandle(server)
+    wrapper = types.SimpleNamespace(actor=actor)
+
+    pool = rollout_pool.PooledRolloutWorker.from_workers([wrapper])
+
+    self.assertEqual(pool.dispatcher.actors, (actor,))
+
+  def test_pool_rejects_something_that_is_not_a_worker(self):
+    with self.assertRaises(TypeError):
+      rollout_pool.PooledRolloutWorker.from_workers([object()])
 
   def test_balances_over_real_grpc_workers(self):
     """Fire-and-forget dispatch plus long polling, across two localhost servers."""

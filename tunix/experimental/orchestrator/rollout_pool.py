@@ -35,6 +35,7 @@ rather consume trajectories as they finish can pass `on_complete`.
 from __future__ import annotations
 
 import asyncio
+import collections
 import traceback as traceback_lib
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -51,6 +52,10 @@ _FAILED_STATUS = "FAILED"
 RequestOrBatch = Union[
     datatypes.RolloutRequest, Sequence[datatypes.RolloutRequest]
 ]
+
+
+class DuplicateRequestIdError(ValueError):
+  """Two rollout requests in one batch carried the same id."""
 
 
 def _as_actor_handle(worker: Any) -> remote_execution.ActorHandle:
@@ -177,8 +182,24 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
       is_single: bool,
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]],
   ) -> Union[datatypes.RolloutResponse, Sequence[datatypes.RolloutResponse]]:
-    """Runs one batch through the dispatcher, as the sole consumer."""
+    """Runs one batch through the dispatcher, as the sole consumer.
+
+    Raises:
+      DuplicateRequestIdError: If two requests share a request id.
+    """
     order = [self._task_id(req, i) for i, req in enumerate(batch)]
+    repeated = sorted(
+        {request_id for request_id, count in collections.Counter(order).items()
+         if count > 1}
+    )
+    if repeated:
+      # Responses are matched by id. Two requests under one id means one gets
+      # dispatched twice and the other never, and a single response resolves
+      # both -- so the batch would come back plausible and wrong.
+      raise DuplicateRequestIdError(
+          f"Rollout requests must have unique ids within a batch; {repeated}"
+          " appear more than once."
+      )
     by_id: Dict[str, datatypes.RolloutRequest] = dict(zip(order, batch))
     tasks = (
         load_balancer.Task(
