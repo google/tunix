@@ -737,7 +737,6 @@ class PeftTrainer:
           optimizer,
           grad_accumulator,
       )
-      # jax.debug.print("DEBUG v1: Grad Norm in train_step: {x}", x=grad_norm)
 
     if isinstance(aux, utils.LossOutput):
       return loss_val, aux, grad_norm
@@ -831,11 +830,7 @@ class PeftTrainer:
     train_step = self.create_train_step_fn()
     eval_step = self.create_eval_step_fn()
     if skip_jit:
-      train_step_fn = functools.partial(
-          train_step, self.model, self.optimizer, self.grad_accumulator
-      )
-      eval_step_fn = functools.partial(eval_step, self.model)
-      return train_step_fn, eval_step_fn
+      return train_step, eval_step
 
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
@@ -1194,7 +1189,6 @@ class PeftTrainer:
               train_example,
               is_update_step=jnp.array(is_update_step_val, dtype=jnp.bool_),
           )
-          # print("Debug: train_loss: ", jax.device_get(train_loss), "grad_norm: ", jax.device_get(grad_norm))
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 
