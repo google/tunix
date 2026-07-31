@@ -76,21 +76,27 @@ class _InProcessWorker(abstract_worker.Worker):
 
 
 class InProcessTrainerWorker(_InProcessWorker):
-  """Trainer handle: runs the actor (and optional critic) trainer.
+  """Trainer handle: runs the actor trainer, and the critic trainer on request.
 
   Handle contract:
       train(chunks, eval_ds, skip_jit) -> None
+      train_critic(chunks, eval_ds, skip_jit) -> None
       per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
+
+  The two trainer passes are separate verbs because the caller drives them
+  separately: an algorithm that has a critic asks for both, one per step.
   """
 
   def __init__(self, rl_cluster: Any, *, worker_id: str = "trainer"):
     super().__init__(rl_cluster, worker_id=worker_id, role="trainer")
 
   def train(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
-    """Runs one actor (and optional critic) trainer pass over the micro-batch."""
+    """Runs one actor trainer pass over the micro-batch."""
     self._rl_cluster.update_actor(chunks, eval_ds, skip_jit)
-    if hasattr(self._rl_cluster, "critic_trainer"):
-      self._rl_cluster.update_critic(chunks, eval_ds, skip_jit)
+
+  def train_critic(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
+    """Runs one critic trainer pass over the micro-batch."""
+    self._rl_cluster.update_critic(chunks, eval_ds, skip_jit)
 
   def per_token_logps(
       self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int

@@ -15,6 +15,7 @@
 """Routing/delegation tests for OrchestratorRLCluster (no real compute)."""
 
 from absl.testing import absltest
+from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import orchestrator_rl_cluster
 
 
@@ -150,6 +151,36 @@ class OrchestratorRlClusterTest(absltest.TestCase):
     fallback = orchestrator_rl_cluster.OrchestratorRLCluster(base)
     fallback.update_actor(["c"], None, False)
     self.assertEqual(base.update_actor_calls, [(["c"], None, False)])
+
+  def test_actor_and_critic_each_train_once_per_step(self):
+    """A step drives one actor pass and one critic pass, not two of either.
+
+    The in-process handle used to run both trainers from its actor verb while
+    the wrapper separately routed the critic, so an algorithm with a critic
+    trained it twice per step.
+    """
+    base = _FakeBaseCluster()
+    base.critic_trainer = "CRITIC"  # A cluster configured with a critic.
+    handle = inprocess_workers.InProcessTrainerWorker(base)
+    routed = orchestrator_rl_cluster.OrchestratorRLCluster(
+        base, trainer_worker=handle
+    )
+
+    routed.update_actor(["c"], None, False)
+    routed.update_critic(["c"], None, False)
+
+    self.assertLen(base.update_actor_calls, 1)
+    self.assertLen(base.update_critic_calls, 1)
+
+  def test_actor_pass_leaves_the_critic_alone(self):
+    base = _FakeBaseCluster()
+    base.critic_trainer = "CRITIC"
+    handle = inprocess_workers.InProcessTrainerWorker(base)
+
+    handle.train(["c"], None, False)
+
+    self.assertLen(base.update_actor_calls, 1)
+    self.assertEmpty(base.update_critic_calls)
 
   def test_sync_weights_routes_then_falls_back(self):
     base = _FakeBaseCluster()

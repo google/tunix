@@ -111,6 +111,9 @@ class RemoteTrainerWorker(_RemoteWorker):
   def train(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
     self._actor.submit("train", chunks, eval_ds, skip_jit)
 
+  def train_critic(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
+    self._actor.submit("train_critic", chunks, eval_ds, skip_jit)
+
   def per_token_logps(
       self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
   ) -> Any:

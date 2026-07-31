@@ -30,7 +30,8 @@ the base. As real workers replace in-process pieces, more of the surface moves
 onto handles and less is delegated.
 
 Handle contracts (all optional; absent -> in-process fallback):
-    trainer_worker.train(chunks, eval_ds, skip_jit) -> None
+    trainer_worker.train(chunks, eval_ds, skip_jit) -> None   # actor only
+    trainer_worker.train_critic(chunks, eval_ds, skip_jit) -> None  # optional
     trainer_worker.per_token_logps(prompt_ids, completion_ids,
                                    pad_id, eos_id) -> array   # optional method
     rollout_worker.generate(prompts, apply_chat_template, mode, micro_batch_size,
