@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import traceback as traceback_lib
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -147,6 +148,25 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
   @property
   def dispatcher(self) -> load_balancer.BalancedDispatcher:
     return self._dispatcher
+
+  @contextlib.asynccontextmanager
+  async def drained(self):
+    """Holds the pool quiet so weights can be replaced underneath it.
+
+    Yields once no request is outstanding and no new one can start, and holds
+    that until the block exits. Without it, work dispatched before a weight
+    change keeps completing after it, and the resulting trajectories cannot
+    honestly be attributed to either version.
+
+    The unit drained is a whole request, so a sync waits out the slowest one
+    in flight -- with multi-turn trajectories that is an entire episode. The
+    reference implementation instead fences between turns, which stalls less
+    but requires the worker to own the episode. Which of those the pooled path
+    should adopt is still open, so this takes the version that is correct
+    under any answer and states what it costs.
+    """
+    async with self._one_consumer:
+      yield
 
   @property
   def max_in_flight(self) -> int:

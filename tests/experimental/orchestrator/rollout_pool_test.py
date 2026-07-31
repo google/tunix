@@ -423,6 +423,48 @@ class PooledRolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_draining_waits_for_outstanding_work_and_holds_off_new_work(self):
+    """Weights can only be replaced when nothing is mid-generation."""
+
+    async def _run():
+      worker = SpyRolloutWorker("w0", stalled_prompts=("p0",))
+      pool = rollout_pool.PooledRolloutWorker(
+          _in_process_handles([worker]), max_concurrency=2
+      )
+      observed = {}
+
+      generating = asyncio.create_task(pool.generate(_requests(1)))
+      await asyncio.sleep(0.05)
+
+      async def _fence():
+        async with pool.drained():
+          # Nothing is in flight by the time the fence is held.
+          observed["outstanding"] = (
+              pool.dispatcher.router.total_outstanding()
+          )
+          observed["generate_done"] = generating.done()
+          # And nothing new can start while it is held.
+          queued = asyncio.create_task(pool.generate(_requests(1)))
+          await asyncio.sleep(0.05)
+          observed["queued_started"] = queued.done()
+          return queued
+
+      fence = asyncio.create_task(_fence())
+      await asyncio.sleep(0.05)
+      # The fence is still waiting on the stalled request.
+      self.assertFalse(fence.done())
+
+      worker.release.set()
+      queued = await asyncio.wait_for(fence, timeout=10.0)
+      await asyncio.wait_for(generating, timeout=10.0)
+      await asyncio.wait_for(queued, timeout=10.0)
+
+      self.assertEqual(observed["outstanding"], 0)
+      self.assertTrue(observed["generate_done"])
+      self.assertFalse(observed["queued_started"])
+
+    asyncio.run(_run())
+
   def test_balances_over_real_grpc_workers(self):
     """Fire-and-forget dispatch plus long polling, across two localhost servers."""
 

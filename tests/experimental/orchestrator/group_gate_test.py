@@ -173,6 +173,46 @@ class GroupGateTest(absltest.TestCase):
     self.assertLen(gated.items, 2)
     self.assertEmpty(gated.dropped)
 
+  def test_a_group_generated_from_old_weights_is_dropped(self):
+    requests = _group("g0")
+    fresh = _response(requests[0])
+    fresh.policy_version = 5
+    stale = _response(requests[1])
+    stale.policy_version = 2
+
+    gated = group_gate.gate_groups(
+        requests, [fresh, stale], group_size=2, min_policy_version=5
+    )
+
+    self.assertEmpty(gated.items)
+    self.assertEqual(gated.dropped[0].reason, group_gate.DropReason.STALE)
+
+  def test_a_group_is_judged_by_its_oldest_member(self):
+    """Mixed versions inside a group make its members incomparable."""
+    requests = _group("g0")
+    responses = [_response(r) for r in requests]
+    for response in responses:
+      response.policy_version = 5
+
+    fresh_enough = group_gate.gate_groups(
+        requests, responses, group_size=2, min_policy_version=5
+    )
+    self.assertLen(fresh_enough.items, 2)
+
+    responses[1].policy_version = 4
+    now_mixed = group_gate.gate_groups(
+        requests, responses, group_size=2, min_policy_version=5
+    )
+    self.assertEmpty(now_mixed.items)
+
+  def test_staleness_checking_is_optional(self):
+    requests = _group("g0")
+    responses = [_response(r) for r in requests]
+
+    gated = group_gate.gate_groups(requests, responses, group_size=2)
+
+    self.assertLen(gated.items, 2)
+
   def test_rejects_a_nonsense_group_size(self):
     with self.assertRaises(ValueError):
       group_gate.gate_groups([], [], group_size=0)

@@ -52,6 +52,7 @@ class DropReason(enum.Enum):
 
   MEMBER_FAILED = "member_failed"
   INCOMPLETE = "incomplete"
+  STALE = "stale"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -98,6 +99,7 @@ def gate_groups(
     group_size: int,
     tokenizer: Any = None,
     success_status: str = SUCCESS_STATUS,
+    min_policy_version: Optional[int] = None,
 ) -> GatedGroups:
   """Splits a batch into groups that may train and groups that may not.
 
@@ -109,6 +111,10 @@ def gate_groups(
     tokenizer: Used to reconstruct completion text when a worker did not send
       it.
     success_status: The status a member must report to count as healthy.
+    min_policy_version: Oldest weights a group may have been generated from.
+      A group is judged by its oldest member, not its average: mixing weight
+      versions inside one group is what makes the comparison between its
+      members meaningless. None disables the check.
 
   Returns:
     The admitted groups and the dropped ones.
@@ -144,7 +150,12 @@ def gate_groups(
   for group_id, group_requests in expected.items():
     group_responses = answered.get(group_id, {})
     drop = _disqualify(
-        group_id, group_requests, group_responses, group_size, success_status
+        group_id,
+        group_requests,
+        group_responses,
+        group_size,
+        success_status,
+        min_policy_version,
     )
     if drop is not None:
       dropped.append(drop)
@@ -166,6 +177,7 @@ def _disqualify(
     group_responses: Mapping[str, datatypes.RolloutResponse],
     group_size: int,
     success_status: str,
+    min_policy_version: Optional[int],
 ) -> Optional[DroppedGroup]:
   """Returns why the group cannot train, or None if it can."""
   if len(group_requests) != group_size:
@@ -199,6 +211,18 @@ def _disqualify(
         DropReason.MEMBER_FAILED,
         f"{sorted(failed)} did not succeed.",
     )
+
+  if min_policy_version is not None:
+    oldest = min(
+        response.policy_version for response in group_responses.values()
+    )
+    if oldest < min_policy_version:
+      return DroppedGroup(
+          group_id,
+          DropReason.STALE,
+          f"generated from weight version {oldest}, older than the"
+          f" {min_policy_version} required.",
+      )
   return None
 
 
