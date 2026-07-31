@@ -250,20 +250,37 @@ _init_ck = tc.tree_bit_checksum(_init_state_host)
 print(f"INIT weight checksum: {_init_ck}")
 
 # Two comparisons with very different sensitivities, so they get different
-# gates:
+# gates -- and, deliberately, different METRICS.
 #
-#   gradients -- what the two trainers are supposed to compute identically.
-#     Anything above 0 ULP is a real divergence in the compiled backward.
+#   gradients: gated on ULP, threshold 0. The two trainers are supposed to
+#     compute these identically, so any difference at all is a real divergence
+#     in the compiled backward and worth seeing.
 #
-#   weights after one SGD step -- `w - lr*g` with lr=1e-5 discards roughly all
-#     but ~9 bits of the update (update/ULP(w) ~ 500 at these magnitudes), and
+#   weights after one SGD step: gated on max|dw| / max|w|, NOT on ULP.
+#     `w - lr*g` with lr=1e-5 discards all but ~9 bits of the update, and
 #     rounding is a threshold operation, so an arbitrarily small difference in
 #     `g` flips the result by a full ULP whenever the exact value sits near a
-#     tie. A handful of 1-ULP weight differences is therefore consistent with
-#     gradients that agree to well under one ULP -- it is an amplifier, not an
-#     independent signal. Compare it, but do not gate on 0.
+#     tie. Weights are an amplifier, not an independent signal.
+#
+# Why not ULP for weights: the two metrics normalise differently.
+#
+#     k ULP      -> relative to the ELEMENT's magnitude:  |dw| ~ k*eps*|w_elem|
+#     |dw|/scale -> relative to the TENSOR's max
+#     |dw|/scale = k * eps * (|w_elem| / max|w|)  <=  k * eps
+#
+# So k ULP only bounds the scale-relative difference; the actual value can be
+# orders of magnitude smaller when the differing entries are not the large ones.
+# Measured here: layers.9 reported max ULP 24 (upper bound 2.9e-6) while the
+# actual max|dw|/max|w| was 1.8e-8 -- 160x below the bound, because those
+# entries sit at 0.23 of the tensor max. A ULP gate therefore raises false
+# alarms on exactly the entries that matter least.
+#
+# For reference, in fp32 (eps = 1.19e-7):
+#     |dw|/scale  1e-7  <->    0.8 ULP   noise floor
+#                 1e-6  <->    8.4 ULP   suspicious
+#                 1e-4  <->  839   ULP   real divergence
 _GRAD_MAX_ULP = 0
-_WEIGHT_MAX_ULP = 4
+_WEIGHT_MAX_REL = 1e-6
 
 # HOW TO COMPARE GRADIENTS: set gradient_accumulation_steps=2 on both configs.
 #
@@ -330,12 +347,55 @@ def diagnose_leaf(path, x, y):
   )
 
 
-def compare(tag, a, b, max_ulp):
+def _scale_rel(x, y):
+  """max|x-y| / max|x| for one leaf, in float64."""
+  x = np.asarray(x).astype(np.float64)
+  y = np.asarray(y).astype(np.float64)
+  scale = float(np.abs(x).max())
+  if scale == 0.0:
+    return 0.0
+  return float(np.abs(x - y).max()) / scale
+
+
+def compare(tag, a, b, *, max_ulp=None, max_rel=None):
+  """Compares two pytrees, gating on ULP or on scale-relative difference.
+
+  Exactly one of `max_ulp` / `max_rel` should be given. Use ULP when the two
+  sides are supposed to be bit-identical and every last bit is signal; use
+  `max_rel` (max|x-y| / max|x| per leaf) when small entries carry large relative
+  error that does not matter -- see the note above the thresholds.
+  """
   ck_a, ck_b = tc.tree_bit_checksum(a), tc.tree_bit_checksum(b)
   status = "identical" if ck_a == ck_b else "DIFFER"
   print(f"[cmp] {tag}: XOR v1={ck_a} v2={ck_b} {status}")
   if ck_a == ck_b:
     return
+
+  pairs = [
+      (pth, l1, l2)
+      for (pth, l1), (_, l2) in zip(
+          jax.tree_util.tree_flatten_with_path(a)[0],
+          jax.tree_util.tree_flatten_with_path(b)[0],
+      )
+  ]
+
+  if max_rel is not None:
+    scored = sorted(
+        ((_scale_rel(p, q), pth, p, q) for pth, p, q in pairs),
+        key=lambda t: -t[0],
+    )
+    worst_rel, worst_path = scored[0][0], scored[0][1]
+    over = [s for s in scored if s[0] > max_rel]
+    verdict = "EXCEEDS" if over else "within"
+    print(
+        f"[cmp] {tag}: {verdict} max|dw|/max|w| = {max_rel:.0e}"
+        f"  (worst leaf {jax.tree_util.keystr(worst_path)}: {worst_rel:.2e},"
+        f" {len(over)}/{len(scored)} leaves over)"
+    )
+    for _, path, p, q in scored[:3]:
+      diagnose_leaf(jax.tree_util.keystr(path), p, q)
+    return
+
   try:
     jax.tree.map_with_path(
         lambda path, x, y: tc.assert_close_ulp(path, x, y, max_ulp=max_ulp),
@@ -348,14 +408,8 @@ def compare(tag, a, b, max_ulp):
     # Report the worst few leaves in a position-independent way.
     worst = sorted(
         (
-            (int(tc.ulp_dist(np.asarray(p), np.asarray(q)).max()), path, p, q)
-            for path, p, q in (
-                (pth, l1, l2)
-                for (pth, l1), (_, l2) in zip(
-                    jax.tree_util.tree_flatten_with_path(a)[0],
-                    jax.tree_util.tree_flatten_with_path(b)[0],
-                )
-            )
+            (int(tc.ulp_dist(np.asarray(p), np.asarray(q)).max()), pth, p, q)
+            for pth, p, q in pairs
         ),
         key=lambda t: -t[0],
     )[:3]
@@ -464,16 +518,16 @@ with mesh:
   grads_v2_host = jax.device_get(trainer_v2.grad_accumulator.grads)
   if jax.tree_util.tree_leaves(grads_v2_host):
     describe_grads("v2", grads_v2_host)
-    compare("grads", grads_v1_host, grads_v2_host, _GRAD_MAX_ULP)
+    compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
 
   # Weights are observable without any hook, so this comparison is valid in
-  # memory-benchmark state. Expect a handful of elements at a few ULP in the
-  # KV-sharing layers on the split path, and bit-identity on the fused path.
+  # memory-benchmark state. Expect ~1e-8 of tensor scale in the KV-sharing
+  # layers on the split path, and bit-identity on the fused path.
   compare(
       "weights after training",
       model_state_v1_host,
       jax.device_get(nnx.state(gemma_v2)),
-      _WEIGHT_MAX_ULP,
+      max_rel=_WEIGHT_MAX_REL,
   )
 
   model_state_v2 = nnx.state(gemma_v2)
