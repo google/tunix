@@ -14,6 +14,7 @@
 
 """Tests that the fleet wires the control plane to the orchestrator's handles."""
 
+import asyncio
 import types
 
 from absl.testing import absltest
@@ -21,6 +22,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import worker_fleet
 from tunix.experimental.worker import abstract_worker
+from tunix.experimental.worker import rollout_worker
 
 
 class _FakeCluster:
@@ -119,6 +121,57 @@ class WorkerFleetTest(absltest.TestCase):
     fleet = worker_fleet.WorkerFleet(trainer=_PlainTrainer())
     self.assertEmpty(fleet.registry.roles())
     self.assertIsNotNone(fleet.trainer)
+
+
+class RolloutFleetPoolTest(absltest.TestCase):
+  """A fleet holding several rollout workers manages and balances all of them."""
+
+  class _TrajectoryWorker(rollout_worker.RolloutWorker):
+    """Minimal worker speaking the per-trajectory rollout contract."""
+
+    def __init__(self, worker_id: str):
+      super().__init__(worker_id=worker_id)
+      self.seen = []
+
+    async def generate(self, request, on_complete=None):
+      del on_complete
+      self.seen.append(request.prompt_id)
+      return datatypes.RolloutResponse(
+          status="SUCCEEDED", metadata={"served_by": self.worker_id}
+      )
+
+  def test_registers_every_rollout_worker_in_the_pool(self):
+    workers = [self._TrajectoryWorker(f"rollout_{i}") for i in range(3)]
+    fleet = worker_fleet.WorkerFleet(rollout=workers)
+
+    self.assertLen(fleet.registry.group("rollout").members(), 3)
+    self.assertLen(fleet.rollout_workers, 3)
+    # Whole-batch generation still targets a single worker.
+    self.assertIs(fleet.rollout, workers[0])
+
+  def test_pool_spreads_requests_over_the_registered_workers(self):
+    workers = [self._TrajectoryWorker(f"rollout_{i}") for i in range(3)]
+    fleet = worker_fleet.WorkerFleet(rollout=workers, rollout_max_concurrency=2)
+
+    pool = fleet.rollout_pool
+    self.assertEqual(pool.max_in_flight, 6)
+
+    requests = [
+        datatypes.RolloutRequest(prompt=f"p{i}", prompt_id=f"p{i}")
+        for i in range(9)
+    ]
+    responses = asyncio.run(pool.generate(requests))
+
+    self.assertLen(responses, 9)
+    self.assertTrue(all(r.status == "SUCCEEDED" for r in responses))
+    # Every worker took a share rather than one absorbing the batch.
+    for worker in workers:
+      self.assertNotEmpty(worker.seen)
+
+  def test_fleet_without_rollout_workers_has_no_pool(self):
+    fleet = worker_fleet.WorkerFleet()
+    self.assertIsNone(fleet.rollout_pool)
+    self.assertIsNone(fleet.rollout)
 
 
 class InProcessHandleTest(absltest.TestCase):

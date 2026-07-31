@@ -38,15 +38,25 @@ Nothing here is in-process-specific: swapping the handles for RPC-backed ones
 the loop.
 """
 
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import health_monitor as health_monitor_lib
 from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import lifecycle as lifecycle_lib
 from tunix.experimental.orchestrator import orchestrator_rl_cluster
+from tunix.experimental.orchestrator import rollout_pool as rollout_pool_lib
 from tunix.experimental.orchestrator import worker_registry as worker_registry_lib
 from tunix.experimental.worker import abstract_worker
+
+
+def _as_sequence(handles: Any) -> Tuple[Any, ...]:
+  """Normalizes a single handle, a sequence of them, or None into a tuple."""
+  if handles is None:
+    return ()
+  if isinstance(handles, (list, tuple)):
+    return tuple(handles)
+  return (handles,)
 
 
 class WorkerFleet:
@@ -59,6 +69,7 @@ class WorkerFleet:
       rollout: Any = None,
       inference: Any = None,
       weight_sync: Any = None,
+      rollout_max_concurrency: int = 1,
       state_deadlines_s: Optional[Mapping[str, float]] = None,
       clock: Any = None,
   ):
@@ -66,23 +77,30 @@ class WorkerFleet:
 
     Args:
       trainer: Trainer handle (`train`, optionally `per_token_logps`).
-      rollout: Rollout handle (`generate`).
+      rollout: Rollout handle (`generate`), or a sequence of them to run as a
+        pool. Every member is registered, so the control plane brings up and
+        monitors each one individually.
       inference: Inference handle (`per_token_logps`) for reference scoring.
       weight_sync: Weight-sync handle (`sync`). Not a Worker, so it is not
         registered or lifecycle-managed.
+      rollout_max_concurrency: Trajectories each rollout worker generates at
+        once when work is dispatched through `rollout_pool`.
       state_deadlines_s: Optional per-state deadlines for the health monitor.
       clock: Optional monotonic clock for the health monitor (tests).
     """
     self._trainer = trainer
-    self._rollout = rollout
+    self._rollout_workers = _as_sequence(rollout)
     self._inference = inference
     self._weight_sync = weight_sync
 
     self._registry = worker_registry_lib.WorkerRegistry()
     # Only handles that are real Workers can be lifecycle-managed and polled.
-    for handle in (trainer, rollout, inference):
+    for handle in (trainer, *self._rollout_workers, inference):
       if isinstance(handle, abstract_worker.Worker):
         self._registry.register(handle)
+
+    self._rollout_max_concurrency = rollout_max_concurrency
+    self._rollout_pool: Optional[rollout_pool_lib.PooledRolloutWorker] = None
 
     self._lifecycle = lifecycle_lib.LifecycleDriver(self._registry)
     monitor_kwargs: dict[str, Any] = {}
@@ -128,6 +146,10 @@ class WorkerFleet:
   def build_cluster(self, base: Any) -> Any:
     """Returns an `OrchestratorRLCluster` routed to this fleet's handles.
 
+    The cluster's `generate` takes a whole prompt batch and blocks on it, so it
+    is routed to a single rollout worker. Trajectory-level work that should be
+    spread over the pool goes through `rollout_pool` instead.
+
     Args:
       base: The in-process cluster supplying the surface that is not routed
         (config, tokenizer, metrics, step counter).
@@ -135,7 +157,7 @@ class WorkerFleet:
     return orchestrator_rl_cluster.OrchestratorRLCluster(
         base,
         trainer_worker=self._trainer,
-        rollout_worker=self._rollout,
+        rollout_worker=self.rollout,
         inference_worker=self._inference,
         weight_sync=self._weight_sync,
     )
@@ -160,7 +182,30 @@ class WorkerFleet:
 
   @property
   def rollout(self) -> Any:
-    return self._rollout
+    """The rollout worker used for whole-batch, blocking generation."""
+    return self._rollout_workers[0] if self._rollout_workers else None
+
+  @property
+  def rollout_workers(self) -> Sequence[Any]:
+    """Every rollout worker in the fleet, each managed by the control plane."""
+    return self._rollout_workers
+
+  @property
+  def rollout_pool(self) -> Optional[rollout_pool_lib.PooledRolloutWorker]:
+    """Load-balanced view of the rollout workers, for per-trajectory requests.
+
+    Dispatches one `RolloutRequest` per trajectory across the fleet's rollout
+    workers, so it requires workers speaking the `RolloutWorker` contract
+    (`generate(request) -> RolloutResponse`). The `InProcessRolloutWorker`
+    adapter speaks the cluster's whole-batch `generate(prompts, ...)` instead
+    and belongs on `build_cluster`, not here.
+    """
+    if self._rollout_pool is None and self._rollout_workers:
+      self._rollout_pool = rollout_pool_lib.PooledRolloutWorker.from_workers(
+          self._rollout_workers,
+          max_concurrency=self._rollout_max_concurrency,
+      )
+    return self._rollout_pool
 
   @property
   def inference(self) -> Any:

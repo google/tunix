@@ -52,6 +52,23 @@ RequestOrBatch = Union[
 ]
 
 
+def _as_actor_handle(worker: Any) -> remote_execution.ActorHandle:
+  """Returns an actor handle addressing `worker`, whatever transport it uses."""
+  if isinstance(worker, remote_execution.ActorHandle):
+    return worker
+  actor = getattr(worker, "actor", None)
+  if isinstance(actor, remote_execution.ActorHandle):
+    return actor
+  if not callable(getattr(worker, "generate", None)):
+    raise TypeError(
+        f"{type(worker).__name__} is not usable as a rollout worker: it is"
+        " neither an ActorHandle nor an object exposing generate()."
+    )
+  return remote_execution.InProcessActorHandle(
+      remote_execution.InProcessRemoteExecutionServer(instance=worker)
+  )
+
+
 class PooledRolloutWorker(rollout_worker.RolloutWorker):
   """Fans rollout requests across a pool of rollout workers.
 
@@ -81,6 +98,22 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
         actors, max_concurrency=max_concurrency
     )
     self._method_name = method_name
+
+  @classmethod
+  def from_workers(
+      cls, workers: Sequence[Any], **kwargs
+  ) -> "PooledRolloutWorker":
+    """Builds a pool from rollout workers of any transport.
+
+    Accepts actor handles, the RPC handles the fleet holds (anything exposing
+    an `actor`), and plain in-process worker objects, which are bound to an
+    in-process server so the pool can drive them the same way.
+
+    Args:
+      workers: The rollout workers to pool. Must not be empty.
+      **kwargs: Forwarded to the constructor.
+    """
+    return cls([_as_actor_handle(worker) for worker in workers], **kwargs)
 
   @property
   def dispatcher(self) -> load_balancer.BalancedDispatcher:
