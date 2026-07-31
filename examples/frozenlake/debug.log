@@ -1,28 +1,2 @@
-
-Traceback (most recent call last):
-  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 513, in <module>
-    trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1241, in train
-    self.train_step(train_example)
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1002, in train_step
-    train_loss, aux, grad_norm = self._jitted_fused_step_fn(
-                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 1023, in __call__
-    pure_args_out, pure_kwargs_out, pure_out = self.jitted_fn(
-                                               ^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 138, in __call__
-    out = self.f(*args, **kwargs)
-          ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 603, in _fused_step
-    return loss, aux, self._update_step(model, optimizer, grad_accumulator)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 569, in _update_step
-    acc_grads = grad_accumulator.get()
-                ^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 273, in get
-    return jax.tree_util.tree_map(
-           ^^^^^^^^^^^^^^^^^^^^^^^
-ValueError: Custom node type mismatch: expected type: <class 'flax.nnx.statelib.State'>, value: {}.
---------------------
-For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+[cmp] weights after training: XOR v1=0 v2=0 identical
 sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
