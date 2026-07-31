@@ -29,6 +29,7 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -49,7 +50,7 @@ from tunix.sft import sharding_utils
 from tunix.sft import utils
 from typing_extensions import override
 
-_ModelInputT = dict[str, Any]
+_ModelInputT = dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
@@ -168,17 +169,6 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-import functools
-
-def pytree_xor_checksum(tree):
-  def leaf_xor(x):
-    # Bitcast floats to integer bits (uint32 for float32, uint16 for bfloat16)
-    bits = jax.lax.bitcast_convert_type(x, jnp.uint32 if x.itemsize == 4 else jnp.uint16).astype(jnp.uint32)
-    return jnp.bitwise_xor.reduce(bits, axis=None)
-  
-  leaves = jax.tree_util.tree_leaves(tree)
-  return functools.reduce(jnp.bitwise_xor, [leaf_xor(l) for l in leaves])
-
 
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
@@ -210,28 +200,40 @@ class GradientAccumulator(nnx.Module):
       model: nnx.Module,
       wrt: type[nnx.Variable],
       *,
-      allocate: bool = True,
+      allocate_grads: bool = True,
+      accumulator_dtype: DTypeLike = jnp.float32,
   ):
     # Static (non-array) attribute: decides whether the buffer is a long-lived
     # accumulation target that must be zeroed between updates, or a scratch slot
     # that `set()` overwrites wholesale and `reset()` can simply drop.
-    self.persistent = allocate
-    if allocate:
-      state = nnx.state(model, wrt)
-      self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    state = nnx.state(model, wrt)
+    self._param_dtypes = nnx.data(
+        jax.tree_util.tree_map(
+            lambda x: getattr(x, "dtype", None),
+            state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+    )
+    self.persistent = allocate_grads
+    if allocate_grads:
+      self.grads = nnx.data(
+          jax.tree_util.tree_map(
+              lambda x: jnp.zeros(x.shape, dtype=accumulator_dtype), state
+          )
+      )
     else:
       # When every update consumes exactly one micro-batch, `set()` overwrites
       # the whole tree before anything reads it, so the initial zeros are dead
       # on arrival. Skipping them avoids writing a full copy of the parameter
       # tree (~3.5 GiB per device for gemma4-e2b at 12 layers in fp32).
       self.grads = nnx.data({})
+      self._param_dtypes = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
   @property
   def allocated(self) -> bool:
     """Whether a parameter-sized gradient buffer is currently held."""
     return bool(jax.tree_util.tree_leaves(self.grads))
-
 
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
@@ -264,9 +266,14 @@ class GradientAccumulator(nnx.Module):
   def get(self):
     scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
 
+    def _scale_and_cast(v, target_dtype):
+      res = v[...] * scale.astype(v[...].dtype)
+      return type(v)(res.astype(target_dtype) if target_dtype else res)
+
     return jax.tree_util.tree_map(
-        lambda v: type(v)(v[...] * scale.astype(v[...].dtype)),
+        _scale_and_cast,
         self.grads,
+        self._param_dtypes,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
@@ -284,10 +291,8 @@ class GradientAccumulator(nnx.Module):
       re-adopts the incoming gradients.
     """
     if self.persistent:
-
       def _zero_in_place(v):
         v.set_value(jnp.zeros_like(v[...]))
-
       jax.tree_util.tree_map(
           _zero_in_place,
           self.grads,
@@ -296,29 +301,6 @@ class GradientAccumulator(nnx.Module):
     else:
       self.grads = nnx.data({})
     self.denom.set_value(jnp.zeros_like(self.denom[...]))
-
-
-def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
-  """Cast the optimizer state's floating-point leaves to float32 in-place.
-
-  Args:
-    optimizer: The nnx.Optimizer instance whose state will be modified.
-  """
-
-  def _cast(v):
-    if isinstance(v, nnx.Variable):
-      val = v.value
-      if (
-          hasattr(val, "dtype")
-          and jnp.issubdtype(val.dtype, jnp.floating)
-          and val.dtype != jnp.float32
-      ):
-        v.value = val.astype(jnp.float32)
-
-  opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
-  jax.tree_util.tree_map(
-      _cast, opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
-  )
 
 
 class PeftTrainer(abstract_trainer.AbstractTrainer):
@@ -370,12 +352,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    # Promote floating-point leaves to float32 in-place to match the dtype of
-    # the optimizer update function branch (which is float32 due to
-    # `optax.inject_hyperparams`).
-    _promote_opt_state_floats_to_float32(self.optimizer)
     self.grad_accumulator = GradientAccumulator(
-        self.model, wrt_target, allocate=not self._is_single_microstep()
+        self.model, wrt_target, allocate_grads=not self._is_single_microstep()
     )
 
     self.loss_fn = _default_loss_fn
@@ -559,32 +537,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # Scale the unreduced gradients using the metric's scale computation
       scale = aux.primary_loss.compute_scale()
       grads = jax.tree.map(lambda g: g * scale, grads)
-      # # 1. Print the precision generated by nnx.value_and_grad:
-      # raw_dtypes = set(jax.tree_util.tree_leaves(jax.tree.map(lambda x: getattr(x, 'dtype', type(x)), grads)))
-      # print("JIT TRACE v2 [fwd_bwd] value_and_grad output dtypes: ", raw_dtypes)
 
       # Compute exactly equivalent legacy loss val
       loss_val = aux.primary_loss.compute()
 
-    # Check raw grad norm before accumulation:
-    # raw_norm = optax.global_norm(
-    #     jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
-    # )
-    # print(f"DEBUG v2: Raw Grad Norm in fwd_bwd: {jax.device_get(raw_norm)}")
-    # jax.debug.print("DEBUG v2: Raw Grad Norm in fwd_bwd: {x}", x=raw_norm)
-
     # TODO(b/491970038): update denom for sequence packing.
     grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
-
-    # norm_after_set = optax.global_norm(
-    #     jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grad_accumulator.grads)
-    # )
-    # jax.debug.print("DEBUG v2: Norm AFTER set inside fwd_bwd: {x}", x=norm_after_set)
-    # # jax.debug.print("DEBUG v2 fwd_bwd: slice: {x}", x=jax.tree_util.tree_leaves(grad_accumulator.grads)[0][0, :5])
-    # jax.debug.print("DEBUG v2 fwd_bwd Whole-Tree XOR: {x}", x=pytree_xor_checksum(grad_accumulator.grads))
-    # # 1. Print the precision generated by nnx.value_and_grad:
-    # acc_dtypes = set(jax.tree_util.tree_leaves(jax.tree.map(lambda x: getattr(x, 'dtype', type(x)), grad_accumulator.grads)))
-    # print("JIT TRACE v2 [fwd_bwd] grad_accumulator.grads output dtypes: ", acc_dtypes)
     if isinstance(aux, utils.LossOutput):
       return loss_val, aux.aux_metrics
     elif self._has_aux:
@@ -608,23 +566,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     Returns:
       The gradient norm.
     """
-    if self._is_single_microstep():
-      acc_grads = grad_accumulator.grads
-    else:
-      acc_grads = grad_accumulator.get()
-    # jax.debug.print("DEBUG v2 update slice: {x}", x=jax.tree_util.tree_leaves(acc_grads)[0][0, :5])
-    # jax.debug.print("DEBUG v2 update Whole-Tree XOR: {x}", x=pytree_xor_checksum(acc_grads))
-    # 1. Print the precision generated by nnx.value_and_grad:
-    # acc_dtypes = set(jax.tree_util.tree_leaves(jax.tree.map(lambda x: getattr(x, 'dtype', type(x)), acc_grads)))
-    # print("JIT TRACE v2 [update_step] acc_grads output dtypes:", acc_dtypes)
-    # Compute the norm in float32. For production-size models the sum-of-squares
-    # over bf16 grads quickly exhausts bf16, and float32 is needed for numerical
-    # stability.
+    acc_grads = grad_accumulator.get()
     norm = optax.global_norm(
         jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
     )
-    # print(f"DEBUG v2: Grad Norm in update_step: {jax.device_get(norm)}")
-    # jax.debug.print("DEBUG v2: Norm in update_step: {x}", x=norm)
     optimizer.update(model, acc_grads)
     # Unconditional: `reset()` itself decides between zeroing the buffer and
     # dropping it, based on whether the accumulator is persistent. Zeroing an
@@ -774,10 +719,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      if not self._is_single_microstep():
-        donate_argnames = ("grad_accumulator",)
-      else:
+      if self._is_single_microstep():
         donate_argnames = None
+      else:
+        donate_argnames = ("grad_accumulator",)
       self._jitted_fwd_bwd_step_fn = nnx.jit(
           fwd_bwd_step, donate_argnames=donate_argnames,
       )
@@ -799,7 +744,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
       self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
           self._jitted_fwd_bwd_step_fn,
-
       )
       self._jitted_update_step_fn = maybe_cache_and_partial(
           self._jitted_update_step_fn,
@@ -1288,6 +1232,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
+          print("is_update_step_val: ", is_update_step_val)
+          print("self._jitted_fused_step_fn: ", self._jitted_fused_step_fn)
           if self._jitted_fused_step_fn is not None and is_update_step_val:
             # Single micro-batch per update: run both halves as one executable
             # so the gradient tree stays an internal temporary. Identical
