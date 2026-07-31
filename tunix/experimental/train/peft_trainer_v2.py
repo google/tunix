@@ -192,21 +192,6 @@ def pytree_xor_checksum(tree):
 >>>>>>> ef1cdcbb (grads_diff)
 
 
-# Debug hook, counterpart to `peft_trainer._EXPOSE_DEPTH1_GRADS`.
-#
-# At depth 1 the accumulator is allocated lazily: `add()` adopts the gradient
-# tree, so its sharding is whatever GSPMD propagated rather than the parameter
-# partition spec that `_shard_optimizer` would have pinned. That is fine on its
-# own, but it makes v2's gradient arrays laid out differently from v1's, and an
-# elementwise diff between the two then compares mismatched positions and
-# reports an enormous difference for arrays that hold identical values.
-#
-# Setting this forces the eager, pre-sharded path so both trainers produce
-# gradients with the same layout and can be compared position by position. It
-# costs one parameter-tree-sized buffer, so leave it off when measuring HBM.
-_FORCE_PREALLOCATED_ACCUMULATOR = False
-
-
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 

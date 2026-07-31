@@ -631,22 +631,6 @@ class PeftTrainer:
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
-      if _EXPOSE_DEPTH1_GRADS:
-        # Same norm, but read back out of the accumulator instead of from
-        # `grads`. This separates the two ways the exposed gradients can be
-        # wrong: if these two lines disagree, the accumulator was written with
-        # the wrong values; if they agree here but the host-side readback is
-        # garbage, the values were fine and it is nnx's state round-trip out of
-        # jit that lost them.
-        jax.debug.print(
-            "DEBUG v1: norm from grads={x} from accumulator={y}",
-            x=grad_norm,
-            y=optax.global_norm(
-                jax.tree_util.tree_map(
-                    lambda x: x.astype(jnp.float32), grad_accumulator.grads
-                )
-            ),
-        )
       optimizer.update(model, grads)
     else:
       if isinstance(aux, utils.LossOutput):
@@ -779,6 +763,16 @@ class PeftTrainer:
 
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+      # Donate exactly what the step writes. A donated argument with no
+      # corresponding output cannot be aliased, so XLA reports "Some donated
+      # buffers were not usable" and falls back to a copy -- costing a buffer
+      # instead of saving one. At depth 1 the fast path applies `grads` directly
+      # and leaves the accumulator alone, so it must not be donated there.
+      # (Note the trailing comma: `("optimizer")` is a bare string, not a
+      # 1-tuple, and only works by accident of jax accepting `str`.)
+      donated = ["optimizer"]
+      if not self._is_single_microstep():
+        donated.append("grad_accumulator")
       self._jitted_train_step_fn = nnx.jit(
           train_step, donate_argnames=("optimizer", "grad_accumulator")
       )
