@@ -91,6 +91,7 @@ class AbstractTrainerHandle(abstract_worker.Worker):
       grad_accumulation_steps: int = 1,
       worker_id: str = "trainer",
       payload_fn: Any = to_trainer_payload,
+      transport: Any = None,
   ):
     """Initializes the handle.
 
@@ -99,6 +100,8 @@ class AbstractTrainerHandle(abstract_worker.Worker):
       grad_accumulation_steps: Micro-batches per optimizer update.
       worker_id: Identifier reported to the control plane.
       payload_fn: Converts one train example into a trainer payload.
+      transport: Carries staged weights to replicas in other processes. None
+        when everything shares a process and there is nothing to carry.
 
     Raises:
       ValueError: If `grad_accumulation_steps` is not positive.
@@ -112,6 +115,7 @@ class AbstractTrainerHandle(abstract_worker.Worker):
     self._grad_accumulation_steps = grad_accumulation_steps
     self._worker_id = worker_id
     self._payload_fn = payload_fn
+    self._transport = transport
     self._micro_steps = 0
     self._updates = 0
 
@@ -134,6 +138,44 @@ class AbstractTrainerHandle(abstract_worker.Worker):
       if self._micro_steps % self._grad_accumulation_steps == 0:
         self._trainer.update()
         self._updates += 1
+
+  def configure_loss(self, spec: Any) -> None:
+    """Builds the loss from its description and installs it on the trainer.
+
+    This is how a trainer in another process gets a loss at all: it receives
+    a description and constructs the function locally.
+    """
+    spec.install_on(self._trainer)
+
+  def drain_metrics(self) -> dict[str, float]:
+    """Hands back what the trainer measured, so the run can log it."""
+    buffer = self._trainer.get_metrics()
+    scalars = getattr(buffer, "scalar_metrics", None) or {}
+    return {key: float(value) for key, value in scalars.items()}
+
+  def prepare_weight_sync(self, metadata: Any = None) -> Any:
+    """Publishes the trainer's current weights and returns their coordinates.
+
+    Args:
+      metadata: The sync round's request, carrying the version being minted.
+
+    Returns:
+      Coordinates a replica can fetch from, or None when no transport is
+      configured -- in one process there is nothing to carry.
+    """
+    if self._transport is None:
+      return None
+    version = getattr(metadata, "policy_version", 0)
+    return self._transport.stage(self._readable_params(), version)
+
+  def _readable_params(self) -> Any:
+    params = getattr(self._trainer, "params", None)
+    if params is None:
+      raise RuntimeError(
+          f"{type(self._trainer).__name__} does not expose its parameters, so"
+          " they cannot be staged for transport."
+      )
+    return params
 
   def per_token_logps(
       self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int

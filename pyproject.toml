@@ -120,3 +120,6 @@ known_third_party = ["tunix"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+  "multiprocess: spawns worker processes; slower, and needs free local ports",
+]

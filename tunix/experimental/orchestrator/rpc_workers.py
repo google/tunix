@@ -163,6 +163,10 @@ class RemoteTrainerWorker(_RemoteWorker):
     """
     self._actor.submit("configure_loss", spec)
 
+  def prepare_weight_sync(self, metadata: Any = None) -> Any:
+    """Asks the remote trainer to publish its weights, returning coordinates."""
+    return self._actor.submit("prepare_weight_sync", metadata)
+
   def drain_metrics(self) -> dict[str, float]:
     """Collects the metrics a remote trainer recorded during its last steps.
 
@@ -208,6 +212,26 @@ class RemoteRolloutWorker(_RemoteWorker):
         trace_tags,
         max_generation_steps,
     )
+
+
+class RemoteHostedRolloutWorker(_RemoteWorker):
+  """Per-trajectory rollout worker served over RPC.
+
+  The twin of the whole-batch handle above, for workers that answer one
+  request per trajectory. Both are named `generate`, so which one a caller
+  wants is decided by the handle it holds.
+  """
+
+  _role = "rollout"
+
+  def generate(self, requests: Any) -> Any:
+    return self._actor.submit("generate", requests)
+
+  def prepare_weight_sync(self, metadata: Any = None) -> Any:
+    return self._actor.submit("prepare_weight_sync", metadata)
+
+  def sync_weights(self, metadata: Any = None) -> int:
+    return self._actor.submit("sync_weights", metadata)
 
 
 class RemoteInferenceWorker(_RemoteWorker):
