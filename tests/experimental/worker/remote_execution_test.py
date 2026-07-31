@@ -1218,6 +1218,134 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_pool_execution_session_tracks_task_before_dispatch_ack_returns(
+      self,
+  ):
+    """The task id is tracked while the ack is still in flight, so an early response can be matched."""
+
+    class SlowAckHandle(remote_lib.ActorHandle):
+      """Completes work before returning the dispatch ack."""
+
+      def __init__(self):
+        self.ack_gate = asyncio.Event()
+        self.dispatch_started = asyncio.Event()
+        self.responses: list[remote_lib.ExecutionResponse] = []
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        self.dispatch_started.set()
+        await self.ack_gate.wait()
+        self.responses.append(
+            remote_lib.ExecutionResponse(
+                request_id=request_id, result=f"res_{request_id}"
+            )
+        )
+        return request_id
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        while not self.responses:
+          await asyncio.sleep(0)
+        return self.responses.pop(0)
+
+    async def _run():
+      handle = SlowAckHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      first = asyncio.create_task(session.submit("req_1", "method"))
+      await handle.dispatch_started.wait()
+      # Still mid-dispatch: the task must already be attributable to this
+      # worker, otherwise a response arriving now cannot be matched to it.
+      self.assertEqual(session._dispatched_tasks[handle], {"req_1"})
+
+      handle.ack_gate.set()
+      await first
+
+      result, exc = await session.as_completed().__anext__()
+      self.assertIsNone(exc)
+      self.assertEqual(result, "res_req_1")
+      self.assertEmpty(session._dispatched_tasks[handle])
+      self.assertEqual(session._in_flight, 0)
+
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_ignores_response_it_did_not_dispatch(self):
+    """A foreign response must not evict or complete one of this session's tasks."""
+
+    class ForeignResponseHandle(remote_lib.ActorHandle):
+      """Emits a response for a request this session never dispatched."""
+
+      def __init__(self):
+        self.responses = [
+            remote_lib.ExecutionResponse(
+                request_id="other_sessions_req", result="not_mine"
+            ),
+            remote_lib.ExecutionResponse(request_id="req_1", result="mine"),
+        ]
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        return request_id
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        if self.responses:
+          return self.responses.pop(0)
+        await asyncio.sleep(100)
+
+    async def _run():
+      handle = ForeignResponseHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      await session.submit("req_1", "method")
+
+      # The foreign response is skipped, so the first completion we see is ours.
+      result, exc = await session.as_completed().__anext__()
+      self.assertIsNone(exc)
+      self.assertEqual(result, "mine")
+      self.assertEmpty(session._dispatched_tasks[handle])
+      self.assertEqual(session._in_flight, 0)
+
+      await session.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

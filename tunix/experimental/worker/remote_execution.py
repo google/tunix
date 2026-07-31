@@ -1052,6 +1052,12 @@ class PoolExecutionSession:
       raise RuntimeError("PoolExecutionSession is closed.")
     actor = self._pool._get_next_actor(method_name, args, kwargs)
 
+    # Register the id BEFORE dispatching. The worker can finish and enqueue its
+    # response while dispatch_task is still awaiting its ack, and the polling
+    # loop must be able to attribute that response to this task.
+    dispatched_set = self._dispatched_tasks.setdefault(actor, set())
+    dispatched_set.add(request_id)
+
     # Increment in_flight BEFORE dispatch to prevent race conditions with as_completed()
     self._in_flight += 1
     self._ensure_worker_polling(actor)
@@ -1060,7 +1066,10 @@ class PoolExecutionSession:
       req_id = await actor.dispatch_task(
           request_id, method_name, *args, **kwargs
       )
-      self._dispatched_tasks.setdefault(actor, set()).add(req_id)
+      if req_id != request_id:
+        # The server minted its own id (caller passed none).
+        dispatched_set.discard(request_id)
+        dispatched_set.add(req_id)
       # Re-ensure worker polling is active in case the previous polling loop
       # died due to a transport error while dispatch_task was awaiting.
       self._ensure_worker_polling(actor)
@@ -1068,6 +1077,7 @@ class PoolExecutionSession:
         self._work_events[actor].set()
       return req_id
     except Exception:
+      dispatched_set.discard(request_id)
       self._in_flight -= 1
       self._notify_if_zero_flight()
       raise
@@ -1092,16 +1102,25 @@ class PoolExecutionSession:
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
           if isinstance(response, ExecutionResponse):
+            if response.request_id not in dispatched_set:
+              # Not one of ours: the server's response queue is shared, so
+              # another consumer of the same worker may be polling it too.
+              # Attributing it to an arbitrary task here would corrupt this
+              # session's per-worker accounting.
+              logging.warning(
+                  "Ignoring response for unknown request_id %r from worker %r;"
+                  " it was not dispatched by this session.",
+                  response.request_id,
+                  actor,
+              )
+              continue
+            dispatched_set.discard(response.request_id)
             try:
               res = response.unwrap()
               self._response_queue.put_nowait((res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
               self._response_queue.put_nowait((None, exc))
             self._in_flight -= 1
-            if response.request_id and response.request_id in dispatched_set:
-              dispatched_set.remove(response.request_id)
-            elif dispatched_set:
-              dispatched_set.pop()
             self._notify_if_zero_flight()
         except asyncio.CancelledError:
           break
