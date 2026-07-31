@@ -19,7 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, cast
 
 from absl import logging
 import flax
@@ -489,7 +489,8 @@ class PeftTrainer:
       if isinstance(out, utils.LossOutput):
         return out.primary_loss.unreduced_sum, out
       elif self._has_aux:
-        return out[0], out[1]
+        out_tuple = cast(Tuple[Any, Any], out)
+        return out_tuple[0], out_tuple[1]
       else:
         return out, None
 
@@ -603,7 +604,7 @@ class PeftTrainer:
       return
 
     def _shard(x, p):
-      if not isinstance(x, (jax.Array, np.ndarray)):
+      if not isinstance(x, jax.Array):
         return x
       if p is None:
         p = shd.PartitionSpec()

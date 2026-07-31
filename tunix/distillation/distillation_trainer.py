@@ -93,7 +93,10 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
   @override
   def with_loss_fn(
       self,
-      loss_fn: Callable[..., ArrayLike | tuple[ArrayLike, Any]],
+      loss_fn: Callable[
+          ...,
+          ArrayLike | tuple[ArrayLike, Any] | peft_trainer.utils.LossOutput,
+      ],
       has_aux: bool = False,
   ) -> "DistillationTrainer":
     raise NotImplementedError(
