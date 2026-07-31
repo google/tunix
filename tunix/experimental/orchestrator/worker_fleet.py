@@ -46,6 +46,7 @@ from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import lifecycle as lifecycle_lib
 from tunix.experimental.orchestrator import orchestrator_rl_cluster
 from tunix.experimental.orchestrator import rollout_pool as rollout_pool_lib
+from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry as worker_registry_lib
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
@@ -158,8 +159,39 @@ class WorkerFleet:
 
   # --- Control plane --------------------------------------------------------
 
-  def bring_up(self, dummy_data: Any = None) -> None:
-    """Runs initialize -> compile -> start across the fleet, phase by phase."""
+  def validate_startup(self, expected: Optional[Mapping[str, Any]] = None):
+    """Checks that the registered workers agree about how they are configured.
+
+    Args:
+      expected: Values this run requires, checked against every worker that
+        declares them.
+
+    Raises:
+      startup_validation.StartupValidationError: On any disagreement, listing
+        all of them.
+    """
+    startup_validation.require_agreement(
+        self._registry.workers(), expected=expected
+    )
+
+  def bring_up(
+      self,
+      dummy_data: Any = None,
+      *,
+      validate: bool = False,
+      expected: Optional[Mapping[str, Any]] = None,
+  ) -> None:
+    """Runs initialize -> compile -> start across the fleet, phase by phase.
+
+    Args:
+      dummy_data: Passed to each worker's compile step.
+      validate: Check configuration agreement first. Off by default because
+        in-process fleets share one config and have nothing to disagree
+        about; a fleet of separate processes should turn it on.
+      expected: Values this run requires, when validating.
+    """
+    if validate:
+      self.validate_startup(expected)
     self._lifecycle.bring_up(dummy_data)
 
   def shutdown(self) -> None:
