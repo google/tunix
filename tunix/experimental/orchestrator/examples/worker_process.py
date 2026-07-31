@@ -32,6 +32,7 @@ line when it is ready so a launcher can wait for it rather than sleeping.
 
 import asyncio
 from collections.abc import Sequence
+from typing import Any
 
 from absl import app
 from absl import flags
@@ -39,6 +40,8 @@ from absl import logging
 import numpy as np
 
 from tunix.experimental.orchestrator import hosted_rollout_worker
+from tunix.experimental.orchestrator import startup_validation
+from tunix.experimental.orchestrator import worker_discovery
 from tunix.experimental.orchestrator import trainer_handle as trainer_handle_lib
 from tunix.experimental.orchestrator import weight_transport
 from tunix.experimental.testing import toy_trainer
@@ -54,6 +57,9 @@ _TRANSPORT_DIR = flags.DEFINE_string(
 _VOCAB_SIZE = flags.DEFINE_integer("vocab_size", 16, "Toy vocabulary size.")
 _GRAD_ACCUMULATION_STEPS = flags.DEFINE_integer(
     "grad_accumulation_steps", 1, "Micro-batches per optimizer update."
+)
+_TOKENIZER_HASH = flags.DEFINE_string(
+    "tokenizer_hash", "toy-vocab", "Identifies the vocabulary in use."
 )
 
 READY_MARKER = "WORKER_READY"
@@ -143,27 +149,58 @@ def build_worker(role: str, transport_dir: str, vocab_size: int):
   raise ValueError(f"Unknown worker role: {role!r}")
 
 
-def serve(worker, port: int) -> None:
+def serve(worker, port: int, context: Any = None) -> None:
   """Serves `worker` until the process is killed.
 
   The blocking entry point cannot be used here: it does not return until the
   server stops, so there would be no moment at which to announce readiness.
+
+  Args:
+    worker: The worker to serve.
+    port: Port to listen on.
+    context: Optional runtime context. When given, the worker announces itself
+      through discovery once it is listening, which is how an orchestrator
+      learns where it is instead of being configured with the address.
   """
   server = remote_execution.GrpcRemoteExecutionServer(worker)
   loop = asyncio.new_event_loop()
   asyncio.set_event_loop(loop)
   loop.run_until_complete(server.start_serving_async(port))
-  # Announced only once the port is accepting connections, so a launcher waits
-  # for this line instead of guessing how long startup takes.
+
+  # Announced only after the port accepts connections. A listener builds a
+  # handle the moment it hears, and a handle to a socket that is not up yet
+  # fails on first use.
+  if context is not None:
+    worker_discovery.announce(
+        context.ipc.discovery,
+        worker_discovery.WorkerAnnouncement(
+            role=_ROLE.value,
+            worker_id=worker.info().worker_id,
+            port=port,
+            resources=_declared_resources(),
+        ),
+    )
   print(f"{READY_MARKER} {port}", flush=True)
   loop.run_forever()
 
 
-def main(argv: Sequence[str]) -> None:
+def _declared_resources() -> dict[str, Any]:
+  """What this worker states about its configuration, for the fleet check."""
+  return startup_validation.describe_resources(
+      tokenizer_hash=_TOKENIZER_HASH.value,
+      pad_id=0,
+      eos_id=1,
+      vocab_size=_VOCAB_SIZE.value,
+  )
+
+
+def main(argv: Sequence[str], context: Any = None) -> None:
+  """Entry point, taking the runtime's context when launched through it."""
   del argv
   serve(
       build_worker(_ROLE.value, _TRANSPORT_DIR.value, _VOCAB_SIZE.value),
       _PORT.value,
+      context,
   )
 
 
