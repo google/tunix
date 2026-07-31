@@ -1,0 +1,130 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""In-process worker handles backed by an RLCluster (or any AbstractRLEngine).
+
+These handles satisfy the same contracts a remote (RPC) worker would, but run in
+the same process by delegating straight to a base ``RLCluster`` /
+``AbstractRLEngine``. They let ``OrchestratorRLEngine`` route its compute
+primitives to handles today (single process) and give the eventual RPC handles a
+behavioral reference to match.
+
+``RLOrchestrator`` (RL Algorithm Layer)
+  └── ``OrchestratorRLEngine`` (Coordination/Routing Layer)
+        └── ``InProcessRolloutWorker`` (Worker Handle)
+              └── ``RLCluster`` /
+              ``AbstractRLEngine`` (Base In-process Engine Layer)
+"""
+
+from typing import Any, Mapping
+
+
+class InProcessTrainerWorker:
+  """Trainer-worker handle that wraps an in-process base ``RLCluster`` / ``AbstractRLEngine``.
+
+  Contract driven by ``OrchestratorRLEngine``:
+
+      train(chunks, eval_ds, skip_jit) -> None
+      per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
+      sync_weights() -> None
+  """
+
+  def __init__(self, rl_engine: Any):
+    self._rl_engine = rl_engine
+
+  def train(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
+    """Runs one actor (and optional critic) trainer pass over the micro-batch."""
+    self._rl_engine.update_actor(chunks, eval_ds, skip_jit)
+    if hasattr(self._rl_engine, "critic_trainer"):
+      self._rl_engine.update_critic(chunks, eval_ds, skip_jit)
+
+  def per_token_logps(
+      self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
+  ) -> Any:
+    """Actor-model per-token logprobs over a padded group."""
+    return self._rl_engine.get_actor_per_token_logps(
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        micro_batch_size=(
+            self._rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
+        ),
+    )
+
+  def sync_weights(self) -> None:
+    """Synchronizes trainer weights to rollout/inference replicas."""
+    self._rl_engine.sync_weights()
+
+
+class InProcessRolloutWorker:
+  """Rollout-worker handle that wraps an in-process base ``RLCluster`` / ``AbstractRLEngine``.
+
+  Contract driven by ``OrchestratorRLEngine``:
+
+      generate(prompts, ...) -> RolloutOutput
+      sync_weights() -> None
+  """
+
+  def __init__(self, rl_engine: Any):
+    self._rl_engine = rl_engine
+
+  def generate(
+      self,
+      prompts: list[str] | list[list[dict[str, str]]],
+      apply_chat_template: bool = False,
+      mode: Any = None,
+      micro_batch_size: int | None = None,
+      trace_tags: Mapping[str, Any] | None = None,
+      max_generation_steps: int | None = None,
+  ) -> Any:
+    """Generates completions for prompts by delegating to base engine."""
+    return self._rl_engine.generate(
+        prompts=prompts,
+        apply_chat_template=apply_chat_template,
+        mode=mode,
+        micro_batch_size=micro_batch_size,
+        trace_tags=trace_tags,
+        max_generation_steps=max_generation_steps,
+    )
+
+  def sync_weights(self) -> None:
+    """Synchronizes rollout weights from trainer."""
+    self._rl_engine.sync_weights()
+
+
+class InProcessInferenceWorker:
+  """Inference-worker handle that wraps an in-process base ``RLCluster`` / ``AbstractRLEngine``.
+
+  Contract driven by ``OrchestratorRLEngine``:
+
+      per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
+  """
+
+  def __init__(self, rl_engine: Any):
+    self._rl_engine = rl_engine
+
+  def per_token_logps(
+      self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
+  ) -> Any:
+    """Reference-model per-token logprobs over a padded group."""
+    return self._rl_engine.get_ref_per_token_logps(
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        micro_batch_size=(
+            self._rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
+        ),
+    )
