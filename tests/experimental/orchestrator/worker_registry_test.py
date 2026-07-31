@@ -110,6 +110,10 @@ class WorkerRegistryTest(absltest.TestCase):
     self.assertNotIn("trainer", registry.roles())
     with self.assertRaises(KeyError):
       registry.unregister("t0")
+    with self.assertRaises(KeyError):
+      registry.get("t0")
+    with self.assertRaises(KeyError):
+      registry.info("t0")
 
   def test_unregister_retains_role_if_members_remain(self):
     registry = worker_registry.WorkerRegistry()

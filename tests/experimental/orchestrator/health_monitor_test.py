@@ -14,6 +14,8 @@
 
 """Tests for the HealthMonitor per-state deadline policy."""
 
+import concurrent.futures
+from unittest import mock
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import health_monitor
@@ -74,6 +76,15 @@ class HealthMonitorTest(absltest.TestCase):
     clock.t = 10_000_000.0
     self.assertEmpty(monitor.overdue())
 
+  def test_poll_skips_unregistered_worker(self):
+    registry = worker_registry.WorkerRegistry()
+    monitor = health_monitor.HealthMonitor(registry)
+    with mock.patch.object(registry, "worker_ids", return_value=["missing"]):
+      with self.assertLogs(level="WARNING") as logs:
+        reports = monitor.poll()
+      self.assertEmpty(reports)
+      self.assertIn("unregistered concurrently", logs.output[0])
+
   def test_state_change_resets_the_deadline_timer(self):
     worker = mock_worker.MockWorker("w0", roles={"trainer"})
     worker._state = WorkerState.COMPILING
@@ -91,6 +102,32 @@ class HealthMonitorTest(absltest.TestCase):
         200.0  # Well past the COMPILING deadline, but no longer COMPILING.
     )
     self.assertEmpty(monitor.overdue())
+
+  def test_close_shuts_down_owned_executor(self):
+    registry = worker_registry.WorkerRegistry()
+    monitor = health_monitor.HealthMonitor(registry)
+    monitor.close()
+    with self.assertRaisesRegex(
+        RuntimeError, "cannot schedule new futures after shutdown"
+    ):
+      monitor._executor.submit(lambda: None)
+
+  def test_injected_executor_not_shut_down_by_close(self):
+    registry = worker_registry.WorkerRegistry()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+      monitor = health_monitor.HealthMonitor(registry, executor=executor)
+      monitor.close()
+      future = executor.submit(lambda: 42)
+      self.assertEqual(future.result(), 42)
+
+  def test_context_manager_closes_monitor(self):
+    registry = worker_registry.WorkerRegistry()
+    with health_monitor.HealthMonitor(registry) as monitor:
+      pass
+    with self.assertRaisesRegex(
+        RuntimeError, "cannot schedule new futures after shutdown"
+    ):
+      monitor._executor.submit(lambda: None)
 
 
 if __name__ == "__main__":
