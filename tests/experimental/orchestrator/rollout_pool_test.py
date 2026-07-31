@@ -398,6 +398,31 @@ class PooledRolloutWorkerTest(absltest.TestCase):
     with self.assertRaises(TypeError):
       rollout_pool.PooledRolloutWorker.from_workers([object()])
 
+  def test_a_lost_trajectory_times_out_instead_of_stalling_the_batch(self):
+    """Nothing else bounds the wait, so a stuck worker would stall the step."""
+
+    async def _run():
+      worker = SpyRolloutWorker("w0", stalled_prompts=("p1",))
+      pool = rollout_pool.PooledRolloutWorker(
+          _in_process_handles([worker]),
+          max_concurrency=2,
+          batch_timeout_s=0.2,
+      )
+
+      responses = await asyncio.wait_for(
+          pool.generate(_requests(2)), timeout=10.0
+      )
+
+      self.assertLen(responses, 2)
+      self.assertEqual(responses[0].status, "SUCCEEDED")
+      # The straggler is reported, not waited on forever.
+      self.assertEqual(responses[1].status, "FAILED")
+      self.assertIsNotNone(responses[1].error)
+
+      worker.release.set()
+
+    asyncio.run(_run())
+
   def test_balances_over_real_grpc_workers(self):
     """Fire-and-forget dispatch plus long polling, across two localhost servers."""
 

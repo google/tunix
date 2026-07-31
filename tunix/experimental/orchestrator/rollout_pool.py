@@ -39,6 +39,8 @@ import collections
 import traceback as traceback_lib
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+from absl import logging
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import load_balancer
 from tunix.experimental.worker import remote_execution
@@ -101,6 +103,7 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
       max_concurrency: int = 1,
       worker_id: str = "rollout_pool",
       method_name: str = "generate",
+      batch_timeout_s: Optional[float] = None,
   ):
     """Initializes the pool.
 
@@ -110,12 +113,18 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
         runs at most `len(actors) * max_concurrency` generations concurrently.
       worker_id: Identifier for this pool.
       method_name: Method to invoke on each remote rollout worker.
+      batch_timeout_s: How long to wait for a batch before giving up on
+        whatever has not answered. Nothing else bounds this: the dispatcher
+        waits indefinitely, so a single lost trajectory would stall the step
+        that needs it. Stragglers come back as failed responses. None waits
+        forever, which is only safe when the workers themselves time out.
     """
     super().__init__(worker_id=worker_id)
     self._dispatcher = load_balancer.BalancedDispatcher(
         actors, max_concurrency=max_concurrency
     )
     self._method_name = method_name
+    self._batch_timeout_s = batch_timeout_s
     # Enforces one consumer per worker; see the class docstring.
     self._one_consumer = asyncio.Lock()
 
@@ -211,11 +220,24 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
     )
 
     responses: Dict[str, datatypes.RolloutResponse] = {}
-    async for request_id, result, exc in self._dispatcher.run(tasks):
-      response = self._as_response(request_id, by_id[request_id], result, exc)
-      responses[request_id] = response
-      if on_complete is not None:
-        on_complete(response)
+
+    async def _collect() -> None:
+      async for request_id, result, exc in self._dispatcher.run(tasks):
+        response = self._as_response(request_id, by_id[request_id], result, exc)
+        responses[request_id] = response
+        if on_complete is not None:
+          on_complete(response)
+
+    try:
+      await asyncio.wait_for(_collect(), timeout=self._batch_timeout_s)
+    except asyncio.TimeoutError:
+      logging.warning(
+          "Rollout batch timed out after %ss with %d of %d answered; the rest"
+          " are reported as failures.",
+          self._batch_timeout_s,
+          len(responses),
+          len(order),
+      )
 
     ordered = [
         responses.get(request_id) or self._missing_response(request_id)

@@ -56,9 +56,17 @@ class TrajectoryItem:
 
   Mirrors the `.traj` dict the agentic path yields, so the same postprocess can
   consume rollouts produced locally or by a remote worker.
+
+  Attributes:
+    traj: The trajectory fields the postprocess reads.
+    group_id: Which group this rollout belongs to. Exposed as an attribute
+      because the reused consumer reads it that way, not out of the dict. The
+      consumer derives a step number from it arithmetically, so a pooled path
+      feeding that consumer must issue numeric group ids.
   """
 
   traj: dict[str, Any]
+  group_id: Any = None
 
 
 def _concat(arrays: Sequence[Any], dtype: Any) -> np.ndarray:
@@ -160,10 +168,12 @@ def to_trajectory_item(
       "original_input": dict(original_input),
       "request_id": response.request_id,
   }
+  group_id = None
   if request is not None:
     traj["prompt_id"] = request.prompt_id
     traj["group_id"] = request.group_id
-  return TrajectoryItem(traj=traj)
+    group_id = request.group_id
+  return TrajectoryItem(traj=traj, group_id=group_id)
 
 
 def _original_input_from(
