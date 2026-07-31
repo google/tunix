@@ -843,8 +843,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
       self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
           self._jitted_fwd_bwd_step_fn,
-          self.model,
-          self.grad_accumulator,
 
       )
       self._jitted_update_step_fn = maybe_cache_and_partial(

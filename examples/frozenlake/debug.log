@@ -1,7 +1,37 @@
-line 863, in test_fp32_single_step_fused_matches_v1_after_one_update
-    loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
-  File "tunix/sft/metrics_logger.py", line 165, in get_metric
-    raise ValueError(
-        f"Metric '{metrics_prefix}/{mode}/{metric_name}' not found."
-    )
-ValueError: Metric '/train/loss' not found.
+INIT weight checksum: 2250560790
+live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
+v2 start weight checksum: 2250560790 OK
+Traceback (most recent call last):
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 459, in <module>
+    trainer_v2.train(dataset, skip_jit=False)
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1307, in train
+    self.update()
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1038, in update
+    return self._record_update(update_step())
+                               ^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/graphlib.py", line 1693, in cache_args_wrapper
+    return f(*cached_args, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 1023, in __call__
+    pure_args_out, pure_kwargs_out, pure_out = self.jitted_fn(
+                                               ^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 138, in __call__
+    out = self.f(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 628, in _update_step
+    optimizer.update(model, acc_grads)
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/training/optimizer.py", line 80, in _check_grads_wrapper
+    return f(self, model, grads, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/training/optimizer.py", line 225, in update
+    new_params = optax.apply_updates(param_arrays, updates)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/optax/_src/update.py", line 41, in apply_updates
+    return jax.tree.map(
+           ^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree.py", line 156, in map
+    return tree_util.tree_map(f, tree, *rest, is_leaf=is_leaf)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Mismatch custom node data: ('embedder', 'final_norm', 'layers') != (); value: State({}).
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
