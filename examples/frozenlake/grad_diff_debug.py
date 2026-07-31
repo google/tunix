@@ -456,7 +456,7 @@ with mesh:
   # single-executable step -- the configuration whose HBM profile we want. To
   # exercise the split path instead, call fwd_bwd(dataset[0]) then update().
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v2.train(dataset, skip_jit=False)
+    trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
     jax.effects_barrier()
 
   # Populated only at gradient_accumulation_steps > 1; see the note above the
