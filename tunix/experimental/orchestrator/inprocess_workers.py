@@ -174,3 +174,48 @@ class InProcessWeightSync:
 
   def sync(self) -> None:
     self._rl_cluster.sync_weights()
+
+
+class AliasedInProcessReplica:
+  """Stands in for a rollout replica when they all share one cluster.
+
+  A sync round visits replicas one at a time so a partial round is visible.
+  In a single process that shape is degenerate: every handle points at the
+  same cluster and the same weights, so installing on one has already
+  installed on all of them. Running the round anyway keeps one code path for
+  both topologies, and this makes the degenerate case honest rather than
+  accidental.
+
+  Two things it deliberately does. It drives the cluster's sync **at most once
+  per version**, because that call also advances the cluster's step counter --
+  visiting N aliased replicas would advance it N times for one round of
+  weights. And it reports the version it was asked for, because in this
+  topology reaching it is what installing means.
+  """
+
+  def __init__(self, rl_cluster: Any, *, worker_id: str = "rollout"):
+    self._rl_cluster = rl_cluster
+    self._worker_id = worker_id
+    self._installed_version = 0
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self._worker_id, roles=frozenset({"rollout"})
+    )
+
+  @property
+  def policy_version(self) -> int:
+    return self._installed_version
+
+  def prepare_weight_sync(self, metadata: Any) -> datatypes.Response:
+    del metadata  # Generation is synchronous here; nothing to fence.
+    return datatypes.Response()
+
+  def sync_weights(self, metadata: Any) -> int:
+    version = getattr(metadata, "policy_version", None)
+    if version is None:
+      version = self._installed_version + 1
+    if version != self._installed_version:
+      self._rl_cluster.sync_weights()
+      self._installed_version = int(version)
+    return self._installed_version

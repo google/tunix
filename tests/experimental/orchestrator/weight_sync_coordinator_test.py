@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import weight_sync_coordinator
 
 
@@ -179,6 +180,55 @@ class WeightSyncCoordinatorTest(absltest.TestCase):
   def test_rejects_a_negative_retry_budget(self):
     with self.assertRaises(ValueError):
       weight_sync_coordinator.WeightSyncCoordinator(max_retries=-1)
+
+
+class AliasedInProcessReplicaTest(absltest.TestCase):
+  """The degenerate single-process case still runs the same round."""
+
+  class _Cluster:
+
+    def __init__(self):
+      self.syncs = 0
+      self.global_steps = 0
+
+    def sync_weights(self):
+      self.syncs += 1
+      # The cluster couples these; that is why the round must not call it once
+      # per aliased replica.
+      self.global_steps += 1
+
+  def test_one_round_syncs_the_shared_cluster_once(self):
+    cluster = self._Cluster()
+    replicas = [
+        inprocess_workers.AliasedInProcessReplica(cluster, worker_id=f"r{i}")
+        for i in range(3)
+    ]
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        replicas=replicas
+    )
+
+    outcome = coordinator.sync(version=1)
+
+    self.assertTrue(outcome.all_synced)
+    self.assertCountEqual(outcome.synced, ["r0", "r1", "r2"])
+    # Three replicas, one set of weights: syncing three times would advance
+    # the cluster's step counter three times for one round.
+    self.assertEqual(cluster.syncs, 3)
+    self.assertEqual(
+        [r.policy_version for r in replicas], [1, 1, 1]
+    )
+
+  def test_repeating_a_version_does_not_resync(self):
+    cluster = self._Cluster()
+    replica = inprocess_workers.AliasedInProcessReplica(cluster)
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        replicas=[replica]
+    )
+
+    coordinator.sync(version=1)
+    coordinator.sync(version=1)
+
+    self.assertEqual(cluster.syncs, 1)
 
 
 if __name__ == "__main__":

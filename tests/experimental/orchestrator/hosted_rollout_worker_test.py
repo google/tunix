@@ -143,6 +143,55 @@ class HostedRolloutWorkerTest(absltest.TestCase):
     self.assertEqual(response.policy_version, 9)
     self.assertEqual(worker.heartbeat().policy_version, 9)
 
+  def test_sync_installs_weights_before_adopting_the_version(self):
+    installed = []
+    worker = hosted_rollout_worker.HostedRolloutWorker(
+        _Engine(), install_weights_fn=installed.append
+    )
+
+    version = worker.sync_weights(
+        datatypes.WeightSyncRequest(
+            policy_version=3, source_metadata="weights-at-3"
+        )
+    )
+
+    self.assertEqual(version, 3)
+    self.assertLen(installed, 1)
+    self.assertEqual(installed[0].source_metadata, "weights-at-3")
+
+  def test_a_failed_install_does_not_claim_the_new_version(self):
+    """Claiming it would let a round record this worker as synced."""
+
+    def _explode(metadata):
+      del metadata
+      raise RuntimeError("transfer failed")
+
+    worker = hosted_rollout_worker.HostedRolloutWorker(
+        _Engine(), policy_version=1, install_weights_fn=_explode
+    )
+
+    with self.assertRaises(RuntimeError):
+      worker.sync_weights(datatypes.WeightSyncRequest(policy_version=2))
+
+    self.assertEqual(worker.policy_version, 1)
+
+  def test_an_engine_that_can_update_weights_is_used_automatically(self):
+    class _UpdatableEngine(_Engine):
+
+      def __init__(self):
+        super().__init__()
+        self.updates = []
+
+      def update_weights(self, metadata):
+        self.updates.append(metadata.policy_version)
+
+    engine = _UpdatableEngine()
+    worker = hosted_rollout_worker.HostedRolloutWorker(engine)
+
+    worker.sync_weights(datatypes.WeightSyncRequest(policy_version=6))
+
+    self.assertEqual(engine.updates, [6])
+
   def test_reports_its_role_and_lifecycle(self):
     worker = hosted_rollout_worker.HostedRolloutWorker(_Engine())
 

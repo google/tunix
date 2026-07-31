@@ -63,6 +63,7 @@ class HostedRolloutWorker(rollout_worker.RolloutWorker):
       worker_id: str = "rollout",
       policy_version: int = 0,
       generate_fn: Optional[Callable[..., Any]] = None,
+      install_weights_fn: Optional[Callable[[Any], None]] = None,
   ):
     """Initializes the worker.
 
@@ -73,11 +74,19 @@ class HostedRolloutWorker(rollout_worker.RolloutWorker):
       policy_version: Version stamped on responses, advanced by weight sync.
       generate_fn: Overrides how generation is invoked; defaults to
         `engine.generate`.
+      install_weights_fn: Fetches and installs the weights a sync round points
+        at, given the round's metadata. Defaults to the engine's own
+        `update_weights` if it has one; otherwise the worker only adopts the
+        version number, which is enough to exercise the protocol but means the
+        weights themselves did not move. That is a real transport's job.
     """
     super().__init__(worker_id=worker_id)
     self._engine = engine
     self._policy_version = policy_version
     self._generate_fn = generate_fn or engine.generate
+    self._install_weights_fn = install_weights_fn or getattr(
+        engine, "update_weights", None
+    )
 
   @property
   def policy_version(self) -> int:
@@ -176,7 +185,21 @@ class HostedRolloutWorker(rollout_worker.RolloutWorker):
     return datatypes.Response()
 
   def sync_weights(self, metadata: Any) -> int:
-    """Adopts a new policy version; subsequent responses are stamped with it."""
+    """Installs the weights a round points at and reports the version reached.
+
+    The version is adopted only after the install succeeds, so a worker never
+    claims to be running weights it failed to load -- the round would then
+    record it as synced while it generated from the old ones.
+
+    Args:
+      metadata: The round's request, carrying the target version and wherever
+        the weights can be fetched from.
+
+    Returns:
+      The version now in effect.
+    """
+    if self._install_weights_fn is not None:
+      self._install_weights_fn(metadata)
     version = getattr(metadata, "policy_version", None)
     self._policy_version = (
         int(version) if version is not None else self._policy_version + 1
