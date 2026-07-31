@@ -95,6 +95,10 @@ class InProcessTrainerWorker(_InProcessWorker):
     if hasattr(self._rl_cluster, "critic_trainer"):
       self._rl_cluster.update_critic(chunks, eval_ds, skip_jit)
 
+  def drain_metrics(self) -> dict[str, float]:
+    """Nothing to hand back: this trainer writes to the shared logger itself."""
+    return {}
+
   def per_token_logps(
       self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
   ) -> Any:

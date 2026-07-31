@@ -42,6 +42,8 @@ Handle contracts (all optional; absent -> in-process fallback):
 
 from typing import Any, Mapping
 
+import numpy as np
+
 from tunix.experimental.common import datatypes
 from tunix.rl import rl_cluster as rl_cluster_lib
 
@@ -121,8 +123,29 @@ class OrchestratorRLCluster:
   def update_actor(self, train_ds: Any, eval_ds: Any, skip_jit: bool = False) -> None:
     if self._trainer_worker is not None:
       self._trainer_worker.train(train_ds, eval_ds, skip_jit)
+      self._harvest_trainer_metrics()
     else:
       self._base.update_actor(train_ds, eval_ds, skip_jit)
+
+  def _harvest_trainer_metrics(self) -> None:
+    """Pulls a remote trainer's metrics into this run's logger.
+
+    A trainer in its own process logs where nobody is looking, so everything
+    it measures would be missing from the run and the gap would look like the
+    trainer having nothing to report. Handles that share the logger already
+    (the in-process ones) return nothing here.
+    """
+    drain = getattr(self._trainer_worker, "drain_metrics", None)
+    if drain is None:
+      return
+    metrics = drain()
+    if not metrics:
+      return
+    # The aggregator is attached here rather than sent: it is a callable, and
+    # callables do not cross the wire.
+    self._base.buffer_metrics(
+        {f"trainer/{key}": (value, np.mean) for key, value in metrics.items()}
+    )
 
   def update_critic(self, train_ds: Any, eval_ds: Any, skip_jit: bool = False) -> None:
     if self._trainer_worker is not None and hasattr(

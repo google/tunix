@@ -155,6 +155,20 @@ class RemoteTrainerWorker(_RemoteWorker):
   def train(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
     self._actor.submit("train", chunks, eval_ds, skip_jit)
 
+  def drain_metrics(self) -> dict[str, float]:
+    """Collects the metrics a remote trainer recorded during its last steps.
+
+    A trainer in another process writes to its own logger, which nobody reads:
+    without pulling them across, everything the trainer measured -- loss,
+    gradient norms, learning rate -- is simply absent from the run's metrics,
+    and the absence looks like the trainer had nothing to say.
+
+    Returns:
+      Scalar metrics by name. Plain numbers on purpose: aggregation functions
+      are callables and do not belong on the wire.
+    """
+    return self._actor.submit("drain_metrics") or {}
+
   def per_token_logps(
       self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
   ) -> Any:

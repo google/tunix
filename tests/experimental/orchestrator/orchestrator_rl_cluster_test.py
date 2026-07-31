@@ -201,6 +201,36 @@ class OrchestratorRlClusterTest(absltest.TestCase):
     )
     self.assertLen(base.ref_calls, 1)
 
+  def test_a_remote_trainers_metrics_reach_the_run_logger(self):
+    """Otherwise everything the trainer measured is simply absent."""
+
+    class _RemoteTrainer(_FakeTrainerWorker):
+
+      def drain_metrics(self):
+        return {"loss": 0.25, "grad_norm": 1.5}
+
+    base = _FakeBaseCluster()
+    routed = orchestrator_rl_cluster.OrchestratorRLCluster(
+        base, trainer_worker=_RemoteTrainer()
+    )
+
+    routed.update_actor(["c"], None, False)
+
+    buffered = base.buffered_metrics[0]
+    self.assertIn("trainer/loss", buffered)
+    self.assertEqual(buffered["trainer/loss"][0], 0.25)
+    self.assertIn("trainer/grad_norm", buffered)
+
+  def test_a_handle_that_shares_the_logger_buffers_nothing_extra(self):
+    base = _FakeBaseCluster()
+    routed = orchestrator_rl_cluster.OrchestratorRLCluster(
+        base, trainer_worker=_FakeTrainerWorker()
+    )
+
+    routed.update_actor(["c"], None, False)
+
+    self.assertEmpty(base.buffered_metrics)
+
   def test_a_scoring_failure_is_raised_rather_than_returned(self):
     """There is no safe fallback value: a zero array would train on fiction."""
     inference = _FakeInferenceWorker(
