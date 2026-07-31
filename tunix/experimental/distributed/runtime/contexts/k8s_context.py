@@ -72,14 +72,26 @@ def resolve_self_hostname() -> str:
   return fqdn
 
 
+def should_use_pathways() -> bool:
+  """Whether this pod should bring up the Pathways runtime.
+
+  Reads the environment defensively: `JAX_PLATFORMS` is frequently unset, and
+  membership-testing an unset variable raises rather than answering no.
+
+  Returns:
+    True when the pod is configured for a Pathways proxy backend.
+  """
+  return "proxy" in os.environ.get("JAX_PLATFORMS", "") and bool(
+      os.environ.get("JAX_BACKEND_TARGET")
+  )
+
+
 class K8sJaxContext(context.JaxContext):
   """JAX distributed runtime initializer for Kubernetes pods."""
 
   def initialize(self) -> None:
     """Initializes Pathways or standard JAX distributed runtime based on environment."""
-    if "proxy" in os.environ.get("JAX_PLATFORMS") and os.environ.get(
-        "JAX_BACKEND_TARGET"
-    ):
+    if should_use_pathways():
       logging.info("initializing Pathways runtime")
 
       import pathwaysutils
