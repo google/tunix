@@ -29,7 +29,10 @@ its models and engines -- but implementing them keeps a single control-plane
 code path for in-process and distributed runs.
 """
 
+import traceback as traceback_lib
 from typing import Any, Mapping, Optional
+
+import numpy as np
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
@@ -140,21 +143,60 @@ class InProcessInferenceWorker(_InProcessWorker):
   """Inference handle: scores tokens under the frozen reference model.
 
   Handle contract:
-      per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
+      compute_logps(LogprobsRequest) -> LogprobsResponse
+
+  The request carries the temperature explicitly. In one process that looks
+  redundant, since this handle could read it from the same config the sampler
+  did -- which is exactly why it was omitted before. Across processes there is
+  no shared config to read, and a score taken at a different temperature than
+  the tokens were sampled at is silently biased, so the value travels with the
+  request.
   """
 
   def __init__(self, rl_cluster: Any, *, worker_id: str = "inference"):
     super().__init__(rl_cluster, worker_id=worker_id, role="inference")
 
-  def per_token_logps(
-      self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
-  ) -> Any:
-    """Reference-model per-token logprobs over a padded group."""
+  def compute_logps(
+      self, request: datatypes.LogprobsRequest
+  ) -> datatypes.LogprobsResponse:
+    """Scores a padded group under the reference model.
+
+    Args:
+      request: Tokens, the temperature to score at, and the model to use.
+
+    Returns:
+      The per-token log-probabilities, or a response carrying the failure.
+    """
+    try:
+      if request.model_role != "reference":
+        raise NotImplementedError(
+            "This handle hosts the frozen reference model only; got"
+            f" model_role={request.model_role!r}."
+        )
+      if request.temperature <= 1e-5:
+        raise ValueError("Temperature must be strictly positive.")
+      logps = self._score(request)
+      return datatypes.LogprobsResponse(
+          request_id=request.request_id,
+          per_token_logps=np.asarray(logps, dtype=np.float32),
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      return datatypes.LogprobsResponse(
+          request_id=request.request_id,
+          per_token_logps=np.zeros((0, 0), dtype=np.float32),
+          error=datatypes.ErrorInfo(
+              error_type=type(e).__name__,
+              message=str(e),
+              traceback=traceback_lib.format_exc(),
+          ),
+      )
+
+  def _score(self, request: datatypes.LogprobsRequest) -> Any:
     return self._rl_cluster.get_ref_per_token_logps(
-        prompt_tokens=prompt_ids,
-        completion_tokens=completion_ids,
-        pad_id=pad_id,
-        eos_id=eos_id,
+        prompt_tokens=request.prompt_tokens,
+        completion_tokens=request.completion_tokens,
+        pad_id=self._rl_cluster.rollout.pad_id(),
+        eos_id=self._rl_cluster.rollout.eos_id(),
         micro_batch_size=self._rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
     )
 

@@ -42,6 +42,7 @@ Handle contracts (all optional; absent -> in-process fallback):
 
 from typing import Any, Mapping
 
+from tunix.experimental.common import datatypes
 from tunix.rl import rl_cluster as rl_cluster_lib
 
 
@@ -133,6 +134,38 @@ class OrchestratorRLCluster:
 
   # --- Scoring --------------------------------------------------------------
 
+  def _scored_by_worker(
+      self, prompt_tokens: Any, completion_tokens: Any
+  ) -> Any:
+    """Scores through the inference handle, stating the temperature.
+
+    Raises:
+      RuntimeError: If the worker reports a failure. Scoring has no sensible
+        fallback value -- a zero or a stale array would train on fiction --
+        so the in-band error is raised here rather than passed along.
+    """
+    response = self._inference_worker.compute_logps(
+        datatypes.LogprobsRequest(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            temperature=self._reference_scoring_temperature(),
+        )
+    )
+    if response.error is not None:
+      raise RuntimeError(
+          "Reference scoring failed on the inference worker:"
+          f" {response.error.error_type}: {response.error.message}"
+      )
+    return response.per_token_logps
+
+  def _reference_scoring_temperature(self) -> float:
+    """The temperature the tokens being scored were sampled at.
+
+    Taken from the training rollout config, matching what the in-process path
+    does; a mismatch here biases every ratio computed from the result.
+    """
+    return self._base.get_rollout_config(rl_cluster_lib.Mode.TRAIN).temperature
+
   def get_ref_per_token_logps(
       self,
       prompt_tokens: Any,
@@ -142,12 +175,7 @@ class OrchestratorRLCluster:
       micro_batch_size: int | None = None,
   ) -> Any:
     if self._inference_worker is not None:
-      return self._inference_worker.per_token_logps(
-          prompt_ids=prompt_tokens,
-          completion_ids=completion_tokens,
-          pad_id=pad_id,
-          eos_id=eos_id,
-      )
+      return self._scored_by_worker(prompt_tokens, completion_tokens)
     return self._base.get_ref_per_token_logps(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

@@ -18,6 +18,7 @@ import asyncio
 import types
 
 from absl.testing import absltest
+import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import worker_fleet
@@ -40,6 +41,11 @@ class _FakeCluster:
             compute_logps_micro_batch_size=2
         )
     )
+    self.rollout = types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 2)
+
+  def get_rollout_config(self, mode):
+    del mode
+    return types.SimpleNamespace(temperature=0.7)
 
   def generate(self, *args):
     self.generate_calls.append(args)
@@ -53,7 +59,7 @@ class _FakeCluster:
 
   def get_ref_per_token_logps(self, **kwargs):
     self.ref_calls.append(kwargs)
-    return "REF"
+    return np.zeros((1, 2), dtype=np.float32)
 
   def get_actor_per_token_logps(self, **kwargs):
     self.actor_calls.append(kwargs)
@@ -194,10 +200,24 @@ class InProcessHandleTest(absltest.TestCase):
   def test_inference_handle_scores_the_reference_model(self):
     base = _FakeCluster()
     handle = inprocess_workers.InProcessInferenceWorker(base)
-    self.assertEqual(
-        handle.per_token_logps("p", "c", pad_id=0, eos_id=2), "REF"
+    response = handle.compute_logps(
+        datatypes.LogprobsRequest(
+            prompt_tokens="p", completion_tokens="c", temperature=0.7
+        )
     )
+    self.assertIsNone(response.error)
     self.assertEqual(base.ref_calls[0]["prompt_tokens"], "p")
+
+  def test_inference_handle_reports_a_bad_temperature_in_band(self):
+    handle = inprocess_workers.InProcessInferenceWorker(_FakeCluster())
+
+    response = handle.compute_logps(
+        datatypes.LogprobsRequest(
+            prompt_tokens="p", completion_tokens="c", temperature=0.0
+        )
+    )
+
+    self.assertIsNotNone(response.error)
 
   def test_weight_sync_handle_syncs(self):
     base = _FakeCluster()

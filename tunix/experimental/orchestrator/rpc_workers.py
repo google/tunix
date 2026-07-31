@@ -193,12 +193,11 @@ class RemoteInferenceWorker(_RemoteWorker):
 
   _role = "inference"
 
-  def per_token_logps(
-      self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
-  ) -> Any:
-    return self._actor.submit(
-        "per_token_logps", prompt_ids, completion_ids, pad_id, eos_id
-    )
+  def compute_logps(
+      self, request: datatypes.LogprobsRequest
+  ) -> datatypes.LogprobsResponse:
+    """Forwards the scoring request unchanged; failures come back in band."""
+    return self._actor.submit("compute_logps", request)
 
 
 class RemoteWeightSync:

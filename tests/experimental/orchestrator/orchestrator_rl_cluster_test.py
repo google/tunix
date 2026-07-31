@@ -14,7 +14,10 @@
 
 """Routing/delegation tests for OrchestratorRLCluster (no real compute)."""
 
+import types
+
 from absl.testing import absltest
+from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import orchestrator_rl_cluster
 
 
@@ -58,6 +61,10 @@ class _FakeBaseCluster:
   def buffer_metrics(self, metrics, **kwargs):
     self.buffered_metrics.append(metrics)
 
+  def get_rollout_config(self, mode):
+    del mode
+    return types.SimpleNamespace(temperature=0.7)
+
 
 class _FakeTrainerWorker:
 
@@ -87,12 +94,19 @@ class _FakeRolloutWorker:
 
 class _FakeInferenceWorker:
 
-  def __init__(self):
+  def __init__(self, error: datatypes.ErrorInfo | None = None):
     self.calls = []
+    self._error = error
 
-  def per_token_logps(self, **kwargs):
-    self.calls.append(kwargs)
-    return "worker_ref"
+  def compute_logps(
+      self, request: datatypes.LogprobsRequest
+  ) -> datatypes.LogprobsResponse:
+    self.calls.append(request)
+    return datatypes.LogprobsResponse(
+        request_id=request.request_id,
+        per_token_logps="worker_ref" if self._error is None else None,
+        error=self._error,
+    )
 
 
 class _FakeWeightSync:
@@ -176,6 +190,8 @@ class OrchestratorRlClusterTest(absltest.TestCase):
         "worker_ref",
     )
     self.assertLen(inference.calls, 1)
+    # The temperature the tokens were sampled at travels with the request.
+    self.assertEqual(inference.calls[0].temperature, 0.7)
     self.assertEmpty(base.ref_calls)
 
     fallback = orchestrator_rl_cluster.OrchestratorRLCluster(base)
@@ -184,6 +200,18 @@ class OrchestratorRlClusterTest(absltest.TestCase):
         "base_ref",
     )
     self.assertLen(base.ref_calls, 1)
+
+  def test_a_scoring_failure_is_raised_rather_than_returned(self):
+    """There is no safe fallback value: a zero array would train on fiction."""
+    inference = _FakeInferenceWorker(
+        error=datatypes.ErrorInfo(error_type="RuntimeError", message="oom")
+    )
+    routed = orchestrator_rl_cluster.OrchestratorRLCluster(
+        _FakeBaseCluster(), inference_worker=inference
+    )
+
+    with self.assertRaisesRegex(RuntimeError, "oom"):
+      routed.get_ref_per_token_logps("p", "c", pad_id=0, eos_id=2)
 
   def test_actor_logps_routes_when_worker_capable_else_base(self):
     base = _FakeBaseCluster()
