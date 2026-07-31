@@ -1,28 +1,36 @@
+v1:
 
-Traceback (most recent call last):
-  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 513, in <module>
-    trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1241, in train
-    self.train_step(train_example)
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1002, in train_step
-    train_loss, aux, grad_norm = self._jitted_fused_step_fn(
-                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 1023, in __call__
-    pure_args_out, pure_kwargs_out, pure_out = self.jitted_fn(
-                                               ^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 138, in __call__
-    out = self.f(*args, **kwargs)
-          ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 603, in _fused_step
-    return loss, aux, self._update_step(model, optimizer, grad_accumulator)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 569, in _update_step
-    acc_grads = grad_accumulator.get()
-                ^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 273, in get
-    return jax.tree_util.tree_map(
-           ^^^^^^^^^^^^^^^^^^^^^^^
-ValueError: Custom node type mismatch: expected type: <class 'flax.nnx.statelib.State'>, value: {}.
---------------------
-For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
-sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+Train step 1 training loss: 4.093186  - training perplexity: 59.930550
+[1] /train/loss=4.093186378479004
+[1] /train/perplexity=59.93054962158203
+[1] /train/grad_norm=222.35650634765625
+Train step 2 training loss: 2.723777  - training perplexity: 15.237767
+[2] /train/loss=2.7237770557403564
+[2] /train/perplexity=15.237767219543457
+[2] /train/grad_norm=190.40914916992188
+[3] /train/loss=2.5299196243286133
+Train step 3 training loss: 2.529920  - training perplexity: 12.552497
+[3] /train/perplexity=12.552496910095215
+[3] /train/grad_norm=45.529598236083984
+
+v2 fused_step:
+Train step 1 training loss: 4.086659  - training perplexity: 59.540630
+[1] /train/loss=4.086658954620361
+[1] /train/perplexity=59.54063034057617
+[1] /train/grad_norm=222.31106567382812
+Train step 2 training loss: 2.736073  - training perplexity: 15.426291
+[2] /train/loss=2.7360732555389404
+[2] /train/perplexity=15.426290512084961
+[2] /train/grad_norm=190.1228485107422
+is_update_step_val:  True
+self._jitted_fused_step_fn:  functools.partial(<function PeftTrainer._fused_step at 0x320fb7abe8e0>)
+is_update_step_val:  True
+self._jitted_fused_step_fn:  functools.partial(<function PeftTrainer._fused_step at 0x320fb7abe8e0>)
+Train step 3 training loss: 2.530935  - training perplexity: 12.565244
+[3] /train/loss=2.5309345722198486
+[3] /train/perplexity=12.5652437210083
+[3] /train/grad_norm=42.264217376708984
+Train step 4 training loss: 1.854100  - training perplexity: 6.385952
+[4] /train/loss=1.8541004657745361
+[4] /train/perplexity=6.385951519012451
+[4] /train/grad_norm=124.44063568115234
