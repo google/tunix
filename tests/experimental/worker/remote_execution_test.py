@@ -149,6 +149,32 @@ async def running_grpc_server(
     await server.stop_serving()
 
 
+class _HandleStub(remote_lib.ActorHandle):
+  """An actor handle that is only ever used as a pool membership token."""
+
+  def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
+    raise NotImplementedError()
+
+  async def asubmit(
+      self, method_name: Optional[str] = None, *args, **kwargs
+  ) -> Any:
+    raise NotImplementedError()
+
+  async def dispatch_task(
+      self,
+      request_id: Optional[str] = None,
+      method_name: Optional[str] = None,
+      *args,
+      **kwargs,
+  ) -> str:
+    raise NotImplementedError()
+
+  async def poll_responses(
+      self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+  ) -> Any:
+    raise NotImplementedError()
+
+
 class _LockReturner:
 
   def get(self):
@@ -1430,6 +1456,69 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_bind_channel())
     asyncio.run(_reuse_from_a_new_loop())
+
+  def test_failing_a_worker_settles_its_outstanding_tasks(self):
+    """Abandoned work is reported to its consumer, not silently dropped."""
+
+    class SilentHandle(remote_lib.ActorHandle):
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        return request_id
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        await asyncio.sleep(100)
+
+    async def _run():
+      handle = SilentHandle()
+      settled = []
+      session = remote_lib.PoolExecutionSession(
+          remote_lib.RoutingActorPool([handle]),
+          on_task_settled=lambda actor, rid: settled.append(rid),
+      )
+      await session.submit("req_1", "method")
+      await session.submit("req_2", "method")
+
+      failed = session.fail_worker_tasks(handle, ConnectionError("evicted"))
+
+      self.assertEqual(failed, 2)
+      self.assertCountEqual(settled, ["req_1", "req_2"])
+      self.assertEqual(session._in_flight, 0)
+
+      outcomes = []
+      async for request_id, _, exc in session.as_completed_with_ids():
+        outcomes.append((request_id, exc))
+      self.assertCountEqual([rid for rid, _ in outcomes], ["req_1", "req_2"])
+      self.assertTrue(all(exc is not None for _, exc in outcomes))
+
+      await session.close()
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=10.0))
+
+  def test_routing_pool_remove_actor(self):
+    handles = [_HandleStub(), _HandleStub()]
+    pool = remote_lib.RoutingActorPool(handles)
+
+    self.assertTrue(pool.remove_actor(handles[0]))
+    self.assertEqual(pool.actors, [handles[1]])
+    self.assertFalse(pool.remove_actor(handles[0]))
 
   def test_pool_execution_session_requires_a_caller_supplied_id(self):
     """A task the session cannot name cannot be matched to its response."""

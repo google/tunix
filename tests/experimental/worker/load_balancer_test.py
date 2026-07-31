@@ -263,6 +263,60 @@ class BalancedDispatcherTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_removing_a_worker_stops_routing_to_it(self):
+    async def _run():
+      keep, drop = FakeRolloutHandle("keep"), FakeRolloutHandle("drop")
+      dispatcher = lb_lib.BalancedDispatcher([keep, drop], max_concurrency=1)
+
+      self.assertTrue(dispatcher.remove_worker(drop))
+      self.assertEqual(dispatcher.actors, (keep,))
+      self.assertEqual(dispatcher.max_in_flight, 1)
+
+      completed = []
+
+      async def _consume():
+        async for request_id, _, exc in dispatcher.run(_tasks(4)):
+          self.assertIsNone(exc)
+          completed.append(request_id)
+
+      consumer = asyncio.create_task(_consume())
+      for _ in range(10):
+        await asyncio.sleep(0.01)
+        keep.finish_all()
+        if consumer.done():
+          break
+      await asyncio.wait_for(consumer, timeout=3.0)
+
+      self.assertLen(completed, 4)
+      self.assertEmpty(drop.accepted)
+
+    asyncio.run(_run())
+
+  def test_removing_a_worker_frees_the_capacity_it_held(self):
+    router = lb_lib.CapacityRouter(max_concurrency=1)
+    actors = [FakeRolloutHandle("a"), FakeRolloutHandle("b")]
+    router(actors)
+    router(actors)
+    self.assertFalse(router.has_capacity(actors))
+
+    router.forget(actors[1])
+
+    self.assertEqual(router.outstanding(actors[1]), 0)
+    self.assertEqual(router.total_outstanding(), 1)
+
+  def test_refuses_to_remove_the_last_worker(self):
+    only = FakeRolloutHandle("only")
+    dispatcher = lb_lib.BalancedDispatcher([only], max_concurrency=1)
+
+    with self.assertRaises(ValueError):
+      dispatcher.remove_worker(only)
+
+  def test_removing_an_unknown_worker_reports_it(self):
+    dispatcher = lb_lib.BalancedDispatcher(
+        [FakeRolloutHandle("a"), FakeRolloutHandle("b")], max_concurrency=1
+    )
+    self.assertFalse(dispatcher.remove_worker(FakeRolloutHandle("stranger")))
+
   def test_correlates_results_to_their_request_ids(self):
     async def _run():
       worker = FakeRolloutHandle("w0")

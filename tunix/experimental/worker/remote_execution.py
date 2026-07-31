@@ -951,6 +951,30 @@ class RoutingActorPool(ActorPool):
     else:
       raise TypeError(f"Expected str or ActorHandle, got {type(actor)}")
 
+  def remove_actor(self, actor: ActorHandle) -> bool:
+    """Takes a worker out of rotation so no further task is routed to it.
+
+    Work already dispatched to it is untouched here: whoever owns the
+    in-flight tasks decides whether to wait for them or abandon them (see
+    `PoolExecutionSession.fail_worker_tasks`).
+
+    Args:
+      actor: The worker to remove.
+
+    Returns:
+      Whether it was in the pool.
+    """
+    try:
+      self._actors.remove(actor)
+    except ValueError:
+      return False
+    return True
+
+  @property
+  def actors(self) -> List[ActorHandle]:
+    """The workers currently in rotation."""
+    return list(self._actors)
+
   def _get_next_actor(
       self,
       method_name: Optional[str] = None,
@@ -1227,6 +1251,32 @@ class PoolExecutionSession:
       self._notify_if_zero_flight()
       raise
 
+  def fail_worker_tasks(self, actor: ActorHandle, exc: Exception) -> int:
+    """Reports every task still outstanding on `actor` as failed.
+
+    Used when a worker can no longer answer -- its polling died, or it is
+    being removed from the pool. The tasks are reported in band rather than
+    dropped, so the consumer sees an outcome for work it dispatched, and their
+    slots are settled so the capacity they held is not lost.
+
+    Args:
+      actor: The worker whose outstanding tasks are being abandoned.
+      exc: The failure reported for each of them.
+
+    Returns:
+      How many tasks were failed.
+    """
+    failed_task_ids = self._dispatched_tasks.pop(actor, set())
+    if not failed_task_ids:
+      return 0
+    for failed_id in failed_task_ids:
+      self._response_queue.put_nowait((failed_id, None, exc))
+    self._in_flight -= len(failed_task_ids)
+    for failed_id in failed_task_ids:
+      self._settle(actor, failed_id)
+    self._notify_if_zero_flight()
+    return len(failed_task_ids)
+
   def _ensure_worker_polling(self, actor: ActorHandle) -> None:
     if actor in self._active_workers:
       return
@@ -1276,15 +1326,7 @@ class PoolExecutionSession:
           break
         except Exception as exc:  # pylint: disable=broad-exception-caught
           # Transport or polling failure on this worker; fail all dispatched tasks on this worker.
-          failed_task_ids = self._dispatched_tasks.pop(actor, set())
-          failed_count = len(failed_task_ids)
-          if failed_count > 0:
-            for failed_id in failed_task_ids:
-              self._response_queue.put_nowait((failed_id, None, exc))
-            self._in_flight -= failed_count
-            for failed_id in failed_task_ids:
-              self._settle(actor, failed_id)
-            self._notify_if_zero_flight()
+          self.fail_worker_tasks(actor, exc)
           break
     finally:
       self._active_workers.discard(actor)

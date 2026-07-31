@@ -106,6 +106,13 @@ class CapacityRouter:
     """Reserves a slot on `actor`, over-subscribing it if it is already full."""
     self._outstanding[actor] = self.outstanding(actor) + 1
 
+  def forget(self, actor: remote_execution.ActorHandle) -> None:
+    """Drops all accounting for a worker that has left the pool."""
+    if self._outstanding.pop(actor, None):
+      # Whatever it was holding is gone with it; unblock anyone waiting on
+      # capacity that will now never be released by that worker.
+      self._slot_freed.set()
+
   def release(self, actor: remote_execution.ActorHandle) -> None:
     """Returns a slot to `actor` and wakes anyone waiting for capacity."""
     remaining = self.outstanding(actor) - 1
@@ -207,6 +214,36 @@ class BalancedDispatcher:
   @property
   def actors(self) -> Sequence[remote_execution.ActorHandle]:
     return tuple(self._actors)
+
+  def remove_worker(self, actor: remote_execution.ActorHandle) -> bool:
+    """Takes a worker out of rotation, forgetting the capacity it held.
+
+    Only stops future routing. Work already dispatched to it is settled by
+    whoever is running the batch, since only the live session knows which
+    tasks those are.
+
+    Args:
+      actor: The worker to remove.
+
+    Returns:
+      Whether it was in the pool.
+
+    Raises:
+      ValueError: If it is the only worker left; a pool with no workers can
+        accept no work, and removing the last one silently would turn every
+        later submission into a hang.
+    """
+    if actor not in self._actors:
+      return False
+    if len(self._actors) == 1:
+      raise ValueError(
+          "Refusing to remove the pool's only worker: nothing would be left"
+          " to dispatch to."
+      )
+    self._actors.remove(actor)
+    self._pool.remove_actor(actor)
+    self.router.forget(actor)
+    return True
 
   @property
   def max_in_flight(self) -> int:
