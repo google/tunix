@@ -48,6 +48,39 @@ from tunix.experimental.orchestrator import orchestrator_rl_cluster
 from tunix.experimental.orchestrator import rollout_pool as rollout_pool_lib
 from tunix.experimental.orchestrator import worker_registry as worker_registry_lib
 from tunix.experimental.worker import abstract_worker
+from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import rollout_worker
+
+
+def _require_per_trajectory_contract(worker: Any) -> None:
+  """Rejects a worker that only speaks whole-batch generation.
+
+  Both contracts are spelled `generate`, so a whole-batch worker can be put in
+  a pool and will accept a rollout request as if it were a prompt batch. It
+  would return something shaped nothing like a response, and the failure would
+  surface much later as malformed training data.
+
+  Args:
+    worker: The rollout worker to check.
+
+  Raises:
+    TypeError: If it does not implement the per-trajectory contract.
+  """
+  if isinstance(worker, rollout_worker.RolloutWorker):
+    return
+  if isinstance(worker, remote_execution.ActorHandle) or isinstance(
+      getattr(worker, "actor", None), remote_execution.ActorHandle
+  ):
+    # Served over RPC: the contract is on the far side and cannot be checked
+    # from here without a call.
+    return
+  raise TypeError(
+      f"{type(worker).__name__} cannot join a rollout pool: the pool sends one"
+      " request per trajectory, and this speaks the cluster's whole-batch"
+      " generation instead. Both are named generate, so this would be"
+      " accepted and produce nonsense. Route it through the cluster, or wrap"
+      " it in a worker that answers per trajectory."
+  )
 
 
 def _as_sequence(handles: Any) -> Tuple[Any, ...]:
@@ -201,6 +234,8 @@ class WorkerFleet:
     and belongs on `build_cluster`, not here.
     """
     if self._rollout_pool is None and self._rollout_workers:
+      for worker in self._rollout_workers:
+        _require_per_trajectory_contract(worker)
       self._rollout_pool = rollout_pool_lib.PooledRolloutWorker.from_workers(
           self._rollout_workers,
           max_concurrency=self._rollout_max_concurrency,
