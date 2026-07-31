@@ -92,6 +92,13 @@ class TrainingConfig:
 
   # Sequence packing configuration.
   max_seq_token_per_tpu: int | None = None
+  # Static upper bound on real segments (sequences) per packed row, used to size
+  # the segment-aware loss buckets (num_segments = this + 1 for the padding
+  # bucket). ``None`` defaults to ``max_seq_token_per_tpu`` -- provably safe (a
+  # pack of ``budget`` tokens holds at most ``budget`` unit-length segments) and
+  # needs no tuning. Set a smaller value only to shrink the loss buckets at very
+  # large budgets; ``pack_sequences`` raises if a pack exceeds it.
+  max_segments_per_packed_row: int | None = None
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
