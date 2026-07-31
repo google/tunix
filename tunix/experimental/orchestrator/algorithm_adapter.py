@@ -80,20 +80,83 @@ class AlgorithmAdapter(Protocol):
     ...
 
 
+class UnsupportedConfigError(ValueError):
+  """A configured behavior this adapter does not implement.
+
+  Raised instead of running, because every case it covers would otherwise
+  train with different math than the agentic learner the adapter mirrors, and
+  produce a healthy-looking run while doing so.
+  """
+
+
 class GRPOAdapter:
   """GRPO hooks, reusing the shared advantage/loss registries and padding.
 
   Holds the `GRPOConfig` (algorithm knobs) and dispatches to the same registry
   functions the agentic GRPO learner uses -- no reimplementation of the group
   math, the loss, or the padding.
+
+  This is a subset of the agentic learner's postprocess: it implements the
+  on-policy path. Configurations it does not implement are rejected up front
+  (see `check_supported_config`) rather than silently ignored.
   """
 
   def __init__(self, algo_config: Any):
     self._algo_config = algo_config
+    self._check_supported_algo_config()
 
   @property
   def algo_config(self) -> Any:
     return self._algo_config
+
+  def _check_supported_algo_config(self) -> None:
+    """Rejects algorithm knobs this adapter would otherwise ignore."""
+    algo = self._algo_config
+
+    if getattr(algo, "sampler_is", None) is not None:
+      raise UnsupportedConfigError(
+          "sampler_is="
+          f"{algo.sampler_is!r} requests sampler importance-sampling"
+          " correction, which this adapter does not compute: it never fills"
+          " sampler_is_weights, so the policy loss would silently skip the"
+          " correction and train on uncorrected ratios. Unset sampler_is or"
+          " use the agentic GRPO learner."
+      )
+
+    # Redundant with the missing-old-logps check that belongs on the scoring
+    # path, but cheap and catches the config before a step runs.
+    if getattr(algo, "num_iterations", 1) > 1:
+      raise UnsupportedConfigError(
+          f"num_iterations={algo.num_iterations} trains multiple times per"
+          " batch, which requires old per-token logprobs to anchor the ratio"
+          " on every iteration after the first. This adapter does not"
+          " guarantee they are present. Use num_iterations=1 or the agentic"
+          " GRPO learner."
+      )
+
+  def check_supported_config(self, cluster: Any) -> None:
+    """Rejects cluster-level configuration this adapter does not implement.
+
+    Args:
+      cluster: The cluster (or orchestrator) whose `cluster_config` is read.
+
+    Raises:
+      UnsupportedConfigError: If sequence packing is enabled.
+    """
+    self._check_supported_algo_config()
+
+    training_config = getattr(
+        getattr(cluster, "cluster_config", None), "training_config", None
+    )
+    token_budget = getattr(training_config, "max_seq_token_per_tpu", None)
+    if token_budget is not None:
+      raise UnsupportedConfigError(
+          f"max_seq_token_per_tpu={token_budget} enables sequence packing."
+          " The agentic GRPO learner defers scoring until after packing and"
+          " scores the packed buffer; this adapter scores the unpacked rows"
+          " eagerly, so training and scoring would see different layouts."
+          " Disable packing or use the agentic GRPO learner."
+      )
 
   def compute_advantages(self, rewards: Any, *, num_generations: int) -> Any:
     estimator = function_registry.get_advantage_estimator(
@@ -159,6 +222,7 @@ class GRPOAdapter:
 
     Reuses the same policy-loss registry entry the agentic GRPO learner uses.
     """
+    self.check_supported_config(cluster)
     self._algo_config.temperature = cluster.get_rollout_config(
         mode=rl_cluster_lib.Mode.TRAIN
     ).temperature
@@ -198,9 +262,10 @@ class GRPOAdapter:
     extract -> pad/mask -> score (reference/actor via orchestrator primitives) ->
     reward (caller-supplied) -> advantage (shared estimator) -> assemble. Reuses
     the same padding helpers and registries, so it stays faithful to the agentic
-    learner. (The extensive diagnostic metrics and the sampler-IS/off-policy paths
+    learner.     (The extensive diagnostic metrics and the sampler-IS/off-policy paths
     of `_process_results` are omitted here; those layer on next.)
     """
+    self.check_supported_config(orchestrator)
     algo = self._algo_config
     pad_value = orchestrator.rollout.pad_id()
     eos_value = orchestrator.rollout.eos_id()

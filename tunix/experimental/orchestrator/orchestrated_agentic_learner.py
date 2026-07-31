@@ -36,6 +36,7 @@ further promoted, those top-level calls move onto `RLOrchestrator` primitives to
 
 from typing import Any
 
+from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import rl_orchestrator as rl_orchestrator_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic import agentic_grpo_learner
@@ -59,10 +60,22 @@ class OrchestratedAgenticGRPOLearner(agentic_grpo_learner.GRPOLearner):
       orchestrator: The `RLOrchestrator` (cluster + algorithm adapter). Its
         cluster backs the reused loop; its adapter drives the postprocess.
       reward_fns: Reward function(s), as for `GRPOLearner`.
-      metric_fns: Optional metric functions.
+      metric_fns: Not supported; see Raises.
       chat_parser: Optional chat parser.
       **kwargs: Forwarded to `GRPOLearner.__init__` (agent/env classes, etc.).
+
+    Raises:
+      algorithm_adapter.UnsupportedConfigError: If `metric_fns` are passed. The
+        base learner invokes them from `_process_results`, which this class
+        overrides, so they would be accepted and never called.
     """
+    if metric_fns:
+      raise algorithm_adapter.UnsupportedConfigError(
+          "metric_fns are not supported by this learner: the base learner"
+          " invokes them at the end of its postprocess, which this class"
+          " replaces, so they would never run. Drop them or use the agentic"
+          " GRPO learner."
+      )
     self._orchestrator = orchestrator
     super().__init__(
         rl_cluster=orchestrator.cluster,
