@@ -316,18 +316,26 @@ def diagnose_leaf(path, x, y):
      size relative to the tensor's own scale, which is what actually decides
      whether the difference can affect training.
   """
-  x = np.asarray(x).astype(np.float64)
-  y = np.asarray(y).astype(np.float64)
-  d = tc.ulp_dist(np.asarray(x, np.float32), np.asarray(y, np.float32))
+  # ULP and the bitwise sort comparison must run in the STORAGE dtype: one ULP
+  # of bfloat16 is 2^16 times one ULP of float32, so forcing float32 here would
+  # inflate every bf16 distance by that factor and make the numbers meaningless.
+  xs = np.asarray(x)
+  ys = np.asarray(y)
+  int_view = {1: np.int8, 2: np.int16, 4: np.int32, 8: np.int64}[xs.dtype.itemsize]
+  d = tc.ulp_dist(xs, ys)
   max_ulp = int(d.max())
   if max_ulp == 0:
-    print(f"[diag] {path}: shape={x.shape} -> bit-identical")
+    print(f"[diag] {path}: shape={xs.shape} dtype={xs.dtype} -> bit-identical")
     return
 
   same_sorted = np.array_equal(
-      np.sort(np.asarray(x, np.float32).ravel()).view(np.int32),
-      np.sort(np.asarray(y, np.float32).ravel()).view(np.int32),
+      np.sort(xs.ravel()).view(int_view),
+      np.sort(ys.ravel()).view(int_view),
   )
+  # float64 only for the magnitude arithmetic, so the check itself cannot
+  # overflow or lose precision.
+  x = xs.astype(np.float64)
+  y = ys.astype(np.float64)
   scale = float(np.abs(x).max())
   absdiff = np.abs(x - y)
   worst = int(np.argmax(absdiff))
@@ -335,7 +343,7 @@ def diagnose_leaf(path, x, y):
   # Magnitude of the entries that disagree, versus the tensor's own scale.
   mag_of_differing = float(np.abs(x).ravel()[bad.ravel()].max()) if bad.any() else 0.0
   print(
-      f"[diag] {path}: shape={x.shape}\n"
+      f"[diag] {path}: shape={xs.shape} dtype={xs.dtype}\n"
       f"        max ULP={max_ulp} violating={int(bad.sum())}/{d.size}"
       f"  sorted-identical={same_sorted}\n"
       f"        tensor scale max|g|={scale:.6g}\n"

@@ -173,6 +173,13 @@ def assert_bitwise_equal(path, x, y):
   assert_close_ulp(path, x, y, max_ulp=0)
 
 
+# Dtype kinds whose bytes are not a fixed-width numeric payload and so cannot be
+# XOR-folded: object, unicode, bytes, datetime, timedelta.
+_UNCHECKSUMMABLE_KINDS = frozenset("OUSMm")
+
+_BIT_VIEW = {1: np.uint8, 2: np.uint16, 4: np.uint32, 8: np.uint64}
+
+
 def tree_bit_checksum(tree):
   """Order-independent XOR checksum over the raw bits of a pytree's leaves.
 
@@ -180,18 +187,36 @@ def tree_bit_checksum(tree):
   a checksum inside a `jax.jit` region makes every leaf an extra graph output,
   which changes XLA's fusion decisions and can itself perturb the numerics
   being measured.
+
+  Raises on a leaf it cannot fold rather than skipping it. A checksum that
+  silently ignores part of the tree reports "identical" for trees that are not,
+  which is the worst possible failure mode for this function -- and not a
+  hypothetical one: an earlier version guarded with
+  `np.issubdtype(dtype, np.number)`, which is False for `ml_dtypes.bfloat16`
+  (it is a numpy extension dtype with `kind == 'V'`), so every bfloat16 tree
+  checksummed to 0 and every bfloat16 comparison passed vacuously.
+
+  Raises:
+    TypeError: If a leaf's dtype has no fixed-width bit representation.
   """
   acc = 0
+  folded = 0
   for leaf in jax.tree_util.tree_leaves(tree):
     a = np.asarray(_convert_leaf_to_nparray(leaf))
-    if not np.issubdtype(a.dtype, np.number):
-      continue
-    view = {1: np.uint8, 2: np.uint16, 4: np.uint32, 8: np.uint64}.get(
+    view = None if a.dtype.kind in _UNCHECKSUMMABLE_KINDS else _BIT_VIEW.get(
         a.dtype.itemsize
     )
     if view is None:
-      continue
+      raise TypeError(
+          f"tree_bit_checksum cannot fold a leaf of dtype {a.dtype!r} "
+          f"(kind={a.dtype.kind!r}, itemsize={a.dtype.itemsize}). Skipping it "
+          "would make unequal trees compare equal; add an explicit conversion "
+          "instead."
+      )
     acc ^= int(np.bitwise_xor.reduce(a.view(view).ravel()))
+    folded += 1
+  if jax.tree_util.tree_leaves(tree) and not folded:
+    raise TypeError("tree_bit_checksum folded no leaves from a non-empty tree.")
   return acc
 
 
