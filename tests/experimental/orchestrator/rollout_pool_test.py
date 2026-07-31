@@ -269,6 +269,62 @@ class PooledRolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_a_second_caller_waits_for_the_first_to_finish(self):
+    """One consumer per worker: the second batch starts only after the first.
+
+    Two consumers polling one worker would take each other's responses, which
+    are then discarded as unrecognized, starving whoever was waiting. The pool
+    prevents that by never having two batches in flight at once.
+    """
+
+    async def _run():
+      worker = SpyRolloutWorker("w0", stalled_prompts=("p0",))
+      pool = rollout_pool.PooledRolloutWorker(
+          _in_process_handles([worker]), max_concurrency=2
+      )
+
+      first = asyncio.create_task(pool.generate(_requests(1)))
+      await asyncio.sleep(0.05)
+      second = asyncio.create_task(pool.generate(_requests(2)))
+      await asyncio.sleep(0.05)
+
+      # The first batch is stalled, so the second has not been dispatched.
+      self.assertEqual(worker.seen, ["p0"])
+      self.assertFalse(second.done())
+
+      worker.release.set()
+      await asyncio.wait_for(asyncio.gather(first, second), timeout=10.0)
+      self.assertEqual(worker.seen, ["p0", "p0", "p1"])
+
+    asyncio.run(_run())
+
+  def test_concurrent_generate_calls_are_serialized(self):
+    """Two callers overlap safely: neither loses a response nor leaks a slot."""
+
+    async def _run():
+      worker = SpyRolloutWorker("w0")
+      pool = rollout_pool.PooledRolloutWorker(
+          _in_process_handles([worker]), max_concurrency=2
+      )
+
+      first, second = await asyncio.wait_for(
+          asyncio.gather(
+              pool.generate(_requests(3)),
+              pool.generate(_requests(3)),
+          ),
+          timeout=10.0,
+      )
+
+      self.assertLen(first, 3)
+      self.assertLen(second, 3)
+      for responses in (first, second):
+        self.assertTrue(all(r.status == "SUCCEEDED" for r in responses))
+      # Serialized, so the worker never saw two batches at once.
+      self.assertEqual(worker.peak_concurrency, 2)
+      self.assertEqual(pool.dispatcher.router.total_outstanding(), 0)
+
+    asyncio.run(_run())
+
   def test_balances_over_real_grpc_workers(self):
     """Fire-and-forget dispatch plus long polling, across two localhost servers."""
 

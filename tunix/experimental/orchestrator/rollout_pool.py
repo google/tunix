@@ -34,6 +34,7 @@ rather consume trajectories as they finish can pass `on_complete`.
 
 from __future__ import annotations
 
+import asyncio
 import traceback as traceback_lib
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -72,6 +73,18 @@ def _as_actor_handle(worker: Any) -> remote_execution.ActorHandle:
 class PooledRolloutWorker(rollout_worker.RolloutWorker):
   """Fans rollout requests across a pool of rollout workers.
 
+  A worker may have only one consumer polling it at a time. Its completed
+  responses sit in a single queue that any poller drains, and the wire has no
+  way to ask for only one's own: a second consumer therefore takes responses
+  belonging to the first, which are then discarded as unrecognized. The first
+  waits forever for work that was already answered, and the capacity it
+  reserved is never returned.
+
+  Concurrent `generate` calls are serialized here to keep that from happening.
+  It costs pipelining -- a second batch cannot overlap the first -- and it only
+  holds within one pool object; two pools sharing a worker still collide.
+  Per-consumer response queues on the worker are the real fix.
+
   Attributes:
     worker_id: Identifier for this pool, as seen by the control plane.
   """
@@ -98,6 +111,8 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
         actors, max_concurrency=max_concurrency
     )
     self._method_name = method_name
+    # Enforces one consumer per worker; see the class docstring.
+    self._one_consumer = asyncio.Lock()
 
   @classmethod
   def from_workers(
@@ -142,6 +157,9 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
       A single response for a single request, otherwise responses in the same
       order as `requests`. A request that fails comes back as a response with
       `error` set and a non-success `status`, never as a missing entry.
+
+      Calls are serialized: a second call waits for the first to finish, so
+      that no worker is ever polled by two consumers at once.
     """
     is_single = isinstance(requests, datatypes.RolloutRequest)
     batch: List[datatypes.RolloutRequest] = (
@@ -150,6 +168,16 @@ class PooledRolloutWorker(rollout_worker.RolloutWorker):
     if not batch:
       return []
 
+    async with self._one_consumer:
+      return await self._generate_batch(batch, is_single, on_complete)
+
+  async def _generate_batch(
+      self,
+      batch: List[datatypes.RolloutRequest],
+      is_single: bool,
+      on_complete: Optional[Callable[[datatypes.RolloutResponse], None]],
+  ) -> Union[datatypes.RolloutResponse, Sequence[datatypes.RolloutResponse]]:
+    """Runs one batch through the dispatcher, as the sole consumer."""
     order = [self._task_id(req, i) for i, req in enumerate(batch)]
     by_id: Dict[str, datatypes.RolloutRequest] = dict(zip(order, batch))
     tasks = (
