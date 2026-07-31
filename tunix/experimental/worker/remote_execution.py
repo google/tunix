@@ -36,6 +36,8 @@ Security Notes / Trust Boundaries:
 import abc
 import asyncio
 import contextlib
+from concurrent import futures
+import functools
 import inspect
 import threading
 import traceback as traceback_lib
@@ -69,6 +71,10 @@ except ImportError:
 # Default per-call deadline (seconds) applied to remote invocations so a dead or
 # wedged worker surfaces an error instead of hanging the caller indefinitely.
 RPC_TIMEOUT_S = 60.0
+
+# Answered on the event loop rather than the worker thread, so they stay
+# responsive while a long call runs.
+HEALTH_METHODS = frozenset({"heartbeat", "info"})
 
 # Server side timeout for handling a poll_responses() call.
 # It should be shorter than the RPC_TIMEOUT_S to allow time for a response to
@@ -228,6 +234,22 @@ class RemoteExecutionServer(abc.ABC):
     self._response_queue: Optional[asyncio.Queue[ExecutionResponse]] = None
     self._request_counter: int = 0
     self._background_tasks: set[asyncio.Task[Any]] = set()
+    self._executor: Optional[futures.ThreadPoolExecutor] = None
+
+  @property
+  def _work_executor(self) -> futures.ThreadPoolExecutor:
+    """Single worker thread for blocking methods, created on first use."""
+    if self._executor is None:
+      self._executor = futures.ThreadPoolExecutor(
+          max_workers=1, thread_name_prefix="tunix-worker"
+      )
+    return self._executor
+
+  def shutdown_executor(self, wait: bool = False) -> None:
+    """Releases the worker thread, if one was started."""
+    if self._executor is not None:
+      self._executor.shutdown(wait=wait)
+      self._executor = None
 
   def _get_response_queue(self) -> asyncio.Queue[ExecutionResponse]:
     if self._response_queue is None:
@@ -338,8 +360,19 @@ class RemoteExecutionServer(abc.ABC):
     try:
       if inspect.iscoroutinefunction(method):
         result = await method(*request.args, **request.kwargs)
-      else:
+      elif target_name in HEALTH_METHODS:
+        # Answered on the event loop: these are cheap state reads, and the
+        # whole point of asking is to get an answer while the worker is busy.
         result = method(*request.args, **request.kwargs)
+      else:
+        # Off the event loop, so a long call cannot stall this worker's
+        # polling, its heartbeats, or anyone else's dispatch. One worker
+        # thread, so calls stay serialized exactly as they were when they ran
+        # inline.
+        result = await asyncio.get_running_loop().run_in_executor(
+            self._work_executor,
+            functools.partial(method, *request.args, **request.kwargs),
+        )
       return ExecutionResponse(result=result, request_id=request.request_id)
     except Exception as e:  # pylint: disable=broad-exception-caught
       return ExecutionResponse(
@@ -466,6 +499,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
 
     if self._server:
       await self._server.stop(grace)
+    self.shutdown_executor()
 
 
 class ActorHandle(abc.ABC):

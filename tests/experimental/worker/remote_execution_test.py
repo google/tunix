@@ -1323,6 +1323,88 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_heartbeat_answers_while_a_blocking_call_runs(self):
+    """A busy worker must be distinguishable from a dead one."""
+
+    class BlockingEngine:
+      """A worker whose method blocks the thread, as real compute does."""
+
+      def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+      def long_call(self) -> str:
+        self.started.set()
+        self.release.wait(timeout=30)
+        return "done"
+
+      def heartbeat(self) -> str:
+        return "alive"
+
+    async def _run_test():
+      engine = BlockingEngine()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}", rpc_timeout_s=30.0
+      )
+      try:
+        long_call = asyncio.create_task(handle.asubmit("long_call"))
+        await asyncio.to_thread(engine.started.wait, 10)
+
+        # The worker is mid-call; the health question still gets answered.
+        beat = await asyncio.wait_for(
+            handle.asubmit("heartbeat"), timeout=5.0
+        )
+        self.assertEqual(beat, "alive")
+        self.assertFalse(long_call.done())
+
+        engine.release.set()
+        self.assertEqual(await asyncio.wait_for(long_call, timeout=10.0), "done")
+      finally:
+        engine.release.set()
+        await handle.close()
+        await server.stop_serving()
+
+    asyncio.run(_run_test())
+
+  def test_blocking_calls_stay_serialized_on_one_worker_thread(self):
+    """Offloading must not start running a worker's methods in parallel."""
+
+    class CountingEngine:
+
+      def __init__(self):
+        self.concurrent = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+      def work(self) -> int:
+        with self._lock:
+          self.concurrent += 1
+          self.peak = max(self.peak, self.concurrent)
+        time.sleep(0.05)
+        with self._lock:
+          self.concurrent -= 1
+        return self.peak
+
+    async def _run_test():
+      engine = CountingEngine()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}", rpc_timeout_s=30.0
+      )
+      try:
+        await asyncio.gather(*[handle.asubmit("work") for _ in range(4)])
+        self.assertEqual(engine.peak, 1)
+      finally:
+        await handle.close()
+        await server.stop_serving()
+
+    asyncio.run(_run_test())
+
   def test_from_address_passes_transport_options_through(self):
     handle = remote_lib.ActorHandle.from_address(
         f"grpc://localhost:{portpicker.pick_unused_port()}",
