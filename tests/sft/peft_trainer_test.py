@@ -735,9 +735,13 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
 
   def test_loss_output_gradient_scaling(self):
-    # Covers the manual gradient scaling in _train_step: grad(unreduced_sum) *
-    # (1/d) must equal grad(sum/d). Uses a parameter-dependent loss because the
-    # original test's constant loss has zero gradient and can't exercise it.
+    # _train_step accumulates grad(unreduced_sum) with the metric's denominator
+    # and defers the division into the accumulator (Sum grads / Sum denom), so a
+    # LossOutput with denominator d must yield the same update as the reduced
+    # scalar loss sum/d. With a constant d (=2 here) the global-weighted and the
+    # old mean-of-means recipes coincide, so this equivalence is stable across
+    # that change. Uses a parameter-dependent loss because the original test's
+    # constant loss has zero gradient and can't exercise it.
     def param_dependent_sum(model, input_tokens, positions):
       logits, _ = model(input_tokens, positions)
       return jnp.sum(logits)  # depends on the parameters
@@ -845,6 +849,85 @@ class PeftTrainerTest(parameterized.TestCase):
         places=5,
     )  # (6+6)/(2+2)
 
+  def test_train_step_denom_is_global_weighted(self):
+    # Two micro-batches with UNEQUAL denominators on the SAME input (so both
+    # gradients equal g = d(sum_logits)/dparam) accumulate into one accumulator
+    # WITHOUT applying (is_update=False, so the model is unchanged between the
+    # two calls). The fixed recipe adds the raw grad(sum) with the real denom,
+    # so acc.get() == (g + g) / (d1 + d2) [global weighted], NOT
+    # (g/d1 + g/d2) / 2 [the old mean-of-means, which pre-scaled by 1/denom and
+    # accumulated with denom=1]. Fails on the pre-fix code.
+    d1, d2 = 2.0, 6.0
+
+    def make_loss(denom):
+      def loss_fn(
+          model,
+          input_tokens,
+          input_mask,
+          positions,
+          attention_mask,
+          images=None,
+      ):
+        del input_mask, attention_mask, images
+        logits, _ = model(input_tokens, positions)
+        return utils.LossOutput(
+            primary_loss=utils.WeightedMetric(
+                jnp.sum(logits), jnp.asarray(denom, jnp.float32)
+            ),
+            aux_metrics={},
+        )
+
+      return loss_fn
+
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=100, gradient_accumulation_steps=2
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+    acc = peft_trainer.GradientAccumulator(trainer.model, nnx.Param)
+    inp = self.train_ds[0]
+
+    # `with_loss_fn` mutates the trainer (returns self) and `_train_step` is
+    # eager, so swapping the loss between the two accumulate-only calls is safe.
+    trainer.with_loss_fn(make_loss(d1))._train_step(
+        trainer.model, trainer.optimizer, acc, inp, jnp.array(False)
+    )
+    trainer.with_loss_fn(make_loss(d2))._train_step(
+        trainer.model, trainer.optimizer, acc, inp, jnp.array(False)
+    )
+    result = _unwrap(acc.get())
+
+    # Reference g = grad of sum(logits) on the (unchanged) model, matching
+    # diff_fn which differentiates primary_loss.unreduced_sum.
+    processed = dummy_gen_model_input_fn(inp)
+
+    def loss_sum(m):
+      logits, _ = m(processed['input_tokens'], processed['positions'])
+      return jnp.sum(logits)
+
+    _, g = nnx.value_and_grad(loss_sum)(trainer.model)
+    g = _unwrap(g)
+    global_weighted = jax.tree_util.tree_map(lambda a: (a + a) / (d1 + d2), g)
+    mean_of_means = jax.tree_util.tree_map(lambda a: (a / d1 + a / d2) / 2.0, g)
+
+    # Now equals the global weighting ...
+    jax.tree_util.tree_map(
+        lambda a, e: np.testing.assert_allclose(a, e, rtol=1e-5, atol=1e-5),
+        result,
+        global_weighted,
+    )
+    # ... and is NOT the old mean-of-means (uneven denoms).
+    max_diff = jax.tree_util.tree_reduce(
+        jnp.maximum,
+        jax.tree_util.tree_map(
+            lambda a, b: jnp.max(jnp.abs(a - b)), result, mean_of_means
+        ),
+        initializer=jnp.asarray(0.0),
+    )
+    self.assertGreater(float(max_diff), 1e-4)
+
   def test_injected_params(self):
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
@@ -939,6 +1022,29 @@ class GradientAccumulatorTest(parameterized.TestCase):
     jax.tree_util.tree_map(
         lambda g, o: np.testing.assert_allclose(o, g, rtol=1e-7, atol=1e-7),
         _unwrap(grads),
+        out,
+    )
+
+  def test_single_add_weighted_is_grads_over_denom(self):
+    """A single add(grads, denom=d) then get() returns grads / max(d, 1).
+
+    The weighted (denom != 1) case of a one-micro-batch update: the global-
+    weighted mean ``Sum grads / Sum denom`` collapses to ``grads / max(denom,
+    1)``
+    for a single add. This is the premise the depth-1 fast path relies on when
+    ``gradient_accumulation_steps == 1`` -- updating directly from
+    ``grads / max(denom, 1)`` (skipping the accumulator + nnx.cond) must equal
+    the accumulator path. Here grads=6.0 and denom=4.0, so get()=6/4=1.5;
+    the "pre-scale by 1/d then divide again" bug would give a different value.
+    """
+    model, acc = self._make_accumulator()
+    acc.add(
+        self._ones_like_params(model, scale=6.0),
+        denom=jnp.asarray(4.0, dtype=jnp.float32),
+    )
+    out = _unwrap(acc.get())
+    jax.tree_util.tree_map(
+        lambda v: np.testing.assert_allclose(v, 1.5 * jnp.ones_like(v)),
         out,
     )
 
@@ -1574,7 +1680,7 @@ class Depth1FastPathTest(parameterized.TestCase):
         before,
         _unwrap(nnx.state(trainer.model, nnx.Param)),
     )
-    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 1.0)
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 60.0)
 
     # Micro-step 2: update and reset.
     trainer._train_step(
@@ -1668,6 +1774,66 @@ class OptimizerMemoryTest(parameterized.TestCase):
     for leaf in leaves:
       if hasattr(leaf, 'dtype') and jnp.issubdtype(leaf.dtype, jnp.floating):
         self.assertEqual(leaf.dtype, jnp.float32)
+
+
+class TrainStepGlobalWeightedTest(parameterized.TestCase):
+  """Pins that _train_step accumulates the GLOBAL weighted mean, not a mean-of-means.
+
+  Emulates the _train_step recipe: grad(unreduced_sum_i) accumulated with the
+  loss's real per-micro-batch denom -> get() = Sum grads / Sum denom. With
+  uneven denoms this must equal the global weighting and differ from the old
+  mean-of-means (grad_i/denom_i averaged equally).
+  """
+
+  @staticmethod
+  def _unwrap(state):
+    return jax.tree_util.tree_map(
+        lambda v: v[...] if isinstance(v, nnx.Variable) else v,
+        state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+  @staticmethod
+  def _loss_sum(model, x, y):
+    return jnp.sum((model(x) - y) ** 2)
+
+  def test_train_step_recipe_is_global_weighted(self):
+    d1, d2 = 2, 6  # uneven micro-batch denominators
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(in_features=4, out_features=2, rngs=rngs)
+    k = jax.random.split(jax.random.PRNGKey(0), 2)
+    x = jax.random.normal(k[0], (d1 + d2, 4))
+    y = jax.random.normal(k[1], (d1 + d2, 2))
+    grad_fn = nnx.value_and_grad(self._loss_sum)
+    _, g1 = grad_fn(model, x[:d1], y[:d1])
+    _, g2 = grad_fn(model, x[d1:], y[d1:])
+    g1, g2 = self._unwrap(g1), self._unwrap(g2)
+    # New recipe: NO local 1/denom scale; add grad(sum) with the real denom.
+    acc = peft_trainer.GradientAccumulator(model, nnx.Param)
+    acc.add(g1, denom=jnp.asarray(float(d1)))
+    acc.add(g2, denom=jnp.asarray(float(d2)))
+    result = self._unwrap(acc.get())
+    global_weighted = jax.tree_util.tree_map(
+        lambda a, b: (a + b) / (d1 + d2), g1, g2
+    )
+    mean_of_means = jax.tree_util.tree_map(
+        lambda a, b: (a / d1 + b / d2) / 2.0, g1, g2
+    )
+    # Now equals the global weighting ...
+    jax.tree_util.tree_map(
+        lambda a, e: np.testing.assert_allclose(a, e, rtol=1e-6, atol=1e-6),
+        result,
+        global_weighted,
+    )
+    # ... and is NOT the old mean-of-means (uneven denoms).
+    max_diff = jax.tree_util.tree_reduce(
+        jnp.maximum,
+        jax.tree_util.tree_map(
+            lambda a, b: jnp.max(jnp.abs(a - b)), result, mean_of_means
+        ),
+        initializer=jnp.asarray(0.0),
+    )
+    self.assertGreater(float(max_diff), 1e-3)
 
 
 if __name__ == '__main__':
