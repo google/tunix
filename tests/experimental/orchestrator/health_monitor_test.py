@@ -129,6 +129,28 @@ class HealthMonitorTest(absltest.TestCase):
     ):
       monitor._executor.submit(lambda: None)
 
+  def test_poll_cancels_remaining_futures_on_exception(self):
+    worker0 = mock_worker.MockWorker("w0", roles={"trainer"})
+    worker1 = mock_worker.MockWorker("w1", roles={"trainer"})
+    registry = worker_registry.WorkerRegistry()
+    registry.register(worker0)
+    registry.register(worker1)
+    monitor = health_monitor.HealthMonitor(registry, max_workers=1)
+    with mock.patch.object(
+        worker0, "heartbeat", side_effect=RuntimeError("heartbeat failed")
+    ):
+      with mock.patch.object(
+          worker1,
+          "heartbeat",
+          return_value=datatypes.HealthReport(state=WorkerState.READY),
+      ) as mock_hb1:
+        with self.assertRaisesRegex(RuntimeError, "heartbeat failed"):
+          monitor.poll()
+        self.assertEqual(mock_hb1.call_count, 0)
+    self.assertEqual(
+        monitor._executor.submit(lambda: "clean").result(), "clean"
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

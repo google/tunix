@@ -125,14 +125,18 @@ class HealthMonitor:
     futures = [
         self._executor.submit(_poll_worker, wid) for wid in worker_ids
     ]
-    for future in concurrent.futures.as_completed(futures):
-      wid, report = future.result()
-      if report is None:
-        continue
-      reports[wid] = report
-      previous = self._state_since.get(wid)
-      if previous is None or previous[0] != report.state:
-        self._state_since[wid] = (report.state, self._clock())
+    try:
+      for future in concurrent.futures.as_completed(futures):
+        wid, report = future.result()
+        if report is None:
+          continue
+        reports[wid] = report
+        previous = self._state_since.get(wid)
+        if previous is None or previous[0] != report.state:
+          self._state_since[wid] = (report.state, self._clock())
+    finally:
+      for future in futures:
+        future.cancel()
 
     # Forget workers that have left the registry.
     for worker_id in self._state_since.keys() - live_ids:
