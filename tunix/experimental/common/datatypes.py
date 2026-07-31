@@ -63,10 +63,14 @@ class Request:
   Attributes:
     request_id: Unique identifier for this request, echoed back on the
       corresponding response so callers can correlate responses.
+    incarnation: Lineage epoch this request was issued in. A restart or rewind
+      advances it, so results produced for a discarded lineage can be told
+      apart from current ones even when every other identifier matches.
     metadata: Optional free-form data attached to the request.
   """
 
   request_id: str = ""
+  incarnation: int = 0
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -161,6 +165,7 @@ class HealthReport:
   """
 
   state: WorkerState
+  incarnation: int = 0
   inflight: int = 0
   queue_depth: int = 0
   policy_version: int = 0
@@ -198,6 +203,9 @@ class RolloutRequest(Request):
     prompt_id: Unique identifier for this prompt within a task or dataset.
     group_id: Optional identifier for grouping related rollout requests (e.g.
       for GRPO).
+    sample_index: Position of this sample within its group. With the group id
+      and the incarnation it names the logical slot being filled, which is
+      what a retry re-fills under a new request id.
     generation_kwargs: Additional keyword arguments for generation (e.g.
       sampling parameters like max_tokens and temperature).
     max_turns: Maximum number of conversation turns for environment interaction.
@@ -208,6 +216,7 @@ class RolloutRequest(Request):
   prompt: Any = ""
   prompt_id: str = "default_prompt"
   group_id: str = ""
+  sample_index: int = 0
   generation_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
   max_turns: int = 10
   target_policy_version: int = 0
