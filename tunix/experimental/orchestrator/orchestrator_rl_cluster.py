@@ -127,6 +127,23 @@ class OrchestratorRLCluster:
     else:
       self._base.update_actor(train_ds, eval_ds, skip_jit)
 
+  def configure_loss(self, spec: Any) -> None:
+    """Delivers the loss description to wherever the trainer actually is.
+
+    A trainer handle that can take the description builds the loss on its own
+    side; that is the only way a trainer in another process gets one, since
+    the alternative is shipping a closure. Otherwise the loss is built here
+    and installed on the base cluster's trainer, as before.
+
+    Args:
+      spec: The loss description.
+    """
+    configure = getattr(self._trainer_worker, "configure_loss", None)
+    if callable(configure):
+      configure(spec)
+      return
+    spec.install_on(self._base.actor_trainer)
+
   def _harvest_trainer_metrics(self) -> None:
     """Pulls a remote trainer's metrics into this run's logger.
 

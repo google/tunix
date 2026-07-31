@@ -155,6 +155,14 @@ class RemoteTrainerWorker(_RemoteWorker):
   def train(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
     self._actor.submit("train", chunks, eval_ds, skip_jit)
 
+  def configure_loss(self, spec: Any) -> None:
+    """Sends the loss description; the remote trainer builds the function.
+
+    The description carries only data, which is the point: a closure over
+    live orchestrator objects could not cross this boundary at all.
+    """
+    self._actor.submit("configure_loss", spec)
+
   def drain_metrics(self) -> dict[str, float]:
     """Collects the metrics a remote trainer recorded during its last steps.
 

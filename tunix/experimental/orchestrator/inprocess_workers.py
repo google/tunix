@@ -95,6 +95,10 @@ class InProcessTrainerWorker(_InProcessWorker):
     if hasattr(self._rl_cluster, "critic_trainer"):
       self._rl_cluster.update_critic(chunks, eval_ds, skip_jit)
 
+  def configure_loss(self, spec: Any) -> None:
+    """Builds the loss from its description and installs it locally."""
+    spec.install_on(self._rl_cluster.actor_trainer)
+
   def drain_metrics(self) -> dict[str, float]:
     """Nothing to hand back: this trainer writes to the shared logger itself."""
     return {}

@@ -30,6 +30,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.orchestrator import loss_spec as loss_spec_lib
 from tunix.rl import function_registry
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
@@ -154,34 +155,44 @@ class GRPOAdapter:
         old_per_token_logps=None,
     )
 
+  def loss_spec(self, cluster: Any) -> loss_spec_lib.LossSpec:
+    """Describes the loss, so it can be built wherever the trainer runs.
+
+    Args:
+      cluster: Supplies the padding ids and chunk size the loss needs.
+
+    Returns:
+      A description carrying only data, no captured functions.
+    """
+    return loss_spec_lib.LossSpec(
+        policy_loss_fn=self._algo_config.policy_loss_fn,
+        algo_config=self._algo_config,
+        pad_id=cluster.rollout.pad_id(),
+        eos_id=cluster.rollout.eos_id(),
+        compute_logps_chunk_size=(
+            cluster.cluster_config.training_config.compute_logps_chunk_size
+        ),
+    )
+
   def configure_trainer(self, cluster: Any) -> None:
     """Wires GRPO's policy loss + model-input adapter onto the actor trainer.
 
     Reuses the same policy-loss registry entry the agentic GRPO learner uses.
+    The wiring is expressed as a description rather than built here, so a
+    trainer in another process can construct the same loss from it; a cluster
+    that knows how to deliver one is given it, and otherwise the loss is built
+    and installed locally exactly as before.
     """
     self._algo_config.temperature = cluster.get_rollout_config(
         mode=rl_cluster_lib.Mode.TRAIN
     ).temperature
-    policy_loss_fn = function_registry.get_policy_loss_fn(
-        self._algo_config.policy_loss_fn
-    )
-    algo_config = self._algo_config
 
-    def loss_fn(model, train_example, algo_config=algo_config):
-      return policy_loss_fn(
-          model,
-          train_example,
-          algo_config=algo_config,
-          pad_id=cluster.rollout.pad_id(),
-          eos_id=cluster.rollout.eos_id(),
-          compute_logps_chunk_size=cluster.cluster_config.training_config.compute_logps_chunk_size,
-      )
-
-    cluster.actor_trainer.with_loss_fn(loss_fn, has_aux=True)
-    cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {"train_example": x, "algo_config": algo_config}
-    )
-    cluster.actor_trainer.is_managed_externally = True
+    spec = self.loss_spec(cluster)
+    deliver = getattr(cluster, "configure_loss", None)
+    if callable(deliver):
+      deliver(spec)
+    else:
+      spec.install_on(cluster.actor_trainer)
 
   def postprocess_group(
       self,
