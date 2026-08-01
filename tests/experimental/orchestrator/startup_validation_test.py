@@ -14,12 +14,20 @@
 
 """Tests for orchestrator startup validation pipeline."""
 
+import dataclasses
 from absl.testing import absltest
 import optax
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.worker import mock_worker
 from tunix.rl import algorithm_config
 from tunix.rl import rl_cluster
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class _MockAlgorithmConfig(algorithm_config.AlgorithmConfig):
+  num_generations: int = 2
+  max_response_length: int = 1024
 
 
 class _MockValidator:
@@ -42,7 +50,7 @@ class StartupValidationTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     self.registry = worker_registry.WorkerRegistry()
-    self.alg_config = algorithm_config.AlgorithmConfig()
+    self.alg_config = _MockAlgorithmConfig()
     self.training_config = rl_cluster.RLTrainingConfig(
         actor_optimizer=optax.identity(),
         eval_every_n_steps=10,
@@ -92,6 +100,80 @@ class StartupValidationTest(absltest.TestCase):
     self.assertEqual(
         ctx.exception.errors,
         ["failure 1", "failure 2", "failure 3"],
+    )
+
+  def test_run_geometry_non_integer_shape_rejected(self):
+    self.training_config.mini_batch_size = 0  # Invalid non-positive integer
+    validator = startup_validation.RunGeometryValidator()
+    errors = validator.validate(
+        self.registry, self.alg_config, self.training_config
+    )
+    self.assertTrue(any("mini_batch_size" in e for e in errors))
+
+  def test_run_geometry_batch_not_divisible_by_group_rejected(self):
+    self.training_config.mini_batch_size = 8
+    self.alg_config.num_generations = 3  # 8 is not divisible by 3
+    validator = startup_validation.RunGeometryValidator()
+    errors = validator.validate(
+        self.registry, self.alg_config, self.training_config
+    )
+    self.assertTrue(any("divisible by num_generations" in e for e in errors))
+
+  def test_run_geometry_batch_not_divisible_by_micro_batch_rejected(self):
+    self.training_config.mini_batch_size = 8
+    self.training_config.train_micro_batch_size = 3  # 8 is not divisible by 3
+    validator = startup_validation.RunGeometryValidator()
+    errors = validator.validate(
+        self.registry, self.alg_config, self.training_config
+    )
+    self.assertTrue(
+        any("divisible by train_micro_batch_size" in e for e in errors)
+    )
+
+  def test_run_geometry_grpo_group_size_one_rejected(self):
+    self.alg_config.algo_variant = "grpo"
+    self.alg_config.num_generations = 1
+    validator = startup_validation.RunGeometryValidator()
+    errors = validator.validate(
+        self.registry, self.alg_config, self.training_config
+    )
+    self.assertTrue(
+        any("num_generations (group_size) must be > 1" in e for e in errors)
+    )
+
+  def test_run_geometry_grpo_group_size_none_or_string_rejected(self):
+    self.alg_config.algo_variant = "grpo"
+    self.alg_config.num_generations = None
+    validator = startup_validation.RunGeometryValidator()
+    errors = validator.validate(
+        self.registry, self.alg_config, self.training_config
+    )
+    self.assertTrue(
+        any("num_generations (group_size) must be > 1" in e for e in errors)
+    )
+
+  def test_run_geometry_valid_configuration_passes(self):
+    self.training_config.mini_batch_size = 16
+    self.training_config.train_micro_batch_size = 4
+    self.alg_config.algo_variant = "grpo"
+    self.alg_config.num_generations = 4
+    validator = startup_validation.RunGeometryValidator()
+    errors = validator.validate(
+        self.registry, self.alg_config, self.training_config
+    )
+    self.assertEmpty(errors)
+
+  def test_default_pipeline_valid_configuration_passes(self):
+    self.registry.register(
+        mock_worker.MockWorker("t0", {"trainer"}, {"fsdp_size": 4})
+    )
+    self.registry.register(mock_worker.MockWorker("i0", {"inference"}))
+    self.registry.register(mock_worker.MockWorker("r0", {"rollout"}))
+    self.alg_config.num_generations = 2
+    self.training_config.mini_batch_size = 8
+    self.training_config.train_micro_batch_size = 4
+    startup_validation.validate_startup(
+        self.registry, self.alg_config, self.training_config
     )
 
 
