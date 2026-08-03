@@ -866,6 +866,65 @@ class FusedStepTest(parameterized.TestCase):
     )
     self.assertEqual(trainer_fused.train_steps, trainer_split.train_steps)
 
+  def test_fused_stays_bitwise_over_many_steps(self):
+    """Bit-identity must survive many steps, not just one.
+
+    Worth its own test because a per-step tolerance would not catch a
+    regression here. Training is chaotic: a difference of a single ULP in one
+    step changes what the next forward pass sees, so the next gradients differ
+    by more, and the gap grows exponentially until the two models are as
+    unrelated as two different seeds. Measured on gemma4-e2b, one extra update
+    multiplied the weight divergence by ~2000x, and any growth above ~1.22x per
+    step reaches O(1) within 100 steps.
+
+    That makes "close after N steps" useless as a gate -- it says nothing about
+    whether the implementations agree, only how fast the same arithmetic
+    decorrelates. Bit-identity is the exception: it composes. If every step is
+    bit-identical then so is the whole run, and the assertion stays sharp no
+    matter how many steps are taken. So assert exactly that, and let any
+    regression show up as an unambiguous failure rather than a tolerance
+    argument.
+    """
+    steps = 12
+    model_fused, model_split = self._two_identical_models()
+    trainer_fused = self._make_trainer(model_fused)
+    trainer_split = self._make_trainer(model_split)
+    trainer_fused.config.max_steps = steps
+    trainer_split.config.max_steps = steps
+
+    batches = dummy_datasets(batch_size=4, repeat=steps)[:steps]
+    self.assertLen(batches, steps)
+
+    for i, batch in enumerate(batches):
+      trainer_fused.train_step(batch)
+      trainer_split.fwd_bwd(batch)
+      trainer_split.update()
+      # Check every step: the first step at which they diverge is the useful
+      # diagnostic, and after chaotic amplification a later check would only
+      # report that everything is different.
+      ck_fused = tc.tree_bit_checksum(nnx.state(model_fused, nnx.Param))
+      ck_split = tc.tree_bit_checksum(nnx.state(model_split, nnx.Param))
+      self.assertEqual(
+          ck_fused,
+          ck_split,
+          f"fused and split diverged at step {i + 1} of {steps}",
+      )
+
+    jax.tree.map_with_path(
+        tc.assert_bitwise_equal,
+        nnx.state(model_fused, nnx.Param),
+        nnx.state(model_split, nnx.Param),
+    )
+    # Guard against the test passing because nothing moved: an update smaller
+    # than half a ULP of the weights rounds away, which would make bit-identity
+    # trivially true (lr=1e-5 on bfloat16 weights does exactly that).
+    _, model_untrained = self._two_identical_models()
+    self.assertNotEqual(
+        tc.tree_bit_checksum(nnx.state(model_fused, nnx.Param)),
+        tc.tree_bit_checksum(nnx.state(model_untrained, nnx.Param)),
+        "weights did not move at all -- the comparison is vacuous",
+    )
+
   def test_fused_unavailable_when_accumulating(self):
     model, _ = self._two_identical_models()
     trainer = self._make_trainer(model, accum_steps=2)
