@@ -34,7 +34,7 @@ from tunix.examples.data import math_dataset as example_data
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.rollout import base_rollout
 from tunix.utils import mesh as mesh_lib
@@ -60,25 +60,25 @@ class BasePipeline(abc.ABC, config.HyperParameters):
   # Mesh
   # ------------------------------------------------------------------
   _ROLE_TO_MODEL_KEY = {
-      rl_cluster_lib.Role.ACTOR: "actor_model_config",
-      rl_cluster_lib.Role.CRITIC: "critic_model_config",
-      rl_cluster_lib.Role.REFERENCE: "reference_model_config",
-      rl_cluster_lib.Role.REWARD: "reward_model_config",
-      rl_cluster_lib.Role.ROLLOUT: "rollout_model_config",
+      rl_engine_lib.Role.ACTOR: "actor_model_config",
+      rl_engine_lib.Role.CRITIC: "critic_model_config",
+      rl_engine_lib.Role.REFERENCE: "reference_model_config",
+      rl_engine_lib.Role.REWARD: "reward_model_config",
+      rl_engine_lib.Role.ROLLOUT: "rollout_model_config",
   }
   _SPLIT_ROLE_ALIASES = {
-      "actor": rl_cluster_lib.Role.ACTOR,
-      "critic": rl_cluster_lib.Role.CRITIC,
-      "reference": rl_cluster_lib.Role.REFERENCE,
-      "reward": rl_cluster_lib.Role.REWARD,
-      "rollout": rl_cluster_lib.Role.ROLLOUT,
+      "actor": rl_engine_lib.Role.ACTOR,
+      "critic": rl_engine_lib.Role.CRITIC,
+      "reference": rl_engine_lib.Role.REFERENCE,
+      "reward": rl_engine_lib.Role.REWARD,
+      "rollout": rl_engine_lib.Role.ROLLOUT,
   }
 
   def _is_agentic_mode(self, mode: str) -> bool:
     """Checks if the given mode is agentic."""
     return mode.startswith("agentic")
 
-  def _resolve_split_role(self, role_name: str) -> rl_cluster_lib.Role:
+  def _resolve_split_role(self, role_name: str) -> rl_engine_lib.Role:
     """Resolves a split role name to an alias.
 
     Args:
@@ -100,7 +100,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
 
   def _get_same_mesh_as_map(
       self,
-  ) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
+  ) -> dict[rl_engine_lib.Role, rl_engine_lib.Role]:
     """Returns a mapping from a role to the role whose mesh it should share."""
     same_mesh_as = {}
     for role, model_key in self._ROLE_TO_MODEL_KEY.items():
@@ -115,18 +115,18 @@ class BasePipeline(abc.ABC, config.HyperParameters):
                         "same_mesh_as to be None or str but got"
                         f"{type(target_name).__name__}")
       target_role = self._resolve_split_role(str(target_name))
-      if role == rl_cluster_lib.Role.ACTOR:
+      if role == rl_engine_lib.Role.ACTOR:
         raise ValueError("Actor must own its mesh.")
       same_mesh_as[role] = target_role
 
     return same_mesh_as
 
-  def _is_role_active(self, role: rl_cluster_lib.Role) -> bool:
+  def _is_role_active(self, role: rl_engine_lib.Role) -> bool:
     """Checks if the given role is active (i.e. used)."""
     if role in (
-        rl_cluster_lib.Role.ACTOR,
-        rl_cluster_lib.Role.REFERENCE,
-        rl_cluster_lib.Role.ROLLOUT,
+        rl_engine_lib.Role.ACTOR,
+        rl_engine_lib.Role.REFERENCE,
+        rl_engine_lib.Role.ROLLOUT,
     ):
       return True
     model_key = self._ROLE_TO_MODEL_KEY[role]
@@ -134,7 +134,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
 
   def _resolve_mesh_owners(
       self,
-  ) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
+  ) -> dict[rl_engine_lib.Role, rl_engine_lib.Role]:
     """Resolves the mesh owner for each role.
 
     Returns:
@@ -149,7 +149,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
 
       # We default to the actor as the mesh owner, and override it if the role
       # has an explicit mesh config.
-      base_owners[role] = rl_cluster_lib.Role.ACTOR
+      base_owners[role] = rl_engine_lib.Role.ACTOR
 
       model_config = self.config.get(model_key, {})
       has_mesh = (
@@ -160,9 +160,9 @@ class BasePipeline(abc.ABC, config.HyperParameters):
         base_owners[role] = role
 
     def resolve_owner(
-        role: rl_cluster_lib.Role,
-        seen: set[rl_cluster_lib.Role],
-    ) -> rl_cluster_lib.Role:
+        role: rl_engine_lib.Role,
+        seen: set[rl_engine_lib.Role],
+    ) -> rl_engine_lib.Role:
       """Resolves the mesh owner for the given role.
 
       Args:
@@ -271,7 +271,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
   # ------------------------------------------------------------------
   def create_rollout_config(
       self,
-      role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
+      role_to_mesh: dict[rl_engine_lib.Role, jax.sharding.Mesh] | None = None,
   ) -> base_rollout.RolloutConfig:
     """Build RolloutConfig from rollout config section in YAML.
 
@@ -339,7 +339,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
       engine: str,
       kv_cache_size: int,
       max_running_requests: int,
-      role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
+      role_to_mesh: dict[rl_engine_lib.Role, jax.sharding.Mesh] | None = None,
   ) -> dict[str, Any]:
     """Return engine-specific RolloutConfig fields for agentic mode."""
     model_id = self._config_mapping("actor_model_config").get("model_id", "")
@@ -379,7 +379,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
         raise ValueError(
             "role_to_mesh must be provided for vllm rollout config."
         )
-      rollout_shape = role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.shape
+      rollout_shape = role_to_mesh[rl_engine_lib.Role.ROLLOUT].devices.shape
       rollout_cfg = self._config_mapping("rollout_config")
       max_num_seqs = rollout_cfg.get(
           "rollout_vllm_max_num_seqs",
@@ -431,7 +431,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
   def create_cluster_config(
       self,
       *,
-      role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh],
+      role_to_mesh: dict[rl_engine_lib.Role, jax.sharding.Mesh],
       rollout_config: base_rollout.RolloutConfig | None = None,
   ):
     """Create ClusterConfig from rollout, optimizer, and rollout engine config sections in YAML.
@@ -446,7 +446,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
     """
     if rollout_config is None:
       rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
-    return rl_cluster_lib.ClusterConfig(
+    return rl_engine_lib.ClusterConfig(
         role_to_mesh=role_to_mesh,
         rollout_engine=self._config_string("rollout_engine"),
         offload_to_cpu=self._config_bool("offload_to_cpu"),
@@ -468,9 +468,9 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           self.create_optimizer(base_key, "critic_optimizer_config")
       )
 
-    return rl_cluster_lib.RLTrainingConfig(**constructed_rl_training_config)
+    return rl_engine_lib.RLTrainingConfig(**constructed_rl_training_config)
 
-  def create_perf_config(self, cluster_config: rl_cluster_lib.ClusterConfig):
+  def create_perf_config(self, cluster_config: rl_engine_lib.ClusterConfig):
     perf_metrics_options = cluster_config.training_config.perf_metrics_options
     if not perf_metrics_options:
       return None
@@ -514,18 +514,18 @@ class BasePipeline(abc.ABC, config.HyperParameters):
         )
     return perf_config
 
-  def create_rl_cluster(self, tokenizer) -> rl_cluster_lib.RLCluster:
-    """Constructs an RLCluster by instantiating models and configurations.
+  def create_rl_engine(self, tokenizer) -> rl_engine_lib.RLEngine:
+    """Constructs an RLEngine by instantiating models and configurations.
 
     This method retrieves configurations from YAML and uses them to
     initialize the Reference, Actor, and optional Critic models.
 
     Args:
-      tokenizer: The tokenizer instance to be passed into the RL cluster
-      for processing text.
+      tokenizer: The tokenizer instance to be passed into the RL engine for
+        processing text.
 
     Returns:
-      An initialized reinforcement learning cluster.
+      An initialized reinforcement learning engine.
     """
 
     role_to_mesh = self.create_role_to_mesh()
@@ -545,12 +545,12 @@ class BasePipeline(abc.ABC, config.HyperParameters):
     reference_model, _ = model_lib.create_model(
         dict(reference_model_config),
         tokenizer_config,
-        role_to_mesh[rl_cluster_lib.Role.REFERENCE],
+        role_to_mesh[rl_engine_lib.Role.REFERENCE],
     )
     if actor_model_config.get("lora_config", None):
       actor_model = model_lib.apply_lora_to_model(
           reference_model,
-          role_to_mesh[rl_cluster_lib.Role.ACTOR],
+          role_to_mesh[rl_engine_lib.Role.ACTOR],
           actor_model_config["lora_config"],
       )
     else:
@@ -575,13 +575,13 @@ class BasePipeline(abc.ABC, config.HyperParameters):
       critic_model, _ = model_lib.create_model(
           dict(critic_model_config),
           tokenizer_config,
-          role_to_mesh[rl_cluster_lib.Role.CRITIC],
+          role_to_mesh[rl_engine_lib.Role.CRITIC],
       )
 
       if critic_model_config.get("lora_config", None):
         critic_model = model_lib.apply_lora_to_model(
             critic_model,
-            role_to_mesh[rl_cluster_lib.Role.CRITIC],
+            role_to_mesh[rl_engine_lib.Role.CRITIC],
             critic_model_config["lora_config"],
         )
 
@@ -606,7 +606,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
         rollout_config=rollout_config,
     )
     perf_config = self.create_perf_config(cluster_config)
-    return rl_cluster_lib.RLCluster(
+    return rl_engine_lib.RLEngine(
         actor=actor_model,
         critic=critic_model,
         reference=reference_model,
@@ -614,6 +614,9 @@ class BasePipeline(abc.ABC, config.HyperParameters):
         cluster_config=cluster_config,
         perf_config=perf_config,
     )
+
+  # Alias for backward compatibility
+  create_rl_cluster = create_rl_engine
 
   def _compute_max_steps(self, dataset):
     """Compute max_steps from the dataset length and RL training config.

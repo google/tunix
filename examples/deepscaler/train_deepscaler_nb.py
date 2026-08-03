@@ -65,7 +65,7 @@ with cm:
   from tunix.rl.agentic.environments import task_environment
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  from tunix.rl import rl_cluster as rl_cluster_lib
+  from tunix.rl import rl_cluster as rl_engine_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
@@ -552,15 +552,15 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={  # pyrefly: ignore[bad-argument-type]
-        rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        rl_engine_lib.Role.ACTOR: trainer_mesh,
+        rl_engine_lib.Role.REFERENCE: trainer_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -603,8 +603,8 @@ perf_metrics_config = PerfMetricsConfig(
 )
 
 # %%
-# RL cluster
-rl_cluster = rl_cluster_lib.RLCluster(
+# RL engine
+rl_engine = rl_engine_lib.RLEngine(
     actor=qwen2_actor,
     reference=qwen2_ref,
     tokenizer=tokenizer,
@@ -612,7 +612,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     perf_config=perf_metrics_config,
 )
 
-show_hbm_usage("after RLCluster creation")
+show_hbm_usage("after RLEngine creation")
 
 
 # %%
@@ -644,7 +644,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     reward_fns=[
         math_rewards.math_reward,
     ],

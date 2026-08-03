@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Client facing abstraction for interacting with RL training cluster."""
+"""Client facing abstraction for interacting with RL training engine."""
 
 import collections
 import contextlib
@@ -188,8 +188,8 @@ class ClusterConfig:
   )
 
 
-class RLCluster:
-  """RLCluster."""
+class RLEngine:
+  """RLEngine."""
 
   def __init__(
       self,
@@ -267,7 +267,7 @@ class RLCluster:
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
 
-    self._init_cluster()
+    self._init_engine()
     gc.collect()
 
     # NB: global steps should be adjusted properly based on the actual RL
@@ -368,8 +368,8 @@ class RLCluster:
     else:
       raise NotImplementedError("Loading from path is not supported yet.")
 
-  def _init_cluster(self):
-    """Initializes the RL cluster."""
+  def _init_engine(self):
+    """Initializes the RL engine."""
     # 1. Initialize rollout.
     if isinstance(
         self.cluster_config.rollout_engine, str
@@ -1293,3 +1293,7 @@ class RLCluster:
           stack.enter_context(self.cluster_config.role_to_mesh[role]),
           stack.enter_context(logical_axis_rule_ctx),
       )
+
+
+# Alias for backward compatibility.
+RLCluster = RLEngine

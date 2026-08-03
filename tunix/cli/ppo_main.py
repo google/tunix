@@ -80,13 +80,13 @@ class PpoPipeline(base_rl_pipeline.BasePipeline):
         custom_batch_fn=custom_batch_fn,
     )
 
-    rl_cluster = self.create_rl_cluster(tokenizer)
+    rl_engine = self.create_rl_engine(tokenizer)
 
     if mode == "ppo":
       from tunix.rl.ppo import ppo_learner  # pylint: disable=g-import-not-at-top
 
       ppo_trainer = ppo_learner.PpoLearner(
-          rl_cluster=rl_cluster,
+          rl_engine=rl_engine,
           reward_fns=self.obtain_reward_fn(),
           algo_config=ppo_learner.PpoConfig(
               **self._config_mapping("ppo_config")
@@ -118,4 +118,3 @@ def main(argv, **kwargs):
 
 if __name__ == "__main__":
   app.run(main)
-  

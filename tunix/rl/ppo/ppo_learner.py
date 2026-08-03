@@ -29,8 +29,9 @@ from tunix.rl import algo_core as ppo_helpers
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
+from tunix.utils import compat
 
 
 TrainingInputT = rl_learner.TrainingInputT
@@ -129,9 +130,10 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
   - https://arxiv.org/abs/1707.06347
   """
 
+  @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
-      rl_cluster: rl_cluster_lib.RLCluster,
+      rl_engine: rl_engine_lib.RLEngine,
       algo_config: PPOConfig,
       reward_fns: RewardFn | List[RewardFn] | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
@@ -140,7 +142,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     """Initializes the `PPOLearner`.
 
     Args:
-      rl_cluster: RL cluster containing actor, reference and reward models.
+      rl_engine: RL engine containing actor, reference and reward models.
       ppo_config: An instance of `PPOConfig` containing all training-specific
         configuration options.
       reward_fns: A single callable or a list of callables that compute a scalar
@@ -157,30 +159,30 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
       data_shuffle_seed: The seed for shuffling the data.
     """
     super().__init__(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         algo_config=algo_config,
         reward_fns=reward_fns,  # pyrefly: ignore[bad-argument-type]
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    # ===== RlCluster should have `reward` and `critic` models =====
+    # ===== RLEngine should have `reward` and `critic` models =====
     if bool(reward_fns) == bool(
-        self.rl_cluster.inference_worker._models.get("reward", None)
+        self.rl_engine.inference_worker._models.get("reward", None)
     ):
       raise ValueError(
-          "PPO requires one of `reward_fns` or `rl_cluster.reward` to be set. "
+          "PPO requires one of `reward_fns` or `rl_engine.reward` to be set. "
           f"Received: reward_fn={reward_fns}, "
-          "rl_cluster.reward="
-          f"{self.rl_cluster.inference_worker._models['reward']}"
+          "rl_engine.reward="
+          f"{self.rl_engine.inference_worker._models['reward']}"
       )
-    if not self.rl_cluster.inference_worker._models["critic"]:
+    if not self.rl_engine.inference_worker._models["critic"]:
       raise ValueError(
           "PPO requires a critic model. Please pass the correct `critic` to "
-          "`RlCluster`."
+          "`RLEngine`."
       )
     self._use_reward_model = bool(
-        self.rl_cluster.inference_worker._models.get("reward", None)
+        self.rl_engine.inference_worker._models.get("reward", None)
     )
 
     # ===== Configure the actor (policy) trainer =====
@@ -192,12 +194,12 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         model,
         train_example,
         algo_config,
-        pad_id=self.rl_cluster.rollout.pad_id(),
-        eos_id=self.rl_cluster.rollout.eos_id(),
-        compute_logps_chunk_size=self.rl_cluster.cluster_config.training_config.compute_logps_chunk_size,
+        pad_id=self.rl_engine.rollout.pad_id(),
+        eos_id=self.rl_engine.rollout.eos_id(),
+        compute_logps_chunk_size=self.rl_engine.cluster_config.training_config.compute_logps_chunk_size,
     )
-    self.rl_cluster.actor_trainer.with_loss_fn(loss_fn, has_aux=True)
-    self.rl_cluster.actor_trainer.with_gen_model_input_fn(
+    self.rl_engine.actor_trainer.with_loss_fn(loss_fn, has_aux=True)
+    self.rl_engine.actor_trainer.with_gen_model_input_fn(
         lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
             "algo_config": self.algo_config,
@@ -208,19 +210,19 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     value_loss_fn = registry.get(
         "value_loss_fn", self.algo_config.value_loss_fn
     )
-    self.rl_cluster.critic_trainer.with_loss_fn(value_loss_fn, has_aux=True)
-    self.rl_cluster.critic_trainer.with_gen_model_input_fn(
+    self.rl_engine.critic_trainer.with_loss_fn(value_loss_fn, has_aux=True)
+    self.rl_engine.critic_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
             "clip_range_value": self.algo_config.clip_range_value,
-            "pad_id": self.rl_cluster.rollout.pad_id(),
-            "eos_id": self.rl_cluster.rollout.eos_id(),
+            "pad_id": self.rl_engine.rollout.pad_id(),
+            "eos_id": self.rl_engine.rollout.eos_id(),
         }
     )
 
     # ===== Configure the metrics logger =====
     # We just log the metrics returned in `aux`. All other metrics are logged
-    # by `RLCluster` itself.
+    # by `RLEngine` itself.
     actor_rl_metrics_to_log = {"pg_clipfrac": common.mean_of_means}
     if self.algo_config.epsilon_c is not None:
       actor_rl_metrics_to_log["pg_clipfrac_lower"] = common.mean_of_means
@@ -229,11 +231,11 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         and self.algo_config.entropy_coef > 0.0
     ):
       actor_rl_metrics_to_log["loss/entropy"] = common.mean_of_means
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
+    self.rl_engine.actor_trainer.with_rl_metrics_to_log(
         actor_rl_metrics_to_log  # pyrefly: ignore[bad-argument-type]
     )
 
-    self.rl_cluster.critic_trainer.with_rl_metrics_to_log({
+    self.rl_engine.critic_trainer.with_rl_metrics_to_log({
         "vpred_mean": common.mean_of_means,
         "vf_clipfrac": common.mean_of_means,
     })
@@ -241,7 +243,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
   def _generate_and_compute_advantage(
       self,
       training_input: TrainingInputT,
-      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+      mode: rl_engine_lib.Mode = rl_engine_lib.Mode.TRAIN,
   ) -> TrainExample:
     """Generates completions and computes advantages for PPO training.
 
@@ -253,11 +255,11 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     Returns:
       A `TrainExample` instance containing the processed input data for PPO.
     """
-    rollout_config = self.rl_cluster.cluster_config.rollout_config
+    rollout_config = self.rl_engine.cluster_config.rollout_config
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
-    pad_value = self.rl_cluster.rollout.pad_id()
-    eos_value = self.rl_cluster.rollout.eos_id()
+    pad_value = self.rl_engine.rollout.pad_id()
+    eos_value = self.rl_engine.rollout.eos_id()
 
     # TODO(abheesht): Other RL libraries may allow specifying different micro batch sizes for
     # computing log probs, values, rewards, etc. We can do that here.
@@ -265,7 +267,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # ===== Generation ======
     # Generate. We use `model`, i.e., the policy model for generating the
     # "experiences".
-    rollout_output = self.rl_cluster.generate(
+    rollout_output = self.rl_engine.generate(
         prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
         micro_batch_size=self._rollout_micro_batch_size,
     )
@@ -297,7 +299,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # ===== Compute log probs ======
     # Compute log probs from the reference model. Shape = `[B, T]`.
     if self.algo_config.beta != 0.0:
-      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+      ref_per_token_logps = self.rl_engine.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=jax_completion_ids,
           pad_id=pad_value,
@@ -311,7 +313,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # the policy model here. Shape = `[B, T]`.
     # TODO(abheesht): Do we do this only when `self.num_iterations > 1`? Don't
     # see this condition in other RL libraries.
-    old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+    old_per_token_logps = self.rl_engine.get_old_per_token_logps(
         prompt_tokens=prompt_ids,
         completion_tokens=jax_completion_ids,
         micro_batch_size=self._compute_logps_micro_batch_size,
@@ -319,7 +321,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
 
     # ===== Value computation ======
     # Get values from the value model before model weights are updated.
-    values = self.rl_cluster.get_values(
+    values = self.rl_engine.get_values(
         prompt_tokens=prompt_ids,
         completion_tokens=jax_completion_ids,
         pad_id=pad_value,
@@ -332,7 +334,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # ===== Reward computation ======
     # Get rewards from the reward model. Eventual shape: `[B, T]`.
     if self._use_reward_model:
-      scores = self.rl_cluster.get_rewards(
+      scores = self.rl_engine.get_rewards(
           prompt_tokens=prompt_ids,
           completion_tokens=jax_completion_ids,
           pad_id=pad_value,
@@ -386,7 +388,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
 
     # ===== Metric logging ======
     # Log raw scores from the reward model fn
-    self.rl_cluster.buffer_metrics(
+    self.rl_engine.buffer_metrics(
         {
             "rewards/score/mean": (np.mean(last_token_scores), np.mean),
             "rewards/score/max": (np.max(last_token_scores), np.max),
@@ -397,7 +399,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
 
     # Log final rewards (scores + KL penalty)
     sequence_rewards = jax.device_get(rewards.sum(-1))
-    self.rl_cluster.buffer_metrics(
+    self.rl_engine.buffer_metrics(
         {
             "rewards/reward/mean": (np.mean(sequence_rewards), np.mean),
             "rewards/reward/max": (np.max(sequence_rewards), np.max),
@@ -410,7 +412,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
       per_sequence_mean_kl = ppo_helpers.masked_mean(
           kl, jax_completion_mask, axis=-1  # pylint: disable=undefined-variable  # pyrefly: ignore[unbound-name]
       )
-      self.rl_cluster.buffer_metrics(
+      self.rl_engine.buffer_metrics(
           {
               "rewards/reward_kl_penalty": (
                   jax.device_get(per_sequence_mean_kl.mean()),
@@ -422,7 +424,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
-    self.rl_cluster.buffer_metrics(
+    self.rl_engine.buffer_metrics(
         {
             "generation/completions/mean_length": (
                 np.mean(agg_completion_mask),
@@ -444,7 +446,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     valid_advantages = np.ma.masked_array(
         advantages, mask=np.logical_not(completion_mask)
     )
-    self.rl_cluster.buffer_metrics(
+    self.rl_engine.buffer_metrics(
         {
             "advantages/mean": (valid_advantages.mean(), np.mean),
             "advantages/max": (valid_advantages.max(), np.max),
@@ -457,7 +459,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     valid_returns = np.ma.masked_array(
         returns, mask=np.logical_not(completion_mask)
     )
-    self.rl_cluster.buffer_metrics(
+    self.rl_engine.buffer_metrics(
         {
             "advantages/returns/mean": (valid_returns.mean(), np.mean),
             "advantages/returns/max": (valid_returns.max(), np.max),
@@ -470,7 +472,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     valid_values = np.ma.masked_array(
         values, mask=np.logical_not(completion_mask)
     )
-    self.rl_cluster.buffer_metrics(
+    self.rl_engine.buffer_metrics(
         {
             "advantages/old_values/mean": (valid_values.mean(), np.mean),
             "advantages/old_values/max": (valid_values.max(), np.max),
@@ -488,7 +490,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
           rewards=last_token_scores,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
-      self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
+      self.rl_engine.buffer_metrics(user_defined_metric, mode=mode)
 
     return TrainExample(
         prompt_ids=prompt_ids,

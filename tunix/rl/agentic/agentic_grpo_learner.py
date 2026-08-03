@@ -41,10 +41,11 @@ from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
 from tunix.rl import function_registry
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.utils import compat
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
@@ -159,9 +160,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     - https://arxiv.org/abs/2402.03300
   """
 
+  @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
-      rl_cluster: rl_cluster_lib.RLCluster,
+      rl_engine: rl_engine_lib.RLEngine,
       algo_config: TGrpoConfig,
       reward_fns: RewardFn | List[RewardFn] | None = None,
       chat_parser: Any | None = None,
@@ -178,34 +180,29 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     """Initializes the `GRPOTrainer`.
 
     Args:
-      rl_cluster: RL cluster containing actor, reference and reward models.
-      reward_fns: A single callable or a list of callables that compute a
-        scalar reward for given prompts and completions. Each function should
-        accept `prompts`, `completions` and optional keyword arguments, and
-        return a list of float rewards.
+      rl_engine: RL engine containing actor, reference and reward models.
+      reward_fns: A single callable or a list of callables that compute a scalar
+        reward for given prompts and completions. Each function should accept
+        `prompts`, `completions` and optional keyword arguments, and return a
+        list of float rewards.
       algo_config: An instance of `GRPOConfig` containing all GRPO specific
         parameters.
       chat_parser: A parser to handle chat message formatting.
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept ``prompts``, ``completions``,
-        ``rewards``, ``advantages`` and optional keyword arguments, and return
-        a dictionary of metric names to tuples of
-        ``(metric_value, aggregation_fn)``:
-
-           >>> def metric_fn(
-           ...     prompts, completions, rewards, advantages, **kargs
-           ... ):
-           ...     return {
-           ...       # ...
-           ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
-           ...       # ... }
+        ``rewards``, ``advantages`` and optional keyword arguments, and return a
+        dictionary of metric names to tuples of ``(metric_value,
+        aggregation_fn)``:  >>> def metric_fn( ...     prompts, completions,
+        rewards, advantages, **kargs ... ): ...     return { ...       # ... ...
+        "prompt_min_len": (min(len(p) for p in prompts), np.min), ...       #
+        ... }
       agent_class: The class of the agent to be used.
       agent_kwargs: Keyword arguments to pass to the agent class.
       env_class: The class of the environment to be used.
       env_kwargs: Keyword arguments to pass to the environment class.
     """  # fmt: skip
     super().__init__(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fns,
         metric_fns=metric_fns,
         algo_config=algo_config,
@@ -218,7 +215,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     self._trajectory_logger = None
     metrics_logger_options = (
-        self.rl_cluster.cluster_config.training_config.metrics_logging_options
+        self.rl_engine.cluster_config.training_config.metrics_logging_options
     )
     metrics_log_dir = (
         metrics_logger_options.log_dir if metrics_logger_options else None
@@ -231,8 +228,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
-    self.algo_config.temperature = self.rl_cluster.get_rollout_config(  # pyrefly: ignore[missing-attribute]
-        mode=rl_cluster_lib.Mode.TRAIN
+    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+        mode=rl_engine_lib.Mode.TRAIN
     ).temperature
 
     # Workaround to pass loss fn with algorithm flag
@@ -243,22 +240,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         model,
         train_example,
         algo_config=self.algo_config,
-        pad_id=self.rl_cluster.rollout.pad_id(),
-        eos_id=self.rl_cluster.rollout.eos_id(),
-        compute_logps_chunk_size=self.rl_cluster.cluster_config.training_config.compute_logps_chunk_size,
+        pad_id=self.rl_engine.rollout.pad_id(),
+        eos_id=self.rl_engine.rollout.eos_id(),
+        compute_logps_chunk_size=self.rl_engine.cluster_config.training_config.compute_logps_chunk_size,
     )
 
-    self.rl_cluster.actor_trainer.with_loss_fn(
+    self.rl_engine.actor_trainer.with_loss_fn(
         loss_fn,
         has_aux=True,
     )
-    self.rl_cluster.actor_trainer.with_gen_model_input_fn(
+    self.rl_engine.actor_trainer.with_gen_model_input_fn(
         lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
+    self.rl_engine.actor_trainer.with_rl_metrics_to_log({
         "kl": common.mean_of_means,
         "entropy": common.mean_of_means,
         "reduced_pg_loss": common.mean_of_means,
@@ -279,7 +276,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "sampler_is/weight_mean": common.mean_of_means,
         "sampler_is/weight_min": np.min,
     })
-    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
+    self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
         if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
@@ -287,7 +284,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
   def _have_actor_mesh(self) -> bool:
     """Whether a real actor mesh exists (the recompute needs one)."""
-    actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
+    actor_mesh = self.rl_engine.r2m[rl_engine_lib.Role.ACTOR]
     return actor_mesh is not None and not actor_mesh.empty
 
   def _sampler_trainer_agreement(
@@ -394,31 +391,29 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   def _compute_packed_logps(self, example: TrainExample) -> TrainExample:
     # pack-first: old/ref logp were deferred in _process_results (left None);
     # compute them here on the packed buffer via the segment-aware forward.
-    pad_value = self.rl_cluster.rollout.pad_id()
-    eos_value = self.rl_cluster.rollout.eos_id()
+    pad_value = self.rl_engine.rollout.pad_id()
+    eos_value = self.rl_engine.rollout.eos_id()
     micro = (
-        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+        self.rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
     )
     updates = {}
     if (
         example.old_per_token_logps is None
         and not self.algo_config.use_rollout_logps
     ):
-      updates["old_per_token_logps"] = (
-          self.rl_cluster.get_actor_per_token_logps(
-              prompt_tokens=example.prompt_ids,
-              completion_tokens=example.completion_ids,
-              pad_id=pad_value,
-              eos_id=eos_value,
-              micro_batch_size=micro,
-              segment_ids=example.segment_ids,
-              segment_positions=example.segment_positions,
-          )
+      updates["old_per_token_logps"] = self.rl_engine.get_actor_per_token_logps(
+          prompt_tokens=example.prompt_ids,
+          completion_tokens=example.completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=micro,
+          segment_ids=example.segment_ids,
+          segment_positions=example.segment_positions,
       )
     if example.ref_per_token_logps is None and (
         self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
     ):
-      updates["ref_per_token_logps"] = self.rl_cluster.get_ref_per_token_logps(
+      updates["ref_per_token_logps"] = self.rl_engine.get_ref_per_token_logps(
           prompt_tokens=example.prompt_ids,
           completion_tokens=example.completion_ids,
           pad_id=pad_value,
@@ -436,7 +431,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     if need_trainer_logps:
       rollout_logps = example.old_per_token_logps
-      trainer_logps = self.rl_cluster.get_actor_per_token_logps(
+      trainer_logps = self.rl_engine.get_actor_per_token_logps(
           prompt_tokens=example.prompt_ids,
           completion_tokens=example.completion_ids,
           pad_id=pad_value,
@@ -449,10 +444,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           rollout_logps, trainer_logps, example.completion_mask
       )
       if metrics:
-        self.rl_cluster.buffer_metrics_async(
+        self.rl_engine.buffer_metrics_async(
             metrics,
-            mode=rl_cluster_lib.Mode.TRAIN,
-            step=self.rl_cluster.global_steps,
+            mode=rl_engine_lib.Mode.TRAIN,
+            step=self.rl_engine.global_steps,
         )
       if sampler_is_weights is not None:
         updates["sampler_is_weights"] = sampler_is_weights
@@ -466,7 +461,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   def _process_results(
       self,
       trajectories: List[Any],
-      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+      mode: rl_engine_lib.Mode = rl_engine_lib.Mode.TRAIN,
       expected_step: int | None = None,
   ) -> List[TrainExample]:
     """Processes generation results, computes rewards and advantages.
@@ -500,8 +495,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     # With a full group, sorting by pair_index is not necessary as they all
     # originate from the same initial prompt.
-    pad_value = self.rl_cluster.rollout.pad_id()
-    eos_value = self.rl_cluster.rollout.eos_id()
+    pad_value = self.rl_engine.rollout.pad_id()
+    eos_value = self.rl_engine.rollout.eos_id()
     # Extract completions and tokens from the group of G results.
     completion_texts: List[str] = []
     prompt_tokens_list: List[np.ndarray] = []
@@ -542,7 +537,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         self._trajectory_logger.log_item_async(traj)
 
     # Pad all prompts and completions to consistent lengths.
-    rollout_config = self.rl_cluster.cluster_config.rollout_config
+    rollout_config = self.rl_engine.cluster_config.rollout_config
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
@@ -617,16 +612,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # device topology) because the actor sharding path requires a real mesh;
     # the metrics are still emitted when running on real accelerators. Cost
     # when active: one extra trainer forward pass per training step.
-    actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
+    actor_mesh = self.rl_engine.r2m[rl_engine_lib.Role.ACTOR]
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
     # pack-first: defer old/ref logp to the packed buffer (computed after
     # pack_sequences in the consumer). Leave the non-packed path untouched.
     is_packed = (
-        self.rl_cluster.cluster_config.training_config.max_seq_token_per_tpu
+        self.rl_engine.cluster_config.training_config.max_seq_token_per_tpu
         is not None
     )
 
-    configured_compute_logps = self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+    configured_compute_logps = (
+        self.rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
+    )
     compute_logps_micro_batch_size = (
         configured_compute_logps * self.algo_config.num_generations
         if configured_compute_logps
@@ -647,7 +644,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # Deferred to _compute_packed_logps under packing: here it would run on
       # the unpacked sequences. Consumers below all guard on `is not None`.
       if need_trainer_logps and not is_packed:
-        trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+        trainer_per_token_logps = self.rl_engine.get_actor_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=completion_ids,
             pad_id=pad_value,
@@ -669,7 +666,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     elif is_packed:
       old_per_token_logps = None
     else:
-      trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+      trainer_per_token_logps = self.rl_engine.get_actor_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           pad_id=pad_value,
@@ -700,12 +697,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if (
         self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
     ) and not is_packed:
-      with self.rl_cluster.perf_v2.span(
+      with self.rl_engine.perf_v2.span(
           perf_constants.REFERENCE_INFERENCE,
-          devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
+          devices=self.rl_engine.r2m[rl_engine_lib.Role.REFERENCE].devices,
           tags=perf_tags,
       ) as interval_v2:
-        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+        ref_per_token_logps = self.rl_engine.get_ref_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=completion_ids,
             pad_id=pad_value,
@@ -725,7 +722,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
 
     prompt_token_len = len(prompt_tokens_list[0])
-    self.rl_cluster.buffer_metrics_async(
+    self.rl_engine.buffer_metrics_async(
         {
             "generation/prompts/mean_length": (prompt_token_len, np.mean),
             "generation/prompts/max_length": (prompt_token_len, np.max),
@@ -739,7 +736,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
     reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
-    with self.rl_cluster.perf_v2.span(
+    with self.rl_engine.perf_v2.span(
         perf_constants.ADVANTAGE_COMPUTATION,
         tags=perf_tags,
     ):
@@ -834,7 +831,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"{prefix}/{sub_key}/max": (np.max(flat_vals), np.max),
             f"{prefix}/{sub_key}/min": (np.min(flat_vals), np.min),
         })
-        self.rl_cluster.buffer_metrics_async(
+        self.rl_engine.buffer_metrics_async(
             metrics_to_log,  # pyrefly: ignore[bad-argument-type]
             mode=mode,
             step=expected_step,  # pyrefly: ignore[bad-argument-type]
@@ -852,7 +849,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               if key != "prompts"
           },
       )
-      self.rl_cluster.buffer_metrics_async(
+      self.rl_engine.buffer_metrics_async(
           user_defined_metric, mode=mode, step=expected_step  # pyrefly: ignore[bad-argument-type]
       )
 

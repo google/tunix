@@ -14,15 +14,15 @@
 
 """The RL engine surface a learning loop drives.
 
-An RL engine is the compute driver for an RL training loop. `RLCluster`
+An RL engine is the compute driver for an RL training loop. `RLEngine`
 (in-process) and `OrchestratorRLEngine` (worker-backed) are two implementations
 of this same `AbstractRLEngine` surface: a learner builds its loop out of these
 calls and is agnostic to whether the work runs in-process or is dispatched to
 workers. Swapping the implementation turns a single-process run into a
 distributed one -- the loop code does not change.
 
-This Protocol maps directly to the current `RLCluster` interface in
-`tunix.rl.rl_cluster.RLCluster`, derived from the members the agentic learners
+This Protocol maps directly to the current `RLEngine` interface in
+`tunix.rl.rl_cluster.RLEngine`, derived from the members the agentic learners
 (`AgenticRLLearner` / `GRPOLearner`) actually touch. It is grouped into:
 
   * compute primitives (generate / train / sync / score),
@@ -30,8 +30,8 @@ This Protocol maps directly to the current `RLCluster` interface in
   * config & topology (cluster_config, role->mesh, rollout config), and
   * sub-engine accessors (rollout, actor_trainer, critic_trainer).
 
-The Protocol is structural: `RLCluster` satisfies it as-is, and
-`OrchestratorRLCluster` satisfies it by routing the compute primitives to
+The Protocol is structural: `RLEngine` satisfies it as-is, and
+`OrchestratorRLEngine` satisfies it by routing the compute primitives to
 workers and delegating the rest. Sub-engines are typed `Any` here (their own
 surfaces -- `rollout.pad_id()/eos_id()/model()`,
 `actor_trainer.with_loss_fn(...)`, etc. -- are large and
@@ -45,7 +45,7 @@ from jax.typing import ArrayLike
 
 @runtime_checkable
 class AbstractRLEngine(Protocol):
-  """Structural interface for an RL engine (maps to current `RLCluster`)."""
+  """Structural interface for an RL engine (maps to current `RLEngine`)."""
 
   # --- Shared bookkeeping ---------------------------------------------------
   # Step counter / weight version, read and written by the loop.
@@ -141,4 +141,4 @@ class AbstractRLEngine(Protocol):
   # `.restored_global_step()`, `.iter_steps`, `.train_steps`, `.model`.
   actor_trainer: Any
   # critic_trainer: present only for actor-critic algorithms (PPO). Guard with
-  # hasattr(cluster, "critic_trainer") before use.
+  # hasattr(engine, "critic_trainer") before use.

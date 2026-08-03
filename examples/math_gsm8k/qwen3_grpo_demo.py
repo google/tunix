@@ -127,7 +127,7 @@ from tunix.cli.utils import model as model_utils
 from tunix.models.qwen3 import model as qwen3_model_lib
 from tunix.models.qwen3 import params as qwen3_params_lib
 from tunix.oss import utils as oss_utils
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
@@ -592,8 +592,8 @@ def create_optimizer() -> optax.GradientTransformation:
   return optax.chain(optax.clip_by_global_norm(MAX_GRAD_NORM), optimizer)
 
 
-def _shutdown_rollout_runtime(rl_cluster) -> None:
-  rollout = getattr(rl_cluster, "rollout", None)
+def _shutdown_rollout_runtime(rl_engine) -> None:
+  rollout = getattr(rl_engine, "rollout", None)
   if rollout is not None:
     for method_name in ("close", "stop", "shutdown"):
       method = getattr(rollout, method_name, None)
@@ -695,15 +695,15 @@ def main() -> None:
   else:
     raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
-  cluster_config = rl_cluster_lib.ClusterConfig(
+  cluster_config = rl_engine_lib.ClusterConfig(
       role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: shared_mesh,
-          rl_cluster_lib.Role.REFERENCE: shared_mesh,
-          rl_cluster_lib.Role.ROLLOUT: shared_mesh,
+          rl_engine_lib.Role.ACTOR: shared_mesh,
+          rl_engine_lib.Role.REFERENCE: shared_mesh,
+          rl_engine_lib.Role.ROLLOUT: shared_mesh,
       },
       rollout_engine=ROLLOUT_ENGINE,
       offload_to_cpu=False,
-      training_config=rl_cluster_lib.RLTrainingConfig(
+      training_config=rl_engine_lib.RLTrainingConfig(
           actor_optimizer=create_optimizer(),
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
           max_steps=MAX_STEPS,
@@ -718,8 +718,8 @@ def main() -> None:
           checkpointing_options=checkpointing_options,
       ),
       rollout_config={
-          rl_cluster_lib.Mode.TRAIN: train_rollout_config,
-          rl_cluster_lib.Mode.EVAL: eval_rollout_config,
+          rl_engine_lib.Mode.TRAIN: train_rollout_config,
+          rl_engine_lib.Mode.EVAL: eval_rollout_config,
       },
   )
 
@@ -739,17 +739,17 @@ def main() -> None:
       loss_agg_mode="sequence-mean-token-mean",
   )
 
-  rl_cluster = rl_cluster_lib.RLCluster(
+  rl_engine = rl_engine_lib.RLEngine(
       actor=actor,
       reference=reference,
       tokenizer=tokenizer,
       cluster_config=cluster_config,
   )
-  show_hbm_usage("after RLCluster creation")
+  show_hbm_usage("after RLEngine creation")
 
   # ====== Trainer ======
   grpo_trainer = VTCGRPOLearner(
-      rl_cluster=rl_cluster,
+      rl_engine=rl_engine,
       algo_config=grpo_config,
       chat_parser=chat_parser,
       metric_fns=[vtc_metric_fn],
@@ -782,10 +782,10 @@ def main() -> None:
   try:
     grpo_trainer.train(train_dataset, eval_dataset=eval_dataset)
   except Exception:
-    rl_cluster.close()
+    rl_engine.close()
     raise
   finally:
-    _shutdown_rollout_runtime(rl_cluster)
+    _shutdown_rollout_runtime(rl_engine)
 
 
 if __name__ == "__main__":

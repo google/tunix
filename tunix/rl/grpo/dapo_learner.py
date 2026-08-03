@@ -15,9 +15,10 @@
 
 import dataclasses
 from typing import Any, Dict, List, Optional, Sequence
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
 from tunix.rl.grpo import grpo_learner as grpo_learner_lib
+from tunix.utils import compat
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -105,7 +106,7 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
 def reward_shaping(
     prompts: List[str],
     completions: List[str],
-    mode: rl_cluster_lib.Mode,
+    mode: rl_engine_lib.Mode,
     overlong_buffer: Dict[str, Any] | None = None,
     **kwargs,
 ) -> List[float]:
@@ -133,9 +134,10 @@ def reward_shaping(
 class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
   """DAPO learner."""
 
+  @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
-      rl_cluster: rl_cluster_lib.RLCluster,
+      rl_engine: rl_engine_lib.RLEngine,
       algo_config: DAPOConfig,
       reward_fns: RewardFn | List[RewardFn],
       metric_fns: Sequence[MetricFn] | None = None,
@@ -148,7 +150,7 @@ class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
     if algo_config.overlong_buffer and algo_config.overlong_buffer["enable"]:
       reward_fns.append(reward_shaping)
     super().__init__(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         algo_config=algo_config,
         reward_fns=reward_fns,
         metric_fns=metric_fns,
