@@ -1,27 +1,7 @@
-INIT weight checksum: 2250560790
-[mode] weights: accum_steps=8 max_steps=1 batches=8 -> expect 1 update(s), final denom=0
-[phase] v1: denom=0  micro-steps=8  updates=1
-[grads] v1: leaves=197 nonzero=0 finite=197 max|g|=0 norm=0.000000
-live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
-v2 start weight checksum: 2250560790 OK
-[phase] v2: denom=0  micro-steps=8  updates=1
-[grads] v2: leaves=197 nonzero=0 finite=197 max|g|=0 norm=0.000000
-[cmp] grads: SKIPPED -- both accumulators were reset by the final update(), so there are no gradients left to compare. Read them between the last fwd_bwd and update().
-[cmp] weights after training: XOR v1=2664980183 v2=2664980202 DIFFER
-[cmp] weights after training: within max|dw|/max|w| = 1e-06  (worst leaf ['layers'][9]['attn']['attn_vec_einsum']['w'].value: 4.46e-09, 0/197 leaves over)
-[diag] ['layers'][9]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536) dtype=float32
-        max ULP=1 violating=3/6291456  sorted-identical=False
-        tensor scale max|g|=0.0522011
-        max |x-y|=2.32831e-10  (= 4.460e-09 of scale)  at |x|=0.00278656
-        largest |x| among differing entries=0.00278656  (= 5.338e-02 of scale)
-[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
-        max ULP=1 violating=2/402653184  sorted-identical=False
-        tensor scale max|g|=0.0541998
-        max |x-y|=5.82077e-11  (= 1.074e-09 of scale)  at |x|=0.000670869
-        largest |x| among differing entries=0.000670869  (= 1.238e-02 of scale)
-[diag] ['embedder']['per_layer_input_embedding'].value: shape=(262144, 3072) dtype=float32 -> bit-identical
-[attr] max|dw| observed = 2.3283e-10
-       max|d(grad)| observed = 0.0000e+00
-       predicted max|dw| = lr * that = 0.0000e+00
-       verdict: gradients identical but weights differ -- the gap did NOT come from the gradients
-sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+line 863, in test_fp32_single_step_fused_matches_v1_after_one_update
+    loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
+  File "tunix/sft/metrics_logger.py", line 165, in get_metric
+    raise ValueError(
+        f"Metric '{metrics_prefix}/{mode}/{metric_name}' not found."
+    )
+ValueError: Metric '/train/loss' not found.
