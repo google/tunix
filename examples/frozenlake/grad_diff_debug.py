@@ -548,7 +548,7 @@ def attribute_weight_gap(w_a, w_b, g_a, g_b, lr, denom=None):
 #                reset afterwards so gradients are not observable, but the
 #                weights reflect one clean update and carry no accumulated
 #                divergence from earlier steps.
-_MODE = "grads"
+_MODE = "weights"
 _ACCUM_STEPS = 8
 _MAX_STEPS = 1
 _N_BATCHES = _ACCUM_STEPS - 1 if _MODE == "grads" else _ACCUM_STEPS
