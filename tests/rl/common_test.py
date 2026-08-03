@@ -713,6 +713,95 @@ class CommonTest(parameterized.TestCase):
     self.assertEqual(loss.dtype, jnp.float32)
     self.assertAlmostEqual(loss, 1.5, places=5)
 
+  class ModelSupportingSegmentIds(tc.ToyTransformer):
+      """Model where __call__ explicitly accepts `segment_ids`."""
+    
+      def __call__(
+          self,
+          x,
+          positions,
+          cache=None,
+          attention_mask=None,
+          output_hidden_states=False,
+          images=None,
+          segment_ids: jax.Array | None = None,
+          skip_lm_head: bool = False,
+      ):
+        if segment_ids is None:
+          raise AssertionError("Expected segment_ids to be passed, but got None.")
+        return super().__call__(
+            x,
+            positions,
+            cache=cache,
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
+            images=images,
+            segment_ids=segment_ids,
+            skip_lm_head=skip_lm_head,
+        )
+
+  class ModelWithoutSegmentIds(tc.ToyTransformer):
+    """Model where __call__ does NOT accept `segment_ids` or `**kwargs`."""
+  
+    def __call__(
+        self,
+        x,
+        positions,
+        cache=None,
+        attention_mask=None,
+        output_hidden_states=False,
+        images=None,
+        skip_lm_head: bool = False,
+    ):
+      # If common.py incorrectly passed `segment_ids=...` to this method,
+      # Python would automatically raise:
+      # TypeError: ModelWithoutSegmentIds.__call__() got an unexpected keyword argument 'segment_ids'
+      return super().__call__(
+          x,
+          positions,
+          cache=cache,
+          attention_mask=attention_mask,
+          output_hidden_states=output_hidden_states,
+          images=images,
+          segment_ids=None,
+          skip_lm_head=skip_lm_head,
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="explicit_parameter",
+          model_cls=ModelSupportingSegmentIds,
+      ),
+      dict(
+          testcase_name="unsupported_ignored_without_type_error",
+          model_cls=ModelWithoutSegmentIds,
+      ),
+  )
+  def test_segment_ids_passed_only_when_supported(self, model_cls):
+    model = model_cls(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(model)
+
+    prompt_tokens = jnp.zeros((1, 0), dtype=jnp.int32)
+    completion_tokens = jnp.array([[1, 2, 3, 4]], dtype=jnp.int32)
+    segment_ids = jnp.ones((1, 4), dtype=jnp.int32)
+    segment_positions = jnp.arange(4, dtype=jnp.int32)
+
+    # 1. For ModelSupportingSegmentIds & ModelWithVarKeyword, our custom assertion inside
+    #    __call__ verifies that segment_ids is passed and not None.
+    # 2. For ModelWithoutSegmentIds, if common.py passed segment_ids when unsupported,
+    #    Python would raise a TypeError: got an unexpected keyword argument 'segment_ids'.
+    #    Completing cleanly proves it was correctly filtered out.
+    logps = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+    )
+    self.assertEqual(logps.shape, (1, 4))
 
 if __name__ == "__main__":
   absltest.main()
