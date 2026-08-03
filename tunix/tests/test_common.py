@@ -17,6 +17,7 @@
 from collections.abc import Iterable
 import dataclasses
 import gc
+import json
 import os
 import shutil
 import sys
@@ -279,6 +280,88 @@ def live_report(tag, top=12, census=None):
     rest = sum(b for _, (_, b) in groups[top:])
     print(f"        ... {len(groups) - top} more groups = {rest / 2**30:.2f} GiB")
   return census
+
+
+def save_live_census(path, tag=None, census=None):
+  """Writes a census to JSON so it can be diffed against a separate process.
+
+  v1 and v2 are normally benchmarked in separate runs, so the two censuses
+  cannot be held in one interpreter. Dump each to a file and diff the files.
+
+  Records the device count alongside the groups, because `nbytes` is the global
+  size: dividing by this is what converts the numbers to the per-device figures
+  a memory profile reports.
+
+  Args:
+    path: Destination JSON file.
+    tag: Optional label stored in the file and used by `live_diff`.
+    census: A census from `live_array_census()`; computed fresh if omitted.
+
+  Returns:
+    The census that was written.
+  """
+  census = live_array_census() if census is None else census
+  total_n, total_b = census[None]
+  payload = {
+      "tag": tag,
+      "device_count": jax.device_count(),
+      "total_count": total_n,
+      "total_bytes": total_b,
+      # Filter before unpacking: the census carries a `None` key holding the
+      # totals, which cannot be destructured into (shape, dtype).
+      "groups": [
+          {"shape": list(k[0]), "dtype": k[1], "count": v[0], "bytes": v[1]}
+          for k, v in census.items()
+          if k is not None
+      ],
+  }
+  with open(path, "w") as f:
+    json.dump(payload, f, indent=2)
+  print(f"[live] wrote census to {path} ({total_n} arrays)")
+  return census
+
+
+def load_live_census(path):
+  """Reads back a census written by `save_live_census`.
+
+  Returns:
+    A tuple of (census, metadata) where census has the same shape as
+    `live_array_census()` and metadata carries `tag` and `device_count`.
+  """
+  with open(path) as f:
+    payload = json.load(f)
+  census = {
+      (tuple(g["shape"]), g["dtype"]): (g["count"], g["bytes"])
+      for g in payload["groups"]
+  }
+  census[None] = (payload["total_count"], payload["total_bytes"])
+  meta = {
+      "tag": payload.get("tag"),
+      "device_count": payload.get("device_count"),
+  }
+  return census, meta
+
+
+def diff_live_census_files(path_a, path_b, top=12):
+  """Convenience wrapper: load two saved censuses and diff them.
+
+  Warns if the two runs saw a different number of devices, since the byte
+  figures are then not comparable (the counts still are).
+  """
+  census_a, meta_a = load_live_census(path_a)
+  census_b, meta_b = load_live_census(path_b)
+  label_a = meta_a["tag"] or path_a
+  label_b = meta_b["tag"] or path_b
+  if meta_a["device_count"] != meta_b["device_count"]:
+    print(
+        f"[live-diff] WARNING: device counts differ"
+        f" ({label_a}: {meta_a['device_count']},"
+        f" {label_b}: {meta_b['device_count']}). Byte totals are not"
+        " comparable; read the counts instead."
+    )
+  live_report(label_a, census=census_a)
+  live_report(label_b, census=census_b)
+  live_diff(census_a, census_b, label_a, label_b, top=top)
 
 
 def live_diff(census_a, census_b, label_a="A", label_b="B", top=12):

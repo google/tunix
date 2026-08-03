@@ -455,16 +455,147 @@ def describe_grads(tag, grads_host, expected_norm=None):
   return norm
 
 
+def attribute_weight_gap(w_a, w_b, g_a, g_b, lr, denom=None):
+  """Says whether the weight gap is explained by the gradient gap.
+
+  Plain SGD's update is elementwise -- `w <- w - lr*g` -- with no reduction, so
+  a difference in the final weights can only come from a difference in the
+  gradients that were applied:
+
+      |dw| = lr * |d(applied gradient)|
+
+  That makes the two measurements checkable against each other. If the observed
+  |dw| is far larger than `lr` times the observed gradient difference, then
+  either the gradients being compared are not the ones that were applied (a
+  phase mismatch in the accumulator, say) or something other than the gradients
+  moved the weights. Reporting the ratio turns "both numbers look odd" into a
+  specific question.
+
+  Args:
+    w_a, w_b: Post-training weight trees.
+    g_a, g_b: Accumulator contents, in the same units on both sides.
+    lr: Learning rate.
+    denom: Accumulation denominator, if known. `get()` divides the accumulated
+      sum by it, so the applied gradient is `accumulated / denom`.
+  """
+  def max_abs_diff(x, y):
+    best = 0.0
+    for (_, a), (_, b) in zip(
+        jax.tree_util.tree_flatten_with_path(x)[0],
+        jax.tree_util.tree_flatten_with_path(y)[0],
+    ):
+      a = np.asarray(a).astype(np.float64)
+      b = np.asarray(b).astype(np.float64)
+      best = max(best, float(np.abs(a - b).max()))
+    return best
+
+  if not jax.tree_util.tree_leaves(g_a) or not jax.tree_util.tree_leaves(g_b):
+    print("[attr] skipped: no gradients captured")
+    return
+
+  dw = max_abs_diff(w_a, w_b)
+  dg_acc = max_abs_diff(g_a, g_b)
+  dg_applied = dg_acc / denom if denom else dg_acc
+  predicted_dw = lr * dg_applied
+  print(
+      f"[attr] max|dw| observed = {dw:.4e}\n"
+      f"       max|d(grad)| observed = {dg_acc:.4e}"
+      + (f"  (/denom={denom:g} -> {dg_applied:.4e})" if denom else "")
+      + f"\n       predicted max|dw| = lr * that = {predicted_dw:.4e}"
+  )
+  if predicted_dw == 0.0:
+    verdict = (
+        "gradients identical but weights differ -- the gap did NOT come from"
+        " the gradients"
+        if dw > 0
+        else "both identical"
+    )
+  else:
+    ratio = dw / predicted_dw
+    if 0.1 <= ratio <= 10:
+      verdict = f"consistent (ratio {ratio:.2f}x) -- the weight gap IS the gradient gap"
+    elif ratio < 0.1:
+      verdict = (
+          f"gradient gap is {1/ratio:.0f}x too LARGE to explain the weights --"
+          " the compared gradients are probably not the applied ones"
+          " (check the accumulation phase)"
+      )
+    else:
+      verdict = (
+          f"weight gap is {ratio:.0f}x LARGER than the gradients explain --"
+          " something other than the gradients moved the weights"
+      )
+  print(f"       verdict: {verdict}")
+
+
+# Two isolated experiments; pick one. Each pins down exactly one quantity, and
+# asking a single run for both is what produced the phase mismatch: the loop
+# ends wherever it ends, and the accumulator then holds whatever micro-batches
+# happen to be left over, which differs between the two trainers.
+#
+# Both loops update when `_iter_steps % gradient_accumulation_steps == 0` and
+# stop when the dataset runs out, so the number of batches fed decides the
+# phase exactly:
+#
+#   "grads"   -- feed ACCUM-1 batches. The update never fires, so both
+#                accumulators end holding the SAME ACCUM-1 micro-batches with
+#                denom == ACCUM-1. This is the only way to compare gradients
+#                without an instrumentation hook (CAVEAT 3), because nothing is
+#                added to the traced step to expose them.
+#
+#   "weights" -- feed exactly ACCUM batches. Exactly one update fires, from
+#                exactly those batches, then the loop stops. The accumulator is
+#                reset afterwards so gradients are not observable, but the
+#                weights reflect one clean update and carry no accumulated
+#                divergence from earlier steps.
+_MODE = "grads"
+_ACCUM_STEPS = 8
+_MAX_STEPS = 1
+_N_BATCHES = _ACCUM_STEPS - 1 if _MODE == "grads" else _ACCUM_STEPS
+_run_dataset = dataset[:_N_BATCHES]
+assert len(_run_dataset) == _N_BATCHES, (
+    f"need at least {_N_BATCHES} batches, dataset has {len(dataset)}"
+)
+print(
+    f"[mode] {_MODE}: accum_steps={_ACCUM_STEPS} max_steps={_MAX_STEPS}"
+    f" batches={_N_BATCHES}"
+    f" -> expect {_N_BATCHES // _ACCUM_STEPS} update(s),"
+    f" final denom={_N_BATCHES % _ACCUM_STEPS}"
+)
+
+
+def phase_of(trainer, tag):
+  """Reports where in the accumulation cycle a trainer stopped.
+
+  `denom` counts micro-steps accumulated since the last `reset()`, so it is the
+  exact phase. Comparing two accumulators at different phases compares different
+  sets of micro-batches: the norms come out similar (same data distribution)
+  while every element differs, which reads like a catastrophic divergence and is
+  really just an off-by-one in the loop.
+  """
+  denom = float(np.asarray(jax.device_get(trainer.grad_accumulator.denom[...])))
+  iters = getattr(trainer, "_iter_steps", None)
+  steps = getattr(trainer, "_train_steps", None)
+  print(
+      f"[phase] {tag}: denom={denom:g}  micro-steps={iters}  updates={steps}"
+  )
+  return denom
+
+
 with mesh:
   # v1
   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=8, gradient_accumulation_steps=4)
+  config_v1 = peft_trainer.TrainingConfig(
+      eval_every_n_steps=2,
+      max_steps=_MAX_STEPS,
+      gradient_accumulation_steps=_ACCUM_STEPS,
+  )
   trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
   trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v1.train(dataset, skip_jit=False)
+    trainer_v1.train(_run_dataset, skip_jit=False)
     jax.effects_barrier()
 
   model_state_v1 = nnx.state(gemma)
@@ -474,6 +605,7 @@ with mesh:
   # branch never calls reset() -- the only reset() lives in `apply_updates`,
   # which runs on the accumulating nnx.cond path.
   grads_v1_host = jax.device_get(trainer_v1.grad_accumulator.grads)
+  denom_v1 = phase_of(trainer_v1, "v1")
   if jax.tree_util.tree_leaves(grads_v1_host):
     describe_grads("v1", grads_v1_host)
   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
@@ -511,7 +643,11 @@ with mesh:
   optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
-  config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=8, gradient_accumulation_steps=4)
+  config_v2 = peft_trainer_v2.TrainingConfig(
+      eval_every_n_steps=2,
+      max_steps=_MAX_STEPS,
+      gradient_accumulation_steps=_ACCUM_STEPS,
+  )
   trainer_v2 = peft_trainer_v2.PeftTrainer(gemma_v2, optimizer_v2, config_v2)
   trainer_v2 = trainer_v2.with_gen_model_input_fn(gen_model_input_fn)
 
@@ -519,24 +655,55 @@ with mesh:
   # single-executable step -- the configuration whose HBM profile we want. To
   # exercise the split path instead, call fwd_bwd(dataset[0]) then update().
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
+    trainer_v2.train(_run_dataset, skip_jit=False, cache_nnx_graph=False)
     jax.effects_barrier()
 
   # Populated only at gradient_accumulation_steps > 1; see the note above the
   # comparison helpers for why depth 1 has no gradient hook.
   grads_v2_host = jax.device_get(trainer_v2.grad_accumulator.grads)
+  denom_v2 = phase_of(trainer_v2, "v2")
   if jax.tree_util.tree_leaves(grads_v2_host):
     describe_grads("v2", grads_v2_host)
+
+  # Gate the gradient comparison on the phase. Two accumulators holding
+  # different micro-batches produce similar norms and 100%-different elements,
+  # which is indistinguishable from a catastrophic divergence unless you check.
+  if denom_v1 != denom_v2:
+    print(
+        f"[cmp] grads: SKIPPED -- different accumulation phase"
+        f" (v1 denom={denom_v1:g}, v2 denom={denom_v2:g}). The two accumulators"
+        " hold different micro-batches, so an elementwise comparison is"
+        " meaningless. Make both runs stop at the same point before comparing."
+    )
+  elif denom_v1 == 0:
+    print(
+        "[cmp] grads: SKIPPED -- both accumulators were reset by the final"
+        " update(), so there are no gradients left to compare. Read them"
+        " between the last fwd_bwd and update()."
+    )
+  elif jax.tree_util.tree_leaves(grads_v1_host) and jax.tree_util.tree_leaves(
+      grads_v2_host
+  ):
     compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
 
   # Weights are observable without any hook, so this comparison is valid in
   # memory-benchmark state. Expect ~1e-8 of tensor scale in the KV-sharing
   # layers on the split path, and bit-identity on the fused path.
+  weights_v2_host = jax.device_get(nnx.state(gemma_v2))
   compare(
       "weights after training",
       model_state_v1_host,
-      jax.device_get(nnx.state(gemma_v2)),
+      weights_v2_host,
       max_rel=_WEIGHT_MAX_REL,
+  )
+
+  attribute_weight_gap(
+      model_state_v1_host,
+      weights_v2_host,
+      grads_v1_host,
+      grads_v2_host,
+      lr=_LEARNING_RATE,
+      denom=denom_v1 if denom_v1 == denom_v2 else None,
   )
 
   model_state_v2 = nnx.state(gemma_v2)
