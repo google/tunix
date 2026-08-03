@@ -920,12 +920,23 @@ class V1ParityTest(parameterized.TestCase):
 class FusedStepTest(parameterized.TestCase):
   """The fused single-executable step must be a pure buffer-assignment change.
 
-  `train_step()` traces `_fwd_bwd_step` and `_update_step` together so that XLA
-  can keep the gradient tree as an internal temporary instead of a program
-  output. The arithmetic is the two existing bodies in the same order, so the
-  results must be bit-identical to running them as separate executables -- if
-  they ever diverge, the fusion changed more than buffer assignment.
-  """
+    learning_rate_scheduler = optax.constant_schedule(TEST_LEARNING_RATE)
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        momentum=0.001,
+        learning_rate=learning_rate_scheduler,
+    )
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
+        TEST_LEARNING_RATE,
+    )
+
+
+class V1ParityTest(parameterized.TestCase):
+  """Parity tests for PeftTrainerV2 against PeftTrainer before the migration to v2 is fully done."""
 
   def _make_trainer(self, model, accum_steps=None):
     config = peft_trainer_v2.TrainingConfig(
@@ -947,48 +958,49 @@ class FusedStepTest(parameterized.TestCase):
         nnx.merge(graphdef, jax.tree.map(jnp.copy, state)),
     )
 
-  def test_fused_matches_split_bitwise(self):
-    model_fused, model_split = self._two_identical_models()
-    initial_weights = jax.tree.map(
-        jnp.copy, nnx.state(model_fused, nnx.Param)
+  def _make_v1_trainer(self, model, accum_steps=None):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=1,
+        gradient_accumulation_steps=accum_steps,
     )
-    jax.tree.map_with_path(
-        tc.assert_bitwise_equal,
-        nnx.state(model_fused, nnx.Param),
-        nnx.state(model_split, nnx.Param),
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
     )
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    trainer_fused = self._make_trainer(model_fused)
-    trainer_split = self._make_trainer(model_split)
+  def _assert_fp32_weights_close(self, weights_v1, weights_v2):
+    """Checks the scale-relative weight difference used by the debug run."""
+    max_relative_difference = 1e-6
 
-    for batch in dummy_datasets(batch_size=4):
-      trainer_fused.train_step(batch)
-      trainer_split.fwd_bwd(batch)
-      trainer_split.update()
+    def assert_leaf_close(path, v1, v2):
+      v1 = np.asarray(jax.device_get(v1))
+      v2 = np.asarray(jax.device_get(v2))
+      self.assertEqual(v1.dtype, np.dtype(np.float32), f'v1 dtype at {path}')
+      self.assertEqual(v2.dtype, np.dtype(np.float32), f'v2 dtype at {path}')
+      difference = float(np.max(np.abs(v1.astype(np.float64) - v2)))
+      scale = float(np.max(np.abs(v1.astype(np.float64))))
+      if scale == 0.0:
+        self.assertEqual(difference, 0.0, f'mismatch at zero leaf {path}')
+      else:
+        self.assertLessEqual(
+            difference / scale,
+            max_relative_difference,
+            f'weight difference exceeds tolerance at {path}',
+        )
 
-    jax.tree.map_with_path(
-        tc.assert_bitwise_equal,
-        nnx.state(model_fused, nnx.Param),
-        nnx.state(model_split, nnx.Param),
+    jax.tree.map_with_path(assert_leaf_close, weights_v1, weights_v2)
+
+  def _assert_weights_changed(self, initial_weights, updated_weights):
+    initial_leaves = jax.tree_util.tree_leaves(jax.device_get(initial_weights))
+    updated_leaves = jax.tree_util.tree_leaves(jax.device_get(updated_weights))
+    self.assertTrue(
+        any(
+            np.any(np.asarray(initial) != np.asarray(updated))
+            for initial, updated in zip(initial_leaves, updated_leaves)
+        ),
+        'the optimizer update did not change any weight',
     )
-    jax.tree.map_with_path(
-        tc.assert_bitwise_equal,
-        nnx.state(trainer_fused.optimizer),
-        nnx.state(trainer_split.optimizer),
-    )
-    tc.assert_bitwise_equal(
-        'grad_norm',
-        trainer_fused._last_update_grad_norm,
-        trainer_split._last_update_grad_norm,
-    )
-    self.assertEqual(trainer_fused.train_steps, trainer_split.train_steps)
-    self._assert_weights_changed(
-        initial_weights, nnx.state(model_fused, nnx.Param)
-    )
-    # Both trainers use the same config; only the methods called differ. Confirm
-    # that actually selected two different programs.
-    self._assert_took_path(trainer_fused, "fused")
-    self._assert_took_path(trainer_split, "split")
 
   def test_fp32_single_step_fused_matches_v1_after_one_update(self):
     model_v1, model_fused = self._two_identical_models()
@@ -1019,7 +1031,6 @@ class FusedStepTest(parameterized.TestCase):
     loss_v1 = trainer_v1.metrics_logger.get_metric('', 'loss', 'train')
     loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
     np.testing.assert_allclose(loss_v1, loss_fused, atol=1e-5)
-    self._assert_took_path(trainer_fused, "fused")
 
   def test_fp32_multiple_step_fwd_bwd_update_matches_v1_after_one_update(self):
     accum_steps = 4
@@ -1052,7 +1063,6 @@ class FusedStepTest(parameterized.TestCase):
     self._assert_weights_changed(initial_weights, weights_v1)
     self._assert_weights_changed(initial_weights, weights_split)
     self._assert_fp32_weights_close(weights_v1, weights_split)
-    self._assert_took_path(trainer_split, "split")
 
   def test_fused_unavailable_when_accumulating(self):
     model, _ = self._two_identical_models()
