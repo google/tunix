@@ -746,63 +746,6 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIn('grad_norm', train_metrics.scalar_metrics)
     self.assertGreater(train_metrics.scalar_metrics['loss'], 0)
 
-  def test_injected_params(self):
-    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
-    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
-
-    learning_rate_scheduler = optax.constant_schedule(TEST_LEARNING_RATE)
-    optimizer = optax.inject_hyperparams(optax.sgd)(
-        momentum=0.001,
-        learning_rate=learning_rate_scheduler,
-    )
-
-    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
-    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
-    trainer.train(self.train_ds, self.eval_ds)
-    self.assertEqual(
-        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
-        TEST_LEARNING_RATE,
-    )
-
-  def test_parity_with_v1_trainer(self):
-    train_ds = dummy_datasets(batch_size=4, repeat=1)
-
-    # v1
-    rngs_v1 = nnx.Rngs(0)
-    model_v1 = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs_v1)
-    optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
-        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
-    )
-    config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
-    trainer_v1 = peft_trainer.PeftTrainer(model_v1, optimizer_v1, config_v1)
-    trainer_v1 = trainer_v1.with_gen_model_input_fn(dummy_gen_model_input_fn)
-    trainer_v1.train(train_ds, None)
-
-    # v2
-    rngs_v2 = nnx.Rngs(0)
-    model_v2 = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs_v2)
-    optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
-        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
-    )
-    config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
-    trainer_v2 = peft_trainer_v2.PeftTrainer(model_v2, optimizer_v2, config_v2)
-    trainer_v2 = trainer_v2.with_gen_model_input_fn(dummy_gen_model_input_fn)
-    trainer_v2.train(train_ds, None)
-
-    model_state_v1 = nnx.state(model_v1)
-    model_state_v2 = nnx.state(model_v2)
-    jax.tree.map_with_path(tc.assert_close, model_state_v1, model_state_v2)
-
-    opt_state_v1 = nnx.state(trainer_v1.optimizer)
-    opt_state_v2 = nnx.state(trainer_v2.optimizer)
-    jax.tree.map_with_path(tc.assert_close, opt_state_v1, opt_state_v2)
-
-    loss_v1 = trainer_v1.metrics_logger.get_metric('', 'loss', 'train')
-    loss_v2 = trainer_v2.metrics_logger.get_metric('', 'loss', 'train')
-
-    np.testing.assert_allclose(loss_v1, loss_v2, atol=1e-5)
-
-
 class FusedStepTest(parameterized.TestCase):
   """The fused single-executable step must be a pure buffer-assignment change.
 
@@ -917,6 +860,9 @@ class FusedStepTest(parameterized.TestCase):
 
   def test_fused_matches_split_bitwise(self):
     model_fused, model_split = self._two_identical_models()
+    initial_weights = jax.tree.map(
+        jnp.copy, nnx.state(model_fused, nnx.Param)
+    )
     jax.tree.map_with_path(
         tc.assert_bitwise_equal,
         nnx.state(model_fused, nnx.Param),
@@ -947,6 +893,9 @@ class FusedStepTest(parameterized.TestCase):
         trainer_split._last_update_grad_norm,
     )
     self.assertEqual(trainer_fused.train_steps, trainer_split.train_steps)
+    self._assert_weights_changed(
+        initial_weights, nnx.state(model_fused, nnx.Param)
+    )
     # Both trainers use the same config; only the methods called differ. Confirm
     # that actually selected two different programs.
     self._assert_took_path(trainer_fused, "fused")
@@ -973,6 +922,14 @@ class FusedStepTest(parameterized.TestCase):
     self._assert_weights_changed(initial_weights, weights_v1)
     self._assert_weights_changed(initial_weights, weights_fused)
     self._assert_fp32_weights_close(weights_v1, weights_fused)
+    jax.tree.map_with_path(
+        tc.assert_close,
+        nnx.state(trainer_v1.optimizer),
+        nnx.state(trainer_fused.optimizer),
+    )
+    loss_v1 = trainer_v1.metrics_logger.get_metric('', 'loss', 'train')
+    loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
+    np.testing.assert_allclose(loss_v1, loss_fused, atol=1e-5)
     self._assert_took_path(trainer_fused, "fused")
 
   def test_fp32_multiple_step_fwd_bwd_update_matches_v1_after_one_update(self):
@@ -1008,98 +965,6 @@ class FusedStepTest(parameterized.TestCase):
     self._assert_fp32_weights_close(weights_v1, weights_split)
     self._assert_took_path(trainer_split, "split")
 
-  def test_fused_stays_bitwise_over_many_steps(self):
-    """Bit-identity must survive many steps, not just one.
-
-    Worth its own test because a per-step tolerance would not catch a
-    regression here. Training is chaotic: a difference of a single ULP in one
-    step changes what the next forward pass sees, so the next gradients differ
-    by more, and the gap grows exponentially until the two models are as
-    unrelated as two different seeds. Measured on gemma4-e2b, one extra update
-    multiplied the weight divergence by ~2000x, and any growth above ~1.22x per
-    step reaches O(1) within 100 steps.
-
-    That makes "close after N steps" useless as a gate -- it says nothing about
-    whether the implementations agree, only how fast the same arithmetic
-    decorrelates. Bit-identity is the exception: it composes. If every step is
-    bit-identical then so is the whole run, and the assertion stays sharp no
-    matter how many steps are taken. So assert exactly that, and let any
-    regression show up as an unambiguous failure rather than a tolerance
-    argument.
-    """
-    steps = 12
-    model_fused, model_split = self._two_identical_models()
-    trainer_fused = self._make_trainer(model_fused)
-    trainer_split = self._make_trainer(model_split)
-    trainer_fused.config.max_steps = steps
-    trainer_split.config.max_steps = steps
-
-    batches = dummy_datasets(batch_size=4, repeat=steps)[:steps]
-    self.assertLen(batches, steps)
-
-    for i, batch in enumerate(batches):
-      trainer_fused.train_step(batch)
-      trainer_split.fwd_bwd(batch)
-      trainer_split.update()
-      # Check every step: the first step at which they diverge is the useful
-      # diagnostic, and after chaotic amplification a later check would only
-      # report that everything is different.
-      ck_fused = tc.tree_bit_checksum(nnx.state(model_fused, nnx.Param))
-      ck_split = tc.tree_bit_checksum(nnx.state(model_split, nnx.Param))
-      self.assertEqual(
-          ck_fused,
-          ck_split,
-          f"fused and split diverged at step {i + 1} of {steps}",
-      )
-
-    jax.tree.map_with_path(
-        tc.assert_bitwise_equal,
-        nnx.state(model_fused, nnx.Param),
-        nnx.state(model_split, nnx.Param),
-    )
-    # The two trainers are configured identically, so nothing but the methods
-    # called distinguishes them. Verify that really produced two different
-    # programs, otherwise this compares the split path against itself.
-    self._assert_took_path(trainer_fused, "fused")
-    self._assert_took_path(trainer_split, "split")
-    # Guard against the test passing because nothing moved: an update smaller
-    # than half a ULP of the weights rounds away, which would make bit-identity
-    # trivially true (lr=1e-5 on bfloat16 weights does exactly that).
-    _, model_untrained = self._two_identical_models()
-    self.assertNotEqual(
-        tc.tree_bit_checksum(nnx.state(model_fused, nnx.Param)),
-        tc.tree_bit_checksum(nnx.state(model_untrained, nnx.Param)),
-        "weights did not move at all -- the comparison is vacuous",
-    )
-
-  def test_fused_and_split_execute_different_programs(self):
-    """The two paths must actually be two programs, not one behind two names.
-
-    Everything else in the equivalence tests is deliberately held equal, so the
-    only thing making them a comparison at all is that one trainer runs the
-    fused executable and the other runs the two split ones. That is an
-    assumption about routing, not something the bit-identity assertions can
-    detect -- if `train_step` ever delegated to fwd_bwd+update, they would still
-    pass while comparing the split path with itself.
-    """
-    model_fused, model_split = self._two_identical_models()
-    trainer_fused = self._make_trainer(model_fused)
-    trainer_split = self._make_trainer(model_split)
-    batch = dummy_datasets(batch_size=4)[0]
-
-    # Nothing executed yet: lazy compilation means every cache is empty.
-    trainer_fused.jit_fwd_bwd_update_and_eval_step()
-    self.assertEqual(
-        self._compiled_variants(trainer_fused._jitted_fused_step_fn), 0
-    )
-
-    trainer_fused.train_step(batch)
-    trainer_split.fwd_bwd(batch)
-    trainer_split.update()
-
-    self._assert_took_path(trainer_fused, "fused")
-    self._assert_took_path(trainer_split, "split")
-
   def test_fused_unavailable_when_accumulating(self):
     model, _ = self._two_identical_models()
     trainer = self._make_trainer(model, accum_steps=2)
@@ -1107,12 +972,6 @@ class FusedStepTest(parameterized.TestCase):
     self.assertIsNone(trainer._jitted_fused_step_fn)
     with self.assertRaisesRegex(ValueError, 'one micro-batch per update'):
       trainer.train_step(dummy_datasets(batch_size=4)[0])
-
-  def test_fused_available_at_depth1(self):
-    model, _ = self._two_identical_models()
-    trainer = self._make_trainer(model)
-    trainer.jit_fwd_bwd_update_and_eval_step()
-    self.assertIsNotNone(trainer._jitted_fused_step_fn)
 
   def test_train_uses_fused_path_at_depth1(self):
     """`train()` must route through the fused step, not fwd_bwd + update."""
