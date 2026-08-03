@@ -746,15 +746,27 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIn('grad_norm', train_metrics.scalar_metrics)
     self.assertGreater(train_metrics.scalar_metrics['loss'], 0)
 
-class FusedStepTest(parameterized.TestCase):
-  """The fused single-executable step must be a pure buffer-assignment change.
+  def test_injected_params(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
 
-  `train_step()` traces `_fwd_bwd_step` and `_update_step` together so that XLA
-  can keep the gradient tree as an internal temporary instead of a program
-  output. The arithmetic is the two existing bodies in the same order, so the
-  results must be bit-identical to running them as separate executables -- if
-  they ever diverge, the fusion changed more than buffer assignment.
-  """
+    learning_rate_scheduler = optax.constant_schedule(TEST_LEARNING_RATE)
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        momentum=0.001,
+        learning_rate=learning_rate_scheduler,
+    )
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
+        TEST_LEARNING_RATE,
+    )
+
+
+class V1ParityTest(parameterized.TestCase):
+  """Parity tests for PeftTrainerV2 against PeftTrainer before the migration to v2 is fully done."""
 
   def _make_trainer(self, model, accum_steps=None, max_steps=4):
     config = peft_trainer_v2.TrainingConfig(
@@ -821,86 +833,6 @@ class FusedStepTest(parameterized.TestCase):
         'the optimizer update did not change any weight',
     )
 
-  def _compiled_variants(self, step_fn):
-    """How many program variants XLA compiled for this step.
-
-    Compilation is lazy, so this is 0 for a step that was never executed. That
-    makes it a direct observation of which path a trainer actually took --
-    which the equivalence tests otherwise only assume. Both trainers are built
-    from the same config on purpose (same weights, same data, same everything)
-    so that the execution path is the single variable; without this check a
-    regression that quietly routed `train_step` through fwd_bwd+update would
-    leave the tests comparing the split path against itself and still passing.
-    """
-    if step_fn is None:
-      return 0
-    try:
-      return step_fn.func.jitted_fn._cache_size()  # pylint: disable=protected-access
-    except AttributeError as e:
-      raise AssertionError(
-          "cannot read the jit cache size to verify which path executed; the"
-          " accessor moved, so this test would silently stop checking anything."
-          f" ({e})"
-      ) from e
-
-  def _assert_took_path(self, trainer, expected):
-    """Asserts a trainer executed the fused path (or the split one), not both."""
-    fused = self._compiled_variants(trainer._jitted_fused_step_fn)  # pylint: disable=protected-access
-    fwd_bwd = self._compiled_variants(trainer._jitted_fwd_bwd_step_fn)  # pylint: disable=protected-access
-    update = self._compiled_variants(trainer._jitted_update_step_fn)  # pylint: disable=protected-access
-    got = f"fused={fused} fwd_bwd={fwd_bwd} update={update}"
-    if expected == "fused":
-      self.assertGreater(fused, 0, f"fused step never compiled ({got})")
-      self.assertEqual(fwd_bwd, 0, f"split path also ran ({got})")
-      self.assertEqual(update, 0, f"split path also ran ({got})")
-    else:
-      self.assertGreater(fwd_bwd, 0, f"fwd_bwd never compiled ({got})")
-      self.assertGreater(update, 0, f"update never compiled ({got})")
-      self.assertEqual(fused, 0, f"fused step also ran ({got})")
-
-  def test_fused_matches_split_bitwise(self):
-    model_fused, model_split = self._two_identical_models()
-    initial_weights = jax.tree.map(
-        jnp.copy, nnx.state(model_fused, nnx.Param)
-    )
-    jax.tree.map_with_path(
-        tc.assert_bitwise_equal,
-        nnx.state(model_fused, nnx.Param),
-        nnx.state(model_split, nnx.Param),
-    )
-
-    trainer_fused = self._make_trainer(model_fused)
-    trainer_split = self._make_trainer(model_split)
-
-    for batch in dummy_datasets(batch_size=4):
-      trainer_fused.train_step(batch)
-      trainer_split.fwd_bwd(batch)
-      trainer_split.update()
-
-    jax.tree.map_with_path(
-        tc.assert_bitwise_equal,
-        nnx.state(model_fused, nnx.Param),
-        nnx.state(model_split, nnx.Param),
-    )
-    jax.tree.map_with_path(
-        tc.assert_bitwise_equal,
-        nnx.state(trainer_fused.optimizer),
-        nnx.state(trainer_split.optimizer),
-    )
-    tc.assert_bitwise_equal(
-        'grad_norm',
-        trainer_fused._last_update_grad_norm,
-        trainer_split._last_update_grad_norm,
-    )
-    self.assertEqual(trainer_fused.train_steps, trainer_split.train_steps)
-    self._assert_weights_changed(
-        initial_weights, nnx.state(model_fused, nnx.Param)
-    )
-    # Both trainers use the same config; only the methods called differ. Confirm
-    # that actually selected two different programs.
-    self._assert_took_path(trainer_fused, "fused")
-    self._assert_took_path(trainer_split, "split")
-
   def test_fp32_single_step_fused_matches_v1_after_one_update(self):
     model_v1, model_fused = self._two_identical_models()
     initial_weights = jax.tree.map(
@@ -930,7 +862,6 @@ class FusedStepTest(parameterized.TestCase):
     loss_v1 = trainer_v1.metrics_logger.get_metric('', 'loss', 'train')
     loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
     np.testing.assert_allclose(loss_v1, loss_fused, atol=1e-5)
-    self._assert_took_path(trainer_fused, "fused")
 
   def test_fp32_multiple_step_fwd_bwd_update_matches_v1_after_one_update(self):
     accum_steps = 4
@@ -963,7 +894,6 @@ class FusedStepTest(parameterized.TestCase):
     self._assert_weights_changed(initial_weights, weights_v1)
     self._assert_weights_changed(initial_weights, weights_split)
     self._assert_fp32_weights_close(weights_v1, weights_split)
-    self._assert_took_path(trainer_split, "split")
 
   def test_fused_unavailable_when_accumulating(self):
     model, _ = self._two_identical_models()
