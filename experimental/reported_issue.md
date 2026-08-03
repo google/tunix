@@ -843,3 +843,118 @@ happens during teardown and does not affect the exit code.
 **Not yet judged.** A 2-batch smoke run shows `solve_ratio=0.000` throughout and many
 `MAX_CONTEXT_LIMIT_REACHED` warnings. Two batches of an untrained model prove nothing either way and
 there is no baseline for this recipe; convergence is phase8's gate, on the new machine.
+
+---
+
+# Runbook — gsm8k splash document-mask A/B (2026-08-03)
+
+## 这是在测什么
+
+TPU 的 splash attention **按整行因果面积计费**:一行打包了 K 条序列,它仍按
+"一条长度 = budget 的序列"排工作,跨段的块**算完再被 `segment_ids` 抹零**。
+
+改法:把该 chunk 的**段布局**(向外取整到 256 块边界)造成一个 mask,在 host 上建成
+splash kernel,**作为参数**传进模型。该 mask 是真实块对角 mask 的**超集**,精确遮蔽仍由
+`segment_ids` 逐元素做 ⇒ **输出逐位不变**,变的只有调度:`grid_width` 从 `budget/block`
+缩到约 `最长段/block`。
+
+设计、被否决的两个替代方案、以及那个静默算错的通道:`experimental/splash_docmask_design.md`。
+
+## ⚠️ 为什么 kernel 必须当**参数**传,不能用模块级全局
+
+全局在 jit 函数体内被读 ⇒ 是 **trace 时常量**,被烤进程序;而 jit 的缓存键是**参数**的
+shape/dtype,全局不是参数 ⇒ **改它不触发重 trace**。实测(v4-8):
+
+| 跑法 | checksum |
+|---|---|
+| 只声明布局 A `(1024,1024)` | `528823221325` |
+| 只声明布局 B `(2048,)` | `528749157605` |
+| **先 A 跑一次,再改成 B 跑** | **`528823221325`** ← 还是 A 的 |
+
+那次数据真实是整行一段 2048,A 的 mask 会**把它切断** ⇒ **第二次调用算的是错的,
+不报错、不重编译、无任何征兆**。这是本课题最贵的一个坑,**任何"声明式开关"都要防**。
+
+## 已验证 / 未验证(读数字前先看这节)
+
+**已验证(v4-8 TPU)**
+- 中立性:补丁 + `kernel=None` 与未打补丁 **checksum 逐位相同**
+- 数值:声明布局 vs 不声明 **BITWISE IDENTICAL**(`out` 与 `grad`)
+- **同进程换布局**:`A_then_B` 得到 B 的答案,`jit cache 1→2`(修复确认)
+- 编译数:3 个同 mask 形状的布局 → **+1 次**;2 个不同形状 → +2 次
+- CPU:`partial_blocks` **恒为 1**、7 分布 11 chunk 只需 **4 个程序**、
+  是精确 mask 的**超集**(逐 chunk 断言)、负控(把因果也取整)确实放行非因果对
+- 路由:packer → `TrainExample` → learner attach → `algo_core` → `common` → model,
+  开关关/开**双向**验证
+
+**未验证**
+- **e2e 收益**(这份 runbook 就是去拿这个数);块计数模型给的是 `0.861×` attention
+- 一次全 train step 的编译耗时
+
+**收益预期**:真实散乱分布下 attention `0.861×`;`near-cap` / 全 `L_max` 分布下**是 0**
+——一行只装一条时没有跨段块可省,**任何 attention 方案都救不了**。
+
+## 怎么跑
+
+```bash
+cd sequence_packing/tunix
+bash experimental/profile_v5p_docmask.sh            # 两臂 off/on
+bash experimental/profile_v5p_docmask.sh on        # 只跑一臂
+MAX_STEPS=12 TRACE_DEST=/tmp/xprof bash experimental/profile_v5p_docmask.sh
+```
+
+旋钮:`MAX_STEPS` · `BUDGET`(默认 2048)· `MAX_RESPONSE` · `MESH_FSDP/TP` ·
+`BATCH/MINI/MICRO/LOGPS` · `ROLLOUT_HBM` · `NUM_HEADS`(默认 16 = qwen3_1p7b)·
+`TRACE_DEST`(xprof,支持 `gs://`)· `PERF_DEST`(perfetto)· `PROFILER_SKIP/STEPS` ·
+`RUN_TAG` · `PATCH_DIR` · `IMAGE`。
+
+脚本**克隆自 `profile_v5p_grad_accum.sh`**,trace 抓取沿用那套已经跑通的机制
+(`--profiler_log_dir` + `--profiler_skip_steps/steps` 出 xprof;
+`--enable_perf_v2 --perf_trace_dir` 出 perfetto)。
+
+**启动前跑 8 项 preflight,不通过拒绝启动**:整条链每一环 + **把脚本要传的 15 个 flag
+逐个在镜像的 demo 源码里查一遍**。后者是有来历的——demo 的参数表**随分支不同而不同**,
+工作树那份甚至没有 `--profiler_log_dir`;一个 flag 拼错就废掉整轮 run。
+
+## 补丁文件(只读挂载,仓库代码未改)
+
+| 挂载点 | 改了什么 |
+|---|---|
+| `/app/tunix/models/qwen3/model.py` | `splash_kernel` 参数穿过 `Qwen3 → DecoderLayer → Attention`(含两条 remat 分支);**纯穿参、零语义** |
+| `/app/tunix/rl/common.py` | `TrainExample.segment_layout`(静态)+ `.splash_kernel`(**普通 pytree 字段**);`compute_per_token_logps` 转发 |
+| `/app/tunix/rl/utils.py` | `_emit` 给每个 chunk 盖上每行段长 |
+| `/app/tunix/rl/splash_mask.py` | **新文件**:唯一读 env 的地方;`docmask()` 造边界取整 mask;`attach()` 在 host 建 kernel |
+| `/app/tunix/rl/algo_core.py` | 从 `train_example` 读 kernel(紧邻已有的 `num_segments`) |
+| `/app/tunix/rl/rl_learner.py` | train step 前一行 `splash_mask.attach()` |
+
+产物目录 `/mnt/disks/tunix-data/p18_splash/p20c/`。
+生成脚本:`p20_patch_docmask.py`、`p20b_patch_thread.py`、`p20c_patch_route.py`
+(锚点缺失即硬失败;后置条件期望值**自动推导**,不手写常数)。
+
+**逐个文件挂载,不要整树挂载** —— 整树会把 packer 一起换掉,静默改变被测对象。
+
+## 结果怎么读
+
+1. **数值**:两臂 loss / grad_norm 曲线应在噪声内一致。**不一致就是 bug**,不是"数值抖动"
+   —— 模块级已证逐位不变。
+2. **xprof**:同名 `*_segmented_{fwd,dq,dkv}` kernel,arm `on` 的 **grid 迭代数应更少**。
+3. **perfetto(v2)**:attention 段墙钟应缩短,projections/MLP 段应不变。
+4. **`(grid_width, partial_blocks)` 直方图**:`partial_blocks` 应**恒为 1**、组合数 **≤8**。
+   超了说明真实布局比合成分布更碎,**编译预算要重估**。
+5. **编译**:前几步每个 mask 形状一次额外编译,之后应**稳态零编译**。
+
+## 已知坑
+
+- **镜像会被第三方删**:v4-8 是共享机器,曾被 prune 掉(盘 25G→13G,VM 未重启)。跑前先
+  `sudo docker images | grep tunix_frozenlake`;没了从有镜像的机器
+  `docker save | ssh <host> 'docker load'`(约 4 分钟)。
+- **`-w /path` 不等于该路径在 `sys.path` 上**:容器里 `import tunix` 默认命中镜像内置的
+  `/app/tunix`。本 runbook 覆盖的正是 `/app/tunix` 下的单个文件,所以不受影响;
+  若改用整树挂载,必须显式 `PYTHONPATH`。
+- **demo 的参数表随分支而变**:工作树、目标分支、镜像三份可能都不同。preflight 里那条
+  flag 检查就是为此。
+- **`num_heads` 目前经 `TUNIX_SPLASH_NUM_HEADS` 传**(缺了会**硬报错**,不静默跳过);
+  生产版应从 model config 取。
+- **`build_kernel` 固定 `head_shards=q_seq_shards=1`**,只对 tp=1、无序列分片的配置正确;
+  分片变了必须传真实值(已写进 docstring)。
+- **gsm8k 的 `budget = L_max = 2048`** ⇒ 配置层面的保证收益是 1.0×,收益全部来自
+  "真实序列比 1024 短"。换 recipe 前先核 `budget` 与 `L_max` 的关系。
