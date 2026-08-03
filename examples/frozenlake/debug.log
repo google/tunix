@@ -1,45 +1,42 @@
 INIT weight checksum: 2250560790
-[grads] v1: leaves=197 nonzero=123 finite=197 max|g|=31.5148 norm=2784.162062
+[mode] grads: accum_steps=8 max_steps=1 batches=7 -> expect 0 update(s), final denom=7
+[phase] v1: denom=7  micro-steps=7  updates=0
+[grads] v1: leaves=197 nonzero=123 finite=197 max|g|=47.1573 norm=5289.807278
 live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
 v2 start weight checksum: 2250560790 OK
-[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=26.4807 norm=2950.594666
-[cmp] grads: XOR v1=3847152705 v2=2784405139 DIFFER
+[phase] v2: denom=7  micro-steps=7  updates=0
+[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=47.1573 norm=5289.807278
+[cmp] grads: XOR v1=1097438197 v2=2087935610 DIFFER
 [cmp] grads: EXCEEDS 0 ULP
 Mismatch at path: (DictKey(key='embedder'), DictKey(key='input_embedding'), GetAttrKey(name='value'))
   dtype        : float32
-  max ULP      : 2197254702 (allowed 0)
-  violating    : 402653079/402653184 (100.0000%)
-  ULP histogram: 0:105, 1:179, 2:201, 3:182, 4:204, 5:152, 6:218, 7:165, >=8:402651778
+  max ULP      : 1390411776 (allowed 0)
+  violating    : 220485029/402653184 (54.7580%)
+  ULP histogram: 0:182168155, 1:132906981, 2:48026849, 3:10909946, 4:9003611, 5:2670261, 6:3019934, 7:998732, >=8:12948715
 [diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
-        max ULP=2197254702 violating=402653079/402653184  sorted-identical=False
-        tensor scale max|g|=31.5148
-        max |x-y|=38.2314  (= 1.213e+00 of scale)  at |x|=29.532
-        largest |x| among differing entries=31.5148  (= 1.000e+00 of scale)
-[diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
-        max ULP=2176722625 violating=786432/786432  sorted-identical=False
-        tensor scale max|g|=10.2742
-        max |x-y|=14.0969  (= 1.372e+00 of scale)  at |x|=5.78754
-        largest |x| among differing entries=10.2742  (= 1.000e+00 of scale)
-[diag] ['layers'][0]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
-        max ULP=2155966608 violating=3145727/3145728  sorted-identical=False
-        tensor scale max|g|=4.58665
-        max |x-y|=6.0225  (= 1.313e+00 of scale)  at |x|=2.80532
-        largest |x| among differing entries=4.58665  (= 1.000e+00 of scale)
-[cmp] weights after training: XOR v1=2296519656 v2=2461192579 DIFFER
-[cmp] weights after training: EXCEEDS max|dw|/max|w| = 1e-06  (worst leaf ['embedder']['input_embedding'].value: 9.69e-06, 5/197 leaves over)
-[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
-        max ULP=3787648 violating=195727/402653184  sorted-identical=False
-        tensor scale max|g|=0.0541998
-        max |x-y|=5.25091e-07  (= 9.688e-06 of scale)  at |x|=0.000858229
-        largest |x| among differing entries=0.0497646  (= 9.182e-01 of scale)
-[diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
-        max ULP=5470624 violating=772589/786432  sorted-identical=False
-        tensor scale max|g|=0.0481287
-        max |x-y|=1.73226e-07  (= 3.599e-06 of scale)  at |x|=0.0165022
-        largest |x| among differing entries=0.0481287  (= 1.000e+00 of scale)
-[diag] ['layers'][0]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
-        max ULP=1670815744 violating=3073120/3145728  sorted-identical=False
-        tensor scale max|g|=0.0542067
-        max |x-y|=8.75443e-08  (= 1.615e-06 of scale)  at |x|=0.0130594
-        largest |x| among differing entries=0.0542067  (= 1.000e+00 of scale)
+        max ULP=1390411776 violating=220485029/402653184  sorted-identical=False
+        tensor scale max|g|=47.1573
+        max |x-y|=1.90735e-06  (= 4.045e-08 of scale)  at |x|=16.0851
+        largest |x| among differing entries=22.6774  (= 4.809e-01 of scale)
+[diag] ['layers'][9]['attn']['attn_vec_einsum']['w'].value: shape=(8, 512, 1536) dtype=float32
+        max ULP=14680064 violating=4936075/6291456  sorted-identical=False
+        tensor scale max|g|=0.00234524
+        max |x-y|=3.49246e-10  (= 1.489e-07 of scale)  at |x|=0.00117845
+        largest |x| among differing entries=0.00202745  (= 8.645e-01 of scale)
+[diag] ['layers'][0]['attn']['_key_norm']['scale'].value: shape=(256,) dtype=float32
+        max ULP=3584 violating=219/256  sorted-identical=False
+        tensor scale max|g|=5.33966
+        max |x-y|=1.43051e-06  (= 2.679e-07 of scale)  at |x|=1.98318
+        largest |x| among differing entries=4.33521  (= 8.119e-01 of scale)
+[cmp] weights after training: XOR v1=2250560790 v2=2250560790 identical
+[attr] max|dw| observed = 0.0000e+00
+       max|d(grad)| observed = 1.9073e-06  (/denom=7 -> 2.7248e-07)
+       predicted max|dw| = lr * that = 2.7248e-12
+Traceback (most recent call last):
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 700, in <module>
+    attribute_weight_gap(
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 519, in attribute_weight_gap
+    f"gradient gap is {1/ratio:.0f}x too LARGE to explain the weights --"
+                       ~^~~~~~
+ZeroDivisionError: float division by zero
 sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
