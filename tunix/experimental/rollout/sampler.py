@@ -16,8 +16,10 @@
 
 import dataclasses
 from typing import Any, Protocol, Sequence, runtime_checkable
+from jax import typing
 import numpy as np
 
+ArrayLike = typing.ArrayLike
 from tunix.experimental.common import datatypes
 
 
@@ -74,7 +76,9 @@ class SamplingResponse(datatypes.Response):
     finish_reason: Reason generation terminated (e.g., "stop", "length",
       "cancelled", "error").
     error: Structured failure details when sampling failed for this prompt, else
-      None.
+      None (inherited from datatypes.Response).
+    routed_experts: Array of routed expert IDs of shape [Batch, Layers, Length,
+      Top K], or None if not requested.
   """
 
   text: str = ""
@@ -83,6 +87,7 @@ class SamplingResponse(datatypes.Response):
   )
   logprobs: np.ndarray | None = None
   finish_reason: str = "stop"
+  routed_experts: ArrayLike | None = None
 
   def __post_init__(self):
     if (
