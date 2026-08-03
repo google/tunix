@@ -22,6 +22,8 @@ from typing import Any, Optional, Tuple
 from flax import nnx
 import jax
 import jaxtyping
+from tunix.generate import continuous_async_driver
+from tunix.generate import continuous_sampler
 from tunix.generate import sampler
 from tunix.rl import common
 from tunix.rl import reshard
@@ -30,19 +32,44 @@ from tunix.rl.rollout import base_rollout
 
 
 class VanillaRollout(base_rollout.BaseRollout):
-  """Vanilla rollout worker."""
+  """Vanilla rollout worker with continuous sampling support."""
 
   def __init__(
       self,
       model: nnx.Module,
       tokenizer: Any,
       cache_config_or_size: base_rollout.CacheConfig,
+      use_continuous_sampling: bool = True,
+      server_mode: bool = False,
   ):
-    self._sampler = sampler.Sampler(
-        model,
-        tokenizer,
-        sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
-    )
+    self._model = model
+    self._tokenizer = tokenizer
+    self.cache_config = cache_config_or_size
+    self.use_continuous_sampling = use_continuous_sampling
+    self.server_mode = server_mode
+
+    if self.use_continuous_sampling:
+      self._continuous_sampler = continuous_sampler.VanillaSampler(
+          model,
+          tokenizer,
+          sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+      )
+      self._driver = None
+      if self.server_mode:
+        self._driver = continuous_async_driver.VanillaInProcessDriver(
+            sampler=self._continuous_sampler,
+            sampling_config=continuous_sampler.SamplingConfig(
+                max_num_sequences=cache_config_or_size.cache_size,
+                max_generation_steps=1024,
+            ),
+        )
+        self._driver.start()
+    else:
+      self._sampler = sampler.Sampler(
+          model,
+          tokenizer,
+          sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+      )
 
   def generate(
       self,
@@ -51,6 +78,11 @@ class VanillaRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
+    if self.use_continuous_sampling:
+      if self.server_mode:
+        return self._generate_server_mode(prompts, rollout_config, **kwargs)
+      return self._generate_continuous(prompts, rollout_config, **kwargs)
+
     output = self._sampler(
         input_strings=prompts,
         max_generation_steps=rollout_config.max_tokens_to_generate,
@@ -72,12 +104,89 @@ class VanillaRollout(base_rollout.BaseRollout):
         logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
     )
 
+  def _generate_continuous(
+      self,
+      prompts: list[str],
+      rollout_config: base_rollout.RolloutConfig,
+      **kwargs,
+  ) -> base_rollout.RolloutOutput:
+    sampling_config = continuous_sampler.SamplingConfig(
+        max_num_sequences=self.cache_config.cache_size,
+        max_generation_steps=rollout_config.max_tokens_to_generate,
+        temperature=rollout_config.temperature,
+        top_p=rollout_config.top_p,
+        top_k=rollout_config.top_k,
+        seed=rollout_config.seed,
+        eos_tokens=rollout_config.eos_tokens,
+    )
+    sampling_state = self._continuous_sampler.init_sample_state(sampling_config)
+
+    req_dicts = [
+        {
+            "id": f"sync_{i}",
+            "prompt": prompt,
+            "max_new_tokens": rollout_config.max_tokens_to_generate,
+            "eos_tokens": rollout_config.eos_tokens,
+        }
+        for i, prompt in enumerate(prompts)
+    ]
+
+    completed: dict[str, continuous_sampler.RequestOutput] = {}
+    step_reqs = req_dicts
+    while len(completed) < len(prompts):
+      outputs = self._continuous_sampler._sample_step(sampling_state, step_reqs)
+      step_reqs = []
+      completed.update(outputs)
+
+    del sampling_state
+
+    results = [completed[f"sync_{i}"] for i in range(len(prompts))]
+    return base_rollout.RolloutOutput(
+        text=[r.text for r in results],
+        logits=None,
+        tokens=[r.tokens for r in results],
+        left_padded_prompt_tokens=[],
+        logprobs=None,
+    )
+
+  def _generate_server_mode(
+      self,
+      prompts: list[str],
+      rollout_config: base_rollout.RolloutConfig,
+      **kwargs,
+  ) -> base_rollout.RolloutOutput:
+    req_dicts = [
+        {"id": f"req_{i}_{id(prompt)}", "prompt": prompt, "max_new_tokens": rollout_config.max_tokens_to_generate}
+        for i, prompt in enumerate(prompts)
+    ]
+    futures = self._driver.submit_requests(req_dicts)
+    results = [fut.result() for fut in futures]
+
+    return base_rollout.RolloutOutput(
+        text=[r.text for r in results],
+        logits=None,
+        tokens=[r.tokens for r in results],
+        left_padded_prompt_tokens=[],
+        logprobs=None,
+    )
+
   def get_per_token_logps(
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
+    if self.use_continuous_sampling:
+      graphdef, state = nnx.split(self._model)
+      return common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=self.pad_id(),
+          eos_id=self.eos_id(),
+          stop_gradient=True,
+      )
     graphdef, state = self._sampler.model_def_and_state()
     return common.compute_per_token_logps(
         graphdef,
@@ -94,6 +203,10 @@ class VanillaRollout(base_rollout.BaseRollout):
       params: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
   ) -> None:
+    if self.use_continuous_sampling:
+      self._continuous_sampler.update_params(params)
+      return
+
     if filter_types is not None:
       dst_params = nnx.state(self.model(), filter_types)
       resharded_params = reshard.reshard_pytree(params, dst_params)
@@ -121,10 +234,14 @@ class VanillaRollout(base_rollout.BaseRollout):
     self._sampler.transformer_state = nnx.variables(new_model, nnx.Param)
 
   def pad_id(self) -> int:
-    return self._sampler.tokenizer.pad_id()
+    val = getattr(self._tokenizer, "pad_id", 0)
+    return val() if callable(val) else val
 
   def eos_id(self) -> int:
-    return self._sampler.tokenizer.eos_id()
+    val = getattr(self._tokenizer, "eos_id", 1)
+    return val() if callable(val) else val
 
   def model(self) -> nnx.Module:
+    if self.use_continuous_sampling:
+      return self._model
     return self._sampler.transformer

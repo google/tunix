@@ -36,6 +36,7 @@ class CacheConfig:
   num_layers: int
   num_kv_heads: int
   head_dim: int
+  dtype: Any = jnp.float32
 
 
 @dataclasses.dataclass
