@@ -114,6 +114,14 @@ class WeightSyncRequest(datatypes.Request):
   extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+@dataclasses.dataclass(kw_only=True)
+class LoadInfo(datatypes.Response):
+  """Load information for a Sampler."""
+  num_requests_waiting: int = 0
+  num_requests_running: int = 0
+  kv_cache_usage_perc: float = 0.0
+
+
 @runtime_checkable
 class Sampler(Protocol):
   """Protocol defining standard lifecycle, sampling, and weight-sync interface for worker slices."""
@@ -190,4 +198,8 @@ class Sampler(Protocol):
       **kwargs,
   ) -> bool:
     """Triggers KV-cache migration from source to target slice."""
+    ...
+
+  async def get_load_info(self, **kwargs) -> LoadInfo | Any:
+    """Returns the current load information for this sampler."""
     ...

@@ -54,6 +54,16 @@ def _weight_sync_request() -> base_sampler_lib.WeightSyncRequest:
   )
 
 
+def _load_info() -> base_sampler_lib.LoadInfo:
+  return base_sampler_lib.LoadInfo(
+      request_id="load-req-1",
+      num_requests_waiting=5,
+      num_requests_running=2,
+      kv_cache_usage_perc=0.45,
+      metadata={"status": "ok"},
+  )
+
+
 class SamplerTest(absltest.TestCase):
 
   def test_weight_sync_request_round_trips_through_cloudpickle(self):
@@ -103,6 +113,31 @@ class SamplerTest(absltest.TestCase):
           token_ids=np.array([1, 2, 3]),
           logprobs=np.array([-0.1, -0.2]),
       )
+
+  def test_load_info_defaults(self):
+    load_info = base_sampler_lib.LoadInfo()
+    self.assertEqual(load_info.num_requests_waiting, 0)
+    self.assertEqual(load_info.num_requests_running, 0)
+    self.assertEqual(load_info.kv_cache_usage_perc, 0.0)
+    self.assertEqual(load_info.request_id, "")
+    self.assertIsNone(load_info.error)
+    self.assertEqual(load_info.metadata, {})
+
+  def test_load_info_round_trips_through_cloudpickle(self):
+    original = _load_info()
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, original.request_id)
+    self.assertEqual(
+        restored.num_requests_waiting, original.num_requests_waiting
+    )
+    self.assertEqual(
+        restored.num_requests_running, original.num_requests_running
+    )
+    self.assertEqual(
+        restored.kv_cache_usage_perc, original.kv_cache_usage_perc
+    )
+    self.assertEqual(restored.metadata, original.metadata)
 
 
 if __name__ == "__main__":
