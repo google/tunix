@@ -1,31 +1,45 @@
-[live] v1: 28.68 GiB global, 1510 arrays
-          180 x (2048, 16384)              bfloat16  =   11.25 GiB
-          108 x (16384, 2048)              bfloat16  =    6.75 GiB
-            6 x (256128, 2048)             bfloat16  =    5.86 GiB
-           18 x (2, 2048, 16384)           bfloat16  =    2.25 GiB
-          108 x (8, 2048, 256)             bfloat16  =    0.84 GiB
-          108 x (8, 256, 2048)             bfloat16  =    0.84 GiB
-          144 x (4, 1024, 256)             bfloat16  =    0.28 GiB
-          144 x (4, 256, 1024)             bfloat16  =    0.28 GiB
-          108 x (2, 1, 2048, 256)          bfloat16  =    0.21 GiB
-          108 x (2, 1, 1024, 256)          bfloat16  =    0.11 GiB
-          222 x (2048,)                    bfloat16  =    0.00 GiB
-          222 x (1024,)                    bfloat16  =    0.00 GiB
-        ... 7 more groups = 0.00 GiB
-census_v1: {((2, 256), 'bool'): (2, 1024), ((2, 256), 'int32'): (2, 4096), ((), 'float32'): (3, 12), ((), 'uint32'): (1, 4), ((2048,), 'bfloat16'): (222, 909312), ((2048, 16384), 'bfloat16'): (180, 12079595520), ((16384, 2048), 'bfloat16'): (108, 7247757312), ((8, 2048, 256), 'bfloat16'): (108, 905969664), ((2, 1, 2048, 256), 'bfloat16'): (108, 226492416), ((8, 256, 2048), 'bfloat16'): (108, 905969664), ((256128, 2048), 'bfloat16'): (6, 6294601728), ((), 'int32'): (7, 28), ((), 'bool'): (1, 1), ((1024,), 'bfloat16'): (222, 454656), ((4, 1024, 256), 'bfloat16'): (144, 301989888), ((2, 1, 1024, 256), 'bfloat16'): (108, 113246208), ((4, 256, 1024), 'bfloat16'): (144, 301989888), ((), 'bfloat16'): (18, 36), ((2, 2048, 16384), 'bfloat16'): (18, 2415919104), None: (1510, 30794900561)}
-
-[live] v2: 24.01 GiB global, 1361 arrays
-          144 x (2048, 16384)              bfloat16  =    9.00 GiB
-           90 x (16384, 2048)              bfloat16  =    5.62 GiB
-            5 x (256128, 2048)             bfloat16  =    4.89 GiB
-           18 x (2, 2048, 16384)           bfloat16  =    2.25 GiB
-           90 x (8, 2048, 256)             bfloat16  =    0.70 GiB
-           90 x (8, 256, 2048)             bfloat16  =    0.70 GiB
-          144 x (4, 1024, 256)             bfloat16  =    0.28 GiB
-          144 x (4, 256, 1024)             bfloat16  =    0.28 GiB
-           90 x (2, 1, 2048, 256)          bfloat16  =    0.18 GiB
-          108 x (2, 1, 1024, 256)          bfloat16  =    0.11 GiB
-          185 x (2048,)                    bfloat16  =    0.00 GiB
-          222 x (1024,)                    bfloat16  =    0.00 GiB
-        ... 4 more groups = 0.00 GiB
-census_v2: {((), 'float32'): (5, 20), ((), 'uint32'): (1, 4), ((2048,), 'bfloat16'): (185, 757760), ((2048, 16384), 'bfloat16'): (144, 9663676416), ((16384, 2048), 'bfloat16'): (90, 6039797760), ((8, 2048, 256), 'bfloat16'): (90, 754974720), ((2, 1, 2048, 256), 'bfloat16'): (90, 188743680), ((8, 256, 2048), 'bfloat16'): (90, 754974720), ((256128, 2048), 'bfloat16'): (5, 5245501440), ((), 'int32'): (7, 28), ((1024,), 'bfloat16'): (222, 454656), ((4, 1024, 256), 'bfloat16'): (144, 301989888), ((2, 1, 1024, 256), 'bfloat16'): (108, 113246208), ((4, 256, 1024), 'bfloat16'): (144, 301989888), ((), 'bfloat16'): (18, 36), ((2, 2048, 16384), 'bfloat16'): (18, 2415919104), None: (1361, 25782026328)}
+INIT weight checksum: 2250560790
+[grads] v1: leaves=197 nonzero=123 finite=197 max|g|=31.5148 norm=2784.162062
+live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
+v2 start weight checksum: 2250560790 OK
+[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=26.4807 norm=2950.594666
+[cmp] grads: XOR v1=3847152705 v2=2784405139 DIFFER
+[cmp] grads: EXCEEDS 0 ULP
+Mismatch at path: (DictKey(key='embedder'), DictKey(key='input_embedding'), GetAttrKey(name='value'))
+  dtype        : float32
+  max ULP      : 2197254702 (allowed 0)
+  violating    : 402653079/402653184 (100.0000%)
+  ULP histogram: 0:105, 1:179, 2:201, 3:182, 4:204, 5:152, 6:218, 7:165, >=8:402651778
+[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
+        max ULP=2197254702 violating=402653079/402653184  sorted-identical=False
+        tensor scale max|g|=31.5148
+        max |x-y|=38.2314  (= 1.213e+00 of scale)  at |x|=29.532
+        largest |x| among differing entries=31.5148  (= 1.000e+00 of scale)
+[diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
+        max ULP=2176722625 violating=786432/786432  sorted-identical=False
+        tensor scale max|g|=10.2742
+        max |x-y|=14.0969  (= 1.372e+00 of scale)  at |x|=5.78754
+        largest |x| among differing entries=10.2742  (= 1.000e+00 of scale)
+[diag] ['layers'][0]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
+        max ULP=2155966608 violating=3145727/3145728  sorted-identical=False
+        tensor scale max|g|=4.58665
+        max |x-y|=6.0225  (= 1.313e+00 of scale)  at |x|=2.80532
+        largest |x| among differing entries=4.58665  (= 1.000e+00 of scale)
+[cmp] weights after training: XOR v1=2296519656 v2=2461192579 DIFFER
+[cmp] weights after training: EXCEEDS max|dw|/max|w| = 1e-06  (worst leaf ['embedder']['input_embedding'].value: 9.69e-06, 5/197 leaves over)
+[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
+        max ULP=3787648 violating=195727/402653184  sorted-identical=False
+        tensor scale max|g|=0.0541998
+        max |x-y|=5.25091e-07  (= 9.688e-06 of scale)  at |x|=0.000858229
+        largest |x| among differing entries=0.0497646  (= 9.182e-01 of scale)
+[diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
+        max ULP=5470624 violating=772589/786432  sorted-identical=False
+        tensor scale max|g|=0.0481287
+        max |x-y|=1.73226e-07  (= 3.599e-06 of scale)  at |x|=0.0165022
+        largest |x| among differing entries=0.0481287  (= 1.000e+00 of scale)
+[diag] ['layers'][0]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
+        max ULP=1670815744 violating=3073120/3145728  sorted-identical=False
+        tensor scale max|g|=0.0542067
+        max |x-y|=8.75443e-08  (= 1.615e-06 of scale)  at |x|=0.0130594
+        largest |x| among differing entries=0.0542067  (= 1.000e+00 of scale)
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
