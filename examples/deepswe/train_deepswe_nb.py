@@ -362,7 +362,7 @@ from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
 from tunix.sft import utils as sft_utils
 from tunix.sft import metrics_logger
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
@@ -916,21 +916,21 @@ logical_rules = getattr(
 if logical_rules:
   print(f"Configuring role_to_logical_axis_rule with: {logical_rules}")
   role_to_logical_axis_rule = {
-      rl_cluster_lib.Role.ACTOR: logical_rules,
-      rl_cluster_lib.Role.REFERENCE: logical_rules,
-      rl_cluster_lib.Role.ROLLOUT: logical_rules,
+      rl_engine_lib.Role.ACTOR: logical_rules,
+      rl_engine_lib.Role.REFERENCE: logical_rules,
+      rl_engine_lib.Role.ROLLOUT: logical_rules,
   }
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: train_mesh,
-        rl_cluster_lib.Role.REFERENCE: train_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        rl_engine_lib.Role.ACTOR: train_mesh,
+        rl_engine_lib.Role.REFERENCE: train_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     role_to_logical_axis_rule=role_to_logical_axis_rule,
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -947,7 +947,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=qwen_actor,
     reference=qwen_reference,
     tokenizer=tokenizer,
@@ -982,7 +982,7 @@ grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     reward_fns=None,
     agent_class=SWEAgent,
     agent_kwargs={},

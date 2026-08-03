@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""In-process worker handles backed by an RLCluster (or any AbstractRLEngine).
+"""In-process worker handles backed by an RLEngine (or any AbstractRLEngine).
 
 These handles satisfy the same contracts a remote (RPC) worker would, but run in
-the same process by delegating straight to a base ``RLCluster`` /
+the same process by delegating straight to a base ``RLEngine`` /
 ``AbstractRLEngine``. They let ``OrchestratorRLEngine`` route its compute
 primitives to handles today (single process) and give the eventual RPC handles a
 behavioral reference to match.
@@ -23,7 +23,7 @@ behavioral reference to match.
 ``RLOrchestrator`` (RL Algorithm Layer)
   └── ``OrchestratorRLEngine`` (Coordination/Routing Layer)
         └── ``InProcessRolloutWorker`` (Worker Handle)
-              └── ``RLCluster`` /
+              └── ``RLEngine`` /
               ``AbstractRLEngine`` (Base In-process Engine Layer)
 """
 
@@ -31,7 +31,7 @@ from typing import Any, Mapping
 
 
 class InProcessTrainerWorker:
-  """Trainer-worker handle that wraps an in-process base ``RLCluster`` / ``AbstractRLEngine``.
+  """Trainer-worker handle that wraps an in-process base ``RLEngine`` / ``AbstractRLEngine``.
 
   Contract driven by ``OrchestratorRLEngine``:
 
@@ -69,7 +69,7 @@ class InProcessTrainerWorker:
 
 
 class InProcessRolloutWorker:
-  """Rollout-worker handle that wraps an in-process base ``RLCluster`` / ``AbstractRLEngine``.
+  """Rollout-worker handle that wraps an in-process base ``RLEngine`` / ``AbstractRLEngine``.
 
   Contract driven by ``OrchestratorRLEngine``:
 
@@ -105,7 +105,7 @@ class InProcessRolloutWorker:
 
 
 class InProcessInferenceWorker:
-  """Inference-worker handle that wraps an in-process base ``RLCluster`` / ``AbstractRLEngine``.
+  """Inference-worker handle that wraps an in-process base ``RLEngine`` / ``AbstractRLEngine``.
 
   Contract driven by ``OrchestratorRLEngine``:
 
