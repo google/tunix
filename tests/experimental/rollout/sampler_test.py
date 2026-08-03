@@ -28,6 +28,7 @@ def _sample_response() -> base_sampler_lib.SamplingResponse:
       token_ids=np.array([101, 102, 103], dtype=np.int32),
       logprobs=np.array([-0.1, -0.2, -0.05], dtype=np.float32),
       finish_reason="stop",
+      routed_experts=np.zeros((1, 2, 3, 2), dtype=np.int32),
       metadata={"cached": True},
   )
 
@@ -104,6 +105,20 @@ class SamplerTest(absltest.TestCase):
     self.assertIsNone(restored.error)
     np.testing.assert_array_equal(restored.token_ids, original.token_ids)
     np.testing.assert_allclose(restored.logprobs, original.logprobs)
+    np.testing.assert_array_equal(
+        restored.routed_experts, original.routed_experts
+    )
+
+  def test_sampling_response_routed_experts(self):
+    # Shape: [Batch, Layers, Length, Top K]
+    routed_experts = np.arange(2 * 4 * 10 * 2, dtype=np.int32).reshape(
+        (2, 4, 10, 2)
+    )
+    response = base_sampler_lib.SamplingResponse(
+        routed_experts=routed_experts
+    )
+    self.assertEqual(response.routed_experts.shape, (2, 4, 10, 2))
+    np.testing.assert_array_equal(response.routed_experts, routed_experts)
 
   def test_sampling_response_enforces_shapes(self):
     with self.assertRaisesRegex(
