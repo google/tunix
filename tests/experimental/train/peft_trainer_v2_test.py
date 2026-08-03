@@ -949,6 +949,9 @@ class FusedStepTest(parameterized.TestCase):
 
   def test_fused_matches_split_bitwise(self):
     model_fused, model_split = self._two_identical_models()
+    initial_weights = jax.tree.map(
+        jnp.copy, nnx.state(model_fused, nnx.Param)
+    )
     jax.tree.map_with_path(
         tc.assert_bitwise_equal,
         nnx.state(model_fused, nnx.Param),
@@ -979,6 +982,77 @@ class FusedStepTest(parameterized.TestCase):
         trainer_split._last_update_grad_norm,
     )
     self.assertEqual(trainer_fused.train_steps, trainer_split.train_steps)
+    self._assert_weights_changed(
+        initial_weights, nnx.state(model_fused, nnx.Param)
+    )
+    # Both trainers use the same config; only the methods called differ. Confirm
+    # that actually selected two different programs.
+    self._assert_took_path(trainer_fused, "fused")
+    self._assert_took_path(trainer_split, "split")
+
+  def test_fp32_single_step_fused_matches_v1_after_one_update(self):
+    model_v1, model_fused = self._two_identical_models()
+    initial_weights = jax.tree.map(
+        jnp.copy, nnx.state(model_v1, nnx.Param)
+    )
+    trainer_v1 = self._make_v1_trainer(model_v1)
+    trainer_fused = self._make_trainer(model_fused, max_steps=1)
+    batch = dummy_datasets(batch_size=4)[0]
+
+    trainer_v1.train([batch])
+    trainer_fused.train_step(batch)
+
+    weights_v1 = nnx.state(model_v1, nnx.Param)
+    weights_fused = nnx.state(model_fused, nnx.Param)
+    self.assertEqual(trainer_v1.train_steps, 1)
+    self.assertEqual(trainer_fused.train_steps, 1)
+    self.assertEqual(float(trainer_v1.grad_accumulator.denom[...]), 0.0)
+    self.assertEqual(float(trainer_fused.grad_accumulator.denom[...]), 0.0)
+    self._assert_weights_changed(initial_weights, weights_v1)
+    self._assert_weights_changed(initial_weights, weights_fused)
+    self._assert_fp32_weights_close(weights_v1, weights_fused)
+    jax.tree.map_with_path(
+        tc.assert_close,
+        nnx.state(trainer_v1.optimizer),
+        nnx.state(trainer_fused.optimizer),
+    )
+    loss_v1 = trainer_v1.metrics_logger.get_metric('', 'loss', 'train')
+    loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
+    np.testing.assert_allclose(loss_v1, loss_fused, atol=1e-5)
+    self._assert_took_path(trainer_fused, "fused")
+
+  def test_fp32_multiple_step_fwd_bwd_update_matches_v1_after_one_update(self):
+    accum_steps = 4
+    batches = dummy_datasets(batch_size=4, repeat=2)[:accum_steps]
+    self.assertLen(batches, accum_steps)
+    model_v1, model_split = self._two_identical_models()
+    initial_weights = jax.tree.map(
+        jnp.copy, nnx.state(model_v1, nnx.Param)
+    )
+    trainer_v1 = self._make_v1_trainer(model_v1, accum_steps=accum_steps)
+    trainer_split = self._make_trainer(
+        model_split, accum_steps=accum_steps, max_steps=1
+    )
+
+    trainer_v1.train(batches)
+    for batch in batches:
+      trainer_split.fwd_bwd(batch)
+    self.assertEqual(trainer_split.train_steps, 0)
+    self.assertEqual(
+        float(trainer_split.grad_accumulator.denom[...]), accum_steps
+    )
+    trainer_split.update()
+
+    weights_v1 = nnx.state(model_v1, nnx.Param)
+    weights_split = nnx.state(model_split, nnx.Param)
+    self.assertEqual(trainer_v1.train_steps, 1)
+    self.assertEqual(trainer_split.train_steps, 1)
+    self.assertEqual(float(trainer_v1.grad_accumulator.denom[...]), 0.0)
+    self.assertEqual(float(trainer_split.grad_accumulator.denom[...]), 0.0)
+    self._assert_weights_changed(initial_weights, weights_v1)
+    self._assert_weights_changed(initial_weights, weights_split)
+    self._assert_fp32_weights_close(weights_v1, weights_split)
+    self._assert_took_path(trainer_split, "split")
 
   def test_fused_unavailable_when_accumulating(self):
     model, _ = self._two_identical_models()
@@ -987,12 +1061,6 @@ class FusedStepTest(parameterized.TestCase):
     self.assertIsNone(trainer._jitted_fused_step_fn)
     with self.assertRaisesRegex(ValueError, 'one micro-batch per update'):
       trainer.train_step(dummy_datasets(batch_size=4)[0])
-
-  def test_fused_available_at_depth1(self):
-    model, _ = self._two_identical_models()
-    trainer = self._make_trainer(model)
-    trainer.jit_fwd_bwd_update_and_eval_step()
-    self.assertIsNotNone(trainer._jitted_fused_step_fn)
 
   def test_train_uses_fused_path_at_depth1(self):
     """`train()` must route through the fused step, not fwd_bwd + update."""
