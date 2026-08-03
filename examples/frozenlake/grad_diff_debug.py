@@ -113,18 +113,42 @@ def create_sharded_model(config, rngs, mesh):
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 config = g4_model.ModelConfig.gemma4_e2b()
 config.num_layers = 12
+# CONCLUSION: v1 and v2 are numerically equivalent. The residual difference sits
+# at the floor of float32 reduction-order reproducibility and does not depend on
+# --xla_allow_excess_precision.
+#
 # Findings (gemma4_e2b, num_layers=12, 2 devices; logs at the bottom of this
 # file). "identical" means bit-for-bit, checked with tc.tree_bit_checksum.
+# fp32 eps = 1.19e-7 throughout.
 #
-#   fp32, excess_precision=false, SPLIT path : 195/197 leaves identical;
-#         layers 4 and 9 differ by <= 2 fp32 eps (2.1e-7 of tensor scale).
-#         After one SGD step at lr=1e-5, 54-87 weights out of 6.3M move by
-#         ~1 ULP.
-#   fp32, excess_precision=false, FUSED path : identical.
+#   GRADIENTS -- _MODE="grads", accum=8, 7 micro-batches, no update, no
+#   instrumentation of any kind:
+#       norms identical to every printed digit (5289.807278 both), max|g|
+#       identical (47.1573 both), and elementwise <= 2.25 fp32 eps:
+#           embedder.input_embedding      4.045e-08 of scale = 0.34 eps
+#           layers.9 attn_vec_einsum.w    1.489e-07           = 1.25 eps
+#           layers.0 _key_norm.scale      2.679e-07           = 2.25 eps
+#       Measured with excess_precision at its DEFAULT (true), so the flag is not
+#       what keeps fp32 gradients in line.
+#
+#   WEIGHTS after exactly ONE update -- _MODE="weights", accum=8:
+#       max|dw|/max|w| = 4.46e-09 = 0.037 eps, 3 elements out of 6.3M differing
+#       by 1 ULP, 0/197 leaves over the 1e-6 gate. The largest tensor
+#       (per_layer_input_embedding, 262144x3072) is bit-identical.
+#       The depth-1 equivalent was 1.82e-08 = 0.15 eps, 87/6.3M.
+#
+#   WEIGHTS after TWO updates -- accum=4, max_steps=8:
+#       9.69e-06 = 81 eps, 195727 elements. One extra update multiplies the
+#       divergence ~2000x. See CAVEAT 5.
+#
 #   bf16, excess_precision=false, 1 and 2 dev : identical.
 #   bf16, excess_precision=true,  1 and 2 dev : grads differ by 1-2 bf16 ULP on
 #         ~24.7% of elements; grad_norm differs 1.35e-4 rel. Independent of the
 #         device count.
+#
+# Also settled along the way: v1's `reset()` inside `nnx.cond` DOES propagate
+# (after one update the accumulator reads back all-zero with denom=0), so the
+# accumulating path does not carry stale gradients into the next update.
 #
 # Two separate mechanisms, and one flag only fixes one of them:
 #
@@ -136,19 +160,30 @@ config.num_layers = 12
 #
 #   Reduction order. The flag does NOT constrain summation trees, collective
 #   algorithms, or the scheduling of a multi-term accumulation. That is what
-#   remains in fp32, and its location is the tell: the ONLY leaves that differ
-#   are layers 4 and 9, which for this config are the GLOBAL attention layers
-#   (index % 5 == 4) and, with num_unshared = int(12 - 12*20/35) = 5, exactly
-#   the KV-sharing origin/consumer pair. Layer 4's gradient accumulates its own
-#   attention path plus the one flowing back through layer 9's shared KV --
-#   two contributions from different depths, which XLA schedules differently
-#   when the backward is compiled alone versus together with the update. Every
-#   other layer has a purely local gradient path and comes out identical.
+#   remains in fp32, and its location is the tell: the leaves that differ most
+#   are the GLOBAL attention layers (index % 5 == 4 for this config) and, with
+#   num_unshared = int(12 - 12*20/35) = 5, exactly the KV-sharing
+#   origin/consumer pair. Their gradients accumulate their own attention path
+#   plus the one flowing back through the shared KV -- two contributions from
+#   different depths, which XLA schedules differently when the backward is
+#   compiled alone versus together with the update. Layers with a purely local
+#   gradient path come out identical.
 #
 # So the flag is necessary but NOT sufficient. Only the fused path guarantees
 # bit-identity, because it makes the two HLO modules identical and leaves XLA no
 # choice. On the split path, compare with a relative tolerance -- roughly
 # max|x-y| / max|x| < 1e-6 -- not with a ULP gate (see CAVEAT 4).
+#
+# HOW TO RUN THIS FILE: pick `_MODE` below. Each mode isolates one quantity;
+# a single run cannot give both, and trying was what produced the phase
+# mismatch described in CAVEAT 5.
+#   "grads"   -- feeds ACCUM-1 micro-batches so the update never fires and both
+#                accumulators end holding the same batches (denom == ACCUM-1).
+#                The only hook-free way to compare gradients.
+#   "weights" -- feeds exactly ACCUM so exactly one update fires. Gradients are
+#                reset and unobservable; the weights are clean.
+# `[phase]` prints denom / micro-steps / updates for both sides, and the
+# gradient comparison refuses to run unless the two phases agree.
 #
 # CAVEAT 1: grad_norm is not a valid pass/fail gate. optax.global_norm sums
 # ~4e8 squares in fp32, and XLA picks a different reduction tree per module,
@@ -198,6 +233,24 @@ config.num_layers = 12
 # 6.3e6 on 78% of elements and was, in absolute terms, 2.1e-7 of the tensor
 # scale. Use ULP for weights and activations; use max|x-y| / max|x| for
 # gradients.
+#
+# CAVEAT 5: only a SINGLE update is a valid equivalence test. Training is
+# chaotic: the sub-ULP weight difference left by one update changes what the
+# next forward pass sees, so the next gradients differ by more, and so on.
+# Measured here, all else equal:
+#     1 update  -> 4.46e-09 of scale (0.037 eps),      3 elements
+#     2 updates -> 9.69e-06 of scale (81 eps),    195727 elements
+# i.e. one extra update multiplied the divergence by ~2000x. A multi-step
+# comparison therefore says nothing about whether two implementations agree --
+# it measures how long it takes the same arithmetic to decorrelate, which for
+# any two non-bit-identical programs is "quickly". Over a real run the two will
+# reach O(1) relative differences and that is expected, not a defect; compare
+# loss curves statistically instead.
+#
+# Corollary: the accumulator must be read at a known phase. Two accumulators
+# holding different micro-batches produce similar norms with 100%-different
+# elements, which reads exactly like a catastrophic divergence. `[phase]` and
+# the denom gate exist to make that impossible to miss.
 #
 # config.param_dtype = jnp.bfloat16
 # config.dtype = jnp.bfloat16
@@ -377,8 +430,13 @@ def compare(tag, a, b, *, max_ulp=None, max_rel=None):
   ck_a, ck_b = tc.tree_bit_checksum(a), tc.tree_bit_checksum(b)
   status = "identical" if ck_a == ck_b else "DIFFER"
   print(f"[cmp] {tag}: XOR v1={ck_a} v2={ck_b} {status}")
-  if ck_a == ck_b:
-    return
+  # Deliberately NOT returning early on a checksum match. The checksum is a fast
+  # screen, not the gate: it is a single XOR fold, so it can collide, and a
+  # match is also trivially true when nothing moved at all (an SGD step whose
+  # update lands below one ULP of the weights leaves them untouched -- which is
+  # exactly what lr=1e-5 does in bfloat16). The elementwise numbers below say
+  # how far apart the two really are, and `describe_grads` / the init checksum
+  # say whether anything happened in the first place.
 
   pairs = [
       (pth, l1, l2)
@@ -493,6 +551,25 @@ def attribute_weight_gap(w_a, w_b, g_a, g_b, lr, denom=None):
     print("[attr] skipped: no gradients captured")
     return
 
+  def all_zero(tree):
+    return all(
+        not np.any(np.asarray(l))
+        for l in jax.tree_util.tree_leaves(tree)
+    )
+
+  if all_zero(g_a) and all_zero(g_b):
+    # Both accumulators were zeroed by the update that produced these weights,
+    # so `max|d(grad)|` is trivially 0. Concluding "the gap did not come from
+    # the gradients" from that would be backwards: the gradients that mattered
+    # are simply no longer observable.
+    print(
+        "[attr] NOT APPLICABLE: both accumulators were reset by the update, so"
+        " the gradients that produced these weights are gone. Attribution needs"
+        ' the "grads" mode, where the update never fires and the accumulator'
+        " still holds them."
+    )
+    return
+
   dw = max_abs_diff(w_a, w_b)
   dg_acc = max_abs_diff(g_a, g_b)
   dg_applied = dg_acc / denom if denom else dg_acc
@@ -503,12 +580,21 @@ def attribute_weight_gap(w_a, w_b, g_a, g_b, lr, denom=None):
       + (f"  (/denom={denom:g} -> {dg_applied:.4e})" if denom else "")
       + f"\n       predicted max|dw| = lr * that = {predicted_dw:.4e}"
   )
-  if predicted_dw == 0.0:
+  if dw == 0.0 and predicted_dw == 0.0:
+    verdict = "both identical"
+  elif dw == 0.0:
+    # No update was applied (the "grads" mode never reaches one), or the
+    # difference in the applied gradient landed below half a ULP of every
+    # weight and rounded away.
+    verdict = (
+        "weights bit-identical while gradients differ by"
+        f" {dg_applied:.3e} -- no update was applied, or lr*that is below half"
+        " a ULP of every weight"
+    )
+  elif predicted_dw == 0.0:
     verdict = (
         "gradients identical but weights differ -- the gap did NOT come from"
         " the gradients"
-        if dw > 0
-        else "both identical"
     )
   else:
     ratio = dw / predicted_dw
@@ -685,6 +771,24 @@ with mesh:
       grads_v2_host
   ):
     compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
+
+  # Did the step move the weights at all? An SGD update smaller than half a ULP
+  # of the weight rounds straight back, so the comparison below would report
+  # "identical" while comparing two untrained models. At lr=1e-5 the update is
+  # ~520 ULP in fp32 but only ~0.008 ULP in bfloat16, i.e. a no-op -- raise the
+  # learning rate to ~1e-2 before drawing any conclusion from a bf16 run.
+  _final_ck_v1 = tc.tree_bit_checksum(model_state_v1_host)
+  _final_ck_v2 = tc.tree_bit_checksum(jax.device_get(nnx.state(gemma_v2)))
+  print(
+      f"[move] weights changed?  v1={_final_ck_v1 != _init_ck}"
+      f"  v2={_final_ck_v2 != _init_ck}"
+      + (
+          "   <-- NOTHING MOVED: the update is below one ULP, so any comparison"
+          " below is vacuous"
+          if _final_ck_v1 == _init_ck and _final_ck_v2 == _init_ck
+          else ""
+      )
+  )
 
   # Weights are observable without any hook, so this comparison is valid in
   # memory-benchmark state. Expect ~1e-8 of tensor scale in the KV-sharing

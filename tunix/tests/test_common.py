@@ -200,25 +200,31 @@ def tree_bit_checksum(tree):
   Raises:
     TypeError: If a leaf's dtype has no fixed-width bit representation.
   """
-  acc = 0
+  acc = np.uint64(0)
   folded = 0
   for leaf in jax.tree_util.tree_leaves(tree):
     a = np.asarray(_convert_leaf_to_nparray(leaf))
-    view = None if a.dtype.kind in _UNCHECKSUMMABLE_KINDS else _BIT_VIEW.get(
-        a.dtype.itemsize
-    )
-    if view is None:
+    if a.dtype.kind in _UNCHECKSUMMABLE_KINDS or a.dtype.itemsize not in _BIT_VIEW:
       raise TypeError(
           f"tree_bit_checksum cannot fold a leaf of dtype {a.dtype!r} "
           f"(kind={a.dtype.kind!r}, itemsize={a.dtype.itemsize}). Skipping it "
           "would make unequal trees compare equal; add an explicit conversion "
           "instead."
       )
-    acc ^= int(np.bitwise_xor.reduce(a.view(view).ravel()))
+    # Fold the raw bytes as uint64 rather than as elements. Folding elementwise
+    # makes the checksum only as wide as the dtype -- 16 bits for bfloat16,
+    # where a collision has probability 2^-16 = 1.5e-5 rather than the 2^-64 you
+    # would expect from a checksum. Byte-level folding is also dtype-agnostic,
+    # so fp32 and bf16 trees get the same collision resistance.
+    raw = np.ascontiguousarray(a).view(np.uint8).ravel()
+    pad = (-raw.size) % 8
+    if pad:
+      raw = np.concatenate([raw, np.zeros(pad, np.uint8)])
+    acc ^= np.bitwise_xor.reduce(raw.view(np.uint64))
     folded += 1
   if jax.tree_util.tree_leaves(tree) and not folded:
     raise TypeError("tree_bit_checksum folded no leaves from a non-empty tree.")
-  return acc
+  return int(acc)
 
 
 def live_array_census():
