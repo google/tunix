@@ -23,6 +23,7 @@ import einops
 import flax
 from flax import nnx
 import jax
+from jax.sharding import PartitionSpec as P
 from jax import numpy as jnp
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
@@ -64,25 +65,27 @@ class ShardingConfig:
   vision_proj: Tuple[str | None, ...]
   vision_soft_emb_norm_weight: Tuple[str | None, ...]
   siglip: vision.SigLIPShardingConfig | None
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_cndh=(None, 'tp', fsdp, None),
-        qkv_weight_cndh=(None, 'tp', fsdp, None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
-        vision_proj=(fsdp, 'tp'),
-        vision_soft_emb_norm_weight=('tp',),
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp',),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
+        vision_proj=P(fsdp, 'tp'),
+        vision_soft_emb_norm_weight=P('tp',),
         siglip=vision.SigLIPShardingConfig.get_default_sharding(is_sampling),
     )
 
@@ -682,10 +685,14 @@ class Attention(nnx.Module):
         self.remat_config == RematConfig.BLOCK
         or self.remat_config == RematConfig.BLOCK.value
     ):
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
@@ -791,8 +798,17 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
@@ -888,9 +904,18 @@ class DecoderLayer(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.DECODER:
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask)

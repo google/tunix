@@ -125,9 +125,9 @@ class VllmRollout(base_rollout.BaseRollout):
       completion_tokens: jax.Array,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
-    # b/428730696, we cannot return self.output.logprobs yet
-    # May need to validate if there will be any difference from recalculation
-    return self.output.logprobs
+    if self.output.logprobs is None:
+      return jax.numpy.empty((0,))
+    return jax.numpy.array(self.output.logprobs)
 
   def update_params(
       self,

@@ -106,6 +106,14 @@ class TrainExample:
   old_per_token_logps: jax.Array | None
   segment_ids: jax.Array | None = None
   segment_positions: jax.Array | None = None
+  # Static (JIT-compile-time) upper bound on segments per packed row, including
+  # the padding bucket (segment 0). Set by `pack_sequences` to
+  # ``max_token_budget + 1`` -- a pack of ``budget`` tokens holds at most
+  # ``budget`` segments (each >= 1 token), so this never overflows. Kept
+  # ``pytree_node=False`` so it is a static Python int (a fixed value every
+  # step -> the segment-aware loss compiles once, no per-step recompilation).
+  num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
+  is_update_step: jax.Array | None = None
   # Truncated importance-sampling correction weights for off-policy
   # correction between the rollout sampler and the trainer. Per-token,
   # detached, multiplied into the policy-gradient loss BEFORE aggregation
@@ -276,6 +284,13 @@ def process_ids(
 def _call_contains_by_type(target_cls: type, target_arg: str) -> bool:
   """Determines if a class' call function contains a target argument and caches the result"""
 
+<<<<<<< HEAD
+=======
+@functools.cache
+def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
+  """Determines if a class' call function contains a target argument and caches the result."""
+
+>>>>>>> 76ca96699c64c9f7f57914fd70195bebe7d5995d
   try:
     sig = inspect.signature(target_cls.__call__)
     return (target_arg in sig.parameters) or any(
@@ -284,6 +299,10 @@ def _call_contains_by_type(target_cls: type, target_arg: str) -> bool:
   except Exception:
     return False
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 76ca96699c64c9f7f57914fd70195bebe7d5995d
 def model_call_contains(model, target_arg: str) -> bool:
   """Determines if a model's call function contains a target argument"""
 
@@ -291,6 +310,10 @@ def model_call_contains(model, target_arg: str) -> bool:
 
   return _call_contains_by_type(type(target_obj), target_arg)
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 76ca96699c64c9f7f57914fd70195bebe7d5995d
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -549,9 +572,6 @@ def compute_chunked_logps(
     return per_token_logps
 
 
-
-
-
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_score(
     model,
@@ -682,18 +702,86 @@ def pad_to_length(
     return jnp.concatenate([x, padding], axis=axis)
 
 
+def segmented_sum(
+    values: jax.Array,
+    segment_ids: jax.Array,
+    num_segments: int,
+) -> jax.Array:
+  """Per-row segment sum: `[B, T]` values grouped by `[B, T]` ids -> `[B, S]`.
+
+  `jax.ops.segment_sum` is 1-D, so this `vmap`s it across the batch. Segment 0
+  is the padding bucket by the `pack_sequences` convention. `indices_are_sorted`
+  is left False on purpose: our ids look like `[1,1,2,2,3,0,0]` (real segments
+  ascending, then trailing pad 0), which is non-monotonic, so the sorted-scan
+  fast path would be an invalid promise (undefined behaviour on TPU) -- we take
+  correctness over a marginal perf hint on this tiny `[B, S]` reduction.
+
+  Args:
+    values: `[batch_size, sequence_len]` values to group and sum per segment.
+    segment_ids: `[batch_size, sequence_len]` segment id per position (0 = pad).
+    num_segments: static upper bound on segment ids (padding bucket included).
+      Must be a Python int because the output width `S` is static under JIT.
+
+  Returns:
+    `[batch_size, num_segments]` per-row per-segment sums.
+  """
+  return jax.vmap(
+      functools.partial(
+          jax.ops.segment_sum,
+          num_segments=num_segments,
+          indices_are_sorted=False,
+      )
+  )(values, segment_ids)
+
+
+def segmented_count(
+    segment_ids: jax.Array,
+    num_segments: int,
+    mask: jax.Array | None = None,
+) -> jax.Array:
+  """Per-row per-segment token count -> `[B, S]` (float32).
+
+  Counts positions per segment. With `mask` (typically `completion_mask`), only
+  `mask != 0` positions are counted, so the count matches the denominator of a
+  per-segment token mean (scored tokens only). Segment 0 is the padding bucket.
+
+  Args:
+    segment_ids: `[batch_size, sequence_len]` segment id per position (0 = pad).
+    num_segments: static upper bound on segment ids (padding bucket included).
+    mask: optional `[batch_size, sequence_len]`; when given, only `mask != 0`
+      positions are counted.
+
+  Returns:
+    `[batch_size, num_segments]` per-row per-segment counts (float32).
+  """
+  if mask is None:
+    ones = jnp.ones_like(segment_ids, dtype=jnp.float32)
+  else:
+    ones = mask.astype(jnp.float32)
+  return segmented_sum(ones, segment_ids, num_segments)
+
+
 def aggregate_loss(
     per_token_loss: jax.Array,
     completion_mask: jax.Array,
     loss_agg_mode: str,
+    segment_ids: jax.Array | None = None,
+    num_segments: int | None = None,
     **kwargs: Any,
-) -> jax.Array:
+) -> utils.WeightedMetric:
   """Aggregate loss based on the loss aggregation mode.
 
   Args:
       per_token_loss: Per token loss.[batch_size, sequence_len]
       completion_mask: Completion mask.[batch_size, sequence_len]
       loss_agg_mode: Loss aggregation mode.
+    segment_ids: optional [batch_size, sequence_len] packing segment ids. When
+      provided, per-sequence reductions operate on segments rather than rows (a
+      packed row holding K segments contributes K separate "sequences"); segment
+      0 is the padding bucket and is excluded. Pairs with num_segments. When
+      None, the per-row branch below runs unchanged.
+    num_segments: static upper bound on segments per row (padding bucket
+      included). Required when segment_ids is not None.
 
   Returns:
       Aggregated loss.
@@ -701,18 +789,33 @@ def aggregate_loss(
 
   per_token_loss = per_token_loss.astype(jnp.float32)
 
+  if segment_ids is not None:
+    return _aggregate_loss_segmented(
+        per_token_loss,
+        completion_mask,
+        loss_agg_mode,
+        segment_ids,
+        num_segments,
+        **kwargs,
+    )
+
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
     # in the batch
-    loss = (per_token_loss * completion_mask).sum() / (
-        jnp.clip(completion_mask.sum(), min=1)
-    )
+    unreduced_sum = (per_token_loss * completion_mask).sum()
+    denominator = completion_mask.sum()
+    min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-mean":
     seq_mask = completion_mask.sum(axis=-1)  # per-sequence token count
     seq_loss = ((per_token_loss * completion_mask).sum(axis=-1)) / jnp.clip(
-        seq_mask, min=1
+        seq_mask, min=1.0
     )
-    loss = seq_loss.mean()
+    unreduced_sum = seq_loss.sum()
+    # Count non-empty rows so unpacked [N_max, R] padding rows do not inflate the
+    # denominator (matches seq-mean-token-sum). For a fully-populated batch this
+    # equals shape[0], so the non-packed path is unchanged.
+    denominator = (seq_mask > 0).sum()
+    min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
@@ -721,20 +824,23 @@ def aggregate_loss(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    loss = seq_loss.mean()
+    unreduced_sum = seq_loss.sum()
+    denominator = (completion_mask.sum(axis=-1) > 0).sum()
+    min_denom = 1.0
   elif loss_agg_mode == "seq-mean-token-sum":
     # 1) sum token losses within each sequence
     # 2) average only across sequences that have at least one valid token
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
     seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
-    loss = (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+    unreduced_sum = (seq_loss * seq_mask).sum()
+    denominator = seq_mask.sum()
+    min_denom = 1e-6
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
     # Get custom normalization factor from kwargs, default to batch size.
     norm = _check_get_norm(kwargs, per_token_loss.shape[0])
-
-    # Sum the per-sequence sums and normalize
-    # TODO(sizhi): Experiment with loss in precision if loss is fp16.
-    loss = (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+    unreduced_sum = (per_token_loss * completion_mask).sum()
+    denominator = norm
+    min_denom = 1e-6
   else:
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
@@ -742,8 +848,290 @@ def aggregate_loss(
         " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
         " 'sequence-mean-token-sum-norm'."
     )
-  return loss
+  return utils.WeightedMetric(
+      jnp.asarray(unreduced_sum, dtype=jnp.float32),
+      jnp.asarray(denominator, dtype=jnp.float32),
+      min_denom=min_denom,
+  )
 
+
+def _aggregate_loss_segmented(
+    per_token_loss: jax.Array,
+    completion_mask: jax.Array,
+    loss_agg_mode: str,
+    segment_ids: jax.Array,
+    num_segments: int | None,
+    **kwargs: Any,
+) -> utils.WeightedMetric:
+  """Segment-aware `aggregate_loss` for packed batches.
+
+  A packed row holds K sequences separated by `segment_ids` (real ids 1..K;
+  0 = padding bucket). Per-sequence reductions group by SEGMENT instead of by
+  row, so the K packed sequences each contribute separately -- the per-segment
+  mirror of `aggregate_loss`'s per-row branch. The padding bucket (segment 0)
+  is excluded from both numerator and denominator, so dummy/padding segments
+  never dilute the loss. Returns the same `WeightedMetric` as the per-row
+  branch, so no downstream (LossOutput / gradient) change is needed.
+
+  Args:
+    per_token_loss: Per token loss. [batch_size, sequence_len]
+    completion_mask: Completion mask. [batch_size, sequence_len]
+    loss_agg_mode: Loss aggregation mode (same set as `aggregate_loss`).
+    segment_ids: [batch_size, sequence_len] packing segment ids (0 = padding).
+    num_segments: static upper bound on segments per row (padding bucket
+      included). Required -- raises ValueError if None.
+    **kwargs: mode-specific extras, e.g. `norm` for the token-scale and
+      token-sum-norm modes.
+
+  Returns:
+    Aggregated loss as a `WeightedMetric` (division deferred).
+  """
+  if num_segments is None:
+    raise ValueError(
+        "num_segments must be provided when segment_ids is not None."
+    )
+
+  masked_loss = per_token_loss * completion_mask
+  # [B, S]: per-segment loss sum and scored-token count.
+  l_seg = segmented_sum(masked_loss, segment_ids, num_segments)
+  c_seg = segmented_count(segment_ids, num_segments, mask=completion_mask)
+  # Active = segments with >=1 scored token; zero the padding bucket (seg 0) so
+  # dummy/padding never dilutes numerator or denominator (denom = n_act).
+  a_seg = (c_seg > 0).astype(jnp.float32)
+  a_seg = a_seg.at[:, 0].set(0.0)
+  n_act = a_seg.sum()
+
+  if loss_agg_mode == "token-mean":
+    # Segment-agnostic: the completion mask already handles everything.
+    unreduced_sum = masked_loss.sum()
+    denominator = completion_mask.sum()
+    min_denom = 1.0
+  elif loss_agg_mode == "sequence-mean-token-mean":
+    per_seg_mean = l_seg / jnp.clip(c_seg, min=1.0)
+    unreduced_sum = (per_seg_mean * a_seg).sum()
+    denominator = n_act
+    min_denom = 1.0
+  elif loss_agg_mode == "sequence-mean-token-scale":
+    # Fail-loud: the default row-width norm is the whole pack budget, which
+    # would dilute every segment -- require an explicit norm.
+    if "norm" not in kwargs:
+      raise ValueError(
+          "sequence-mean-token-scale under sequence packing requires an"
+          " explicit 'norm' (e.g. max_response_length); the default row-width"
+          " norm is the pack budget, which dilutes every sequence."
+      )
+    norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
+    per_seg_scaled = l_seg / jnp.clip(norm, min=1e-6)
+    unreduced_sum = (per_seg_scaled * a_seg).sum()
+    denominator = n_act
+    min_denom = 1.0
+  elif loss_agg_mode == "seq-mean-token-sum":
+    unreduced_sum = (l_seg * a_seg).sum()
+    denominator = n_act
+    min_denom = 1e-6
+  elif loss_agg_mode == "sequence-mean-token-sum-norm":
+    # Default norm = active segment count (per-segment analog of row count).
+    norm = _check_get_norm(kwargs, n_act)
+    unreduced_sum = masked_loss.sum()
+    denominator = norm
+    min_denom = 1e-6
+  else:
+    raise ValueError(
+        f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
+        " 'sequence-mean-token-sum-norm'."
+    )
+  return utils.WeightedMetric(
+      jnp.asarray(unreduced_sum, dtype=jnp.float32),
+      jnp.asarray(denominator, dtype=jnp.float32),
+      min_denom=min_denom,
+  )
+
+
+def reduced_loss_agg(
+    per_token_loss: jax.Array,
+    completion_mask: jax.Array,
+    loss_agg_mode: str,
+    segment_ids: jax.Array | None = None,
+    num_segments: int | None = None,
+    **kwargs: Any,
+) -> jax.Array:
+  """Eager per-sequence loss reduction (the pre-unreduced form).
+
+  Divides immediately and returns a scalar, unlike `aggregate_loss` which
+  defers division into a `WeightedMetric`. Used only as the `reduced_pg_loss`
+  logging metric to guard against regression; it never feeds the gradient.
+  Numerically equal to `aggregate_loss(...).compute()` (asserted in
+  common_test.py::CommonTest.test_reduced_equals_unreduced_compute) -- kept as
+  an INDEPENDENT eager form (this divides eagerly; `aggregate_loss` defers into
+  a WeightedMetric) so the two computation paths cross-check each other.
+
+  Segment-aware: when `segment_ids` is given it reduces per SEGMENT via an
+  independent eager branch (`_reduced_loss_agg_segmented`, NOT a call into
+  `aggregate_loss`), so the metric is packing-invariant -- the same sequences
+  give the same value packed or unpacked.
+
+  Args:
+    per_token_loss: Per token loss. [batch_size, sequence_len]
+    completion_mask: Completion mask. [batch_size, sequence_len]
+    loss_agg_mode: Loss aggregation mode.
+    segment_ids: optional [batch_size, sequence_len] packing segment ids; when
+      given, reduce per segment (segment 0 = padding bucket, excluded).
+    num_segments: static upper bound on segments per row; required with
+      segment_ids.
+    **kwargs: Mode-specific extras (e.g. `norm`).
+
+  Returns:
+    A scalar reduced loss.
+  """
+  per_token_loss = per_token_loss.astype(jnp.float32)
+
+  if segment_ids is not None:
+    return _reduced_loss_agg_segmented(
+        per_token_loss,
+        completion_mask,
+        loss_agg_mode,
+        segment_ids,
+        num_segments,
+        **kwargs,
+    )
+
+  if loss_agg_mode == "token-mean":
+    return (per_token_loss * completion_mask).sum() / jnp.clip(
+        completion_mask.sum(), min=1.0
+    )
+  elif loss_agg_mode == "sequence-mean-token-mean":
+    seq_mask = completion_mask.sum(axis=-1)
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        seq_mask, min=1.0
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "sequence-mean-token-scale":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        norm, min=1e-6
+    )
+    return seq_loss.mean()
+  elif loss_agg_mode == "seq-mean-token-sum":
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
+    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+    return (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+  elif loss_agg_mode == "sequence-mean-token-sum-norm":
+    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
+    return (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+  else:
+    raise ValueError(
+        f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
+        " 'sequence-mean-token-sum-norm'."
+    )
+
+
+def _reduced_loss_agg_segmented(
+    per_token_loss: jax.Array,
+    completion_mask: jax.Array,
+    loss_agg_mode: str,
+    segment_ids: jax.Array,
+    num_segments: int | None,
+    **kwargs: Any,
+) -> jax.Array:
+  """Eager per-SEGMENT reduction (scalar): the packed mirror of the per-row
+
+  branch of `reduced_loss_agg`.
+
+  Deliberately INDEPENDENT of `_aggregate_loss_segmented` (which defers division
+  into a WeightedMetric) -- it divides eagerly -- so the two forms cross-check.
+  Shares only the `segmented_sum`/`segmented_count` primitives. Each mode's
+  `jnp.clip(denom, min=X)` uses the SAME `X` as the matching WeightedMetric
+  `min_denom` (1.0 for the mean modes, 1e-6 for the sum modes) so the eager and
+  deferred forms produce the same scalar.
+
+  Args:
+    per_token_loss: Per token loss. [batch_size, sequence_len]
+    completion_mask: Completion mask. [batch_size, sequence_len]
+    loss_agg_mode: Loss aggregation mode (same set as `reduced_loss_agg`).
+    segment_ids: [batch_size, sequence_len] packing segment ids (0 = padding).
+    num_segments: static upper bound on segments per row (padding bucket
+      included). Required -- raises ValueError if None.
+    **kwargs: mode-specific extras, e.g. `norm` for the token-scale and
+      token-sum-norm modes.
+
+  Returns:
+    The reduced scalar loss.
+  """
+  if num_segments is None:
+    raise ValueError(
+        "num_segments must be provided when segment_ids is not None."
+    )
+
+  masked = per_token_loss * completion_mask
+  l_seg = segmented_sum(masked, segment_ids, num_segments)
+  c_seg = segmented_count(segment_ids, num_segments, mask=completion_mask)
+  a_seg = (c_seg > 0).astype(jnp.float32)
+  a_seg = a_seg.at[:, 0].set(0.0)
+  n_act = a_seg.sum()
+
+  if loss_agg_mode == "token-mean":
+    return masked.sum() / jnp.clip(completion_mask.sum(), min=1.0)
+  elif loss_agg_mode == "sequence-mean-token-mean":
+    per_seg_mean = l_seg / jnp.clip(c_seg, min=1.0)
+    return (per_seg_mean * a_seg).sum() / jnp.clip(n_act, min=1.0)
+  elif loss_agg_mode == "sequence-mean-token-scale":
+    if "norm" not in kwargs:
+      raise ValueError(
+          "sequence-mean-token-scale under sequence packing requires an"
+          " explicit 'norm' (e.g. max_response_length); the default row-width"
+          " norm is the pack budget, which dilutes every sequence."
+      )
+    norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
+    per_seg_scaled = l_seg / jnp.clip(norm, min=1e-6)
+    return (per_seg_scaled * a_seg).sum() / jnp.clip(n_act, min=1.0)
+  elif loss_agg_mode == "seq-mean-token-sum":
+    return (l_seg * a_seg).sum() / jnp.clip(n_act, min=1e-6)
+  elif loss_agg_mode == "sequence-mean-token-sum-norm":
+    norm = _check_get_norm(kwargs, n_act)
+    return masked.sum() / jnp.clip(norm, min=1e-6)
+  else:
+    raise ValueError(
+        f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
+        " 'sequence-mean-token-sum-norm'."
+    )
+
+
+def _metric_scalar(value: Any) -> Any:
+  """A WeightedMetric reduced to its scalar via compute(); scalars pass through.
+
+  Metric aux values may be `WeightedMetric` (deferred division) or plain
+  scalars. This normalizes either to a scalar for reduction / logging.
+  """
+  return value.compute() if isinstance(value, utils.WeightedMetric) else value
+
+
+def mean_of_means(values: Iterable[Any]) -> np.ndarray:
+  """Reducer: mean of per-micro-batch values (a WeightedMetric-safe np.mean).
+
+  Each value is reduced to a scalar first (WeightedMetric via compute(), i.e.
+  divided per micro-batch), then averaged. For plain scalars this is exactly
+  np.mean, so it is a safe drop-in replacement.
+  """
+  return np.mean([np.asarray(_metric_scalar(v)) for v in values])
+
+
+def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
+  """Reducer: global sum(S)/sum(d) across per-micro-batch WeightedMetric values.
+
+  Sums numerators and denominators before dividing (token-weighted / global),
+  as opposed to `mean_of_means` which averages per-micro-batch means. Equal to
+  `mean_of_means` when the denominator is constant across micro-batches; they
+  diverge otherwise (e.g. sequence packing).
+  """
+  total_sum = sum(float(v.unreduced_sum) for v in values)
+  total_denom = sum(float(v.denominator) for v in values)
+  return total_sum / total_denom if total_denom != 0 else 0.0
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   """Computes the entropy of a distribution given its logits.
@@ -760,9 +1148,7 @@ def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   return -jnp.sum(probs * log_probs, axis=-1)
 
 
-def _check_get_norm(
-  arguments: dict[str, Any], default: float | int
-) -> float:
+def _check_get_norm(arguments: dict[str, Any], default: Any) -> Any:
   """Get custom normalization factor from kwargs with a default value.
 
   Args:
@@ -775,9 +1161,17 @@ def _check_get_norm(
   Raises:
       ValueError: If the 'norm' key is present but has an invalid value or type.
   """
-  norm = arguments.get("norm", float(default))
-  if not isinstance(norm, (int, float)) or norm <= 0:
-    raise ValueError(
-        f"Invalid 'norm' value: {norm}. Must be a positive number."
-    )
-  return norm  # pyrefly: ignore[bad-return]
+  if "norm" in arguments:
+    try:
+      norm = float(arguments["norm"])
+    except (ValueError, TypeError):
+      raise ValueError(
+          f"Invalid 'norm' value: {arguments['norm']}. Must be a positive"
+          " number."
+      )
+    if norm <= 0:
+      raise ValueError(
+          f"Invalid 'norm' value: {norm}. Must be a positive number."
+      )
+    return norm
+  return default

@@ -130,46 +130,24 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
       )
 
       # Attention projections
-      # nnx: (num_heads, embed_dim, head_dim) → safetensors: (num_heads*head_dim, embed_dim)
-      # Transform: transpose(1,0,2) then reshape then transpose
       if hasattr(layer.attn, "q_proj"):
-        w = np.array(
-            layer.attn.q_proj.w.value
-        )  # (num_heads, embed_dim, head_dim)
-        w = w.transpose(1, 0, 2)  # (embed_dim, num_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_heads*head_dim)
+        w = np.array(layer.attn.q_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.q_proj.weight"] = w.T
 
       if hasattr(layer.attn, "k_proj"):
-        w = np.array(
-            layer.attn.k_proj.w.value
-        )  # (num_kv_heads, embed_dim, head_dim)
-        w = w.transpose(1, 0, 2)  # (embed_dim, num_kv_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_kv_heads*head_dim)
+        w = np.array(layer.attn.k_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.k_proj.weight"] = w.T
 
       if hasattr(layer.attn, "v_proj"):
-        w = np.array(
-            layer.attn.v_proj.w.value
-        )  # (num_kv_heads, embed_dim, head_dim)
-        w = w.transpose(1, 0, 2)  # (embed_dim, num_kv_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_kv_heads*head_dim)
+        w = np.array(layer.attn.v_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.v_proj.weight"] = w.T
 
       if hasattr(layer.attn, "o_proj"):
-        w = np.array(
-            layer.attn.o_proj.w.value
-        )  # (num_heads, head_dim, embed_dim)
-        w = w.transpose(2, 0, 1)  # (embed_dim, num_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_heads*head_dim)
+        w = np.array(layer.attn.o_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.o_proj.weight"] = w.T
 
       # MLP projections
@@ -189,6 +167,10 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
         base_state[f"{prefix}.mlp.down_proj.weight"] = np.array(
             layer.mlp.down_proj.kernel.value
         ).T
+
+    # Ensure all arrays are contiguous before saving
+    for k, v in base_state.items():
+      base_state[k] = np.ascontiguousarray(v)
 
     safe_np.save_file(
         base_state, os.path.join(self.base_checkpoint_dir, "model.safetensors")

@@ -19,7 +19,7 @@ import dataclasses
 import gc
 from itertools import count
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from absl import logging
 from flax import nnx
@@ -65,7 +65,7 @@ class VllmConfig:
   enable_dp_attention: bool = False
   hbm_utilization: float = 0.5
   lora_config: Optional[Dict[str, Any]] = None
-  mesh: jax.sharding.Mesh = None
+  mesh: Optional[jax.sharding.Mesh] = None
   data_parallel_size: int = -1
   tensor_parallel_size: int = -1
   expert_parallel_size: int = 1
@@ -294,6 +294,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["tensor_parallel_size"] = tp
     args["data_parallel_size"] = dp
 
+    assert config.mesh is not None
     device_indexes = config.mesh.device_ids.flatten().tolist()
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
@@ -344,7 +345,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
-  def tokenize(self, input_string: str) -> jax.Array | list[int]:
+  def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
@@ -352,7 +353,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def detokenize(
       self, input_strings: List[str], request_outputs: List[RequestOutput]
-  ) -> Tuple[List[str], List[float], List[int]]:
+  ) -> Tuple[
+      List[List[str]], List[List[List[float] | None]], List[List[np.ndarray]]
+  ]:
     """Detokenize the vllm outputs."""
     generations = len(request_outputs[0].outputs)
     decoded_outputs = [[] for _ in range(generations)]
@@ -377,7 +380,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             self.tokenizer.decode(single_output.token_ids)
         )
         logprobs = utils.get_logprobs_from_vllm_output(
-            single_output.token_ids, single_output.logprobs
+            list(single_output.token_ids), single_output.logprobs
         )
         out_logprobs[idx].append(logprobs)
         logging.debug(
@@ -424,12 +427,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       input_strings: str | List[str],
       max_generation_steps: int,
-      max_prompt_length: int = None,
+      max_prompt_length: Optional[int] = None,
       temperature: float = 0.0,
-      top_p: float = None,
-      top_k: int = None,
-      beam_size: int = None,
-      seed: int = None,  # vLLM Jax backend doesn't support per request seed.
+      top_p: Optional[float] = None,
+      top_k: Optional[int] = None,
+      beam_size: Optional[int] = None,
+      seed: Optional[
+          int
+      ] = None,  # vLLM Jax backend doesn't support per request seed.
       multi_sampling: int = 1,
       return_logits: bool = True,
       echo: bool = False,
@@ -520,7 +525,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           )
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    prompt_objects = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids]
+    prompt_objects = cast(
+        List[TokensPrompt],
+        [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
+    )
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:

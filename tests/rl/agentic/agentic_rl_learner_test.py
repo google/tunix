@@ -159,6 +159,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       training_config.compute_logps_micro_batch_size = 2
       training_config.train_micro_batch_size = 1
       training_config.mini_batch_size = None
+      training_config.max_seq_token_per_tpu = None
       rl_cluster.cluster_config.training_config = training_config
       rl_cluster.cluster_config.rollout_config = base_rollout.RolloutConfig(
           max_tokens_to_generate=10, return_logprobs=True
@@ -181,6 +182,50 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           r'compute_logps_micro_batch_size \(2\) must be equal to'
           r' train_micro_batch_size \(1\)',
       ):
+        learner.train(train_dataset)
+
+  def test_train_with_packing_executes_end_to_end(self):
+    with mock.patch.object(
+        rl_utils, "is_sharing_weights", return_value=False
+    ):
+      rl_cluster = mock.Mock()
+      rl_cluster.cluster_config = mock.Mock()
+      mesh = mock.Mock()
+      mesh.shape = {'fsdp': 1, 'dp': 1}
+      rl_cluster.cluster_config.role_to_mesh = {
+          rl_cluster_lib.Role.ACTOR: mesh,
+          rl_cluster_lib.Role.ROLLOUT: mesh,
+      }
+      training_config = mock.Mock()
+      training_config.compute_logps_micro_batch_size = 1
+      training_config.train_micro_batch_size = 1
+      training_config.mini_batch_size = None
+      training_config.max_seq_token_per_tpu = 16  # Enable packing
+      training_config.max_steps = 100
+      rl_cluster.cluster_config.training_config = training_config
+      rl_cluster.cluster_config.rollout_config = base_rollout.RolloutConfig(
+          max_tokens_to_generate=10, return_logprobs=True
+      )
+      rl_cluster.cluster_config.rollout_engine = 'generic'
+      rl_cluster.actor_trainer = mock.Mock()
+      rl_cluster.actor_trainer.restored_global_step.return_value = 0
+      rl_cluster.actor_trainer.iter_steps = 0
+      rl_cluster.global_steps = 0
+      rl_cluster.rollout = mock.Mock()
+      rl_cluster.tokenizer = mock.Mock()
+      algo_config = agentic_rl_learner.AgenticRLConfig(max_response_length=10)
+      learner = DummyLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=mock.Mock(),
+          algo_config=algo_config,
+      )
+      train_dataset = [{'prompt': ['p1']}]
+      
+      async def mock_producer(*args, **kwargs):
+        if False:
+          yield
+          
+      with mock.patch.object(learner, "_orchestrator_producer", side_effect=mock_producer):
         learner.train(train_dataset)
 
 

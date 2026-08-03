@@ -176,7 +176,7 @@ class UtilsTest(parameterized.TestCase):
     ]
     expected = [-1.71, -0.37, 0.0]
     self.assertEqual(
-        utils.get_logprobs_from_vllm_output(token_ids, logprobs),
+        utils.get_logprobs_from_vllm_output(token_ids, logprobs),  # pyrefly: ignore[bad-argument-type]
         expected,
     )
 
@@ -184,7 +184,7 @@ class UtilsTest(parameterized.TestCase):
     token_ids = [100, 200]
     logprobs = [{101: Logprob(-0.5)}, {200: Logprob(-1.2)}]
     with self.assertRaises(ValueError):
-      utils.get_logprobs_from_vllm_output(token_ids, logprobs)
+      utils.get_logprobs_from_vllm_output(token_ids, logprobs)  # pyrefly: ignore[bad-argument-type]
 
   @parameterized.named_parameters(
       ("none_logprobs", [], None),
@@ -492,16 +492,16 @@ class UtilsTest(parameterized.TestCase):
 
     # Mock destination state (vLLM Jax backend style)
     dst_params = {
-        "model.layers.0.self_attn.qkv_proj.weight": MockParam(
+        "language_model.layers.0.self_attn.qkv_proj.weight": MockParam(
             jnp.zeros((16, 64), dtype=jnp.float32)
         ),
-        "model.layers.0.mlp.gate_up_proj.weight": MockParam(
+        "language_model.layers.0.mlp.gate_up_proj.weight": MockParam(
             jnp.zeros((16, 64), dtype=jnp.float32)
         ),
-        "model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
+        "language_model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
             jnp.zeros((4, 2, 8, 16), dtype=jnp.float32)
         ),
-        "model.layers.0.experts.kernel_down_proj_EFD": MockParam(
+        "language_model.layers.0.experts.kernel_down_proj_EFD": MockParam(
             jnp.zeros((4, 16, 8), dtype=jnp.float32)
         ),
     }
@@ -539,27 +539,27 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.qkv_proj.weight"],
+            new_tgt_state.params["language_model.layers.0.self_attn.qkv_proj.weight"],
             expected_qkv,
         )
     )
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.mlp.gate_up_proj.weight"],
+            new_tgt_state.params["language_model.layers.0.mlp.gate_up_proj.weight"],
             expected_gate_up,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.experts.kernel_gating_upproj_EDF"],
+            new_tgt_state.params["language_model.layers.0.experts.kernel_gating_upproj_EDF"],
             src_params["layers.0.moe.gating_einsum"].value,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.experts.kernel_down_proj_EFD"],
+            new_tgt_state.params["language_model.layers.0.experts.kernel_down_proj_EFD"],
             src_params["layers.0.moe.linear"].value,
         )
     )

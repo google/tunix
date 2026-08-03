@@ -10,9 +10,9 @@ import logging
 import os
 import signal
 import sys
+
 from absl import logging as absl_logging
 import datasets as datasets_lib
-from datasets import load_dataset
 from flax import nnx
 import grain
 from huggingface_hub import snapshot_download
@@ -26,8 +26,8 @@ from orbax import checkpoint as ocp
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
-from tunix.utils import compat
 from tunix.rl.agentic.agents import agent_types
+from tunix.utils import compat
 import vllm  # pytype: disable=import-error
 
 faulthandler.register(signal.SIGINT, all_threads=True)
@@ -42,9 +42,24 @@ parser = argparse.ArgumentParser(
 
 # General Config
 parser.add_argument("--models_base_dir", type=str, default="models")
+parser.add_argument(
+    "--model_source",
+    type=str,
+    default="huggingface",
+    choices=["huggingface", "maxtext"],
+)
+parser.add_argument(
+    "--model_absolute_path",
+    type=str,
+    default=None,
+)
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--model_version", type=str, default="Qwen3-32B")
+parser.add_argument("--model_version", type=str, default="Qwen/Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
+parser.add_argument("--dataset_path", type=str, default=None)
+
+parser.add_argument("--tpu_topology", type=str, default=None)
+
 
 # Data & Training Flow
 parser.add_argument("--batch_size", type=int, default=8)
@@ -87,6 +102,18 @@ parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
 parser.add_argument("--rollout_engine", type=str, default="vllm")
 parser.add_argument("--vllm_utilization", type=float, default=0.4)
+parser.add_argument(
+    "--vllm_reshard_chunk_size",
+    type=int,
+    default=None,
+    help="Number of flat keys to reshard at a time. None for single-call.",
+)
+parser.add_argument(
+    "--max_num_batched_tokens",
+    type=int,
+    default=8192,
+    help="Max number of tokens to be processed in parallel by vLLM.",
+)
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -233,6 +260,49 @@ args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
+
+# Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector.
+def patch_kubernetes_runtime():
+  try:
+    from r2egym.agenthub.runtime.docker import DockerRuntime
+    import os
+
+    original_start_kubernetes_pod = DockerRuntime._start_kubernetes_pod
+
+    def patched_start_kubernetes_pod(
+        self, docker_image, command, pod_name, **docker_kwargs
+    ):
+      original_create_namespaced_pod = self.client.create_namespaced_pod
+
+      def patched_create_namespaced_pod(*args, **kwargs):
+        body = kwargs.get("body")
+        if body and "spec" in body:
+          key = os.environ.get(
+              "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
+          )
+          val = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
+          body["spec"]["nodeSelector"] = {key: val}
+          print(f"[Monkeypatch] Overrode nodeSelector to {key}={val}")
+        return original_create_namespaced_pod(*args, **kwargs)
+
+      self.client.create_namespaced_pod = patched_create_namespaced_pod
+      try:
+        return original_start_kubernetes_pod(
+            self, docker_image, command, pod_name, **docker_kwargs
+        )
+      finally:
+        self.client.create_namespaced_pod = original_create_namespaced_pod
+
+    DockerRuntime._start_kubernetes_pod = patched_start_kubernetes_pod
+    print(
+        "[Monkeypatch] Successfully patched DockerRuntime._start_kubernetes_pod"
+    )
+  except Exception as e:
+    print(f"[Monkeypatch] Failed to patch DockerRuntime: {e}")
+
+
+patch_kubernetes_runtime()
+
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
 absl_logging.use_python_logging()
@@ -266,7 +336,7 @@ tunix_root = os.path.join(workdir, "tunix")
 pathways_root = os.path.join(workdir, "pathways-utils")
 r2egym_root = os.path.join(workdir, "r2egym")
 
-for root in [workdir, tunix_root, pathways_root, r2egym_root]:
+for root in [workdir, pathways_root, r2egym_root]:
   if root not in sys.path:
     sys.path.insert(0, root)
 
@@ -345,25 +415,33 @@ except Exception as e:
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
-MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
+MODEL_SOURCE = args.model_source
+MODEL_ABSOLUTE_PATH = args.model_absolute_path
 
-print(f"Looking for local model at: {MODEL_PATH}...")
-
-# Check if directory exists and is not empty
-if not os.path.exists(MODEL_PATH) or not os.listdir(MODEL_PATH):
-  print(f"Model not found locally. Starting download to {MODEL_PATH}...")
-  os.makedirs(MODEL_PATH, exist_ok=True)
-
-  # Assumes "Qwen/" organization prefix for HF download. Adjust if using other models.
-  snapshot_download(  # pyrefly: ignore[no-matching-overload]
-      repo_id=f"Qwen/{MODEL_VERSION}",
-      local_dir=MODEL_PATH,
-      local_dir_use_symlinks=False,
-  )
-  print("Download complete!")
+if MODEL_ABSOLUTE_PATH:
+  MODEL_PATH = MODEL_ABSOLUTE_PATH
+  print(f"Using model from absolute path: {MODEL_PATH}")
 else:
-  print(f"✅ Found existing local model at {MODEL_PATH}")
+  MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
+  MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
+
+  print(f"Looking for local model at: {MODEL_PATH}...")
+
+  # Check if directory exists and is not empty
+  if not os.path.exists(MODEL_PATH) or not os.listdir(MODEL_PATH):
+    print(f"Model not found locally. Starting download to {MODEL_PATH}...")
+    os.makedirs(MODEL_PATH, exist_ok=True)
+
+    # Assumes "Qwen/" organization prefix for HF download. Adjust if using
+    # other models.
+    snapshot_download(  # pyrefly: ignore[no-matching-overload]
+        repo_id=f"Qwen/{MODEL_VERSION}",
+        local_dir=MODEL_PATH,
+        local_dir_use_symlinks=False,
+    )
+    print("Download complete!")
+  else:
+    print(f"✅ Found existing local model at {MODEL_PATH}")
 
 # ====== Data ======
 TRAIN_FRACTION = args.train_fraction
@@ -449,17 +527,21 @@ DO_MEM_PROFILING = args.do_mem_profiling
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = args.rollout_engine
-CKPT_DIR = args.ckpt_dir
+CKPT_DIR = (
+    args.ckpt_dir
+    if args.ckpt_dir and args.ckpt_dir.lower() not in ("none", "null")
+    else None
+)
+
 
 # Max number of sequences to be processed in parallel by vllm.
 VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 
 VLLM_UTILIZATION = args.vllm_utilization
+VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
 # Max number of tokens to be processed in parallel by vllm.
-# Divide by 8 for on policy, 1 step off divide by 4
-
-VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+VLLM_MAX_BATCHED_TOKENS = args.max_num_batched_tokens
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
@@ -475,10 +557,110 @@ USE_ROLLOUT_LOGPS = args.use_rollout_logps
 
 # %%
 # ==========================================
-# 5. JAX Device & Mesh Setup
+# 5. Tokenizer & Dataset Preparation (No JAX)
+# ==========================================
+tokenizer_path = MODEL_PATH
+local_files_only = True
+if MODEL_SOURCE == "maxtext" and MODEL_PATH.startswith("gs://"):
+  tokenizer_path = f"Qwen/{MODEL_VERSION}"
+  local_files_only = False
+  print(f"Loading tokenizer from HF Hub: {tokenizer_path}")
+
+tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer_path, local_files_only=local_files_only, trust_remote_code=True
+)
+
+chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
+
+print("Loading Dataset...")
+
+if args.dataset_path:
+  dataset = datasets_lib.load_from_disk(args.dataset_path)
+  if isinstance(dataset, datasets_lib.DatasetDict):
+    dataset = dataset["train"]
+else:
+  dataset = datasets_lib.load_dataset(
+      "R2E-Gym/R2E-Gym-Subset",
+      split="train",
+      cache_dir=DATASET_CACHE,
+      trust_remote_code=True,
+  )
+
+
+def transform(entry):
+  for k, v in entry.items():
+    if isinstance(v, list):
+      entry[k] = json.dumps(v)
+  return entry
+
+
+dataset = dataset.map(
+    transform,
+    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
+)
+
+dataset = dataset.shuffle(seed=SEED)
+grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
+
+
+def mixed_type_batch_fn(elements):
+  """elements: A list of dicts."""
+  batched_data = {}
+  str_set = {
+      "repo_name",
+      "docker_image",
+      "commit_hash",
+      "parsed_commit_content",
+      "execution_result_content",
+  }
+  dict_set = {"modified_files", "relevant_files", "modified_entity_summaries"}
+  int_set = {
+      "num_non_test_files",
+      "num_non_test_func_methods",
+      "num_non_test_lines",
+      "prompt",
+      "problem_statement",
+      "expected_output_json",
+  }
+  keys = elements[0].keys()
+
+  for key in keys:
+    if key in str_set or key in dict_set:
+      # Keep these as standard Python lists
+      batched_data[key] = [item[key] for item in elements]
+
+    elif key in int_set:
+      # Convert these to NumPy arrays.
+      # np.array() safely handles both single integers and lists of integers.
+      batched_data[key] = np.array([item[key] for item in elements])
+
+    else:
+      # Fallback for any unexpected keys (defaulting to lists is usually safest)
+      batched_data[key] = [item[key] for item in elements]
+
+  return batched_data
+
+train_dataset, _ = data_lib.post_init_dataset(
+    grain_dataset,
+    tokenizer,
+    batch_size=BATCH_SIZE,
+    num_batches=None,
+    max_prompt_length=MAX_PROMPT_LENGTH,
+    fraction=TRAIN_FRACTION,
+    num_epochs=NUM_EPOCHS,
+    prompt_key="problem_statement",
+    custom_batch_fn=mixed_type_batch_fn,
+)
+
+
+# %%
+# ==========================================
+# 6. JAX Device & Mesh Setup
 # ==========================================
 import jax
 import jax.numpy as jnp
+from tunix.models.automodel import AutoModel
+from tunix.models.automodel import ModelSource
 from tunix.models.automodel import call_model_config
 
 config = call_model_config(MODEL_VERSION)
@@ -504,6 +686,8 @@ total_devices = len(devices)
 # Each explicitly-provided dim becomes an axis in the mesh; unspecified dims are
 # dropped (not defaulted to 1), so passing only --rollout_mesh_fsdp yields a 1D mesh.
 # If nothing is provided, fall back to the split-fraction heuristic (2D: fsdp+tp).
+tp_axis_name = "tensor" if MODEL_SOURCE == "maxtext" else "tp"
+
 rollout_fsdp = args.rollout_mesh_fsdp
 rollout_tp = args.rollout_mesh_tp
 if rollout_fsdp is not None or rollout_tp is not None:
@@ -511,12 +695,12 @@ if rollout_fsdp is not None or rollout_tp is not None:
   if rollout_fsdp is not None:
     rollout_dims.append(("fsdp", rollout_fsdp))
   if rollout_tp is not None:
-    rollout_dims.append(("tp", rollout_tp))
+    rollout_dims.append((tp_axis_name, rollout_tp))
 else:
   num_rollout_devices = int(total_devices * args.rollout_split_fraction)
   rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
   rollout_fsdp = num_rollout_devices // rollout_tp
-  rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+  rollout_dims = [("fsdp", rollout_fsdp), (tp_axis_name, rollout_tp)]
 num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 
 # 2. Resolve Train Mesh Dimensions
@@ -531,14 +715,14 @@ if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
   train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
   if train_sp is not None:
     train_dims.append(("sp", train_sp))
-  train_dims.append(("tp", train_tp if train_tp is not None else 1))
+  train_dims.append((tp_axis_name, train_tp if train_tp is not None else 1))
 else:
   num_train_devices = total_devices - num_rollout_devices
   train_fsdp = int(
       np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
   )
   train_tp = num_train_devices // train_fsdp
-  train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+  train_dims = [("fsdp", train_fsdp), (tp_axis_name, train_tp)]
 num_train_devices = int(np.prod([d for _, d in train_dims]))
 
 # 3. Sanity Check
@@ -575,12 +759,21 @@ if train_sp is not None:
 
 # %%
 # ==========================================
-# 6. Model Initialization
+# 7. Model Initialization
 # ==========================================
 
-qwen_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
-)
+if MODEL_SOURCE == "maxtext":
+  qwen_reference, _ = AutoModel.from_pretrained(
+      model_id=MODEL_VERSION,
+      mesh=train_mesh,
+      model_source=ModelSource.MAXTEXT,
+      model_path=MODEL_PATH,
+      enable_checkpointing=True,
+  )
+else:
+  qwen_reference = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
+  )
 
 
 def get_lora_model(base_model, model_mesh):
@@ -618,52 +811,21 @@ else:
 sft_utils.show_hbm_usage()
 
 # %%
-# ==========================================
-# 7. Tokenizer & Parser
-# ==========================================
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH, local_files_only=True, trust_remote_code=True
-)
-
-chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
-
 
 # %%
 # ==========================================
-# 8. Data Loading
+# 8. Optimizer & Checkpointing
 # ==========================================
-print("Loading Dataset...")
+if CKPT_DIR:
+  checkpointing_options = ocp.CheckpointManagerOptions(
+      save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+  )
+else:
+  checkpointing_options = None
 
-dataset = load_dataset(
-    "R2E-Gym/R2E-Gym-Subset",
-    split="train",
-    cache_dir=DATASET_CACHE,
-    trust_remote_code=True,
-)
-
-
-def transform(entry):
-  for k, v in entry.items():
-    if isinstance(v, list):
-      entry[k] = json.dumps(v)
-  return entry
-
-
-dataset = dataset.map(
-    transform,
-    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
-)
-
-# %%
-# ==========================================
-# 9. Optimizer & Checkpointing
-# ==========================================
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
-)
 
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir=args.metrics_logger_dir, flush_every_n_steps=2
+    log_dir=args.metric_logger_dir, flush_every_n_steps=2
 )
 
 optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
@@ -679,7 +841,7 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # ==========================================
-# 10. RL Cluster Setup
+# 9. RL Cluster Setup
 # ==========================================
 
 base_rollout_dict = {
@@ -705,12 +867,15 @@ sglang_jax_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
+    "rollout_vllm_model_version": (
+        tokenizer_path if MODEL_SOURCE == "maxtext" else MODEL_PATH
+    ),
     "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
+    "rollout_vllm_reshard_chunk_size": VLLM_RESHARD_CHUNK_SIZE,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
-    "tensor_parallel_size": rollout_mesh.shape.get("tp", 1),
+    "tensor_parallel_size": rollout_mesh.shape.get(tp_axis_name, 1),
     "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
@@ -718,6 +883,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": True,
+        "tokenizer": tokenizer_path,
     },
 }
 
@@ -741,12 +907,27 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
+role_to_logical_axis_rule = None
+logical_rules = getattr(
+    getattr(getattr(qwen_reference, "base", None), "config", None),
+    "logical_axis_rules",
+    None,
+)
+if logical_rules:
+  print(f"Configuring role_to_logical_axis_rule with: {logical_rules}")
+  role_to_logical_axis_rule = {
+      rl_cluster_lib.Role.ACTOR: logical_rules,
+      rl_cluster_lib.Role.REFERENCE: logical_rules,
+      rl_cluster_lib.Role.ROLLOUT: logical_rules,
+  }
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: train_mesh,
         rl_cluster_lib.Role.REFERENCE: train_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
+    role_to_logical_axis_rule=role_to_logical_axis_rule,
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
@@ -758,8 +939,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
-        checkpoint_root_directory=None,
-        checkpointing_options=None,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
         # optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
@@ -776,7 +957,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 
 # %%
 # ==========================================
-# 11. Learner & Agent Setup
+# 10. Learner & Agent Setup
 # ==========================================
 
 config_kwargs = {
@@ -816,51 +997,6 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 )
 
 
-# %%
-# ==========================================
-# 11. process dataset and start training
-# ==========================================
-
-dataset = dataset.shuffle(seed=SEED)
-grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
-
-def mixed_type_batch_fn(elements):
-  """elements: A list of dicts."""
-  batched_data = {}
-  str_set = {
-      "repo_name",
-      "docker_image",
-      "commit_hash",
-      "parsed_commit_content",
-      "execution_result_content",
-  }
-  dict_set = {"modified_files", "relevant_files", "modified_entity_summaries"}
-  int_set = {
-      "num_non_test_files",
-      "num_non_test_func_methods",
-      "num_non_test_lines",
-      "prompt",
-      "problem_statement",
-      "expected_output_json",
-  }
-  keys = elements[0].keys()
-
-  for key in keys:
-    if key in str_set or key in dict_set:
-      # Keep these as standard Python lists
-      batched_data[key] = [item[key] for item in elements]
-
-    elif key in int_set:
-      # Convert these to NumPy arrays.
-      # np.array() safely handles both single integers and lists of integers.
-      batched_data[key] = np.array([item[key] for item in elements])
-
-    else:
-      # Fallback for any unexpected keys (defaulting to lists is usually safest)
-      batched_data[key] = [item[key] for item in elements]
-
-  return batched_data
-
 try:
   import datetime
   import wandb # pytype: disable=import-error
@@ -884,6 +1020,9 @@ try:
       "train_mesh_fsdp": train_fsdp,
       "train_mesh_sp": train_sp,
       "train_mesh_tp": train_tp,
+      "checkpoint_root_directory": CKPT_DIR,
+      "save_interval_steps": SAVE_INTERVAL_STEPS,
+      "max_to_keep": MAX_TO_KEEP,
   }
   wandb.init(
       project="tunix", name=run_name, config=wandb_config, settings=settings
@@ -892,20 +1031,7 @@ except Exception as e:
   print(f"W&B initialization failed with error: {e}")
 
 
-train_dataset, _ = data_lib.post_init_dataset(
-    grain_dataset,
-    tokenizer,
-    batch_size=BATCH_SIZE,
-    num_batches=None,
-    max_prompt_length=MAX_PROMPT_LENGTH,
-    fraction=TRAIN_FRACTION,
-    num_epochs=NUM_EPOCHS,
-    prompt_key="problem_statement",
-    custom_batch_fn=mixed_type_batch_fn,
-)
-
-
-print("Starting training...")
+print("Starting training...", flush=True)
 agentic_grpo_learner.train(train_dataset=train_dataset)
 
 

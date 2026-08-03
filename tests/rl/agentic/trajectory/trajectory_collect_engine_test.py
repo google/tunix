@@ -202,7 +202,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     # Check env_time (mocked thread_time delta)
     self.assertIsInstance(result_traj.env_time, dict)
-    self.assertGreaterEqual(result_traj.env_time['step_latency'], 0.0)
+    self.assertIsInstance(result_traj.env_time['step_latency'], list)
     self.assertGreaterEqual(result_traj.env_time['reset_latency'], 0.0)
     self.assertIsInstance(result_traj.reward_time, dict)
     self.assertGreaterEqual(result_traj.reward_time['reward_latency'], 0.0)
@@ -299,7 +299,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ),  # 1.0 + 2.0 + 0.5 (final reward from final_reward_fn)
         'env_time': {
             'reset_latency': 0.0,
-            'step_latency': 0.0,
+            'step_latency': [],
         },
         'reward_time': {
             'reward_latency': 0.0,
@@ -315,7 +315,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       if k in ['env_time', 'reward_time']:
         self.assertIsInstance(token_data[k], dict)
         for sub_k in v:
-          self.assertGreaterEqual(token_data[k][sub_k], 0.0)
+          val = token_data[k][sub_k]
+          if isinstance(val, list):
+            self.assertIsInstance(val, list)
+          else:
+            self.assertGreaterEqual(val, 0.0)
       elif isinstance(v, np.ndarray):
         np.testing.assert_array_equal(token_data[k], v)
       else:
@@ -552,6 +556,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       # Reset: 3 calls
       # Step 1: 3 calls
       # Final reward: 2 calls
+      # Close: 2 calls
       mock_perf.side_effect = [
           100.0,
           100.01,
@@ -562,6 +567,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           100.21,
           100.22,
           100.23,  # _append_final_reward
+          100.24,
+          100.25,  # _close
       ]
 
       engine = trajectory_collect_engine.TrajectoryCollectEngine(
@@ -683,6 +690,20 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(
         token_data['conversation_masks'], expected_masks
     )
+
+  def test_env_time_metrics_close(self):
+    self.mock_env.close = mock.Mock()
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    trajectory = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.mock_env.close.assert_called_once()
+    self.assertIn('reset_latency', trajectory.env_time)
+    self.assertIn('step_latency', trajectory.env_time)
+    self.assertIsInstance(trajectory.env_time['step_latency'], list)
+    self.assertIn('close_latency', trajectory.env_time)
 
 
 if __name__ == '__main__':

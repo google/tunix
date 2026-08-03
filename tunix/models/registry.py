@@ -204,6 +204,22 @@ MODEL_CATALOG = (
         model_config_category='gemma4',
     ),
     naming.ModelNaming(
+        model_id='google/gemma-4-12b',
+        model_name='gemma-4-12b',
+        model_family='gemma4',
+        model_version='12b',
+        model_config_id='gemma4_12b',
+        model_config_category='gemma4',
+    ),
+    naming.ModelNaming(
+        model_id='google/gemma-4-12b-it',
+        model_name='gemma-4-12b-it',
+        model_family='gemma4',
+        model_version='12b_it',
+        model_config_id='gemma4_12b_it',
+        model_config_category='gemma4',
+    ),
+    naming.ModelNaming(
         model_id='google/gemma-4-31b',
         model_name='gemma-4-31b',
         model_family='gemma4',
@@ -499,6 +515,14 @@ MODEL_CATALOG = (
         model_family='qwen3',
         model_version='32b',
         model_config_id='qwen3_32b',
+        model_config_category='qwen3',
+    ),
+    naming.ModelNaming(
+        model_id='Qwen/Qwen3.5-35B-A3B',
+        model_name='qwen3.5-35b-a3b',
+        model_family='qwen3p5',
+        model_version='35b_a3b',
+        model_config_id='qwen3p5_35b_a3b',
         model_config_category='qwen3',
     ),
 )

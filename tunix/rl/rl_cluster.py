@@ -40,7 +40,6 @@ import numpy as np
 import optax
 from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
-# Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -102,11 +101,10 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     compute_logps_chunk_size: The chunk size used for computing log
       probabilities. Instead of using final logits from model, where size is [B,
       T, V], this will use the last hidden output with size [B, T, D] from model
-      and compute logps in a chunked manner.
-      Good values to pick are like 256, 512, etc. When value is 0, it means this
-      feature is disabled.
-      This also requires model to support `skip_lm_head` in its `__call__`
-      method and have a `compute_final_logits` method.
+      and compute logps in a chunked manner. Good values to pick are like 256,
+      512, etc. When value is 0, it means this feature is disabled. This also
+      requires model to support `skip_lm_head` in its `__call__` method and have
+      a `compute_final_logits` method.
   """
 
   actor_optimizer: optax.GradientTransformation
@@ -124,8 +122,9 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
         "train_micro_batch_size",
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
+        "max_segments_per_packed_row",
     ]:
-      rl_utils.is_positive_integer(getattr(self, name), name)
+      rl_utils.is_positive_integer(getattr(self, name, None), name)
 
     if self.gradient_accumulation_steps is not None:
       raise ValueError(
@@ -414,7 +413,7 @@ class RLCluster:
       )
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
-      from tunix.rl.rollout import vllm_rollout
+      # OSS Placeholder for vllm rollout worker, don't change this line.
 
       if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
@@ -431,6 +430,8 @@ class RLCluster:
         # the rollout mesh. This is important for out-of-tree models in vLLM
         # that are implemented with custom logical axis rules, like is the case
         # for MaxText models.
+        from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
+
         self._rollout = vllm_rollout.VllmRollout(
             self.rollout_actor,
             self.tokenizer,
@@ -954,6 +955,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        gc.collect()
 
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
@@ -988,6 +990,8 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
       micro_batch_size: int | None = None,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     batch_size = prompt_tokens.shape[0]
@@ -1008,6 +1012,22 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
+      dest_segment_ids = (
+          None
+          if segment_ids is None
+          else sharding_utils.shard_input(
+              segment_ids,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
+      dest_segment_positions = (
+          None
+          if segment_positions is None
+          else sharding_utils.shard_input(
+              segment_positions,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -1023,6 +1043,16 @@ class RLCluster:
                 pad_id,
                 eos_id,
                 temperature=temperature,
+                segment_ids=(
+                    None
+                    if dest_segment_ids is None
+                    else dest_segment_ids[batch_slice]
+                ),
+                segment_positions=(
+                    None
+                    if dest_segment_positions is None
+                    else dest_segment_positions[batch_slice]
+                ),
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -1063,6 +1093,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        gc.collect()
       return per_token_logps
 
   def get_actor_per_token_logps(
@@ -1073,6 +1104,8 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       temperature: float | None = None,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1103,6 +1136,22 @@ class RLCluster:
       dest_completion_tokens = sharding_utils.shard_input(
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_segment_ids = (
+          None
+          if segment_ids is None
+          else sharding_utils.shard_input(
+              segment_ids,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
+      dest_segment_positions = (
+          None
+          if segment_positions is None
+          else sharding_utils.shard_input(
+              segment_positions,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
       )
 
       # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
@@ -1139,6 +1188,16 @@ class RLCluster:
                 stop_gradient=True,
                 temperature=temperature,
                 chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
+                segment_ids=(
+                    None
+                    if dest_segment_ids is None
+                    else dest_segment_ids[batch_slice]
+                ),
+                segment_positions=(
+                    None
+                    if dest_segment_positions is None
+                    else dest_segment_positions[batch_slice]
+                ),
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -1167,6 +1226,7 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
+      gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
           nnx.state(self.actor_trainer.model), "pinned_host"

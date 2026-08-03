@@ -555,7 +555,7 @@ class RlClusterTest(parameterized.TestCase):
       expected_train_config,
       expected_cache_size,
   ):
-    # Internal placeholder for vllm rollout worker stub, don't change this line.
+
     from tunix.rl.rollout import vllm_rollout
 
     with mock.patch.object(

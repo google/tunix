@@ -32,6 +32,7 @@ except ImportError:
 from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.generate.sampler import Cache, cdiv
@@ -73,25 +74,25 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
-  score_weight_d1: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_cndh=(None, 'tp', fsdp, None),
-        qkv_weight_cndh=(None, 'tp', fsdp, None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
-        score_weight_d1=(fsdp, None),
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp',),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
     )
 
 
@@ -598,8 +599,12 @@ class Attention(nnx.Module):
     ):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, layer_name, attention_mask, seq_lens, distribution, soft_cap
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, seq_lens, distribution, soft_cap
       )
     else:
       return self.block(
@@ -694,8 +699,17 @@ class FeedForward(nnx.Module):
     return outputs
 
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)
 
@@ -791,9 +805,18 @@ class DecoderLayer(nnx.Module):
       distribution: jaxtyping.Array | None = None,
       soft_cap: float | None = None,
   ) -> tuple[Cache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.DECODER:
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, layer_name, attention_mask, seq_lens, distribution, soft_cap
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, seq_lens, distribution, soft_cap
       )
     else:
       return self.block(
@@ -1124,35 +1147,3 @@ class Gemma(BackendMappingMixin, nnx.Module):
             (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
         ),
     }
-
-
-class GemmaWithScoreHead(nnx.Module):
-  """Gemma transformer with a score head."""
-
-  def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
-    """Initializes the transformer with a score head.
-
-    Args:
-      transformer: The transformer backbone.
-      rngs: The random number generator.
-    """
-
-    self.transformer = transformer
-    self.score = nnx.Linear(
-        in_features=transformer.embed_dim,
-        out_features=1,
-        use_bias=False,
-        kernel_init=nnx.with_partitioning(
-            nnx.initializers.normal(),
-            transformer.config.shd_config.score_weight_d1,
-        ),
-        rngs=rngs,
-    )
-
-  def __call__(self, *args, **kwargs):
-    self.transformer(*args, **kwargs, output_hidden_states=True)
-    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
-        'all_hidden_states'
-    ].value[-1]
-    score = self.score(hidden_states)
-    return score
