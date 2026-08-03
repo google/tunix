@@ -7,7 +7,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential git python3 python3-pip && \
+    apt-get install -y build-essential git python3 python3-pip curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
@@ -19,6 +19,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Upgrade pip
 RUN pip install --upgrade pip
+RUN pip install uv
 
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.

@@ -11,8 +11,31 @@ import os
 import signal
 import sys
 
+# Monkeypatch HfFolder for compatibility with huggingface_hub >= 1.0.0 (used by newer transformers)
+import os
+class DummyHfFolder:
+    @staticmethod
+    def get_token():
+        return os.environ.get('HF_TOKEN')
+    @staticmethod
+    def save_token(token):
+        pass
+    @staticmethod
+    def delete_token():
+        pass
+import huggingface_hub
+huggingface_hub.HfFolder = DummyHfFolder
+
 from absl import logging as absl_logging
 import datasets as datasets_lib
+# Monkeypatch datasets to handle "List" type in dataset_info.json (compatibility with older datasets)
+import datasets.features.features as df_features
+orig_generate = df_features.generate_from_dict
+def my_generate(obj):
+    if isinstance(obj, dict) and obj.get('_type') == 'List':
+        return [my_generate(obj['feature'])]
+    return orig_generate(obj)
+df_features.generate_from_dict = my_generate
 from flax import nnx
 import grain
 from huggingface_hub import snapshot_download

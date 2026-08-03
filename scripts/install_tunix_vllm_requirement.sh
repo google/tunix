@@ -19,8 +19,11 @@
 set -euo pipefail
 set -x
 
-# Install uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install uv if not present
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REQ_FILE=${REQ_FILE:-"${ROOT_DIR}/requirements/requirements.txt"}
@@ -36,4 +39,7 @@ pip install keyring keyrings.google-artifactregistry-auth
 
 VLLM_TARGET_DEVICE="tpu" uv pip install -r "${REQ_FILE}" --torch-backend=cpu
 uv pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall --torch-backend=cpu
+uv pip install tokamax
 uv pip install --no-deps "qwix>=0.1.6"
+uv pip install "r2e-gym @ git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735"
+uv pip install --no-deps "maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@8f123463231bb86ab4548f0f5ad1051230105cb7"

@@ -16,6 +16,8 @@
 
 from typing import Tuple
 
+import flax.core.spmd as core_spmd
+import flax.linen as nn
 import jax
 from jax.interpreters import pxla
 import jax.sharding as shd
@@ -73,6 +75,30 @@ def shard_input(
     )
 
 
+def resolve_and_filter_spec(
+    pspec: shd.PartitionSpec, mesh: shd.Mesh
+) -> shd.PartitionSpec:
+  rules = core_spmd.get_logical_axis_rules()
+  if rules:
+    physical_spec = nn.logical_to_mesh_axes(pspec, rules=rules)
+  else:
+    physical_spec = pspec
+
+  if physical_spec is None:
+    return None
+
+  filtered_spec = []
+  for s in physical_spec:
+    if s is None or s == shd.PartitionSpec.UNCONSTRAINED:
+      filtered_spec.append(s)
+    elif isinstance(s, tuple):
+      filtered_tuple = tuple(i for i in s if i in mesh.shape)
+      filtered_spec.append(filtered_tuple if filtered_tuple else None)
+    else:
+      filtered_spec.append(s if s in mesh.shape else None)
+  return shd.PartitionSpec(*filtered_spec)
+
+
 def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
   """Get a sharding for an tensor given a mesh and partition spec."""
   # Only shard arrays with rank > 0.
@@ -83,8 +109,10 @@ def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
   if x.ndim < len(pspec):
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
 
+  resolved_spec = resolve_and_filter_spec(pspec, mesh)
+
   # Check for divisibility for all sharded axes.
-  for i, axis_name in enumerate(pspec):
+  for i, axis_name in enumerate(resolved_spec):
     if axis_name is not None:
       axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
       for name in axis_names:
@@ -92,4 +120,4 @@ def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
         if x.shape[i] % axis_size != 0:
           # Replicate if not evenly divisible.
           return shd.NamedSharding(mesh, shd.PartitionSpec())
-  return shd.NamedSharding(mesh, pspec)
+  return shd.NamedSharding(mesh, resolved_spec)
