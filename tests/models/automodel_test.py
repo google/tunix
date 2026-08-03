@@ -8,6 +8,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from tunix.models import automodel
+from tunix.models import maxtext_parallelism
 from tunix.models import naming
 
 
@@ -210,6 +211,91 @@ class AutoModelTest(parameterized.TestCase):
 
       m_maxtext_utils_model_creation_utils.from_pretrained.assert_called_once_with(
           mock_config, mesh=mock_mesh, wrap_with_tunix_adapter=True
+      )
+
+  @mock.patch(
+      "tunix.models.automodel.download_model",
+      return_value="qwen3-8b",
+  )
+  def test_from_pretrained_maxtext_pipeline_config(self, mock_download):
+    del mock_download
+    m_maxtext = types.ModuleType("maxtext")
+    m_configs = types.ModuleType("maxtext.configs")
+    m_pyconfig = types.ModuleType("maxtext.configs.pyconfig")
+    m_types = types.ModuleType("maxtext.configs.types")
+    m_utils = types.ModuleType("maxtext.utils")
+    m_creation = types.ModuleType("maxtext.utils.model_creation_utils")
+
+    config = maxtext_parallelism.MaxTextPipelineConfig(
+        pipeline_parallelism=2,
+        tensor_parallelism=4,
+        num_layers_per_pipeline_stage=18,
+        num_pipeline_microbatches=4,
+        pipeline_parallel_layers=36,
+    )
+    mesh = types.SimpleNamespace(
+        shape=dict(
+            zip(
+                maxtext_parallelism.MAXTEXT_MESH_AXIS_NAMES,
+                config.mesh_axis_shapes,
+            )
+        )
+    )
+
+    class MockMaxTextConfig:
+      model_fields = {
+          "skip_jax_distributed_system": True,
+          **{key: True for key in config.as_maxtext_kwargs()},
+      }
+
+    mock_config = mock.MagicMock()
+    m_pyconfig.initialize = mock.MagicMock(return_value=mock_config)
+    m_creation.from_pretrained = mock.MagicMock()
+    m_types.MaxTextConfig = MockMaxTextConfig
+    m_pyconfig.__file__ = "/opt/maxtext/configs/pyconfig.py"
+    m_configs.pyconfig = m_pyconfig
+    m_configs.types = m_types
+    m_utils.model_creation_utils = m_creation
+    m_maxtext.configs = m_configs
+    m_maxtext.utils = m_utils
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "maxtext": m_maxtext,
+            "maxtext.configs": m_configs,
+            "maxtext.configs.pyconfig": m_pyconfig,
+            "maxtext.configs.types": m_types,
+            "maxtext.utils": m_utils,
+            "maxtext.utils.model_creation_utils": m_creation,
+        },
+    ):
+      automodel.AutoModel.from_pretrained(
+          "Qwen/Qwen3-8B",
+          mesh=mesh,
+          model_source=automodel.ModelSource.MAXTEXT,
+          maxtext_pipeline_config=config,
+      )
+
+    called_argv = m_pyconfig.initialize.call_args[0][0]
+    self.assertEqual(called_argv[1], "/opt/maxtext/configs/base.yml")
+    self.assertIn("ici_pipeline_parallelism=2", called_argv)
+    self.assertIn("ici_tensor_parallelism=4", called_argv)
+    self.assertIn("num_layers_per_pipeline_stage=18", called_argv)
+    self.assertIn("num_pipeline_microbatches=4", called_argv)
+
+  def test_rejects_maxtext_pipeline_config_for_native_model(self):
+    config = maxtext_parallelism.MaxTextPipelineConfig(
+        pipeline_parallelism=2,
+        tensor_parallelism=4,
+    )
+
+    with self.assertRaisesRegex(ValueError, "only supported"):
+      automodel.AutoModel.from_pretrained(
+          "Qwen/Qwen3-8B",
+          mesh=mock.MagicMock(),
+          model_source=automodel.ModelSource.HUGGINGFACE,
+          maxtext_pipeline_config=config,
       )
 
   @parameterized.named_parameters(*_get_all_models_test_parameters())
@@ -432,6 +518,7 @@ class AutoModelTest(parameterized.TestCase):
     self.assertTrue(called_config.use_flash_attention)
     self.assertEqual(called_config.flash_attention_block_size, 512)
     self.assertFalse(hasattr(called_config, "invalid_param"))
+
 
 if __name__ == "__main__":
   absltest.main()

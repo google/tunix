@@ -18,17 +18,28 @@ import enum
 import gc
 import importlib
 import os
+from pathlib import Path
 import shutil
 from typing import Any
+
 from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from orbax import checkpoint as ocp
+from tunix.models import maxtext_parallelism
 from tunix.models import naming
 
-
 _BASE_MODULE_PATH = 'tunix.models'  # pylint: disable=invalid-name
+
+
+def _maxtext_base_config_path(pyconfig_module: Any) -> str:
+  """Finds base.yml next to the imported MaxText pyconfig module."""
+  module_file = getattr(pyconfig_module, '__file__', None)
+  if module_file is None:
+    # Some internal loaders and unit-test module shims do not expose __file__.
+    return 'src/maxtext/configs/base.yml'
+  return str(Path(module_file).resolve().with_name('base.yml'))
 
 
 class ModelModule(enum.Enum):
@@ -101,7 +112,9 @@ def call_model_config(model_name: str) -> Any:
         f"for model '{model_name}'. Target object type: {type(target_obj)}"
     )
 
-  method_to_call = getattr(target_obj, config_id)  # pyrefly: ignore[bad-argument-type]
+  method_to_call = getattr(
+      target_obj, config_id
+  )  # pyrefly: ignore[bad-argument-type]
 
   if not callable(method_to_call):
     raise TypeError(
@@ -184,7 +197,8 @@ def create_gemma_model_with_nnx_conversion(
       logging.warning(
           'model_path is not provided. Inferring from model_name. This may lead'
           ' to incorrect results if the model_name (%s) is not a standard Gemma'
-          ' model name.', model_name
+          ' model name.',
+          model_name,
       )
       naming_info = naming.ModelNaming(model_name=model_name)
       version_dashed = None
@@ -198,7 +212,9 @@ def create_gemma_model_with_nnx_conversion(
       else:  # gemma
         dir_name = version_dashed
 
-    params_path = os.path.join(ckpt_path, dir_name)  # pyrefly: ignore[no-matching-overload]
+    params_path = os.path.join(
+        ckpt_path, dir_name
+    )  # pyrefly: ignore[no-matching-overload]
 
     model, params = create_gemma_model_from_params(params_path, model_name)
 
@@ -310,11 +326,15 @@ def download_model(
   if model_source == ModelSource.KAGGLE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
+    return oss_utils.kaggle_pipeline(
+        model_id_or_path, model_download_path
+    )  # pyrefly: ignore[bad-argument-type]
   elif model_source == ModelSource.HUGGINGFACE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
+    return oss_utils.hf_pipeline(
+        model_id_or_path, model_download_path
+    )  # pyrefly: ignore[bad-argument-type]
   elif model_source in (ModelSource.GCS, ModelSource.MAXTEXT):
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
@@ -332,7 +352,7 @@ def create_model_from_safe_tensors(
     model_config: Any,
     mesh: jax.sharding.Mesh,
     dtype: jnp.dtype | None = None,
-    mode: str = "auto",
+    mode: str = 'auto',
 ) -> Any:
   """Dynamically imports the correct module and calls `create_model_from_safe_tensors` based on the model_name.
 
@@ -355,7 +375,11 @@ def create_model_from_safe_tensors(
   """
   naming_info = naming.ModelNaming(model_name=model_name)
   if naming_info.model_family in (
-      'gemma', 'gemma1p1', 'gemma2', 'gemma3', 'gemma4'
+      'gemma',
+      'gemma1p1',
+      'gemma2',
+      'gemma3',
+      'gemma4',
   ):
     params_module = get_model_module(model_name, ModelModule.PARAMS_SAFETENSORS)
   else:
@@ -396,6 +420,9 @@ class AutoModel:
       model_source: ModelSource = ModelSource.HUGGINGFACE,
       model_path: str | None = None,
       model_download_path: str | None = None,
+      maxtext_pipeline_config: (
+          maxtext_parallelism.MaxTextPipelineConfig | None
+      ) = None,
       **kwargs,
   ) -> tuple[nnx.Module, str | None]:
     """Loads a pretrained model from a given identifier.
@@ -419,6 +446,9 @@ class AutoModel:
         model_download_path: The local directory where the model should be
           downloaded. The corresponding model_source will handle `None` cases
           differently.
+        maxtext_pipeline_config: Optional validated single-slice pipeline and
+          tensor parallelism layout for ``ModelSource.MAXTEXT``. The supplied
+          mesh must match this configuration.
         **kwargs: Additional keyword arguments passed to the underlying model
           creation functions. - For ModelSource.KAGGLE, Gemma models:
           `intermediate_ckpt_dir` , `rng_seed`
@@ -431,6 +461,15 @@ class AutoModel:
     model: nnx.Module = None  # pyrefly: ignore[bad-assignment]
     model_params: Any = None
     naming_info = naming.ModelNaming(model_id=model_id)
+
+    if (
+        maxtext_pipeline_config is not None
+        and model_source != ModelSource.MAXTEXT
+    ):
+      raise ValueError(
+          'maxtext_pipeline_config is only supported with '
+          'model_source=ModelSource.MAXTEXT.'
+      )
 
     # Download the model
     if model_path:
@@ -452,6 +491,21 @@ class AutoModel:
 
     # Case 1: MaxText models
     if model_source == ModelSource.MAXTEXT:
+      if maxtext_pipeline_config is not None:
+        maxtext_pipeline_config.validate_mesh(mesh)
+        pipeline_overrides = maxtext_pipeline_config.as_maxtext_kwargs()
+        conflicting_overrides = {
+            key: {'config': value, 'kwargs': kwargs[key]}
+            for key, value in pipeline_overrides.items()
+            if key in kwargs and kwargs[key] != value
+        }
+        if conflicting_overrides:
+          raise ValueError(
+              'MaxText pipeline overrides conflict with explicit kwargs: '
+              f'{conflicting_overrides}.'
+          )
+        kwargs.update(pipeline_overrides)
+
       try:
         import maxtext.configs.pyconfig as pyconfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
         from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
@@ -464,7 +518,7 @@ class AutoModel:
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       argv = [
           '',
-          'src/maxtext/configs/base.yml',
+          _maxtext_base_config_path(pyconfig),
           f'model_name={naming_info.model_name}',
       ]
 
@@ -548,7 +602,8 @@ class AutoModel:
         )
       elif model_source == ModelSource.INTERNAL:
         model, model_params = create_gemma_model_from_params(
-            params_path=resolved_model_path, model_name=naming_info.model_name  # pyrefly: ignore[bad-argument-type]
+            params_path=resolved_model_path,
+            model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
         )
       else:
         raise NotImplementedError(
@@ -566,7 +621,9 @@ class AutoModel:
     # Common path for all other native Tunix models -- create model from safe tensors
     if not model_params:
       # pick corresponding config based on model version
-      model_params = call_model_config(naming_info.model_name)  # pyrefly: ignore[bad-argument-type]
+      model_params = call_model_config(
+          naming_info.model_name
+      )  # pyrefly: ignore[bad-argument-type]
 
       # Get load_dtype explicitly from kwargs
       load_dtype_str = kwargs.get('load_dtype')
@@ -574,8 +631,8 @@ class AutoModel:
         load_dtype = getattr(jnp, load_dtype_str)
       except AttributeError:
         raise ValueError(
-            f"Invalid load_dtype: {load_dtype_str}. Must be a valid"
-            " jax.numpy type."
+            f'Invalid load_dtype: {load_dtype_str}. Must be a valid'
+            ' jax.numpy type.'
         )
       except TypeError:
         load_dtype = load_dtype_str
@@ -584,17 +641,27 @@ class AutoModel:
       # use_flash_attention, flash_attention_block_size).
       if dataclasses.is_dataclass(model_params):
         valid_fields = {f.name for f in dataclasses.fields(model_params)}
-        overrides = {k: v for k, v in kwargs.items() if k in valid_fields and v is not None}
-        if 'remat_config' in overrides and isinstance(overrides['remat_config'], str):
-          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)
+        overrides = {
+            k: v
+            for k, v in kwargs.items()
+            if k in valid_fields and v is not None
+        }
+        if 'remat_config' in overrides and isinstance(
+            overrides['remat_config'], str
+        ):
+          model_module = get_model_module(
+              naming_info.model_name, ModelModule.MODEL
+          )
           if hasattr(model_module, 'RematConfig'):
             remat_cfg_str = overrides['remat_config']
             try:
-              overrides['remat_config'] = getattr(model_module.RematConfig, remat_cfg_str)
+              overrides['remat_config'] = getattr(
+                  model_module.RematConfig, remat_cfg_str
+              )
             except AttributeError:
               raise ValueError(
-                  f"Invalid remat_config: {remat_cfg_str}. Must be a valid"
-                  " RematConfig type."
+                  f'Invalid remat_config: {remat_cfg_str}. Must be a valid'
+                  ' RematConfig type.'
               )
         if 'dtype' in overrides:
           dtype_str = overrides['dtype']
@@ -602,7 +669,7 @@ class AutoModel:
             overrides['dtype'] = getattr(jnp, dtype_str)
           except AttributeError:
             raise ValueError(
-                f"Invalid dtype: {dtype_str}. Must be a valid jax.numpy type."
+                f'Invalid dtype: {dtype_str}. Must be a valid jax.numpy type.'
             )
           except TypeError:
             pass

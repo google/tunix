@@ -153,6 +153,45 @@ model, model_path = AutoModel.from_pretrained(
 )
 ```
 
+##### Pipeline parallel MaxText models
+
+Tunix can use MaxText's pipeline runtime for trainer forward and backward
+passes. Use `MaxTextPipelineConfig` to keep the MaxText config and JAX mesh in
+sync. The helper builds a mesh with MaxText's `stage` and `tensor` axis names;
+a native Tunix mesh using an axis such as `tp` does not enable MaxText pipeline
+parallelism.
+
+For example, this layout assigns the 36 Qwen3-8B decoder layers to two pipeline
+stages, with tensor parallelism degree four inside every stage:
+
+```python
+from tunix.models import automodel
+from tunix.models import maxtext_parallelism
+
+parallelism = maxtext_parallelism.MaxTextPipelineConfig(
+    pipeline_parallelism=2,
+    tensor_parallelism=4,
+    num_layers_per_pipeline_stage=18,
+    num_pipeline_microbatches=4,
+    pipeline_parallel_layers=36,
+)
+mesh = parallelism.create_mesh()
+parallelism.validate_batch_size(global_batch_size=16)
+
+model, model_path = automodel.AutoModel.from_pretrained(
+    model_id="Qwen/Qwen3-8B",
+    mesh=mesh,
+    model_source=automodel.ModelSource.MAXTEXT,
+    model_path="gs://my-bucket/qwen3-8b-maxtext-checkpoint",
+    maxtext_pipeline_config=parallelism,
+    per_device_batch_size=2,
+)
+```
+
+On eight devices, another valid Qwen3-8B layout is PP4 x TP2 with nine layers
+per stage and eight pipeline microbatches. Pipeline and tensor degrees multiply:
+PP8 x TP8 therefore requires 64 devices rather than eight.
+
 To load a Maxtext model when launching training via a shell script, append the corresponding override arguments directly to the script execution:
 
 ```bash
