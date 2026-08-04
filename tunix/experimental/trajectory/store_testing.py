@@ -131,6 +131,7 @@ class TrajectoryWriterTestCase(
   def test_add_step(self) -> None:
     """Tests that a single step and its metadata are correctly added."""
     self.writer.add_step(STEP_1_1, METADATA_1)
+    self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
     self.assertEqual(metas, [METADATA_1])
@@ -142,6 +143,7 @@ class TrajectoryWriterTestCase(
     """Tests that sequential steps are correctly appended to a trajectory."""
     self.writer.add_step(STEP_2_1, METADATA_2)
     self.writer.add_step(STEP_2_2, METADATA_2)
+    self.writer.flush()
 
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_2])
     self.assertEqual(trajs, [TRAJECTORY_2])
@@ -159,6 +161,7 @@ class TrajectoryWriterTestCase(
     """Tests adding steps across multiple distinct trajectories."""
     self.writer.add_step(STEP_1_1, METADATA_1)
     self.writer.add_step(STEP_2_1, METADATA_2)
+    self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
     self.assertLen(metas, 2)
@@ -174,5 +177,7 @@ class TrajectoryWriterTestCase(
     self.assertEqual(traj_2, expected_traj_2_partial)
 
     self.writer.add_step(STEP_2_2, METADATA_2)
+    self.writer.flush()
+
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_1, TRAJECTORY_ID_2])
     self.assertCountEqual(trajs, [TRAJECTORY_1, TRAJECTORY_2])

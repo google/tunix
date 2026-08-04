@@ -71,3 +71,7 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       )
     self._metadata_by_trajectory_id[traj_id] = metadata
     self._steps_by_trajectory_id[traj_id].append(step)
+
+  def flush(self) -> None:
+    """Flushes any pending or asynchronous writes to persistent storage."""
+    pass

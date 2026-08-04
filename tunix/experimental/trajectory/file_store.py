@@ -181,3 +181,7 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
 
     step_path = self.get_step_path(traj_id, step.step_id)
     step_path.write_text(_dump_json(step))
+
+  def flush(self) -> None:
+    """Flushes any pending or asynchronous writes to persistent storage."""
+    pass
