@@ -608,6 +608,36 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
+    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
+
+    from flax.linen import get_logical_axis_rules
+    from flax.linen import partitioning as nn_partitioning
+    from tunix.utils import compat
+
+    def _is_logical_spec(spec):
+      for name in spec:
+        if name is not None:
+          names = name if isinstance(name, tuple) else (name,)
+          for n in names:
+            if n not in mesh.shape:
+              return True
+      return False
+
+    def _resolve_spec(spec):
+      if isinstance(spec, shd.PartitionSpec):
+        rules = get_logical_axis_rules()
+        is_logical = _is_logical_spec(spec)
+        if rules and is_logical:
+          resolved = nn_partitioning.logical_to_mesh_axes(spec)
+          return sharding_utils.filter_spec(resolved, mesh)
+        elif is_logical:
+          return sharding_utils.filter_spec(spec, mesh)
+      return spec
+
+    with compat.set_mesh(mesh):
+      optimizer_pspecs = jax.tree.map(_resolve_spec, optimizer_pspecs)
+
 
     def _shard(x, p):
       if not isinstance(x, jax.Array):
@@ -622,23 +652,25 @@ class PeftTrainer:
           return jax.device_put(x, sharding)
       return x
 
-    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
-    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
     optimizer_sharded_state = jax.tree.map(
         _shard, optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-    # Partition Gradients same as the model
-    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
-    self.grad_accumulator.grads = jax.tree.map(
-        _shard, self.grad_accumulator.grads, grad_pspecs
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    model_state = nnx.state(self.model, wrt_target)
+    model_pspecs = nnx.get_partition_spec(model_state)
+    model_pspecs = jax.tree.map(_resolve_spec, model_pspecs)
+
+    # Partition Gradients similar to the model
+    grads_sharded = jax.lax.with_sharding_constraint(
+        self.grad_accumulator.grads, model_pspecs
     )
+    self.grad_accumulator.grads = grads_sharded
 
     # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.device_put(
-        self.grad_accumulator.denom[...],
-        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+    self.grad_accumulator.denom[...] = jax.lax.with_sharding_constraint(
+        self.grad_accumulator.denom[...], jax.sharding.PartitionSpec()
     )
 
   def jit_train_and_eval_step(
