@@ -768,7 +768,7 @@ class PeftTrainerTest(parameterized.TestCase):
 class V1ParityTest(parameterized.TestCase):
   """Parity tests for PeftTrainerV2 against PeftTrainer before the migration to v2 is fully done."""
 
-  def _make_trainer(self, model, accum_steps=None, max_steps=4):
+  def _make_trainer_v2(self, model, accum_steps=None, max_steps=4):
     config = peft_trainer_v2.TrainingConfig(
         eval_every_n_steps=1,
         max_steps=max_steps,
@@ -833,17 +833,17 @@ class V1ParityTest(parameterized.TestCase):
         'the optimizer update did not change any weight',
     )
 
-  def test_fp32_single_step_fused_matches_v1_after_one_update(self):
+  def test_fp32_single_step_parity_with_v1(self):
     model_v1, model_fused = self._two_identical_models()
     initial_weights = jax.tree.map(
         jnp.copy, nnx.state(model_v1, nnx.Param)
     )
     trainer_v1 = self._make_v1_trainer(model_v1)
-    trainer_fused = self._make_trainer(model_fused, max_steps=1)
+    trainer_fused = self._make_trainer_v2(model_fused, max_steps=1)
     batch = dummy_datasets(batch_size=4)[0]
 
     trainer_v1.train([batch])
-    trainer_fused.train_step(batch)
+    trainer_fused.train([batch])
 
     weights_v1 = nnx.state(model_v1, nnx.Param)
     weights_fused = nnx.state(model_fused, nnx.Param)
@@ -863,7 +863,7 @@ class V1ParityTest(parameterized.TestCase):
     loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
     np.testing.assert_allclose(loss_v1, loss_fused, atol=1e-5)
 
-  def test_fp32_multiple_step_fwd_bwd_update_matches_v1_after_one_update(self):
+  def test_fp32_multiple_step_parity_with_v1(self):
     accum_steps = 4
     batches = dummy_datasets(batch_size=4, repeat=2)[:accum_steps]
     self.assertLen(batches, accum_steps)
@@ -872,7 +872,7 @@ class V1ParityTest(parameterized.TestCase):
         jnp.copy, nnx.state(model_v1, nnx.Param)
     )
     trainer_v1 = self._make_v1_trainer(model_v1, accum_steps=accum_steps)
-    trainer_split = self._make_trainer(
+    trainer_split = self._make_trainer_v2(
         model_split, accum_steps=accum_steps, max_steps=1
     )
 
@@ -897,16 +897,16 @@ class V1ParityTest(parameterized.TestCase):
 
   def test_fused_unavailable_when_accumulating(self):
     model, _ = self._two_identical_models()
-    trainer = self._make_trainer(model, accum_steps=2)
+    trainer = self._make_trainer_v2(model, accum_steps=2)
     trainer.jit_fwd_bwd_update_and_eval_step()
-    self.assertIsNone(trainer._jitted_fused_step_fn)
+    self.assertIsNone(trainer._jitted_train_step_fn)
     with self.assertRaisesRegex(ValueError, 'one micro-batch per update'):
       trainer.train_step(dummy_datasets(batch_size=4)[0])
 
   def test_train_uses_fused_path_at_depth1(self):
     """`train()` must route through the fused step, not fwd_bwd + update."""
     model, _ = self._two_identical_models()
-    trainer = self._make_trainer(model)
+    trainer = self._make_trainer_v2(model)
     with mock.patch.object(
         trainer, 'train_step', wraps=trainer.train_step
     ) as fused, mock.patch.object(
