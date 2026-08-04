@@ -346,15 +346,10 @@ class GradientAccumulator(nnx.Module):
   def reset(self):
     """Clears the accumulator, either by zeroing the buffer or by dropping it.
 
-    Which one is right depends on how the buffer is used, so the choice is made
-    from `self.persistent` rather than at the call site:
-
-    * persistent (accumulating across micro-steps): the next `add()` reads the
-      current value, so the buffer must survive and be zeroed in place.
-    * non-persistent (one micro-batch per update): the next `set()` overwrites
-      the whole tree, so zeroing would write a full parameter-sized copy that is
-      never read. Drop the reference instead and let the memory go; `set()`
-      re-adopts the incoming gradients.
+    When self.persistent, the buffer must survive and be zeroed in place. If
+    not persistent: zeroing would write a full parameter-sized copy that is
+    never read. Drop the reference instead; `add()` re-adopts the incoming
+    gradients.
     """
     if self.persistent:
       def _zero_in_place(v):
@@ -810,6 +805,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       else:
         donate_argnames = ("grad_accumulator",)
       self._jitted_fwd_bwd_step_fn = nnx.jit(
+          fwd_bwd_step, donate_argnames=donate_argnames,
           fwd_bwd_step, donate_argnames=donate_argnames,
       )
       # Donating `grad_accumulator` is sound again now that `reset()` always
