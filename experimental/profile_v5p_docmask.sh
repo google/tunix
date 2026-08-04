@@ -51,7 +51,12 @@ MESH_FSDP="${MESH_FSDP:-4}"; MESH_TP="${MESH_TP:-1}"
 BATCH="${BATCH:-8}"; MINI="${MINI:-8}"; MICRO="${MICRO:-1}"; LOGPS="${LOGPS:-1}"
 MAX_STEPS="${MAX_STEPS:-20}"
 MAX_RESPONSE="${MAX_RESPONSE:-1024}"
-BUDGET="${BUDGET:-2048}"          # max_seq_token_per_tpu; gsm8k L_max = 2048
+# Production values: train_v5p_1host_pack.sh defaults MAX_TOKEN_PER_TPU to 8192,
+# the gsm8k packing yamls pass 4096.  This used to default to 2048, which is not
+# a production value and is the flattest end of the curve -- causal work grows
+# quadratically with the budget while the segment mask grows linearly, so 2048
+# measures ~0.45x on the kernel where 8192 measures ~0.18-0.31x.
+BUDGET="${BUDGET:-8192}"          # max_seq_token_per_tpu
 ROLLOUT_HBM="${ROLLOUT_HBM:-0.3}"
 NUM_HEADS="${NUM_HEADS:-16}"      # qwen3_1p7b; splash_mask.attach refuses to guess
 
@@ -103,6 +108,22 @@ for name, cond in (
 import tunix.rl.rl_learner as L
 wired = 'splash_mask.attach' in open(L.__file__).read()
 print(f'  {\"learner attaches it\":<32}{wired}'); ok &= wired
+# The falsified NumpyMask path must be unreachable: kernel_for has to route to
+# the computable mask, whose MaskInfo fetches no tiles.  A silent fallback here
+# would produce wrong numbers more slowly, with no other symptom.
+import numpy as _np
+comp = hasattr(splash_mask, 'SegmentCausalMask')
+print(f'  {\"SegmentCausalMask present\":<32}{comp}'); ok &= comp
+if comp:
+    _sid = _np.concatenate([_np.full(n, i, _np.int32)
+                            for i, n in enumerate([512] * 8)])
+    _k = splash_mask.build_segment_kernel(4096, _sid, 256, 4)
+    _fi = _k.fwd_mask_info
+    _computable = _fi.q_sequence is not None and _fi.partial_mask_blocks is None
+    print(f'  {\"computable path (no tiles)\":<32}{_computable}')
+    ok &= _computable
+    _routed = 'build_segment_kernel' in inspect.getsource(splash_mask.kernel_for)
+    print(f'  {\"kernel_for routes to it\":<32}{_routed}'); ok &= _routed
 # every flag this script passes must exist in THIS image's demo
 src = open('/app/examples/math_gsm8k/qwen3_grpo_demo.py').read()
 need = ['--mesh_fsdp','--mesh_tp','--batch_size','--mini_batch_size',

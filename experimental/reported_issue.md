@@ -846,44 +846,43 @@ there is no baseline for this recipe; convergence is phase8's gate, on the new m
 
 ---
 
-# Runbook — gsm8k splash document-mask A/B (2026-08-03)
+# Runbook — gsm8k splash segment-mask A/B (2026-08-03)
 
-> ## ⛔ 已证伪(2026-08-03,v4-8 实测)—— **不要跑下面这个 A/B**
+> ### 走过的弯路,和现在实际走的那条(读之前先看这段)
 >
-> 这个设计**既不正确、也更慢**,两条独立的原因:
+> **不要用 `NumpyMask` 那版块对角(phase20)。** 它已被证伪,两条独立原因:
+> ① `segment_layout` 只列真实段,而 padding 的 `segment_id` 是 0、splash 的段判据是
+> 裸的 `q_ids == kv_ids`(**pad attends pad**),所以整行 padding 的行完全没被覆盖
+> ⇒ 输出真的不同(3,656,487 个元素);② `NumpyMask` 不透明,**每个半块都要从 HBM
+> 搬一张 256×256 的 tile**,把 `CausalMask` 换成内容逐字节相同的 `NumpyMask`
+> 单这一项就慢 1.18–1.35×。
 >
-> 1. **不是超集**:padding 的 `segment_id` 是 0,而 splash 的段判据是裸的
->    `q_ids == kv_ids`,**pad 会 attend pad**。`segment_layout` 只列真实段,
->    整行 padding 的那些行(packer 确实会产出)完全没被覆盖 ⇒ 输出真的不同
->    (3,656,487 个元素)。此前所有"逐位相同"都是拿**每行刚好装满**的手造布局验的,
->    padding 段从未出现。
-> 2. **代价在 mask 的表示形式**:把 `CausalMask` 换成**内容完全相同**的
->    `NumpyMask`,单这一项就慢 **1.347×** —— 前者是 `_ComputableMask`,splash
->    在寄存器里现算三角;后者不透明,每个部分块都要从 HBM 搬 256×256 的 tile。
->    `grid_width` 砍半只赚回一点(1.296×),补上 padding 段修正正确性后
->    `grid_width` 退回 8,净亏 **1.431×**。
+> **现在走的是 `SegmentCausalMask`(`_ComputableMask` 子类)。** 给 splash 一个**公式**
+> 而不是一张表,它在寄存器里现算,**一张 tile 都不搬**;`seg_start` 从 **`segment_ids`**
+> 推(不是 `segment_layout`),所以 padding 自动是"另一个段",不需要特例。
 >
-> `0.861×` 那个块计数模型**只数块、不算表示代价**,从来就达不到。
-> 证据:`p20f_diag.py`;完整分析见 `splash_docmask_design.md` 的
-> "Why this does not work"。
->
-> 下面的操作步骤保留,只为将来有人做出**可计算 mask**(`_ComputableMask` 子类)
-> 版本时能复用这套 A/B 骨架。**现在跑它只会得到一个更慢且算错的臂。**
-
+> 那条旧路径(`build_kernel` / `docmask`)代码还在,但 **`kernel_for` 已改道,不可达**。
+> **怎么确认自己没走回去:`fwd_mask_info.partial_mask_blocks` 必须是 `None`。**
+> preflight 会断言这一条,不过就拒绝启动。
 
 ## 这是在测什么
 
 TPU 的 splash attention **按整行因果面积计费**:一行打包了 K 条序列,它仍按
 "一条长度 = budget 的序列"排工作,跨段的块**算完再被 `segment_ids` 抹零**。
 
-改法:把该 chunk 的**段布局**(向外取整到 256 块边界)造成一个 mask,在 host 上建成
-splash kernel,**作为参数**传进模型。该 mask 是真实块对角 mask 的**超集**,精确遮蔽仍由
-`segment_ids` 逐元素做 ⇒ **输出逐位不变**,变的只有调度:`grid_width` 从 `budget/block`
-缩到约 `最长段/block`。
+改法:把该 chunk 的段边界编进 `q_sequence`,给 splash 一个能自己算的 mask:
 
-设计、被否决的两个替代方案、以及那个静默算错的通道:`experimental/splash_docmask_design.md`。
+```python
+q_sequence[i] = 所在段起点 << 16 | 自身位置
+mask_function = lambda q, kv: (kv >= q >> 16) & (kv <= q & 0xFFFF)
+```
 
-## ⚠️ 为什么 kernel 必须当**参数**传,不能用模块级全局
+段是连续区间,所以这两条合起来**精确等于**「同段 ∧ 因果」——不是超集,是相等。
+于是 `grid_width` 从 `budget/256` 缩到并集的实际带宽。
+
+设计与全部实测:`experimental/splash_docmask_design.md`。
+
+## ⚠️ kernel 必须当**参数**传,不能用模块级全局
 
 全局在 jit 函数体内被读 ⇒ 是 **trace 时常量**,被烤进程序;而 jit 的缓存键是**参数**的
 shape/dtype,全局不是参数 ⇒ **改它不触发重 trace**。实测(v4-8):
@@ -895,26 +894,44 @@ shape/dtype,全局不是参数 ⇒ **改它不触发重 trace**。实测(v4-8):
 | **先 A 跑一次,再改成 B 跑** | **`528823221325`** ← 还是 A 的 |
 
 那次数据真实是整行一段 2048,A 的 mask 会**把它切断** ⇒ **第二次调用算的是错的,
-不报错、不重编译、无任何征兆**。这是本课题最贵的一个坑,**任何"声明式开关"都要防**。
+不报错、不重编译、无任何征兆**。**任何"声明式开关"都要防这一条。**
+
+## 收益是多少 —— 区间 + 条件,不是一个数
+
+**全部实测于 v4-8,splash kernel only,交叉重复 + 同配置重复臂做噪声底(±0.2%)。**
+
+| 层级 | 值 | 来源 |
+|---|---|---|
+| splash kernel,**budget=8192**,装满的 chunk | **0.178 – 0.310×** | 实测 |
+| splash kernel,budget=4096 | **0.251×** | 实测(等长段) |
+| splash kernel,budget=2048 | **0.449×** | 实测(等长段) |
+| Attention block(含 q/k/v/o 投影)@8192 | ~0.5× | **外推**,投影线性 / attention 平方 |
+| **一个训练步** | **未测** | ← 这轮 profiling 就是去拿这个 |
+
+**⚠️ `budget` 是这条曲线上最重要的变量。** causal 的工作块随序列**平方**增长,
+段 mask 只**线性**增长(实测 36→136→528 对 12→24→48)。
+
+**在 `budget=2048` 上跑,结论会是"没用"——那是曲线最平的一端,不是方案的性质。**
+生产值:`train_v5p_1host_pack.sh` 默认 `MAX_TOKEN_PER_TPU=8192`;
+gsm8k 打包 yaml 用 `--max_seq_token_per_tpu 4096`。**脚本默认已改成 8192。**
 
 ## 已验证 / 未验证(读数字前先看这节)
 
-**已验证(v4-8 TPU)**
-- 中立性:补丁 + `kernel=None` 与未打补丁 **checksum 逐位相同**
-- 数值:声明布局 vs 不声明 **BITWISE IDENTICAL**(`out` 与 `grad`)
-- **同进程换布局**:`A_then_B` 得到 B 的答案,`jit cache 1→2`(修复确认)
-- 编译数:3 个同 mask 形状的布局 → **+1 次**;2 个不同形状 → +2 次
-- CPU:`partial_blocks` **恒为 1**、7 分布 11 chunk 只需 **4 个程序**、
-  是精确 mask 的**超集**(逐 chunk 断言)、负控(把因果也取整)确实放行非因果对
-- 路由:packer → `TrainExample` → learner attach → `algo_core` → `common` → model,
-  开关关/开**双向**验证
+**已验证(v4-8 TPU,真 packer,budget=8192)**
+- **路径**:`q_sequence` 存在、`partial_mask_blocks is None` ⇒ 走的是可计算路径
+- **数值**:`compute_per_token_logps` 在开/关两臂 **BITWISE IDENTICAL**
+- **mask 精确性**:与 `causal & same-segment` **逐元素相等**(4 种布局,含整行 padding)
+- **负控**:`seg_start` 全 0 时退化成 causal ⇒ 断言有分辨率
+- **同进程换布局**:`A_then_B` 得到 B 的答案,`jit cache 1→2`
+- **护栏**:`gw` 没缩的 chunk 自动回退 `CausalMask`,不挂 kernel
+- 中立性:补丁 + `kernel=None` 与未打补丁 checksum 逐位相同
 
 **未验证**
-- **e2e 收益**(这份 runbook 就是去拿这个数);块计数模型给的是 `0.861×` attention
-- 一次全 train step 的编译耗时
-
-**收益预期**:真实散乱分布下 attention `0.861×`;`near-cap` / 全 `L_max` 分布下**是 0**
-——一行只装一条时没有跨段块可省,**任何 attention 方案都救不了**。
+- **一个完整训练步(含 backward)的收益** ← 这份 runbook 就是去拿这个
+- **backward 的 `dq`/`dkv` mask info 是否也走 `q_sequence`** —— 只读了 fwd 的源码。
+  若 bwd 走 tile 路径,训练步收益会明显低于 fwd 的比值。
+- 真实 gsm8k 长度分布(上面用的是 lognormal 合成:中位 417、最大 1400)
+- 尾 chunk(会触发护栏)在真实数据流里的占比
 
 ## 怎么跑
 
@@ -922,10 +939,10 @@ shape/dtype,全局不是参数 ⇒ **改它不触发重 trace**。实测(v4-8):
 cd sequence_packing/tunix
 bash experimental/profile_v5p_docmask.sh            # 两臂 off/on
 bash experimental/profile_v5p_docmask.sh on        # 只跑一臂
-MAX_STEPS=12 TRACE_DEST=/tmp/xprof bash experimental/profile_v5p_docmask.sh
+BUDGET=4096 bash experimental/profile_v5p_docmask.sh   # 换 budget
 ```
 
-旋钮:`MAX_STEPS` · `BUDGET`(默认 2048)· `MAX_RESPONSE` · `MESH_FSDP/TP` ·
+旋钮:**`BUDGET`(默认 8192)** · `MAX_STEPS` · `MAX_RESPONSE` · `MESH_FSDP/TP` ·
 `BATCH/MINI/MICRO/LOGPS` · `ROLLOUT_HBM` · `NUM_HEADS`(默认 16 = qwen3_1p7b)·
 `TRACE_DEST`(xprof,支持 `gs://`)· `PERF_DEST`(perfetto)· `PROFILER_SKIP/STEPS` ·
 `RUN_TAG` · `PATCH_DIR` · `IMAGE`。
@@ -934,9 +951,38 @@ MAX_STEPS=12 TRACE_DEST=/tmp/xprof bash experimental/profile_v5p_docmask.sh
 (`--profiler_log_dir` + `--profiler_skip_steps/steps` 出 xprof;
 `--enable_perf_v2 --perf_trace_dir` 出 perfetto)。
 
-**启动前跑 8 项 preflight,不通过拒绝启动**:整条链每一环 + **把脚本要传的 15 个 flag
-逐个在镜像的 demo 源码里查一遍**。后者是有来历的——demo 的参数表**随分支不同而不同**,
-工作树那份甚至没有 `--profiler_log_dir`;一个 flag 拼错就废掉整轮 run。
+**启动前跑 preflight,不通过拒绝启动**:整条链每一环 + 15 个 CLI flag 逐个在镜像
+demo 源码里查 + **断言走的是可计算路径**(`partial_mask_blocks is None`)。
+flag 那条是有来历的——demo 的参数表**随分支不同而不同**,工作树那份甚至没有
+`--profiler_log_dir`;一个 flag 拼错就废掉整轮 run。
+
+## 结果怎么读 —— 先看这三行日志
+
+```
+splash doc mask ACTIVE: chunk N, grid_width=?, partial_mask_blocks=0
+WARNING: TUNIX_SPLASH_DOCMASK=1 but no kernel attached (union did not shrink ...)
+```
+
+| 现象 | 含义 | 下一步 |
+|---|---|---|
+| 完全没有 `ACTIVE` 行 | **没生效** | 查 preflight、查 `TUNIX_SPLASH_DOCMASK` |
+| `partial_mask_blocks` **不是 0** | **退回了被证伪的实现** | **数字全部作废**,查 `kernel_for` 的路由 |
+| `grid_width` 接近 `budget/256` | 并集没缩,护栏应已拦下 | 正常;看 WARNING 占比 |
+| `grid_width` 3–7 | 正常工作 | 可以看时间了 |
+| WARNING 占比高 | 尾 chunk 太多 | 看打包器,不是 mask 的问题 |
+
+**⚠️ WARNING 不等于 bug。** 整行 padding 的行 = 一整段跨满 budget,并集必然退化成
+causal,护栏此时回退是**正确行为**——没收益就不付 `mask_function` 的钱
+(实测:块数与 causal 相同的退化 chunk 仍慢 15.8%)。
+
+然后:
+
+1. **数值**:两臂 loss / grad_norm 曲线应在噪声内一致。**不一致就是 bug**,不是"数值抖动"
+   —— 模块级已证逐位不变。
+2. **xprof**:同名 `*_segmented_{fwd,dq,dkv}` kernel,arm `on` 的 grid 迭代数应更少。
+   **重点看 `dq`/`dkv`** —— backward 是否同样受益,目前**未验证**。
+3. **perfetto(v2)**:attention 段墙钟应缩短,projections/MLP 段应不变。
+4. **编译**:前几步每个 mask 形状一次额外编译,之后应**稳态零编译**。
 
 ## 补丁文件(只读挂载,仓库代码未改)
 
@@ -945,31 +991,25 @@ MAX_STEPS=12 TRACE_DEST=/tmp/xprof bash experimental/profile_v5p_docmask.sh
 | `/app/tunix/models/qwen3/model.py` | `splash_kernel` 参数穿过 `Qwen3 → DecoderLayer → Attention`(含两条 remat 分支);**纯穿参、零语义** |
 | `/app/tunix/rl/common.py` | `TrainExample.segment_layout`(静态)+ `.splash_kernel`(**普通 pytree 字段**);`compute_per_token_logps` 转发 |
 | `/app/tunix/rl/utils.py` | `_emit` 给每个 chunk 盖上每行段长 |
-| `/app/tunix/rl/splash_mask.py` | **新文件**:唯一读 env 的地方;`docmask()` 造边界取整 mask;`attach()` 在 host 建 kernel |
+| `/app/tunix/rl/splash_mask.py` | **新文件**:`SegmentCausalMask`、`seg_start_union`、`attach`;唯一读 env 的地方 |
 | `/app/tunix/rl/algo_core.py` | 从 `train_example` 读 kernel(紧邻已有的 `num_segments`) |
 | `/app/tunix/rl/rl_learner.py` | train step 前一行 `splash_mask.attach()` |
 
-产物目录 `/mnt/disks/tunix-data/p18_splash/p20c/`。
-生成脚本:`p20_patch_docmask.py`、`p20b_patch_thread.py`、`p20c_patch_route.py`
-(锚点缺失即硬失败;后置条件期望值**自动推导**,不手写常数)。
+产物目录 `/mnt/disks/tunix-data/p18_splash/p20c/`。生成脚本:`p20_patch_packer.py`、
+`p20b_patch_thread.py`、`p20c_patch_route.py`(锚点缺失即硬失败;后置条件期望值
+**自动推导**,不手写常数),模块本体 `p20_splash_mask.py` 原样拷入。
 
 **逐个文件挂载,不要整树挂载** —— 整树会把 packer 一起换掉,静默改变被测对象。
-
-## 结果怎么读
-
-1. **数值**:两臂 loss / grad_norm 曲线应在噪声内一致。**不一致就是 bug**,不是"数值抖动"
-   —— 模块级已证逐位不变。
-2. **xprof**:同名 `*_segmented_{fwd,dq,dkv}` kernel,arm `on` 的 **grid 迭代数应更少**。
-3. **perfetto(v2)**:attention 段墙钟应缩短,projections/MLP 段应不变。
-4. **`(grid_width, partial_blocks)` 直方图**:`partial_blocks` 应**恒为 1**、组合数 **≤8**。
-   超了说明真实布局比合成分布更碎,**编译预算要重估**。
-5. **编译**:前几步每个 mask 形状一次额外编译,之后应**稳态零编译**。
+**换机器要先把这 6 个文件传过去**,`PATCH_DIR` 指向它们。
 
 ## 已知坑
 
-- **镜像会被第三方删**:v4-8 是共享机器,曾被 prune 掉(盘 25G→13G,VM 未重启)。跑前先
-  `sudo docker images | grep tunix_frozenlake`;没了从有镜像的机器
-  `docker save | ssh <host> 'docker load'`(约 4 分钟)。
+- **`budget` 必须与生产一致。** 默认已是 8192;用 2048 跑会得出"没收益"的错误结论。
+- **整行 padding 的行会触发护栏并打 WARNING** —— 正常行为,不是 bug。
+- **镜像会被第三方删**:v4-8 是共享机器,本课题期间被 prune 过**两次**(盘 25G→13G、
+  25G→14G,VM 未重启)。跑前先 `sudo docker images | grep tunix_frozenlake`;
+  没了从有镜像的机器 `docker save | ssh <host> 'sudo docker load'`(约 4 分钟;
+  `gcloud compute tpus tpu-vm ssh` 不适合传二进制流,要直连内网 IP)。
 - **`-w /path` 不等于该路径在 `sys.path` 上**:容器里 `import tunix` 默认命中镜像内置的
   `/app/tunix`。本 runbook 覆盖的正是 `/app/tunix` 下的单个文件,所以不受影响;
   若改用整树挂载,必须显式 `PYTHONPATH`。
@@ -977,7 +1017,8 @@ MAX_STEPS=12 TRACE_DEST=/tmp/xprof bash experimental/profile_v5p_docmask.sh
   flag 检查就是为此。
 - **`num_heads` 目前经 `TUNIX_SPLASH_NUM_HEADS` 传**(缺了会**硬报错**,不静默跳过);
   生产版应从 model config 取。
-- **`build_kernel` 固定 `head_shards=q_seq_shards=1`**,只对 tp=1、无序列分片的配置正确;
-  分片变了必须传真实值(已写进 docstring)。
-- **gsm8k 的 `budget = L_max = 2048`** ⇒ 配置层面的保证收益是 1.0×,收益全部来自
-  "真实序列比 1024 短"。换 recipe 前先核 `budget` 与 `L_max` 的关系。
+- **`build_kernel` / `build_segment_kernel` 固定 `head_shards=q_seq_shards=1`**,
+  只对 tp=1、无序列分片的配置正确;分片变了必须传真实值(已写进 docstring)。
+- **量具纪律**(本课题栽过三次):jit 和 kernel 一律建在**计时循环外**;
+  **量 splash kernel 本体,不要量 `Attention` 整块**(里面 75% 是投影,会把 0.31× 摊成 0.93×);
+  报任何 <10% 的差异前**先放一个同配置重复臂测噪声底**。
