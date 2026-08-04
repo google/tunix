@@ -1,6 +1,7 @@
 import tempfile
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from etils import epath
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import store
@@ -46,7 +47,7 @@ class FileTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     return file_s, file_s
 
 
-class FileTrajectoryStoreTest(absltest.TestCase):
+class FileTrajectoryStoreTest(parameterized.TestCase):
   """Unit tests for FileTrajectoryStore property behavior and extra-file handling."""
 
   def setUp(self) -> None:
@@ -112,6 +113,24 @@ class FileTrajectoryStoreTest(absltest.TestCase):
 
     with self.assertRaises(store.TrajectoryMetadataNotFoundError):
       self.file_s.get_trajectories_metadata()
+
+  @parameterized.named_parameters(
+      ("with_slash", "traj/1001"),
+      ("with_dot", "traj.1001"),
+      ("with_space", "traj 1001"),
+      ("with_colon", "traj:1001"),
+  )
+  def test_add_step_rejects_invalid_trajectory_id(
+      self, bad_trajectory_id: str
+  ) -> None:
+    """Verifies add_step rejects trajectory_ids that would not round-trip."""
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id=bad_trajectory_id,
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+
+    with self.assertRaises(ValueError):
+      self.file_s.add_step(store_testing.STEP_1_1, meta)
 
 
 if __name__ == "__main__":
