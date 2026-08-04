@@ -769,7 +769,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         donate_argnames = ("grad_accumulator",)
       self._jitted_fwd_bwd_step_fn = nnx.jit(
           fwd_bwd_step, donate_argnames=donate_argnames,
-          fwd_bwd_step, donate_argnames=donate_argnames,
       )
       # Donating `grad_accumulator` is sound again now that `reset()` always
       # writes it: the donated input has a matching output to alias onto. In the
