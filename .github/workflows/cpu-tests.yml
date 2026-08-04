@@ -79,6 +79,12 @@ jobs:
         run: |
           python -m pytest tests/models/flash_attention_cache_test.py -v --tb=short
 
+      - name: Compile gRPC Protobuf definitions
+        run: |
+          python -m pip install grpcio-tools
+          find tunix/experimental/distributed -name "*.proto" -exec \
+            python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. {} +
+
       - name: Run experimental tests
         run: |
           python -m pytest tests/experimental/ -v --tb=short
