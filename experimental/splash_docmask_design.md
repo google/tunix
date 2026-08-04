@@ -4,9 +4,64 @@ Companion to the runbook at the end of `reported_issue.md`. This file records
 *why* the design looks the way it does, including the two approaches that were
 measured and dropped and the one that was measured and found silently wrong.
 
-Status: harness landed, **end-to-end benefit not yet measured**. The production
-plumbing (threading the kernel through `model.py` / `common.py` / `algo_core.py`
-/ `rl_learner.py`) is deliberately NOT in this change — see "What is not here".
+Status: **FALSIFIED on TPU, 2026-08-03.** The design is both incorrect and
+slower than what it replaces. Do not ship it and do not run the A/B; the
+measurements that motivated it were taken against the wrong baseline. Details
+in "Why this does not work" below. Everything before that section is the
+original reasoning, kept because the mechanism it describes is real — it is the
+cost model that was wrong.
+
+The production plumbing was never landed, so nothing under `tunix/` is affected.
+
+## Why this does not work
+
+Measured on v4-8 through the real packer, one Qwen3 attention block, 4 rows x
+2048, block 256, `p20f_diag.py`:
+
+| arm | ms | vs today | correct? |
+|---|---|---|---|
+| `CausalMask` (today) | **2.327** | 1.000 | — |
+| `NumpyMask` holding the IDENTICAL causal mask | 3.136 | **1.347x** | bitwise identical |
+| `NumpyMask` holding the document mask | 3.017 | 1.296x | **DIFFERENT** |
+| document mask + padding segment (correct) | 3.329 | 1.431x | identical, but `grid_width` back to 8 |
+
+**Two independent failures.**
+
+**1. The mask is not a superset, because padding is a segment.** The packer's
+`segment_layout` lists the real segments only. Padding gets `segment_id = 0`,
+and splash's segment test is a bare `q_ids == kv_ids` with no special case for
+zero, so **pad attends pad** across the padding region's whole causal triangle.
+A row that is entirely padding — the packer emits them, e.g.
+`((700,650,600), (550,500,450,400), (350,300,250,200,150), ())` gives
+`row3: id0 x 2048` — is a full triangle that the union over layout rows does
+not cover. Measured: 1,063,936 uncovered pairs, 3,656,487 differing output
+elements in rows 2 and 3. Every earlier bitwise check used hand-built layouts
+whose rows were exactly full, so the padding segment never appeared.
+
+**2. The cost is the mask REPRESENTATION, not the mask content.** `CausalMask`
+subclasses `_ComputableMask`: it carries a `mask_function` and a `q_sequence`,
+and splash rebuilds the triangle **in-register**. `NumpyMask` is opaque, so
+every partial block becomes a 256x256 tile fetched from HBM. Swapping
+`CausalMask` for a `NumpyMask` with byte-identical content costs **1.347x** on
+its own. Halving `grid_width` claws back only part of that (1.296x), and once
+the padding segment is included to make it correct, `grid_width` returns to 8
+and the arm is a pure 1.431x loss.
+
+**The block-count model was measuring the wrong quantity.** It counted work
+blocks and ignored the per-block cost of the mask representation, so `0.861x`
+was never achievable. Any earlier A/B whose baseline was itself a `NumpyMask`
+compared 1.347x against 1.347x and reported a win that does not exist relative
+to production.
+
+**What would have to change for this to work.** The mask has to stay
+computable: a `_ComputableMask` subclass whose `mask_function(q_ids, kv_ids)`
+derives causal-and-same-segment from an encoded `q_sequence` (segment index in
+the high bits, position in the low bits), so no tile is ever fetched. The open
+problem is that splash's mask is shared across the batch while each packed row
+has a different layout, which is exactly why this version took a union — and a
+union is what makes `grid_width` degrade to the worst row. `ChunkedCausalMask`
+is the shape of the answer for equal-length documents; variable lengths are
+unsolved here.
 
 ## The problem
 

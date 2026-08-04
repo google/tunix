@@ -848,6 +848,29 @@ there is no baseline for this recipe; convergence is phase8's gate, on the new m
 
 # Runbook — gsm8k splash document-mask A/B (2026-08-03)
 
+> ## ⛔ 已证伪(2026-08-03,v4-8 实测)—— **不要跑下面这个 A/B**
+>
+> 这个设计**既不正确、也更慢**,两条独立的原因:
+>
+> 1. **不是超集**:padding 的 `segment_id` 是 0,而 splash 的段判据是裸的
+>    `q_ids == kv_ids`,**pad 会 attend pad**。`segment_layout` 只列真实段,
+>    整行 padding 的那些行(packer 确实会产出)完全没被覆盖 ⇒ 输出真的不同
+>    (3,656,487 个元素)。此前所有"逐位相同"都是拿**每行刚好装满**的手造布局验的,
+>    padding 段从未出现。
+> 2. **代价在 mask 的表示形式**:把 `CausalMask` 换成**内容完全相同**的
+>    `NumpyMask`,单这一项就慢 **1.347×** —— 前者是 `_ComputableMask`,splash
+>    在寄存器里现算三角;后者不透明,每个部分块都要从 HBM 搬 256×256 的 tile。
+>    `grid_width` 砍半只赚回一点(1.296×),补上 padding 段修正正确性后
+>    `grid_width` 退回 8,净亏 **1.431×**。
+>
+> `0.861×` 那个块计数模型**只数块、不算表示代价**,从来就达不到。
+> 证据:`p20f_diag.py`;完整分析见 `splash_docmask_design.md` 的
+> "Why this does not work"。
+>
+> 下面的操作步骤保留,只为将来有人做出**可计算 mask**(`_ComputableMask` 子类)
+> 版本时能复用这套 A/B 骨架。**现在跑它只会得到一个更慢且算错的臂。**
+
+
 ## 这是在测什么
 
 TPU 的 splash attention **按整行因果面积计费**:一行打包了 K 条序列,它仍按
