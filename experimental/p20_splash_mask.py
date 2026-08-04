@@ -139,17 +139,41 @@ def build_kernel(seq_len, layout, block, num_heads, head_shards=1,
 
 def kernel_for(example, seq_len, block, num_heads, head_shards=1,
                q_seq_shards=1):
-  """Kernel for this packed chunk, or None to leave splash on its causal mask."""
+  """Kernel for this packed chunk, or None to leave splash on its causal mask.
+
+  Routes to the COMPUTABLE mask (`build_segment_kernel`).  The earlier
+  `build_kernel` / `docmask` pair is kept below for reference but is no longer
+  reachable: it was falsified on TPU -- it did not cover the padding segment,
+  and NumpyMask made every partial block fetch a tile from HBM.
+
+  `seg_start` comes from `segment_ids`, not from the packer's `segment_layout`,
+  which is what makes padding correct for free: padding is simply another
+  segment, and segment_ids is the only place that records it.
+  """
   if not ENABLED:
     return None
-  layout = getattr(example, "segment_layout", None)
-  if not layout:
+  sid = getattr(example, "segment_ids", None)
+  if sid is None:
+    _skip("no segment_ids -- is sequence packing on?")
     return None
-  kernel = build_kernel(seq_len, layout, block, num_heads, head_shards,
-                        q_seq_shards)
+  kernel = build_segment_kernel(seq_len, np.asarray(sid), block, num_heads,
+                                head_shards, q_seq_shards)
   info = kernel.fwd_mask_info
   gw = int(np.asarray(info.data_next).shape[-1])
-  pb = int(np.asarray(info.partial_mask_blocks).shape[0])
+  # If the union did not shrink the grid at all there is nothing to win, and
+  # the mask still costs something: our mask_function does two integer
+  # div/mods per element where CausalMask does one compare, measured at 1.157x
+  # on a chunk whose block counts matched causal exactly. Fall back rather than
+  # pay for nothing. This happens when a row is wholly padding, which is one
+  # segment spanning the budget, dragging the union back to plain causal.
+  if gw >= seq_len // block:
+    _skip(f"union did not shrink the grid (grid_width={gw}); "
+          "falling back to the causal mask")
+    return None
+  # A computable mask fetches nothing; if this is ever non-None the routing has
+  # fallen back to the falsified NumpyMask path.
+  pb = (0 if info.partial_mask_blocks is None
+        else int(np.asarray(info.partial_mask_blocks).shape[0]))
   note_shapes(gw, pb)
   _note_attached(gw, pb)
   return kernel
