@@ -42,6 +42,8 @@ Off unless TUNIX_SPLASH_DOCMASK=1.
 
 import os
 
+from absl import logging
+
 import numpy as np
 from jax.experimental.pallas.ops.tpu.splash_attention import (
     splash_attention_kernel as splash,
@@ -54,6 +56,36 @@ from jax.experimental.pallas.ops.tpu.splash_attention import (
 ENABLED = os.getenv("TUNIX_SPLASH_DOCMASK", "") == "1"
 
 _seen: dict[tuple, int] = {}
+_attached = 0
+_skipped = 0
+
+
+def _skip(why: str) -> None:
+  """Count a no-op and say so the first few times.
+
+  ENABLED-but-doing-nothing is the failure mode this whole module has to make
+  impossible to miss: it costs nothing, changes no numbers, and looks exactly
+  like a real run that simply did not speed up.
+  """
+  global _skipped
+  _skipped += 1
+  if _skipped <= 3:
+    logging.warning("TUNIX_SPLASH_DOCMASK=1 but no kernel attached (%s). "
+                    "The document mask is NOT in effect.", why)
+
+
+def _note_attached(grid_width: int, partial_blocks: int) -> None:
+  global _attached
+  _attached += 1
+  if _attached <= 3 or _attached % 50 == 0:
+    logging.info("splash doc mask ACTIVE: chunk %d, grid_width=%d, "
+                 "partial_mask_blocks=%d, shapes seen so far=%s",
+                 _attached, grid_width, partial_blocks, sorted(_seen))
+
+
+def stats() -> dict:
+  """{'attached': n, 'skipped': n, 'shapes': {(gw, pb): chunks}}."""
+  return {"attached": _attached, "skipped": _skipped, "shapes": dict(_seen)}
 
 
 def docmask(seq_len: int, layout, block: int) -> np.ndarray:
@@ -116,8 +148,10 @@ def kernel_for(example, seq_len, block, num_heads, head_shards=1,
   kernel = build_kernel(seq_len, layout, block, num_heads, head_shards,
                         q_seq_shards)
   info = kernel.fwd_mask_info
-  note_shapes(np.asarray(info.data_next).shape[-1],
-              np.asarray(info.partial_mask_blocks).shape[0])
+  gw = int(np.asarray(info.data_next).shape[-1])
+  pb = int(np.asarray(info.partial_mask_blocks).shape[0])
+  note_shapes(gw, pb)
+  _note_attached(gw, pb)
   return kernel
 
 
@@ -136,6 +170,11 @@ def attach(example, seq_len=None, block=256, num_heads=None, head_shards=1,
            q_seq_shards=1):
   """Return `example` with its document-mask kernel attached, or unchanged.
 
+  `pack_sequences` yields a LIST of TrainExample per step, not a single one, so
+  a list is unwrapped elementwise.  Getting this wrong is silent -- a list has
+  no `segment_layout`, so an earlier version returned it untouched on every
+  step and the whole feature was a no-op with no error and no log line.
+
   Called on the host, after packing and before the jitted step, so the kernel's
   MaskInfo arrays reach the model as traced ARGUMENTS.  Building it inside the
   jit from a module-level global would instead bake the mask in as a trace-time
@@ -143,12 +182,21 @@ def attach(example, seq_len=None, block=256, num_heads=None, head_shards=1,
   """
   if not ENABLED:
     return example
+  if isinstance(example, (list, tuple)):
+    attached = [
+        attach(e, seq_len, block, num_heads, head_shards, q_seq_shards)
+        for e in example
+    ]
+    return type(example)(attached) if isinstance(example, tuple) else attached
   layout = getattr(example, "segment_layout", None)
   if not layout:
+    _skip("no segment_layout on %s -- is sequence packing on?"
+          % type(example).__name__)
     return example
   if seq_len is None:
     ids = getattr(example, "completion_ids", None)
     if ids is None:
+      _skip("no completion_ids, cannot infer seq_len")
       return example
     seq_len = int(ids.shape[-1])
   if num_heads is None:
@@ -161,4 +209,7 @@ def attach(example, seq_len=None, block=256, num_heads=None, head_shards=1,
         "TUNIX_SPLASH_NUM_HEADS) -- refusing to silently skip the doc mask")
   kernel = kernel_for(example, seq_len, block, num_heads, head_shards,
                       q_seq_shards)
-  return example if kernel is None else example.replace(splash_kernel=kernel)
+  if kernel is None:
+    _skip("kernel_for returned None")
+    return example
+  return example.replace(splash_kernel=kernel)

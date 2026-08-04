@@ -177,6 +177,34 @@ the scripts themselves would only mislead.
 | P20.4 G4 compile count: 3 same-shape → +1; 2 different-shape → +2 | ✅ |
 | P20.5 full route, both switch positions | ✅ CPU, `(gw, pb) = (3, 1)` |
 
+## The second bug: `attach` got a list, not an example
+
+`pack_sequences` is typed `-> Iterator[list[TrainExample]]`, and `_mark`
+returns `[merged.replace(...)]`. The learner therefore hands `attach` a LIST.
+The first version read `segment_layout` straight off it, got `None` from
+`getattr`, and returned it untouched -- **on every step of a full end-to-end
+run**, with no error and no log line. Attention time was unchanged, which looks
+exactly like an optimisation that simply did not help.
+
+The P20.5 route gate missed it because it fed a hand-built single
+`TrainExample` instead of the container the pipeline actually produces. Gates
+have to be built from the real structure, not a plausible stand-in.
+
+Two fixes, both in `p20_splash_mask.py`:
+
+* `attach` unwraps a list/tuple elementwise.
+* Doing nothing is now **loud**. Every no-op path calls `_skip(why)`, which
+  warns the first three times; every successful attach logs its `grid_width`
+  and `partial_mask_blocks`. `splash_mask.stats()` returns
+  `{'attached': n, 'skipped': n, 'shapes': {(gw, pb): chunks}}`.
+
+`p20d_gate_list.py` asserts on the real container and on the loud-failure
+behaviour, in both switch positions.
+
+**Read `shapes` before reading any timing.** If every entry is `(8, 1)` at
+budget 2048 then `grid_width` never shrank and no speed-up is possible --
+that is a property of the length distribution, not a bug.
+
 ## What is not here, and what is not known
 
 **Not in this change:** the production plumbing. Those edits exist only as the
