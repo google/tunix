@@ -7,7 +7,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential git python3 python3-pip && \
+    apt-get install -y build-essential git python3 python3-pip curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
@@ -25,17 +25,42 @@ RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
 RUN pip install wandb
+RUN pip install uv
 
 # Set the working directory
 WORKDIR /app
 
-# Copy the project files to the image
+# Copy scripts and requirements first to leverage Docker cache
+COPY scripts/install_tunix_vllm_requirement.sh scripts/
+COPY requirements/ requirements/
+
+RUN bash scripts/install_tunix_vllm_requirement.sh
+
+# Copy pyproject.toml and README.md to install dependencies first
+COPY pyproject.toml README.md /app/
+RUN mkdir /app/tunix && touch /app/tunix/__init__.py
+RUN uv pip install .
+
+# Install other third-party packages
+RUN pip install kubernetes
+RUN pip install gym swebench==3.0.2
+RUN pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
+RUN pip install --upgrade flax
+RUN pip install torchax
+RUN pip install aqtp tokamax
+RUN pip install git+https://github.com/google/maxtext.git
+
+# Copy the rest of the project files
 COPY . .
 
-# Install the project in editable mode
-RUN pip install -e .
+# Install the project in editable mode (without dependencies, as they are already installed)
+RUN pip install --no-deps -e .
 
-RUN bash /app/scripts/install_tunix_vllm_requirement.sh
+
+
+# Patch r2egym bugs
+RUN sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py
+RUN sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py
 
 # Set the default command to bash
 CMD ["bash"]
