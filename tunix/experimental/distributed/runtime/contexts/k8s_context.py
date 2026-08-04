@@ -77,7 +77,7 @@ class K8sJaxContext(context.JaxContext):
 
   def initialize(self) -> None:
     """Initializes Pathways or standard JAX distributed runtime based on environment."""
-    if "proxy" in os.environ.get("JAX_PLATFORMS") and os.environ.get(
+    if "proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get(
         "JAX_BACKEND_TARGET"
     ):
       logging.info("initializing Pathways runtime")
