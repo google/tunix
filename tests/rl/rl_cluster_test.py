@@ -239,6 +239,35 @@ class RlClusterTest(parameterized.TestCase):
 
     cfg = rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
+        critic_optimizer=None,
+        mini_batch_size=1,
+        train_micro_batch_size=1,
+        trajectory_mini_batch_size=8,
+        train_trajectory_micro_batch_size=2,
+        eval_every_n_steps=1,
+    )
+    self.assertEqual(cfg.gradient_accumulation_steps, 4)
+
+    with self.assertRaises(ValueError):
+      rl_cluster_lib.RLTrainingConfig(
+          actor_optimizer=optax.sgd(1e-3),
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          trajectory_mini_batch_size=8,
+          eval_every_n_steps=1,
+      )
+    with self.assertRaises(ValueError):
+      rl_cluster_lib.RLTrainingConfig(
+          actor_optimizer=optax.sgd(1e-3),
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          trajectory_mini_batch_size=8,
+          train_trajectory_micro_batch_size=3,
+          eval_every_n_steps=1,
+      )
+
+    cfg = rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
         eval_every_n_steps=1,
     )
     self.assertEqual(cfg.gradient_accumulation_steps, None)

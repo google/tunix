@@ -43,6 +43,7 @@ from tunix.rl import algo_core
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
@@ -238,6 +239,68 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self._mock_generate = functools.partial(
         _mock_generate, tokenizer=self.tokenizer
     )
+
+  def test_trajectory_microbatch_preserves_group_update(self):
+    example = {
+        "features": np.arange(16, dtype=np.float64).reshape(8, 2) / 8.0,
+        "targets": np.arange(8, dtype=np.float64) / 4.0,
+        "shared": np.array([11.0, 12.0, 13.0], dtype=np.float64),
+        "scalar": np.array(7.0, dtype=np.float64),
+    }
+    chunks = agentic_rl_learner._split_train_example_by_trajectory(
+        example,
+        total_trajectories=8,
+        trajectory_micro_batch_size=2,
+    )
+    self.assertLen(chunks, 4)
+    np.testing.assert_array_equal(
+        np.concatenate([chunk["features"] for chunk in chunks]),
+        example["features"],
+    )
+    np.testing.assert_array_equal(
+        np.concatenate([chunk["targets"] for chunk in chunks]),
+        example["targets"],
+    )
+    for chunk in chunks:
+      np.testing.assert_array_equal(chunk["shared"], example["shared"])
+      np.testing.assert_array_equal(chunk["scalar"], example["scalar"])
+
+    weights = np.array([0.25, -0.5], dtype=np.float64)
+
+    def gradient(batch):
+      residual = batch["features"] @ weights - batch["targets"]
+      return np.mean(2.0 * residual[:, None] * batch["features"], axis=0)
+
+    full_gradient = gradient(example)
+    accumulated_gradient = np.mean(
+        np.stack([gradient(chunk) for chunk in chunks]), axis=0
+    )
+    np.testing.assert_allclose(
+        accumulated_gradient, full_gradient, rtol=0.0, atol=1e-15
+    )
+    np.testing.assert_allclose(
+        weights - 2e-7 * accumulated_gradient,
+        weights - 2e-7 * full_gradient,
+        rtol=0.0,
+        atol=1e-15,
+    )
+
+    counter = 0
+    update_flags = []
+    for _ in chunks:
+      counter, is_update = agentic_rl_learner._advance_unpacked_microsteps(
+          counter, 1, 4
+      )
+      update_flags.append(is_update)
+    self.assertEqual(update_flags, [False, False, False, True])
+    with self.assertRaises(ValueError):
+      agentic_rl_learner._split_train_example_by_trajectory(
+          example,
+          total_trajectories=8,
+          trajectory_micro_batch_size=3,
+      )
+    with self.assertRaises(ValueError):
+      agentic_rl_learner._advance_unpacked_microsteps(0, 8, 4)
 
   def test_iterator(self):
     class _MockTrainer(agentic_grpo_learner.GRPOLearner):
@@ -1467,14 +1530,19 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_text": [
                 {"role": "assistant", "content": f"msg {index}"}
             ],
-            "conversation_tokens": np.array([1, 2, 3]),
+            # Token id 0 is also this test vocabulary's pad id.  The explicit
+            # masks must preserve it as a real prompt/completion token.
+            "conversation_tokens": np.array([1, 2, 0]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": (
                 np.full(3, 1.0, dtype=np.float32) if return_logprobs else None
             ),
             "policy_version": 0,
             "trajectory_reward": 1.0,
-            "prompt_tokens": np.array([4, 5]),
+            # Storage width is 6 but only the final two positions are real;
+            # the final real token deliberately equals pad id 0.
+            "prompt_tokens": np.array([0, 0, 0, 0, 5, 0]),
+            "prompt_length": 2,
             "original_input": {"prompts": "hello"},
             "group_id": "test_group",
         }
@@ -1490,9 +1558,26 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       results = learner._process_results(trajectories, expected_step=1)
       self.assertLen(results, 1)
       train_example = results[0]
+      expected_prompt_mask = np.zeros((2, 32), dtype=np.bool_)
+      expected_prompt_mask[:, -2:] = True
+      np.testing.assert_array_equal(
+          train_example.prompt_mask, expected_prompt_mask
+      )
+      np.testing.assert_array_equal(
+          train_example.completion_mask[:, :3],
+          np.ones((2, 3), dtype=np.bool_),
+      )
 
       if expect_get_actor_logps:
         mock_get_actor_logps.assert_called_once()
+        actor_kwargs = mock_get_actor_logps.call_args.kwargs
+        np.testing.assert_array_equal(
+            actor_kwargs["prompt_mask"], expected_prompt_mask
+        )
+        np.testing.assert_array_equal(
+            actor_kwargs["completion_mask"][:, :3],
+            np.ones((2, 3), dtype=np.bool_),
+        )
         self.assertIsNotNone(train_example.old_per_token_logps)
         # If get_actor_per_token_logps is called, logps should be all -1.0
         # as per the mock return value.

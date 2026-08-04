@@ -107,8 +107,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           text=[text],
           logits=[jnp.zeros_like(tokens)],
           tokens=[tokens],
-          left_padded_prompt_tokens=np.array([101]),
+          left_padded_prompt_tokens=np.array([[0, 0, 101]]),
           logprobs=[np.ones_like(tokens)],
+          prompt_lengths=np.array([1], dtype=np.int32),
       )
 
     # Configure mock model call
@@ -289,7 +290,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             {'role': 'assistant', 'content': 'response2'},
             {'role': 'user', 'content': 'obs2'},
         ],
-        'prompt_tokens': np.array([101]),
+        'prompt_tokens': np.array([0, 0, 101]),
+        'prompt_length': 1,
         'conversation_tokens': np.array(
             [201, 202, 301, 302, 203, 204]
         ),

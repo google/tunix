@@ -60,6 +60,7 @@ class _FakeLLMEngine:
     self._lock = threading.Lock()
     self.engine_core = _StubEngineCore()
     self.log_called = threading.Event()
+    self.reset_pending_snapshots: list[tuple[str, ...]] = []
 
   # The driver only exercises a subset of the LLMEngine surface.
   def add_request(self, request_id: str, *_, **__):
@@ -92,6 +93,11 @@ class _FakeLLMEngine:
 
   def abort_request(self, *_args, **_kwargs):
     pass
+
+  def reset_prefix_cache(self):
+    with self._lock:
+      self.reset_pending_snapshots.append(tuple(self._pending))
+    return True
 
   # Log stats API exercised by the driver's log thread.
   def do_log_stats(self):
@@ -304,6 +310,67 @@ class VllmDriverAsyncTest(absltest.TestCase):
           submission_timeout_s=-1.0,
           auto_start=False,
       )
+
+  def test_atomic_prefix_reset_waits_for_idle_before_queuing_scores(self):
+    engine = _FakeLLMEngine(["rollout", "score"])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+
+    rollout_future = driver.submit_request(
+        request_id="rollout",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    score_futures = []
+    submit_finished = threading.Event()
+
+    def submit_score_after_reset():
+      score_futures.extend(
+          driver.submit_requests_after_idle_prefix_cache_reset(
+              [{
+                  "request_id": "score",
+                  "prompt": {"prompt_token_ids": [1, 2]},
+                  "params": object(),
+              }],
+              timeout_s=5.0,
+          )
+      )
+      submit_finished.set()
+
+    submit_thread = threading.Thread(target=submit_score_after_reset)
+    submit_thread.start()
+    self.addCleanup(submit_thread.join, 5.0)
+    time.sleep(0.02)
+    self.assertFalse(submit_finished.is_set())
+    self.assertEmpty(engine.reset_pending_snapshots)
+
+    driver.start()
+    self.assertEqual(rollout_future.result(timeout=5.0).request_id, "rollout")
+    self.assertTrue(submit_finished.wait(timeout=5.0))
+    self.assertLen(score_futures, 1)
+    self.assertEqual(score_futures[0].result(timeout=5.0).request_id, "score")
+    self.assertEqual(engine.reset_pending_snapshots, [()])
+
+  def test_atomic_prefix_reset_times_out_if_driver_never_becomes_idle(self):
+    engine = _FakeLLMEngine(["rollout"])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+    driver.submit_request(
+        request_id="rollout",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    with self.assertRaises(TimeoutError):
+      driver.submit_requests_after_idle_prefix_cache_reset(
+          [{
+              "request_id": "score",
+              "prompt": {"prompt_token_ids": [1, 2]},
+              "params": object(),
+          }],
+          timeout_s=0.01,
+      )
+    self.assertEmpty(engine.reset_pending_snapshots)
 
 
 if __name__ == "__main__":

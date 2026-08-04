@@ -140,6 +140,21 @@ class CommonTest(parameterized.TestCase):
           segment_positions=None,
       )
 
+  def test_process_ids_explicit_mask_preserves_real_pad_id_token(self):
+    prompt_tokens = jnp.array([[0, 1]], dtype=jnp.int32)
+    completion_tokens = jnp.array([[2, 0]], dtype=jnp.int32)
+    ids, positions, _, input_seg_ids = common.process_ids(
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=7,
+        prompt_mask=jnp.array([[0, 1]], dtype=jnp.int32),
+        completion_mask=jnp.array([[1, 1]], dtype=jnp.int32),
+    )
+    np.testing.assert_array_equal(ids, [[0, 1, 2, 0]])
+    np.testing.assert_array_equal(input_seg_ids, [[0, 1, 1, 1]])
+    np.testing.assert_array_equal(positions, [[0, 0, 1, 2]])
+
   @parameterized.named_parameters(
       dict(
           testcase_name="normal",

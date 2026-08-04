@@ -845,6 +845,126 @@ class PeftTrainerTest(parameterized.TestCase):
         places=5,
     )  # (6+6)/(2+2)
 
+  def test_alignment_gate_only_returns_gradient_without_mutating_state(self):
+    """The post-JIT host gate cannot race an optimizer/accumulator mutation."""
+
+    def loss_fn(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.sum(logits), jnp.array(1.0, jnp.float32)
+          ),
+          aux_metrics={},
+      )
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn).with_loss_fn(loss_fn)
+
+    def copy_state(value):
+      return jax.tree.map(lambda x: np.asarray(x).copy(), nnx.state(value))
+
+    model_before = copy_state(trainer.model)
+    optimizer_before = copy_state(trainer.optimizer)
+    accumulator_before = copy_state(trainer.grad_accumulator)
+    with mock.patch.dict(
+        os.environ,
+        {
+            'CANON_ALIGNMENT_GATE': '1',
+            'CANON_ALIGNMENT_GATE_ONLY': '1',
+        },
+        clear=False,
+    ):
+      _, aux, grad_norm = trainer._train_step(
+          trainer.model,
+          trainer.optimizer,
+          trainer.grad_accumulator,
+          self.train_ds[0],
+          jnp.array(True),
+      )
+
+    self.assertEqual(int(aux['canon/optimizer_skipped']), 1)
+    self.assertGreater(float(grad_norm), 0.0)
+    for before, after in zip(
+        jax.tree_util.tree_leaves(model_before),
+        jax.tree_util.tree_leaves(copy_state(trainer.model)),
+    ):
+      np.testing.assert_array_equal(before, after)
+    for before, after in zip(
+        jax.tree_util.tree_leaves(optimizer_before),
+        jax.tree_util.tree_leaves(copy_state(trainer.optimizer)),
+    ):
+      np.testing.assert_array_equal(before, after)
+    for before, after in zip(
+        jax.tree_util.tree_leaves(accumulator_before),
+        jax.tree_util.tree_leaves(copy_state(trainer.grad_accumulator)),
+    ):
+      np.testing.assert_array_equal(before, after)
+
+  def test_alignment_gate_only_without_host_gate_is_rejected(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+    with mock.patch.dict(
+        os.environ,
+        {
+            'CANON_ALIGNMENT_GATE': '0',
+            'CANON_ALIGNMENT_GATE_ONLY': '1',
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(ValueError, 'requires CANON_ALIGNMENT_GATE=1'):
+        trainer._train_step(
+            trainer.model,
+            trainer.optimizer,
+            trainer.grad_accumulator,
+            self.train_ds[0],
+            jnp.array(True),
+        )
+
+  def test_alignment_update_canary_executes_optimizer(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    before = jax.tree.map(lambda x: np.asarray(x).copy(), nnx.state(trainer.model))
+    with mock.patch.dict(
+        os.environ,
+        {
+            'CANON_ALIGNMENT_GATE': '1',
+            'CANON_ALIGNMENT_GATE_ONLY': '0',
+            'CANON_ALIGNMENT_UPDATE_CANARY': '1',
+        },
+        clear=False,
+    ):
+      _, aux, grad_norm = trainer._train_step(
+          trainer.model,
+          trainer.optimizer,
+          trainer.grad_accumulator,
+          self.train_ds[0],
+          jnp.array(True),
+      )
+
+    self.assertEqual(int(aux['canon/optimizer_skipped']), 0)
+    self.assertGreater(float(grad_norm), 0.0)
+    after = jax.tree.map(lambda x: np.asarray(x).copy(), nnx.state(trainer.model))
+    self.assertTrue(any(
+        not np.array_equal(a, b)
+        for a, b in zip(
+            jax.tree_util.tree_leaves(before),
+            jax.tree_util.tree_leaves(after),
+        )
+    ))
+
   def test_injected_params(self):
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
