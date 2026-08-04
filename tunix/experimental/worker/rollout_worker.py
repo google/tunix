@@ -12,12 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Top-level RolloutWorker abstractions."""
+"""Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
-from typing import Any, AsyncIterator, Callable, Sequence
-
+import dataclasses
+from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
+import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.rollout import manager as manager_lib
+from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.worker import abstract_worker
+from tunix.rl.rollout import base_rollout
+
+
+@dataclasses.dataclass
+class RolloutConfig(base_rollout.RolloutConfig):
+  """Rollout configuration extending base RolloutConfig with sampler choice and registry options.
+
+  Attributes:
+    sampler_type: Type of sampler adapter to construct ("vanilla",
+      "legacy_vllm", "vllm").
+    env_name: Registered name of environment class in ENV_REGISTRY.
+    agent_name: Registered name of agent class in AGENT_REGISTRY.
+    env_config: Configuration dictionary passed to environment constructor.
+    agent_config: Configuration dictionary passed to agent constructor.
+  """
+
+  sampler_type: str = "vanilla"
+  env_name: str = ""
+  agent_name: str = ""
+  env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+  agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+TrajectoryOrError = Union[
+    trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
+]
+
+WorkerState = datatypes.WorkerState
 
 WorkerState = datatypes.WorkerState
 
@@ -25,12 +57,42 @@ WorkerState = datatypes.WorkerState
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
 
-  Encapsulates RolloutManager and executes concurrent episode loops.
+  Encapsulates RolloutManager and executes concurrent episode loops
+  locally on its remote CPU host.
   """
 
-  def __init__(self, worker_id: str, **kwargs):
-    del kwargs
+  def __init__(
+      self,
+      worker_id: str,
+      config: Optional[RolloutConfig] = None,
+      sampler: Optional[sampler_lib.Sampler] = None,
+      env_pool: Any = None,
+      agent_factory: Optional[Callable[[], Any]] = None,
+      max_concurrency: int = 64,
+      tokenizer: Any = None,
+      chat_parser: Any = None,
+  ):
+    super().__init__()
     self.worker_id = worker_id
+    self.config = config
+    if tokenizer is None or chat_parser is None:
+      raise ValueError(
+          "RolloutWorker requires valid tokenizer and chat_parser arguments"
+          " (none can be None)."
+      )
+    self.manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=sampler,
+        env_pool=env_pool,
+        agent_factory=agent_factory,
+        max_concurrency=max_concurrency,
+        tokenizer=tokenizer,
+        chat_parser=chat_parser,
+    )
+
+  @property
+  def sampler(self) -> Any:
+    return self.manager.sampler
 
   def get_worker_id(self) -> str:
     """Returns the unique worker ID."""
@@ -60,87 +122,108 @@ class RolloutWorker(abstract_worker.Worker):
 
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
+    self.manager.cancel_all()
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
-    raise NotImplementedError()
+    self.manager.pause_all()
+    return datatypes.Response()
 
   def resume(self) -> datatypes.Response:
-    raise NotImplementedError()
+    self.manager.resume_all()
+    return datatypes.Response()
+
+  def _infer_shapes(self) -> Any:
+    return None
+
+  def _compile_with_shapes(self, abstract_state: Any) -> None:
+    pass
 
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=self.state)
 
+  def _to_rollout_response(
+      self,
+      item: Any,
+      request_id: str = "",
+      prompt_tokens: np.ndarray | None = None,
+      policy_version: int = 0,
+  ) -> datatypes.RolloutResponse:
+    """Converts internal Trajectory or TrajectoryError to wire-safe RolloutResponse."""
+    if isinstance(item, datatypes.RolloutResponse):
+      return item
+    if isinstance(item, trajectory_lib.TrajectoryError):
+      return datatypes.RolloutResponse(
+          request_id=request_id
+          or getattr(item, "trajectory_id", "")
+          or getattr(item, "prompt_id", ""),
+          status="ERROR",
+          error=item.error_message,
+          prompt_tokens=(
+              prompt_tokens
+              if prompt_tokens is not None
+              else np.zeros(0, dtype=np.int32)
+          ),
+          policy_version=policy_version,
+      )
+    if isinstance(item, trajectory_lib.Trajectory):
+      req_id = request_id or getattr(item, "trajectory_id", "default")
+      return datatypes.RolloutResponse.from_trajectory(
+          request_id=req_id,
+          traj=item,
+          prompt_tokens=(
+              prompt_tokens
+              if prompt_tokens is not None
+              else np.zeros(0, dtype=np.int32)
+          ),
+          policy_version=policy_version,
+      )
+    return item
+
   async def generate(
       self,
-      requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
-      on_complete: Callable[[datatypes.RolloutResponse], None] | None = None,
-  ) -> datatypes.RolloutResponse | Sequence[datatypes.RolloutResponse]:
-    """Coroutine method for single or batched generate requests.
+      requests: (
+          datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest] | Any
+      ),
+      on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
+  ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse] | Any:
+    """Coroutine method for single or batched generate requests."""
+    cb = None
+    if on_complete is not None:
+      cb = lambda item: on_complete(self._to_rollout_response(item))
+    res = await self.manager.generate(requests, on_complete=cb)
+    if isinstance(res, (list, tuple)):
+      return [self._to_rollout_response(r) for r in res]
+    return self._to_rollout_response(res)
 
-    Args:
-      requests: A single RolloutRequest or a sequence of them to process.
-      on_complete: An optional callback invoked immediately as each individual
-        RolloutResponse is successfully generated. This allows the caller to
-        stream results asynchronously without waiting for the entire batch to
-        finish.
+  async def pop_next_completed(self) -> datatypes.RolloutResponse | Any:
+    """Pull-based stream: yields whichever trajectory finishes first out-of-order."""
+    res = await self.manager.pop_next_completed()
+    return self._to_rollout_response(res)
 
-    Returns:
-      A single RolloutResponse (if a single request was provided) or a sequence
-      of
-      completed RolloutResponses corresponding to the batch of requests.
-    """
-    raise NotImplementedError()
+  async def as_completed_stream(
+      self,
+  ) -> AsyncIterator[datatypes.RolloutResponse | Any]:
+    """Async stream yielding completed trajectories or errors strictly out-of-order."""
+    async for res in self.manager.as_completed_stream():
+      yield self._to_rollout_response(res)
 
-  async def pop_next_completed(self) -> datatypes.RolloutResponse:
-    """Pull-based stream: yields whichever trajectory finishes first out-of-order.
-
-    This provides an alternative to the `on_complete` callback for consumers
-    who prefer to actively await the next available trajectory from the worker.
-
-    Returns:
-      The next completed RolloutResponse.
-    """
-    raise NotImplementedError()
-
-  def as_completed_stream(self) -> AsyncIterator[datatypes.RolloutResponse]:
-    """Async stream yielding completed trajectories or errors strictly out-of-order.
-
-    Yields:
-      Completed RolloutResponse objects as they finish generation.
-    """
-    # Convert `datatypes.Trajectory` to a `RolloutResponse` using
-    # `datatypes.RolloutResponse.from_trajectory()` before yielding
-    raise NotImplementedError()
-
-  def prepare_weight_sync(self, metadata: Any) -> datatypes.Response:
-    """Prepares the worker for an upcoming weight synchronization step.
-
-    This is used to fence off state or pause ongoing execution to ensure
-    safe memory updates without race conditions.
-
-    Args:
-      metadata: Any metadata required to prepare the sync (e.g. sync IDs).
-    """
+  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Prepares the worker for an upcoming weight synchronization step."""
     self.state = WorkerState.SYNCING
-    del metadata
     try:
-      raise NotImplementedError()
+      return await self.manager.pre_weight_sync(sync_request, **kwargs)
     finally:
       self.state = WorkerState.READY
 
-  def sync_weights(self, metadata: Any) -> int:
-    """Synchronizes the worker's internal model weights.
-
-    Args:
-      metadata: Metadata locating the weights to sync (e.g. from Raiden).
-
-    Returns:
-      The version identifier (policy version) of the newly synced weights.
-    """
+  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Synchronizes the worker's internal model weights."""
     self.state = WorkerState.SYNCING
-    del metadata
     try:
-      raise NotImplementedError()
+      return await self.manager.weight_sync(sync_request, **kwargs)
     finally:
       self.state = WorkerState.READY
+
+  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Finalizes policy weight update and resumes workers."""
+    return await self.manager.post_weight_sync(sync_request, **kwargs)

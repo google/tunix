@@ -117,6 +117,10 @@ class LegacyVllmSamplerAdapterTest(absltest.TestCase):
           uninit.sample(base_sampler_lib.SamplingRequest(prompt="test"))
       )
 
+  def test_sample_none_requests_raises(self):
+    with self.assertRaises(ValueError):
+      asyncio.run(self.sampler_adapter.sample(None))
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -6,9 +6,10 @@ https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import enum
-from typing import Any, Final, Literal, get_args
+from typing import Any, Dict, Final, Literal, get_args
 
 import pydantic
 
@@ -422,3 +423,14 @@ class Trajectory(TrajectoryMetadata):
   def from_json_dict(cls, data: dict[str, Any]) -> Trajectory:
     """Deserializes a dictionary into a Trajectory object."""
     return cls.model_validate(data)
+
+
+@dataclasses.dataclass
+class TrajectoryError:
+  """Structured error payload returned over streams or futures when generation fails."""
+
+  trajectory_id: str
+  prompt_id: str
+  error_message: str
+  error_type: str = "RuntimeError"
+  metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)

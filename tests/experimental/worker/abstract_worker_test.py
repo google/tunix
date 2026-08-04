@@ -19,6 +19,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.worker import inference_worker
 from tunix.experimental.worker import rollout_worker
 from tunix.experimental.worker import trainer_worker
@@ -66,7 +67,11 @@ class AbstractWorkerTest(parameterized.TestCase):
           module_path=(
               "tunix.experimental.worker.rollout_worker.datatypes.Response"
           ),
-          kwargs=dict(worker_id="w2"),
+          kwargs=dict(
+              worker_id="w2",
+              tokenizer=mocks.MockTokenizer(),
+              chat_parser=mocks.MockChatParser(),
+          ),
       ),
       dict(
           testcase_name="trainer_worker",

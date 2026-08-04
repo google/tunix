@@ -37,10 +37,13 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
       server_id: str,
       tokenizer: Any = None,
       config: Any = None,
+      model_name: str = "",
+      **kwargs,
   ):
     self.server_id = server_id
     self.tokenizer = tokenizer
     self.config = config
+    self.model_name = model_name or kwargs.get("model", "")
     self.vllm_sampler = None
 
     if self.tokenizer is not None and self.config is not None:
@@ -51,6 +54,15 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
 
   def initialize(self) -> None:
     """Initializes vLLM sampler if needed."""
+    if self.tokenizer is None and self.model_name:
+      from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
+      from tunix.generate import vllm_sampler as tunix_vllm_sampler  # pylint: disable=g-import-not-at-top
+
+      self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+      self.config = tunix_vllm_sampler.VllmConfig(
+          engine_kwargs={"model": self.model_name}
+      )
+
     if (
         self.vllm_sampler is None
         and self.tokenizer is not None
@@ -115,6 +127,9 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
           f"LegacyVllmSamplerAdapter [{self.server_id}] vllm_sampler is not"
           " initialized."
       )
+
+    if sampling_requests is None:
+      raise ValueError("sampling_requests cannot be None.")
 
     if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
       requests: List[Any] = [sampling_requests]

@@ -133,6 +133,10 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
           )
       )
 
+  def test_sample_none_requests_raises(self):
+    with self.assertRaises(ValueError):
+      asyncio.run(self.vanilla_sampler.sample(None))
+
 
 if __name__ == "__main__":
   absltest.main()
