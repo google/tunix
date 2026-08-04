@@ -202,11 +202,15 @@ class RolloutManager:
   async def as_completed_stream(
       self,
   ) -> AsyncIterator[TrajectoryOrError]:
-    """Async generator yielding completed trajectories strictly out-of-order."""
-    # TODO(lancewang): Add termination condition to prevent hangs when stream
-    # is exhausted.
+    """Async generator yielding completed trajectories strictly out-of-order.
+
+    Yields:
+      Completed rollout trajectories or errors in out-of-order completion order.
+    """
     while True:
       yield await self.pop_next_completed()
+      if not self._active_tasks and self._completed_queue.empty():
+        break
 
   async def migrate_straggler(
       self,

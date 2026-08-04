@@ -150,6 +150,34 @@ class RolloutWorkerTest(parameterized.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_as_completed_stream_dynamic_termination(self):
+    """Verifies that as_completed_stream terminates cleanly when all tasks complete without hanging."""
+
+    async def _run_test():
+      req_a = datatypes.RolloutRequest(
+          prompt_id="term_A",
+          prompt="Task A",
+          generation_kwargs={"delay_seconds": 0.01, "force_finish": True},
+      )
+      req_b = datatypes.RolloutRequest(
+          prompt_id="term_B",
+          prompt="Task B",
+          generation_kwargs={"delay_seconds": 0.02, "force_finish": True},
+      )
+
+      _ = asyncio.create_task(
+          self.actor_handle.asubmit("generate", [req_a, req_b])
+      )
+
+      completed: List[str] = []
+      async for traj in self.service.as_completed_stream():
+        completed.append(traj.request_id)
+
+      self.assertLen(completed, 2)
+      self.assertCountEqual(completed, ["traj_term_A", "traj_term_B"])
+
+    asyncio.run(_run_test())
+
   def test_two_worker_orchestrator_coordination(self):
     """Verifies orchestrator coordinating 2 local rollout workers using open streams without webhooks."""
 

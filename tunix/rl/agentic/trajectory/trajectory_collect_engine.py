@@ -20,6 +20,7 @@ an LLM-based agent and an environment. It supports single and concurrent
 multi-pair trajectory collection.
 """
 import asyncio
+import inspect
 import json
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
@@ -503,22 +504,41 @@ class TrajectoryCollectEngine:
     )
     logging.debug("%s model_call starting", self._debug_prefix)
 
-    def _safe_model_call():
+    model_call_fn = self.model_call
+    is_async = inspect.iscoroutinefunction(model_call_fn) or (
+        hasattr(model_call_fn, "__call__")
+        and inspect.iscoroutinefunction(  # pytype: disable=not-supported-yet
+            getattr(model_call_fn, "__call__")
+        )
+    )
+    if is_async:
       try:
-        return self.model_call(
+        rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
             self.agent.chat_completions,
             self.env,
             max_generation_steps=max_generation_steps,
             **self.model_call_kwargs,
         )
       except Exception as e:
-        logging.exception("Caught exception inside model_call: %s", e)
+        logging.exception("Caught exception inside async model_call: %s", e)
         raise
+    else:
+      def _safe_model_call():
+        try:
+          return model_call_fn(
+              self.agent.chat_completions,
+              self.env,
+              max_generation_steps=max_generation_steps,
+              **self.model_call_kwargs,
+          )
+        except Exception as e:
+          logging.exception("Caught exception inside model_call: %s", e)
+          raise
 
-    rollout_output = await asyncio.get_event_loop().run_in_executor(
-        None,
-        _safe_model_call,
-    )
+      rollout_output = await asyncio.get_running_loop().run_in_executor(
+          None,
+          _safe_model_call,
+      )
     logging.debug("%s model_call done", self._debug_prefix)
 
     # Align trajectory prompt tokens with the rollout worker's actual
