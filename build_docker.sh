@@ -27,7 +27,7 @@ export DOCKER_BUILDKIT=1
 echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
 
 build_ai_image() {
-    COMMIT_HASH=$(git rev-parse --short HEAD)
+    COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     echo "Building Tunix Image at commit hash ${COMMIT_HASH}..."
 
     DOCKER_COMMAND="docker"
