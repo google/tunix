@@ -226,7 +226,26 @@ class MetricLoggerTest(absltest.TestCase):
           resume="must",
           id="12345",
           settings=mock_wandb.Settings.return_value,
+          config={
+              "tunix_version": mock.ANY,
+              "tunix_commit": mock.ANY,
+              "vllm_version": mock.ANY,
+              "vllm_commit": mock.ANY,
+          },
       )
+
+  def test_get_module_info(self):
+    """Tests environment fingerprinting module info extraction."""
+    ver, commit = metrics_logger._get_module_info(None)
+    self.assertEqual(ver, "not_installed")
+    self.assertEqual(commit, "not_installed")
+
+    dummy_module = mock.Mock()
+    dummy_module.__version__ = "0.4.0+dev.deadbeef"
+    del dummy_module.__file__
+    ver, commit = metrics_logger._get_module_info(dummy_module)
+    self.assertEqual(ver, "0.4.0+dev.deadbeef")
+    self.assertEqual(commit, "deadbeef")
 
 
 if __name__ == "__main__":
