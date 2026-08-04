@@ -75,8 +75,9 @@ import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
 
-# For OSS usage
-# import tensorflow_datasets.text.gsm8k
+# Register the OSS builder before ``tfds.data_source('gsm8k')``.  Without this
+# import the exact local image reports DatasetNotFoundError.
+import tensorflow_datasets.text.gsm8k  # noqa: F401
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -128,6 +129,7 @@ from tunix.models.qwen3 import model as qwen3_model_lib
 from tunix.models.qwen3 import params as qwen3_params_lib
 from tunix.oss import utils as oss_utils
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import alignment as alignment_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
@@ -142,8 +144,13 @@ arg_parser = argparse.ArgumentParser(
 arg_parser.add_argument("--batch_size", type=int, default=4)
 arg_parser.add_argument("--mini_batch_size", type=int, default=2)
 arg_parser.add_argument("--train_micro_batch_size", type=int, default=1)
+arg_parser.add_argument(
+    "--train_trajectory_micro_batch_size", type=int, default=None
+)
 arg_parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--max_steps", type=int, default=200)
+arg_parser.add_argument("--num_generations", type=int, default=8)
+arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=1024)
 arg_parser.add_argument("--max_concurrency", type=int, default=None)
 arg_parser.add_argument("--mesh_fsdp", type=int, default=None)
@@ -155,7 +162,22 @@ arg_parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
 arg_parser.add_argument(
     "--rollout_vllm_max_num_batched_tokens", type=int, default=None
 )
+arg_parser.add_argument(
+    "--wandb_project", type=str, default="zero-tim-gsm8k-v5p"
+)
+arg_parser.add_argument("--wandb_run_name", type=str, default="")
 args, _ = arg_parser.parse_known_args()
+
+CANON_GSM8K_L3 = os.getenv("CANON_GSM8K_L3", "") == "1"
+CANON_GSM8K_TRAIN = os.getenv("CANON_GSM8K_TRAIN", "") == "1"
+CANON_GSM8K_UPDATE_CANARY = (
+    os.getenv("CANON_GSM8K_UPDATE_CANARY", "") == "1"
+)
+if CANON_GSM8K_L3 and CANON_GSM8K_TRAIN:
+  raise ValueError("CANON_GSM8K_L3 and CANON_GSM8K_TRAIN are mutually exclusive")
+if CANON_GSM8K_UPDATE_CANARY and not CANON_GSM8K_L3:
+  raise ValueError("CANON_GSM8K_UPDATE_CANARY requires CANON_GSM8K_L3")
+CANON_GSM8K_ACTIVE = CANON_GSM8K_L3 or CANON_GSM8K_TRAIN
 
 
 # ====== Recipe Defaults ======
@@ -164,19 +186,25 @@ MODEL_ID = f"Qwen/{MODEL_NAME}"
 SEED = 42
 
 NUM_PROMPTS_PER_STEP = args.batch_size
-NUM_GENERATIONS = 8
+NUM_GENERATIONS = args.num_generations
 MINI_BATCH_SIZE = args.mini_batch_size
 TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
+TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = args.train_trajectory_micro_batch_size
+TRAJECTORY_MINI_BATCH_SIZE = (
+    None
+    if TRAIN_TRAJECTORY_MICRO_BATCH_SIZE is None
+    else MINI_BATCH_SIZE * NUM_GENERATIONS
+)
 COMPUTE_LOGPS_MICRO_BATCH_SIZE = args.compute_logps_micro_batch_size
 
-MAX_STEPS = args.max_steps
+MAX_STEPS = 1 if CANON_GSM8K_L3 else args.max_steps
 NUM_EPOCHS = 1000
 EVAL_EVERY_N_STEPS = 50
 EVAL_BATCH_SIZE = 128
-EVAL_AT_START = True
-EVAL_AT_END = True
+EVAL_AT_START = not CANON_GSM8K_ACTIVE
+EVAL_AT_END = not CANON_GSM8K_ACTIVE
 
-BETA = 0.04
+BETA = 0.0 if CANON_GSM8K_L3 else 0.04
 EPSILON = 0.2
 # NeMo's reference_policy_kl_type="k2" is exactly 0.5 * (logp-ref_logp)^2,
 # which matches Tunix's "mse_kl" implementation.
@@ -190,14 +218,14 @@ MAX_GRAD_NORM = 1.0
 WARMUP_STEPS = 50
 LR_DECAY_STEPS = 500
 
-MAX_PROMPT_LENGTH = 1024
+MAX_PROMPT_LENGTH = args.max_prompt_length
 MAX_RESPONSE_LENGTH = args.max_response_length
 MAX_TOTAL_SEQUENCE_LENGTH = 1024
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256
 
 TRAIN_TEMPERATURE = 1.0
 TRAIN_TOP_P = 1.0
-TRAIN_TOP_K = None
+TRAIN_TOP_K = 0 if CANON_GSM8K_ACTIVE else None
 EVAL_TEMPERATURE = 0.0
 EVAL_TOP_P = 1.0
 EVAL_TOP_K = 1
@@ -214,14 +242,19 @@ ENABLE_REMAT = False
 ENABLE_FLASH_ATTENTION = True
 MODEL_DTYPE = jnp.bfloat16
 
-ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_vtc")
+ARTIFACT_ROOT = os.getenv(
+    "GSM8K_ARTIFACT_ROOT",
+    os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_vtc"),
+)
 TFDS_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data")
 MODEL_DOWNLOAD_DIR = os.path.join(ARTIFACT_ROOT, "models")
 INTERMEDIATE_CKPT_DIR = os.path.join(ARTIFACT_ROOT, "intermediate_ckpt")
 CHECKPOINT_ROOT = os.path.join(
     ARTIFACT_ROOT, "checkpoints", str(int(time.time()))
 )
-TB_LOG_DIR = os.path.join(ARTIFACT_ROOT, "logs")
+TB_LOG_DIR = os.getenv(
+    "GSM8K_LOG_DIR", os.path.join(ARTIFACT_ROOT, "logs")
+)
 
 for path in [
     TFDS_DATA_DIR,
@@ -480,6 +513,10 @@ class VTCRawTextParser:
         parts.append(content)
     return "\n".join(parts)
 
+  def update_assistant_end_tokens(self, tokens):
+    """Raw text has no extra assistant terminator; preserve tokens exactly."""
+    return tokens, 0
+
 
 class VTCGRPOLearner(GRPOLearner):
   """Demo-local learner that normalizes TFDS string payloads to Python str."""
@@ -499,7 +536,18 @@ def ensure_model_downloaded() -> None:
       for filename in os.listdir(MODEL_DOWNLOAD_DIR)
   ):
     os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
-    oss_utils.hf_pipeline(MODEL_ID, MODEL_DOWNLOAD_DIR)
+    if CANON_GSM8K_ACTIVE:
+      # The public checkpoint must not trigger the legacy interactive
+      # ``hf_pipeline`` login inside a bounded, unattended release gate.
+      from huggingface_hub import snapshot_download
+
+      snapshot_download(
+          repo_id=MODEL_ID,
+          local_dir=MODEL_DOWNLOAD_DIR,
+          token=False,
+      )
+    else:
+      oss_utils.hf_pipeline(MODEL_ID, MODEL_DOWNLOAD_DIR)
 
 
 def maybe_apply_lora(model: nnx.Module, mesh: Mesh) -> nnx.Module:
@@ -566,24 +614,38 @@ wandb_config.update({
     "num_generations": NUM_GENERATIONS,
     "kl_loss_mode": KL_LOSS_MODE,
     "train_temperature": TRAIN_TEMPERATURE,
+    "canonical_gsm8k_train": CANON_GSM8K_TRAIN,
+    "max_prompt_length": MAX_PROMPT_LENGTH,
+    "max_response_length": MAX_RESPONSE_LENGTH,
 })
-metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir=TB_LOG_DIR,
-    project_name="tunix-gsm8k-vtc",
-    flush_every_n_steps=1,
-    backend_kwargs={"wandb": {"config": wandb_config}},
-)
+metrics_logging_options = None
+if not CANON_GSM8K_L3:
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+      log_dir=TB_LOG_DIR,
+      project_name=args.wandb_project,
+      run_name=args.wandb_run_name,
+      flush_every_n_steps=1,
+      backend_kwargs={"wandb": {"config": wandb_config}},
+  )
 
 
 def create_optimizer() -> optax.GradientTransformation:
+  if CANON_GSM8K_UPDATE_CANARY:
+    # The production schedule intentionally starts warmup at LR=0.  A one-step
+    # update canary would therefore call the optimizer without changing any
+    # weight.  Use the recipe's registered peak LR as a default-off diagnostic
+    # constant so the canary tests a real update rather than a no-op.
+    learning_rate = optax.constant_schedule(LEARNING_RATE)
+  else:
+    learning_rate = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=LEARNING_RATE,
+        warmup_steps=WARMUP_STEPS,
+        decay_steps=LR_DECAY_STEPS,
+        end_value=0.0,
+    )
   optimizer = optax.adamw(
-      learning_rate=optax.warmup_cosine_decay_schedule(
-          init_value=0.0,
-          peak_value=LEARNING_RATE,
-          warmup_steps=WARMUP_STEPS,
-          decay_steps=LR_DECAY_STEPS,
-          end_value=0.0,
-      ),
+      learning_rate=learning_rate,
       b1=ADAM_B1,
       b2=ADAM_B2,
       eps=ADAM_EPS,
@@ -620,7 +682,7 @@ def main() -> None:
 
   # ====== Tokenizer / Model ======
   tokenizer = AutoTokenizer.from_pretrained(
-      MODEL_ID,
+      MODEL_DOWNLOAD_DIR if CANON_GSM8K_ACTIVE else MODEL_ID,
       token=os.getenv("HF_TOKEN"),
       trust_remote_code=True,
   )
@@ -659,8 +721,76 @@ def main() -> None:
       if args.rollout_vllm_max_num_batched_tokens is not None
       else (vllm_max_num_seqs * KV_CACHE_SIZE) // 8
   )
+  if CANON_GSM8K_ACTIVE:
+    expected_gate_only = (
+        "0" if CANON_GSM8K_UPDATE_CANARY or CANON_GSM8K_TRAIN else "1"
+    )
+    expected_update_canary = "1" if CANON_GSM8K_UPDATE_CANARY else "0"
+    expected_train = "1" if CANON_GSM8K_TRAIN else "0"
+    expected_grad_probe = "1" if CANON_GSM8K_L3 else "0"
+    required = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": expected_gate_only,
+        "CANON_ALIGNMENT_UPDATE_CANARY": expected_update_canary,
+        "CANON_ALIGNMENT_TRAIN": expected_train,
+        "CANON_ENGINE_MODULE_C": "1",
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+        "CANON_LOGPROB_M": "256",
+        "MIN_TOKEN_BUCKET": "256",
+        "CANON_GSM8K_GRAD_PROBE": expected_grad_probe,
+    }
+    wrong = {
+        key: os.getenv(key)
+        for key, expected in required.items()
+        if os.getenv(key) != expected
+    }
+    if wrong:
+      raise ValueError(f"canonical GSM8K environment mismatch: {wrong}")
+    if CANON_GSM8K_UPDATE_CANARY and ENABLE_CHECKPOINTING:
+      raise ValueError("update canary must not persist a checkpoint")
+    if os.getenv("CANON_PALLAS_LOGSOFTMAX") not in ("0", "1"):
+      raise ValueError("CANON_PALLAS_LOGSOFTMAX=0/1 must select the causal arm")
+    if CANON_GSM8K_L3:
+      if NUM_PROMPTS_PER_STEP != 1 or NUM_GENERATIONS != 2:
+        raise ValueError(
+            "canonical GSM8K L3 requires one prompt and two generations"
+        )
+      if (
+          MAX_STEPS != 1
+          or MAX_PROMPT_LENGTH != 256
+          or MAX_RESPONSE_LENGTH != 64
+      ):
+        raise ValueError(
+            "canonical GSM8K L3 requires one step, prompt cap 256 and "
+            "response cap 64"
+        )
+      vllm_max_num_seqs = 2
+    else:
+      if os.getenv("CANON_GSM8K_GRAD_PROBE", "") == "1":
+        raise ValueError("real GSM8K training forbids diagnostic advantages")
+      if MAX_PROMPT_LENGTH != 1024 or MAX_RESPONSE_LENGTH != 1024:
+        raise ValueError("real GSM8K training requires prompt/response 1024/1024")
+      if SHARED_MESH_SHAPE != (1, 4):
+        raise ValueError("real GSM8K training requires fsdp=1,tp=4")
+      if BETA != 0.04:
+        raise ValueError("real GSM8K training requires reference beta=0.04")
+      if os.getenv("CANON_PALLAS_LOGSOFTMAX") != "1":
+        raise ValueError("real GSM8K training requires canonical log-softmax")
+      expected_num_seqs = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+      if vllm_max_num_seqs != expected_num_seqs:
+        raise ValueError(
+            "real GSM8K training requires max_num_seqs == batch*generations; "
+            f"got {vllm_max_num_seqs} vs {expected_num_seqs}"
+        )
+      if vllm_max_batched_tokens != 256:
+        raise ValueError("real GSM8K training requires all-M max batched tokens 256")
+    vllm_max_batched_tokens = 256
   vllm_rollout_dict = {
-      "rollout_vllm_model_version": MODEL_ID,
+      "rollout_vllm_model_version": (
+          MODEL_DOWNLOAD_DIR if CANON_GSM8K_ACTIVE else MODEL_ID
+      ),
       "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
       "rollout_vllm_server_mode": True,
       "rollout_vllm_async_scheduling": False,
@@ -710,6 +840,10 @@ def main() -> None:
           max_inflight_computations=1,
           mini_batch_size=MINI_BATCH_SIZE,
           train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+          trajectory_mini_batch_size=TRAJECTORY_MINI_BATCH_SIZE,
+          train_trajectory_micro_batch_size=(
+              TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
+          ),
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
@@ -723,6 +857,15 @@ def main() -> None:
       },
   )
 
+  canonical_grpo = (
+      {
+          "sampler_is": "token",
+          "sampler_is_threshold": 2.0,
+          "force_compute_kl": False,
+      }
+      if CANON_GSM8K_ACTIVE
+      else {}
+  )
   grpo_config = GRPOConfig(
       num_generations=NUM_GENERATIONS,
       num_iterations=1,
@@ -732,12 +875,21 @@ def main() -> None:
       epsilon_high=EPSILON,
       advantage_estimator="grpo",
       degenerate_group_masking=False,
-      use_rollout_logps=False,
+      use_rollout_logps=CANON_GSM8K_ACTIVE,
       system_prompt="",
       max_response_length=MAX_RESPONSE_LENGTH,
       max_concurrency=MAX_CONCURRENCY,
       loss_agg_mode="sequence-mean-token-mean",
+      **canonical_grpo,
   )
+  if CANON_GSM8K_L3:
+    if grpo_config.beta != 0.0 or grpo_config.force_compute_kl:
+      raise RuntimeError("canonical GSM8K L3 must not execute reference KL")
+    print(
+        "[CANON_GSM8K_L3] reference_kl_skipped "
+        "beta=0.0 force_compute_kl=0",
+        flush=True,
+    )
 
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=actor,
@@ -746,6 +898,10 @@ def main() -> None:
       cluster_config=cluster_config,
   )
   show_hbm_usage("after RLCluster creation")
+  if CANON_GSM8K_ACTIVE:
+    contract = rl_cluster.rollout.canonical_engine_contract_attestation()
+    marker = "CANON_GSM8K_TRAIN" if CANON_GSM8K_TRAIN else "CANON_GSM8K_L3"
+    print(f"[{marker}] engine contract admitted: {contract}", flush=True)
 
   # ====== Trainer ======
   grpo_trainer = VTCGRPOLearner(
@@ -768,9 +924,17 @@ def main() -> None:
           "num_generations": NUM_GENERATIONS,
           "mini_batch_size": MINI_BATCH_SIZE,
           "train_micro_batch_size": TRAIN_MICRO_BATCH_SIZE,
+          "trajectory_mini_batch_size": TRAJECTORY_MINI_BATCH_SIZE,
+          "train_trajectory_micro_batch_size": (
+              TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
+          ),
           "compute_logps_micro_batch_size": COMPUTE_LOGPS_MICRO_BATCH_SIZE,
           "max_steps": MAX_STEPS,
+          "max_prompt_length": MAX_PROMPT_LENGTH,
           "max_response_length": MAX_RESPONSE_LENGTH,
+          "reference_beta": BETA,
+          "wandb_project": args.wandb_project,
+          "wandb_run_name": args.wandb_run_name,
           "max_concurrency": MAX_CONCURRENCY,
           "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
           "rollout_vllm_max_num_seqs": vllm_max_num_seqs,
@@ -780,7 +944,35 @@ def main() -> None:
 
   # ====== Training ======
   try:
-    grpo_trainer.train(train_dataset, eval_dataset=eval_dataset)
+    grpo_trainer.train(
+        train_dataset,
+        eval_dataset=None if CANON_GSM8K_ACTIVE else eval_dataset,
+    )
+    if CANON_GSM8K_L3:
+      if CANON_GSM8K_UPDATE_CANARY:
+        print(
+            "[CANON_GSM8K_UPDATE] ONE_STEP_CANARY_PASS "
+            "checkpoint_written=0 convergence_claim=0",
+            flush=True,
+        )
+      else:
+        print("[CANON_GSM8K_L3] FULL_GATE_PASS", flush=True)
+      # Both bounded modes are ephemeral. Avoid blocking forever in vLLM
+      # thread teardown after their durable report and PASS marker exist.
+      os._exit(0)
+    if CANON_GSM8K_TRAIN:
+      print(
+          f"[CANON_GSM8K_TRAIN] TRAINING_DONE max_steps={MAX_STEPS}",
+          flush=True,
+      )
+  except alignment_lib.AlignmentGateError as exc:
+    if CANON_GSM8K_L3:
+      print(f"[CANON_GSM8K_L3] expected_gate_exit {exc}", flush=True)
+      os._exit(3)
+    if CANON_GSM8K_TRAIN:
+      print(f"[CANON_GSM8K_TRAIN] alignment_gate_exit {exc}", flush=True)
+    rl_cluster.close()
+    raise
   except Exception:
     rl_cluster.close()
     raise

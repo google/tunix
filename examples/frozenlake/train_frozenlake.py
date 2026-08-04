@@ -177,6 +177,19 @@ SEED = args.seed
 # else:
 ROLLOUT_MESH_SHAPE = (2, jax.device_count()//2)
 TRAINER_MESH_SHAPE = (jax.device_count(), 1)
+# P22.L3 alignment-arm overrides (frozenlake_ladder_plan.md L3), env-gated and DEFAULT-OFF:
+# the stock recipe puts the rollout on tp=2 and the trainer on tp=1, a régime where the 4-way
+# all-reduce phenomenon F4 fixes cannot occur -- a green stock run validates nothing about the
+# alignment work.  L3 needs BOTH sides on the same (1, 4) pure-TP mesh and the rollout token
+# budget pinned to the 256 bucket.  Unset ⇒ byte-identical stock behaviour.
+_fl_rm = os.getenv("FL_ROLLOUT_MESH")     # e.g. "1,4"
+_fl_tm = os.getenv("FL_TRAINER_MESH")     # e.g. "1,4"
+if _fl_rm:
+  ROLLOUT_MESH_SHAPE = tuple(int(x) for x in _fl_rm.split(","))
+  print(f"[P22.L3] ROLLOUT_MESH_SHAPE override -> {ROLLOUT_MESH_SHAPE}", flush=True)
+if _fl_tm:
+  TRAINER_MESH_SHAPE = tuple(int(x) for x in _fl_tm.split(","))
+  print(f"[P22.L3] TRAINER_MESH_SHAPE override -> {TRAINER_MESH_SHAPE}", flush=True)
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
@@ -193,6 +206,13 @@ NUM_GENERATIONS = args.num_generations
 # trainer needs at peak (logits + activations + optimizer state).
 VLLM_MAX_NUM_SEQS = 32
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
+# P22.L3: pin the rollout's per-forward token budget to the aligned bucket (all-M-256).
+# Stock is 8192; the alignment gates only hold when EVERY forward fits one 256 bucket.
+# Unset ⇒ stock.  (Known cost, pre-declared in the ladder plan: ~32x more prefill chunks.)
+_fl_mbt = os.getenv("FL_MAX_BATCHED_TOKENS")
+if _fl_mbt:
+  VLLM_MAX_BATCHED_TOKENS = int(_fl_mbt)
+  print(f"[P22.L3] VLLM_MAX_BATCHED_TOKENS override -> {VLLM_MAX_BATCHED_TOKENS}", flush=True)
 
 NUM_ITERATIONS = 1
 BETA = args.beta

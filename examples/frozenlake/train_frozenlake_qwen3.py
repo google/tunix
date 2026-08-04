@@ -48,8 +48,20 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
-from examples.frozenlake.agent import FrozenLakeAgent
-from examples.frozenlake.env import FrozenLakeEnv
+# The A1b/A2 contract and A3 adapter preflights exit before constructing the
+# learner and intentionally have no FrozenLake environment dependency.  Keep
+# the normal path's eager imports unchanged so a real L3 run still fails
+# immediately when its environment package is absent.
+_CANON_PRELEARNER_ONLY = (
+    os.getenv("CANON_L3_CONTRACT_ONLY", "") == "1"
+    or os.getenv("CANON_L3_A3_ONLY", "") == "1"
+)
+if not _CANON_PRELEARNER_ONLY:
+  from examples.frozenlake.agent import FrozenLakeAgent
+  from examples.frozenlake.env import FrozenLakeEnv
+else:
+  FrozenLakeAgent = None
+  FrozenLakeEnv = None
 
 _DISTRIBUTED_INITIALIZED = False
 try:
@@ -138,6 +150,16 @@ arg_parser.add_argument(
 )
 args, _ = arg_parser.parse_known_args()
 
+CANON_L3 = os.getenv("CANON_FROZENLAKE_L3", "") == "1"
+CANON_CONTRACT_ONLY = os.getenv("CANON_L3_CONTRACT_ONLY", "") == "1"
+CANON_A3_ONLY = os.getenv("CANON_L3_A3_ONLY", "") == "1"
+if CANON_CONTRACT_ONLY and CANON_A3_ONLY:
+  raise ValueError("contract-only and A3-only modes are mutually exclusive")
+if (CANON_CONTRACT_ONLY or CANON_A3_ONLY) and not CANON_L3:
+  raise ValueError(
+      "canonical prelearner modes require CANON_FROZENLAKE_L3=1"
+  )
+
 TRAIN_FRACTION = 1.0
 SEED = args.seed
 
@@ -162,7 +184,9 @@ NUM_GENERATIONS = args.num_generations
 # shared trainer+rollout mesh that KV-cache pool consumes HBM that the
 # trainer needs at peak (logits + activations + optimizer state).
 VLLM_MAX_NUM_SEQS = 64
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
+VLLM_MAX_BATCHED_TOKENS = (
+    256 if CANON_L3 else VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
+)
 
 NUM_ITERATIONS = 1
 BETA = args.beta
@@ -194,7 +218,14 @@ NUM_TEST_BATCHES = 2
 
 EVAL_EVERY_N_STEPS = 10
 NUM_EPOCHS = 3
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+# P21.3 L3 is a one-batch, no-update release gate, not a convergence run.
+# Keeping this decision inside the default-off L3 branch prevents the three
+# dataset epochs from silently producing three alignment records.
+MAX_STEPS = (
+    1
+    if CANON_L3
+    else int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+)
 
 MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
@@ -224,11 +255,47 @@ MAX_TO_KEEP = 1
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
+if CANON_L3:
+  required_l3_env = {
+      "CANON_ALIGNMENT_GATE": "1",
+      "CANON_ALIGNMENT_GATE_ONLY": "1",
+      "CANON_ENGINE_MODULE_C": "1",
+      "CANON_RPA_VJP2": "1",
+      "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+  }
+  bad_l3_env = {
+      key: os.getenv(key)
+      for key, expected in required_l3_env.items()
+      if os.getenv(key) != expected
+  }
+  if bad_l3_env:
+    raise ValueError(
+        "canonical FrozenLake L3 environment is incomplete: "
+        f"{bad_l3_env}"
+    )
+  if ROLLOUT_ENGINE != "vllm":
+    raise ValueError("canonical FrozenLake L3 requires ROLLOUT_ENGINE=vllm")
+  # The adapter maps the outer training batch with ``jax.lax.map`` and invokes
+  # the real engine ``model_fn`` once per sequence.  VJP2's static sequence
+  # capacity therefore describes one model_fn call, not the outer batch size.
+  expected_vjp2_max_seqs = 1
+  if os.getenv("CANON_VJP2_MAX_SEQS") != str(expected_vjp2_max_seqs):
+    raise ValueError(
+        "canonical FrozenLake L3 maps the outer batch one sequence per "
+        "engine model_fn call and requires CANON_VJP2_MAX_SEQS=1: "
+        f"expected {expected_vjp2_max_seqs}, got "
+        f"{os.getenv('CANON_VJP2_MAX_SEQS')!r}"
+    )
+  if os.getenv("CANON_PALLAS_LOGSOFTMAX") not in ("0", "1"):
+    raise ValueError(
+        "canonical FrozenLake L3 requires an explicit "
+        "CANON_PALLAS_LOGSOFTMAX=0/1 causal arm"
+    )
 
 # ====== Paths ======
 MODEL_VERSION = "Qwen/Qwen3-8B"
-MODEL_DOWNLOAD_DIR = "/tmp/models/Qwen3-8B"
-DATA_DIR = "/tmp/data/frozenlake"
+MODEL_DOWNLOAD_DIR = os.getenv("MODEL_DOWNLOAD_DIR", "/tmp/models/Qwen3-8B")
+DATA_DIR = os.getenv("FROZENLAKE_DATA_DIR", "/tmp/data/frozenlake")
 
 # Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
 CKPT_DIR = None
@@ -302,23 +369,29 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 # before producing an action.
 chat_parser = parser.QwenChatTemplateParser(tokenizer, enable_thinking=False)
 
-train_dataset, test_dataset = create_datasets()
-train_dataset, val_dataset = data_lib.post_init_dataset(
-    train_dataset,
-    tokenizer,
-    batch_size=BATCH_SIZE,
-    num_batches=NUM_BATCHES,
-    max_prompt_length=MAX_PROMPT_LENGTH,
-    fraction=TRAIN_FRACTION,
-    num_epochs=NUM_EPOCHS,
-)
-test_dataset, _ = data_lib.post_init_dataset(
-    test_dataset,
-    tokenizer,
-    batch_size=BATCH_SIZE,
-    num_batches=NUM_TEST_BATCHES,
-    max_prompt_length=MAX_PROMPT_LENGTH,
-)
+if CANON_CONTRACT_ONLY or CANON_A3_ONLY:
+  # A1b/A2 inventory needs the real model and rollout runner, not an RL batch.
+  # Skipping dataset I/O keeps this preflight independent of FrozenLake data.
+  train_dataset = test_dataset = None
+  print("[CANON_L3] contract-only: dataset I/O skipped", flush=True)
+else:
+  train_dataset, test_dataset = create_datasets()
+  train_dataset, val_dataset = data_lib.post_init_dataset(
+      train_dataset,
+      tokenizer,
+      batch_size=BATCH_SIZE,
+      num_batches=NUM_BATCHES,
+      max_prompt_length=MAX_PROMPT_LENGTH,
+      fraction=TRAIN_FRACTION,
+      num_epochs=NUM_EPOCHS,
+  )
+  test_dataset, _ = data_lib.post_init_dataset(
+      test_dataset,
+      tokenizer,
+      batch_size=BATCH_SIZE,
+      num_batches=NUM_TEST_BATCHES,
+      max_prompt_length=MAX_PROMPT_LENGTH,
+  )
 
 show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
@@ -371,12 +444,14 @@ wandb_config.update({
     "model_id": MODEL_VERSION,
     "mesh_shape": SHARED_MESH_SHAPE,
 })
-metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir=TB_LOG_DIR,
-    project_name="tunix-frozenlake",
-    flush_every_n_steps=1,
-    backend_kwargs={"wandb": {"config": wandb_config}},
-)
+metrics_logging_options = None
+if not (CANON_L3 or CANON_CONTRACT_ONLY or CANON_A3_ONLY):
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+      log_dir=TB_LOG_DIR,
+      project_name="tunix-frozenlake",
+      flush_every_n_steps=1,
+      backend_kwargs={"wandb": {"config": wandb_config}},
+  )
 
 optimizer = optax.adamw(
     learning_rate=LEARNING_RATE,
@@ -414,6 +489,9 @@ vllm_rollout_dict = {
     # offloaded to host RAM during train_step.
     "rollout_vllm_hbm_utilization": 0.20,
     "rollout_vllm_tpu_backend_type": "jax",
+    # AgenticRLLearner requires the in-process continuous-batching driver.
+    # Canonical C accesses that driver's live model runner through the same
+    # VllmSampler._model_runner contract as batch-inference mode.
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
     # disable it under engine-disagg so each rollout completes before the next
@@ -468,8 +546,11 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # dominant allocation on small TPU slices) at the cost of more
         # micro-step launches per optimizer update. It does NOT change the
         # effective optimizer batch size or training dynamics.
-        train_micro_batch_size=4,
-        compute_logps_micro_batch_size=4,
+        # Keep the execution micro-batch tied to the requested mini-batch.
+        # Stock/release remains 4; the default-off C0 compile discriminator
+        # sets both to 1 so one legal two-generation GRPO pair is one JIT call.
+        train_micro_batch_size=MINI_BATCH_SIZE,
+        compute_logps_micro_batch_size=MINI_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -499,6 +580,7 @@ grpo_config = GRPOConfig(
     # importance ratios.
     sampler_is="token",
     sampler_is_threshold=2.0,
+    use_rollout_logps=True,
     advantage_estimator=args.advantage_estimator,
 )
 
@@ -509,6 +591,22 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 show_hbm_usage("after RLCluster creation")
+if CANON_L3:
+  contract = rl_cluster.rollout.canonical_engine_contract_attestation()
+  print(f"[CANON_L3] engine contract admitted: {contract}", flush=True)
+  if CANON_CONTRACT_ONLY:
+    print("[CANON_L3] CONTRACT_ONLY_PASS", flush=True)
+    raise SystemExit(0)
+  if CANON_A3_ONLY:
+    import p21_l30_a3_gate
+
+    p21_l30_a3_gate.run(
+        actor=qwen_actor,
+        tokenizer=tokenizer,
+        temperature=TEMPERATURE,
+    )
+    print("[CANON_L3] A3_ONLY_PASS", flush=True)
+    raise SystemExit(0)
 
 
 _metric_call_idx = 0
@@ -553,4 +651,11 @@ show_hbm_usage("after GRPOLearner creation")
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
 # trajectory_reward → solve rate) separately from train metrics.
-grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+grpo_trainer.train(
+    train_dataset,
+    # P21.3's gate-only trainer rejects evaluation so a second batch cannot
+    # consume or reorder the pending host sidecar.
+    eval_dataset=None if CANON_L3 else test_dataset,
+)
+if CANON_L3:
+  print("[CANON_L3] FULL_GATE_PASS", flush=True)
