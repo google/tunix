@@ -47,6 +47,9 @@ class SamplerOutput:
 
   logprobs: Optional[list[list[float]]]
 
+  # Number of real prompt tokens before left padding, one per prompt.
+  prompt_lengths: Optional[np.ndarray] = None
+
 
 class BaseSampler(ABC):
   """Base class for samplers."""

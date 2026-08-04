@@ -76,6 +76,7 @@ class VLLMInProcessDriver:
       raise ValueError("submission_timeout_s must be >= 0.")
 
     self._engine_lock = threading.Lock()
+    self._idle_condition = threading.Condition(self._engine_lock)
     self._work_event = threading.Event()
     self._stop_event = threading.Event()
     self._loop_thread: Optional[threading.Thread] = None
@@ -193,6 +194,75 @@ class VLLMInProcessDriver:
         self._work_event.set()
     return futures
 
+  def submit_requests_after_idle_prefix_cache_reset(
+      self,
+      requests: Sequence[QueuedRequest],
+      *,
+      timeout_s: float = 300.0,
+  ) -> list[RequestFuture]:
+    """Waits for driver idle, resets prefix cache, then queues requests atomically.
+
+    Canonical prefill scoring must start from an empty prefix cache.  A separate
+    ``reset_prefix_cache_when_idle`` call leaves a race between the reset and the
+    following submission when continuous-batching producers are active.  This
+    operation closes that race by performing the idle transition, reset, and
+    request enqueue while holding the driver's engine lock.
+
+    Args:
+      requests: Requests to enqueue immediately after the cache reset.
+      timeout_s: Maximum time to wait for requests already in flight to finish.
+
+    Returns:
+      Futures corresponding to ``requests`` in input order.
+
+    Raises:
+      TimeoutError: If the driver does not become idle before ``timeout_s``.
+      RuntimeError: If the driver stops or its loop has already failed.
+      ValueError: If ``timeout_s`` is not positive or a request id is duplicated.
+    """
+    if timeout_s <= 0:
+      raise ValueError("timeout_s must be positive.")
+
+    deadline = time.perf_counter() + timeout_s
+    futures: list[RequestFuture] = []
+    with self._idle_condition:
+      while (
+          self._pending
+          or self._submission_queue
+          or self._llm_engine.has_unfinished_requests()
+      ):
+        if self._last_error is not None:
+          raise RuntimeError("vLLM in-process driver loop failed.") from self._last_error
+        if self._stop_event.is_set():
+          raise RuntimeError("vLLM in-process driver stopped while waiting for idle.")
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+          raise TimeoutError(
+              "timed out waiting for the in-process driver to become idle "
+              "before resetting prefix cache"
+          )
+        self._idle_condition.wait(timeout=remaining)
+
+      if self._last_error is not None:
+        raise RuntimeError("vLLM in-process driver loop failed.") from self._last_error
+      self._llm_engine.reset_prefix_cache()
+      for request in requests:
+        futures.append(
+            self._queue_request_locked(
+                request_id=request["request_id"],
+                prompt=request["prompt"],
+                params=request["params"],
+                arrival_time=request.get("arrival_time"),
+                lora_request=request.get("lora_request"),
+                tokenization_kwargs=request.get("tokenization_kwargs"),
+                trace_headers=request.get("trace_headers"),
+                priority=request.get("priority", 0),
+            )
+        )
+      if futures:
+        self._work_event.set()
+    return futures
+
   def _queue_request_locked(
       self,
       *,
@@ -278,19 +348,35 @@ class VLLMInProcessDriver:
       self._stop_event.wait(self._log_stats_interval_s)
 
   def cancel(self, request_id: str) -> None:
-    with self._engine_lock:
+    with self._idle_condition:
       future = self._pending.pop(request_id, None)
       if future is not None and not future.done():
         future.cancel()
       self._llm_engine.abort_request([request_id])
       if not self._llm_engine.has_unfinished_requests():
         self._work_event.clear()
+      self._idle_condition.notify_all()
+
+  def reset_prefix_cache_when_idle(self) -> bool:
+    """Resets prefix cache only when no driver request can race the reset."""
+    with self._engine_lock:
+      if (
+          self._pending
+          or self._submission_queue
+          or self._llm_engine.has_unfinished_requests()
+      ):
+        raise RuntimeError(
+            "cannot reset prefix cache while the in-process driver has "
+            "pending requests"
+        )
+      return self._llm_engine.reset_prefix_cache()
 
   def shutdown(self) -> None:
     self.stop()
-    with self._engine_lock:
+    with self._idle_condition:
       pending = list(self._pending.values())
       self._pending.clear()
+      self._idle_condition.notify_all()
     for future in pending:
       if not future.done():
         future.set_exception(RuntimeError("Driver shut down."))
@@ -300,6 +386,8 @@ class VLLMInProcessDriver:
   def stop(self) -> None:
     self._stop_event.set()
     self._work_event.set()
+    with self._idle_condition:
+      self._idle_condition.notify_all()
     if self._loop_thread is not None:
       self._loop_thread.join()
       self._loop_thread = None
@@ -375,8 +463,9 @@ class VLLMInProcessDriver:
       if callback is not None:
         callback(output)
       return
-    with self._engine_lock:
+    with self._idle_condition:
       future = self._pending.pop(output.request_id, None)
+      self._idle_condition.notify_all()
     if future is None or future.done():
       return
     logging.debug(
@@ -387,9 +476,10 @@ class VLLMInProcessDriver:
   def _record_error(self, exc: Exception) -> None:
     logging.debug("VLLMInProcessDriver encountered an error: %s", exc)
     self._last_error = exc
-    with self._engine_lock:
+    with self._idle_condition:
       pending = list(self._pending.values())
       self._pending.clear()
+      self._idle_condition.notify_all()
     for future in pending:
       if not future.done():
         future.set_exception(exc)

@@ -394,6 +394,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       prompts: List[TokensPrompt],
       sampling_params: Union[SamplingParams, BeamSearchParams],
+      *,
+      reset_prefix_cache: bool = False,
+      reset_timeout_s: float = 300.0,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -411,7 +414,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           "params": params,
       })
 
-    futures = self._driver.submit_requests(requests)
+    if reset_prefix_cache:
+      futures = self._driver.submit_requests_after_idle_prefix_cache_reset(
+          requests, timeout_s=reset_timeout_s
+      )
+    else:
+      futures = self._driver.submit_requests(requests)
 
     outputs: List[RequestOutput] = []
     for future in futures:
@@ -422,6 +430,40 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         )
       outputs.append(result)
     return outputs
+
+  def reset_prefix_cache_when_idle(self) -> bool:
+    """Resets prefix cache without racing the continuous-batching driver."""
+    if self.llm is not None:
+      return self.llm.reset_prefix_cache()
+    if self._driver is not None:
+      return self._driver.reset_prefix_cache_when_idle()
+    raise RuntimeError("vLLM engine is not initialized.")
+
+  def generate_request_outputs(
+      self,
+      prompts: List[TokensPrompt],
+      sampling_params: Union[SamplingParams, BeamSearchParams],
+      *,
+      reset_prefix_cache: bool = False,
+      reset_timeout_s: float = 300.0,
+  ) -> List[RequestOutput]:
+    """Runs pre-tokenized requests through either supported in-process mode."""
+    if self._driver is not None:
+      return self._generate_server_mode(
+          prompts,
+          sampling_params,
+          reset_prefix_cache=reset_prefix_cache,
+          reset_timeout_s=reset_timeout_s,
+      )
+    if self.llm is not None:
+      if reset_prefix_cache:
+        self.llm.reset_prefix_cache()
+      return self.llm.generate(
+          prompts=prompts,
+          sampling_params=sampling_params,
+          use_tqdm=False,
+      )
+    raise RuntimeError("vLLM engine is not initialized.")
 
   def __call__(
       self,
@@ -567,4 +609,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs[0] if self.config.return_logprobs else None,
+        prompt_lengths=np.asarray(
+            [len(prompt_id) for prompt_id in prompt_ids], dtype=np.int32
+        ),
     )
