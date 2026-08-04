@@ -15,6 +15,7 @@
 """Algorithm core implementations for RL and Agentic RL learners."""
 
 import functools
+import os
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -194,6 +195,8 @@ def ppo_policy_loss_fn(
       segment_ids=getattr(train_example, "segment_ids", None),
       segment_positions=getattr(train_example, "segment_positions", None),
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+      prompt_mask=getattr(train_example, "prompt_mask", None),
+      completion_mask=completion_mask,
   )
   if return_entropy:
     per_token_logps, token_entropy = outputs
@@ -419,6 +422,9 @@ def grpo_loss_fn(
       segment_positions=getattr(train_example, "segment_positions", None),
       temperature=algo_config.temperature,
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+      canonical_actor=True,
+      prompt_mask=getattr(train_example, "prompt_mask", None),
+      completion_mask=completion_mask,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
@@ -547,6 +553,12 @@ def grpo_loss_fn(
       "advantage/min": adv_min,
       "advantage/nonzero_frac": nonzero_adv_frac,
   }
+  # P21.3 L3 gate: expose the exact logprobs returned by the real
+  # value_and_grad primal.  This is default-off and is consumed only by the
+  # host-side alignment sidecar after the compiled call.  Do not substitute a
+  # standalone forward here: that would miss the third-program boundary.
+  if os.environ.get("CANON_ALIGNMENT_GATE", "") == "1":
+    aux["canon/T_current"] = per_token_logps
   if sampler_is_weights is not None:
     sis = sampler_is_weights.astype(jnp.float32)
     aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)

@@ -30,6 +30,7 @@ The data flow is designed around an asynchronous producer-consumer pattern:
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
@@ -38,6 +39,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algo_core  # pylint: disable=unused-import
+from tunix.rl import alignment
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
 from tunix.rl import function_registry
@@ -56,6 +58,30 @@ RewardFn = agentic_rl_learner.RewardFn
 MetricFn = agentic_rl_learner.MetricFn
 
 TrainExample = agentic_rl_learner.TrainExample
+
+
+def _canonical_gsm8k_gate_advantages(advantages: Any) -> np.ndarray:
+  """Return the registered nonzero cotangent for the two-rollout gate."""
+  original = np.asarray(advantages, dtype=np.float32)
+  if original.shape != (2,) or not np.array_equal(
+      original, np.zeros(2, dtype=np.float32)
+  ):
+    raise alignment.AlignmentGateError(
+        "GSM8K gradient probe expected deterministic degenerate advantages, "
+        f"got {original.tolist()}"
+    )
+  return np.asarray([-1.0, 1.0], dtype=np.float32)
+
+
+def _canonical_frozenlake_c0_advantages(advantages: Any) -> np.ndarray:
+  """Return the registered nonzero cotangent for the C0 GRPO pair."""
+  original = np.asarray(advantages, dtype=np.float32)
+  if original.shape != (2,) or not np.isfinite(original).all():
+    raise alignment.AlignmentGateError(
+        "FrozenLake C0 gradient probe requires two finite advantages, "
+        f"got shape={original.shape} values={original.tolist()}"
+    )
+  return np.asarray([-1.0, 1.0], dtype=np.float32)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -327,6 +353,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # Extract completions and tokens from the group of G results.
     completion_texts: List[str] = []
     prompt_tokens_list: List[np.ndarray] = []
+    prompt_lengths_list: List[int | None] = []
     completion_tokens_list: List[np.ndarray] = []
     completion_masks_list: List[np.ndarray] = []
     old_logprobs_list: List[np.ndarray] = []
@@ -349,6 +376,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
       completion_texts.append(assistant_text)
       prompt_tokens_list.append(item.traj.get("prompt_tokens"))
+      prompt_lengths_list.append(item.traj.get("prompt_length"))
       completion_tokens_list.append(item.traj.get("conversation_tokens"))
       completion_masks_list.append(item.traj.get("conversation_masks"))
       old_logprobs_list.append(item.traj.get("old_logprobs"))
@@ -369,14 +397,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       rollout_config = rollout_config[mode]
 
     padded_prompt_ids = []
+    padded_prompt_masks = []
     padded_completion_ids = []
     padded_completion_masks = []
     padded_old_logprobs = []
 
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
-    for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
+    for (
+        prompt_tokens,
+        prompt_length,
+        completion_tokens,
+        completion_mask,
+        old_logprobs,
+    ) in zip(
         prompt_tokens_list,
+        prompt_lengths_list,
         completion_tokens_list,
         completion_masks_list,
         old_logprobs_list,
@@ -399,6 +435,27 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           )
       )
       padded_prompt_ids.append(padded_prompt)
+      if prompt_length is None:
+        # Legacy rollout engines do not expose exact pre-padding length.
+        prompt_valid = np.asarray(prompt_tokens) != pad_value
+      else:
+        prompt_length = int(prompt_length)
+        if prompt_length < 0 or prompt_length > len(prompt_tokens):
+          raise ValueError(
+              f"invalid prompt length {prompt_length} for width {len(prompt_tokens)}"
+          )
+        prompt_valid = agentic_utils.left_pad(
+            np.ones(prompt_length, dtype=np.int32),
+            len(prompt_tokens),
+            0,
+        )
+      padded_prompt_masks.append(
+          agentic_utils.left_pad(
+              prompt_valid,
+              rollout_config.max_prompt_length,
+              0,
+          )
+      )
       padded_completion_ids.append(padded_completion[:max_response_length])
       padded_completion_masks.append(
           agentic_utils.right_pad(completion_mask, max_response_length, 0)[
@@ -421,7 +478,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           )
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
-    prompt_mask = prompt_ids != pad_value
+    prompt_mask = jnp.asarray(padded_prompt_masks, dtype=jnp.bool_)
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
     logging.debug(
@@ -459,6 +516,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            prompt_mask=prompt_mask,
+            completion_mask=completion_mask,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -479,6 +538,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+          prompt_mask=prompt_mask,
+          completion_mask=completion_mask,
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -513,6 +574,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            prompt_mask=prompt_mask,
+            completion_mask=completion_mask,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
@@ -558,6 +621,64 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
       advantages = advantage_estimator(
           rewards=rewards, num_generations=self.algo_config.num_generations
+      )
+
+    # The bounded GSM8K numerical gate must exercise a real backward program.
+    # Its deterministic two rollouts currently both receive reward zero, so
+    # ordinary GRPO produces [0, 0] advantages and XLA can DCE the entire
+    # gradient path.  In gate-only mode, inject a fixed zero-mean cotangent to
+    # test the exact same rollout tokens/logprobs without mutating the model.
+    # The separately authorized update canary reuses the same cotangent solely
+    # to prove optimizer/update plumbing; it is not a GSM8K learning claim.
+    gsm8k_grad_probe = os.environ.get("CANON_GSM8K_GRAD_PROBE", "") == "1"
+    frozenlake_c0_grad_probe = (
+        os.environ.get("CANON_FROZENLAKE_GRAD_PROBE", "") == "1"
+    )
+    frozenlake_c0 = os.environ.get("CANON_FROZENLAKE_C0", "") == "1"
+    if frozenlake_c0_grad_probe != frozenlake_c0:
+      raise alignment.AlignmentGateError(
+          "CANON_FROZENLAKE_C0 and CANON_FROZENLAKE_GRAD_PROBE must be "
+          "enabled or disabled together"
+      )
+    if gsm8k_grad_probe and frozenlake_c0_grad_probe:
+      raise alignment.AlignmentGateError(
+          "GSM8K and FrozenLake diagnostic cotangents are mutually exclusive"
+      )
+    if gsm8k_grad_probe:
+      if not alignment.enabled():
+        raise alignment.AlignmentGateError(
+            "CANON_GSM8K_GRAD_PROBE requires the alignment gate"
+        )
+      mode = alignment.execution_mode()
+      original_advantages = np.asarray(advantages, dtype=np.float32)
+      advantages = _canonical_gsm8k_gate_advantages(original_advantages)
+      if mode == "gate-only":
+        # Keep the frozen release-gate marker stable.
+        logging.info(
+            "[CANON_GSM8K_L3] diagnostic_advantages original=%s "
+            "injected=%s gate_only=1",
+            original_advantages.tolist(),
+            advantages.tolist(),
+        )
+      else:
+        logging.info(
+            "[CANON_GSM8K_UPDATE] diagnostic_advantages original=%s "
+            "injected=%s mode=update-canary",
+            original_advantages.tolist(),
+            advantages.tolist(),
+        )
+    elif frozenlake_c0_grad_probe:
+      if not alignment.enabled() or alignment.execution_mode() != "gate-only":
+        raise alignment.AlignmentGateError(
+            "CANON_FROZENLAKE_GRAD_PROBE requires alignment gate-only mode"
+        )
+      original_advantages = np.asarray(advantages, dtype=np.float32)
+      advantages = _canonical_frozenlake_c0_advantages(original_advantages)
+      logging.info(
+          "[CANON_FROZENLAKE_C0] diagnostic_advantages original=%s "
+          "injected=%s gate_only=1",
+          original_advantages.tolist(),
+          advantages.tolist(),
       )
 
     logging.debug("Advantages computed: %s", advantages)
@@ -763,6 +884,46 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
     )
+    if alignment.enabled():
+      if not self.algo_config.use_rollout_logps:
+        raise alignment.AlignmentGateError(
+            "FrozenLake alignment requires use_rollout_logps=True"
+        )
+      if self.algo_config.sampler_is != "token":
+        raise alignment.AlignmentGateError(
+            "FrozenLake alignment requires sampler_is='token' to preserve w and r"
+        )
+      if rollout_per_token_logps is None or trainer_per_token_logps is None:
+        raise alignment.AlignmentGateError(
+            "alignment batch is missing S_decode or trainer T_old"
+        )
+      rescore_source = self.rl_cluster.rollout.get_prefill_rescore_logps
+      s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+          prompt_ids,
+          completion_ids,
+          completion_lengths=np.asarray(raw_completion_lengths, dtype=np.int32),
+      )
+      rollout_config = self.rl_cluster.get_rollout_config(
+          mode=rl_cluster_lib.Mode.TRAIN
+      )
+      combined_batch = alignment.wrap_train_example(
+          combined_batch,
+          s_decode=rollout_per_token_logps,
+          s_prefill=s_prefill,
+          t_old=trainer_per_token_logps,
+          action_mask=completion_mask,
+          tokens=completion_ids,
+          policy_version=policy_versions,
+          temperature=rollout_config.temperature,
+          top_k=rollout_config.top_k,
+          top_p=rollout_config.top_p,
+          s_prefill_source=rescore_source,
+      )
+      logging.info(
+          "[CANON_ALIGN] attached host sidecar rows=%d completion_width=%d",
+          completion_ids.shape[0],
+          completion_ids.shape[1],
+      )
     return [combined_batch]
 
 

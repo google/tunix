@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import functools
+import os
 import time
 from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
@@ -543,11 +544,54 @@ class PeftTrainer:
     def skip_updates(model, optimizer, grad_accumulator):
       return jnp.array(0.0, dtype=jnp.float32)
 
+    # P21.3 L3 gate-only mode must return the real value_and_grad primal and a
+    # live gradient to the host gate without changing params OR the gradient
+    # accumulator.  The host comparison necessarily happens after this
+    # compiled call, so skipping only the optimizer would not be sufficient.
+    canon_alignment = os.environ.get("CANON_ALIGNMENT_GATE", "") == "1"
+    canon_gate_only_requested = (
+        os.environ.get("CANON_ALIGNMENT_GATE_ONLY", "") == "1"
+    )
+    canon_update_canary_requested = (
+        os.environ.get("CANON_ALIGNMENT_UPDATE_CANARY", "") == "1"
+    )
+    canon_train_requested = (
+        os.environ.get("CANON_ALIGNMENT_TRAIN", "") == "1"
+    )
+    if canon_gate_only_requested and not canon_alignment:
+      raise ValueError(
+          "CANON_ALIGNMENT_GATE_ONLY=1 requires CANON_ALIGNMENT_GATE=1; "
+          "refusing to skip an optimizer update without the host gate"
+      )
+    if canon_update_canary_requested and not canon_alignment:
+      raise ValueError(
+          "CANON_ALIGNMENT_UPDATE_CANARY=1 requires CANON_ALIGNMENT_GATE=1; "
+          "refusing an unattested diagnostic optimizer update"
+      )
+    if canon_train_requested and not canon_alignment:
+      raise ValueError(
+          "CANON_ALIGNMENT_TRAIN=1 requires CANON_ALIGNMENT_GATE=1; "
+          "refusing unattested training updates"
+      )
+    if canon_alignment and sum((
+        canon_gate_only_requested,
+        canon_update_canary_requested,
+        canon_train_requested,
+    )) != 1:
+      raise ValueError(
+          "alignment mode requires exactly one of CANON_ALIGNMENT_GATE_ONLY=1, "
+          "CANON_ALIGNMENT_UPDATE_CANARY=1, or CANON_ALIGNMENT_TRAIN=1"
+      )
+    canon_gate_only = canon_alignment and canon_gate_only_requested
+    if canon_gate_only:
+      grad_norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
+      )
     # At depth 1 the accumulator is a no-op and the cond predicate is always
     # True, so update directly from `grads` (no per-leaf accumulator writes,
     # no XLA Conditional, accumulator shardings untouched); sequence packing
     # keeps the cond path since its cadence comes from `is_update_step`.
-    if (
+    elif (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
         and self.config.max_seq_token_per_tpu is None
     ):
@@ -578,6 +622,11 @@ class PeftTrainer:
       )
 
     if isinstance(aux, utils.LossOutput):
+      if canon_alignment:
+        aux.aux_metrics["canon/gradient_norm"] = grad_norm
+        aux.aux_metrics["canon/optimizer_skipped"] = jnp.asarray(
+            canon_gate_only, dtype=jnp.int32
+        )
       # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
       return loss_val, aux.aux_metrics, grad_norm
     elif self._has_aux:
@@ -1027,6 +1076,20 @@ class PeftTrainer:
 
         if is_update_step_val:
           self._train_steps += 1
+          if os.environ.get("CANON_ALIGNMENT_TRAIN", "") == "1":
+            print(
+                "[CANON_GSM8K_TRAIN] update_step_committed "
+                f"train_steps={self._train_steps}",
+                flush=True,
+            )
+          if (
+              os.environ.get("CANON_ALIGNMENT_UPDATE_CANARY", "") == "1"
+          ):
+            print(
+                "[CANON_GSM8K_UPDATE] update_step_committed "
+                f"train_steps={self._train_steps}",
+                flush=True,
+            )
           self._write_train_metrics()
 
           # Checkpoint frequency is configured by checkpointing_options.

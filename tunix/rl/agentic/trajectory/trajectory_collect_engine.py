@@ -258,6 +258,7 @@ class TrajectoryCollectEngine:
       # flatten all steps into single batch dict
       conversation_tokens, conversation_masks, logprobs = [], [], []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
+      prompt_length = getattr(self.agent.trajectory, "prompt_length", None)
 
       for step in self.agent.trajectory.steps:
         # Keep tokens/masks/logprobs appended in lockstep. A step with
@@ -315,6 +316,7 @@ class TrajectoryCollectEngine:
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
+          "prompt_length": prompt_length,
           "conversation_tokens": conversation_tokens,
           "conversation_masks": final_masks,
           "status": self.agent.trajectory.status.name,
@@ -529,6 +531,16 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
           rollout_output.left_padded_prompt_tokens[0]
       )
+      if rollout_output.prompt_lengths is not None:
+        prompt_lengths = np.asarray(rollout_output.prompt_lengths)
+        if prompt_lengths.shape != (1,):
+          raise ValueError(
+              "agentic model call expected one prompt length, got "
+              f"{prompt_lengths.shape}"
+          )
+        self.agent.trajectory.prompt_length = int(  # pyrefly: ignore[missing-attribute]
+            prompt_lengths[0]
+        )
 
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])

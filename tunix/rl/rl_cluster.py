@@ -95,6 +95,12 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     train_micro_batch_size: The micro-batch size used for gradient accumulation
       at training time. `train_micro_batch_size` must be divisible by
       `mini_batch_size`.
+    trajectory_mini_batch_size: Optional mini-batch size measured in completed
+      trajectories instead of prompts.  This is useful for grouped-policy
+      methods where one prompt expands to multiple generations.
+    train_trajectory_micro_batch_size: Optional compiled train-step batch size
+      measured in trajectories.  When set, gradient accumulation is derived
+      from `trajectory_mini_batch_size` instead of the prompt-level sizes.
     rollout_micro_batch_size: The micro-batch size used for model rollouts.
     compute_logps_micro_batch_size: The micro-batch size used for computing log
       probabilities (e.g. for reference and old policy models).
@@ -111,6 +117,8 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   critic_optimizer: optax.GradientTransformation | None = None
   mini_batch_size: int | None = None
   train_micro_batch_size: int | None = None
+  trajectory_mini_batch_size: int | None = None
+  train_trajectory_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
   compute_logps_chunk_size: int = 0
@@ -120,6 +128,8 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     for name in [
         "mini_batch_size",
         "train_micro_batch_size",
+        "trajectory_mini_batch_size",
+        "train_trajectory_micro_batch_size",
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
     ]:
@@ -130,6 +140,20 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
           "For RL training, gradient_accumulation_steps should be None. It is "
           "automatically derived from: "
           "`mini_batch_size // train_micro_batch_size`."
+      )
+
+    trajectory_sizes = (
+        self.trajectory_mini_batch_size,
+        self.train_trajectory_micro_batch_size,
+    )
+    if (trajectory_sizes[0] is None) != (trajectory_sizes[1] is None):
+      raise ValueError(
+          "trajectory_mini_batch_size and"
+          " train_trajectory_micro_batch_size must be set together"
+      )
+    if trajectory_sizes[0] is not None and self.train_micro_batch_size is None:
+      raise ValueError(
+          "trajectory-level accumulation requires train_micro_batch_size"
       )
 
     if self.train_micro_batch_size is not None:
@@ -144,9 +168,21 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
           f"{self.train_micro_batch_size=}",
           f"{self.mini_batch_size=}",
       )
-      self.gradient_accumulation_steps = (
-          self.mini_batch_size // self.train_micro_batch_size
-      )
+      if self.train_trajectory_micro_batch_size is None:
+        self.gradient_accumulation_steps = (
+            self.mini_batch_size // self.train_micro_batch_size
+        )
+      else:
+        rl_utils.check_divisibility(
+            self.train_trajectory_micro_batch_size,
+            self.trajectory_mini_batch_size,
+            f"{self.train_trajectory_micro_batch_size=}",
+            f"{self.trajectory_mini_batch_size=}",
+        )
+        self.gradient_accumulation_steps = (
+            self.trajectory_mini_batch_size
+            // self.train_trajectory_micro_batch_size
+        )
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -970,6 +1006,14 @@ class RLCluster:
           itertools.chain.from_iterable(out.logits for out in outputs)
       )
 
+    prompt_lengths = None
+    if outputs[0].prompt_lengths is not None:
+      if any(out.prompt_lengths is None for out in outputs):
+        raise ValueError("rollout outputs disagree on prompt-length metadata")
+      prompt_lengths = np.concatenate(
+          [out.prompt_lengths for out in outputs], axis=0  # pyrefly: ignore[bad-argument-type]
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
@@ -980,6 +1024,7 @@ class RLCluster:
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,
+        prompt_lengths=prompt_lengths,
     )
 
   def get_ref_per_token_logps(
@@ -989,6 +1034,8 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
       micro_batch_size: int | None = None,
+      prompt_mask: jax.Array | None = None,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     batch_size = prompt_tokens.shape[0]
@@ -1009,6 +1056,18 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
+      if prompt_mask is None:
+        prompt_mask = prompt_tokens != pad_id
+      if completion_mask is None:
+        completion_mask = completion_tokens != pad_id
+      dest_prompt_mask = sharding_utils.shard_input(
+          prompt_mask,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion_mask = sharding_utils.shard_input(
+          completion_mask,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -1024,6 +1083,8 @@ class RLCluster:
                 pad_id,
                 eos_id,
                 temperature=temperature,
+                prompt_mask=dest_prompt_mask[batch_slice],
+                completion_mask=dest_completion_mask[batch_slice],
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -1067,6 +1128,29 @@ class RLCluster:
         gc.collect()
       return per_token_logps
 
+  def get_prefill_rescore_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      *,
+      completion_lengths: np.ndarray,
+  ) -> np.ndarray:
+    """Returns a fresh processed prefill re-score from the rollout engine."""
+    source = getattr(self.rollout, "get_prefill_rescore_logps", None)
+    if source is None or not getattr(source, "is_real_rescore", False):
+      raise RuntimeError(
+          "rollout engine has no declared real S_prefill source; refusing cached logprobs"
+      )
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+      return np.asarray(
+          source(
+              prompt_tokens,
+              completion_tokens,
+              completion_lengths=completion_lengths,
+              processed=True,
+          )
+      )
+
   def get_actor_per_token_logps(
       self,
       prompt_tokens: jax.Array,
@@ -1075,6 +1159,8 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       temperature: float | None = None,
+      prompt_mask: jax.Array | None = None,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1104,6 +1190,18 @@ class RLCluster:
       )
       dest_completion_tokens = sharding_utils.shard_input(
           completion_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      if prompt_mask is None:
+        prompt_mask = prompt_tokens != pad_id
+      if completion_mask is None:
+        completion_mask = completion_tokens != pad_id
+      dest_prompt_mask = sharding_utils.shard_input(
+          prompt_mask,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion_mask = sharding_utils.shard_input(
+          completion_mask,
           self.cluster_config.training_config.data_sharding_axis,
       )
 
@@ -1141,6 +1239,9 @@ class RLCluster:
                 stop_gradient=True,
                 temperature=temperature,
                 chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
+                canonical_actor=True,
+                prompt_mask=dest_prompt_mask[batch_slice],
+                completion_mask=dest_completion_mask[batch_slice],
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)

@@ -23,6 +23,7 @@ import contextlib
 import copy
 import dataclasses
 import itertools
+import os
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
@@ -53,6 +54,52 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
+
+
+def _split_train_example_by_trajectory(
+    train_example: Any,
+    *,
+    total_trajectories: int,
+    trajectory_micro_batch_size: int,
+) -> list[Any]:
+  """Slices every batch-shaped leaf into equal trajectory micro-batches."""
+  if total_trajectories <= 0 or trajectory_micro_batch_size <= 0:
+    raise ValueError("trajectory batch sizes must be positive")
+  if total_trajectories % trajectory_micro_batch_size != 0:
+    raise ValueError(
+        "total trajectories must be divisible by trajectory micro-batch size:"
+        f" {total_trajectories} vs {trajectory_micro_batch_size}"
+    )
+  return [
+      jax.tree_util.tree_map(
+          lambda x: (
+              x[i : i + trajectory_micro_batch_size]
+              if hasattr(x, "shape")
+              and x.shape
+              and x.shape[0] == total_trajectories
+              else x
+          ),
+          train_example,
+      )
+      for i in range(0, total_trajectories, trajectory_micro_batch_size)
+  ]
+
+
+def _advance_unpacked_microsteps(
+    counter: int, num_microsteps: int, steps_per_update: int
+) -> tuple[int, bool]:
+  """Advances a host cadence counter and reports one optimizer boundary."""
+  if counter < 0 or num_microsteps <= 0 or steps_per_update <= 0:
+    raise ValueError("microstep cadence values must be positive")
+  next_counter = counter + num_microsteps
+  updates = next_counter // steps_per_update - counter // steps_per_update
+  if updates > 1:
+    raise ValueError(
+        "one learner chunk crossed multiple optimizer boundaries:"
+        f" counter={counter} microsteps={num_microsteps}"
+        f" steps_per_update={steps_per_update}"
+    )
+  return next_counter, updates == 1
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
@@ -759,11 +806,38 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     grad_acc_steps = self._training_config.get_with_default(
         "gradient_accumulation_steps", 1
     )
+    trajectory_micro_batch_size = (
+        self._training_config.train_trajectory_micro_batch_size
+    )
+    if trajectory_micro_batch_size is not None:
+      expected_trajectory_mini_batch_size = (
+          mini_batch_size * self.algo_config.num_generations
+      )
+      if (
+          self._training_config.trajectory_mini_batch_size
+          != expected_trajectory_mini_batch_size
+      ):
+        raise ValueError(
+            "trajectory_mini_batch_size must equal mini_batch_size *"
+            " num_generations:"
+            f" {self._training_config.trajectory_mini_batch_size} vs"
+            f" {expected_trajectory_mini_batch_size}"
+        )
+      expected_grad_acc_steps = (
+          expected_trajectory_mini_batch_size
+          // trajectory_micro_batch_size
+      )
+      if grad_acc_steps != expected_grad_acc_steps:
+        raise ValueError(
+            "trajectory gradient accumulation mismatch:"
+            f" {grad_acc_steps=} vs {expected_grad_acc_steps=}"
+        )
 
     logging.info(  # pylint: disable=logging-fstring-interpolation
         f"Training with {full_batch_size=}, {mini_batch_size=},"
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=},"
+        f" {trajectory_micro_batch_size=}"
     )
 
     logging.info("Starting AgenticRLLearner training loop.")
@@ -865,16 +939,33 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # example along its batch axis into chunks sized to one micro-step,
       # and pass the list to ``update_actor``; ``peft_trainer.train``
       # iterates the list and calls ``train_step`` once per chunk.
-      seqs_per_chunk = (
+      n_total = merged_train_micro_batch.completion_ids.shape[0]
+      seqs_per_chunk = trajectory_micro_batch_size or (
           train_micro_batch_size * self.algo_config.num_generations
       )
-      n_total = merged_train_micro_batch.completion_ids.shape[0]
-      if n_total > seqs_per_chunk:
+      if trajectory_micro_batch_size is not None:
+        chunked_train_micro_batch = _split_train_example_by_trajectory(
+            merged_train_micro_batch,
+            total_trajectories=n_total,
+            trajectory_micro_batch_size=seqs_per_chunk,
+        )
+        marker = (
+            "trajectory_microbatch"
+            f" total={n_total} size={trajectory_micro_batch_size}"
+            f" chunks={len(chunked_train_micro_batch)}"
+            f" grad_acc={grad_acc_steps}"
+        )
+        logging.info(marker)
+        if os.environ.get("CANON_ALIGNMENT_TRAIN", "") == "1":
+          print(f"[CANON_GSM8K_TRAIN] {marker}", flush=True)
+      elif n_total > seqs_per_chunk:
         chunked_train_micro_batch = [
             jax.tree_util.tree_map(
                 lambda x: (
                     x[i : i + seqs_per_chunk]
-                    if hasattr(x, "shape") and x.shape and x.shape[0] == n_total
+                    if hasattr(x, "shape")
+                    and x.shape
+                    and x.shape[0] == n_total
                     else x
                 ),
                 merged_train_micro_batch,
@@ -944,8 +1035,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       else:
         # Mirror `peft_trainer._train_step`'s derivation:
         # `is_update_step` flips True every `grad_acc_steps` micro-batches.
-        unpacked_micro_step_counter += 1
-        is_update = unpacked_micro_step_counter % grad_acc_steps == 0
+        unpacked_micro_step_counter, is_update = _advance_unpacked_microsteps(
+            unpacked_micro_step_counter,
+            len(chunked_train_micro_batch),
+            grad_acc_steps,
+        )
         
       if is_update:
         update_steps_since_last_sync += 1

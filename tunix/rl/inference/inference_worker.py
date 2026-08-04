@@ -56,6 +56,8 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
       temperature: float = 1.0,
+      prompt_mask: jax.Array | None = None,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     graphdef, state = self._model_states.get("reference")  # pyrefly: ignore[not-iterable]
     if graphdef is None:
@@ -69,6 +71,8 @@ class InferenceWorker:
         eos_id=eos_id,
         stop_gradient=True,
         temperature=temperature,
+        prompt_mask=prompt_mask,
+        completion_mask=completion_mask,
     )
 
   def get_values(

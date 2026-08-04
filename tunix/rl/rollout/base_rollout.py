@@ -63,6 +63,9 @@ class RolloutOutput:
   # The log probs from sampler generations.
   logprobs: list[np.ndarray] | None
 
+  # Number of real prompt tokens before left padding, one per prompt.
+  prompt_lengths: np.ndarray | None = None
+
 
 @dataclasses.dataclass
 class RolloutConfig:

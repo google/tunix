@@ -221,6 +221,8 @@ def process_ids(
     eos_id: int,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
+    prompt_mask: jax.Array | None = None,
+    completion_mask: jax.Array | None = None,
 ):
   """Processes prompt and completion ids.
 
@@ -234,7 +236,10 @@ def process_ids(
       sequentially.
     pad_id: pad token identifier.
     eos_id: end of sequence identifier.
-    completion_mask: optional attention weights mapping completion sequences.
+    prompt_mask: optional explicit prompt validity mask. This is authoritative
+      when a sampled/real token id can equal ``pad_id``.
+    completion_mask: optional explicit completion validity mask. This is
+      authoritative when a sampled/real token id can equal ``pad_id``.
     segment_ids: optional 1D sequential document identifiers used for packing.
     segment_positions: optional 1D local position indices used for packing.
   """
@@ -253,8 +258,23 @@ def process_ids(
     # mask here.
     return prompt_completion_ids, segment_positions, attn_mask, None
 
-  prompt_mask = prompt_tokens != pad_id
-  completion_mask = completion_tokens != pad_id
+  if prompt_mask is None:
+    prompt_mask = prompt_tokens != pad_id
+  else:
+    prompt_mask = jnp.asarray(prompt_mask, dtype=jnp.bool_)
+  if completion_mask is None:
+    completion_mask = completion_tokens != pad_id
+  else:
+    completion_mask = jnp.asarray(completion_mask, dtype=jnp.bool_)
+  if prompt_mask.shape != prompt_tokens.shape:
+    raise ValueError(
+        f"prompt_mask shape {prompt_mask.shape} != prompt shape {prompt_tokens.shape}"
+    )
+  if completion_mask.shape != completion_tokens.shape:
+    raise ValueError(
+        "completion_mask shape "
+        f"{completion_mask.shape} != completion shape {completion_tokens.shape}"
+    )
 
   prompt_completion_mask = jnp.concatenate(
       [prompt_mask, completion_mask], axis=-1
@@ -304,6 +324,7 @@ def model_call_contains(model, target_arg: str) -> bool:
         "return_entropy",
         "temperature",
         "chunk_size",
+        "canonical_actor",
     ),
 )
 def compute_per_token_logps(
@@ -320,6 +341,9 @@ def compute_per_token_logps(
     segment_positions: jax.Array | None = None,
     temperature: float = 1.0,
     chunk_size: int = 0,
+    canonical_actor: bool = False,
+    prompt_mask: jax.Array | None = None,
+    completion_mask: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -343,6 +367,15 @@ def compute_per_token_logps(
     temperature: temperature used for rollout.
     chunk_size: If not 0, computes the log probabilities in sequence chunks of
       this size.
+    canonical_actor: If true and ``CANON_ENGINE_MODULE_C=1``, dispatch through
+      the registered differentiable ``tpu_inference`` engine-module adapter.
+      This path is fail-closed: enabling the environment gate without an
+      attested adapter raises instead of falling back to the native Tunix NNX
+      forward. If the environment gate is off, the native path is unchanged.
+    prompt_mask: optional authoritative prompt validity mask.
+    completion_mask: optional authoritative completion validity mask. Prefer
+      this over inferring padding from token ids because Qwen may legally emit
+      a stop token whose id is also ``pad_id``.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -354,6 +387,28 @@ def compute_per_token_logps(
     entropy: optional per-token entropy jax.Array of shape matches per_token_logps,
       returned if return_entropy is True.
   """
+  if canonical_actor:
+    from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+
+    if canonical_forward.enabled():
+      return canonical_forward.compute_per_token_logps(
+          graphdef=graphdef,
+          state=state,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          images=images,
+          stop_gradient=stop_gradient,
+          return_entropy=return_entropy,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          temperature=temperature,
+          chunk_size=chunk_size,
+          prompt_mask=prompt_mask,
+          completion_mask=completion_mask,
+      )
+
   model = nnx.merge(graphdef, state)
 
   input_tokens, calculated_positions, attn_mask, input_seg_ids = process_ids(
@@ -363,6 +418,8 @@ def compute_per_token_logps(
       eos_id,
       segment_ids,
       segment_positions,
+      prompt_mask,
+      completion_mask,
   )
 
   model_kwargs = {

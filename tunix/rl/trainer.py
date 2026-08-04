@@ -14,16 +14,22 @@
 
 """RL Trainer."""
 
+import hashlib
+import json
+import os
 from typing import Any, Callable, Optional
 
 from flax import nnx
+import jax
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
+import numpy as np
 from tunix.sft import peft_trainer
 from typing_extensions import override
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-import
+from tunix.rl import alignment
 
 
 class Trainer(peft_trainer.PeftTrainer):
@@ -52,6 +58,96 @@ class Trainer(peft_trainer.PeftTrainer):
     self.rl_metrics_to_log = {}  # Metric name -> key in aux.
     self.tqdm_metrics_to_display = []
     self.custom_checkpoint_metadata_fn = custom_checkpoint_metadata_fn
+    self._canon_alignment_sidecar = None
+    self._canon_update_before = None
+
+  @staticmethod
+  def _canon_fingerprint_state(state: Any, *, max_leaves: int = 12) -> dict:
+    """Hash a deterministic, bounded sample of small floating state leaves."""
+    flat = jax.tree_util.tree_flatten_with_path(
+        state, is_leaf=lambda value: isinstance(value, nnx.Variable)
+    )[0]
+    candidates = []
+    for path, value in flat:
+      array = value[...] if isinstance(value, nnx.Variable) else value
+      shape = tuple(getattr(array, "shape", ()))
+      dtype = getattr(array, "dtype", None)
+      size = int(np.prod(shape, dtype=np.int64)) if shape else 1
+      if dtype is None or not np.issubdtype(np.dtype(dtype), np.floating):
+        continue
+      if not 128 <= size <= 1_048_576:
+        continue
+      candidates.append((jax.tree_util.keystr(path), array, shape, str(dtype)))
+    if not candidates:
+      raise alignment.AlignmentGateError("no bounded floating state leaves to hash")
+    count = min(max_leaves, len(candidates))
+    positions = np.linspace(0, len(candidates) - 1, count, dtype=np.int64)
+    leaves = {}
+    total_bytes = 0
+    for position in positions.tolist():
+      path, value, shape, dtype = candidates[position]
+      host = np.ascontiguousarray(np.asarray(jax.device_get(value)))
+      total_bytes += int(host.nbytes)
+      leaves[path] = {
+          "sha256": hashlib.sha256(host.tobytes()).hexdigest(),
+          "shape": list(shape),
+          "dtype": dtype,
+          "bytes": int(host.nbytes),
+      }
+    return {
+        "eligible_leaves": len(candidates),
+        "sampled_leaves": len(leaves),
+        "sampled_bytes": total_bytes,
+        "leaves": leaves,
+    }
+
+  @staticmethod
+  def _canon_changed_paths(before: dict, after: dict) -> list[str]:
+    if set(before["leaves"]) != set(after["leaves"]):
+      raise alignment.AlignmentGateError("update fingerprint leaf set changed")
+    return [
+        path
+        for path in before["leaves"]
+        if before["leaves"][path]["sha256"]
+        != after["leaves"][path]["sha256"]
+    ]
+
+  @override
+  def _prepare_inputs(self, input_data: Any) -> Any:
+    if not alignment.enabled():
+      return input_data
+    mode = alignment.execution_mode()
+    if mode == "update-canary":
+      if self._canon_update_before is not None:
+        raise alignment.AlignmentGateError(
+            "previous update snapshot was not consumed; refusing another update"
+        )
+      self._canon_update_before = {
+          "model": self._canon_fingerprint_state(nnx.state(self.model, nnx.Param)),
+          "optimizer": self._canon_fingerprint_state(
+              nnx.state(self.optimizer, nnx.optimizer.OptState)
+          ),
+          "train_steps": self.train_steps,
+      }
+      print(
+          "[CANON_GSM8K_UPDATE] pre_update_snapshot "
+          f"model_leaves={self._canon_update_before['model']['sampled_leaves']} "
+          f"optimizer_leaves={self._canon_update_before['optimizer']['sampled_leaves']} "
+          f"train_steps={self.train_steps}",
+          flush=True,
+      )
+    core, sidecar = alignment.unwrap_train_example(input_data)
+    if sidecar is None:
+      raise alignment.AlignmentGateError(
+          "alignment gate enabled but train batch has no ObservedTrainExample sidecar"
+      )
+    if self._canon_alignment_sidecar is not None:
+      raise alignment.AlignmentGateError(
+          "previous alignment sidecar was not consumed; refusing batch reordering"
+      )
+    self._canon_alignment_sidecar = sidecar
+    print("[CANON_ALIGN] host sidecar stripped before shard_input/JIT", flush=True)
+    return core
 
   def with_rl_metrics_to_log(
       self,
@@ -73,6 +169,144 @@ class Trainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:
+    if alignment.enabled():
+      sidecar = self._canon_alignment_sidecar
+      self._canon_alignment_sidecar = None
+      if sidecar is None:
+        raise alignment.AlignmentGateError(
+            "value_and_grad returned without a pending alignment sidecar"
+        )
+      required = (
+          "canon/T_current",
+          "canon/gradient_norm",
+          "canon/optimizer_skipped",
+      )
+      missing = [key for key in required if key not in aux]
+      if missing:
+        raise alignment.AlignmentGateError(
+            f"value_and_grad aux missing required alignment outputs: {missing}"
+        )
+      record = alignment.check_batch(
+          sidecar,
+          t_current=jax.device_get(aux["canon/T_current"]),
+          gradient_norm=jax.device_get(aux["canon/gradient_norm"]),
+          optimizer_skipped=jax.device_get(aux["canon/optimizer_skipped"]),
+          step=self.train_steps,
+          fail_closed=True,
+      )
+      if record["execution_mode"] == "train":
+        if self._buffered_train_metrics is None:
+          raise alignment.AlignmentGateError(
+              "alignment record exists without a train metrics buffer"
+          )
+        boundaries = record["boundaries"]
+        exact = record["exact"]
+        scalars = {
+            "zero_tim/hard_gate_pass": 1.0,
+            "zero_tim/n_action": float(record["N_action"]),
+            "zero_tim/s_decode_vs_s_prefill_bytes": float(
+                boundaries["S_decode_vs_S_prefill"]["differing_bytes"]
+            ),
+            "zero_tim/s_prefill_vs_t_old_bytes": float(
+                boundaries["S_prefill_vs_T_old"]["differing_bytes"]
+            ),
+            "zero_tim/t_old_vs_t_current_bytes": float(
+                boundaries["T_old_vs_T_current"]["differing_bytes"]
+            ),
+            "zero_tim/s_decode_vs_s_prefill_max_abs": float(
+                boundaries["S_decode_vs_S_prefill"]["max_abs"]
+            ),
+            "zero_tim/s_prefill_vs_t_old_max_abs": float(
+                boundaries["S_prefill_vs_T_old"]["max_abs"]
+            ),
+            "zero_tim/t_old_vs_t_current_max_abs": float(
+                boundaries["T_old_vs_T_current"]["max_abs"]
+            ),
+            "zero_tim/w_exact": float(exact["w_all_exactly_1"]),
+            "zero_tim/r_exact": float(exact["r_all_exactly_1"]),
+            "zero_tim/wr_exact": float(exact["wr_all_exactly_1"]),
+            "zero_tim/clip_hits": float(record["clip_hits"]),
+            "zero_tim/tis_hits": float(record["tis_hits"]),
+            "zero_tim/gradient_nonzero": float(record["gradient"]["nonzero"]),
+            "zero_tim/first_order_kl": float(
+                record["kl_protocol"]["first_order_-mean_delta"]
+            ),
+            "zero_tim/second_order_kl": float(
+                record["kl_protocol"]["second_order_half_mean_delta2"]
+            ),
+        }
+        for metric_name, value in scalars.items():
+          entry = self._buffered_train_metrics.additional_metrics.get(
+              metric_name
+          )
+          if entry is None:
+            self._buffered_train_metrics.additional_metrics[metric_name] = (
+                [value],
+                np.mean,
+            )
+          else:
+            entry[0].append(value)
+      if record["execution_mode"] == "update-canary":
+        before = self._canon_update_before
+        self._canon_update_before = None
+        if before is None:
+          raise alignment.AlignmentGateError("update snapshot missing after train step")
+        after = {
+            "model": self._canon_fingerprint_state(nnx.state(self.model, nnx.Param)),
+            "optimizer": self._canon_fingerprint_state(
+                nnx.state(self.optimizer, nnx.optimizer.OptState)
+            ),
+        }
+        model_changed = self._canon_changed_paths(before["model"], after["model"])
+        optimizer_changed = self._canon_changed_paths(
+            before["optimizer"], after["optimizer"]
+        )
+        update_record = {
+            "verdict": (
+                "PASS" if model_changed and optimizer_changed else "FAIL"
+            ),
+            "alignment_hashes": record["hashes"],
+            "train_steps_before": before["train_steps"],
+            "expected_train_steps_after": before["train_steps"] + 1,
+            "model": {
+                "sampled_leaves": before["model"]["sampled_leaves"],
+                "sampled_bytes": before["model"]["sampled_bytes"],
+                "changed_count": len(model_changed),
+                "changed_paths": model_changed,
+                "before": before["model"]["leaves"],
+                "after": after["model"]["leaves"],
+            },
+            "optimizer": {
+                "sampled_leaves": before["optimizer"]["sampled_leaves"],
+                "sampled_bytes": before["optimizer"]["sampled_bytes"],
+                "changed_count": len(optimizer_changed),
+                "changed_paths": optimizer_changed,
+                "before": before["optimizer"]["leaves"],
+                "after": after["optimizer"]["leaves"],
+            },
+            "checkpoint_enabled": self.config.checkpoint_root_directory is not None,
+        }
+        update_path = os.environ.get("CANON_UPDATE_REPORT", "")
+        if not update_path:
+          raise alignment.AlignmentGateError("CANON_UPDATE_REPORT is required")
+        os.makedirs(os.path.dirname(update_path) or ".", exist_ok=True)
+        with open(update_path, "w", encoding="utf-8") as update_file:
+          json.dump(update_record, update_file, indent=2, sort_keys=True)
+          update_file.write("\n")
+        print(
+            "[CANON_GSM8K_UPDATE] post_update_snapshot "
+            f"verdict={update_record['verdict']} "
+            f"model_changed={len(model_changed)}/"
+            f"{before['model']['sampled_leaves']} "
+            f"optimizer_changed={len(optimizer_changed)}/"
+            f"{before['optimizer']['sampled_leaves']} "
+            f"checkpoint_enabled={int(update_record['checkpoint_enabled'])}",
+            flush=True,
+        )
+        if update_record["verdict"] != "PASS":
+          raise alignment.AlignmentGateError(
+              f"optimizer update did not change sampled state; report={update_path}"
+          )
     assert self._buffered_train_metrics is not None
     for metric_name, op in self.rl_metrics_to_log.items():
       if metric_name not in self._buffered_train_metrics.additional_metrics:
@@ -87,6 +321,12 @@ class Trainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_eval_step(self, aux: Any) -> None:
+    if alignment.enabled():
+      self._canon_alignment_sidecar = None
+      raise alignment.AlignmentGateError(
+          "evaluation is unsupported while CANON_ALIGNMENT_GATE=1; set "
+          "eval_dataset=None for the one-step gate-only run"
+      )
     assert self._buffered_eval_metrics is not None
     for metric_name, op in self.rl_metrics_to_log.items():
       if metric_name not in self._buffered_eval_metrics.additional_metrics:
