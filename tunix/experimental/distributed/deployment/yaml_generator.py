@@ -89,6 +89,16 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--otel_exporter_otlp_endpoint",
+      default="http://$(NODE_IP):4317",
+      help="OpenTelemetry Collector OTLP gRPC endpoint URL",
+  )
+  parser.add_argument(
+      "--otel_exporter_otlp_protocol",
+      default="grpc",
+      help="OpenTelemetry Collector OTLP protocol (grpc or http/protobuf)",
+  )
 
   args = parser.parse_args()
 
@@ -164,6 +174,8 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        OTEL_EXPORTER_OTLP_ENDPOINT=args.otel_exporter_otlp_endpoint,
+        OTEL_EXPORTER_OTLP_PROTOCOL=args.otel_exporter_otlp_protocol,
     )
     print(content)
 
