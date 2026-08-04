@@ -89,6 +89,31 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--otel_exporter_otlp_endpoint",
+      default='http://$(NODE_IP):4317',
+      help="OpenTelemetry OTLP collector gRPC/HTTP endpoint address",
+  )
+  parser.add_argument(
+      "--otel_exporter_otlp_protocol",
+      default="grpc",
+      help="OpenTelemetry OTLP transport protocol (grpc or http/protobuf)",
+  )
+  parser.add_argument(
+      "--wandb_api_key",
+      default=os.environ.get("WANDB_API_KEY", ""),
+      help="Weights & Biases API key",
+  )
+  parser.add_argument(
+      "--wandb_project",
+      default=os.environ.get("WANDB_PROJECT", ""),
+      help="Weights & Biases project name",
+  )
+  parser.add_argument(
+      "--wandb_name",
+      default=os.environ.get("WANDB_NAME", ""),
+      help="Weights & Biases run name",
+  )
 
   args = parser.parse_args()
 
@@ -143,7 +168,7 @@ def main() -> None:
 
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
-    content = template.substitute(
+    content = template.safe_substitute(
         JOBSET_NAME=jobset_name,
         USER=os.environ.get("USER"),
         SERVER_IMAGE=args.pathways_server_image,
@@ -164,6 +189,13 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        OTEL_EXPORTER_OTLP_ENDPOINT=args.otel_exporter_otlp_endpoint,
+        OTEL_EXPORTER_OTLP_PROTOCOL=args.otel_exporter_otlp_protocol,
+        WANDB_API_KEY=args.wandb_api_key,
+        WANDB_PROJECT=args.wandb_project,
+        WANDB_NAME=args.wandb_name,
+        OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector-contrib:latest",
+        OTEL_COLLECTOR_PORT="4317",
     )
     print(content)
 
