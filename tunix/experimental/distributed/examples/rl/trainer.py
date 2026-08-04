@@ -18,7 +18,9 @@ class TrainerServer:
   def __init__(self) -> None:
     self._server: grpc.Server | None = None
 
-  def start(self, port: int, on_train: Callable[[str, str], str]) -> None:
+  def start(
+      self, port: int, on_train: Callable[[str, str], tuple[str, dict[str, float]]]
+  ) -> None:
     if self._server is not None:
       raise RuntimeError("server already started")
 
@@ -28,9 +30,8 @@ class TrainerServer:
     class _handler(pb2_grpc.TrainerServiceServicer):
 
       def Train(self, request: pb2.TrainRequest, context: grpc.ServicerContext):
-        return pb2.TrainResponse(
-            weights=on_train(request.prompt, request.completion)
-        )
+        weights, metrics = on_train(request.prompt, request.completion)
+        return pb2.TrainResponse(weights=weights, metrics=metrics)
 
     pb2_grpc.add_TrainerServiceServicer_to_server(_handler(), server)
 
@@ -65,18 +66,35 @@ def main(argv, context: ProcessContext | None) -> None:
 
   weights = [5.0]
 
-  def on_train(prompt: str, completion: str) -> str:
+  def on_train(prompt: str, completion: str) -> tuple[str, dict[str, float]]:
     # if completion does the math correctly, learn a lot
     # otherwise, learn little
-    if eval(prompt) == int(completion.split()[1]):
+    import random
+    is_correct = (eval(prompt) == int(completion.split()[1]))
+    if is_correct:
       weights[0] = 0.99 * weights[0] + 0.01 * float(completion.split()[1])
+      loss = random.uniform(0.05, 0.25)
     else:
       weights[0] = 0.9999 * weights[0] + 0.0001 * float(completion.split()[1])
+      loss = random.uniform(0.5, 1.2)
+
+    grad_norm = random.uniform(0.01, 0.1)
+    kl_div = random.uniform(0.001, 0.02)
+    lr = 1e-4
+    actor_train_time = random.uniform(0.02, 0.08)
+    metrics = {
+        "loss": float(loss),
+        "kl_divergence": float(kl_div),
+        "grad_norm": float(grad_norm),
+        "learning_rate": float(lr),
+        "actor_train_time": float(actor_train_time),
+    }
+
     logging.info(
         f"[{args.server_id}] train({prompt}, {completion}) ->"
-        f" [{weights[0]:.2f}]"
+        f" [{weights[0]:.2f}] (loss={loss:.4f}, kl={kl_div:.4f})"
     )
-    return f"[{weights[0]:.2f}]"
+    return f"[{weights[0]:.2f}]", metrics
 
   server = TrainerServer()
   server.start(args.server_port, on_train=on_train)
