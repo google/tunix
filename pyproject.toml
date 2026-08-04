@@ -69,9 +69,16 @@ test = [
   "pytest-xdist",
   "gcsfs",
   "chex",
+  "opentelemetry-sdk>=1.25.0",
+  "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
 ]
 cli = [
   "tensorflow",
+]
+otel = [
+  # Experimental OpenTelemetry double-write path for MetricsLogger.
+  "opentelemetry-api>=1.25.0",
+  "opentelemetry-sdk>=1.25.0",
 ]
 frozenlake = [
   "gymnasium",
