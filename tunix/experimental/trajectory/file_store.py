@@ -141,7 +141,6 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
         step = trajectory_lib.Step.model_validate_json(file_entry.read_text())
         steps.append(step)
 
-      steps.sort(key=lambda s: s.step_id)
       traj_data = meta.model_dump()
       traj_data["steps"] = steps
       trajs.append(trajectory_lib.Trajectory(**traj_data))
