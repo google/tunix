@@ -247,6 +247,35 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertLen(result_traj.steps, 1)
     self.assertEqual(len(result_traj.steps[0].logprobs), 2)
 
+  def test_collect_with_async_model_call(self):
+    """Verifies that TrajectoryCollectEngine supports an async coroutine model_call callback."""
+    self.mock_env.max_steps = 1
+    self.mock_env.step.side_effect = [
+        ('obs_async', 2.0, True, {}),
+    ]
+
+    async def _async_model_call(chat_completions, env=None, **kwargs):
+      del env, kwargs
+      await asyncio.sleep(0.001)
+      return RolloutOutput(
+          text=['async_resp'],
+          logits=[jnp.zeros_like(np.array([10, 20]))],
+          tokens=[np.array([10, 20])],
+          left_padded_prompt_tokens=np.array([1]),
+          logprobs=[[0.5, 0.5]],
+      )
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=_async_model_call,
+    )
+    result_traj = asyncio.run(
+        self._run_collect(engine, mode='Trajectory')
+    )
+    self.assertLen(result_traj.steps, 1)
+    self.assertEqual(result_traj.steps[0].reward, 2.5)
+
   def test_collect_conversation_mode(self):
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,
