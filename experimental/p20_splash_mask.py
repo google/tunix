@@ -213,3 +213,93 @@ def attach(example, seq_len=None, block=256, num_heads=None, head_shards=1,
     _skip("kernel_for returned None")
     return example
   return example.replace(splash_kernel=kernel)
+
+
+# ---------------------------------------------------------------------------
+# Phase 21: the mask splash can COMPUTE, so no tile is ever fetched.
+#
+# The measured cost of the phase-20 NumpyMask design was not opacity but the
+# per-partial-block tile fetch: a partial block costs 0.165 ms against 0.102 ms
+# when the kernel can compute it in-register, and 0.069 ms for a full block
+# (v4-8, three-point fit).  `partial_mask_blocks = 1` deduplicated the tile
+# SHAPE, not the number of fetches -- every diagonal block still fetched one.
+#
+# splash calls `mask_function(q_sequence, k_sequence)` where q_sequence is ours
+# and k_sequence is the raw kv position built on the fly
+# (splash_attention_kernel.py:630, and its comment says exactly why).  That
+# asymmetry is enough: pack the start of q's segment into the high bits and q's
+# own position into the low bits, and since segments are contiguous intervals,
+#
+#     seg_start <= kv <= q     IS     same-segment AND causal
+#
+# exactly -- not a superset, so no rounding, and padding needs no special case
+# because it is simply another segment.
+# ---------------------------------------------------------------------------
+
+_SHIFT = 1 << 16  # > any seq_len we pack; seq_len * _SHIFT stays inside int32
+
+
+def seg_start_per_row(segment_ids_row: np.ndarray) -> np.ndarray:
+  """First index of the run containing each position."""
+  sid = np.asarray(segment_ids_row)
+  change = np.empty(sid.shape, dtype=bool)
+  change[0] = True
+  change[1:] = sid[1:] != sid[:-1]
+  idx = np.arange(sid.shape[0], dtype=np.int32)
+  return np.maximum.accumulate(np.where(change, idx, 0)).astype(np.int32)
+
+
+def seg_start_union(segment_ids: np.ndarray) -> np.ndarray:
+  """Union over the chunk's rows: the EARLIEST segment start at each position.
+
+  splash's mask is shared across the batch -- `model.py` does
+  `jax.vmap(kernel)(q, k, v, segment_ids=...)` with the kernel closed over, not
+  mapped -- so one mask must cover every row.  Taking the minimum start only
+  ADDS positions, so the result is a superset of every row's true mask and
+  `segment_ids` still masks exactly.
+
+  A row that is one single segment spanning the whole budget (the packer emits
+  these: a wholly-padded row is exactly that) has start 0 everywhere and drags
+  the union back to plain causal.  That is the open problem, not a bug here.
+  """
+  sid = np.asarray(segment_ids)
+  if sid.ndim == 1:
+    return seg_start_per_row(sid)
+  return np.minimum.reduce([seg_start_per_row(r) for r in sid])
+
+
+class SegmentCausalMask(mask_lib._ComputableMask):  # noqa: SLF001
+  """`causal AND same-segment`, computed inside the kernel from q_sequence."""
+
+  def __init__(self, seq_len: int, seg_start: np.ndarray):
+    def mask_function(q_enc, kv_pos):
+      return (kv_pos >= q_enc // _SHIFT) & (kv_pos <= q_enc % _SHIFT)
+
+    super().__init__(shape=(seq_len, seq_len), mask_function=mask_function)
+    seg_start = np.asarray(seg_start, dtype=np.int32)
+    if seg_start.shape != (seq_len,):
+      raise ValueError(f"seg_start must be [{seq_len}], got {seg_start.shape}")
+    self.q_sequence = (seg_start * _SHIFT
+                       + np.arange(seq_len, dtype=np.int32)).astype(np.int32)
+
+  # _ComputableMask leaves these to the subclass; CausalMask:330 is the model.
+  def __eq__(self, other):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+    return (self.shape == other.shape
+            and np.array_equal(self.q_sequence, other.q_sequence))
+
+  def __hash__(self):
+    return hash((type(self), self.shape, self.q_sequence.tobytes()))
+
+
+def build_segment_kernel(seq_len, segment_ids, block, num_heads,
+                         head_shards=1, q_seq_shards=1):
+  """Splash kernel carrying a COMPUTED segment-causal mask (no tiles)."""
+  block_sizes = splash.BlockSizes(
+      block_q=block, block_kv=block, block_q_dkv=block, block_kv_dkv=block,
+      block_kv_dkv_compute=block, block_q_dq=block, block_kv_dq=block)
+  mask = SegmentCausalMask(seq_len, seg_start_union(segment_ids))
+  return splash.make_splash_mha(
+      mask_lib.MultiHeadMask([mask] * num_heads), block_sizes=block_sizes,
+      head_shards=head_shards, q_seq_shards=q_seq_shards)
