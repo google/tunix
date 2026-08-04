@@ -530,6 +530,7 @@ cluster_config = rl_engine_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
+        max_seq_token_per_tpu=4096,
         compute_logps_chunk_size=2048,
     ),
     rollout_config=rollout_engine_config,
