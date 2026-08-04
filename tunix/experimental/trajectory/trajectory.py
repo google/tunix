@@ -343,6 +343,7 @@ class Trajectory(TrajectoryMetadata):
   @classmethod
   def validate_step_ids(cls, steps: list[Step]) -> list[Step]:
     """Validate that step_ids are sequential starting from 1."""
+    steps.sort(key=lambda step: step.step_id)
     for expected_step_id, step in enumerate(steps, start=1):
       if step.step_id != expected_step_id:
         raise ValueError(

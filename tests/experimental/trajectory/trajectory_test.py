@@ -249,6 +249,19 @@ class TrajectoryTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       trajectory.Trajectory.from_json_dict(data)
 
+  def test_unordered_steps_are_sorted(self):
+    # Valid: out-of-order steps are sorted by step_id
+    data = {
+        "agent": {"name": "test-agent", "version": "1.0"},
+        "steps": [
+            {"step_id": 2, "source": "agent", "message": "Second"},
+            {"step_id": 1, "source": "user", "message": "First"},
+        ],
+    }
+    traj = trajectory.Trajectory.from_json_dict(data)
+    self.assertEqual(traj.steps[0].step_id, 1)
+    self.assertEqual(traj.steps[1].step_id, 2)
+
   def test_validate_embedded_subagent_missing_trajectory_id(self):
     # Invalid: missing trajectory_id on embedded subagent
     data = {
