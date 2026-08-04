@@ -14,7 +14,6 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
-import asyncio
 from typing import Any, List
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -61,14 +60,10 @@ class TrajectoryCollectorEngine:
 
   async def run_episode(self) -> trajectory_lib.Trajectory:
     """Executes multi-turn agentic rollout episode and returns standardized Trajectory."""
-    loop = asyncio.get_running_loop()
-
-    # Note: model_call is invoked synchronously from
-    # TrajectoryCollectEngine's thread execution pool. It bridges to the
-    # asyncio event loop via run_coroutine_threadsafe.
-    # TODO(lancewang): Consider native async callback support in
-    # TrajectoryCollectEngine to avoid blocking threads under concurrency.
-    def model_call(
+    # Note: model_call is an async coroutine callback invoked directly by
+    # TrajectoryCollectEngine on the asyncio event loop without blocking
+    # threads.
+    async def model_call(
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
       del env, kwargs
@@ -90,11 +85,7 @@ class TrajectoryCollectorEngine:
             prompt=chat_completions,
             sampling_params=sampling_params,
         )
-        fut = asyncio.run_coroutine_threadsafe(
-            self.sampler.sample(sampling_req, **generation_kwargs),
-            loop,
-        )
-        res = fut.result()
+        res = await self.sampler.sample(sampling_req, **generation_kwargs)
         text = res if isinstance(res, str) else getattr(res, "text", str(res))
         tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
         logprobs = getattr(res, "logprobs", None)
