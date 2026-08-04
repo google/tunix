@@ -22,7 +22,7 @@ This module centralizes type aliases and dataclasses used for:
 import dataclasses
 import enum
 import time
-from typing import Any
+from typing import Any, Dict
 
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
@@ -212,6 +212,15 @@ class RolloutRequest(Request):
   max_turns: int = 10
   target_policy_version: int = 0
 
+  @property
+  def traj_id(self) -> str:
+    """Standardized semantic trajectory identifier computed from prompt_id and group_id."""
+    return (
+        f"traj_{self.prompt_id}_{self.group_id}"
+        if self.group_id
+        else f"traj_{self.prompt_id}"
+    )
+
 
 @dataclasses.dataclass(kw_only=True)
 class TokenSegment:
@@ -298,32 +307,47 @@ class RolloutResponse(Response):
     Returns:
       A wire-safe RolloutResponse.
     """
+    def _get_step_attr(step, attr):
+      val = getattr(step, attr, None)
+      if val is not None:
+        return val
+      extra = getattr(step, "extra", None)
+      if isinstance(extra, dict):
+        return extra.get(attr)
+      return None
+
     segments = []
     for step in traj.steps:
-      if step.assistant_tokens is not None:
+      assistant_tokens = _get_step_attr(step, "assistant_tokens")
+      if assistant_tokens is not None:
         segments.append(
             TokenSegment(
                 source="assistant",
-                tokens=step.assistant_tokens,
-                loss_mask=step.assistant_masks,
-                logps=step.logprobs,
+                tokens=assistant_tokens,
+                loss_mask=_get_step_attr(step, "assistant_masks"),
+                logps=_get_step_attr(step, "logprobs"),
             )
         )
-      if step.env_tokens is not None:
+      env_tokens = _get_step_attr(step, "env_tokens")
+      if env_tokens is not None:
         segments.append(
             TokenSegment(
                 source="env",
-                tokens=step.env_tokens,
-                loss_mask=step.env_masks,
+                tokens=env_tokens,
+                loss_mask=_get_step_attr(step, "env_masks"),
                 logps=None,
             )
         )
+    if hasattr(traj, "status") and traj.status is not None:
+      status_val = getattr(traj.status, "name", str(traj.status))
+    else:
+      status_val = "COMPLETED"
     return cls(
         request_id=request_id,
-        status=traj.status.name,
+        status=status_val,
         prompt_tokens=prompt_tokens,
         segments=segments,
-        env_reward=traj.reward,
+        env_reward=getattr(traj, "reward", 0.0) or 0.0,
         policy_version=policy_version,
     )
 
@@ -365,6 +389,59 @@ class WeightSyncRequest(Request):
   policy_version: int = 0
   source_metadata: Any = None
   extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass
+class WeightSyncMetadata:
+  """Metadata passed by Orchestrator during Phase 3 decentralized weight synchronization.
+
+  Used to coordinate peer-to-peer (P2P) or broadcast weight transfers between
+  TPU Trainer slices and RolloutWorker inference pods without routing large
+  model weights through the central orchestrator.
+
+  Attributes:
+    worker_ips: List of target rollout worker IP addresses participating in
+      sync.
+    data_ports: Corresponding list of high-speed data transfer ports for each
+      worker.
+    ctrl_ports: List of control plane ports for coordination.
+    mesh: Optional device mesh object for sharded tensor transfer.
+    layout: Optional tensor memory sharding layout dimensions.
+    new_policy_version: The updated policy weight version index being
+      synchronized.
+    transfer_mode: Transport mechanism option for decentralized weight sync: -
+      "p2p" (default): Direct peer-to-peer transfer (e.g., direct RPC, Ray, or
+      Raiden KV/weight streaming between source Trainer pods and target
+      RolloutWorker pods using P2P DMA). - "broadcast" (Not implemented):
+      Collective/tree broadcast (e.g., distributing weights across a pod mesh
+      via collective communication like NCCL or Gloo over DMA links). - "fs"
+      (Not implemented): Shared filesystem checkpoint transfer (where trainers
+      save checkpoint weights to a shared filesystem like CNS/POSIX and rollout
+      workers reload from disk).
+    source_endpoints: Host/port endpoints of the source trainer pods serving the
+      weights.
+    sharding_topology: Optional device mesh sharding layout (e.g., {"mesh": [2,
+      2]}).
+  """
+
+  worker_ips: list[str] = dataclasses.field(default_factory=list)
+  data_ports: list[str] = dataclasses.field(default_factory=list)
+  ctrl_ports: list[str] = dataclasses.field(default_factory=list)
+  mesh: Any = None
+  layout: list[int] = dataclasses.field(default_factory=list)
+  new_policy_version: int = 0
+  transfer_mode: str = "p2p"
+  source_endpoints: list[str] = dataclasses.field(default_factory=list)
+  sharding_topology: Dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  def __post_init__(self):
+    if self.transfer_mode in ("broadcast", "fs"):
+      raise NotImplementedError(
+          f"transfer_mode='{self.transfer_mode}' is not implemented yet."
+          " Currently only 'p2p' is supported."
+      )
+    elif self.transfer_mode != "p2p":
+      raise ValueError(f"Unknown transfer_mode: '{self.transfer_mode}'")
 
 
 ##### Training DTOs #####

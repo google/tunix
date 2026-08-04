@@ -38,6 +38,7 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
       cache_config: generate_sampler_lib.CacheConfig | int | None = None,
       image_processor: Any = None,
       model: Any = None,
+      **kwargs,
   ):
     self.server_id = server_id
     self.transformer = transformer if transformer is not None else model
@@ -104,7 +105,9 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
     ):
       self.sampler = self._build_generate_sampler(None)
 
-    if self.sampler is None:
+    if self.sampler is None and (
+        self.transformer is not None or self.tokenizer is not None
+    ):
       raise RuntimeError(
           f"VanillaSamplerAdapter [{self.server_id}] requires a sampler"
           " instance or transformer + tokenizer."
@@ -157,6 +160,9 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
           f"VanillaSamplerAdapter [{self.server_id}] sampler is not"
           " initialized."
       )
+
+    if sampling_requests is None:
+      raise ValueError("sampling_requests cannot be None.")
 
     if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
       requests: List[Any] = [sampling_requests]
