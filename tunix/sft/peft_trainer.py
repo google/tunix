@@ -228,7 +228,7 @@ class GradientAccumulator(nnx.Module):
     if allocate_grads:
       self.grads = nnx.data(
           jax.tree_util.tree_map(
-              lambda x: jnp.zeros(x.shape, dtype=accumulator_dtype), state
+              lambda x: jnp.zeros_like(x, dtype=accumulator_dtype), state
           )
       )
     else:
