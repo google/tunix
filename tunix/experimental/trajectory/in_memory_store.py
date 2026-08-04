@@ -44,7 +44,10 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       if traj_id not in self._metadata_by_trajectory_id:
         raise store.TrajectoryNotFoundError(traj_id)
       meta = self._metadata_by_trajectory_id[traj_id]
-      steps = list(self._steps_by_trajectory_id.get(traj_id, []))
+      steps = sorted(
+          self._steps_by_trajectory_id.get(traj_id, []),
+          key=lambda s: s.step_id,
+      )
       traj_data = meta.model_dump()
       traj_data["steps"] = steps
       result.append(trajectory_lib.Trajectory(**traj_data))
