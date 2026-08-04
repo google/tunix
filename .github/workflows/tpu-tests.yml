@@ -87,6 +87,8 @@ jobs:
         "
 
     - name: Run tunix model tests
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         python -m pytest tests/models/ -v --tb=short -m "not cpu_only and not gpu_only" \
           --ignore=tests/models/naming_test.py \
@@ -147,7 +149,14 @@ jobs:
           key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
           restore-keys: |
             hf-${{ runner.os }}-
-
+      # Cache TensorFlow Datasets (TFDS)
+      - name: Cache TFDS datasets
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.tfds_cache
+          key: tfds-${{ runner.os }}-gsm8k
+          restore-keys: |
+            tfds-${{ runner.os }}-
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -168,9 +177,28 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python3 -m pytest tests/models/naming_test.py -v --tb=short
+      - name: Seed TFDS Cache (Retry on 429)
+        env:
+          TFDS_DATA_DIR: ${{ github.workspace }}/.tfds_cache
+        run: |
+          max_retries=5
+          count=0
+          
+          # Only retries the dataset download, not the actual test
+          until python3 -c "import tensorflow_datasets as tfds; tfds.builder('gsm8k', data_dir='${TFDS_DATA_DIR}').download_and_prepare()"; do
+              exit_code=$?
+              count=$((count + 1))
+              if [ $count -ge $max_retries ]; then
+                echo "Failed to download dataset after $max_retries attempts."
+                exit $exit_code
+              fi
+              echo "Download failed (likely 429). Retrying in 30s... ($count/$max_retries)"
+              sleep 30
+          done
       - name: GRPO Integration Test
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TFDS_DATA_DIR: ${{ github.workspace }}/.tfds_cache
         run: |
           # Run GRPO demo script with minimal configuration
           python3 scripts/grpo_demo_llama3_qwen2.py \
