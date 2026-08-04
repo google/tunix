@@ -14,10 +14,12 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
-from typing import Any, List
+import asyncio
+from typing import Any, List, Optional
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
@@ -35,6 +37,7 @@ class TrajectoryCollectorEngine:
       agent: Any,
       tokenizer: Any,
       chat_parser: Any,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     if (
         sampler is None
@@ -54,6 +57,7 @@ class TrajectoryCollectorEngine:
     self.agent = agent
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self.trajectory_store = trajectory_store
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
@@ -117,16 +121,37 @@ class TrajectoryCollectorEngine:
     )
     rl_traj = await inner_engine.collect(mode="Trajectory")
     self.is_done = True
-    return self._convert_to_trajectory(rl_traj)
+    trajectory = self._convert_to_trajectory(rl_traj)
+    if self.trajectory_store is not None:
+      metadata = trajectory.get_metadata()
+      for step in trajectory.steps:
+        self.trajectory_store.add_step(step, metadata)
+    return trajectory
 
   def _convert_to_trajectory(self, rl_traj: Any) -> trajectory_lib.Trajectory:
     """Converts internal rollout trajectory to standardized Trajectory format."""
+    meta_extra = {
+        "prompt_id": getattr(self.request, "prompt_id", ""),
+        "group_id": getattr(self.request, "group_id", ""),
+        "target_policy_version": getattr(
+            self.request, "target_policy_version", 0
+        ),
+        "status": "SUCCEEDED" if self.is_done else "RUNNING",
+    }
+    req_meta = getattr(self.request, "metadata", None)
+    if isinstance(req_meta, dict):
+      meta_extra.update(req_meta)
+    gen_kwargs = getattr(self.request, "generation_kwargs", None)
+    if isinstance(gen_kwargs, dict):
+      meta_extra["hyperparams"] = gen_kwargs
+
     trajectory = trajectory_lib.Trajectory(
         trajectory_id=self.traj_id,
         agent=trajectory_lib.Agent(
             name=getattr(self.agent, "name", "agent"),
             version="1.0",
         ),
+        extra=meta_extra,
     )
     if hasattr(rl_traj, "steps"):
       for step in rl_traj.steps:
