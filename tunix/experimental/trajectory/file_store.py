@@ -11,8 +11,16 @@ from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 _METADATA_FILENAME: Final[str] = "metadata.json"
 _TRAJECTORY_DIR_PREFIX: Final[str] = "traj_"
+# Characters allowed in a trajectory_id: ASCII letters, digits, underscores, and
+# hyphens. Shared between `_TRAJECTORY_ID_REGEX` and `_TRAJECTORY_DIR_REGEX` so
+# that every ID written to disk is discoverable when listing trajectory
+# directories.
+_TRAJECTORY_ID_PATTERN: Final[str] = r"[a-zA-Z0-9_\-]+"
+_TRAJECTORY_ID_REGEX: Final[re.Pattern[str]] = re.compile(
+    rf"^{_TRAJECTORY_ID_PATTERN}$"
+)
 _TRAJECTORY_DIR_REGEX: Final[re.Pattern[str]] = re.compile(
-    rf"^{_TRAJECTORY_DIR_PREFIX}(?P<trajectory_id>[\w\-_]+)$"
+    rf"^{_TRAJECTORY_DIR_PREFIX}(?P<trajectory_id>{_TRAJECTORY_ID_PATTERN})$"
 )
 _STEP_FILENAME_TEMPLATE: Final[str] = "step_{step_id:06d}.json"
 _STEP_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(r"^step_\d+\.json$")
@@ -152,12 +160,18 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
 
     Raises:
-      ValueError: If metadata.trajectory_id is empty or None.
+      ValueError: If metadata.trajectory_id is empty, None, or contains
+        characters that cannot be encoded in a trajectory directory name.
     """
     traj_id = metadata.trajectory_id
     if not traj_id:
       raise ValueError(
           "TrajectoryMetadata must have a non-empty trajectory_id."
+      )
+    if not _TRAJECTORY_ID_REGEX.match(traj_id):
+      raise ValueError(
+          f"trajectory_id {traj_id!r} contains unsupported characters; only "
+          "letters, digits, underscores, and hyphens are allowed."
       )
 
     traj_dir = self.get_trajectory_dir(traj_id)
