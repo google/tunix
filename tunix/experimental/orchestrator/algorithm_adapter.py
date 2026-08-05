@@ -58,6 +58,7 @@ class AlgorithmAdapter(Protocol):
       max_prompt_length: int,
       max_response_length: int,
       pad_id: int,
+      **kwargs: Any,
   ) -> Any:
     """Pads/masks a group of (prompt, completion) pairs into a train example."""
     ...
@@ -115,6 +116,10 @@ class GRPOAdapter:
       max_prompt_length: int,
       max_response_length: int,
       pad_id: int,
+      policy_version: Any = None,
+      ref_per_token_logps: Any = None,
+      old_per_token_logps: Any = None,
+      sampler_is_weights: Any = None,
   ) -> agentic_rl_learner.TrainExample:
     """Single-turn assembly: left-pad prompts, right-pad completions, build masks.
 
@@ -149,17 +154,19 @@ class GRPOAdapter:
       ]
       completion_masks.append(mask)
 
-    prompt_ids = jnp.asarray(np.stack(padded_prompts))
-    completion_ids = jnp.asarray(np.stack(padded_completions))
-    completion_mask = jnp.asarray(np.stack(completion_masks))
+    prompt_ids = np.asarray(np.stack(padded_prompts), dtype=np.int32)
+    completion_ids = np.asarray(np.stack(padded_completions), dtype=np.int32)
+    completion_mask = np.asarray(np.stack(completion_masks), dtype=np.int32)
     return agentic_rl_learner.TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=(prompt_ids != pad_id),
         completion_ids=completion_ids,
         completion_mask=completion_mask,
-        advantages=jnp.asarray(advantages),
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
+        advantages=np.asarray(advantages, dtype=np.float32),
+        ref_per_token_logps=ref_per_token_logps,
+        old_per_token_logps=old_per_token_logps,
+        policy_version=policy_version,
+        sampler_is_weights=sampler_is_weights,
     )
 
   def configure_trainer(self, cluster: Any) -> None:
@@ -167,6 +174,28 @@ class GRPOAdapter:
 
     Reuses the same policy-loss registry entry the agentic GRPO learner uses.
     """
+    configure_grpo_loss = getattr(cluster, "configure_grpo_loss", None)
+    if callable(configure_grpo_loss) and getattr(
+        cluster, "has_trainer_worker", False
+    ):
+      configure_grpo_loss(
+          num_generations=self._algo_config.num_generations,
+          max_response_length=self._algo_config.max_response_length,
+          beta=self._algo_config.beta,
+          epsilon=self._algo_config.epsilon,
+          epsilon_high=self._algo_config.epsilon_high,
+          kl_loss_mode=self._algo_config.kl_loss_mode,
+          force_compute_kl=self._algo_config.force_compute_kl,
+          loss_agg_mode=self._algo_config.loss_agg_mode,
+          loss_algo=self._algo_config.loss_algo,
+          policy_loss_fn=self._algo_config.policy_loss_fn,
+          advantage_estimator=self._algo_config.advantage_estimator,
+          temperature=getattr(self._algo_config, "temperature", None),
+          sampler_is=self._algo_config.sampler_is,
+          sampler_is_threshold=self._algo_config.sampler_is_threshold,
+      )
+      return
+
     self._algo_config.temperature = cluster.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
     ).temperature

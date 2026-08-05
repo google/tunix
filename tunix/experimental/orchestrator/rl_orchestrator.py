@@ -83,9 +83,9 @@ class RLOrchestrator:
 
   def train_step(
       self, batch: Any, eval_ds: Any = None, skip_jit: bool = False
-  ) -> None:
+  ) -> Any:
     """Runs one actor trainer pass over the (chunked) micro-batch."""
-    self._cluster.update_actor(batch, eval_ds, skip_jit)
+    return self._cluster.update_actor(batch, eval_ds, skip_jit)
 
   # --- Weight sync ----------------------------------------------------------
 
@@ -142,6 +142,7 @@ class RLOrchestrator:
       max_prompt_length: int,
       max_response_length: int,
       pad_id: int,
+      **kwargs: Any,
   ) -> Any:
     return self._algorithm.assemble_train_example(
         prompt_token_lists,
@@ -150,6 +151,7 @@ class RLOrchestrator:
         max_prompt_length=max_prompt_length,
         max_response_length=max_response_length,
         pad_id=pad_id,
+        **kwargs,
     )
 
   def configure_trainer(self) -> None:

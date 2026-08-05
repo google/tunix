@@ -15,7 +15,9 @@
 """Routing/delegation tests for OrchestratorRLEngine (no real compute)."""
 
 from absl.testing import absltest
+from types import SimpleNamespace
 from tunix.experimental.orchestrator import orchestrator_rl_engine
+from tunix.rl import rl_cluster as rl_cluster_lib
 
 
 class _FakeBaseEngine:
@@ -73,6 +75,25 @@ class _FakeTrainerWorker:
   def _per_token_logps(self, **kwargs):
     self.logps_calls.append(kwargs)
     return "worker_actor"
+
+
+class _FakeStepTrainerWorker:
+
+  def __init__(self):
+    self.fwd_bwd_calls = []
+    self.update_calls = []
+    self.configure_calls = []
+
+  def configure_grpo_loss(self, **kwargs):
+    self.configure_calls.append(kwargs)
+    return {"configured_loss": "grpo"}
+
+  def fwd_bwd(self, chunk):
+    self.fwd_bwd_calls.append(chunk)
+
+  def update(self, eval_ds=None, skip_jit=False):
+    self.update_calls.append((eval_ds, skip_jit))
+    return 7
 
 
 class _FakeRolloutWorker:
@@ -151,6 +172,17 @@ class OrchestratorRlEngineTest(absltest.TestCase):
     fallback.update_actor(["c"], None, False)
     self.assertEqual(base.update_actor_calls, [(["c"], None, False)])
 
+  def test_update_actor_routes_to_fwd_bwd_update_api(self):
+    base = _FakeBaseEngine()
+    worker = _FakeStepTrainerWorker()
+    routed = orchestrator_rl_engine.OrchestratorRLEngine(
+        base, trainer_worker=worker
+    )
+    self.assertEqual(routed.update_actor(["c0", "c1"], "eval", True), 7)
+    self.assertEqual(worker.fwd_bwd_calls, ["c0", "c1"])
+    self.assertEqual(worker.update_calls, [("eval", True)])
+    self.assertEmpty(base.update_actor_calls)
+
   def test_sync_weights_routes_then_falls_back(self):
     base = _FakeBaseEngine()
     weight_sync = _FakeWeightSync()
@@ -208,6 +240,46 @@ class OrchestratorRlEngineTest(absltest.TestCase):
         "base_actor",
     )
     self.assertLen(base.actor_calls, 1)
+
+  def test_remote_only_routes_without_base_engine(self):
+    trainer = _FakeStepTrainerWorker()
+    rollout = _FakeRolloutWorker()
+    inference = _FakeInferenceWorker()
+    weight_sync = _FakeWeightSync()
+    cluster_config = SimpleNamespace(
+        rollout_config={
+            rl_cluster_lib.Mode.TRAIN: "TRAIN_ROLLOUT_CONFIG",
+        }
+    )
+    cluster = orchestrator_rl_engine.OrchestratorRLEngine(
+        trainer_worker=trainer,
+        rollout_worker=rollout,
+        inference_worker=inference,
+        weight_sync=weight_sync,
+        cluster_config=cluster_config,
+        pad_id=0,
+        eos_id=2,
+    )
+
+    self.assertTrue(cluster.has_trainer_worker)
+    self.assertEqual(cluster.rollout.pad_id(), 0)
+    self.assertEqual(cluster.rollout.eos_id(), 2)
+    self.assertEqual(
+        cluster.get_rollout_config(rl_cluster_lib.Mode.TRAIN),
+        "TRAIN_ROLLOUT_CONFIG",
+    )
+    self.assertEqual(cluster.generate(["p"]), "worker_generate")
+    self.assertEqual(cluster.update_actor(["chunk"], None, False), 7)
+    self.assertEqual(
+        cluster.configure_grpo_loss(num_generations=2),
+        {"configured_loss": "grpo"},
+    )
+    self.assertEqual(
+        cluster.get_ref_per_token_logps("p", "c", pad_id=0, eos_id=2),
+        "worker_ref",
+    )
+    cluster.sync_weights()
+    self.assertEqual(weight_sync.syncs, 1)
 
 
 if __name__ == "__main__":

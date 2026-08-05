@@ -49,8 +49,12 @@ class GrpcRolloutWorkerProxy:
       prompts: Any,
       apply_chat_template: bool = False,
       mode: Any = rl_engine_lib.Mode.TRAIN,
+      micro_batch_size: int | None = None,
+      trace_tags: Any = None,
+      max_generation_steps: int | None = None,
       **kwargs,
   ) -> Any:
+    del apply_chat_template, micro_batch_size, trace_tags
     # Resolve configs from local base config
     rollout_cfg = self.cluster_config.rollout_config
     if isinstance(rollout_cfg, dict):
@@ -59,10 +63,12 @@ class GrpcRolloutWorkerProxy:
     # Convert to wire format
     return self.handle.submit(
         "generate",
-        prompts=prompts,
-        apply_chat_template=apply_chat_template,
-        mode=mode,
-        max_generation_steps=rollout_cfg.max_tokens_to_generate,
+        prompts,
+        max_generation_steps=(
+            max_generation_steps
+            if max_generation_steps is not None
+            else rollout_cfg.max_tokens_to_generate
+        ),
         temperature=rollout_cfg.temperature,
         top_p=rollout_cfg.top_p,
         top_k=rollout_cfg.top_k,
@@ -76,18 +82,27 @@ class GrpcWeightSyncProxy:
       self,
       trainer_handle: remote_execution.ActorHandle,
       rollout_handle: remote_execution.ActorHandle,
+      *,
+      sync_lora_weights: bool = True,
   ):
     self.trainer_handle = trainer_handle
     self.rollout_handle = rollout_handle
+    self.sync_lora_weights = sync_lora_weights
 
   def sync(self) -> None:
-    logging.info("[WeightSyncProxy] Pulling LoRA weights from Trainer...")
-    self.trainer_handle.submit("prepare_weight_sync")
-    lora_state = self.trainer_handle.submit("get_lora_weights")
-    logging.info("[WeightSyncProxy] Pushing LoRA weights to Rollout worker...")
-    self.rollout_handle.submit("pre_weight_sync")
-    self.rollout_handle.submit("weight_sync", lora_state)
-    self.rollout_handle.submit("post_weight_sync")
+    if self.sync_lora_weights:
+      logging.info("[WeightSyncProxy] Pulling LoRA weights from Trainer...")
+      self.trainer_handle.submit("prepare_weight_sync")
+      lora_state = self.trainer_handle.submit("get_lora_weights")
+      logging.info("[WeightSyncProxy] Pushing LoRA weights to Rollout worker...")
+      self.rollout_handle.submit("pre_weight_sync")
+      self.rollout_handle.submit("weight_sync", lora_state)
+      self.rollout_handle.submit("post_weight_sync")
+    else:
+      logging.info("[WeightSyncProxy] Running rollout sync barrier.")
+      self.rollout_handle.submit("pre_weight_sync")
+      self.rollout_handle.submit("weight_sync")
+      self.rollout_handle.submit("post_weight_sync")
     logging.info("[WeightSyncProxy] Sync completed.")
 
 
@@ -97,10 +112,19 @@ class GrpcTrainerWorkerProxy:
   def __init__(self, handle: remote_execution.ActorHandle):
     self.handle = handle
 
+  def configure_grpo_loss(self, **kwargs) -> Any:
+    return self.handle.submit("configure_grpo_loss", **kwargs)
+
+  def fwd_bwd(self, chunk: Any) -> Any:
+    return self.handle.submit("fwd_bwd", chunk)
+
+  def update(self, eval_ds: Any = None, skip_jit: bool = False) -> int:
+    return self.handle.submit("update", eval_ds=eval_ds, skip_jit=skip_jit)
+
   def train(self, chunks: list[Any], eval_ds: Any = None, skip_jit: bool = False) -> None:
     for chunk in chunks:
-      self.handle.submit("fwd_bwd", chunk)
-    self.handle.submit("update", eval_ds=eval_ds, skip_jit=skip_jit)
+      self.fwd_bwd(chunk)
+    self.update(eval_ds=eval_ds, skip_jit=skip_jit)
 
   def per_token_logps(
       self,

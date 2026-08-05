@@ -14,12 +14,13 @@
 
 """CPU orchestrator for a minimal distributed GSM8K-style GRPO chain demo.
 
-This script intentionally drives remote worker primitives directly:
+This script intentionally drives the training loop through RLOrchestrator:
   1. lifecycle handshake with trainer and rollout workers,
-  2. rollout generation on the rollout worker,
-  3. TrainExample assembly on the CPU orchestrator,
-  4. trainer-side GRPO loss configuration and actor update,
-  5. optional LoRA weight sync back to the rollout worker.
+  2. remote-only OrchestratorRLEngine over gRPC worker proxies,
+  3. rollout generation on the rollout worker,
+  4. TrainExample assembly through the GRPO algorithm adapter,
+  5. trainer-side GRPO loss configuration and actor update,
+  6. optional LoRA weight sync back to the rollout worker.
 
 It is a plumbing demo, not a full-quality GSM8K training recipe.
 """
@@ -31,6 +32,7 @@ import logging
 import os
 import re
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -45,10 +47,14 @@ REPO_ROOT = os.path.abspath(
 if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
+from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import grpc_worker_proxies  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import orchestrator_rl_engine  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import rl_orchestrator  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
-from tunix.rl import function_registry  # pylint: disable=g-import-not-at-top
+from tunix.rl import rl_cluster as rl_cluster_lib  # pylint: disable=g-import-not-at-top
 from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic import utils as agentic_utils  # pylint: disable=g-import-not-at-top
+from tunix.rl.rollout import base_rollout  # pylint: disable=g-import-not-at-top
 
 
 PROMPT_TEMPLATE = """Solve the following math problem.
@@ -155,48 +161,6 @@ def _encode(tokenizer: Any, text: str) -> list[int]:
     return tokenizer.encode(text)
 
 
-def _build_train_example(
-    *,
-    tokenizer: Any,
-    prompts: list[str],
-    completion_tokens: list[Any],
-    rewards: np.ndarray,
-    num_generations: int,
-    max_prompt_length: int,
-    max_response_length: int,
-    pad_id: int,
-) -> agentic_grpo_learner.TrainExample:
-  padded_prompt_ids = []
-  padded_completion_ids = []
-  padded_completion_masks = []
-  for prompt, tokens in zip(prompts, completion_tokens):
-    prompt_ids = _encode(tokenizer, prompt)
-    completion_ids = np.asarray(tokens, dtype=np.int32).tolist()
-    padded_prompt, padded_completion, _ = agentic_utils.pad_prompt_and_completion(
-        prompt_ids,
-        completion_ids,
-        max_prompt_length,
-        max_response_length,
-        pad_id,
-    )
-    padded_prompt_ids.append(padded_prompt)
-    padded_completion_ids.append(padded_completion)
-    padded_completion_masks.append((padded_completion != pad_id).astype(np.int32))
-
-  advantage_fn = function_registry.get_advantage_estimator("grpo")
-  advantages = advantage_fn(rewards, num_generations=num_generations)
-  return agentic_grpo_learner.TrainExample(
-      prompt_ids=np.asarray(padded_prompt_ids, dtype=np.int32),
-      prompt_mask=np.asarray(padded_prompt_ids) != pad_id,
-      completion_ids=np.asarray(padded_completion_ids, dtype=np.int32),
-      completion_mask=np.asarray(padded_completion_masks, dtype=np.int32),
-      advantages=np.asarray(advantages, dtype=np.float32),
-      ref_per_token_logps=None,
-      old_per_token_logps=None,
-      policy_version=np.zeros((len(prompts),), dtype=np.int32),
-  )
-
-
 def _slice_or_none(value: Any, start: int, end: int) -> Any:
   if value is None:
     return None
@@ -236,7 +200,7 @@ def _split_train_example(
 
 
 def _maybe_add_ref_logps(
-    trainer_handle: remote_execution.ActorHandle,
+    orchestrator: rl_orchestrator.RLOrchestrator,
     example: agentic_grpo_learner.TrainExample,
     *,
     beta: float,
@@ -245,14 +209,80 @@ def _maybe_add_ref_logps(
 ) -> agentic_grpo_learner.TrainExample:
   if beta == 0.0:
     return example
-  ref_logps = trainer_handle.submit(
-      "reference_logps",
+  ref_logps = orchestrator.reference_logps(
       example.prompt_ids,
       example.completion_ids,
       pad_id,
       eos_id,
   )
   return example.replace(ref_per_token_logps=ref_logps)
+
+
+def _build_cluster_config(args: argparse.Namespace) -> Any:
+  top_k = None if args.top_k < 0 else args.top_k
+  rollout_config = base_rollout.RolloutConfig(
+      max_prompt_length=args.max_prompt_length,
+      max_tokens_to_generate=args.max_response_length,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=top_k,
+      return_logprobs=True,
+  )
+  return SimpleNamespace(
+      training_config=SimpleNamespace(
+          train_micro_batch_size=args.train_micro_batch_size,
+          compute_logps_micro_batch_size=args.train_micro_batch_size,
+          compute_logps_chunk_size=0,
+      ),
+      rollout_config={
+          rl_cluster_lib.Mode.TRAIN: rollout_config,
+          rl_cluster_lib.Mode.EVAL: rollout_config,
+      },
+  )
+
+
+def _build_orchestrator(
+    args: argparse.Namespace,
+    tokenizer: Any,
+    trainer_handle: remote_execution.ActorHandle,
+    rollout_handle: remote_execution.ActorHandle,
+    pad_id: int,
+    eos_id: int,
+) -> rl_orchestrator.RLOrchestrator:
+  cluster_config = _build_cluster_config(args)
+  trainer_proxy = grpc_worker_proxies.GrpcTrainerWorkerProxy(trainer_handle)
+  rollout_proxy = grpc_worker_proxies.GrpcRolloutWorkerProxy(
+      rollout_handle, cluster_config
+  )
+  inference_proxy = grpc_worker_proxies.GrpcInferenceWorkerProxy(trainer_handle)
+  weight_sync_proxy = grpc_worker_proxies.GrpcWeightSyncProxy(
+      trainer_handle,
+      rollout_handle,
+      sync_lora_weights=args.sync_lora_weights,
+  )
+  cluster = orchestrator_rl_engine.OrchestratorRLEngine(
+      trainer_worker=trainer_proxy,
+      rollout_worker=rollout_proxy,
+      inference_worker=inference_proxy,
+      weight_sync=weight_sync_proxy,
+      cluster_config=cluster_config,
+      tokenizer=tokenizer,
+      pad_id=pad_id,
+      eos_id=eos_id,
+  )
+  grpo_config = agentic_grpo_learner.GRPOConfig(
+      num_generations=args.num_generations,
+      num_iterations=1,
+      beta=args.beta,
+      kl_loss_mode="mse_kl",
+      epsilon=args.epsilon,
+      max_response_length=args.max_response_length,
+      use_rollout_logps=False,
+  )
+  grpo_config.temperature = args.temperature
+  return rl_orchestrator.RLOrchestrator(
+      cluster, algorithm_adapter.GRPOAdapter(grpo_config)
+  )
 
 
 def _log_lifecycle(name: str, handle: remote_execution.ActorHandle) -> None:
@@ -288,18 +318,18 @@ def main() -> None:
 
   _log_lifecycle("trainer", trainer_handle)
   _log_lifecycle("rollout", rollout_handle)
-  logging.info("Configuring trainer-side GRPO loss.")
-  trainer_handle.submit(
-      "configure_grpo_loss",
-      num_generations=args.num_generations,
-      max_response_length=args.max_response_length,
-      beta=args.beta,
-      epsilon=args.epsilon,
-      temperature=args.temperature,
+  orchestrator = _build_orchestrator(
+      args,
+      tokenizer,
+      trainer_handle,
+      rollout_handle,
+      pad_id,
+      eos_id,
   )
+  logging.info("Configuring trainer-side GRPO loss through RLOrchestrator.")
+  orchestrator.configure_trainer()
   logging.info("Trainer-side GRPO loss configured.")
 
-  top_k = None if args.top_k < 0 else args.top_k
   for step in range(args.max_steps):
     prompts, gold_answers = _build_prompts(args.batch_size, args.num_generations)
     logging.info(
@@ -307,13 +337,9 @@ def main() -> None:
         step,
         len(prompts),
     )
-    rollout_output = rollout_handle.submit(
-        "generate",
+    rollout_output = orchestrator.generate(
         prompts,
         max_generation_steps=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=top_k,
     )
     logging.info(
         "Step %d: rollout returned %d completions.",
@@ -326,18 +352,23 @@ def main() -> None:
         mode=args.reward_mode,
         num_generations=args.num_generations,
     )
-    train_example = _build_train_example(
-        tokenizer=tokenizer,
-        prompts=prompts,
-        completion_tokens=rollout_output.tokens,
-        rewards=rewards,
-        num_generations=args.num_generations,
+    advantages = orchestrator.compute_advantages(
+        rewards, num_generations=args.num_generations
+    )
+    prompt_tokens = [_encode(tokenizer, prompt) for prompt in prompts]
+    train_example = orchestrator.assemble_train_example(
+        prompt_tokens,
+        rollout_output.tokens,
+        advantages,
         max_prompt_length=args.max_prompt_length,
         max_response_length=args.max_response_length,
         pad_id=pad_id,
+        policy_version=np.full(
+            (len(prompts),), orchestrator.global_steps, dtype=np.int32
+        ),
     )
     train_example = _maybe_add_ref_logps(
-        trainer_handle,
+        orchestrator,
         train_example,
         beta=args.beta,
         pad_id=pad_id,
@@ -351,28 +382,14 @@ def main() -> None:
         float(rewards.std()),
         len(chunks),
     )
-    for chunk in chunks:
-      trainer_handle.submit("fwd_bwd", chunk)
-    train_step = trainer_handle.submit("update", eval_ds=None, skip_jit=False)
+    train_step = orchestrator.train_step(chunks, eval_ds=None, skip_jit=False)
     logging.info(
         "Step %d: trainer update finished at train_step=%s.", step, train_step
     )
 
-    if args.sync_lora_weights:
-      logging.info("Step %d: syncing LoRA weights to rollout worker.", step)
-      trainer_handle.submit("prepare_weight_sync")
-      lora_weights = trainer_handle.submit("get_lora_weights")
-      rollout_handle.submit("pre_weight_sync")
-      rollout_handle.submit("weight_sync", lora_weights)
-      rollout_handle.submit("post_weight_sync")
-    else:
-      logging.info(
-          "Step %d: running rollout weight-sync barrier without LoRA weights.",
-          step,
-      )
-      rollout_handle.submit("pre_weight_sync")
-      rollout_handle.submit("weight_sync")
-      rollout_handle.submit("post_weight_sync")
+    logging.info("Step %d: syncing weights through RLOrchestrator.", step)
+    orchestrator.sync_weights()
+    orchestrator.global_steps += 1
     logging.info("Step %d: distributed train+sync chain completed.", step)
 
   if args.stop_workers_on_exit:

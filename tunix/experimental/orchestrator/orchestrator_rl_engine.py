@@ -22,12 +22,12 @@ in-process. Because the agentic learners call these primitives directly on
 `rl_engine`, swapping in this engine distributes the loop with no learner
 changes.
 
-It is built by composition over a base `RLEngine`: the routed primitives go to
-the handles (falling back to the base when a handle is absent, for incremental
-bring-up), and everything else the loop reads -- `cluster_config`, `rollout`,
-`actor_trainer`, `perf_v2`, tokenizer, metric buffering, etc. -- is delegated to
-the base. As real workers replace in-process pieces, more of the surface moves
-onto handles and less is delegated.
+It can run in two modes. In incremental mode it is built by composition over a
+base `RLEngine`: routed primitives go to handles and fall back to the base when
+a handle is absent. In remote-only mode the CPU orchestrator provides only
+metadata (`cluster_config`, tokenizer, rollout pad/eos ids) and every compute
+primitive must be backed by worker handles, so the orchestrator process never
+loads the model or initializes TPU.
 
 Handle contracts (all optional; absent -> in-process fallback):
     trainer_worker.fwd_bwd(chunk) -> Response
@@ -47,46 +47,104 @@ from typing import Any, Mapping
 from tunix.rl import rl_cluster as rl_engine_lib
 
 
+class _TokenIdRolloutView:
+  """Small rollout metadata view used by remote-only orchestrators."""
+
+  def __init__(self, pad_id: int, eos_id: int):
+    self._pad_id = pad_id
+    self._eos_id = eos_id
+
+  def pad_id(self) -> int:
+    return self._pad_id
+
+  def eos_id(self) -> int:
+    return self._eos_id
+
+
 class OrchestratorRLEngine:
   """Worker-backed cluster that routes compute primitives and delegates the rest."""
 
   def __init__(
       self,
-      base: rl_engine_lib.RLEngine,
+      base: rl_engine_lib.RLEngine | None = None,
       *,
       trainer_worker: Any = None,
       rollout_worker: Any = None,
       inference_worker: Any = None,
       weight_sync: Any = None,
+      cluster_config: Any = None,
+      rollout: Any = None,
+      actor_trainer: Any = None,
+      tokenizer: Any = None,
+      r2m: Any = None,
+      pad_id: int | None = None,
+      eos_id: int | None = None,
   ):
     """Initializes the orchestrator cluster.
 
     Args:
-      base: The in-process cluster that supplies the full surface (models,
+      base: Optional in-process cluster that supplies the full surface (models,
         trainers, rollout, config, metrics, step counter). Routed primitives
-        fall back to it when the matching handle is not provided.
+        fall back to it when the matching handle is not provided. For a
+        remote-only CPU orchestrator, pass no base and provide the metadata the
+        loop needs (`cluster_config`, tokenizer, pad/eos ids) explicitly.
       trainer_worker: Optional handle exposing `fwd_bwd(...)`, `update(...)`,
         and optionally `per_token_logps(...)` for the actor trainer.
       rollout_worker: Optional handle exposing `generate(...)`.
       inference_worker: Optional handle exposing `per_token_logps(...)` for the
         frozen reference model.
       weight_sync: Optional handle exposing `sync()`.
+      cluster_config: Optional cluster config metadata for remote-only mode.
+      rollout: Optional rollout metadata surface. If omitted and pad/eos ids
+        are supplied, a small `pad_id()/eos_id()` view is created.
+      actor_trainer: Optional actor trainer metadata surface.
+      tokenizer: Optional tokenizer used by learner-side code.
+      r2m: Optional role-to-mesh metadata.
+      pad_id: Optional tokenizer pad id for remote-only rollout metadata.
+      eos_id: Optional tokenizer eos id for remote-only rollout metadata.
     """
     self._base = base
     self._trainer_worker = trainer_worker
     self._rollout_worker = rollout_worker
     self._inference_worker = inference_worker
     self._weight_sync = weight_sync
+    self._cluster_config = cluster_config
+    self._rollout = rollout
+    if self._rollout is None and pad_id is not None and eos_id is not None:
+      self._rollout = _TokenIdRolloutView(pad_id, eos_id)
+    self._actor_trainer = actor_trainer
+    self._tokenizer = tokenizer
+    self._r2m = r2m
+    self._global_steps = 0
+    self._buffered_metrics: list[tuple[Any, dict[str, Any]]] = []
+    self._buffered_async_metrics: list[tuple[Any, dict[str, Any]]] = []
+
+  def _require_base(self, method_name: str) -> rl_engine_lib.RLEngine:
+    if self._base is None:
+      raise RuntimeError(
+          f"{method_name} requires either a remote worker/proxy or a base "
+          "RLEngine. This OrchestratorRLEngine was constructed in remote-only "
+          "mode without the required worker."
+      )
+    return self._base
+
+  @property
+  def has_trainer_worker(self) -> bool:
+    return self._trainer_worker is not None
 
   # --- Shared bookkeeping (read + write, kept on the base) -------------------
 
   @property
   def global_steps(self) -> int:
-    return self._base.global_steps
+    if self._base is not None:
+      return self._base.global_steps
+    return self._global_steps
 
   @global_steps.setter
   def global_steps(self, value: int) -> None:
-    self._base.global_steps = value
+    if self._base is not None:
+      self._base.global_steps = value
+    self._global_steps = value
 
   # --- Generation (rollout) -------------------------------------------------
 
@@ -108,7 +166,7 @@ class OrchestratorRLEngine:
           trace_tags=trace_tags,
           max_generation_steps=max_generation_steps,
       )
-    return self._base.generate(
+    return self._require_base("generate").generate(
         prompts,
         apply_chat_template,
         mode,
@@ -121,19 +179,25 @@ class OrchestratorRLEngine:
 
   def update_actor(
       self, train_ds: Any, eval_ds: Any, skip_jit: bool = False
-  ) -> None:
+  ) -> Any:
     if self._trainer_worker is not None:
       fwd_bwd = getattr(self._trainer_worker, "fwd_bwd", None)
       update = getattr(self._trainer_worker, "update", None)
-      if not callable(fwd_bwd) or not callable(update):
-        raise TypeError(
-            "trainer_worker must expose the experimental fwd_bwd/update API."
-        )
-      for chunk in train_ds:
-        fwd_bwd(chunk)
-      update(eval_ds=eval_ds, skip_jit=skip_jit)
+      if callable(fwd_bwd) and callable(update):
+        for chunk in train_ds:
+          fwd_bwd(chunk)
+        return update(eval_ds=eval_ds, skip_jit=skip_jit)
+      else:
+        train = getattr(self._trainer_worker, "train", None)
+        if not callable(train):
+          raise TypeError(
+              "trainer_worker must expose fwd_bwd/update or train(...)."
+          )
+        return train(train_ds, eval_ds=eval_ds, skip_jit=skip_jit)
     else:
-      self._base.update_actor(train_ds, eval_ds, skip_jit)
+      return self._require_base("update_actor").update_actor(
+          train_ds, eval_ds, skip_jit
+      )
 
   def update_critic(
       self, train_ds: Any, eval_ds: Any, skip_jit: bool = False
@@ -143,7 +207,9 @@ class OrchestratorRLEngine:
     ):
       self._trainer_worker.train_critic(train_ds, eval_ds, skip_jit)
     else:
-      self._base.update_critic(train_ds, eval_ds, skip_jit)
+      self._require_base("update_critic").update_critic(
+          train_ds, eval_ds, skip_jit
+      )
 
   # --- Scoring --------------------------------------------------------------
 
@@ -162,7 +228,7 @@ class OrchestratorRLEngine:
           pad_id=pad_id,
           eos_id=eos_id,
       )
-    return self._base.get_ref_per_token_logps(
+    return self._require_base("get_ref_per_token_logps").get_ref_per_token_logps(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         pad_id=pad_id,
@@ -179,14 +245,16 @@ class OrchestratorRLEngine:
       micro_batch_size: int | None = None,
   ) -> Any:
     per_token_logps = getattr(self._trainer_worker, "per_token_logps", None)
-    if per_token_logps is not None:
+    if callable(per_token_logps):
       return per_token_logps(
           prompt_ids=prompt_tokens,
           completion_ids=completion_tokens,
           pad_id=pad_id,
           eos_id=eos_id,
       )
-    return self._base.get_actor_per_token_logps(
+    return self._require_base(
+        "get_actor_per_token_logps"
+    ).get_actor_per_token_logps(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         pad_id=pad_id,
@@ -200,7 +268,74 @@ class OrchestratorRLEngine:
     if self._weight_sync is not None:
       self._weight_sync.sync()
     else:
-      self._base.sync_weights()
+      self._require_base("sync_weights").sync_weights()
+
+  def configure_grpo_loss(self, **kwargs) -> Any:
+    configure = getattr(self._trainer_worker, "configure_grpo_loss", None)
+    if callable(configure):
+      return configure(**kwargs)
+    raise RuntimeError(
+        "configure_grpo_loss requires a trainer worker/proxy exposing "
+        "configure_grpo_loss(...)."
+    )
+
+  def buffer_metrics(self, metrics: Any, **kwargs) -> None:
+    if self._base is not None:
+      self._base.buffer_metrics(metrics, **kwargs)
+      return
+    self._buffered_metrics.append((metrics, kwargs))
+
+  def buffer_metrics_async(self, metrics: Any, **kwargs) -> None:
+    if self._base is not None:
+      self._base.buffer_metrics_async(metrics, **kwargs)
+      return
+    self._buffered_async_metrics.append((metrics, kwargs))
+
+  def close(self) -> None:
+    if self._base is not None:
+      self._base.close()
+
+  @property
+  def cluster_config(self) -> Any:
+    if self._cluster_config is not None:
+      return self._cluster_config
+    return self._require_base("cluster_config").cluster_config
+
+  @property
+  def rollout(self) -> Any:
+    if self._rollout is not None:
+      return self._rollout
+    return self._require_base("rollout").rollout
+
+  @property
+  def actor_trainer(self) -> Any:
+    if self._actor_trainer is not None:
+      return self._actor_trainer
+    return self._require_base("actor_trainer").actor_trainer
+
+  @property
+  def tokenizer(self) -> Any:
+    if self._tokenizer is not None:
+      return self._tokenizer
+    return self._require_base("tokenizer").tokenizer
+
+  @property
+  def r2m(self) -> Any:
+    if self._r2m is not None:
+      return self._r2m
+    return self._require_base("r2m").r2m
+
+  @property
+  def perf_v2(self) -> Any:
+    return self._require_base("perf_v2").perf_v2
+
+  def get_rollout_config(self, mode: Any) -> Any:
+    if self._base is not None:
+      return self._base.get_rollout_config(mode)
+    rollout_config = self.cluster_config.rollout_config
+    if isinstance(rollout_config, dict):
+      return rollout_config[mode]
+    return rollout_config
 
   # --- Everything else is delegated to the in-process base cluster ----------
 

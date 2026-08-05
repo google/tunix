@@ -72,6 +72,15 @@ class _FakeEngine:
     return "ACTOR"
 
 
+class _FakeRemoteEngine(_FakeEngine):
+
+  has_trainer_worker = True
+
+  def configure_grpo_loss(self, **kwargs):
+    self.calls["configure_grpo_loss"] = kwargs
+    return {"configured_loss": "grpo"}
+
+
 def _make(cluster=None, algorithm=None):
   cluster = cluster or _FakeEngine()
   algorithm = algorithm or _grpo_adapter()
@@ -153,6 +162,19 @@ class RlOrchestratorTest(absltest.TestCase):
     self.assertIs(orch.cluster, cluster)
     self.assertIs(orch.algorithm, algorithm)
     self.assertIsInstance(algorithm, algorithm_adapter.AlgorithmAdapter)
+
+  def test_configure_trainer_uses_remote_safe_grpo_config(self):
+    cluster = _FakeRemoteEngine()
+    algorithm = _grpo_adapter()
+    orch = rl_orchestrator.RLOrchestrator(cluster, algorithm)
+
+    orch.configure_trainer()
+
+    config_call = cluster.calls["configure_grpo_loss"]
+    self.assertEqual(config_call["num_generations"], 2)
+    self.assertEqual(config_call["policy_loss_fn"], "grpo")
+    self.assertEqual(config_call["advantage_estimator"], "grpo")
+    self.assertFalse("loss_fn" in config_call)
 
 
 if __name__ == "__main__":
