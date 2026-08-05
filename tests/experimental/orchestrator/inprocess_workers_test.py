@@ -32,7 +32,6 @@ class InProcessWorkersTest(absltest.TestCase):
   def test_trainer_worker_train(self):
     worker = inprocess_workers.InProcessTrainerWorker(self.mock_engine)
     worker.train(
-        rl_engine_lib.Role.ACTOR,
         train_ds="chunks_data",
         eval_ds="eval_data",
         skip_jit=True,
@@ -41,8 +40,7 @@ class InProcessWorkersTest(absltest.TestCase):
         rl_engine_lib.Role.ACTOR, "chunks_data", "eval_data", True
     )
 
-    worker.train(
-        rl_engine_lib.Role.CRITIC,
+    worker.train_critic(
         train_ds="chunks_data",
         eval_ds="eval_data",
         skip_jit=False,

@@ -47,13 +47,21 @@ class InProcessTrainerWorker:
 
   def train(
       self,
-      role: rl_engine_lib.Role,
       train_ds: Any,
       eval_ds: Any,
       skip_jit: bool = False,
   ) -> None:
-    """Runs a training update for the specified role."""
-    self._rl_engine.train(role, train_ds, eval_ds, skip_jit)
+    """Runs a training update for the Actor."""
+    self._rl_engine.train(rl_engine_lib.Role.ACTOR, train_ds, eval_ds, skip_jit)
+
+  def train_critic(
+      self,
+      train_ds: Any,
+      eval_ds: Any,
+      skip_jit: bool = False,
+  ) -> None:
+    """Runs a training update for the Critic."""
+    self._rl_engine.train(rl_engine_lib.Role.CRITIC, train_ds, eval_ds, skip_jit)
 
   def per_token_logps(
       self,
