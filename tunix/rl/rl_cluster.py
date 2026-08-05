@@ -858,6 +858,21 @@ class RLEngine:
       for m in [self._buffered_eval_metrics.pop(0)]:
         self._log_metrics(m)
 
+  def train(
+      self,
+      role: Role,
+      train_ds: Any,
+      eval_ds: Any,
+      skip_jit: bool = False,
+  ) -> None:
+    """Runs a training update for the specified role."""
+    if role == Role.ACTOR:
+      self.update_actor(train_ds, eval_ds, skip_jit=skip_jit)
+    elif role == Role.CRITIC:
+      self.update_critic(train_ds, eval_ds, skip_jit=skip_jit)
+    else:
+      raise ValueError(f"Unsupported role for train: {role}")
+
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -982,6 +997,41 @@ class RLEngine:
         ),
         logprobs=logprobs,
     )
+
+  def per_token_logps(
+      self,
+      role: Role,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int | None = None,
+      segment_ids: jax.Array | None = None,
+      **kwargs: Any,
+  ) -> jax.Array:
+    """Computes per-token logprobs under the specified model role."""
+    if role == Role.REFERENCE:
+      return self.get_ref_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          segment_ids=segment_ids,
+          **kwargs,
+      )
+    elif role == Role.ACTOR:
+      return self.get_actor_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          segment_ids=segment_ids,
+          **kwargs,
+      )
+    else:
+      raise ValueError(f"Unsupported role for per_token_logps: {role}")
 
   def get_ref_per_token_logps(
       self,

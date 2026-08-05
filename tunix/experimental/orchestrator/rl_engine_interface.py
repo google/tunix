@@ -41,6 +41,7 @@ comments.
 
 from typing import Any, Mapping, Protocol, runtime_checkable
 from jax.typing import ArrayLike
+from tunix.rl import rl_cluster as rl_engine_lib
 
 
 @runtime_checkable
@@ -81,40 +82,31 @@ class AbstractRLEngine(Protocol):
     ...
 
   # --- Training (train_step) ------------------------------------------------
-  # TODO(noghabi): change to a single update() and refactor current loop.
-  def update_actor(
-      self, train_ds: Any, eval_ds: Any, skip_jit: bool = False
+  def train(
+      self,
+      role: rl_engine_lib.Role,
+      train_ds: Any,
+      eval_ds: Any,
+      skip_jit: bool = False,
   ) -> None:
-    """Runs the actor trainer over the (chunked) micro-batch."""
-    ...
-
-  def update_critic(
-      self, train_ds: Any, eval_ds: Any, skip_jit: bool = False
-  ) -> None:
-    """Runs the critic trainer (PPO); absent/no-op for critic-free algorithms."""
+    """Runs a training update for the specified role (e.g. Role.ACTOR, Role.CRITIC)."""
     ...
 
   # --- Scoring (feeds advantage / IS math) ----------------------------------
-  def get_ref_per_token_logps(
+  def per_token_logps(
       self,
+      role: rl_engine_lib.Role,
       prompt_tokens: ArrayLike,
       completion_tokens: ArrayLike,
       pad_id: int,
       eos_id: int,
       micro_batch_size: int | None = None,
+      segment_ids: ArrayLike | None = None,
+      **kwargs: Any,
   ) -> Any:
-    """Per-token logprobs under the frozen reference model."""
-    ...
-
-  def get_actor_per_token_logps(
-      self,
-      prompt_tokens: ArrayLike,
-      completion_tokens: ArrayLike,
-      pad_id: int,
-      eos_id: int,
-      micro_batch_size: int | None = None,
-  ) -> Any:
-    """Per-token logprobs under the (trainable) actor model."""
+    """Per-token logprobs under the specified model role."""
+    # TODO(noghabi): add per batch interface (replace or keep both). that is
+    # the interface worker uses.
     ...
 
   # --- Weight sync ----------------------------------------------------------

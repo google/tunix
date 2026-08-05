@@ -28,6 +28,7 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 from transformers import tokenization_utils_base
+from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.generate import mappings
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils
@@ -870,6 +871,132 @@ class RlEngineTest(parameterized.TestCase):
 
     self.assertTrue(invoked)
     self.assertEqual(nn_partitioning.get_axis_rules(), ())
+
+  def test_generic_role_primitives_delegate_to_shorthands(self):
+    actor_mesh = Mesh(
+        np.array(jax.devices()[: self.device_count]).reshape(
+            self.device_count, 1
+        ),
+        ('fsdp', 'tp'),
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: actor_mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    with self.subTest('update_actor'):
+      with mock.patch.object(
+          rl_engine, 'update_actor'
+      ) as mock_update_actor:
+        rl_engine.train(
+            rl_engine_lib.Role.ACTOR, 'train_ds', 'eval_ds', skip_jit=True
+        )
+        mock_update_actor.assert_called_once_with(
+            'train_ds', 'eval_ds', skip_jit=True
+        )
+
+    with self.subTest('update_critic'):
+      with mock.patch.object(
+          rl_engine, 'update_critic'
+      ) as mock_update_critic:
+        rl_engine.train(
+            rl_engine_lib.Role.CRITIC, 'train_ds', 'eval_ds', skip_jit=False
+        )
+        mock_update_critic.assert_called_once_with(
+            'train_ds', 'eval_ds', skip_jit=False
+        )
+
+    with self.subTest('update_unsupported_role'):
+      with self.assertRaises(ValueError):
+        rl_engine.train(
+            rl_engine_lib.Role.REFERENCE, 'train_ds', 'eval_ds'
+        )
+
+    with self.subTest('per_token_logps_reference'):
+      with mock.patch.object(
+          rl_engine, 'get_ref_per_token_logps', return_value='ref_logps'
+      ) as mock_ref_logps:
+        res_ref = rl_engine.per_token_logps(
+            rl_engine_lib.Role.REFERENCE,
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            segment_ids='s',
+        )
+        self.assertEqual(res_ref, 'ref_logps')
+        mock_ref_logps.assert_called_once_with(
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            micro_batch_size=None,
+            segment_ids='s',
+        )
+
+    with self.subTest('per_token_logps_actor'):
+      with mock.patch.object(
+          rl_engine, 'get_actor_per_token_logps', return_value='actor_logps'
+      ) as mock_actor_logps:
+        res_actor = rl_engine.per_token_logps(
+            rl_engine_lib.Role.ACTOR,
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            segment_ids='s',
+        )
+        self.assertEqual(res_actor, 'actor_logps')
+        mock_actor_logps.assert_called_once_with(
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            micro_batch_size=None,
+            segment_ids='s',
+        )
+
+    with self.subTest('per_token_logps_unsupported_role'):
+      with self.assertRaises(ValueError):
+        rl_engine.per_token_logps(
+            rl_engine_lib.Role.CRITIC,
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+        )
+
+    with self.subTest('satisfies_abstract_rl_engine_protocol'):
+      self.assertIsInstance(
+          rl_engine, rl_engine_interface.AbstractRLEngine
+      )
 
 
 if __name__ == '__main__':

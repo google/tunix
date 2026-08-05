@@ -17,6 +17,7 @@
 from unittest import mock
 from absl.testing import absltest
 from tunix.experimental.orchestrator import inprocess_workers
+from tunix.rl import rl_cluster as rl_engine_lib
 
 
 class InProcessWorkersTest(absltest.TestCase):
@@ -28,39 +29,31 @@ class InProcessWorkersTest(absltest.TestCase):
         4
     )
 
-  def test_trainer_worker_train_without_critic(self):
-    # Ensure critic_trainer attribute is absent
-    del self.mock_engine.critic_trainer
+  def test_trainer_worker_train(self):
     worker = inprocess_workers.InProcessTrainerWorker(self.mock_engine)
-    worker.train(chunks="chunks_data", eval_ds="eval_data", skip_jit=True)
-
-    self.mock_engine.update_actor.assert_called_once_with(
-        "chunks_data", "eval_data", True
+    worker.train(
+        rl_engine_lib.Role.ACTOR,
+        train_ds="chunks_data",
+        eval_ds="eval_data",
+        skip_jit=True,
     )
-    self.mock_engine.update_critic.assert_not_called()
-
-  def test_trainer_worker_train_with_critic(self):
-    self.mock_engine.critic_trainer = mock.MagicMock()
-    worker = inprocess_workers.InProcessTrainerWorker(self.mock_engine)
-    worker.train(chunks="chunks_data", eval_ds="eval_data", skip_jit=False)
-
-    self.mock_engine.update_actor.assert_called_once_with(
-        "chunks_data", "eval_data", False
-    )
-    self.mock_engine.update_critic.assert_called_once_with(
-        "chunks_data", "eval_data", False
+    self.mock_engine.train.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR, "chunks_data", "eval_data", True
     )
 
-  def test_trainer_worker_train_with_critic_missing_update_critic_raises(self):
-    self.mock_engine.critic_trainer = mock.MagicMock()
-    del self.mock_engine.update_critic
-    worker = inprocess_workers.InProcessTrainerWorker(self.mock_engine)
-    with self.assertRaises(AttributeError):
-      worker.train(chunks="chunks_data", eval_ds="eval_data", skip_jit=False)
+    worker.train(
+        rl_engine_lib.Role.CRITIC,
+        train_ds="chunks_data",
+        eval_ds="eval_data",
+        skip_jit=False,
+    )
+    self.mock_engine.train.assert_called_with(
+        rl_engine_lib.Role.CRITIC, "chunks_data", "eval_data", False
+    )
 
   def test_trainer_worker_per_token_logps(self):
     worker = inprocess_workers.InProcessTrainerWorker(self.mock_engine)
-    self.mock_engine.get_actor_per_token_logps.return_value = "logp_result"
+    self.mock_engine.per_token_logps.return_value = "logp_result"
 
     result = worker.per_token_logps(
         prompt_ids="prompts",
@@ -70,7 +63,8 @@ class InProcessWorkersTest(absltest.TestCase):
     )
 
     self.assertEqual(result, "logp_result")
-    self.mock_engine.get_actor_per_token_logps.assert_called_once_with(
+    self.mock_engine.per_token_logps.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR,
         prompt_tokens="prompts",
         completion_tokens="completions",
         pad_id=0,
@@ -129,7 +123,7 @@ class InProcessWorkersTest(absltest.TestCase):
 
   def test_inference_worker_per_token_logps(self):
     worker = inprocess_workers.InProcessInferenceWorker(self.mock_engine)
-    self.mock_engine.get_ref_per_token_logps.return_value = "ref_logp_result"
+    self.mock_engine.per_token_logps.return_value = "ref_logp_result"
 
     result = worker.per_token_logps(
         prompt_ids="prompts",
@@ -139,7 +133,8 @@ class InProcessWorkersTest(absltest.TestCase):
     )
 
     self.assertEqual(result, "ref_logp_result")
-    self.mock_engine.get_ref_per_token_logps.assert_called_once_with(
+    self.mock_engine.per_token_logps.assert_called_once_with(
+        rl_engine_lib.Role.REFERENCE,
         prompt_tokens="prompts",
         completion_tokens="completions",
         pad_id=0,

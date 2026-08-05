@@ -29,13 +29,15 @@ behavioral reference to match.
 
 from typing import Any, Mapping
 
+from tunix.rl import rl_cluster as rl_engine_lib
+
 
 class InProcessTrainerWorker:
   """Trainer-worker handle that wraps an in-process base ``RLEngine`` / ``AbstractRLEngine``.
 
   Contract driven by ``OrchestratorRLEngine``:
 
-      train(chunks, eval_ds, skip_jit) -> None
+      train(role, train_ds, eval_ds, skip_jit) -> None
       per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
       sync_weights() -> None
   """
@@ -43,24 +45,45 @@ class InProcessTrainerWorker:
   def __init__(self, rl_engine: Any):
     self._rl_engine = rl_engine
 
-  def train(self, chunks: Any, eval_ds: Any, skip_jit: bool) -> None:
-    """Runs one actor (and optional critic) trainer pass over the micro-batch."""
-    self._rl_engine.update_actor(chunks, eval_ds, skip_jit)
-    if hasattr(self._rl_engine, "critic_trainer"):
-      self._rl_engine.update_critic(chunks, eval_ds, skip_jit)
+  def train(
+      self,
+      role: rl_engine_lib.Role,
+      train_ds: Any,
+      eval_ds: Any,
+      skip_jit: bool = False,
+  ) -> None:
+    """Runs a training update for the specified role."""
+    self._rl_engine.train(role, train_ds, eval_ds, skip_jit)
 
   def per_token_logps(
-      self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
+      self,
+      prompt_ids: Any,
+      completion_ids: Any,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int | None = None,
+      segment_ids: Any | None = None,
+      **kwargs: Any,
   ) -> Any:
     """Actor-model per-token logprobs over a padded group."""
-    return self._rl_engine.get_actor_per_token_logps(
+    call_kwargs = dict(
         prompt_tokens=prompt_ids,
         completion_tokens=completion_ids,
         pad_id=pad_id,
         eos_id=eos_id,
         micro_batch_size=(
-            self._rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
+            micro_batch_size
+            if micro_batch_size is not None
+            else (
+                self._rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
+            )
         ),
+        **kwargs,
+    )
+    if segment_ids is not None:
+      call_kwargs["segment_ids"] = segment_ids
+    return self._rl_engine.per_token_logps(
+        rl_engine_lib.Role.ACTOR, **call_kwargs
     )
 
   def sync_weights(self) -> None:
@@ -116,15 +139,32 @@ class InProcessInferenceWorker:
     self._rl_engine = rl_engine
 
   def per_token_logps(
-      self, prompt_ids: Any, completion_ids: Any, pad_id: int, eos_id: int
+      self,
+      prompt_ids: Any,
+      completion_ids: Any,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int | None = None,
+      segment_ids: Any | None = None,
+      **kwargs: Any,
   ) -> Any:
     """Reference-model per-token logprobs over a padded group."""
-    return self._rl_engine.get_ref_per_token_logps(
+    call_kwargs = dict(
         prompt_tokens=prompt_ids,
         completion_tokens=completion_ids,
         pad_id=pad_id,
         eos_id=eos_id,
         micro_batch_size=(
-            self._rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
+            micro_batch_size
+            if micro_batch_size is not None
+            else (
+                self._rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
+            )
         ),
+        **kwargs,
+    )
+    if segment_ids is not None:
+      call_kwargs["segment_ids"] = segment_ids
+    return self._rl_engine.per_token_logps(
+        rl_engine_lib.Role.REFERENCE, **call_kwargs
     )
