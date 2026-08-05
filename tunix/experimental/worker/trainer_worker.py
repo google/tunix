@@ -14,7 +14,8 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
-from typing import Any, Callable
+import contextlib
+from typing import Any, Callable, ContextManager, cast
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
@@ -46,80 +47,204 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer = trainer_factory()
     self._is_running = False
     self._worker_id = worker_id
+    self._state = WorkerState.PENDING
+    self._last_error: str | None = None
+
+  def _policy_version(self) -> int:
+    return int(getattr(self._trainer, "policy_version", 0))
+
+  def _response(self, **metadata: Any) -> datatypes.Response:
+    return datatypes.Response(
+        metadata={
+            "worker_id": self._worker_id,
+            "state": self.state.value,
+            "policy_version": self._policy_version(),
+            **metadata,
+        }
+    )
+
+  def _ensure_ready(self) -> None:
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    if self.state != WorkerState.READY:
+      raise RuntimeError(f"TrainerWorker is not ready: {self.state.value}.")
 
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
+    if self.state == WorkerState.READY:
+      return self._response(initialized=True, already_ready=True)
     self.state = WorkerState.INITIALIZING
     try:
-      return datatypes.Response()
+      return self._response(initialized=True)
     finally:
       self.state = WorkerState.READY
 
-  def compile(self, dummy_data: Any) -> datatypes.Response:
+  def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
     self.state = WorkerState.COMPILING
     try:
       self._trainer.compile(dummy_data)
-      return datatypes.Response()
+      return self._response(compiled=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
     finally:
-      self.state = WorkerState.READY
+      if self.state == WorkerState.COMPILING:
+        self.state = WorkerState.READY
 
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    if self.state != WorkerState.READY:
+      raise RuntimeError(f"Cannot start TrainerWorker from {self.state.value}.")
     self._is_running = True
-    return datatypes.Response()
+    return self._response(started=True)
 
   def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
+    if self.state == WorkerState.STOPPED:
+      return self._response(stopped=True, already_stopped=True)
     self._is_running = False
-    self.state = WorkerState.STOPPED
+    if self.state == WorkerState.READY:
+      self.state = WorkerState.DRAINING
     self._trainer.close()
-    return datatypes.Response()
+    self.state = WorkerState.STOPPED
+    return self._response(stopped=True)
 
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
-        worker_id=self._worker_id, roles=frozenset({"trainer"})
+        worker_id=self._worker_id,
+        roles=frozenset({"trainer", "weight_sync"}),
+        resources={
+            "trainer": type(self._trainer).__name__,
+            "policy_version": self._policy_version(),
+        },
     )
 
   def heartbeat(self) -> datatypes.HealthReport:
-    return datatypes.HealthReport(state=self.state)
+    return datatypes.HealthReport(
+        state=self.state,
+        policy_version=self._policy_version(),
+        last_error=self._last_error,
+    )
 
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
-  ) -> "TrainerWorker":
+  ) -> datatypes.Response:
     """Sets the loss function used by `fwd_bwd` (and evaluation)."""
     self._trainer.with_loss_fn(loss_fn, has_aux)
-    return self
+    return self._response(loss_fn_configured=True)
 
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
-  ) -> "TrainerWorker":
+  ) -> datatypes.Response:
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
     self._trainer.with_gen_model_input_fn(gen_model_input_fn)
-    return self
+    return self._response(gen_model_input_fn_configured=True)
 
   def fwd_bwd(
-      self, payload: datatypes.TrainerPayload, **kwargs
-  ) -> datatypes.Response:
-    """Executes forward and backward passes."""
-    self._trainer.fwd_bwd(payload, **kwargs)
-    return datatypes.Response()
+      self,
+      payload: Any | None = None,
+      **kwargs,
+  ) -> datatypes.Response | dict[str, Any]:
+    """Executes forward/backward and optionally applies an optimizer update."""
+    self._ensure_ready()
+    if payload is None:
+      payload = kwargs.pop("batch", None)
+    if payload is None:
+      raise ValueError("fwd_bwd requires `payload` or v2 `batch`.")
+    accumulate_gradients = bool(kwargs.pop("accumulate_gradients", False))
+    apply_optimizer = bool(kwargs.pop("apply_optimizer", False))
+    kwargs.pop("skip_jit", None)
+    try:
+      self._trainer.fwd_bwd(payload, **kwargs)
+      train_step = None
+      if apply_optimizer:
+        train_step = self._trainer.update()
+      self._last_error = None
+      if accumulate_gradients or apply_optimizer:
+        return {
+            "queued": True,
+            "updated": apply_optimizer,
+            "train_step": train_step,
+        }
+      return self._response(queued=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
-    return self._trainer.update(**kwargs)
+    self._ensure_ready()
+    try:
+      train_step = self._trainer.update(**kwargs)
+      self._last_error = None
+      return train_step
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
   def eval_step(
       self, payload: datatypes.TrainerPayload, **kwargs
   ) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
-    self._trainer.eval_step(payload, **kwargs)
-    return datatypes.Response()
+    self._ensure_ready()
+    try:
+      self._trainer.eval_step(payload, **kwargs)
+      self._last_error = None
+      return self._response(evaluated=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
+    """Runs an explicit evaluation phase over eval micro-batches."""
+    self._ensure_ready()
+    if eval_ds is None:
+      return self._response(evaluated=True, eval_batches=0)
+    try:
+      run_eval = getattr(self._trainer, "run_eval", None)
+      if callable(run_eval):
+        run_eval(eval_ds, **kwargs)
+        self._last_error = None
+        return self._response(evaluated=True)
+
+      eval_context = getattr(self._trainer, "eval_context", None)
+      context = (
+          cast(ContextManager[Any], eval_context())
+          if callable(eval_context)
+          else contextlib.nullcontext()
+      )
+      eval_batches = 0
+      with context:
+        for payload in eval_ds:
+          self._trainer.eval_step(payload, **kwargs)
+          eval_batches += 1
+      self._last_error = None
+      return self._response(evaluated=True, eval_batches=eval_batches)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
   def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
-    self._trainer.save_checkpoint(metadata, **kwargs)
-    return datatypes.Response()
+    self._ensure_ready()
+    try:
+      self._trainer.save_checkpoint(metadata, **kwargs)
+      self._last_error = None
+      return self._response(checkpoint_saved=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
   def restore_checkpoint(self, **kwargs) -> Any:
     """Restore state from latest checkpoint and return the metadata pytree."""
@@ -127,12 +252,27 @@ class TrainerWorker(abstract_worker.Worker):
 
   def prepare_weight_sync(self, **kwargs) -> datatypes.Response:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
+    self._ensure_ready()
     self.state = WorkerState.SYNCING
     try:
       self._trainer.prepare_weight_sync(**kwargs)
-      return datatypes.Response()
-    finally:
       self.state = WorkerState.READY
+      self._last_error = None
+      return self._response(weight_sync_ready=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def get_lora_weights(self) -> Any:
+    """Returns staged LoRA weights for rollout workers to consume."""
+    self._ensure_ready()
+    get_lora_weights = getattr(self._trainer, "get_lora_weights", None)
+    if not callable(get_lora_weights):
+      raise AttributeError(
+          f"{type(self._trainer).__name__} does not expose get_lora_weights()."
+      )
+    return get_lora_weights()
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""

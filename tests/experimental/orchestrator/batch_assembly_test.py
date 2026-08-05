@@ -82,6 +82,42 @@ class BatchAssemblyTest(absltest.TestCase):
     self.assertEqual(payload.action_mask.shape, (2, 8))
     self.assertEqual(payload.advantages.shape, (2, 8))
 
+  def test_grpo_train_example_assembler(self):
+    payload = datatypes.RLTrainerPayload(
+        token_ids=np.array([10, 11, 20, 21, 22], dtype=np.int32),
+        token_mask=np.ones(5, dtype=np.float32),
+        loss_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
+        action_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
+        advantages=np.array([0, 0, 2, 2, 2], dtype=np.float32),
+        prompt_ids=np.array([10, 11], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([20, 21, 22], dtype=np.int32),
+        completion_mask=np.array([1, 1, 0], dtype=np.float32),
+    )
+
+    assembler = batch_assembly.GRPOTrainExampleAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=5,
+        pad_id=0,
+    )
+    train_example = assembler.pack([payload])[0]
+
+    self.assertEqual(train_example.prompt_ids.shape, (2, 4))
+    self.assertEqual(train_example.completion_ids.shape, (2, 5))
+    np.testing.assert_array_equal(
+        train_example.prompt_ids[0], np.array([0, 0, 10, 11])
+    )
+    np.testing.assert_array_equal(
+        train_example.completion_ids[0], np.array([20, 21, 22, 0, 0])
+    )
+    np.testing.assert_array_equal(
+        train_example.completion_mask[0], np.array([1, 1, 0, 0, 0])
+    )
+    np.testing.assert_array_equal(
+        train_example.advantages[0], np.array([2, 2, 2, 0, 0])
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

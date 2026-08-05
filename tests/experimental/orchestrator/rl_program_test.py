@@ -87,6 +87,25 @@ class RLProgramTest(absltest.TestCase):
 
     self.assertEqual(begin_calls, [0])
     self.assertEqual(end_calls, [(1, "mock_train_result")])
+    self.assertIsNotNone(program.last_step_result)
+    self.assertEqual(program.last_step_result.num_rollouts, 1)
+    self.assertEqual(program.last_step_result.num_microbatches, 1)
+
+  def test_step_once_can_skip_weight_sync(self):
+    program = rl_program.SyncRLProgram(
+        engine=self.mock_engine,
+        algo=self.mock_algo,
+        assembler=self.assembler,
+        sync_weights=False,
+    )
+
+    res = program.step_once(prompts=["prompt1"])
+
+    self.assertEqual(res, "mock_train_result")
+    self.mock_engine.sync_weights.assert_not_called()
+    self.assertEqual(program.step, 1)
+    self.assertIsNotNone(program.last_step_result)
+    self.assertEqual(program.last_step_result.policy_version, 1)
 
   def test_eval_step_once_flow(self):
     program = rl_program.SyncRLProgram(

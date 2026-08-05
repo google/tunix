@@ -16,6 +16,7 @@
 
 import asyncio
 from collections.abc import Callable, Iterable, Sequence
+import dataclasses
 import inspect
 from typing import Any, Protocol
 
@@ -53,6 +54,28 @@ def _sync_or_async(coro: Any) -> Any:
   return coro
 
 
+@dataclasses.dataclass(frozen=True)
+class RLStepResult:
+  """Summary for the most recent synchronous RL step."""
+
+  step: int
+  policy_version: int
+  num_rollouts: int
+  num_microbatches: int
+  reward_mean: float
+  reward_std: float
+  train_result: Any
+
+
+def _default_reward(item: Any) -> float:
+  if hasattr(item, "env_reward"):
+    return float(getattr(item, "env_reward", 0.0))
+  traj = getattr(item, "traj", None)
+  if traj is not None:
+    return float(getattr(traj, "reward", 0.0) or 0.0)
+  return 0.0
+
+
 class SyncRLProgram:
   """Synchronous RL Program coordinating an iterative RL training loop."""
 
@@ -64,6 +87,7 @@ class SyncRLProgram:
       assembler: batch_assembly.BatchAssembler | None = None,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
+      sync_weights: bool = True,
   ):
     self.engine = engine
     self.algo = algo
@@ -73,7 +97,9 @@ class SyncRLProgram:
     )
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
+    self.sync_weights = sync_weights
     self.policy_version = 0
+    self.last_step_result: RLStepResult | None = None
 
   @property
   def step(self) -> int:
@@ -81,7 +107,7 @@ class SyncRLProgram:
 
   def step_once(
       self,
-      prompts: list[str] | list[list[dict[str, str]]],
+      prompts: Sequence[Any],
       **kwargs: Any,
   ) -> Any:
     """Executes a single end-to-end RL training step."""
@@ -95,7 +121,7 @@ class SyncRLProgram:
     # 2. Evaluate rewards
     rewards = []
     for item in rollouts:
-      r = sum(fn(item) for fn in self.reward_fns) if self.reward_fns else getattr(item, "env_reward", 0.0)
+      r = sum(fn(item) for fn in self.reward_fns) if self.reward_fns else _default_reward(item)
       rewards.append(float(r))
 
     # 3. Create RLTrainerPayloads via AlgorithmAdapter
@@ -108,24 +134,43 @@ class SyncRLProgram:
 
     # 4. Pack into microbatches
     microbatches = self.assembler.pack(trainer_payloads)
+    if not microbatches:
+      raise RuntimeError("No trainer microbatches were assembled.")
 
     # 5. Execute gradient updates
     step_result = None
-    for batch in microbatches:
+    for index, batch in enumerate(microbatches):
+      is_last = index == len(microbatches) - 1
       step_result = _sync_or_async(
           self.engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
-              accumulate_gradients=False,
-              apply_optimizer=True,
+              accumulate_gradients=len(microbatches) > 1,
+              apply_optimizer=is_last,
           )
       )
 
     # 6. Sync weights to rollout replicas
-    _sync_or_async(self.engine.sync_weights(role=datatypes.Role.ACTOR))
+    if self.sync_weights:
+      new_version = _sync_or_async(
+          self.engine.sync_weights(role=datatypes.Role.ACTOR)
+      )
+      if isinstance(new_version, int) and new_version > current_step:
+        self.policy_version = new_version
+      else:
+        self.policy_version = current_step + 1
+    else:
+      self.policy_version = current_step + 1
 
-    # 7. Increment step
-    self.policy_version = current_step + 1
+    self.last_step_result = RLStepResult(
+        step=current_step,
+        policy_version=self.policy_version,
+        num_rollouts=len(rollouts),
+        num_microbatches=len(microbatches),
+        reward_mean=float(np.mean(rewards)) if rewards else 0.0,
+        reward_std=float(np.std(rewards)) if rewards else 0.0,
+        train_result=step_result,
+    )
 
     if self.on_step_end:
       self.on_step_end(self.policy_version, step_result)
@@ -134,20 +179,20 @@ class SyncRLProgram:
 
   def eval_step_once(
       self,
-      prompts: list[str] | list[list[dict[str, str]]],
+      prompts: Sequence[Any],
       **kwargs: Any,
   ) -> list[datatypes.RLTrainerPayload]:
     """Executes evaluation step without updating weights."""
     rollouts = _sync_or_async(self.engine.generate(prompts=prompts, **kwargs))
     rewards = [
-        sum(fn(item) for fn in self.reward_fns) if self.reward_fns else getattr(item, "env_reward", 0.0)
+        sum(fn(item) for fn in self.reward_fns) if self.reward_fns else _default_reward(item)
         for item in rollouts
     ]
     return self.algo.create_trainer_payloads(rollouts, rewards=rewards)
 
   def run(
       self,
-      train_dataset: Iterable[list[str] | list[list[dict[str, str]]]],
+      train_dataset: Iterable[Sequence[Any]],
       num_steps: int | None = None,
       **kwargs: Any,
   ) -> None:

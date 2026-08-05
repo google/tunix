@@ -48,7 +48,6 @@ class RolloutWorkerTest(parameterized.TestCase):
     self.server = remote_execution.InProcessRemoteExecutionServer(self.service)
     self.actor_handle = remote_execution.InProcessActorHandle(self.server)
     self.service.start()
-    self.service.initialize()
 
   def tearDown(self):
     super().tearDown()
