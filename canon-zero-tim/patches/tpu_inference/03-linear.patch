@@ -1,0 +1,152 @@
+--- /tmp/claude-2005/-home-yuxuan-code-rl-repro/2f32a913-cb87-4966-a5ab-1b70bd1d2f5f/scratchpad/stock/layers/jax/linear.py	2026-07-27 18:38:32.000000000 +0000
++++ /mnt/disks/tunix-data/claude_work/tpu_inference_src/linear_patched.py	2026-07-31 07:40:16.006857283 +0000
+@@ -23,6 +23,119 @@
+ from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+ from tpu_inference.logger import init_logger
+ 
++
++# ---- P19.matmul.3: opt-in batch-invariant matmul (CANON_MM_ALGO=1) --------------------------
++# P19.sweep measured, on real per-shard shapes: a plain jnp.dot gives a DIFFERENT answer for the
++# same row depending on how many rows accompany it -- drift 32/32 seeds, worst 1.907e-06.  Decode is
++# M=1 and prefill is M=bucket, so that IS the A-vs-B seed.  Pinning the dot ALGORITHM (not the
++# precision) takes it to 0/32.  Precision knobs do NOT help: highest / float32 / tensorfloat32 all
++# still drift 8/8.
++#
++# Why this is applied HERE rather than via JAX_DEFAULT_MATMUL_PRECISION: the global flag also
++# reaches the einsums INSIDE Pallas kernels, and Mosaic's lowering rule assumes `precision` is a
++# 2-tuple -- `jax/_src/pallas/mosaic/lowering.py:2855 if precision[0] != precision[1]` raises
++# TypeError: 'DotAlgorithmPreset' object is not subscriptable (measured, via RPA
++# kernel.py:456).  So the algorithm is pinned only at the model's own linear/MLP/lm_head einsums,
++# leaving kernel-internal dots on the default.  rope.py's einsums are deliberately NOT touched:
++# they are f32 outer products for which a bf16 algorithm would be wrong.
++import os as _canon_os
++
++_CANON_MM_ANNOUNCED = False
++
++
++# ---- P19.F4: opt-in fixed-order TP reduction (CANON_FIXED_AR=1) -----------------------------
++# Root cause proven 2026-07-31 (phase19 v6d/v6e/v6f): the bf16 all-reduce that completes a
++# contract-dim-sharded projection sums the per-chip partials in a ROW-POSITION-DEPENDENT order
++# (ring chunking), and bf16 addition is non-associative, so the same token at a different padded
++# row gets different bits -- the decode-vs-prefill (A-vs-B) seed.  Under CANON_FIXED_AR=1 the two
++# value-path reductions (attn .o_proj, mlp .down_proj) are computed instead as an explicit
++# fixed-order tree (((p0+p1)+p2)+p3) via shard_map+ppermute: same addends, one row-independent
++# order.  Measured: f32-cast AR does NOT fix this (v6e F1); the fixed tree does (v6f all-SAME).
++# Default OFF: with the env unset this file's __call__ is byte-identical in behavior to stock.
++_CANON_MESH = None          # stashed by tpu_runner._init_mesh on the mounted copy
++_CANON_TP_AXIS = "model"
++_canon_fixed_ar_logged = set()
++
++_CANON_FIXED_SPECS = {
++    "mn,np->mp": ((None, _CANON_TP_AXIS), (_CANON_TP_AXIS, None)),
++    "TNH,NHD->TD": ((None, _CANON_TP_AXIS, None), (_CANON_TP_AXIS, None, None)),
++}
++
++
++def _canon_fixed_ar_wanted(prefix):
++    return (_canon_os.environ.get("CANON_FIXED_AR") == "1"
++            and (prefix.endswith(".down_proj") or prefix.endswith(".o_proj")))
++
++
++def _canon_fixed_einsum(einsum_str, inputs, weight, mm_kwargs, prefix):
++    from jax.experimental.shard_map import shard_map
++    from jax.sharding import PartitionSpec as _P
++    mesh = _CANON_MESH
++    n = int(mesh.shape[_CANON_TP_AXIS])
++    in_spec, w_spec = _CANON_FIXED_SPECS[einsum_str]
++
++    def _local(a_, w_):
++        if einsum_str == "mn,np->mp" and _canon_os.environ.get("CANON_MM_KBLOCK") == "1":
++            print(f"[PATHTRACE] CANON_MM_KBLOCK=1 fixed-K(640)-f32 down GEMM at {prefix} "
++                  f"(M={a_.shape[0]}, K={a_.shape[-1]})", flush=True)
++            # P19.K2 fix probe: fixed-K-block, fixed-order f32 accumulation for the per-chip
++            # down GEMM -- makes the K-loop grouping independent of M (= bucket).  Both X.1
++            # arms use the same variant, so the cross-bucket compare stays single-variable.
++            _K = a_.shape[-1]
++            _KB = 640
++            assert _K % _KB == 0, (_K, _KB)
++            _acc = jnp.zeros((a_.shape[0], w_.shape[-1]), jnp.float32)
++            for _ks in range(0, _K, _KB):
++                _acc = _acc + jnp.einsum(einsum_str, a_[:, _ks:_ks + _KB],
++                                         w_[_ks:_ks + _KB, :],
++                                         preferred_element_type=jnp.float32)
++            p = _acc.astype(a_.dtype)[None]
++        else:
++            p = jnp.einsum(einsum_str, a_, w_, **mm_kwargs)[None]
++        parts = [p]
++        cur = p
++        for _ in range(n - 1):
++            cur = jax.lax.ppermute(cur, _CANON_TP_AXIS,
++                                   [(i, (i + 1) % n) for i in range(n)])
++            parts.append(cur)
++        j = jax.lax.axis_index(_CANON_TP_AXIS)
++        ordered = jnp.stack(parts)[jnp.argsort((j - jnp.arange(n)) % n)]
++        acc = ordered[0]
++        for k in range(1, n):
++            acc = acc + ordered[k]   # fixed order, independent of ring position / row chunk
++        return acc[0]
++
++    if prefix not in _canon_fixed_ar_logged:
++        _canon_fixed_ar_logged.add(prefix)
++        print(f"[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at {prefix} "
++              f"({einsum_str}, tp={n})", flush=True)
++    try:
++        sm = shard_map(_local, mesh=mesh, in_specs=(_P(*in_spec), _P(*w_spec)),
++                       out_specs=_P(None, None), check_vma=False)
++    except TypeError:
++        sm = shard_map(_local, mesh=mesh, in_specs=(_P(*in_spec), _P(*w_spec)),
++                       out_specs=_P(None, None), check_rep=False)
++    return sm(inputs, weight)
++
++
++def _canon_mm_kwargs():
++    """Return {'precision': <preset>} when CANON_MM_ALGO is on, else {}.
++
++    Default OFF, so an unset env reproduces the engine's stock numerics exactly.
++    """
++    if _canon_os.environ.get("CANON_MM_ALGO") != "1":
++        return {}
++    name = _canon_os.environ.get("CANON_MM_ALGO_PRESET", "BF16_BF16_F32")
++    # PATHTRACE (once): without it, an "on" arm whose numbers equal the "off" arm is ambiguous --
++    # "the intervention had no effect" cannot be told apart from "the intervention never fired"
++    # (e.g. a quantised path bypassing these einsums).  Printed only under CANON_MM_ALGO=1, so the
++    # off arm executes bit-identically either way.
++    global _CANON_MM_ANNOUNCED
++    if not _CANON_MM_ANNOUNCED:
++        _CANON_MM_ANNOUNCED = True
++        print(f"[PATHTRACE] CANON_MM_ALGO on preset={name} ({__name__})", flush=True)
++    return {"precision": getattr(jax.lax.DotAlgorithmPreset, name)}
++
+ logger = init_logger(__name__)
+ 
+ 
+@@ -85,10 +198,18 @@
+             self.quant_method = None
+ 
+     def __call__(self, inputs: jax.Array) -> jax.Array:
++        if (_CANON_MESH is not None and self.einsum_str in _CANON_FIXED_SPECS
++                and _canon_fixed_ar_wanted(self.prefix)):
++            output = _canon_fixed_einsum(self.einsum_str, inputs, self.weight.value,
++                                         _canon_mm_kwargs(), self.prefix)
++            if self.bias is not None:
++                output += self.bias
++            return output
+         if self.quant_method is not None:
+             return self.quant_method.apply_jax(self, inputs)
+ 
+-        output = jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)
++        output = jax.numpy.einsum(self.einsum_str, inputs, self.weight.value,
++                                  **_canon_mm_kwargs())
+         if self.bias is not None:
+             output += self.bias
+         return output
+@@ -169,7 +290,8 @@
+         self.quant_method = None
+ 
+     def __call__(self, inputs: jax.Array) -> jax.Array:
+-        return jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)
++        return jax.numpy.einsum(self.einsum_str, inputs, self.weight.value,
++                                **_canon_mm_kwargs())
+ 
+ 
+ class JaxMergedColumnParallelLinear(JaxLinear):

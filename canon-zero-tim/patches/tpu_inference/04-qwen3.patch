@@ -1,0 +1,122 @@
+--- /tmp/claude-2005/-home-yuxuan-code-rl-repro/2f32a913-cb87-4966-a5ab-1b70bd1d2f5f/scratchpad/stock/models/jax/qwen3.py	2026-07-27 18:38:32.000000000 +0000
++++ /mnt/disks/tunix-data/claude_work/tpu_inference_src/qwen3.py	2026-07-30 23:07:04.593762683 +0000
+@@ -168,9 +168,12 @@
+         attention_metadata: AttentionMetadata,
+     ) -> Tuple[jax.Array, jax.Array]:
+         md = attention_metadata
++        _cut_x = x                                     # P19.R4: cut points along the q chain
+         # q: (T, N, H)
+         q = self.q_proj(x)
++        _cut_qproj = q
+         q = self.q_norm(q)
++        _cut_qnorm = q
+         q = apply_rope(q, md.input_positions, self.head_dim_original,
+                        self.rope_theta, self.rope_scaling)
+ 
+@@ -192,6 +195,25 @@
+             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+                                v_scale)
+ 
++        # P19.R7b -- pre-attention bypass: branch BEFORE the attention call, so the RPA custom
++        # calls and the cache update are absent from the compiled program entirely (the q/k/v
++        # projections above get dead-code-eliminated).  Output is the same broadcast constant as
++        # CUT=const.  preattn SAME while const (post-RPA) DIFFERS at the same n would pin the
++        # mechanism on RPA's buffer-assignment/donation/lifetime CONTEXT rather than the tail's
++        # own arithmetic.  Default off.
++        import os as _os_pre
++        if _os_pre.environ.get("CANON_CUT") == "preattn":
++            _key = jax.random.PRNGKey(42)
++            _row = jax.random.normal(_key, (1, self.o_proj.weight.value.shape[-1]
++                                            if hasattr(self.o_proj, "weight") else 5120),
++                                     dtype=jnp.float32) * 0.05
++            _o = jnp.broadcast_to(_row, (x.shape[0], _row.shape[-1])).astype(x.dtype)
++            if not hasattr(self, "_canon_preattn_announced"):
++                self._canon_preattn_announced = True
++                print("[PATHTRACE] CANON_CUT=preattn (attention + cache update NOT executed; "
++                      "RPA absent from the program)", flush=True)
++            return kv_cache, _o
++
+         new_kv_cache, outputs = attention(
+             kv_cache,
+             q,
+@@ -206,6 +228,58 @@
+         )
+         # (T, D)
+         o = self.o_proj(outputs)
++
++        # P19.R4 -- cut-point instrument (CANON_CUT, default off).  Replaces the attention block's
++        # returned output with an intermediate, so the vehicle's existing bitwise hidden-row
++        # comparison becomes a comparison AT THAT CUT, with zero signature changes.  Valid because
++        # the target row's downstream (residual add, RMSNorm, MLP) is row-local and row-position
++        # invariant (P19.R4a: 6/6 bitwise over 16 row positions, zeros and garbage padding).
++        #   CANON_CUT=x     -> the attention block's INPUT (post input_layernorm):
++        #                      splits {embedding + input RMSNorm fusion} vs {q chain}
++        #   CANON_CUT=qproj -> q_proj output, before q_norm:             isolates the projection
++        #   CANON_CUT=qnorm -> q_norm output, before RoPE:               isolates the per-head norm
++        #   CANON_CUT=q     -> q after q_norm+RoPE (the kernel's INPUT): splits producers vs kernel
++        #   CANON_CUT=attn  -> the kernel's output, before o_proj:       splits kernel vs o_proj+AR
++        # Both are flattened and sliced/padded to (T, D) so every shape/sharding downstream is
++        # unchanged.  Slicing keeps the first D elements (=40 of 64 heads at D=5120, head_dim 128):
++        # a detector, not a full capture -- any bitwise difference in those heads still shows.
++        import os as _os
++        _cut = _os.environ.get("CANON_CUT", "")
++        if _cut == "const":
++            # De-confounding probe.  Every DIFFERS cut flows through the layer TAIL
++            # (residual -> post_attention_layernorm -> MLP), itself a fused norm->matmul structure;
++            # the only SAME cut (embed) bypasses it.  If the TAIL is the cross-row contaminator,
++            # every upstream cut shows DIFFERS regardless of the true seed.  CUT=const replaces the
++            # attention output with a fixed pseudo-random constant (independent of everything): the
++            # tail's TARGET-ROW input is then equal across the two calls BY CONSTRUCTION, and only
++            # the other rows differ (via the residual x).  hidden DIFFERS here  => tail contaminates
++            # in-context (the cut-chain inference collapses to "fused norm->matmul structures");
++            # hidden SAME => tail clean, the cut-chain stands and the seed really is the input norm.
++            # MUST be the SAME vector in every row: the comparison is decode row 0 vs prefill
++            # row n-1, so a full-shape random tensor compares two DIFFERENT constant rows -- the
++            # n=64 control caught exactly that (84% differing, max 8.06, where every previous cut
++            # was SAME).  A broadcast row makes the target-row tail input equal by construction.
++            _key = jax.random.PRNGKey(42)
++            _row = jax.random.normal(_key, (1, o.shape[-1]), dtype=jnp.float32) * 0.05
++            o = jnp.broadcast_to(_row, o.shape).astype(o.dtype)
++            if not hasattr(self, "_canon_cut_announced"):
++                self._canon_cut_announced = True
++                print("[PATHTRACE] CANON_CUT=const (attention output replaced by a fixed constant)",
++                      flush=True)
++            return new_kv_cache, o
++        if _cut in ("x", "qproj", "qnorm", "q", "attn"):
++            _t = {"x": _cut_x, "qproj": _cut_qproj, "qnorm": _cut_qnorm,
++                  "q": q, "attn": outputs}[_cut]
++            _flat = _t.reshape(_t.shape[0], -1).astype(o.dtype)
++            _D = o.shape[-1]
++            if _flat.shape[-1] >= _D:
++                o = _flat[:, :_D]
++            else:
++                o = jnp.pad(_flat, ((0, 0), (0, _D - _flat.shape[-1])))
++            if not hasattr(self, "_canon_cut_announced"):
++                self._canon_cut_announced = True
++                print(f"[PATHTRACE] CANON_CUT={_cut} (attention output replaced at the cut)",
++                      flush=True)
+         return new_kv_cache, o
+ 
+ 
+@@ -319,6 +393,21 @@
+         else:
+             self.norm = PPMissingLayer()
+ 
++        # P16.11 — env-gated layer truncation, for bisecting where A(decode) and B(prefill)
++        # first diverge in the REAL run. (Re-created 2026-07-30 after the /tmp wipe.)
++        # Truncation instead of boundary capture: capture forces intermediates to materialise,
++        # suppressing fusion (worth 1.361e-02 in bf16 per P15.B1) and could manufacture the very
++        # effect under study. Each run here is an ordinary, unmodified N-layer forward.
++        import os as _os
++        _p16_n = _os.environ.get("P16_NUM_LAYERS", "").strip()
++        # "0" is a truthy STRING in Python, so a bare `if _p16_n` would read P16_NUM_LAYERS=0 as
++        # "truncate to zero layers" -- silently running an empty model.  Treat 0/empty as unset.
++        if _p16_n and _p16_n != "0":
++            _n = int(_p16_n)
++            self.end_layer = min(self.end_layer, self.start_layer + _n)
++            print(f"[PATHTRACE] P16_NUM_LAYERS={_n} -> running layers "
++                  f"[{self.start_layer}, {self.end_layer})", flush=True)
++
+         self.aux_hidden_state_layers = []
+         spec_config = getattr(vllm_config, "speculative_config", None)
+         if spec_config and spec_config.method == "dflash":

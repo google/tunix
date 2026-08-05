@@ -1,0 +1,171 @@
+--- /tmp/claude-2005/-home-yuxuan-code-rl-repro/2f32a913-cb87-4966-a5ab-1b70bd1d2f5f/scratchpad/stock/layers/common/attention_interface.py	2026-07-27 18:38:32.000000000 +0000
++++ /mnt/disks/tunix-data/claude_work/tpu_inference_src/attn_iface_patched.py	2026-07-31 20:35:01.110248934 +0000
+@@ -14,10 +14,12 @@
+ 
+ import functools
+ import math
++import os
+ from typing import Any, Callable, Optional, Tuple
+ 
+ import jax
+ import jax.numpy as jnp
++import numpy as np
+ from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
+ from jax.experimental.pallas.ops.tpu.splash_attention import \
+     splash_attention_kernel as splash
+@@ -367,6 +369,18 @@
+         ))
+ 
+ 
++_AHIT = set()
++
++# P19.X.15: attention outputs stashed for the decode-vs-prefill comparison (CANON_ATTN_DUMP=1).
++ATTN_DUMP = []
++
++
++def _ahit(tag):
++    if tag not in _AHIT:
++        _AHIT.add(tag)
++        print("[PATHTRACE]", tag, flush=True)
++
++
+ def sharded_ragged_paged_attention(
+     mesh: Mesh,
+     q: jax.Array,
+@@ -452,16 +466,103 @@
+         if not use_hd64:
+             kwargs["update_kv_cache"] = update_kv_cache
+             kwargs["use_causal_mask"] = use_causal_mask
++        # Phase 12 Step 1 (re-created 2026-07-30 after the /tmp wipe): PIN the RPA v3 block
++        # sizes. Without this the kernel calls get_tuned_block_sizes(), whose result is
++        # shape-dependent twice over: the lookup key includes the shape, AND it clamps with
++        # min(max_num_tokens, bq) -- max_num_tokens IS the decode concurrency. So the
++        # online-softmax KV block (the accumulation granularity) changes with concurrency and
++        # with decode-vs-prefill (measured (16,16) vs (16,32) at Qwen3-32B@tp4).
++        # Tuple order: (bq_sz, bkv_sz, bq_csz, bkv_csz).
++        import os as _os
++
++        def _blk(_name):
++            _v = _os.environ.get(_name)
++            if not _v:
++                return None
++            return tuple(int(_t) for _t in _v.split(","))
++
++        if not use_hd64:
++            for _k, _e in (("d_block_sizes", "CANON_RPA_D"),
++                           ("p_block_sizes", "CANON_RPA_P"),
++                           ("m_block_sizes", "CANON_RPA_M")):
++                _b = _blk(_e)
++                if _b is not None:
++                    kwargs[_k] = _b
++                    _ahit("RPA_BLOCK %s=%s" % (_k, _b))
+         return func(*args, **kwargs)
+ 
+-    return jax.shard_map(
+-        _ragged_paged_attention,
++    # P18.3a.2: make the SHARED forward differentiable without touching its numerics.
++    # RPA is inference-only (jax.grad -> pallas_call NotImplementedError, measured P14.8.0), but
++    # P18.1b/P18.2 proved this exact forward is what reproduces B bitwise.  `make_diff_rpa` keeps
++    # the kernel as the forward and supplies a backward by autodiffing a pure-JAX attention that
++    # computes the same function, so the forward CANNOT move -- which the P18.3a.2 gate measures
++    # rather than assumes.  Default off; enabled with CANON_RPA_VJP=1.
++    _local_fn = _ragged_paged_attention
++    if os.environ.get("CANON_RPA_VJP2") == "1":
++        # P19.RDC: chunked-cache differentiable wrapper (F_canonical building block).
++        # Forward = kernel verbatim; backward = gate-verified extended replica with cache
++        # cotangents + g[1] routing (fp64 chain-vs-oracle selftest PASS).  Single-seq mode.
++        if use_hd64 or attention_sink is not None:
++            raise NotImplementedError("CANON_RPA_VJP2: v3 default path only")
++        import sys as _sys
++        if "/mnt/disks/tunix-data/claude_work" not in _sys.path:
++            _sys.path.insert(0, "/mnt/disks/tunix-data/claude_work")
++        from rpa_diff_chunked import make_diff_rpa_chunked_ragged as _mk2
++        _local_fn = _mk2(_ragged_paged_attention, sm_scale=sm_scale,
++                         page_size=args[3].shape[1], num_q_heads=args[0].shape[-2],
++                         num_kv_heads=args[3].shape[3])
++        _ahit("RPA_VJP2 on (chunked-cache differentiable)")
++    elif os.environ.get("CANON_RPA_VJP") == "1":
++        if use_hd64 or attention_sink is not None:
++            raise NotImplementedError(
++                "CANON_RPA_VJP is only wired for the v3 default RPA path without attention sink "
++                f"(use_hd64={use_hd64}, attention_sink={attention_sink is not None})")
++        import sys as _sys
++        if "/mnt/disks/tunix-data/claude_work" not in _sys.path:
++            _sys.path.insert(0, "/mnt/disks/tunix-data/claude_work")
++        from rpa_diff import make_diff_rpa as _make_diff_rpa
++        _local_fn = _make_diff_rpa(_ragged_paged_attention, sm_scale=sm_scale,
++                                   use_causal_mask=use_causal_mask)
++        _ahit("RPA_VJP on")
++
++    _out = jax.shard_map(
++        _local_fn,
+         mesh=mesh,
+         in_specs=in_specs,
+         out_specs=out_specs,
+         check_vma=False,
+     )(*args)
+ 
++    # P19.X.15: capture the ATTENTION OUTPUT itself.  The standalone kernel reproduction (sharded
++    # and unsharded) shows NO difference at any (n, bucket), while the model path does -- but the
++    # model-level comparison was on the HIDDEN STATE, i.e. after o_proj (which carries the TP
++    # all-reduce) and the MLP.  Capturing here splits the two: if the attention output already
++    # differs, the carrier is the kernel call in its real context; if it does not, the carrier is
++    # downstream of attention.  Default off.
++    if os.environ.get("CANON_ATTN_DUMP") == "1":
++        # A plain `ATTN_DUMP.append(_out[0])` does NOT work here: this code runs during TRACING, so
++        # it would append a tracer, and only on the first trace -- later calls reuse the compiled
++        # executable and never re-enter this Python.  `jax.debug.callback` fires at EXECUTION time
++        # and hands the host a concrete array, which is what capturing an intermediate requires.
++        # ordered=True is REQUIRED: without it the callback is asynchronous relative to the Python
++        # program, and the first attempt produced a self-contradictory reading -- the attention
++        # output "differed" by 92% at n=64 while the hidden state and logits were bitwise identical,
++        # which is impossible.  That was a race between the callback and the surrounding
++        # ATTN_DUMP.clear() calls, i.e. a broken instrument, not a property of the object (R9).
++        # NOTE (measured, 3 attempts): capturing this intermediate reliably is NOT solved.
++        #   1. `ATTN_DUMP.append(_out[0])` appends a TRACER at trace time and never fires again.
++        #   2. Unordered `jax.debug.callback` races with the surrounding Python: it produced a
++        #      self-contradictory reading (attention "92% different" while the hidden state and
++        #      logits were bitwise identical -- impossible).
++        #   3. `ordered=True` raises `ValueError: ordered effects are not supported for more than
++        #      1 device` -- the model runs on 4 chips.
++        # The correct fix is to RETURN the attention output from `run_model` (a signature change in
++        # model_loader.py), which was judged not worth it for a refinement.  Left env-gated and off;
++        # the caller refuses to report unless exactly one entry was captured.
++        jax.debug.callback(lambda a: ATTN_DUMP.append(np.asarray(a)), _out[0])
++        _ahit("ATTN_DUMP on")
++    return _out
++
+ 
+ def attention(
+     kv_cache: jax.Array,
+@@ -500,6 +601,21 @@
+ 
+     md = attention_metadata
+ 
++    # P19.X.4: force every sequence into the MIXED bucket of `distribution`.
++    #
++    # `distribution` = (i, j, k): seqs[0:i] are decode-only, [i:j] chunked-prefill-only, [j:k] mixed,
++    # k = total (kernel.py:1638-1640).  It is a TRACED array, so decode and prefill share one
++    # compiled program -- but the RPA Pallas kernel BRANCHES ON IT AT RUNTIME, taking a different
++    # grid/loop structure per class even when d/p/m block sizes are pinned to identical values.
++    # That runtime branch is the one difference between A (decode) and B (prefill) that survives
++    # single-bucketing, and it is the leading suspect for why single-bucketing collapses A-vs-B at
++    # bucket [256] (1.63e-06) but not at [1024] (1.55e-02) or [8192] (1.12e-02).
++    # Rewriting it to [0, 0, k] sends BOTH paths down the mixed branch.  Default off.
++    _dist = md.request_distribution
++    if os.environ.get("CANON_FORCE_MIXED") == "1":
++        _dist = jnp.stack([jnp.zeros_like(_dist[0]), jnp.zeros_like(_dist[1]), _dist[2]])
++        _ahit("FORCE_MIXED distribution -> [0, 0, k]")
++
+     # (T, N, H)
+     output, kv_cache = sharded_ragged_paged_attention(
+         mesh,
+@@ -510,7 +626,7 @@
+         md.seq_lens,
+         md.block_tables,
+         md.query_start_loc,
+-        md.request_distribution,
++        _dist,
+         sinks,
+         sm_scale=sm_scale,
+         attention_chunk_size=attention_chunk_size,

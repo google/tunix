@@ -1,0 +1,656 @@
+--- /tmp/claude-2005/-home-yuxuan-code-rl-repro/2f32a913-cb87-4966-a5ab-1b70bd1d2f5f/scratchpad/stock/runner/tpu_runner.py	2026-07-27 18:38:32.000000000 +0000
++++ /home/yuxuan/code_rl_repro/tasks/logprob_diff_operator_alignment/patches/tpu_runner_p21_l30.py	2026-08-03 22:27:17.781857933 +0000
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ import functools
++import os  # P18.0 capture helper needs it; upstream file does not import os
+ import logging
+ import random
+ import sys
+@@ -62,6 +63,7 @@
+ from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
+ from tpu_inference.layers.jax.sample.sampling import (
+     PromptLogprobsAsyncData, PromptLogprobsReqSnap,
++    _SAMPLING_EPS, _apply_sampling_transforms,
+     _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
+     compute_prompt_logprobs, sample)
+ from tpu_inference.layers.jax.sample.sampling_metadata import \
+@@ -122,6 +124,234 @@
+ 
+ logger = init_logger(__name__)
+ 
++_CANON_LOGPROB_M_ANNOUNCED = False
++
++
++def _canon_logprob_m() -> Optional[int]:
++    """Return the opt-in canonical logprob row count, failing closed on bad input."""
++    raw = os.environ.get("CANON_LOGPROB_M", "")
++    if not raw:
++        return None
++    try:
++        value = int(raw)
++    except ValueError as exc:
++        raise ValueError(f"CANON_LOGPROB_M must be an integer, got {raw!r}") from exc
++    if value <= 0:
++        raise ValueError(f"CANON_LOGPROB_M must be positive, got {value}")
++    return value
++
++
++def _canon_pad_logprob_inputs(
++    logits: jax.Array,
++    token_ids: jax.Array,
++    target_rows: int,
++) -> tuple[jax.Array, jax.Array, int]:
++    """Pad decode logprob inputs to one canonical M without changing real rows."""
++    rows = int(logits.shape[0])
++    if int(token_ids.shape[0]) != rows:
++        raise ValueError(
++            f"logprob logits/token row mismatch: {rows} vs {token_ids.shape[0]}")
++    if rows > target_rows:
++        raise ValueError(
++            f"decode logprob rows {rows} exceed CANON_LOGPROB_M={target_rows}")
++    if rows == target_rows:
++        return logits, token_ids, rows
++    pad = target_rows - rows
++    logits = jnp.pad(logits, ((0, pad), (0, 0)), constant_values=0.0)
++    token_pad = [(0, pad)] + [(0, 0)] * (token_ids.ndim - 1)
++    token_ids = jnp.pad(token_ids, token_pad, constant_values=0)
++    return logits, token_ids, rows
++
++
++def _canon_slice_logprobs(
++    tensors: LogprobsTensors,
++    rows: int,
++) -> LogprobsTensors:
++    """Remove canonical padding before vLLM consumes decode logprob tensors."""
++    return LogprobsTensors(
++        logprob_token_ids=tensors.logprob_token_ids[:rows],
++        logprobs=tensors.logprobs[:rows],
++        selected_token_ranks=tensors.selected_token_ranks[:rows],
++    )
++
++
++def _canon_snapshot_prompt_logprobs(
++    prompt_lp_tensors: LogprobsTensors,
++    padded_num_tokens: int,
++    num_prompt_logprobs: Dict[str, int],
++    requests: Dict[str, "CachedRequestState"],
++    scheduler_output: VllmSchedulerOutput,
++    req_ids_dp: Optional[Dict[int, List[str]]],
++    dp_size: int,
++) -> PromptLogprobsAsyncData:
++    """Keep exact-build prompt slicing while replacing only its TPU numeric call."""
++    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
++    padded_tokens_per_dp = padded_num_tokens // dp_size
++    req_snaps: List[PromptLogprobsReqSnap] = []
++    if req_ids_dp:
++        for dp_rank, req_id_list in req_ids_dp.items():
++            dp_token_offset = dp_rank * padded_tokens_per_dp
++            local_token_offset = 0
++            for req_id in req_id_list:
++                num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
++                if req_id in num_prompt_logprobs:
++                    num_k = num_prompt_logprobs[req_id]
++                    req_state = requests[req_id]
++                    start_idx = req_state.num_computed_tokens
++                    num_remaining = req_state.num_prompt_tokens - (start_idx + 1)
++                    if num_scheduled <= num_remaining:
++                        num_logits = num_scheduled
++                        is_last_chunk = False
++                    else:
++                        num_logits = num_remaining
++                        is_last_chunk = True
++                    req_snaps.append(
++                        PromptLogprobsReqSnap(
++                            req_id=req_id,
++                            req_state=req_state,
++                            req_offset=dp_token_offset + local_token_offset,
++                            start_idx=start_idx,
++                            num_logits=num_logits,
++                            is_last_chunk=is_last_chunk,
++                            num_k=num_k,
++                        ))
++                local_token_offset += num_scheduled
++    return PromptLogprobsAsyncData(
++        tensors=prompt_lp_tensors,
++        req_snaps=req_snaps,
++    )
++
++
++def _canon_expand_prompt_target_ids(
++    requests: Dict[str, "CachedRequestState"],
++    scheduler_output: VllmSchedulerOutput,
++    req_ids_dp: Optional[Dict[int, List[str]]],
++    dp_size: int,
++    padded_num_tokens: int,
++) -> np.ndarray:
++    """Build next-token ids from absolute request positions across prefill chunks.
++
++    ``jnp.roll(input_ids, -1)`` is only valid inside one packed scheduler step.  At a
++    256-token chunk boundary its final row wraps to the first row of that same packed
++    step (or another request), while the prompt logprob for that row must target the
++    first token in the *next* chunk.  Reconstruct targets from the immutable request
++    sequence and ``num_computed_tokens`` so chunking and continuous batching cannot
++    change the requested token id.  The final token has no successor and is never
++    copied by the prompt-logprob snapshot, so its zero target is an explicit sentinel.
++    """
++    if req_ids_dp is None:
++        raise ValueError("direct prompt logprobs require req_ids_dp for target ids")
++    if dp_size <= 0 or padded_num_tokens <= 0:
++        raise ValueError(
++            f"invalid prompt target dimensions: dp={dp_size}, tokens={padded_num_tokens}"
++        )
++    if padded_num_tokens % dp_size:
++        raise ValueError(
++            f"padded prompt target rows {padded_num_tokens} not divisible by dp_size "
++            f"{dp_size}"
++        )
++
++    rows_per_dp = padded_num_tokens // dp_size
++    target_ids = np.zeros((padded_num_tokens,), dtype=np.int32)
++    populated = 0
++    for dp_rank in range(dp_size):
++        local_offset = 0
++        for req_id in req_ids_dp.get(dp_rank, []):
++            if req_id not in scheduler_output.num_scheduled_tokens:
++                raise KeyError(f"scheduled-token count missing for request {req_id}")
++            if req_id not in requests:
++                raise KeyError(f"request state missing for request {req_id}")
++            num_scheduled = int(scheduler_output.num_scheduled_tokens[req_id])
++            if num_scheduled < 0 or local_offset + num_scheduled > rows_per_dp:
++                raise ValueError(
++                    f"request {req_id} overflows target rows on dp rank {dp_rank}: "
++                    f"offset={local_offset}, scheduled={num_scheduled}, "
++                    f"capacity={rows_per_dp}"
++                )
++            req_state = requests[req_id]
++            start_idx = int(req_state.num_computed_tokens)
++            start = dp_rank * rows_per_dp + local_offset
++            for rel_idx in range(num_scheduled):
++                next_idx = start_idx + rel_idx + 1
++                if next_idx < req_state.num_prompt_tokens:
++                    target_ids[start + rel_idx] = int(req_state.get_token_id(next_idx))
++            local_offset += num_scheduled
++            populated += num_scheduled
++
++    expected = sum(int(v) for v in scheduler_output.num_scheduled_tokens.values())
++    if populated != expected:
++        raise ValueError(
++            f"prompt target rows incomplete: expanded={populated}, scheduled={expected}"
++        )
++    return target_ids
++
++
++def _canon_expand_prompt_sampling_params(
++    input_batch: InputBatch,
++    scheduler_output: VllmSchedulerOutput,
++    req_ids_dp: Optional[Dict[int, List[str]]],
++    dp_size: int,
++    padded_num_tokens: int,
++) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
++    """Expand per-request sampling parameters to packed prompt-token rows.
++
++    This is host-side contract construction only.  The returned arrays are consumed by the
++    same TPU `_apply_sampling_transforms` callable as decode.  Padding rows receive neutral
++    values and are never included in prompt-logprob slicing.
++    """
++    if req_ids_dp is None:
++        raise ValueError("processed prompt logprobs require req_ids_dp")
++    if dp_size <= 0 or padded_num_tokens <= 0:
++        raise ValueError(
++            f"invalid prompt metadata dimensions: dp={dp_size}, tokens={padded_num_tokens}")
++    if padded_num_tokens % dp_size:
++        raise ValueError(
++            f"padded prompt rows {padded_num_tokens} not divisible by dp_size {dp_size}")
++
++    rows_per_dp = padded_num_tokens // dp_size
++    temperatures = np.ones((padded_num_tokens,), dtype=np.float32)
++    top_ks = np.full((padded_num_tokens,), -1, dtype=np.int32)
++    top_ps = np.ones((padded_num_tokens,), dtype=np.float32)
++    populated = 0
++
++    for dp_rank in range(dp_size):
++        local_offset = 0
++        for req_id in req_ids_dp.get(dp_rank, []):
++            if req_id not in scheduler_output.num_scheduled_tokens:
++                raise KeyError(f"scheduled-token count missing for request {req_id}")
++            if req_id not in input_batch.req_id_to_index:
++                raise KeyError(f"input-batch slot missing for request {req_id}")
++            num_scheduled = int(scheduler_output.num_scheduled_tokens[req_id])
++            if num_scheduled < 0 or local_offset + num_scheduled > rows_per_dp:
++                raise ValueError(
++                    f"request {req_id} overflows dp rank {dp_rank}: offset={local_offset}, "
++                    f"scheduled={num_scheduled}, capacity={rows_per_dp}")
++            req_index = input_batch.req_id_to_index[req_id]
++            start = dp_rank * rows_per_dp + local_offset
++            stop = start + num_scheduled
++            temperatures[start:stop] = input_batch.temperature_cpu[req_index]
++            top_ks[start:stop] = input_batch.top_k_cpu[req_index]
++            top_ps[start:stop] = input_batch.top_p_cpu[req_index]
++            local_offset += num_scheduled
++            populated += num_scheduled
++
++    expected = sum(int(v) for v in scheduler_output.num_scheduled_tokens.values())
++    if populated != expected:
++        raise ValueError(
++            f"prompt sampling rows incomplete: expanded={populated}, scheduled={expected}")
++    return temperatures, top_ks, top_ps, populated
++
++
++@jax.jit
++def _canon_process_prompt_logits(
++    logits: jax.Array,
++    metadata: TPUSupportedSamplingMetadata,
++) -> jax.Array:
++    """Use decode's exact sampling processor on packed prompt logits."""
++    processed = _apply_sampling_transforms(logits, metadata)
++    is_greedy = metadata.temperature < _SAMPLING_EPS
++    return jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits, processed)
++
+ logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
+ 
+ INVALID_TOKEN_ID = -1
+@@ -523,6 +753,126 @@
+     return routed_experts
+ 
+ 
++
++# ---------------------------------------------------------------- P18.0 capture
++# Host-side, env-gated capture of the REAL lowering inputs on the B (prompt-logprobs)
++# path, plus the intermediate hidden states and the full logits.
++#
++# Design notes (see tasks/logprob_diff_operator_alignment/p18lc_lowering_contract.md):
++#  * Everything here runs OUTSIDE jit, after the traced calls have returned, so it does
++#    not add graph nodes. A layer-boundary callback would instead force intermediates to
++#    materialise and can suppress fusion -- worth mean 1.361e-02 in bf16 (P15.B1) -- i.e.
++#    instrumentation could manufacture the very effect under study. It is still not
++#    "zero observer effect": host transfers can perturb timing -> scheduling -> bucket
++#    choice, which is exactly what the P18.0 neutrality gate exists to rule out.
++#  * The B path is identified by `input_batch.num_prompt_logprobs` being non-empty
++#    (tpu_runner.py:1376), not by a shape heuristic.
++#  * state_leaves (32B weights) and kv_caches are NOT dumped (size); replay reloads the
++#    same checkpoint, and for a full prefill the kernel takes K/V from the fresh tensors
++#    (kv_left_frm_cache = max(kv_len - q_len, 0) = 0), so cache CONTENTS should not affect
++#    the logits -- an assumption P18.1 must test rather than assume.
++_P18_CAPTURE_DIR = os.environ.get("P18_CAPTURE_DIR", "")
++_P18_SEQ = {"n": 0}
++
++
++def _p18_leaf(x):
++    """Materialise one leaf to numpy plus its sharding/dtype, or a plain scalar."""
++    import numpy as _np
++    if x is None:
++        return None
++    if hasattr(x, "shape") and hasattr(x, "dtype"):
++        try:
++            sharding = str(getattr(x, "sharding", None))
++        except Exception:
++            sharding = "unknown"
++        return {"array": _np.asarray(jax.device_get(x)), "sharding": sharding,
++                "dtype": str(x.dtype), "shape": tuple(x.shape)}
++    return {"value": x, "type": type(x).__name__}
++
++
++def _p18_dump(tag, payload, meta):
++    """Write one capture record. Arrays go to .npz, everything else to .json."""
++    import json as _json
++    import numpy as _np
++    from pathlib import Path as _Path
++    d = _Path(_P18_CAPTURE_DIR)
++    d.mkdir(parents=True, exist_ok=True)
++    seq = _P18_SEQ["n"]
++    _P18_SEQ["n"] += 1
++    arrays, describe = {}, {}
++    for k, v in payload.items():
++        if isinstance(v, dict) and "array" in v:
++            arrays[k] = v["array"]
++            describe[k] = {kk: vv for kk, vv in v.items() if kk != "array"}
++        else:
++            describe[k] = v
++    base = d / f"p18_{tag}_{seq:04d}"
++    if arrays:
++        _np.savez(str(base) + ".npz", **arrays)
++    _json.dump({"tag": tag, "seq": seq, "describe": describe, "meta": meta},
++               open(str(base) + ".json", "w"), indent=2, default=str)
++    print(f"[PATHTRACE] P18_CAPTURE tag={tag} seq={seq} arrays={sorted(arrays)} "
++          f"path={base}", flush=True)
++
++
++
++def _p18_weight_fingerprint(state_leaves):
++    """Exact bitwise checksum over the weights, computed on-device (cheap).
++
++    Bitcast each leaf to its unsigned integer view and sum as uint64: this is an EXACT function of
++    the bit patterns, so any single-bit weight difference between two processes changes it.  A
++    float sum would not be exact and a host-side hash would mean transferring ~64 GB.
++    """
++    import jax.numpy as _jnp
++    tot, n_el = 0, 0
++    per = []
++    for i, leaf in enumerate(state_leaves):
++        a = getattr(leaf, "value", leaf)
++        if not hasattr(a, "dtype") or not hasattr(a, "shape"):
++            per.append({"i": i, "kind": type(a).__name__})
++            continue
++        itemsize = _jnp.dtype(a.dtype).itemsize
++        uview = {1: _jnp.uint8, 2: _jnp.uint16, 4: _jnp.uint32, 8: _jnp.uint64}.get(itemsize)
++        if uview is None:
++            per.append({"i": i, "shape": tuple(a.shape), "dtype": str(a.dtype), "sum": None})
++            continue
++        try:
++            v = int(_jnp.sum(jax.lax.bitcast_convert_type(a, uview).astype(_jnp.uint64)))
++        except Exception as e:                       # keep going; report which leaf failed
++            per.append({"i": i, "shape": tuple(a.shape), "dtype": str(a.dtype),
++                        "error": str(e)[:60]})
++            continue
++        tot = (tot + v) % (1 << 64)
++        n_el += int(a.size)
++        if i < 4 or i >= len(state_leaves) - 2:
++            per.append({"i": i, "shape": tuple(a.shape), "dtype": str(a.dtype), "sum": v})
++    return {"n_leaves": len(state_leaves), "n_elements": n_el, "bitsum_u64": tot,
++            "sample_leaves": per}
++
++def _p18_contract_meta(mesh):
++    """The lowering-contract fields that must match for a replay to be the same program."""
++    keys = ("NEW_MODEL_DESIGN", "USE_2D_TP", "XLA_FLAGS", "JAX_DEFAULT_MATMUL_PRECISION",
++            "SKIP_JAX_PRECOMPILE", "MIN_TOKEN_BUCKET", "VLLM_XLA_CACHE_PATH",
++            "VLLM_DISABLE_COMPILE_CACHE", "VLLM_XLA_CHECK_RECOMPILATION",
++            "MODEL_IMPL_TYPE", "P16_NUM_LAYERS")
++    env = {k: os.environ.get(k) for k in keys}
++    env.update({k: v for k, v in os.environ.items() if k.startswith("CANON_")})
++    try:
++        # C6a: record the DEVICE ORDER, not just the count.  The engine builds its mesh with
++        # mesh_utils.create_device_mesh(..., allow_split_physical_axes=True) (:646-651), a
++        # topology-aware permutation -- on this v5p-8 that is [0,2,1,3] where a plain reshape
++        # gives [0,1,2,3].  Same shape and axis names, different chips per TP position, hence a
++        # different all-reduce order and a ULP seed in every layer.  Recording only the count made
++        # P18.1b's C6 check pass while the meshes were in fact different.
++        _flat = list(mesh.devices.flatten())
++        mesh_desc = {"shape": dict(mesh.shape), "axis_names": list(mesh.axis_names),
++                     "devices": len(_flat),
++                     "device_ids": [int(d.id) for d in _flat],
++                     "device_coords": [list(getattr(d, "coords", ()) or ()) for d in _flat]}
++    except Exception:
++        mesh_desc = "unknown"
++    return {"env": env, "mesh": mesh_desc, "jax_version": jax.__version__}
++
+ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
+ 
+     def __init__(
+@@ -614,6 +964,36 @@
+             # in the future.
+             self.mesh = self._create_2d_mesh()
+ 
++        # P22.S4 admission gate: the worker-facing device_indexes list is not the
++        # model mesh order.  NEW_MODEL_DESIGN rebuilds a topology-aware mesh via
++        # create_device_mesh, so assert the concrete order after that rebuild.
++        # Default-off and diagnostic-only.
++        _expected_mesh_ids = os.environ.get("CANON_EXPECT_MODEL_MESH_IDS")
++        if _expected_mesh_ids:
++            _expected = [
++                int(x.strip()) for x in _expected_mesh_ids.split(",")
++                if x.strip()
++            ]
++            _actual = [int(d.id) for d in self.mesh.devices.flatten()]
++            print(
++                "PATHTRACE CANON_MODEL_MESH_IDS "
++                f"expected={_expected} actual={_actual}",
++                flush=True,
++            )
++            if _actual != _expected:
++                raise RuntimeError(
++                    "CANON_EXPECT_MODEL_MESH_IDS mismatch: "
++                    f"expected={_expected}, actual={_actual}"
++                )
++
++        # P19.F4: expose the concrete mesh to the mounted linear.py so CANON_FIXED_AR can
++        # shard_map its fixed-order reduction (default-off; no effect when env unset).
++        try:
++            from tpu_inference.layers.jax import linear as _canon_linear
++            _canon_linear._CANON_MESH = self.mesh
++        except Exception:
++            pass
++
+         logger.info(f"Init mesh | mesh={self.mesh}")
+ 
+     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
+@@ -1317,6 +1697,37 @@
+                     scheduler_output) as kv_connector_output:
+                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
+                 # but one of them would be `None`
++                if _P18_CAPTURE_DIR and self.input_batch.num_prompt_logprobs:
++                    # B path only: dump the real run_model inputs (contract C2/C6/C7/C9/C10).
++                    _md = attn_metadata
++                    _p18_dump("model_fn_inputs", {
++                        "input_ids": _p18_leaf(input_ids),
++                        "input_positions": _p18_leaf(input_positions),
++                        "md_input_positions": _p18_leaf(getattr(_md, "input_positions", None)),
++                        "md_block_tables": _p18_leaf(getattr(_md, "block_tables", None)),
++                        "md_seq_lens": _p18_leaf(getattr(_md, "seq_lens", None)),
++                        "md_query_start_loc": _p18_leaf(getattr(_md, "query_start_loc", None)),
++                        "md_request_distribution": _p18_leaf(getattr(_md, "request_distribution", None)),
++                    }, {**_p18_contract_meta(self.mesh),
++                        "static_layer_name_to_kvcache_index":
++                            list(self.layer_name_to_kvcache_index.items()),
++                        "static_is_first_rank": bool(self.is_first_rank),
++                        "static_is_last_rank": bool(self.is_last_rank),
++                        "md_padded_num_reqs": getattr(_md, "padded_num_reqs", None),
++                        "inputs_embeds_is_none": inputs_embeds is None,
++                        "lora_metadata_is_none": lora_metadata is None,
++                        # Record the kv_cache SHARDING too, not just shape/dtype: P18.1b showed
++                        # input shardings are part of the jit signature (contract C3a), and with
++                        # only shape/dtype recorded the replay has to re-derive the spec by hand --
++                        # which is exactly how it got P(None,None,'model',None,None) wrong.
++                        "kv_caches_spec": [
++                            {"shape": tuple(c.shape), "dtype": str(c.dtype),
++                             "sharding": str(getattr(c, "sharding", None))}
++                            for c in self.kv_caches[:2]],
++                        "num_kv_caches": len(self.kv_caches),
++                        "num_prompt_logprobs": dict(self.input_batch.num_prompt_logprobs),
++                        "weight_fingerprint": _p18_weight_fingerprint(self.state_leaves),
++                    })
+                 (self.kv_caches, hidden_states, aux_hidden_states,
+                  expert_indices) = self.model_fn(
+                      self.state_leaves,
+@@ -1380,6 +1791,57 @@
+                 full_hidden_states,
+                 lora_metadata,
+             )
++            if _P18_CAPTURE_DIR:
++                # Segment-wise evidence: hidden_states lets P18.1 verify run_model and
++                # run_compute_logits INDEPENDENTLY, so a replay mismatch localises itself.
++                _p18_dump("b_outputs", {
++                    "full_hidden_states": _p18_leaf(full_hidden_states),
++                    "full_logits": _p18_leaf(full_logits),
++                }, _p18_contract_meta(self.mesh))
++
++            if os.environ.get("P18_REPLAY") == "1":
++                # P18.1a -- in-process replay. Re-invoke the SAME jitted functions with the
++                # SAME inputs and compare bitwise. This single cheap experiment tests two
++                # things at once:
++                #   (1) program determinism: same program + same inputs -> same bits
++                #   (2) the assumption that for a full prefill the kv_cache CONTENTS do not
++                #       affect the logits (the kernel takes K/V from the fresh tensors because
++                #       kv_left_frm_cache = max(kv_len - q_len, 0) = 0).  The second call is
++                #       fed the cache AFTER the first call wrote into it, so the contents
++                #       differ by construction.  Bitwise-equal output therefore confirms (2);
++                #       a difference means P18.1b must reproduce cache contents as well.
++                # kv_caches are donated (donate_argnums=1), so the result is reassigned exactly
++                # as the original call does -- the cache ends in the same state either way,
++                # since identical inputs write identical K/V.
++                import numpy as _np
++                _h0 = _np.asarray(jax.device_get(full_hidden_states))
++                _l0 = _np.asarray(jax.device_get(full_logits))
++                with set_forward_context(None, self.vllm_config):
++                    (self.kv_caches, _h_r, _aux_r,
++                     _exp_r) = self.model_fn(
++                         self.state_leaves,
++                         self.kv_caches,
++                         input_ids,
++                         attn_metadata,
++                         inputs_embeds,
++                         input_positions,
++                         tuple(self.layer_name_to_kvcache_index.items()),
++                         lora_metadata,
++                         intermediate_tensors,
++                         self.is_first_rank,
++                         self.is_last_rank,
++                     )
++                _l_r = self.compute_logits_fn(self.state_leaves, _h_r, lora_metadata)
++                _h1 = _np.asarray(jax.device_get(_h_r))
++                _l1 = _np.asarray(jax.device_get(_l_r))
++                _hd = int((_h0 != _h1).sum())
++                _ld = int((_l0 != _l1).sum())
++                print(f"[PATHTRACE] P18_REPLAY hidden_nonzero_diff={_hd}/{_h0.size} "
++                      f"logits_nonzero_diff={_ld}/{_l0.size} "
++                      f"hidden_max={float(_np.abs(_h0.astype('f4')-_h1.astype('f4')).max()):.6e} "
++                      f"logits_max={float(_np.abs(_l0.astype('f4')-_l1.astype('f4')).max()):.6e} "
++                      f"verdict={'BITWISE_SAME' if (_hd==0 and _ld==0) else 'DIFFERS'}",
++                      flush=True)
+             logits = self._select_from_array_fn(full_logits, logits_indices,
+                                                 self.mesh)
+         else:
+@@ -1795,23 +2257,132 @@
+                     logprobs_logits = (processed_logits
+                                        if self.model_config.logprobs_mode
+                                        == "processed_logprobs" else logits)
++                canon_logprob_m = _canon_logprob_m()
++                original_logprob_rows = int(logprobs_logits.shape[0])
++                if canon_logprob_m is not None:
++                    if self.model_config.logprobs_mode != "processed_logprobs":
++                        raise ValueError(
++                            "CANON_LOGPROB_M requires logprobs_mode=processed_logprobs")
++                    if spec_decode_metadata is not None:
++                        raise ValueError(
++                            "CANON_LOGPROB_M does not yet support speculative decoding")
++                    logprobs_logits, next_tokens, original_logprob_rows = (
++                        _canon_pad_logprob_inputs(
++                            logprobs_logits, next_tokens, canon_logprob_m))
++                    global _CANON_LOGPROB_M_ANNOUNCED
++                    if not _CANON_LOGPROB_M_ANNOUNCED:
++                        _CANON_LOGPROB_M_ANNOUNCED = True
++                        print(
++                            "[PATHTRACE] CANON_LOGPROB_M on "
++                            f"decode_rows={original_logprob_rows} canonical_rows={canon_logprob_m}",
++                            flush=True,
++                        )
+                 logprobs = compute_and_gather_logprobs(
+                     logprobs_logits, next_tokens,
+                     self.model_config.max_logprobs)
++                if canon_logprob_m is not None:
++                    logprobs = _canon_slice_logprobs(
++                        logprobs, original_logprob_rows)
+                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
+             else:
+                 logprobs = None
+ 
+-            prompt_logprobs_async = compute_prompt_logprobs(
+-                full_logits,
+-                input_ids,
+-                self.input_batch.num_prompt_logprobs,
+-                self.requests,
+-                scheduler_output,
+-                req_ids_dp,
+-                self.dp_size,
+-                max_logprobs=self.model_config.max_logprobs,
+-            )
++            prompt_logprobs_logits = full_logits
++            prompt_logprobs_async = None
++            if (os.environ.get("CANON_PROMPT_PROCESSED_LOGPROBS", "") == "1"
++                    and full_logits is not None
++                    and self.input_batch.num_prompt_logprobs):
++                canon_logprob_m = _canon_logprob_m()
++                if (canon_logprob_m is not None
++                        and int(full_logits.shape[0]) != canon_logprob_m):
++                    raise ValueError(
++                        "processed prompt rows must equal CANON_LOGPROB_M: "
++                        f"{full_logits.shape[0]} vs {canon_logprob_m}")
++                temperatures, top_ks, top_ps, populated = (
++                    _canon_expand_prompt_sampling_params(
++                        self.input_batch,
++                        scheduler_output,
++                        req_ids_dp,
++                        self.dp_size,
++                        full_logits.shape[0],
++                    ))
++                token_sharding = NamedSharding(
++                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
++                prompt_sampling_metadata = TPUSupportedSamplingMetadata(
++                    temperature=device_array(
++                        self.mesh, temperatures, sharding=token_sharding),
++                    top_k=device_array(
++                        self.mesh, top_ks, sharding=token_sharding),
++                    top_p=device_array(
++                        self.mesh, top_ps, sharding=token_sharding),
++                    do_sampling=True,
++                    logprobs=True,
++                )
++                if canon_logprob_m is not None:
++                    if input_ids is None:
++                        raise ValueError(
++                            "CANON_LOGPROB_M direct prompt path requires input_ids")
++                    _, prompt_logprobs_logits = sample(
++                        step_rng,
++                        self.mesh,
++                        full_logits,
++                        prompt_sampling_metadata,
++                    )
++                    prompt_target_ids = device_array(
++                        self.mesh,
++                        _canon_expand_prompt_target_ids(
++                            self.requests,
++                            scheduler_output,
++                            req_ids_dp,
++                            self.dp_size,
++                            int(full_logits.shape[0]),
++                        ),
++                        sharding=token_sharding,
++                    )
++                    prompt_lp_tensors = compute_and_gather_logprobs(
++                        prompt_logprobs_logits,
++                        prompt_target_ids,
++                        self.model_config.max_logprobs,
++                    )
++                    prompt_logprobs_async = _canon_snapshot_prompt_logprobs(
++                        prompt_lp_tensors,
++                        int(full_logits.shape[0]),
++                        self.input_batch.num_prompt_logprobs,
++                        self.requests,
++                        scheduler_output,
++                        req_ids_dp,
++                        self.dp_size,
++                    )
++                    print(
++                        "[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on "
++                        f"rows={full_logits.shape[0]}",
++                        flush=True,
++                    )
++                    print(
++                        "[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on "
++                        f"rows={full_logits.shape[0]}",
++                        flush=True,
++                    )
++                else:
++                    prompt_logprobs_logits = _canon_process_prompt_logits(
++                        full_logits, prompt_sampling_metadata)
++                print(
++                    "[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on "
++                    f"rows={full_logits.shape[0]} populated={populated}",
++                    flush=True,
++                )
++
++            if prompt_logprobs_async is None:
++                prompt_logprobs_async = compute_prompt_logprobs(
++                    prompt_logprobs_logits,
++                    input_ids,
++                    self.input_batch.num_prompt_logprobs,
++                    self.requests,
++                    scheduler_output,
++                    req_ids_dp,
++                    self.dp_size,
++                    max_logprobs=self.model_config.max_logprobs,
++                )
+ 
+         num_reqs = self.input_batch.num_reqs
+ 

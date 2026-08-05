@@ -1,0 +1,72 @@
+--- /tmp/claude-2005/-home-yuxuan-code-rl-repro/2f32a913-cb87-4966-a5ab-1b70bd1d2f5f/scratchpad/stock/layers/jax/embed.py	2026-07-27 18:38:32.000000000 +0000
++++ /mnt/disks/tunix-data/claude_work/tpu_inference_src/embed_patched.py	2026-08-01 08:08:45.153882594 +0000
+@@ -22,6 +22,9 @@
+ from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+ 
+ 
++_CANON_F4E_ANNOUNCED = False
++
++
+ class JaxEmbed(nnx.Embed, JaxModule):
+     """Embedding layer for JAX."""
+ 
+@@ -57,6 +60,59 @@
+             return self.weight
+ 
+     def __call__(self, x) -> jax.Array:
++        # P19.F4E: the ONLY remaining 4-way all-reduce in the forward is this vocab-sharded
++        # gather's (HLO: jit(_take)/gather -> bf16[T,D] all-reduce).  minrepro proved that a
++        # 4-way XLA all-reduce is lowered DIFFERENTLY in fwd-only vs fwd+bwd programs, while an
++        # explicit fixed-order ppermute tree is program-invariant.  Under CANON_FIXED_AR_EMBED=1
++        # the gather+reduce is done manually with the F4 tree.  Default off.
++        import os as _os_e
++        if _os_e.environ.get("CANON_FIXED_AR_EMBED") == "1" and self.quant_method is None:
++            import jax.numpy as _jnp
++            from jax.experimental.shard_map import shard_map as _sm
++            from jax.sharding import PartitionSpec as _P
++            from tpu_inference.layers.jax import linear as _lin
++            _mesh = getattr(_lin, "_CANON_MESH", None)
++            if _mesh is not None:
++                _ax = getattr(_lin, "_CANON_TP_AXIS", "model")
++                _n = int(_mesh.shape[_ax])
++                _w = self.weight.value
++
++                def _local(ids_, tab_):
++                    j = jax.lax.axis_index(_ax)
++                    vloc = tab_.shape[0]
++                    li = ids_ - j * vloc
++                    ok = (li >= 0) & (li < vloc)
++                    part = _jnp.where(ok[:, None],
++                                      _jnp.take(tab_, _jnp.clip(li, 0, vloc - 1), axis=0),
++                                      _jnp.zeros((), tab_.dtype))[None]
++                    parts = [part]
++                    cur = part
++                    for _ in range(_n - 1):
++                        cur = jax.lax.ppermute(cur, _ax,
++                                               [(i, (i + 1) % _n) for i in range(_n)])
++                        parts.append(cur)
++                    ordered = _jnp.stack(parts)[_jnp.argsort((j - _jnp.arange(_n)) % _n)]
++                    acc = ordered[0]
++                    for k in range(1, _n):
++                        acc = acc + ordered[k]
++                    return acc[0]
++
++                # NB: JaxEmbed defines a permissive __getattr__ that returns None for any
++                # unknown name, so hasattr() is ALWAYS True on this class -- an attribute-based
++                # "announce once" guard is silently dead here (instrument event #17).  Use a
++                # module-global instead.
++                global _CANON_F4E_ANNOUNCED
++                if not _CANON_F4E_ANNOUNCED:
++                    _CANON_F4E_ANNOUNCED = True
++                    print(f"[PATHTRACE] CANON_FIXED_AR_EMBED=1 fixed-order embed gather "
++                          f"(tp={_n})", flush=True)
++                try:
++                    f = _sm(_local, mesh=_mesh, in_specs=(_P(None), _P(_ax, None)),
++                            out_specs=_P(None, None), check_vma=False)
++                except TypeError:
++                    f = _sm(_local, mesh=_mesh, in_specs=(_P(None), _P(_ax, None)),
++                            out_specs=_P(None, None), check_rep=False)
++                return f(x, _w)
+         if self.quant_method is None:
+             return super().__call__(x)
+         return self.quant_method.apply_jax(self, x)

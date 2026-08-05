@@ -1,0 +1,79 @@
+--- /tmp/claude-2005/-home-yuxuan-code-rl-repro/2f32a913-cb87-4966-a5ab-1b70bd1d2f5f/scratchpad/stock/models/jax/qwen2.py	2026-07-27 18:38:32.000000000 +0000
++++ /mnt/disks/tunix-data/claude_work/tpu_inference_src/qwen2_patched.py	2026-08-01 04:17:09.494019736 +0000
+@@ -98,6 +98,12 @@
+         gate = self.act_fn(self.gate_proj(x))
+         up = self.up_proj(x)
+         fuse = gate * up
++        import os as _os_mlp
++        if _os_mlp.environ.get("CANON_TAIL", "") == "act":
++            # P19.K2 MLP-internal cut: exit after gate/up+silu*mul, BEFORE down_proj.  Sliced to
++            # [T, D] so the residual add keeps shapes; the compare sees a deterministic transform
++            # of act.  Seed present here => born in gate/up conv or silu*mul; absent => down GEMM.
++            return fuse[:, : x.shape[-1]]
+         result = self.down_proj(fuse)
+         return result
+ 
+@@ -279,16 +285,63 @@
+         x: jax.Array,
+         attention_metadata: AttentionMetadata,
+     ) -> Tuple[jax.Array, jax.Array]:
++        # P19.TP2 -- THIRD-PROGRAM probe: barrier the hidden stream at EVERY layer boundary.
++        # The earlier one-seam CANON_BARRIER was negative, but the third-program gate needs the
++        # WHOLE forward pinned: value_and_grad re-optimises the entire primal, so a single seam
++        # cannot hold it.  Applied to BOTH arms (plain and value_and_grad) so the gate compares
++        # like with like; the cost is suppressed fusion, measured in the same run.  Default off.
++        import os as _os_b
++        if _os_b.environ.get("CANON_BARRIER_ALL") == "1":
++            x = jax.lax.optimization_barrier(x)
+         hidden_states = self.input_layernorm(x)
+         kv_cache, attn_output = self.self_attn(
+             kv_cache,
+             hidden_states,
+             attention_metadata,
+         )
++        if _os_b.environ.get("CANON_BARRIER_ALL") == "1":
++            attn_output = jax.lax.optimization_barrier(attn_output)
++        # P19.R4c -- the last upstream cut.  CANON_CUT=x showed the attention block's INPUT already
++        # differs, but that cut cannot separate "post-norm x differs" from "the raw embedding
++        # (residual) differs" because the residual add mixes both.  CANON_CUT=embed returns the RAW
++        # layer input (the embedding stream, pre-RMSNorm) as the layer output, bypassing the
++        # residual add and MLP entirely; downstream (final norm + lm_head) is row-local and
++        # row-position invariant (P19.R4a), so the vehicle's hidden comparison compares the
++        # embedding itself.  Default off.
++        import os as _os
++        if _os.environ.get("CANON_CUT") == "embed":
++            if not hasattr(self, "_canon_cut_embed_announced"):
++                self._canon_cut_embed_announced = True
++                print("[PATHTRACE] CANON_CUT=embed (layer returns the raw pre-norm input)",
++                      flush=True)
++            return kv_cache, x
+         attn_output += x
+ 
++        # P19.R6 -- localise WITHIN the tail (used together with CANON_CUT=const, whose corrected
++        # control proved the tail cross-row-contaminates with bitwise-equal target-row inputs):
++        #   CANON_TAIL=res  : return the residual sum only (skip post-norm and MLP)
++        #                     -> tests the residual add alone
++        #   CANON_TAIL=norm : return post_attention_layernorm(residual) (skip MLP)
++        #                     -> adds the norm; caveat: skipping the MLP changes the norm's
++        #                        consumer and hence its fusion, so a SAME here narrows but does
++        #                        not fully exonerate the norm
++        _tail = _os.environ.get("CANON_TAIL", "")
++        if _tail == "res":
++            return kv_cache, attn_output
+         residual = attn_output
+         attn_output = self.post_attention_layernorm(attn_output)
++        if _tail == "norm":
++            return kv_cache, attn_output
++        # P19.R8 -- the deployable-fix probe (user priority): a semantic no-op that only blocks
++        # fusion/motion across the norm->MLP seam.  Run on the REAL path (no const cut): if the
++        # n=160 A-vs-B DIFFERS flips to SAME with this on, a one-line barrier is a deployable fix
++        # candidate, far cheaper than any custom kernel.  Default off.
++        if _os.environ.get("CANON_BARRIER") == "1" or _os.environ.get("CANON_BARRIER_ALL") == "1":
++            attn_output = jax.lax.optimization_barrier(attn_output)
++            if not hasattr(self, "_canon_barrier_announced"):
++                self._canon_barrier_announced = True
++                print("[PATHTRACE] CANON_BARRIER=1 (optimization_barrier at norm->MLP seam)",
++                      flush=True)
+         outputs = self.mlp(attn_output)
+         outputs = residual + outputs
+         return kv_cache, outputs
