@@ -51,8 +51,6 @@ TrajectoryOrError = Union[
 
 WorkerState = datatypes.WorkerState
 
-WorkerState = datatypes.WorkerState
-
 
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
@@ -75,6 +73,7 @@ class RolloutWorker(abstract_worker.Worker):
     super().__init__()
     self.worker_id = worker_id
     self.config = config
+    self._policy_version = 0
     if tokenizer is None or chat_parser is None:
       raise ValueError(
           "RolloutWorker requires valid tokenizer and chat_parser arguments"
@@ -100,17 +99,31 @@ class RolloutWorker(abstract_worker.Worker):
 
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
-        worker_id=self.worker_id, roles=frozenset({"rollout"})
+        worker_id=self.worker_id,
+        roles=frozenset({"rollout", "sampling", "weight_sync"}),
+        resources={
+            "sampler": type(self.sampler).__name__,
+            "policy_version": self._policy_version,
+        },
     )
 
   def initialize(self) -> datatypes.Response:
     self.state = WorkerState.INITIALIZING
-    try:
-      return datatypes.Response()
-    finally:
-      self.state = WorkerState.READY
+    initialize = getattr(self.sampler, "initialize", None)
+    if callable(initialize):
+      initialize()
+    self.state = WorkerState.READY
+    return datatypes.Response(
+        metadata={
+            "worker_id": self.worker_id,
+            "state": self.state.value,
+            "policy_version": self._policy_version,
+        }
+    )
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
+    if self.state == WorkerState.PENDING:
+      self.initialize()
     self.state = WorkerState.COMPILING
     try:
       return datatypes.Response()
@@ -118,7 +131,15 @@ class RolloutWorker(abstract_worker.Worker):
       self.state = WorkerState.READY
 
   def start(self) -> datatypes.Response:
-    return datatypes.Response()
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    return datatypes.Response(
+        metadata={
+            "worker_id": self.worker_id,
+            "state": self.state.value,
+            "policy_version": self._policy_version,
+        }
+    )
 
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
@@ -140,7 +161,97 @@ class RolloutWorker(abstract_worker.Worker):
     pass
 
   def heartbeat(self) -> datatypes.HealthReport:
-    return datatypes.HealthReport(state=self.state)
+    return datatypes.HealthReport(
+        state=self.state,
+        policy_version=self._policy_version,
+        inflight=len(self.manager._active_tasks),  # pylint: disable=protected-access
+        queue_depth=self.manager._completed_queue.qsize(),  # pylint: disable=protected-access
+    )
+
+  def _encode_prompt(self, prompt: str) -> np.ndarray:
+    try:
+      token_ids = self.manager.tokenizer.encode(
+          prompt, add_special_tokens=False
+      )
+    except TypeError:
+      token_ids = self.manager.tokenizer.encode(prompt)
+    return np.asarray(token_ids, dtype=np.int32)
+
+  def _left_padded_prompt_tokens(self, prompts: Sequence[str]) -> np.ndarray:
+    encoded = [self._encode_prompt(prompt) for prompt in prompts]
+    pad_id = getattr(self.manager.tokenizer, "pad_token_id", None)
+    if pad_id is None:
+      pad_id = getattr(self.manager.tokenizer, "eos_token_id", 0) or 0
+    configured_len = (
+        getattr(self.config, "max_prompt_length", 0) if self.config else 0
+    )
+    max_len = max([1, configured_len] + [len(ids) for ids in encoded])
+    padded = np.full((len(prompts), max_len), pad_id, dtype=np.int32)
+    for i, ids in enumerate(encoded):
+      if ids.size:
+        padded[i, -min(ids.size, max_len) :] = ids[-max_len:]
+    return padded
+
+  async def sample_prompts(
+      self,
+      prompts: str | Sequence[str],
+      *,
+      max_generation_steps: int | None = None,
+      temperature: float | None = None,
+      top_p: float | None = None,
+      top_k: int | None = None,
+      seed: int | None = None,
+      return_logprobs: bool = True,
+  ) -> base_rollout.RolloutOutput:
+    """Direct single-turn prompt sampling path using the worker's Sampler."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
+    if not prompt_list:
+      return base_rollout.RolloutOutput(
+          text=[],
+          logits=None,
+          tokens=[],
+          left_padded_prompt_tokens=np.zeros((0, 1), dtype=np.int32),
+          logprobs=[] if return_logprobs else None,
+      )
+
+    config = self.config or base_rollout.RolloutConfig()
+    sampling_params = sampler_lib.SamplingParams(
+        max_tokens=(
+            max_generation_steps
+            if max_generation_steps is not None
+            else config.max_tokens_to_generate
+        ),
+        temperature=temperature if temperature is not None else config.temperature,
+        top_p=top_p if top_p is not None else config.top_p,
+        top_k=top_k if top_k is not None else config.top_k,
+        seed=seed if seed is not None else config.seed,
+        return_logprobs=return_logprobs,
+    )
+    requests = [
+        sampler_lib.SamplingRequest(
+            request_id=f"{self.worker_id}_sample_{i}",
+            prompt=prompt,
+            sampling_params=sampling_params,
+        )
+        for i, prompt in enumerate(prompt_list)
+    ]
+    responses = await self.sampler.sample(requests)
+    if not isinstance(responses, (list, tuple)):
+      responses = [responses]
+
+    return base_rollout.RolloutOutput(
+        text=[response.text for response in responses],
+        logits=None,
+        tokens=[response.token_ids for response in responses],
+        left_padded_prompt_tokens=self._left_padded_prompt_tokens(prompt_list),
+        logprobs=(
+            [response.logprobs for response in responses]
+            if return_logprobs
+            else None
+        ),
+    )
 
   def _to_rollout_response(
       self,
@@ -186,8 +297,15 @@ class RolloutWorker(abstract_worker.Worker):
           datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest] | Any
       ),
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
+      **generation_kwargs,
   ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse] | Any:
     """Coroutine method for single or batched generate requests."""
+    if isinstance(requests, str) or (
+        isinstance(requests, (list, tuple))
+        and all(isinstance(req, str) for req in requests)
+    ):
+      return await self.sample_prompts(requests, **generation_kwargs)
+
     cb = None
     if on_complete is not None:
       cb = lambda item: on_complete(self._to_rollout_response(item))
@@ -210,6 +328,8 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Prepares the worker for an upcoming weight synchronization step."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
     self.state = WorkerState.SYNCING
     try:
       return await self.manager.pre_weight_sync(sync_request, **kwargs)
@@ -218,9 +338,13 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Synchronizes the worker's internal model weights."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
     self.state = WorkerState.SYNCING
     try:
-      return await self.manager.weight_sync(sync_request, **kwargs)
+      result = await self.manager.weight_sync(sync_request, **kwargs)
+      self._policy_version += 1
+      return result
     finally:
       self.state = WorkerState.READY
 

@@ -12,7 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Orchestrator script for distributed GSM8K GRPO training. Runs on CPU."""
+"""CPU orchestrator for a minimal distributed GSM8K-style GRPO chain demo.
+
+This script intentionally drives remote worker primitives directly:
+  1. lifecycle handshake with trainer and rollout workers,
+  2. rollout generation on the rollout worker,
+  3. TrainExample assembly on the CPU orchestrator,
+  4. trainer-side GRPO loss configuration and actor update,
+  5. optional LoRA weight sync back to the rollout worker.
+
+It is a plumbing demo, not a full-quality GSM8K training recipe.
+"""
 
 from __future__ import annotations
 
@@ -23,349 +33,354 @@ import re
 import sys
 from typing import Any
 
-from absl import logging as absl_logging
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-# Force CPU for Orchestrator JAX
-os.environ["JAX_PLATFORMS"] = "cpu"
+import jax  # pylint: disable=g-import-not-at-top
+import numpy as np  # pylint: disable=g-import-not-at-top
+from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
-import grain
-from flax import nnx
-import jax
-from jax import numpy as jnp
-from jax.sharding import Mesh
-import numpy as np
-import optax
-import tensorflow_datasets as tfds
-from transformers import AutoTokenizer
-
-# Setup paths to import tunix
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+)
 if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
-from tunix.cli.utils import model as model_utils
-from tunix.models.qwen3 import model as qwen3_model_lib
-from tunix.models.qwen3 import params as qwen3_params_lib
-from tunix.rl import rl_cluster as rl_engine_lib
-from tunix.rl import utils as rl_utils
-from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
-from tunix.rl.rollout import base_rollout
-from tunix.sft import metrics_logger
-from tunix.sft import utils as sft_utils
-
-from tunix.experimental.orchestrator import orchestrator_rl_engine
-from tunix.experimental.orchestrator import grpc_worker_proxies
-from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
+from tunix.rl import function_registry  # pylint: disable=g-import-not-at-top
+from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
+from tunix.rl.agentic import utils as agentic_utils  # pylint: disable=g-import-not-at-top
 
 
-# ====== Argparse ======
-arg_parser = argparse.ArgumentParser(
-    description="Distributed Orchestrator for Qwen3-1.7B on GSM8K with GRPO."
-)
-arg_parser.add_argument("--batch_size", type=int, default=4)
-arg_parser.add_argument("--mini_batch_size", type=int, default=2)
-arg_parser.add_argument("--max_steps", type=int, default=20)
-arg_parser.add_argument("--max_response_length", type=int, default=512)
-arg_parser.add_argument("--trainer_addr", type=str, default="localhost:20000")
-arg_parser.add_argument("--rollout_addr", type=str, default="localhost:20001")
-args, _ = arg_parser.parse_known_args()
-
-# ====== Recipe Defaults ======
-MODEL_NAME = "Qwen3-1.7B"
-MODEL_ID = f"Qwen/{MODEL_NAME}"
-SEED = 42
-
-NUM_PROMPTS_PER_STEP = args.batch_size
-NUM_GENERATIONS = 8
-MINI_BATCH_SIZE = args.mini_batch_size
-TRAIN_MICRO_BATCH_SIZE = 1
-COMPUTE_LOGPS_MICRO_BATCH_SIZE = 1
-
-MAX_STEPS = args.max_steps
-NUM_EPOCHS = 1
-EVAL_EVERY_N_STEPS = 100
-EVAL_BATCH_SIZE = 16
-EVAL_AT_START = False
-EVAL_AT_END = False
-
-BETA = 0.04
-EPSILON = 0.2
-KL_LOSS_MODE = "mse_kl"
-LEARNING_RATE = 2.0e-7
-WEIGHT_DECAY = 0.01
-ADAM_B1 = 0.9
-ADAM_B2 = 0.999
-ADAM_EPS = 1.0e-8
-MAX_GRAD_NORM = 1.0
-WARMUP_STEPS = 5
-LR_DECAY_STEPS = 50
-
-MAX_PROMPT_LENGTH = 512
-MAX_RESPONSE_LENGTH = args.max_response_length
-KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
-
-TRAIN_TEMPERATURE = 1.0
-TRAIN_TOP_P = 1.0
-TRAIN_TOP_K = None
-EVAL_TEMPERATURE = 0.0
-EVAL_TOP_P = 1.0
-EVAL_TOP_K = 1
-
-USE_LORA = True  # MUST use LoRA for gRPC weight sync to fit in memory
-LORA_RANK = 64
-LORA_ALPHA = 64.0
-MODEL_DTYPE = jnp.bfloat16
-
-ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_dist")
-TFDS_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data")
-os.makedirs(TFDS_DATA_DIR, exist_ok=True)
-
-VTC_PROMPT_TEMPLATE = """Solve the following math problem.
+PROMPT_TEMPLATE = """Solve the following math problem.
 First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
-Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags. Do not put anything else in the answer tags.
+Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags.
 
-Problem: {}
+Problem: {question}
 <reasoning>
 """
 
-# ====== Data Loader ======
-def _as_text(value: Any) -> str:
-  return value if isinstance(value, str) else value.decode("utf-8")
+DEMO_TASKS = (
+    ("Natalia sold clips to 48 friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?", "72"),
+    ("Weng earns $12 an hour for babysitting. Yesterday, she babysat for 3 hours. How much did she earn?", "36"),
+    ("A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts of fiber does it take?", "3"),
+    ("Betty is saving money for a wallet which costs $100. She has $15 saved. How much more does she need?", "85"),
+)
 
-def extract_hash_answer(text: str) -> str | None:
-  if "####" not in text:
-    return None
-  return text.split("####", 1)[1].strip()
 
-def build_prompt(question: str) -> str:
-  return VTC_PROMPT_TEMPLATE.format(question)
-
-def build_gsm8k_dataset(
-    *,
-    split: str,
-    seed: int,
-    batch_size: int,
-    data_dir: str,
-    shuffle: bool,
-) -> grain.MapDataset:
-  data = tfds.data_source(
-      "gsm8k",
-      split=split,
-      data_dir=data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
+def _parse_args() -> argparse.Namespace:
+  parser = argparse.ArgumentParser(
+      description="Minimal distributed Qwen3 GRPO chain demo on remote workers."
   )
-  dataset = grain.MapDataset.source(data)
-  if shuffle:
-    dataset = dataset.shuffle(seed=seed)
-  dataset = dataset.map(
-      lambda x: {
-          "prompts": build_prompt(_as_text(x["question"])),
-          "question": _as_text(x["question"]),
-          "answer": extract_hash_answer(_as_text(x["answer"])),
-      }
+  parser.add_argument(
+      "--batch_size",
+      type=int,
+      default=2,
+      help="Number of prompt groups per step; trajectories=batch_size*num_generations.",
   )
-  return dataset.batch(batch_size)
+  parser.add_argument("--num_generations", type=int, default=2)
+  parser.add_argument("--max_steps", type=int, default=1)
+  parser.add_argument("--max_prompt_length", type=int, default=512)
+  parser.add_argument("--max_response_length", type=int, default=128)
+  parser.add_argument("--train_micro_batch_size", type=int, default=1)
+  parser.add_argument("--trainer_addr", type=str, default="localhost:20000")
+  parser.add_argument("--rollout_addr", type=str, default="localhost:20001")
+  parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
+  parser.add_argument("--tokenizer_path", type=str, default="")
+  parser.add_argument("--temperature", type=float, default=1.0)
+  parser.add_argument("--top_p", type=float, default=1.0)
+  parser.add_argument("--top_k", type=int, default=-1)
+  parser.add_argument("--beta", type=float, default=0.0)
+  parser.add_argument("--epsilon", type=float, default=0.2)
+  parser.add_argument(
+      "--reward_mode",
+      choices=("synthetic", "exact"),
+      default="synthetic",
+      help="synthetic proves the distributed chain without relying on model quality.",
+  )
+  parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
+  parser.add_argument("--sync_lora_weights", action="store_true")
+  parser.add_argument("--stop_workers_on_exit", action="store_true")
+  return parser.parse_args()
 
-# ====== Reward + Metrics ======
-def extract_boxed_answer(text: str) -> str | None:
+
+def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
+  return remote_execution.GrpcRemoteActorHandle(
+      target_address=f"grpc://{addr}", rpc_timeout_s=timeout_s
+  )
+
+
+def _build_prompts(batch_size: int, num_generations: int) -> tuple[list[str], list[str]]:
+  prompts = []
+  gold_answers = []
+  for i in range(batch_size):
+    question, answer = DEMO_TASKS[i % len(DEMO_TASKS)]
+    prompt = PROMPT_TEMPLATE.format(question=question)
+    for _ in range(num_generations):
+      prompts.append(prompt)
+      gold_answers.append(answer)
+  return prompts, gold_answers
+
+
+def _extract_answer(text: str) -> str | None:
   answer_blocks = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
   content = answer_blocks[-1] if answer_blocks else text
-  boxed = []
-  stack = []
-  for i, ch in enumerate(content):
-    if ch == "{":
-      stack.append(i)
-    elif ch == "}":
-      if not stack:
-        continue
-      open_idx = stack.pop()
-      if content[:open_idx].endswith(r"\boxed"):
-        boxed.append(content[open_idx + 1 : i].strip())
+  boxed = re.search(r"\\boxed\s*\{([^{}]+)\}", content)
   if boxed:
-    return boxed[-1]
-  fallback = re.search(r"\\boxed\s*\{?\s*([a-zA-Z0-9\.,\-]+)\s*\}?", content)
-  if fallback:
-    return fallback.group(1).strip()
-  return None
+    return boxed.group(1).strip().replace(",", "")
+  numeric = re.findall(r"-?\d+(?:\.\d+)?", content)
+  return numeric[-1].replace(",", "") if numeric else None
 
-def is_vtc_format_correct(text: str) -> bool:
-  has_reasoning = text.count("</reasoning>") == 1
-  has_answer = text.count("<answer>") == 1 and text.count("</answer>") == 1
-  reasoning_end = text.find("</reasoning>")
-  answer_open = text.find("<answer>")
-  answer_close = text.find("</answer>")
-  return (
-      has_reasoning
-      and has_answer
-      and reasoning_end != -1
-      and answer_open != -1
-      and answer_close != -1
-      and reasoning_end < answer_open < answer_close
+
+def _compute_rewards(
+    completions: list[str],
+    gold_answers: list[str],
+    *,
+    mode: str,
+    num_generations: int,
+) -> np.ndarray:
+  if mode == "synthetic":
+    per_group = np.linspace(0.0, 1.0, num_generations, dtype=np.float32)
+    return np.tile(per_group, len(completions) // num_generations)
+
+  rewards = []
+  for completion, gold in zip(completions, gold_answers):
+    rewards.append(1.0 if _extract_answer(completion) == gold else 0.0)
+  return np.asarray(rewards, dtype=np.float32)
+
+
+def _encode(tokenizer: Any, text: str) -> list[int]:
+  try:
+    return tokenizer.encode(text, add_special_tokens=False)
+  except TypeError:
+    return tokenizer.encode(text)
+
+
+def _build_train_example(
+    *,
+    tokenizer: Any,
+    prompts: list[str],
+    completion_tokens: list[Any],
+    rewards: np.ndarray,
+    num_generations: int,
+    max_prompt_length: int,
+    max_response_length: int,
+    pad_id: int,
+) -> agentic_grpo_learner.TrainExample:
+  padded_prompt_ids = []
+  padded_completion_ids = []
+  padded_completion_masks = []
+  for prompt, tokens in zip(prompts, completion_tokens):
+    prompt_ids = _encode(tokenizer, prompt)
+    completion_ids = np.asarray(tokens, dtype=np.int32).tolist()
+    padded_prompt, padded_completion, _ = agentic_utils.pad_prompt_and_completion(
+        prompt_ids,
+        completion_ids,
+        max_prompt_length,
+        max_response_length,
+        pad_id,
+    )
+    padded_prompt_ids.append(padded_prompt)
+    padded_completion_ids.append(padded_completion)
+    padded_completion_masks.append((padded_completion != pad_id).astype(np.int32))
+
+  advantage_fn = function_registry.get_advantage_estimator("grpo")
+  advantages = advantage_fn(rewards, num_generations=num_generations)
+  return agentic_grpo_learner.TrainExample(
+      prompt_ids=np.asarray(padded_prompt_ids, dtype=np.int32),
+      prompt_mask=np.asarray(padded_prompt_ids) != pad_id,
+      completion_ids=np.asarray(padded_completion_ids, dtype=np.int32),
+      completion_mask=np.asarray(padded_completion_masks, dtype=np.int32),
+      advantages=np.asarray(advantages, dtype=np.float32),
+      ref_per_token_logps=None,
+      old_per_token_logps=None,
+      policy_version=np.zeros((len(prompts),), dtype=np.int32),
   )
 
-def normalize_answer(text: str | None) -> str | None:
-  if text is None:
+
+def _slice_or_none(value: Any, start: int, end: int) -> Any:
+  if value is None:
     return None
-  return str(text).replace(",", "").strip()
-
-def _vtc_completion_outcome(
-    completion: str, gold: Any
-) -> tuple[float, bool, bool, bool]:
-  format_ok = is_vtc_format_correct(completion)
-  pred = normalize_answer(extract_boxed_answer(completion))
-  true = normalize_answer(gold)
-  answer_ok = pred is not None and true is not None and pred == true
-  extracted_ok = pred is not None
-  if format_ok and answer_ok:
-    score = 1.0
-  elif format_ok and not answer_ok:
-    score = 0.1
-  elif not format_ok and answer_ok:
-    score = 0.5
-  else:
-    score = 0.0
-  return score, format_ok, answer_ok, extracted_ok
-
-def vtc_env_reward(task, action):
-  gold = task.get("answer")
-  completion = action.action if hasattr(action, "action") else action
-  score, _, _, _ = _vtc_completion_outcome(completion, gold)
-  return score
-
-def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
-  del prompts, completions, advantages, answer, kwargs
-  rewards = np.asarray(rewards, dtype=np.float32)
-  solve_ratio = float(np.mean(rewards > 0.1))
-  reward_mean = float(rewards.mean())
-  logging.info("[Orchestrator Metric] solve_ratio=%.3f, reward_mean=%.3f", solve_ratio, reward_mean)
-  return {
-      "rewards/solve_ratio": (solve_ratio, np.mean),
-      "rewards/reward_mean": (reward_mean, np.mean),
-  }
+  return value[start:end]
 
 
-class VTCGRPOLearner(GRPOLearner):
+def _split_train_example(
+    example: agentic_grpo_learner.TrainExample,
+    micro_batch_size: int,
+) -> list[agentic_grpo_learner.TrainExample]:
+  batch = int(example.prompt_ids.shape[0])
+  if micro_batch_size <= 0:
+    raise ValueError("train_micro_batch_size must be positive.")
+  chunks = []
+  for start in range(0, batch, micro_batch_size):
+    end = min(start + micro_batch_size, batch)
+    chunks.append(
+        example.replace(
+            prompt_ids=example.prompt_ids[start:end],
+            prompt_mask=example.prompt_mask[start:end],
+            completion_ids=example.completion_ids[start:end],
+            completion_mask=example.completion_mask[start:end],
+            advantages=example.advantages[start:end],
+            ref_per_token_logps=_slice_or_none(
+                example.ref_per_token_logps, start, end
+            ),
+            old_per_token_logps=_slice_or_none(
+                example.old_per_token_logps, start, end
+            ),
+            policy_version=_slice_or_none(example.policy_version, start, end),
+            sampler_is_weights=_slice_or_none(
+                example.sampler_is_weights, start, end
+            ),
+        )
+    )
+  return chunks
 
-  def _create_agent_env_pair(self, single_example, group_id: int, pair_index: int):
-    # Normalize tfds byte arrays/ndarrays to standard strings for gRPC
-    normalized = {
-        "prompts": _as_text(single_example["prompts"]),
-        "question": _as_text(single_example["question"]),
-        "answer": _as_text(single_example["answer"]),
-    }
-    return super()._create_agent_env_pair(normalized, group_id=group_id, pair_index=pair_index)
 
-
-def main():
-  absl_logging.use_python_logging()
-  logging.basicConfig(level=logging.INFO, format="%(asctime)s - [Orchestrator] %(message)s")
-  
-  # Connect to remote worker processes via gRPC
-  logging.info("Connecting to Trainer at grpc://%s", args.trainer_addr)
-  trainer_handle = remote_execution.ActorHandle.from_address(f"grpc://{args.trainer_addr}")
-  
-  logging.info("Connecting to Rollout at grpc://%s", args.rollout_addr)
-  rollout_handle = remote_execution.ActorHandle.from_address(f"grpc://{args.rollout_addr}")
-
-  # 1. Initialize tokenizer and local dummy model on CPU
-  tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-  
-  # Mesh is a dummy on CPU orchestrator
-  mesh = Mesh(jax.devices()[:1], ("data",))
-  config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
-  # Instantiate dummy model to obtain parameter structure (no weights loaded)
-  dummy_actor = qwen3_model_lib.Qwen3(config, rngs=nnx.Rngs(0))
-
-  # 2. Local configurations (mirrors trainer/rollout settings)
-  cluster_config = rl_engine_lib.ClusterConfig(
-      role_to_mesh={
-          rl_engine_lib.Role.ACTOR: mesh,
-          rl_engine_lib.Role.REFERENCE: mesh,
-          rl_engine_lib.Role.ROLLOUT: mesh,
-      },
-      rollout_engine="vanilla",
-      offload_to_cpu=False,
-      training_config=rl_engine_lib.RLTrainingConfig(
-          actor_optimizer=optax.sgd(1e-3),
-          eval_every_n_steps=EVAL_EVERY_N_STEPS,
-          max_steps=MAX_STEPS,
-          mini_batch_size=MINI_BATCH_SIZE,
-          train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
-          compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
-      ),
-      rollout_config=base_rollout.RolloutConfig(
-          max_prompt_length=MAX_PROMPT_LENGTH,
-          max_tokens_to_generate=MAX_RESPONSE_LENGTH,
-          return_logprobs=True,
-          kv_cache_size=KV_CACHE_SIZE,
-          temperature=TRAIN_TEMPERATURE,
-          top_p=TRAIN_TOP_P,
-      ),
+def _maybe_add_ref_logps(
+    trainer_handle: remote_execution.ActorHandle,
+    example: agentic_grpo_learner.TrainExample,
+    *,
+    beta: float,
+    pad_id: int,
+    eos_id: int,
+) -> agentic_grpo_learner.TrainExample:
+  if beta == 0.0:
+    return example
+  ref_logps = trainer_handle.submit(
+      "reference_logps",
+      example.prompt_ids,
+      example.completion_ids,
+      pad_id,
+      eos_id,
   )
+  return example.replace(ref_per_token_logps=ref_logps)
 
-  # 3. Create dummy base engine and wrap with OrchestratorRLEngine
-  base_dummy = rl_engine_lib.RLEngine(
-      actor=dummy_actor,
-      tokenizer=tokenizer,
-      cluster_config=cluster_config,
+
+def _log_lifecycle(name: str, handle: remote_execution.ActorHandle) -> None:
+  init_resp = handle.submit("initialize")
+  start_resp = handle.submit("start")
+  info = handle.submit("info")
+  heartbeat = handle.submit("heartbeat")
+  logging.info("%s initialize: %s", name, getattr(init_resp, "metadata", init_resp))
+  logging.info("%s start: %s", name, getattr(start_resp, "metadata", start_resp))
+  logging.info("%s info: %s", name, info)
+  logging.info("%s heartbeat: %s", name, heartbeat)
+
+
+def main() -> None:
+  args = _parse_args()
+  if args.num_generations <= 1:
+    raise ValueError("num_generations must be greater than 1 for GRPO.")
+
+  logging.basicConfig(
+      level=logging.INFO, format="%(asctime)s - [Orchestrator] %(message)s"
   )
+  logging.info("Orchestrator JAX backend: %s", jax.default_backend())
 
-  # Proxies route calls from OrchestratorRLEngine to remote gRPC nodes
-  trainer_proxy = grpc_worker_proxies.GrpcTrainerWorkerProxy(trainer_handle)
-  inference_proxy = grpc_worker_proxies.GrpcInferenceWorkerProxy(trainer_handle)
-  rollout_proxy = grpc_worker_proxies.GrpcRolloutWorkerProxy(rollout_handle, cluster_config)
-  weight_sync_proxy = grpc_worker_proxies.GrpcWeightSyncProxy(trainer_handle, rollout_handle)
+  tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
+  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+  if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
+    tokenizer.pad_token = tokenizer.eos_token
+  pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+  eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
 
-  cluster = orchestrator_rl_engine.OrchestratorRLEngine(
-      base=base_dummy,
-      trainer_worker=trainer_proxy,
-      rollout_worker=rollout_proxy,
-      inference_worker=inference_proxy, # Reference scoring runs on Trainer TPU
-      weight_sync=weight_sync_proxy,
+  trainer_handle = _connect(args.trainer_addr, args.rpc_timeout_s)
+  rollout_handle = _connect(args.rollout_addr, args.rpc_timeout_s)
+
+  _log_lifecycle("trainer", trainer_handle)
+  _log_lifecycle("rollout", rollout_handle)
+  logging.info("Configuring trainer-side GRPO loss.")
+  trainer_handle.submit(
+      "configure_grpo_loss",
+      num_generations=args.num_generations,
+      max_response_length=args.max_response_length,
+      beta=args.beta,
+      epsilon=args.epsilon,
+      temperature=args.temperature,
   )
-  
-  # Patch actor_trainer with proxy so with_loss_fn() is sent over gRPC
-  cluster.actor_trainer = grpc_worker_proxies.RemoteActorTrainerProxy(trainer_handle)
+  logging.info("Trainer-side GRPO loss configured.")
 
-  # 4. GRPOLearner initialization
-  grpo_config = GRPOConfig(
-      num_generations=NUM_GENERATIONS,
-      num_iterations=1,
-      beta=BETA,
-      kl_loss_mode=KL_LOSS_MODE,
-      epsilon=EPSILON,
-      epsilon_high=EPSILON,
-      advantage_estimator="grpo",
-      degenerate_group_masking=False,
-      use_rollout_logps=False,
-      system_prompt="",
-      max_response_length=MAX_RESPONSE_LENGTH,
-      loss_agg_mode="sequence-mean-token-mean",
-  )
+  top_k = None if args.top_k < 0 else args.top_k
+  for step in range(args.max_steps):
+    prompts, gold_answers = _build_prompts(args.batch_size, args.num_generations)
+    logging.info(
+        "Step %d: requesting %d trajectories from rollout worker.",
+        step,
+        len(prompts),
+    )
+    rollout_output = rollout_handle.submit(
+        "generate",
+        prompts,
+        max_generation_steps=args.max_response_length,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=top_k,
+    )
+    logging.info(
+        "Step %d: rollout returned %d completions.",
+        step,
+        len(rollout_output.text),
+    )
+    rewards = _compute_rewards(
+        rollout_output.text,
+        gold_answers,
+        mode=args.reward_mode,
+        num_generations=args.num_generations,
+    )
+    train_example = _build_train_example(
+        tokenizer=tokenizer,
+        prompts=prompts,
+        completion_tokens=rollout_output.tokens,
+        rewards=rewards,
+        num_generations=args.num_generations,
+        max_prompt_length=args.max_prompt_length,
+        max_response_length=args.max_response_length,
+        pad_id=pad_id,
+    )
+    train_example = _maybe_add_ref_logps(
+        trainer_handle,
+        train_example,
+        beta=args.beta,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+    chunks = _split_train_example(train_example, args.train_micro_batch_size)
+    logging.info(
+        "Step %d: reward_mean=%.3f reward_std=%.3f chunks=%d.",
+        step,
+        float(rewards.mean()),
+        float(rewards.std()),
+        len(chunks),
+    )
+    for chunk in chunks:
+      trainer_handle.submit("fwd_bwd", chunk)
+    train_step = trainer_handle.submit("update", eval_ds=None, skip_jit=False)
+    logging.info(
+        "Step %d: trainer update finished at train_step=%s.", step, train_step
+    )
 
-  grpo_trainer = VTCGRPOLearner(
-      rl_engine=cluster,
-      algo_config=grpo_config,
-      chat_parser=AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True), # Use tokenizer directly as mock chat template formatter
-      metric_fns=[vtc_metric_fn],
-      env_kwargs={"reward_fn": vtc_env_reward},
-  )
+    if args.sync_lora_weights:
+      logging.info("Step %d: syncing LoRA weights to rollout worker.", step)
+      trainer_handle.submit("prepare_weight_sync")
+      lora_weights = trainer_handle.submit("get_lora_weights")
+      rollout_handle.submit("pre_weight_sync")
+      rollout_handle.submit("weight_sync", lora_weights)
+      rollout_handle.submit("post_weight_sync")
+    else:
+      logging.info(
+          "Step %d: running rollout weight-sync barrier without LoRA weights.",
+          step,
+      )
+      rollout_handle.submit("pre_weight_sync")
+      rollout_handle.submit("weight_sync")
+      rollout_handle.submit("post_weight_sync")
+    logging.info("Step %d: distributed train+sync chain completed.", step)
 
-  # Load datasets
-  logging.info("Loading gsm8k dataset...")
-  train_dataset = build_gsm8k_dataset(
-      split="train",
-      seed=SEED,
-      batch_size=NUM_PROMPTS_PER_STEP,
-      data_dir=TFDS_DATA_DIR,
-      shuffle=True,
-  ).repeat(NUM_EPOCHS)
-  
-  # Run the training loop!
-  logging.info("Starting distributed training...")
-  grpo_trainer.train(train_dataset)
-  logging.info("Training finished successfully.")
+  if args.stop_workers_on_exit:
+    rollout_handle.submit("stop")
+    trainer_handle.submit("stop")
+
+  logging.info("Distributed GRPO chain demo finished successfully.")
+
 
 if __name__ == "__main__":
   main()

@@ -23,7 +23,7 @@ from tunix.experimental.worker import remote_execution
 
 
 class RemoteActorTrainerProxy:
-  """Proxies configurations (like loss function) to the remote JAX Trainer Worker."""
+  """Proxies configurations like loss functions to a remote TrainerWorker."""
 
   def __init__(self, handle: remote_execution.ActorHandle):
     self.handle = handle
@@ -69,7 +69,6 @@ class GrpcRolloutWorkerProxy:
         **kwargs,
     )
 
-
 class GrpcWeightSyncProxy:
   """Orchestrates weight sync from Trainer to Rollout worker over gRPC."""
 
@@ -83,20 +82,25 @@ class GrpcWeightSyncProxy:
 
   def sync(self) -> None:
     logging.info("[WeightSyncProxy] Pulling LoRA weights from Trainer...")
+    self.trainer_handle.submit("prepare_weight_sync")
     lora_state = self.trainer_handle.submit("get_lora_weights")
     logging.info("[WeightSyncProxy] Pushing LoRA weights to Rollout worker...")
-    self.rollout_handle.submit("update_params", lora_state)
+    self.rollout_handle.submit("pre_weight_sync")
+    self.rollout_handle.submit("weight_sync", lora_state)
+    self.rollout_handle.submit("post_weight_sync")
     logging.info("[WeightSyncProxy] Sync completed.")
 
 
 class GrpcTrainerWorkerProxy:
-  """Proxies train() and per_token_logps() to remote JaxTrainerWorkerService."""
+  """Proxies trainer calls to a remote experimental TrainerWorker."""
 
   def __init__(self, handle: remote_execution.ActorHandle):
     self.handle = handle
 
   def train(self, chunks: list[Any], eval_ds: Any = None, skip_jit: bool = False) -> None:
-    self.handle.submit("train", chunks, eval_ds, skip_jit)
+    for chunk in chunks:
+      self.handle.submit("fwd_bwd", chunk)
+    self.handle.submit("update", eval_ds=eval_ds, skip_jit=skip_jit)
 
   def per_token_logps(
       self,
@@ -115,7 +119,7 @@ class GrpcTrainerWorkerProxy:
 
 
 class GrpcInferenceWorkerProxy:
-  """Proxies per_token_logps() to remote JaxTrainerWorkerService's reference_logps()."""
+  """Proxies reference logprob calls to a remote GRPO trainer worker."""
 
   def __init__(self, handle: remote_execution.ActorHandle):
     self.handle = handle
@@ -135,4 +139,3 @@ class GrpcInferenceWorkerProxy:
         pad_id=pad_id,
         eos_id=eos_id,
     )
-

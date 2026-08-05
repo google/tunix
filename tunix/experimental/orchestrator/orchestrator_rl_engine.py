@@ -30,7 +30,8 @@ the base. As real workers replace in-process pieces, more of the surface moves
 onto handles and less is delegated.
 
 Handle contracts (all optional; absent -> in-process fallback):
-    trainer_worker.train(chunks, eval_ds, skip_jit) -> None
+    trainer_worker.fwd_bwd(chunk) -> Response
+    trainer_worker.update(eval_ds=..., skip_jit=...) -> int
     trainer_worker.per_token_logps(prompt_ids, completion_ids,
                                    pad_id, eos_id) -> array   # optional method
     rollout_worker.generate(prompts, apply_chat_template, mode,
@@ -64,8 +65,8 @@ class OrchestratorRLEngine:
       base: The in-process cluster that supplies the full surface (models,
         trainers, rollout, config, metrics, step counter). Routed primitives
         fall back to it when the matching handle is not provided.
-      trainer_worker: Optional handle exposing `train(...)` (and optionally
-        `per_token_logps(...)`) for the actor trainer.
+      trainer_worker: Optional handle exposing `fwd_bwd(...)`, `update(...)`,
+        and optionally `per_token_logps(...)` for the actor trainer.
       rollout_worker: Optional handle exposing `generate(...)`.
       inference_worker: Optional handle exposing `per_token_logps(...)` for the
         frozen reference model.
@@ -122,7 +123,15 @@ class OrchestratorRLEngine:
       self, train_ds: Any, eval_ds: Any, skip_jit: bool = False
   ) -> None:
     if self._trainer_worker is not None:
-      self._trainer_worker.train(train_ds, eval_ds, skip_jit)
+      fwd_bwd = getattr(self._trainer_worker, "fwd_bwd", None)
+      update = getattr(self._trainer_worker, "update", None)
+      if not callable(fwd_bwd) or not callable(update):
+        raise TypeError(
+            "trainer_worker must expose the experimental fwd_bwd/update API."
+        )
+      for chunk in train_ds:
+        fwd_bwd(chunk)
+      update(eval_ds=eval_ds, skip_jit=skip_jit)
     else:
       self._base.update_actor(train_ds, eval_ds, skip_jit)
 

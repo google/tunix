@@ -13,73 +13,384 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -e
+set -Ee
 
-# Resolve directory path
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
 
-TRAINER_PORT=20000
-ROLLOUT_PORT=20001
+TRAINER_PORT=${TRAINER_PORT:-20000}
+ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
+MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
+TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
+BATCH_SIZE=${BATCH_SIZE:-2}
+NUM_GENERATIONS=${NUM_GENERATIONS:-2}
+MAX_STEPS=${MAX_STEPS:-1}
+TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-1}
+EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
+LORA_RANK=${LORA_RANK:-16}
+LORA_ALPHA=${LORA_ALPHA:-16.0}
+USE_LORA=${USE_LORA:-0}
+PYTHON_BIN=${PYTHON_BIN:-python3}
+WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
+WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
+WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
+WAIT_LOG_TAIL_LINES=${WAIT_LOG_TAIL_LINES:-40}
+TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
+ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
+TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
+TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
+TRAINER_LOG="${DIR}/trainer.log"
+ROLLOUT_LOG="${DIR}/rollout.log"
+ORCHESTRATOR_LOG="${DIR}/orchestrator.log"
 
-# Parse engine type (default to vllm)
-ENGINE=${1:-vllm}
+print_section() {
+  echo
+  echo "================ $1 ================"
+}
 
-if [[ "$ENGINE" != "vllm" && "$ENGINE" != "vanilla" ]]; then
-  echo "Error: Unknown engine type '$ENGINE'."
-  echo "Usage: $0 [vllm|vanilla]"
-  exit 1
+print_command() {
+  local label="$1"
+  shift
+  echo "$label:"
+  printf '  %q' "$@"
+  echo
+}
+
+print_file_debug() {
+  local label="$1"
+  local file_path="$2"
+  echo "$label log path: $file_path"
+  if [[ -f "$file_path" ]]; then
+    ls -lh "$file_path" 2>/dev/null || true
+    echo "$label log last ${WAIT_LOG_TAIL_LINES} lines:"
+    tail -n "$WAIT_LOG_TAIL_LINES" "$file_path" 2>/dev/null || true
+  else
+    echo "$label log does not exist yet."
+  fi
+}
+
+print_process_debug() {
+  local label="$1"
+  local pid="$2"
+  echo "$label pid=$pid"
+  ps -fp "$pid" 2>/dev/null || true
+  ps -o pid,ppid,stat,etime,pcpu,pmem,rss,args -p "$pid" 2>/dev/null || true
+}
+
+print_port_debug() {
+  local port="$1"
+  echo "Port $port listeners:"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep -E "(:${port}\\b|:${port} )" || true
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+  else
+    echo "Neither ss nor lsof is available."
+  fi
+}
+
+print_related_processes() {
+  echo "Related processes:"
+  pgrep -af "run_trainer_node.py|run_rollout_node.py|run_gsm8k_dist_grpo.py|vllm" 2>/dev/null || true
+}
+
+dump_debug_snapshot() {
+  print_section "process snapshot"
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    print_process_debug "trainer" "$TRAINER_PID"
+  fi
+  if [[ -n "${ROLLOUT_PID:-}" ]]; then
+    print_process_debug "rollout" "$ROLLOUT_PID"
+  fi
+  print_related_processes
+  print_section "port snapshot"
+  print_port_debug "$TRAINER_PORT"
+  print_port_debug "$ROLLOUT_PORT"
+  print_section "log snapshot"
+  print_file_debug "trainer" "$TRAINER_LOG"
+  print_file_debug "rollout" "$ROLLOUT_LOG"
+  print_file_debug "orchestrator" "$ORCHESTRATOR_LOG"
+}
+
+on_error() {
+  local exit_code="$?"
+  print_section "launcher error"
+  echo "Launcher failed with exit code $exit_code."
+  dump_debug_snapshot
+  exit "$exit_code"
+}
+
+print_safetensors_candidates() {
+  local root="$1"
+  if [[ ! -d "$root" ]]; then
+    echo "MODEL_DIR does not exist yet; no nested safetensors to inspect."
+    return
+  fi
+  local candidates
+  candidates="$(
+    find "$root" -mindepth 2 -maxdepth 5 -type f -name '*.safetensors' -print 2>/dev/null \
+      | sed 's#/[^/]*$##' \
+      | sort \
+      | uniq -c \
+      | sort -nr \
+      | head -20 || true
+  )"
+  if [[ -n "$candidates" ]]; then
+    echo "Found nested safetensors directories. The trainer expects MODEL_DIR"
+    echo "to be one of these directories, not their parent:"
+    echo "$candidates" | sed 's/^/  /'
+  else
+    echo "No nested safetensors were found under MODEL_DIR either."
+  fi
+}
+
+has_direct_safetensors() {
+  [[ -d "$MODEL_DIR" ]] && [[ -n "$(
+    find "$MODEL_DIR" -maxdepth 1 -type f -name '*.safetensors' -print -quit 2>/dev/null || true
+  )" ]]
+}
+
+download_model_dir() {
+  echo "Downloading $MODEL_ID to MODEL_DIR: $MODEL_DIR"
+  PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_BIN" - "$MODEL_ID" "$MODEL_DIR" <<'PY'
+import os
+import sys
+
+from tunix.oss import utils as oss_utils
+
+model_id, model_dir = sys.argv[1], sys.argv[2]
+os.makedirs(model_dir, exist_ok=True)
+oss_utils.hf_pipeline(model_id, model_dir)
+PY
+}
+
+ensure_model_dir() {
+  if [[ -e "$MODEL_DIR" && ! -d "$MODEL_DIR" ]]; then
+    echo "Error: MODEL_DIR exists but is not a directory: $MODEL_DIR"
+    exit 1
+  fi
+
+  if has_direct_safetensors; then
+    return
+  fi
+
+  echo "No '*.safetensors' files found directly in MODEL_DIR: $MODEL_DIR"
+  echo "The JAX trainer loader uses a non-recursive '*.safetensors' lookup."
+  print_safetensors_candidates "$MODEL_DIR"
+  download_model_dir
+
+  if ! has_direct_safetensors; then
+    echo "Error: download finished but MODEL_DIR still has no direct '*.safetensors': $MODEL_DIR"
+    print_safetensors_candidates "$MODEL_DIR"
+    exit 1
+  fi
+}
+
+ensure_model_dir
+
+echo "=================================================="
+echo "Starting distributed GSM8K GRPO chain demo locally"
+echo "  rollout engine: vLLM"
+echo "  model dir:      $MODEL_DIR"
+echo "  tokenizer path: $TOKENIZER_PATH"
+echo "  python:         $PYTHON_BIN"
+echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
+echo "  batch size:     $BATCH_SIZE"
+echo "  generations:    $NUM_GENERATIONS"
+echo "  max steps:      $MAX_STEPS"
+echo "  eval interval:  $EVAL_EVERY_N_STEPS"
+echo "  prompt length:  $MAX_PROMPT_LENGTH"
+echo "  response len:   $MAX_RESPONSE_LENGTH"
+echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
+echo "  mini batch:     $MINI_BATCH_SIZE"
+echo "  use lora:       $USE_LORA"
+echo "  trainer chips:  $TRAINER_TPU_CHIPS"
+echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
+echo "  chip bounds:    $TPU_CHIPS_PER_HOST_BOUNDS"
+echo "  host bounds:    $TPU_HOST_BOUNDS"
+echo "  wait timeout:   ${WAIT_TIMEOUT_SECS}s"
+echo "  wait poll:      ${WAIT_POLL_SECS}s"
+echo "  log tail lines: $WAIT_LOG_TAIL_LINES"
+echo "  trainer log:    $TRAINER_LOG"
+echo "  rollout log:    $ROLLOUT_LOG"
+echo "  orch log:       $ORCHESTRATOR_LOG"
+echo "=================================================="
+
+dump_logs() {
+  print_section "trainer.log tail"
+  tail -n 200 "$TRAINER_LOG" 2>/dev/null || true
+  print_section "rollout.log tail"
+  tail -n 200 "$ROLLOUT_LOG" 2>/dev/null || true
+  print_section "orchestrator.log tail"
+  tail -n 200 "$ORCHESTRATOR_LOG" 2>/dev/null || true
+}
+
+check_process_alive() {
+  local name="$1"
+  local pid="$2"
+  local log_file="$3"
+  local process_state
+  process_state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+  if [[ -z "$process_state" || "$process_state" == Z* ]]; then
+    echo "Error: $name process exited before gRPC port became ready (pid=$pid)."
+    print_file_debug "$name" "$log_file"
+    dump_debug_snapshot
+    exit 1
+  fi
+}
+
+wait_for_port() {
+  local name="$1"
+  local port="$2"
+  local pid="$3"
+  local log_file="$4"
+  local elapsed=0
+  local poll_count=0
+  while true; do
+    check_process_alive "$name" "$pid" "$log_file"
+    if "$PYTHON_BIN" - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+try:
+  socket.create_connection(("localhost", port), timeout=1).close()
+except OSError:
+  sys.exit(1)
+PY
+    then
+      echo "$name port $port is ready after ${elapsed}s."
+      return
+    fi
+    if (( elapsed >= WAIT_TIMEOUT_SECS )); then
+      echo "Error: timed out waiting ${WAIT_TIMEOUT_SECS}s for $name port $port."
+      dump_debug_snapshot
+      exit 1
+    fi
+    echo "Waiting for $name port $port... elapsed=${elapsed}s pid=$pid log=$log_file"
+    if (( poll_count == 0 || poll_count % WAIT_DEBUG_EVERY_POLLS == 0 )); then
+      print_process_debug "$name" "$pid"
+      print_port_debug "$port"
+      print_file_debug "$name" "$log_file"
+    fi
+    sleep "$WAIT_POLL_SECS"
+    elapsed=$((elapsed + WAIT_POLL_SECS))
+    poll_count=$((poll_count + 1))
+  done
+}
+
+: > "$TRAINER_LOG"
+: > "$ROLLOUT_LOG"
+: > "$ORCHESTRATOR_LOG"
+
+print_section "runtime context"
+date
+pwd
+"$PYTHON_BIN" --version 2>&1 || true
+git -C "$DIR" rev-parse --short HEAD 2>/dev/null || true
+git -C "$DIR" status --short --branch 2>/dev/null || true
+echo "MODEL_DIR exists? $(if [[ -d "$MODEL_DIR" ]]; then echo yes; else echo no; fi)"
+echo "TOKENIZER_PATH exists? $(if [[ -d "$TOKENIZER_PATH" ]]; then echo yes; else echo no; fi)"
+echo "Initial LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}"
+print_related_processes
+print_port_debug "$TRAINER_PORT"
+print_port_debug "$ROLLOUT_PORT"
+
+echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
+TRAINER_CMD=(
+  "$PYTHON_BIN" "${DIR}/run_trainer_node.py"
+  --port="$TRAINER_PORT"
+  --tpu_chips="$TRAINER_TPU_CHIPS"
+  --tpu_chips_per_host_bounds="$TPU_CHIPS_PER_HOST_BOUNDS"
+  --tpu_host_bounds="$TPU_HOST_BOUNDS"
+  --model_name="$MODEL_NAME"
+  --model_id="$MODEL_ID"
+  --model_dir="$MODEL_DIR"
+  --tokenizer_path="$TOKENIZER_PATH"
+  --max_prompt_length="$MAX_PROMPT_LENGTH"
+  --max_response_length="$MAX_RESPONSE_LENGTH"
+  --mini_batch_size="$MINI_BATCH_SIZE"
+  --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+  --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
+  --lora_rank="$LORA_RANK"
+  --lora_alpha="$LORA_ALPHA"
+)
+if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+  TRAINER_CMD+=(--use_lora)
 fi
-
-echo "=================================================="
-echo "Starting Distributed GSM8K GRPO training locally..."
-echo "Using $ENGINE Engine for Rollout Generation Node."
-echo "=================================================="
-
-# 1. Start Trainer Worker on TPU chips 0,1
-echo "Launching Trainer Node on TPU chips 0,1..."
-python3 "${DIR}/run_trainer_node.py" \
-  --port=$TRAINER_PORT \
-  --tpu_chips="0,1" > "${DIR}/trainer.log" 2>&1 &
+print_command "Trainer command" PYTHONUNBUFFERED=1 "${TRAINER_CMD[@]}"
+PYTHONUNBUFFERED=1 "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1 &
 TRAINER_PID=$!
+echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
+print_process_debug "trainer" "$TRAINER_PID"
 
-# 2. Start Rollout Worker on TPU chips 2,3 (configures engine type)
-echo "Launching Rollout Node ($ENGINE) on TPU chips 2,3..."
-python3 "${DIR}/run_rollout_node.py" \
-  --port=$ROLLOUT_PORT \
-  --tpu_chips="2,3" \
-  --engine="$ENGINE" > "${DIR}/rollout.log" 2>&1 &
+echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
+ROLLOUT_CMD=(
+  "$PYTHON_BIN" "${DIR}/run_rollout_node.py"
+  --port="$ROLLOUT_PORT"
+  --tpu_chips="$ROLLOUT_TPU_CHIPS"
+  --tpu_chips_per_host_bounds="$TPU_CHIPS_PER_HOST_BOUNDS"
+  --tpu_host_bounds="$TPU_HOST_BOUNDS"
+  --model_id="$MODEL_ID"
+  --model_dir="$MODEL_DIR"
+  --tokenizer_path="$TOKENIZER_PATH"
+  --max_prompt_length="$MAX_PROMPT_LENGTH"
+  --max_response_length="$MAX_RESPONSE_LENGTH"
+  --lora_rank="$LORA_RANK"
+  --lora_alpha="$LORA_ALPHA"
+)
+if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+  ROLLOUT_CMD+=(--use_lora)
+fi
+print_command "Rollout command" PYTHONUNBUFFERED=1 "${ROLLOUT_CMD[@]}"
+PYTHONUNBUFFERED=1 "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1 &
 ROLLOUT_PID=$!
+echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
+print_process_debug "rollout" "$ROLLOUT_PID"
 
-# Function to clean up background processes on exit
 cleanup() {
   echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID)..."
-  kill $TRAINER_PID $ROLLOUT_PID || true
-  wait $TRAINER_PID $ROLLOUT_PID 2>/dev/null || true
+  kill "$TRAINER_PID" "$ROLLOUT_PID" 2>/dev/null || true
+  wait "$TRAINER_PID" "$ROLLOUT_PID" 2>/dev/null || true
   echo "Workers stopped."
 }
+trap on_error ERR
 trap cleanup EXIT
 
-# 3. Wait for workers to start gRPC services
-echo "Waiting for gRPC servers to initialize (TPU compilation/loading weights might take a moment)..."
-python3 -c "
-import socket, time
-for p in ($TRAINER_PORT, $ROLLOUT_PORT):
-  while True:
-    try:
-      socket.create_connection(('localhost', p), timeout=1)
-      print(f'Port {p} is ready.')
-      break
-    except OSError:
-      time.sleep(2)
-"
+echo "Waiting for gRPC servers to bind..."
+wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
+wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+dump_debug_snapshot
 
-# 4. Start Orchestrator on CPU
-echo "Launching Orchestrator..."
-python3 "${DIR}/run_gsm8k_dist_grpo.py" \
-  --trainer_addr="localhost:$TRAINER_PORT" \
-  --rollout_addr="localhost:$ROLLOUT_PORT" \
-  --batch_size=4 \
-  --mini_batch_size=2 \
-  --max_steps=20
+echo "Launching CPU orchestrator..."
+ORCHESTRATOR_CMD=(
+  "$PYTHON_BIN" "${DIR}/run_gsm8k_dist_grpo.py"
+  --trainer_addr="localhost:$TRAINER_PORT"
+  --rollout_addr="localhost:$ROLLOUT_PORT"
+  --model_id="$MODEL_ID"
+  --tokenizer_path="$TOKENIZER_PATH"
+  --batch_size="$BATCH_SIZE"
+  --num_generations="$NUM_GENERATIONS"
+  --max_steps="$MAX_STEPS"
+  --max_prompt_length="$MAX_PROMPT_LENGTH"
+  --max_response_length="$MAX_RESPONSE_LENGTH"
+  --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+)
+if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+  ORCHESTRATOR_CMD+=(--sync_lora_weights)
+fi
+print_command "Orchestrator command" PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}"
+PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1 || {
+  exit_code="$?"
+  echo "Error: CPU orchestrator failed with exit code $exit_code."
+  print_file_debug "orchestrator" "$ORCHESTRATOR_LOG"
+  exit "$exit_code"
+}
 
-echo "Distributed GSM8K GRPO training run ($ENGINE) finished successfully!"
+echo "Distributed GSM8K GRPO chain demo (vLLM) finished successfully."

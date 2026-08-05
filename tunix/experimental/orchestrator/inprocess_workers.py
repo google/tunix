@@ -37,13 +37,37 @@ class InProcessTrainerWorker:
 
   Contract driven by ``OrchestratorRLEngine``:
 
-      train(role, train_ds, eval_ds, skip_jit) -> None
+      fwd_bwd(payload) -> None
+      update(eval_ds=None, skip_jit=False) -> int
       per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
       sync_weights() -> None
   """
 
   def __init__(self, rl_engine: Any):
     self._rl_engine = rl_engine
+    self._pending_payloads: list[Any] = []
+
+  def fwd_bwd(self, payload: Any) -> None:
+    """Stages one actor micro-batch for the next optimizer update."""
+    if isinstance(payload, list):
+      self._pending_payloads.extend(payload)
+    else:
+      self._pending_payloads.append(payload)
+
+  def update(self, eval_ds: Any = None, skip_jit: bool = False) -> int:
+    """Runs an actor update over the staged micro-batches."""
+    if not self._pending_payloads:
+      return int(getattr(self._rl_engine.actor_trainer, "train_steps", 0))
+    chunks = self._pending_payloads
+    self._pending_payloads = []
+    try:
+      self._rl_engine.train(
+          rl_engine_lib.Role.ACTOR, chunks, eval_ds, skip_jit
+      )
+    except Exception:
+      self._pending_payloads = chunks + self._pending_payloads
+      raise
+    return int(getattr(self._rl_engine.actor_trainer, "train_steps", 0))
 
   def train(
       self,
@@ -51,8 +75,9 @@ class InProcessTrainerWorker:
       eval_ds: Any,
       skip_jit: bool = False,
   ) -> None:
-    """Runs a training update for the Actor."""
-    self._rl_engine.train(rl_engine_lib.Role.ACTOR, train_ds, eval_ds, skip_jit)
+    """Compatibility shim for callers that still submit a full train_ds."""
+    self.fwd_bwd(train_ds)
+    self.update(eval_ds=eval_ds, skip_jit=skip_jit)
 
   def train_critic(
       self,
