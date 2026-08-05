@@ -734,6 +734,159 @@ class PeftTrainerTest(parameterized.TestCase):
     # Since eval_ds is length 2, it evaluates at step 2.
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
 
+  def test_loss_output_metrics_support_plain_scalars(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        images: jax.Array | None = None,
+    ) -> utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask, images
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              'weighted': utils.WeightedMetric(
+                  jnp.array(10.0, dtype=jnp.float32),
+                  jnp.array(5.0, dtype=jnp.float32),
+              ),
+              'plain': jnp.array(4.0, dtype=jnp.float32),
+          },
+      )
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'weighted', 'train'), 2.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'plain', 'train'), 4.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'weighted', 'eval'), 2.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'plain', 'eval'), 4.0
+    )
+
+  def test_metrics_buffer_rejects_mixed_metric_kinds(self):
+    weighted = utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0), weighted],
+    )
+    with self.assertRaisesRegex(TypeError, 'must not mix'):
+      _ = buffer.loss
+
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    weighted_buffer = trainer._buffer_metrics(
+        None,
+        loss=weighted,
+        step=0,
+    )
+    with self.assertRaisesRegex(TypeError, 'loss values must not mix'):
+      trainer._buffer_metrics(
+          weighted_buffer,
+          loss=jnp.array(1.0),
+          step=0,
+      )
+
+    buffer = trainer._buffer_metrics(
+        None,
+        loss=jnp.array(1.0),
+        step=0,
+        additional_metrics={'metric': (jnp.array(1.0), np.mean)},
+    )
+    with self.assertRaisesRegex(TypeError, "additional metric 'metric'"):
+      trainer._buffer_metrics(
+          buffer,
+          loss=jnp.array(1.0),
+          step=0,
+          additional_metrics={
+              'metric': (weighted, peft_trainer._weighted_metric_mean),
+          },
+      )
+
+  def test_weighted_metric_mean_handles_empty_and_rejects_mixed_values(self):
+    self.assertEqual(peft_trainer._weighted_metric_mean([]), 0.0)
+
+    weighted = utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    with self.assertRaisesRegex(TypeError, 'must not include scalar values'):
+      peft_trainer._weighted_metric_mean([weighted, jnp.array(1.0)])
+
+  def test_write_metrics_handles_reducer_edge_cases(self):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    weighted = utils.WeightedMetric(jnp.array(2.0), jnp.array(2.0))
+
+    mixed_buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0)],
+        additional_metrics={
+            'metric': ([weighted, jnp.array(1.0)], np.mean),
+        },
+    )
+    with self.assertRaisesRegex(TypeError, 'metrics must not mix'):
+      trainer._write_metrics(mixed_buffer)
+
+    def count_values(values):
+      return len(values)
+
+    edge_buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0)],
+        additional_metrics={
+            'empty': ([], count_values),
+            'fallback': ([weighted, weighted], np.mean),
+        },
+    )
+    with mock.patch.object(trainer, '_log_metrics') as log_metrics:
+      trainer._write_metrics(edge_buffer)
+
+    additional_metrics = log_metrics.call_args.kwargs['additional_metrics']
+    self.assertEqual(additional_metrics['empty'], 0)
+    self.assertEqual(additional_metrics['fallback'], 1.0)
+
+  def test_weighted_metric_mean_preserves_denominator_bounds(self):
+    metrics = [
+        utils.WeightedMetric(
+            jnp.array(3.0), jnp.array(0.0), eps=1.0, min_denom=2.0
+        ),
+        utils.WeightedMetric(
+            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=2.0
+        ),
+    ]
+    self.assertEqual(peft_trainer._weighted_metric_mean(metrics), 2.0)
+
+    inconsistent = [
+        metrics[0],
+        utils.WeightedMetric(
+            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=3.0
+        ),
+    ]
+    with self.assertRaisesRegex(ValueError, 'consistent denominator bounds'):
+      peft_trainer._weighted_metric_mean(inconsistent)
+
   def test_loss_output_gradient_scaling(self):
     # _train_step accumulates grad(unreduced_sum) with the metric's denominator
     # and defers the division into the accumulator (Sum grads / Sum denom), so a
@@ -806,6 +959,71 @@ class PeftTrainerTest(parameterized.TestCase):
     # the scale is applied.
     self.assertGreater(max_abs_diff(params_a, params_b1), 1e-6)
 
+  def test_loss_output_metrics_use_global_denominator(self):
+    inputs = jnp.array(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, -1.0]],
+        dtype=jnp.float32,
+    )
+    targets = jnp.array([[0.5], [-0.5], [1.0], [-1.0]], dtype=jnp.float32)
+    weights = jnp.array([0.1, 0.0, 0.2, 0.3], dtype=jnp.float32)
+
+    def weighted_loss_sum(model, x, y, example_weights):
+      per_example = jnp.sum(jnp.square(model(x) - y), axis=-1)
+      return jnp.sum(per_example * example_weights)
+
+    def loss_fn(model, x, y, example_weights):
+      metric = utils.WeightedMetric(
+          weighted_loss_sum(model, x, y, example_weights),
+          jnp.sum(example_weights),
+      )
+      return utils.LossOutput(
+          primary_loss=metric,
+          aux_metrics={'weighted_mse': metric},
+      )
+
+    reference_model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    expected = weighted_loss_sum(
+        reference_model, inputs, targets, weights
+    ) / jnp.sum(weights)
+    model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(0.0),
+        peft_trainer.TrainingConfig(
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=2,
+        ),
+    ).with_loss_fn(loss_fn)
+    training_hooks = mock.create_autospec(hooks.TrainingHooks)
+    trainer.with_training_hooks(training_hooks)
+    batches = [
+        {
+            'x': inputs[start : start + 2],
+            'y': targets[start : start + 2],
+            'example_weights': weights[start : start + 2],
+        }
+        for start in (0, 2)
+    ]
+
+    trainer.train(batches, batches)
+
+    for mode in ('train', 'eval'):
+      np.testing.assert_allclose(
+          trainer.metrics_logger.get_metric('', 'loss', mode),
+          expected,
+          rtol=1e-6,
+      )
+      np.testing.assert_allclose(
+          trainer.metrics_logger.get_metric('', 'weighted_mse', mode),
+          expected,
+          rtol=1e-6,
+      )
+
+    self.assertLen(training_hooks.on_eval_step_end.call_args_list, 2)
+    for eval_call in training_hooks.on_eval_step_end.call_args_list:
+      np.testing.assert_allclose(eval_call.args[1], expected, rtol=1e-6)
+
   def test_stream_train_step_returns_raw_weighted_metric_aux(self):
     # Since _compute_legacy_aux was dropped, the (stream) _train_step returns
     # the raw aux with WeightedMetric preserved, so the metric ops can reduce
@@ -837,15 +1055,23 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.model, trainer.optimizer, acc, self.train_ds[0], jnp.array(True)
     )
 
+    self.assertIsInstance(aux, utils.LossOutput)
+    aux_metrics = aux.aux_metrics
     # aux values stay raw WeightedMetric (not pre-divided to scalars).
-    self.assertIsInstance(aux['foo'], utils.WeightedMetric)
-    self.assertIsInstance(aux['bar'], utils.WeightedMetric)
+    self.assertIsInstance(aux_metrics['foo'], utils.WeightedMetric)
+    self.assertIsInstance(aux_metrics['bar'], utils.WeightedMetric)
     # Metric ops reduce the raw WeightedMetric correctly across micro-batches.
     self.assertAlmostEqual(
-        float(common.mean_of_means([aux['foo'], aux['foo']])), 2.0, places=5
+        float(common.mean_of_means([aux_metrics['foo'], aux_metrics['foo']])),
+        2.0,
+        places=5,
     )  # mean(10/5, 10/5)
     self.assertAlmostEqual(
-        float(common.global_weighted_mean([aux['bar'], aux['bar']])),
+        float(
+            common.global_weighted_mean(
+                [aux_metrics['bar'], aux_metrics['bar']]
+            )
+        ),
         3.0,
         places=5,
     )  # (6+6)/(2+2)
