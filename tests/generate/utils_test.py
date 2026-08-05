@@ -564,6 +564,87 @@ class UtilsTest(parameterized.TestCase):
         )
     )
 
+  def test_transfer_state_with_mappings_gemma(self):
+    """Test transfer_state_with_mappings for Gemma."""
+    from tunix.models.gemma import mapping_vllm_jax
+    from tunix.models.gemma import model as gemma_model
+
+    mapping_config = mapping_vllm_jax.VLLM_JAX_MAPPING
+    self.assertIn("to_hf_mappings", gemma_model.Gemma.mapping_for("vllm_jax"))
+    self.assertIsNotNone(gemma_model.Gemma.to_hf_mappings("vllm_jax"))
+
+    src_params = {
+        "embedder.input_embedding": MockParam(
+            jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
+        ),
+        "layers.0.pre_attention_norm.scale": MockParam(
+            jnp.arange(32, dtype=jnp.float32)
+        ),
+        "layers.0.attn.q_einsum.w": MockParam(
+            jnp.arange(4 * 32 * 8, dtype=jnp.float32).reshape(4, 32, 8)
+        ),
+        "layers.0.attn.kv_einsum.w": MockParam(
+            jnp.arange(2 * 2 * 32 * 8, dtype=jnp.float32).reshape(2, 2, 32, 8)
+        ),
+        "layers.0.mlp.gate_proj.kernel": MockParam(
+            jnp.arange(32 * 64, dtype=jnp.float32).reshape(32, 64)
+        ),
+        "layers.0.mlp.up_proj.kernel": MockParam(
+            jnp.arange(32 * 64, dtype=jnp.float32).reshape(32, 64)
+        ),
+        "layers.0.mlp.down_proj.kernel": MockParam(
+            jnp.arange(64 * 32, dtype=jnp.float32).reshape(64, 32)
+        ),
+        "final_norm.scale": MockParam(jnp.arange(32, dtype=jnp.float32)),
+    }
+    src_state = MockState(src_params)
+
+    dst_params = {
+        "model.embed_tokens.weight": MockParam(
+            jnp.zeros((16, 32), dtype=jnp.float32)
+        ),
+        "model.layers.0.input_layernorm.weight": MockParam(
+            jnp.zeros(32, dtype=jnp.float32)
+        ),
+        "model.layers.0.self_attn.qkv_proj.weight": MockParam(
+            jnp.zeros((32, 64), dtype=jnp.float32)
+        ),
+        "model.layers.0.mlp.gate_up_proj.weight": MockParam(
+            jnp.zeros((32, 128), dtype=jnp.float32)
+        ),
+        "model.layers.0.mlp.down_proj.weight": MockParam(
+            jnp.zeros((64, 32), dtype=jnp.float32)
+        ),
+        "model.norm.weight": MockParam(jnp.zeros(32, dtype=jnp.float32)),
+    }
+    dst_state = MockState(dst_params)
+
+    if "preprocess_src_state" in mapping_config:
+      src_state = mapping_config["preprocess_src_state"](src_state)
+
+    key_mappings = mapping_config["to_hf_mappings"]
+    transpose_keys = mapping_config["to_hf_transpose_keys"]
+
+    new_tgt_state = utils.transfer_state_with_mappings(
+        src_state,
+        dst_state,
+        key_mappings=key_mappings,
+        transpose_keys=transpose_keys,
+    )
+
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params["model.embed_tokens.weight"],
+            src_params["embedder.input_embedding"].value,
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params["model.norm.weight"],
+            src_params["final_norm.scale"].value,
+        )
+    )
+
   def test_verify_state_closeness(self):
     """Test verify_state_closeness function with various scenarios."""
 
