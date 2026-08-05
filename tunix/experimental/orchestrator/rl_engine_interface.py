@@ -15,58 +15,29 @@
 """The RL engine surface a learning loop drives.
 
 An RL engine is the compute driver for an RL training loop. `RLEngine`
-(in-process) and `OrchestratorRLEngine` (worker-backed) are two implementations
+(in-process) and `DistributedRLEngine` (worker-backed) are two implementations
 of this same `AbstractRLEngine` surface: a learner builds its loop out of these
 calls and is agnostic to whether the work runs in-process or is dispatched to
 workers. Swapping the implementation turns a single-process run into a
 distributed one -- the loop code does not change.
 
-This Protocol maps directly to the current `RLEngine` interface in
-`tunix.rl.rl_cluster.RLEngine`, derived from the members the agentic learners
-(`AgenticRLLearner` / `GRPOLearner`) actually touch. It is grouped into:
+This Protocol defines the core compute primitives (`generate`, `train`,
+`train_step`, `per_token_logps`, `sync_weights`) required by learning algorithms
+(`RLDriver`, `AgenticRLLearner`, `GRPOLearner`).
 
-  * compute primitives (generate / train / sync / score),
-  * shared bookkeeping (step counter, metrics, tokenizer, teardown),
-  * config & topology (cluster_config, role->mesh, rollout config), and
-  * sub-engine accessors (rollout, actor_trainer, critic_trainer).
-
-The Protocol is structural: `RLEngine` satisfies it as-is, and
-`OrchestratorRLEngine` satisfies it by routing the compute primitives to
-workers and delegating the rest. Sub-engines are typed `Any` here (their own
-surfaces -- `rollout.pad_id()/eos_id()/model()`,
-`actor_trainer.with_loss_fn(...)`, etc. -- are large and
-worker-implementation-specific); the members exercised by the loop are noted in
-comments.
+The Protocol is structural and purely stateless: `DistributedRLEngine` satisfies
+it by routing compute calls across distributed workers without carrying
+bookkeeping or topology state.
 """
 
 from typing import Any, Mapping, Protocol, runtime_checkable
 from jax.typing import ArrayLike
-from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.experimental.common import datatypes
 
 
 @runtime_checkable
 class AbstractRLEngine(Protocol):
-  """Structural interface for an RL engine (maps to current `RLEngine`)."""
-
-  # --- Shared bookkeeping ---------------------------------------------------
-  # Step counter / weight version, read and written by the loop.
-  global_steps: int
-  # Tokenizer adapter used for chat templating / (de)tokenization.
-  tokenizer: Any
-
-  def buffer_metrics(self, metrics: Mapping[str, Any], mode: Any = ...) -> None:
-    """Buffers metrics, flushed on the next step boundary."""
-    ...
-
-  def buffer_metrics_async(
-      self, metrics: Mapping[str, Any], mode: Any = ..., step: int = ...
-  ) -> None:
-    """Buffers metrics for a specific step (async producer path)."""
-    ...
-
-  def close(self) -> None:
-    """Releases cluster resources at end of run."""
-    ...
+  """Structural interface for an RL engine (stateless compute primitives)."""
 
   # --- Generation (rollout) -------------------------------------------------
   def generate(
@@ -84,18 +55,21 @@ class AbstractRLEngine(Protocol):
   # --- Training (train_step) ------------------------------------------------
   def train(
       self,
-      role: rl_engine_lib.Role,
+      role: datatypes.Role,
       train_ds: Any,
       eval_ds: Any,
       skip_jit: bool = False,
   ) -> None:
-    """Runs a training update for the specified role (e.g. Role.ACTOR, Role.CRITIC)."""
+    """Runs a training update for the specified role (e.g.
+
+    Role.ACTOR, Role.CRITIC).
+    """
     ...
 
   # --- Scoring (feeds advantage / IS math) ----------------------------------
   def per_token_logps(
       self,
-      role: rl_engine_lib.Role,
+      role: datatypes.Role,
       prompt_tokens: ArrayLike,
       completion_tokens: ArrayLike,
       pad_id: int,
@@ -110,27 +84,6 @@ class AbstractRLEngine(Protocol):
     ...
 
   # --- Weight sync ----------------------------------------------------------
-  def sync_weights(self) -> None:
+  def sync_weights(self) -> Any:
     """Publishes the trainer's weights to the rollout/inference replicas."""
     ...
-
-  # --- Config & topology ----------------------------------------------------
-  # ClusterConfig: training_config (+ micro-batch sizes, chunk sizes, metrics
-  # options), rollout_config, rollout_engine, role_to_mesh.
-  cluster_config: Any
-  # Role -> Mesh mapping (aka cluster_config.role_to_mesh); `.devices`/`.empty`.
-  r2m: Any
-
-  def get_rollout_config(self, mode: Any) -> Any:
-    """Returns the effective rollout config for the given mode."""
-    ...
-
-  # --- Sub-engine accessors (surfaces the loop reaches into) -----------------
-  # rollout: `.pad_id()`, `.eos_id()`, `.model()`.
-  rollout: Any
-  # actor_trainer: `.with_loss_fn(...)`, `.with_gen_model_input_fn(...)`,
-  # `.with_rl_metrics_to_log(...)`, `.is_managed_externally`,
-  # `.restored_global_step()`, `.iter_steps`, `.train_steps`, `.model`.
-  actor_trainer: Any
-  # critic_trainer: present only for actor-critic algorithms (PPO). Guard with
-  # hasattr(engine, "critic_trainer") before use.

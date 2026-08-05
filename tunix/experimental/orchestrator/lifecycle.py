@@ -48,13 +48,14 @@ class LifecycleDriver:
     self._registry = registry
     self._max_workers = max_workers
 
-  def bring_up(self, dummy_data: Any) -> None:
+  def bring_up(self, dummy_data: Any = None) -> None:
     """Runs initialize -> compile -> start across all workers, phase by phase.
 
     Each phase runs across all workers before the next phase begins. If any
     worker raises an exception during a phase, the exception is re-raised after
     all workers have attempted the phase, preventing subsequent phases from
     running.
+
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
     """
@@ -66,6 +67,7 @@ class LifecycleDriver:
       # compile/start and potentially retry failed ones, rather than fail-fast
       # on the first error.
       list(pool.map(lambda w: w.initialize(), workers))
+      # TODO(noghabi): setup with_loss_fn and other configs before compiling
       list(pool.map(lambda w: w.compile(dummy_data), workers))
       list(pool.map(lambda w: w.start(), workers))
 

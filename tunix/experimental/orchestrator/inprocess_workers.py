@@ -16,12 +16,12 @@
 
 These handles satisfy the same contracts a remote (RPC) worker would, but run in
 the same process by delegating straight to a base ``RLEngine`` /
-``AbstractRLEngine``. They let ``OrchestratorRLEngine`` route its compute
+``AbstractRLEngine``. They let ``DistributedRLEngine`` route its compute
 primitives to handles today (single process) and give the eventual RPC handles a
 behavioral reference to match.
 
-``RLOrchestrator`` (RL Algorithm Layer)
-  └── ``OrchestratorRLEngine`` (Coordination/Routing Layer)
+``RLDriver`` (RL Algorithm Layer)
+  └── ``DistributedRLEngine`` (Coordination/Routing Layer)
         └── ``InProcessRolloutWorker`` (Worker Handle)
               └── ``RLEngine`` /
               ``AbstractRLEngine`` (Base In-process Engine Layer)
@@ -29,13 +29,13 @@ behavioral reference to match.
 
 from typing import Any, Mapping
 
-from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.experimental.common import datatypes
 
 
 class InProcessTrainerWorker:
   """Trainer-worker handle that wraps an in-process base ``RLEngine`` / ``AbstractRLEngine``.
 
-  Contract driven by ``OrchestratorRLEngine``:
+  Contract driven by ``DistributedRLEngine``:
 
       train(role, train_ds, eval_ds, skip_jit) -> None
       per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
@@ -47,7 +47,7 @@ class InProcessTrainerWorker:
 
   def train(
       self,
-      role: rl_engine_lib.Role,
+      role: datatypes.Role,
       train_ds: Any,
       eval_ds: Any,
       skip_jit: bool = False,
@@ -83,7 +83,7 @@ class InProcessTrainerWorker:
     if segment_ids is not None:
       call_kwargs["segment_ids"] = segment_ids
     return self._rl_engine.per_token_logps(
-        rl_engine_lib.Role.ACTOR, **call_kwargs
+        datatypes.Role.ACTOR, **call_kwargs
     )
 
   def sync_weights(self) -> None:
@@ -94,7 +94,7 @@ class InProcessTrainerWorker:
 class InProcessRolloutWorker:
   """Rollout-worker handle that wraps an in-process base ``RLEngine`` / ``AbstractRLEngine``.
 
-  Contract driven by ``OrchestratorRLEngine``:
+  Contract driven by ``DistributedRLEngine``:
 
       generate(prompts, ...) -> RolloutOutput
       sync_weights() -> None
@@ -130,7 +130,7 @@ class InProcessRolloutWorker:
 class InProcessInferenceWorker:
   """Inference-worker handle that wraps an in-process base ``RLEngine`` / ``AbstractRLEngine``.
 
-  Contract driven by ``OrchestratorRLEngine``:
+  Contract driven by ``DistributedRLEngine``:
 
       per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
   """
@@ -166,5 +166,5 @@ class InProcessInferenceWorker:
     if segment_ids is not None:
       call_kwargs["segment_ids"] = segment_ids
     return self._rl_engine.per_token_logps(
-        rl_engine_lib.Role.REFERENCE, **call_kwargs
+        datatypes.Role.REFERENCE, **call_kwargs
     )

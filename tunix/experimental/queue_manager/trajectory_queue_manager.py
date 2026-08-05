@@ -57,3 +57,45 @@ class TrajectoryQueueManager(
         group_fn=group_fn,
         filter_fn=filter_fn,
     )
+
+  async def abort(self, exc: Exception) -> None:
+    """Aborts the queue by propagating the exception to waiting tasks."""
+    await self.put_exception(exc)
+
+  async def get_batch(
+      self,
+      batch_size: Optional[int] = None,
+      *,
+      num_groups: Optional[int] = None,
+  ) -> list[TrajectoryItem]:
+    """Retrieves a batch of items, waiting until enough items are ready.
+
+    Args:
+      batch_size: Optional number of items to retrieve.
+      num_groups: Optional number of prompt groups to retrieve. If specified and
+        batch_size is None, batch_size is computed as num_groups * group_size.
+
+    Returns:
+      A list of TrajectoryItem instances.
+    """
+    if batch_size is None:
+      if num_groups is not None:
+        batch_size = num_groups * (self.group_size or 1)
+      else:
+        batch_size = self.group_size or 1
+    return await super().get_batch(batch_size)
+
+  def __aiter__(self) -> TrajectoryQueueManager:
+    return self
+
+  async def __anext__(self) -> list[TrajectoryItem]:
+    """Yields the next ready group of TrajectoryItems."""
+    if self._clearing:
+      raise StopAsyncIteration
+    if self._exc:
+      raise self._exc
+    group = await self._get_one_ready_group()
+    if not group:
+      raise StopAsyncIteration
+    return group
+
