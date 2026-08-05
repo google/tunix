@@ -1913,6 +1913,37 @@ class Depth1FastPathTest(parameterized.TestCase):
         _unwrap(nnx.state(trainer.model, nnx.Param)),
     )
 
+  def test_zero_denom_produces_zero_update(self):
+    def zero_weight_loss(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.sum(logits), jnp.asarray(0.0, jnp.float32)
+          ),
+          aux_metrics={},
+      )
+
+    trainer = self._make_trainer().with_loss_fn(zero_weight_loss)
+    before = _unwrap(nnx.state(trainer.model, nnx.Param))
+    loss, _, grad_norm = trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        dummy_datasets(batch_size=4)[0],
+        jnp.array(True),
+    )
+
+    np.testing.assert_array_equal(loss, 0.0)
+    np.testing.assert_array_equal(grad_norm, 0.0)
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        before,
+        _unwrap(nnx.state(trainer.model, nnx.Param)),
+    )
+
   def test_depth1_jaxpr_has_no_cond(self):
     """Sentinel: the depth-1 step jaxpr must contain no `cond` primitive."""
     self.assertNotIn('cond', self._train_step_primitives(self._make_trainer()))
