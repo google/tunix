@@ -50,6 +50,8 @@ _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+_MetricValue = ArrayLike | utils.WeightedMetric
+_MetricReducer = Callable[[Any], ArrayLike]
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -111,6 +113,41 @@ class TrainingInput:
   images: jax.Array | np.ndarray | None = None
 
 
+def _weighted_metric_mean(values: Iterable[utils.WeightedMetric]) -> float:
+  """Aggregates unreduced metrics without microbatch-mean bias."""
+  values = list(values)
+  if not values:
+    return 0.0
+  if not all(isinstance(value, utils.WeightedMetric) for value in values):
+    raise TypeError("weighted metrics must not include scalar values")
+
+  eps = values[0].eps
+  min_denom = values[0].min_denom
+  if any(
+      value.eps != eps or value.min_denom != min_denom for value in values[1:]
+  ):
+    raise ValueError("weighted metrics must use consistent denominator bounds")
+
+  numerator = sum(float(np.asarray(value.unreduced_sum)) for value in values)
+  denominator = sum(float(np.asarray(value.denominator)) for value in values)
+  if eps is not None:
+    denominator += eps
+  if min_denom is not None:
+    denominator = max(denominator, min_denom)
+  return numerator / denominator if denominator else 0.0
+
+
+def _metric_reducer(
+    metric: _MetricValue,
+) -> _MetricReducer:
+  """Selects the reduction that matches a buffered auxiliary metric."""
+  return (
+      _weighted_metric_mean
+      if isinstance(metric, utils.WeightedMetric)
+      else np.mean
+  )
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class MetricsBuffer:
   """Metrics collected for a specific step.
@@ -125,14 +162,21 @@ class MetricsBuffer:
   """
 
   step: int
-  losses: List[ArrayLike]
-  additional_metrics: Dict[
-      str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
-  ] = dataclasses.field(default_factory=dict)
+  losses: List[_MetricValue]
+  additional_metrics: Dict[str, Tuple[List[_MetricValue], _MetricReducer]] = (
+      dataclasses.field(default_factory=dict)
+  )
 
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
+    weighted = [
+        isinstance(value, utils.WeightedMetric) for value in self.losses
+    ]
+    if any(weighted):
+      if not all(weighted):
+        raise TypeError("loss values must not mix weighted and scalar metrics")
+      return _weighted_metric_mean(self.losses)
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
@@ -571,8 +615,7 @@ class PeftTrainer:
       )
 
     if isinstance(aux, utils.LossOutput):
-      # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
-      return loss_val, aux.aux_metrics, grad_norm
+      return loss_val, aux, grad_norm
     elif self._has_aux:
       return loss_val, aux, grad_norm
     else:
@@ -584,7 +627,7 @@ class PeftTrainer:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
-      return out.primary_loss.compute(), out.aux_metrics
+      return out.primary_loss.compute(), out
     elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
@@ -749,10 +792,10 @@ class PeftTrainer:
   def _buffer_metrics(
       self,
       metrics_buffer: MetricsBuffer | None,
-      loss: ArrayLike,
+      loss: _MetricValue,
       step: int,
       additional_metrics: (
-          dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
+          dict[str, Tuple[_MetricValue, _MetricReducer]] | None
       ) = None,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
@@ -763,13 +806,25 @@ class PeftTrainer:
       )
     else:
       assert metrics_buffer.step == step
+      if isinstance(
+          metrics_buffer.losses[0], utils.WeightedMetric
+      ) != isinstance(loss, utils.WeightedMetric):
+        raise TypeError("loss values must not mix weighted and scalar metrics")
       metrics_buffer.losses.append(loss)
     if additional_metrics is not None:
       for k, (v, op) in additional_metrics.items():
         if k not in metrics_buffer.additional_metrics:
           metrics_buffer.additional_metrics[k] = ([v], op)
         else:
-          metrics_buffer.additional_metrics[k][0].append(v)
+          values = metrics_buffer.additional_metrics[k][0]
+          if isinstance(values[0], utils.WeightedMetric) != isinstance(
+              v, utils.WeightedMetric
+          ):
+            raise TypeError(
+                f"additional metric {k!r} must not mix weighted and scalar"
+                " values"
+            )
+          values.append(v)
     return metrics_buffer
 
   def _write_train_metrics(self):
@@ -800,13 +855,18 @@ class PeftTrainer:
       return v
 
     def _apply_op(v, op):
-      if isinstance(v, list) and v and isinstance(v[0], utils.WeightedMetric):
-        if getattr(op, "__name__", "") in (
-            "global_weighted_mean",
-            "mean_of_means",
-        ):
-          return op(v)
-        v = [x.compute() for x in v]
+      if isinstance(v, list) and v:
+        weighted = [isinstance(x, utils.WeightedMetric) for x in v]
+        if any(weighted) and not all(weighted):
+          raise TypeError("metrics must not mix weighted and scalar values")
+        if all(weighted):
+          if getattr(op, "__name__", "") in (
+              "_weighted_metric_mean",
+              "global_weighted_mean",
+              "mean_of_means",
+          ):
+            return op(v)
+          v = [x.compute() for x in v]
       return op(_to_np_array(v))
 
     self._log_metrics(
@@ -1009,14 +1069,27 @@ class PeftTrainer:
           span_v2.async_end([train_loss])
 
         self._throttler.add_computation(train_loss)
+        buffered_loss = (
+            aux.primary_loss
+            if isinstance(aux, utils.LossOutput)
+            else train_loss
+        )
+        additional_metrics = {"grad_norm": (grad_norm, np.mean)}
+        post_process_aux = aux
+        if isinstance(aux, utils.LossOutput):
+          additional_metrics.update({
+              name: (metric, _metric_reducer(metric))
+              for name, metric in aux.aux_metrics.items()
+          })
+          post_process_aux = aux.aux_metrics
         self._buffered_train_metrics = self._buffer_metrics(
             self._buffered_train_metrics,
-            loss=train_loss,
+            loss=buffered_loss,
             step=self._train_steps,
-            additional_metrics={"grad_norm": (grad_norm, np.mean)},
+            additional_metrics=additional_metrics,
         )
         # NB: put this after self._buffer_metrics is important
-        self._post_process_train_step(aux)
+        self._post_process_train_step(post_process_aux)
 
         if is_update_step_val:
           self._train_steps += 1
@@ -1098,6 +1171,7 @@ class PeftTrainer:
     eval_iterator = iter(eval_ds)
     with self._switch_mode(sft_metrics_logger.Mode.EVAL):
       eval_loss, eval_steps = 0, 0
+      uses_weighted_loss = False
       while True:
         if self.data_hooks:
           eval_example = self.data_hooks.load_next_eval_batch(self)
@@ -1116,12 +1190,25 @@ class PeftTrainer:
           self.training_hooks.on_eval_step_start(self)
         loss, aux = eval_step_fn(eval_example)
         loss = jax.lax.stop_gradient(loss)
+        buffered_loss = (
+            aux.primary_loss if isinstance(aux, utils.LossOutput) else loss
+        )
+        additional_metrics = None
+        post_process_aux = aux
+        if isinstance(aux, utils.LossOutput):
+          uses_weighted_loss = True
+          additional_metrics = {
+              name: (metric, _metric_reducer(metric))
+              for name, metric in aux.aux_metrics.items()
+          }
+          post_process_aux = aux.aux_metrics
         self._buffered_eval_metrics = self._buffer_metrics(
             self._buffered_eval_metrics,
-            loss=loss,
+            loss=buffered_loss,
             step=self._train_steps,
+            additional_metrics=additional_metrics,
         )
-        self._post_process_eval_step(aux)
+        self._post_process_eval_step(post_process_aux)
         eval_loss += loss
         eval_steps += 1
 
@@ -1131,7 +1218,11 @@ class PeftTrainer:
         )
         return
 
-      self._write_metrics(self._buffered_eval_metrics)  # pyrefly: ignore[bad-argument-type]
+      metrics_buffer = self._buffered_eval_metrics
+      assert metrics_buffer is not None
+      if uses_weighted_loss:
+        eval_loss = metrics_buffer.loss
+      self._write_metrics(metrics_buffer)
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
           self._train_steps,
