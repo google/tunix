@@ -53,7 +53,7 @@ jobs:
 
     # Cache Hugging Face hub
     - name: Cache HF hub
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
         key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -61,7 +61,7 @@ jobs:
           hf-${{ runner.os }}-
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
 
@@ -214,6 +214,10 @@ jobs:
           done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
         done
 
+        # Frozenlake Tests
+        pip install -e .[frozenlake]
+        run_and_log "frozenlake (gemma4 e2b)" bash -c "chmod +x ./examples/frozenlake/run_gemma4_e2b.sh && bash ./examples/frozenlake/run_gemma4_e2b.sh rl_training_config.max_steps=5 rl_training_config.eval_every_n_steps=1"
+
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
           echo "🚫 One or more RL scripts failed:" >&2
           for failed_script in "${FAILED_SCRIPTS[@]}"; do
@@ -314,7 +318,7 @@ jobs:
 
     # Cache Hugging Face hub
     - name: Cache HF hub
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
         key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -322,7 +326,7 @@ jobs:
           hf-${{ runner.os }}-
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
 
@@ -398,6 +402,11 @@ jobs:
         echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4) ..."
         model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
           bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || { FAILED=1; FAILED_SCRIPTS+=("Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4)"); }
+
+        echo "📦 Executing Frozenlake (gemma4 e2b) ..."
+        pip install -e .[frozenlake]
+        chmod +x ./examples/frozenlake/run_gemma4_e2b.sh
+        bash ./examples/frozenlake/run_gemma4_e2b.sh rl_training_config.max_steps=5 rl_training_config.eval_every_n_steps=1 || { FAILED=1; FAILED_SCRIPTS+=("Frozenlake (gemma4 e2b)"); }
 
         if [ "$FAILED" -ne 0 ]; then
           echo "❌ One or more run_latest tests failed:" >&2
