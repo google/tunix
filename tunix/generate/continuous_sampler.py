@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import threading
+import inspect
 import time
 from typing import Any, Dict, List, Sequence, Tuple, Union
 
@@ -33,20 +34,17 @@ from tunix.generate import beam_search as beam_search_lib
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import utils
 
-
-class KVStatus(enum.IntEnum):
+class RequestStatus(enum.IntEnum):
   """Status of KV values stored for each sequence slot."""
-  NONE = 0    # Prompt tokens only; no KV layers written
-  PREFIX = 1  # Shared prompt prefix KV layers loaded from prefix_cache
-  FULL = 2    # Full KV layers computed and written
-
+  PREFILL = 0    # Prompt tokens only; no KV layers written
+  DECODE = 1  # Shared prompt prefix KV layers loaded from prefix_cache
 
 @dataclasses.dataclass
 class SamplingConfig:
   max_num_sequences: int
   max_generation_steps: int
-  max_prompt_length: int = 1024
-  page_size: int = 16
+  max_prompt_length: int = 128 
+  page_size: int = 8 
   dtype: jnp.dtype = jnp.bfloat16
   temperature: float = 0.0
   top_p: float | None = None
@@ -58,7 +56,6 @@ class SamplingConfig:
   include_logits: bool = False
   include_logprobs: bool = False
   pad_output: bool = False
-  group_size: int | None = None
   max_audio_length: int | None = None
   max_audio_clips: int | None = None
   attn_logits_soft_cap: float | None = None
@@ -104,6 +101,7 @@ class _SamplingState:
   """Internal sampling state for Continuous Batching."""
   # Decoding steps: ith entry contains the decoding step of the ith HBM sequence
   decoding_steps: jnp.ndarray  # i32[max_num_sequences]
+  offloaded_decoding_steps: jnp.ndarray  # i32[max_num_sequences]
   # (i, j, k) represents that sequences[0:i] are decode-only,
   # sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed.
   distribution: jnp.ndarray  # i32[3]
@@ -113,14 +111,10 @@ class _SamplingState:
   hbm_cache: sampler_lib.PageManager
   # CPU cache storing tokens and offloaded KV values for pending/preempted sequences
   offloaded_cache: sampler_lib.PageManager
-  # CPU prefix cache for GRPO group prompts (max_seq_len == max_prompt_length)
-  prefix_cache: sampler_lib.PageManager
   # Is decoding done on the given sequence?
   done: jnp.ndarray  # bool[max_num_sequences]
   # Static array mapping seq_idx -> monotonic insertion timestamp for fairness ordering
   insertion_timestamps: jnp.ndarray  # f64[max_num_sequences]
-  # Status of KV layers for each sequence slot: NONE (0), PREFIX (1), or FULL (2)
-  kv_status: jnp.ndarray  # i32[max_num_sequences]
   # Fixed-size buffer for accumulating output logits.
   logits_buffer: jnp.ndarray | None
   # Fixed-size buffer for accumulating output logprobs.
@@ -139,19 +133,8 @@ class _SamplingState:
   cpu_request_ids: list[str] = flax.struct.field(
       default_factory=list, pytree_node=False
   )
-  group_ids: list[str | None] = flax.struct.field(
-      default_factory=list, pytree_node=False
-  )
-  group_member_count: Dict[str, int] = flax.struct.field(
-      default_factory=dict, pytree_node=False
-  )
-  group_prefix_slots: Dict[str, int] = flax.struct.field(
-      default_factory=dict, pytree_node=False
-  )
 
-  group_size: int | None = flax.struct.field(
-      default=None, pytree_node=False
-  )
+
   sampling_mode: str = flax.struct.field(
       default="greedy", pytree_node=False
   )
@@ -174,20 +157,32 @@ class VanillaSampler:
 
   def __init__(
       self,
-      model: nnx.Module,
+      transformer: nnx.Module,
       tokenizer: Any,
       cache_config: sampler_lib.CacheConfig,
   ):
-    self.model_module = model
     self.tokenizer = tokenizer
     self.cache_config = cache_config
-    self._jit_step = jax.jit(self._model_step_fn)
+
+    self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)  # pyrefly: ignore[bad-assignment]
+    self._transformer_state: list[statelib.State] = nnx.variables(transformer)
+    self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
+        self._transformer_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    
+    self._compiled_step_fn = jax.jit(self._model_step_fn, donate_argnums=(1,))
+    self._supports_decode_only_last_token = (
+        'decode_only_last_token'
+        in inspect.signature(transformer.__call__).parameters
+    )
 
   def update_params(
       self,
       updated_weights: jaxtyping.PyTree,
   ) -> None:
     """Update underlying NNX model weights in-place with synchronization barrier."""
+    return
     jax.effects_barrier()
     nnx.update(self.model_module, updated_weights)
     jax.effects_barrier()
@@ -220,10 +215,11 @@ class VanillaSampler:
           (
               self.cache_config.cache_size,
               page_size,
-              self.cache_config.num_kv_heads,
+              2 * self.cache_config.num_kv_heads // self.cache_config.kv_packing,
+              self.cache_config.kv_packing,
               self.cache_config.head_dim,
           ),
-          dtype=layer_dtype,
+          dtype=self.dtype,
       )
       if dp_axis is not None or tp_axis is not None:
         layer_block = sampler_lib.shard(layer_block, (dp_axis, None, tp_axis, None, None))
@@ -251,6 +247,65 @@ class VanillaSampler:
         page_size=page_size,
         max_seq_len=max_seq_len,
     )
+  
+  def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
+    """Returns the transformer graphdef and state."""
+    return self._transformer_graphdef, self._flattened_transformer_state
+
+  @property
+  def transformer(self) -> nnx.Module:
+    return nnx.merge(  # pyrefly: ignore[no-matching-overload]
+        self._transformer_graphdef, self._flattened_transformer_state
+    )
+
+  @property
+  def transformer_state(self) -> statelib.State:
+    return self._transformer_state
+
+  @transformer_state.setter
+  def transformer_state(self, state: statelib.State) -> None:
+
+    def get_all_param_types(tree):
+      param_types = set()
+      jax.tree_util.tree_map(
+          lambda x: param_types.add(type(x)),
+          tree,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+      return param_types
+
+    def check_tree_structure(tree1, tree2):
+      if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(
+          tree2
+      ):
+        raise ValueError(
+            'New state must have the same structure as the old state.'
+            f' {jax.tree_util.tree_structure(tree1)} vs'
+            f' {jax.tree_util.tree_structure(tree2)}'
+        )
+
+      def check_shape_dtype_sharding(x, y):
+
+        def equivalent_sharding(x, y):
+          if isinstance(
+              x.sharding, jax.sharding.SingleDeviceSharding
+          ) and isinstance(y.sharding, jax.sharding.SingleDeviceSharding):
+            return x.sharding.device_set == y.sharding.device_set
+          if not (
+              isinstance(x.sharding, jax.sharding.NamedSharding)
+              and isinstance(y.sharding, jax.sharding.NamedSharding)
+          ):
+            return False
+          if x.sharding.mesh != y.sharding.mesh:
+            return False
+
+  @property
+  def dtype(self) -> jnp.dtype:
+    if hasattr(self.transformer, 'config') and (
+        hasattr(self.transformer.config, 'dtype')
+    ):
+      return self.transformer.config.dtype
+    return self._flattened_transformer_state[0].dtype
 
   def init_sample_state(
       self,
@@ -261,9 +316,8 @@ class VanillaSampler:
     page_size = sampling_config.page_size
     max_seq_len = sampling_config.max_generation_steps + sampling_config.max_prompt_length
     max_num_pages_per_seq = sampler_lib.cdiv(max_seq_len, page_size)
-    prefix_pages_per_seq = sampler_lib.cdiv(sampling_config.max_prompt_length, page_size)
 
-    shd_config = getattr(getattr(self.model_module, "config", None), "shd_config", None)
+    shd_config = getattr(getattr(self.transformer, "config", None), "shd_config", None)
     if shd_config is not None:
       dp_axis = shd_config.act_btd[0]
       tp_axis = shd_config.act_btnh[2]
@@ -291,28 +345,18 @@ class VanillaSampler:
         tp_axis=None,
         device=cpu_device,
     )
-    prefix_cache = self._init_page_manager(
-        max_seqs=max_seqs,
-        max_num_pages_per_seq=prefix_pages_per_seq,
-        page_size=page_size,
-        max_seq_len=sampling_config.max_prompt_length,
-        dp_axis=None,
-        tp_axis=None,
-        device=cpu_device,
-    )
 
     eos_ids = tuple(sampling_config.eos_tokens) if sampling_config.eos_tokens is not None else None
 
     return _SamplingState(
         decoding_steps=jnp.zeros((max_seqs,), dtype=jnp.int32),
+        offloaded_decoding_steps=jnp.zeros((max_seqs,), dtype=jnp.int32),
         distribution=jnp.array([0, 0, 0], dtype=jnp.int32),
         sequence_lengths=jnp.zeros((max_seqs,), dtype=jnp.int32),
         hbm_cache=hbm_cache,
         offloaded_cache=offloaded_cache,
-        prefix_cache=prefix_cache,
         done=jnp.zeros((max_seqs,), dtype=jnp.bool_),
         insertion_timestamps=jnp.zeros((max_seqs,), dtype=jnp.float64),
-        kv_status=jnp.zeros((max_seqs,), dtype=jnp.int32),
         logits_buffer=None,
         logprobs_buffer=None,
         forbidden_token_ids=sampling_config.forbidden_tokens,
@@ -320,10 +364,6 @@ class VanillaSampler:
         seed=jax.random.PRNGKey(sampling_config.seed or 0),
         hbm_request_ids=[],
         cpu_request_ids=[],
-        group_ids=[None] * max_seqs,
-        group_member_count={},
-        group_prefix_slots={},
-        group_size=sampling_config.group_size,
         sampling_mode="top_p" if sampling_config.top_p else "greedy",
         temperature=sampling_config.temperature,
         sampling_parameters={"top_p": sampling_config.top_p or 1.0},
@@ -335,7 +375,7 @@ class VanillaSampler:
       pm: sampler_lib.PageManager,
       should_release: jax.Array,
   ) -> sampler_lib.PageManager:
-    """Unified release helper function across CPU, prefix, and TPU HBM PageManagers."""
+    """Unified release helper function across CPU, and TPU HBM PageManagers."""
     return pm.release(should_release)
 
   def _remove_request_from_pool(
@@ -345,31 +385,18 @@ class VanillaSampler:
       request_ids: list[str],
       cache: sampler_lib.PageManager,
   ) -> tuple[_SamplingState, sampler_lib.PageManager, bool]:
-    """Removes request_id from a pool, decrements group refcounts, and releases allocated pages."""
+    """Removes request_id from a pool, and releases allocated pages."""
     if request_id not in request_ids:
       return sampling_state, cache, False
 
     slot = request_ids.index(request_id)
     request_ids.pop(slot)
-    group_id = sampling_state.group_ids[slot]
-    sampling_state.group_ids[slot] = None
     sampling_state = dataclasses.replace(
         sampling_state,
-        kv_status=sampling_state.kv_status.at[slot].set(KVStatus.NONE),
     )
-
-    prefix_cache = sampling_state.prefix_cache
-    if group_id is not None and group_id in sampling_state.group_member_count:
-      sampling_state.group_member_count[group_id] -= 1
-      if sampling_state.group_member_count[group_id] <= 0:
-        p_slot = sampling_state.group_prefix_slots.pop(group_id, None)
-        if p_slot is not None:
-          should_rel_p = jnp.zeros((int(prefix_cache.batch_size),), dtype=jnp.bool_).at[p_slot].set(True)
-          prefix_cache = self._release_slots(prefix_cache, should_rel_p)
 
     should_release = jnp.zeros((int(cache.batch_size),), dtype=jnp.bool_).at[slot].set(True)
     updated_cache = self._release_slots(cache, should_release)
-    sampling_state = dataclasses.replace(sampling_state, prefix_cache=prefix_cache)
     return sampling_state, updated_cache, True
 
   def cancel_request(
@@ -377,7 +404,7 @@ class VanillaSampler:
       sampling_state: _SamplingState,
       request_id: str,
   ) -> _SamplingState:
-    """Cancels a request, decrementing group refcounts and releasing slots."""
+    """Cancels a request, and release slots."""
     sampling_state, updated_offloaded, removed = self._remove_request_from_pool(
         sampling_state, request_id, sampling_state.cpu_request_ids, sampling_state.offloaded_cache
     )
@@ -416,12 +443,27 @@ class VanillaSampler:
     if not transfer_kv:
       src_tensor = src_cache.pages["token_buffer"]
       dst_tensor = dst_cache.pages.get("token_buffer", jnp.zeros_like(src_tensor))
-      dst_cache.pages["token_buffer"] = dst_tensor.at[dst_idxs].set(src_tensor[src_idxs])
+
+      src_slice = src_tensor[src_idxs]
+      if hasattr(dst_tensor, "sharding") and dst_tensor.sharding is not None:
+        src_slice = jax.device_put(src_slice, dst_tensor.sharding)
+      elif len(jax.devices("cpu")) > 0:
+        src_slice = jax.device_put(src_slice, jax.devices("cpu")[0])
+
+      dst_cache.pages["token_buffer"] = dst_tensor.at[dst_idxs].set(src_slice)
       return dst_cache
 
     for key, src_tensor in src_cache.pages.items():
       dst_tensor = dst_cache.pages.get(key, jnp.zeros_like(src_tensor))
-      dst_cache.pages[key] = dst_tensor.at[dst_idxs].set(src_tensor[src_idxs])
+
+      src_slice = src_tensor[src_idxs]
+      if hasattr(dst_tensor, "sharding") and dst_tensor.sharding is not None:
+        src_slice = jax.device_put(src_slice, dst_tensor.sharding)
+      elif len(jax.devices("cpu")) > 0:
+        src_slice = jax.device_put(src_slice, jax.devices("cpu")[0])
+
+      dst_cache.pages[key] = dst_tensor.at[dst_idxs].set(src_slice)
+
     return dst_cache
 
   def _queue_new_requests(
@@ -429,7 +471,7 @@ class VanillaSampler:
       sampling_state: _SamplingState,
       new_requests: Sequence[dict[str, Any]],
   ) -> _SamplingState:
-    """Load incoming requests into offloaded_cache, initializing kv_status unconditionally to NONE."""
+    """Load incoming requests into offloaded_cache."""
     if not new_requests:
       return sampling_state
 
@@ -447,9 +489,7 @@ class VanillaSampler:
       )
 
     insertion_timestamps = sampling_state.insertion_timestamps
-    kv_status = sampling_state.kv_status
-    group_ids = list(sampling_state.group_ids)
-
+    offloaded_decoding_steps = sampling_state.offloaded_decoding_steps
     for req_dict in new_requests:
       req_id = req_dict["id"]
       prompt_str = req_dict["prompt"]
@@ -459,15 +499,7 @@ class VanillaSampler:
       slot_idx = len(cpu_req_ids)
       cpu_req_ids.append(req_id)
       insertion_timestamps = insertion_timestamps.at[slot_idx].set(time.perf_counter())
-
-      group_id = req_dict.get("group_id")
-      group_ids[slot_idx] = group_id
-      if (
-          sampling_state.group_size is not None
-          and group_id is not None
-          and group_id not in sampling_state.group_member_count
-      ):
-        sampling_state.group_member_count[group_id] = sampling_state.group_size
+      offloaded_decoding_steps = offloaded_decoding_steps.at[slot_idx].set(0)
 
       q_lens = jnp.zeros((max_seqs,), dtype=jnp.int32).at[slot_idx].set(prompt_len)
       offloaded_cache = offloaded_cache.allocate(q_lens=q_lens)
@@ -475,22 +507,18 @@ class VanillaSampler:
       tokens_arr = jnp.array(prompt_tokens, dtype=jnp.int32)
       lens_arr = jnp.zeros((max_seqs,), dtype=jnp.int32).at[slot_idx].set(prompt_len)
       offloaded_cache = offloaded_cache.load_prompt_tokens(tokens_arr, lens=lens_arr, key="token_buffer")
-      kv_status = kv_status.at[slot_idx].set(KVStatus.NONE)
+      
 
     return dataclasses.replace(
         sampling_state,
+        offloaded_decoding_steps=offloaded_decoding_steps,
         offloaded_cache=offloaded_cache,
         cpu_request_ids=cpu_req_ids,
         insertion_timestamps=insertion_timestamps,
-        kv_status=kv_status,
-        group_ids=group_ids,
     )
 
   def _make_room_for_allocation(self, sampling_state: _SamplingState) -> _SamplingState:
     """Evicts newest active HBM sequence to offloaded_cache when HBM is constrained.
-    
-    Since eviction occurs before queue draining, any sequence in hbm_cache has already
-    completed at least one sampling step and thus unconditionally transitions to KVStatus.FULL.
     """
     hbm_available = int(sampling_state.hbm_cache.num_available_pages)
     num_tpu = len(sampling_state.hbm_request_ids)
@@ -501,9 +529,7 @@ class VanillaSampler:
 
     hbm_request_ids = list(sampling_state.hbm_request_ids)
     cpu_request_ids = list(sampling_state.cpu_request_ids)
-    group_ids = list(sampling_state.group_ids)
     offloaded_cache = sampling_state.offloaded_cache
-    kv_status = sampling_state.kv_status
 
     while hbm_available < num_tpu:
       evict_idx = num_tpu - 1 - len(evict_hbm_slots)
@@ -516,8 +542,6 @@ class VanillaSampler:
 
       cpu_slot = num_cpu + len(evict_cpu_slots)
       cpu_request_ids.append(req_id)
-      group_ids[cpu_slot] = group_ids[evict_idx]
-      kv_status = kv_status.at[cpu_slot].set(KVStatus.FULL)
 
       q_lens = jnp.zeros((int(offloaded_cache.batch_size),), dtype=jnp.int32).at[cpu_slot].set(seq_len)
       offloaded_cache = offloaded_cache.allocate(q_lens=q_lens)
@@ -527,6 +551,8 @@ class VanillaSampler:
       hbm_available += int(pages_needed)
 
     if evict_hbm_slots:
+      offloaded_decoding_steps[evict_cpu_slots] = sampling_state.decoding_steps[evict_hbm_slots]
+
       offloaded_cache = self._batch_transfer_pages(
           sampling_state.hbm_cache,
           offloaded_cache,
@@ -548,14 +574,12 @@ class VanillaSampler:
           offloaded_cache=offloaded_cache,
           hbm_request_ids=hbm_request_ids,
           cpu_request_ids=cpu_request_ids,
-          group_ids=group_ids,
-          kv_status=kv_status,
       )
 
     return sampling_state
 
   def _drain_pending_queue(self, sampling_state: _SamplingState) -> _SamplingState:
-    """Admit sequences from offloaded_cache to HBM cache with selective KV transfers based on kv_status."""
+    """Admit sequences from offloaded_cache to HBM cache."""
     hbm_req_ids = list(sampling_state.hbm_request_ids)
     cpu_req_ids = list(sampling_state.cpu_request_ids)
 
@@ -566,54 +590,32 @@ class VanillaSampler:
 
     decode_src_slots: list[int] = []
     prefill_src_slots: list[int] = []
-    mixed_src_slots: list[int] = []
 
-    num_existing_decode = len(hbm_req_ids)
-    max_seqs = int(sampling_state.hbm_cache.batch_size)
-    kv_status = sampling_state.kv_status
-    offloaded_cache = sampling_state.offloaded_cache
-
+    is_decode = sampling_state.offloaded_decoding_steps > 0
     for cpu_slot in sorted_cpu_slots:
-      group_id = sampling_state.group_ids[cpu_slot]
-      status = int(kv_status[cpu_slot])
-
-      # Check again if a group prefix became available while queued in offloaded_cache
-      if (
-          status == KVStatus.NONE
-          and group_id is not None
-          and group_id in sampling_state.group_prefix_slots
-      ):
-        p_slot = sampling_state.group_prefix_slots[group_id]
-        offloaded_cache = self._batch_transfer_pages(
-            sampling_state.prefix_cache,
-            offloaded_cache,
-            [p_slot],
-            [cpu_slot],
-            transfer_kv=True,
-        )
-        status = KVStatus.PREFIX
-        kv_status = kv_status.at[cpu_slot].set(KVStatus.PREFIX)
-
-      if status == KVStatus.FULL:
+      if is_decode[cpu_slot]: 
         decode_src_slots.append(cpu_slot)
-      elif status == KVStatus.PREFIX:
-        mixed_src_slots.append(cpu_slot)
       else:
         prefill_src_slots.append(cpu_slot)
 
+    num_existing_decode = len(hbm_req_ids)
+  
+    max_seqs = int(sampling_state.hbm_cache.batch_size)
+    offloaded_cache = sampling_state.offloaded_cache
+        
     i_val = num_existing_decode + len(decode_src_slots)
     j_val = i_val + len(prefill_src_slots)
-    k_val = j_val + len(mixed_src_slots)
-
-    all_src_slots = decode_src_slots + prefill_src_slots + mixed_src_slots
-    all_dst_slots = list(range(num_existing_decode, k_val))
+    k_val = j_val 
+  
+    src_slots = decode_src_slots + prefill_src_slots
+    dst_slots = list(range(num_existing_decode, k_val))
 
     q_lens = jnp.zeros((max_seqs,), dtype=jnp.int32)
     for idx in range(num_existing_decode):
       q_lens = q_lens.at[idx].set(1)
 
     sequence_lengths = sampling_state.sequence_lengths
-    for src_slot, dst_slot in zip(all_src_slots, all_dst_slots):
+    for src_slot, dst_slot in zip(src_slots, dst_slots):
       req_id = cpu_req_ids[src_slot]
       seq_len = int(offloaded_cache.seq_lens[src_slot])
       hbm_req_ids.append(req_id)
@@ -621,45 +623,36 @@ class VanillaSampler:
       sequence_lengths = sequence_lengths.at[dst_slot].set(seq_len)
 
     updated_hbm_cache = sampling_state.hbm_cache.allocate(q_lens=q_lens)
-
+    
     # Decode sequences have full KV values -> transfer_kv=True
+    decode_dst_slots = list(range(num_existing_decode, i_val))
     updated_hbm_cache = self._batch_transfer_pages(
         offloaded_cache,
         updated_hbm_cache,
         decode_src_slots,
-        list(range(num_existing_decode, i_val)),
+        decode_dst_slots,
         transfer_kv=True,
     )
-    # Prefill sequences have NO KV values written -> transfer_kv=False (skips empty layer tensors)
-    updated_hbm_cache = self._batch_transfer_pages(
-        offloaded_cache,
-        updated_hbm_cache,
-        prefill_src_slots,
-        list(range(i_val, j_val)),
-        transfer_kv=False,
-    )
-    # Mixed sequences have prefix KV values written -> transfer_kv=True
-    updated_hbm_cache = self._batch_transfer_pages(
-        offloaded_cache,
-        updated_hbm_cache,
-        mixed_src_slots,
-        list(range(j_val, k_val)),
-        transfer_kv=True,
-    )
-
+    
     should_release_cpu = jnp.zeros((max_seqs,), dtype=jnp.bool_)
-    for slot in all_src_slots:
+    for slot in src_slots:
       should_release_cpu = should_release_cpu.at[slot].set(True)
 
-    admitted_set = set(all_src_slots)
+    admitted_set = set(src_slots)
     cpu_req_ids = [rid for i, rid in enumerate(cpu_req_ids) if i not in admitted_set]
 
     dist = jnp.array([i_val, j_val, k_val], dtype=jnp.int32)
+    src_slots = jnp.array(src_slots)
+    dst_slots = jnp.array(dst_slots)
+
+    src_decoding_steps = sampling_state.offloaded_decoding_steps[src_slots] 
+    updated_decoding_steps = sampling_state.decoding_steps.at[dst_slots].set(src_decoding_steps)
+
     return dataclasses.replace(
         sampling_state,
+        decoding_steps=updated_decoding_steps,
         distribution=dist,
         sequence_lengths=sequence_lengths,
-        kv_status=kv_status,
         hbm_cache=updated_hbm_cache,
         offloaded_cache=self._release_slots(offloaded_cache, should_release_cpu),
         hbm_request_ids=hbm_req_ids,
@@ -681,37 +674,97 @@ class VanillaSampler:
         seq_lens=sampling_state.hbm_cache.seq_lens[slot_perm],
     )
     reordered_ids = [sampling_state.hbm_request_ids[int(i)] for i in jax.device_get(slot_perm)[:num_remaining]]
-    reordered_group_ids = [sampling_state.group_ids[int(i)] for i in jax.device_get(slot_perm)]
 
     return dataclasses.replace(
         sampling_state,
         decoding_steps=sampling_state.decoding_steps[slot_perm],
         sequence_lengths=sampling_state.sequence_lengths[slot_perm],
         insertion_timestamps=sampling_state.insertion_timestamps[slot_perm],
-        kv_status=sampling_state.kv_status[slot_perm],
         done=jnp.zeros_like(sampling_state.done),
         hbm_cache=compacted_hbm_cache,
         hbm_request_ids=reordered_ids,
-        group_ids=reordered_group_ids,
     )
 
   def _model_step_fn(
       self,
-      cache: sampler_lib.PageManager,
-      last_tokens: jnp.ndarray,
-      positions: jnp.ndarray,
+      params: statelib.State,
+      hbm_cache: sampler_lib.PageManager,
+      decoding_steps: jax.Array,
+      sequence_lengths: jax.Array,
       distribution: jnp.ndarray,
+      images: jnp.ndarray | None = None,
+      audios: Any = None,
+      echo: bool = False,
       soft_cap: float | None = None,
+      **kwargs,
   ) -> Tuple[jnp.ndarray, sampler_lib.PageManager]:
     """JIT-compiled forward pass invoking Gemma with ragged paged attention and explicit soft_cap."""
-    logits, new_cache = self.model_module(
-        last_tokens=last_tokens,
-        positions=positions,
-        cache=cache,
+    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
+    kwargs = {}
+    if images is not None:
+      kwargs['images'] = images
+    if audios is not None:
+      kwargs['audios'] = audios
+    decode_only_last_token = self._supports_decode_only_last_token and not echo
+    if decode_only_last_token:
+      kwargs['decode_only_last_token'] = True
+
+    transformer = nnx.merge(self._transformer_graphdef, params)
+    max_seqs = int(hbm_cache.batch_size)
+
+    is_decode = decoding_steps > 0
+    active_seq_lens = jnp.where(
+        is_decode,
+        1,
+        sequence_lengths, # Prefill
+    )
+    token_start_idxs = jnp.where(
+        is_decode,
+        decoding_steps,
+        sequence_lengths,
+    )
+
+    max_seqs = int(hbm_cache.batch_size)
+    static_token_capacity = (
+         hbm_cache.max_seq_len * max_seqs
+    )
+    ragged = sampler_lib.RaggedArray(
+        data=jnp.zeros((static_token_capacity,), dtype=jnp.int32),
+        lens=active_seq_lens,
+    )
+    seq_idxs = ragged.row_idxs
+    intra_offsets = ragged.intra_offsets
+
+    # 2) Absolute token positions and physical page indirection:
+    abs_positions = token_start_idxs[seq_idxs] + intra_offsets
+    page_cols = abs_positions // hbm_cache.page_size
+    page_offsets = abs_positions % hbm_cache.page_size
+    phys_page_ids = hbm_cache.page_indices[seq_idxs, page_cols]
+
+    tokens = hbm_cache.pages["token_buffer"][
+        phys_page_ids, page_offsets
+    ]
+
+    logits, new_hbm_cache = transformer(
+        tokens,
+        abs_positions,
+        cache=hbm_cache,
+        seq_lens=sequence_lengths,
         distribution=distribution,
         soft_cap=soft_cap,
+        **kwargs,
     )
-    return logits, new_cache
+
+    last_token_logits = logits[:, hbm_cache.seq_lens - 1]
+    
+    """
+    updated_state = dataclasses.replace(
+        sampler_state,
+        hbm_cache=new_hbm_cache,
+    )
+    """
+
+    return last_token_logits, new_hbm_cache 
 
   def _release_completed(
       self,
@@ -721,24 +774,15 @@ class VanillaSampler:
     """Inspects generated tokens, appends EOS at max_seq_len - 1, formats outputs, and releases completed slots."""
     completed_outputs: dict[str, RequestOutput] = {}
     should_release_hbm = jnp.zeros((int(sampling_state.hbm_cache.batch_size),), dtype=jnp.bool_)
-    should_release_prefix = jnp.zeros((int(sampling_state.prefix_cache.batch_size),), dtype=jnp.bool_)
-
+    
+    # TODO: We should find and write the completed outputs in batched operations.
     for idx, req_id in enumerate(sampling_state.hbm_request_ids):
       sampled_token = int(next_tokens[idx])
       eos_ids = sampling_state.eos_token_ids or (1,)
-
-      if int(sampling_state.decoding_steps[idx]) == 0:
-        group_id = sampling_state.group_ids[idx]
-        if group_id is not None and group_id in sampling_state.group_member_count:
-          sampling_state.group_member_count[group_id] -= 1
-          if sampling_state.group_member_count[group_id] <= 0:
-            p_slot = sampling_state.group_prefix_slots.pop(group_id, None)
-            if p_slot is not None:
-              should_release_prefix = should_release_prefix.at[p_slot].set(True)
-
+      
       is_done = (
           (sampled_token in eos_ids)
-          or (int(sampling_state.decoding_steps[idx]) >= sampling_state.hbm_cache.max_seq_len - 1)
+          or (int(sampling_state.hbm_cache.seq_lens[idx]) >= sampling_state.hbm_cache.max_seq_len - 1)
       )
       if is_done:
         if sampled_token not in eos_ids:
@@ -751,12 +795,10 @@ class VanillaSampler:
         should_release_hbm = should_release_hbm.at[idx].set(True)
 
     updated_hbm_cache = self._release_slots(sampling_state.hbm_cache, should_release_hbm)
-    updated_prefix_cache = self._release_slots(sampling_state.prefix_cache, should_release_prefix)
 
     sampling_state = dataclasses.replace(
         sampling_state,
         hbm_cache=updated_hbm_cache,
-        prefix_cache=updated_prefix_cache,
         done=should_release_hbm,
     )
     return self._compact_batch(sampling_state), completed_outputs
@@ -766,7 +808,7 @@ class VanillaSampler:
       sampling_state: _SamplingState,
       requests: Sequence[dict[str, Any]] = (),
   ) -> dict[str, RequestOutput]:
-    """Complete a single sampling step, store prefix KV values if needed, and return completions."""
+    """Complete a single sampling step, and return completions."""
     sampling_state = self._queue_new_requests(sampling_state, requests)
     sampling_state = self._make_room_for_allocation(sampling_state)
     sampling_state = self._drain_pending_queue(sampling_state)
@@ -775,15 +817,18 @@ class VanillaSampler:
     if num_tpu == 0:
       return {}
 
-    last_tokens = jnp.zeros((int(sampling_state.hbm_cache.batch_size), 1), dtype=jnp.int32)
-    positions = jnp.expand_dims(sampling_state.decoding_steps, axis=-1)
-
-    logits, updated_hbm_cache = self._jit_step(
-        cache=sampling_state.hbm_cache,
-        last_tokens=last_tokens,
-        positions=positions,
+    logits, updated_hbm_cache = self._compiled_step_fn(
+        params=self._flattened_transformer_state,
+        hbm_cache=sampling_state.hbm_cache,
+        decoding_steps=sampling_state.decoding_steps,
+        sequence_lengths=sampling_state.sequence_lengths,
         distribution=sampling_state.distribution,
         soft_cap=sampling_state.attn_logits_soft_cap,
+    )
+
+    sampling_state = dataclasses.replace(
+        sampling_state,
+        hbm_cache=new_hbm_cache,
     )
 
     key, subkey = jax.random.split(sampling_state.seed)
@@ -795,26 +840,9 @@ class VanillaSampler:
         top_k=None,
     )
 
-    # Immediately copy prefix KV layers into prefix_cache for any group member finishing prefill step 0
-    prefix_cache = sampling_state.prefix_cache
-    for idx, _ in enumerate(sampling_state.hbm_request_ids):
-      if int(sampling_state.decoding_steps[idx]) == 0:
-        group_id = sampling_state.group_ids[idx]
-        if group_id is not None and group_id not in sampling_state.group_prefix_slots:
-          p_slot = len(sampling_state.group_prefix_slots)
-          sampling_state.group_prefix_slots[group_id] = p_slot
-          prefix_cache = self._batch_transfer_pages(
-              updated_hbm_cache,
-              prefix_cache,
-              [idx],
-              [p_slot],
-              transfer_kv=True,
-          )
-
     sampling_state = dataclasses.replace(
         sampling_state,
         hbm_cache=updated_hbm_cache,
-        prefix_cache=prefix_cache,
         seed=key,
         decoding_steps=sampling_state.decoding_steps + 1,
     )

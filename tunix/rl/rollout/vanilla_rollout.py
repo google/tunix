@@ -52,15 +52,15 @@ class VanillaRollout(base_rollout.BaseRollout):
       self._continuous_sampler = continuous_sampler.VanillaSampler(
           model,
           tokenizer,
-          sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+          base_rollout.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
       )
       self._driver = None
       if self.server_mode:
         self._driver = continuous_async_driver.VanillaInProcessDriver(
             sampler=self._continuous_sampler,
             sampling_config=continuous_sampler.SamplingConfig(
-                max_num_sequences=cache_config_or_size.cache_size,
-                max_generation_steps=1024,
+                max_num_sequences=32,
+                max_generation_steps=824,
             ),
         )
         self._driver.start()
@@ -68,7 +68,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       self._sampler = sampler.Sampler(
           model,
           tokenizer,
-          sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+          base_rollout.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
       )
 
   def generate(

@@ -284,13 +284,10 @@ def process_ids(
 def _call_contains_by_type(target_cls: type, target_arg: str) -> bool:
   """Determines if a class' call function contains a target argument and caches the result"""
 
-<<<<<<< HEAD
-=======
 @functools.cache
 def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
   """Determines if a class' call function contains a target argument and caches the result."""
 
->>>>>>> 76ca96699c64c9f7f57914fd70195bebe7d5995d
   try:
     sig = inspect.signature(target_cls.__call__)
     return (target_arg in sig.parameters) or any(
@@ -299,21 +296,6 @@ def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
   except Exception:
     return False
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 76ca96699c64c9f7f57914fd70195bebe7d5995d
-def model_call_contains(model, target_arg: str) -> bool:
-  """Determines if a model's call function contains a target argument"""
-
-  target_obj = model.transformer if hasattr(model, "transformer") else model
-
-  return _call_contains_by_type(type(target_obj), target_arg)
-
-<<<<<<< HEAD
-=======
-
->>>>>>> 76ca96699c64c9f7f57914fd70195bebe7d5995d
 @functools.partial(
     jax.jit,
     static_argnames=(

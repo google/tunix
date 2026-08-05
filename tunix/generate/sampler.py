@@ -101,12 +101,12 @@ class CacheConfig:
   head_dim: int
 
   max_seq_len: int = 1028
-  max_num_pages: int = 2048 
+  max_num_pages: int = 128 
   page_size: int = 8
   num_shards: int = 1
   window_size: int | None = None
 
-  kv_packing: int = 2
+  kv_packing: int = 1
   seq_partition: str | None = None
   head_partition: str | None = None
 

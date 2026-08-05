@@ -291,7 +291,14 @@ class Einsum(nnx.Module):
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
+    einsum_str = self.einsum_str
+    in_sub, out_sub = einsum_str.split('->')
+    op0_sub = in_sub.split(',')[0]
+    
+    if x.ndim < len(op0_sub):
+      einsum_str = einsum_str.replace("B","")
+
+    return jnp.einsum(einsum_str, x, self.w.value)
 
 
 @jax.named_scope('rope')
@@ -307,7 +314,8 @@ def apply_rope(
 
   fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
   timescale = max_wavelength**fraction
-
+  
+  # Handle missing b dim
   if positions.ndim == 1:
     sinusoid_inp = positions[:, None] / timescale[None, :]
     sinusoid_inp = sinusoid_inp[:, None, :]
