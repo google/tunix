@@ -202,18 +202,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     jax.effects_barrier()
 
     if self.converter is not None:
-      from flax import traverse_util
-      logging.info("Using native WeightConverter specifically for Qwen3 integration.")
+      from flax import traverse_util, nnx
+      logging.info("Using native WeightConverter specifically for MaxText integration.")
       vllm_state = self.converter.convert(
           updated_weights, target_state=self.transformer_state
       )
 
       if isinstance(self.transformer_state, nnx.State):
-        state_dict = self.transformer_state.to_pure_dict() if hasattr(self.transformer_state, "to_pure_dict") else dict(self.transformer_state)
+        state_dict = (
+            self.transformer_state.to_pure_dict()
+            if hasattr(self.transformer_state, "to_pure_dict")
+            else dict(self.transformer_state)
+        )
       else:
         state_dict = self.transformer_state
 
-      if self.config.reshard_chunk_size is not None:
+      if getattr(self.config, "reshard_chunk_size", None) is not None:
         src_flat = traverse_util.flatten_dict(vllm_state)
         spec_flat = traverse_util.flatten_dict(state_dict)
 
@@ -221,8 +225,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             src_flat,
             spec_flat,
             reshard.reshard_pytree,
-            self.config.reshard_chunk_size,
-            self.config.delete_dst_buffers,
+            getattr(self.config, "reshard_chunk_size", None),
+            getattr(self.config, "delete_dst_buffers", False),
         )
         resharded_weights = traverse_util.unflatten_dict(resharded_flat)
       else:
@@ -233,6 +237,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
       if isinstance(self.transformer_state, nnx.State):
         nnx.update(self.transformer_state, resharded_weights)
+      elif hasattr(self.transformer_state, "update"):
+        self.transformer_state.update(resharded_weights)
+      elif isinstance(self.transformer_state, dict):
+        self.transformer_state.update(resharded_weights)
       else:
         self._model_runner.state = resharded_weights
     elif self.to_hf_key_mappings:

@@ -986,23 +986,35 @@ def _unstack_scanned_param(
       # Unstack along the 0th axis
       # Handling JAX version differences where unstack might be under jnp
       try:
-        if hasattr(jax, 'unstack'):
-          return jax.unstack(src_val)
-        elif hasattr(jnp, 'unstack'):
-          return jnp.unstack(src_val)
-        else:
-           # Fallback for older JAX versions
-          return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
+        import jax.numpy as jnp
+        import numpy as np
+        
+        # If it's a lazy array, trying to iterate might fail. Let's do it with jnp.asarray or np.asarray first.
+        try:
+          if hasattr(jax, 'unstack'):
+            return jax.unstack(src_val)
+          elif hasattr(jnp, 'unstack'):
+            return jnp.unstack(src_val)
+        except Exception:
+          pass
+          
+        try:
+            return [src_val[i] for i in range(src_val.shape[0])]
+        except Exception:
+            # Maybe it's a lazy array that doesn't support indexing?
+            try:
+                eager_src = jnp.asarray(src_val.value) if hasattr(src_val, 'value') else jnp.asarray(src_val)
+                return [eager_src[i] for i in range(eager_src.shape[0])]
+            except Exception as e2:
+                raise e2
+                
       except Exception as e:
-        logging.debug(
-            "Failed to unstack parameter '%s'. Error: %s. Using original.",
-            key_path, e
-        )
+        import traceback
+        logging.error("CRITICAL! Failed to unstack parameter '%s'. Error: %s\n%s", key_path, e, traceback.format_exc())
         return (src_val,)
     else:
       logging.warning(
-          "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
-          ' determine scan axis.',
+          "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot determine scan axis.",
           key_path, src_shape, tgt_shape,
       )
 
@@ -1644,23 +1656,37 @@ def transfer_state_directly(
       match_index = -1
 
       for i, part in enumerate(key_tuple):
-        # Optimization: Only check strings that look like layers
+        # Optimization: Check strings that look like layers_X or integer following 'layers'
         if isinstance(part, str) and part.startswith('layers_'):
           m = layer_pattern.match(part)
           if m:
             layer_idx = int(m.group(1))
             match_index = i
             break
+        elif isinstance(part, int) and i > 0 and key_tuple[i-1] == 'layers':
+          layer_idx = part
+          match_index = i
+          break
+        elif isinstance(part, str) and part.isdigit() and i > 0 and key_tuple[i-1] == 'layers':
+          layer_idx = int(part)
+          match_index = i
+          break
 
       if match_index != -1:
         # Check different candidate path formats for scanned layers
         # Candidate A: Replace 'layers_X' with 'layers' (Standard MaxText)
         candidate_a = list(key_tuple)
-        candidate_a[match_index] = 'layers'
-
-        # Candidate B: Remove 'layers_X' (Implicit Container / GPT-OSS)
-        candidate_b = list(key_tuple)
-        candidate_b.pop(match_index)
+        
+        # If it was ('layers', 40) format, the scanned key is just removing the 40
+        if isinstance(key_tuple[match_index], int) or (isinstance(key_tuple[match_index], str) and key_tuple[match_index].isdigit()):
+            candidate_a.pop(match_index)
+            candidate_b = candidate_a
+        else:
+            # Candidate A: Replace 'layers_X' with 'layers'
+            candidate_a[match_index] = 'layers'
+            # Candidate B: Remove 'layers_X' (Implicit Container / GPT-OSS)
+            candidate_b = list(key_tuple)
+            candidate_b.pop(match_index)
 
         found_candidate = None
         for cand in [tuple(candidate_a), tuple(candidate_b)]:
@@ -1678,28 +1704,73 @@ def transfer_state_directly(
             candidate_path = '.'.join(str(k) for k in found_candidate)
             # Cast the bulk tensor once before unstacking.
             src_val = _apply_dtype_cast(src_val, tgt_val.dtype, candidate_path)
+            
+            eff_scan_axis = scan_axis
+            if len(src_val.shape) > len(tgt_val.shape):
+                best_axis = -1
+                max_exact_matches = -1
+                for axis in range(len(src_val.shape)):
+                    dropped = src_val.shape[:axis] + src_val.shape[axis+1:]
+                    if len(dropped) == len(tgt_val.shape):
+                        exact_matches = sum(1 for a, b in zip(dropped, tgt_val.shape) if a == b)
+                        if exact_matches > max_exact_matches:
+                            max_exact_matches = exact_matches
+                            best_axis = axis
+                if best_axis != -1:
+                    eff_scan_axis = best_axis
+            else:
+                if len(src_val.shape) == 1:
+                    eff_scan_axis = 0
+                elif scan_axis >= len(src_val.shape):
+                    eff_scan_axis = len(src_val.shape) - 1
+                
             scanned_per_layer_shape = (
-                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1:]
+                src_val.shape[:eff_scan_axis] + src_val.shape[eff_scan_axis + 1:]
             )
             if scanned_per_layer_shape == tgt_val.shape:
               # Pure unstack — no alignment needed.
-              unstacked_cache[cache_key] = _unstack_scanned_param(
-                  src_val, tgt_val, candidate_path, scan_axis=scan_axis
-              )
+              # unstacked_cache[cache_key] = _unstack_scanned_param(
+              #     src_val, tgt_val, candidate_path, scan_axis=eff_scan_axis
+              # )
+              # We use a Lazy proxy to avoid OOM from unstacking 48 layers eagerly
+              class LazySlice:
+                  def __init__(self, val, axis):
+                      self.val = val
+                      self.axis = axis
+                  def __getitem__(self, idx):
+                      slices = [slice(None)] * len(self.val.shape)
+                      slices[self.axis] = idx
+                      return self.val[tuple(slices)]
+              unstacked_cache[cache_key] = LazySlice(src_val, eff_scan_axis)
+              
             else:
               # Bulk align (repeat / zero-pad per axis) on the full scanned
               # tensor, then unstack. Replaces N per-layer alignments with
               # one bulk op + free unstack.
-              logging.info(
-                  'Bulk-aligning scanned %s: %s -> per-layer %s',
-                  candidate_path, src_val.shape, tgt_val.shape,
-              )
-              unstacked_cache[cache_key] = _bulk_align_and_unstack(
-                  src_val, scan_axis, tgt_val, candidate_path
-              )
+              if src_val.size * getattr(src_val.dtype, 'itemsize', 2) > 2 * 1024**3:
+                  logging.info(
+                      'Skipping bulk-align for %s (too large: %s), will align per-layer.',
+                      candidate_path, src_val.shape
+                  )
+                  unstacked_cache[cache_key] = _unstack_scanned_param(
+                      src_val, tgt_val, candidate_path, scan_axis=eff_scan_axis
+                  )
+              else:
+                  logging.info(
+                      'Bulk-aligning scanned %s: %s -> per-layer %s',
+                      candidate_path, src_val.shape, tgt_val.shape,
+                  )
+                  unstacked_cache[cache_key] = _bulk_align_and_unstack(
+                      src_val, eff_scan_axis, tgt_val, candidate_path
+                  )
 
           # Extract the layer_idx-th element from the unstacked cache.
           sliced_val = unstacked_cache[cache_key][layer_idx]
+          
+          # Force eager execution of the slice to release the XLA graph reference quickly
+          import jax
+          sliced_val = jax.tree_util.tree_map(lambda x: x, sliced_val)
+          
           sliced_val = _align_to_model_shape(sliced_val, tgt_val, path_str)
           filtered_src_flat[key_tuple] = sliced_val
           filtered_tgt_flat[key_tuple] = tgt_val
@@ -1711,9 +1782,12 @@ def transfer_state_directly(
         # N per-layer jnp.concatenate dispatches and 2N intermediate device
         # allocations that cause compilation pressure and memory fragmentation.
         if key_tuple and key_tuple[-1] == 'wi':
-          scanned_prefix = (
-              key_tuple[:match_index] + ('layers',) + key_tuple[match_index + 1:-1]
-          )
+          if isinstance(key_tuple[match_index], int) or (isinstance(key_tuple[match_index], str) and key_tuple[match_index].isdigit()):
+              scanned_prefix = key_tuple[:match_index] + key_tuple[match_index + 1:-1]
+          else:
+              scanned_prefix = (
+                  key_tuple[:match_index] + ('layers',) + key_tuple[match_index + 1:-1]
+              )
           wi_0_key = scanned_prefix + ('wi_0',)
           wi_1_key = scanned_prefix + ('wi_1',)
 
@@ -1728,10 +1802,17 @@ def transfer_state_directly(
               wi_1_full = _apply_dtype_cast(
                   src_flat[wi_1_key], tgt_val.dtype, '.'.join(str(k) for k in wi_1_key)
               )
-              num_layers = src_flat[wi_0_key].shape[scan_axis]
               
-              # Remove scan_axis to compare against the per-layer tgt_val shape
-              wi_0_single_shape = wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1:]
+              eff_scan_axis_moe = scan_axis
+              if len(wi_0_full.shape) == 1:
+                  eff_scan_axis_moe = 0
+              elif scan_axis >= len(wi_0_full.shape):
+                  eff_scan_axis_moe = len(wi_0_full.shape) - 1
+                  
+              num_layers = src_flat[wi_0_key].shape[eff_scan_axis_moe]
+              
+              # Remove eff_scan_axis_moe to compare against the per-layer tgt_val shape
+              wi_0_single_shape = wi_0_full.shape[:eff_scan_axis_moe] + wi_0_full.shape[eff_scan_axis_moe + 1:]
               mismatched_axes = [
                   i for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape)) if s != t
               ]
@@ -1739,10 +1820,10 @@ def transfer_state_directly(
               n_shards = _get_n_shards(tgt_val, tgt_axis)
               
               # Offset the axis by 1 if it falls after the scan axis in the bulk tensor
-              scan_padded_axis = tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
+              scan_padded_axis = tgt_axis if tgt_axis < eff_scan_axis_moe else tgt_axis + 1
 
               unstacked_cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
-                  wi_0_full, wi_1_full, scan_axis, num_layers, n_shards, tgt_val.shape, scan_padded_axis, tgt_axis
+                  wi_0_full, wi_1_full, eff_scan_axis_moe, num_layers, n_shards, tgt_val.shape, scan_padded_axis, tgt_axis
               )
               del wi_0_full, wi_1_full
 
