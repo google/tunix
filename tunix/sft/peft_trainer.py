@@ -167,6 +167,10 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+def _zero_safe_reciprocal(denom: jax.Array) -> jax.Array:
+  return jnp.where(denom == 0, jnp.zeros_like(denom), 1.0 / denom)
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -261,7 +265,7 @@ class GradientAccumulator(nnx.Module):
     self.denom.set_value(self.denom[...] + denom_val)
 
   def get(self):
-    scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
+    scale = _zero_safe_reciprocal(self.denom[...])
 
     def _scale_and_cast(v, target_dtype):
       res = v[...] * scale.astype(v[...].dtype)
@@ -285,8 +289,6 @@ class GradientAccumulator(nnx.Module):
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
     self.denom.set_value(jnp.zeros_like(self.denom[...]))
-
-
 
 
 class PeftTrainer:
@@ -532,7 +534,10 @@ class PeftTrainer:
     ):
       if isinstance(aux, utils.LossOutput):
         denom = jnp.asarray(aux.primary_loss.denominator, dtype=jnp.float32)
-        grads = jax.tree_util.tree_map(lambda x: x / denom, grads)
+        scale = _zero_safe_reciprocal(denom)
+        grads = jax.tree_util.tree_map(
+            lambda x: x * scale.astype(x.dtype), grads
+        )
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
