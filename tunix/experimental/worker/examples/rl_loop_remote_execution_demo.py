@@ -98,7 +98,7 @@ class MockRolloutWorker(abstract_worker.Worker):
 
     env_kwargs = {
         "task": task_data,
-        "group_id": request.group_id,
+        "group_id": request.group_offset_id,
         **request.metadata.get("env_kwargs", {}),
     }
     env = env_cls(**env_kwargs)

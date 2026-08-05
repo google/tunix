@@ -86,7 +86,7 @@ class DistributedRolloutWorker(abstract_worker.Worker):
 
     env_kwargs = {
         "task": task_data,
-        "group_id": request.group_id,
+        "group_id": request.group_offset_id,
         **request.metadata.get("env_kwargs", {}),
     }
     env = env_cls(**env_kwargs)
@@ -139,7 +139,7 @@ async def run_orchestrator_node(
   request = datatypes.RolloutRequest(
       request_id="req_group4_pair0",
       prompt=single_example,
-      group_id="group_4",
+      group_offset_id="group_4",
       target_policy_version=1,
       metadata={
           "agent_type": "diagnostic",
