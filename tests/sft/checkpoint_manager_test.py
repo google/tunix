@@ -171,6 +171,54 @@ class CheckpointManagerTest(parameterized.TestCase):
         nnx.state(model),
     )
 
+  def test_restore_with_pathways_persistence(self):
+    with mock.patch.dict(
+        os.environ,
+        {'JAX_PLATFORMS': 'proxy', 'ENABLE_PATHWAYS_PERSISTENCE': '1'},
+    ):
+      cp_path = f'{self.temp_path}/{self.id()}'
+      cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+      model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+      optimizer = nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)
+
+      # Save checkpoint at step 25.
+      self.assertTrue(
+          cp_manager.save(25, model, optimizer=optimizer, force=True)
+      )
+      assert cp_manager._checkpointer is not None
+      cp_manager._checkpointer.wait()
+
+      # Mutate state before saving step 50.
+      changed_model_state = jax.tree.map(lambda x: x + 1, nnx.state(model))
+      nnx.update(model, changed_model_state)
+
+      # Save checkpoint at step 50.
+      self.assertTrue(
+          cp_manager.save(50, model, optimizer=optimizer, force=True)
+      )
+      cp_manager._checkpointer.wait()
+      cp_manager.close()
+
+      # Simulate workload restart by creating a new CheckpointManager instance.
+      restart_cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+      restore_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+      restore_optimizer = nnx.Optimizer(
+          restore_model, optax.adam(1e-3), wrt=nnx.Param
+      )
+
+      # Restore latest step (50) automatically upon restart.
+      restored_step, _ = restart_cp_manager.maybe_restore(
+          restore_model, optimizer=restore_optimizer
+      )
+      self.assertEqual(restored_step, 50)
+
+      # Verify model and optimizer states match expected step 50 state.
+      jax.tree.map_with_path(
+          assert_close,
+          changed_model_state,
+          nnx.state(restore_model),
+      )
+
   def test_restore_different_sharding(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path)
