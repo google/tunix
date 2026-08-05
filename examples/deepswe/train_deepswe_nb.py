@@ -257,11 +257,25 @@ parser.add_argument(
 )
 
 args, _ = parser.parse_known_args()
+
+# Register MaxText vLLM adapter if using a MaxText model
+if args.model_source == "maxtext":
+  try:
+    from maxtext.integration.vllm import maxtext_vllm_adapter  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
+    maxtext_vllm_adapter.register()
+    logging.info("Successfully registered MaxTextForCausalLM model with vLLM.")
+  except ImportError as e:
+    logging.warning("Could not import maxtext_vllm_adapter: %s", e)
+
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
 
 # Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector.
+# This is required because r2egym hardcodes the CPU nodepool name (using
+# Karpenter bigcpu-standby), which does not exist in our GKE cluster. We
+# override it here to match the nodepool configured via the
+# --node_selector_val flag.
 def patch_kubernetes_runtime():
   try:
     from r2egym.agenthub.runtime.docker import DockerRuntime
@@ -369,18 +383,8 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as template_pars
 from tunix import PerfMetricsConfig
 from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from examples.deepswe.swe_agent import (
-    SWE_SYSTEM_PROMPT,
-    SWE_SYSTEM_PROMPT_FN_CALL,
-    SWE_USER_PROMPT,
-    SWE_USER_PROMPT_FN_CALL,
-    SWEAGENT_SYSTEM_PROMPT,
-    SWEAGENT_USER_PROMPT,
-)
-
-# Assumed custom imports based on usage
-from examples.deepswe.swe_agent import SWEAgent
-from examples.deepswe.swe_env import SWEEnv
+from examples.deepswe import swe_agent
+from examples.deepswe import swe_env
 
 # %%
 # ==========================================
@@ -432,10 +436,9 @@ else:
     print(f"Model not found locally. Starting download to {MODEL_PATH}...")
     os.makedirs(MODEL_PATH, exist_ok=True)
 
-    # Assumes "Qwen/" organization prefix for HF download. Adjust if using
-    # other models.
+    # Requires full HF repository ID (e.g. "Qwen/Qwen3-32B").
     snapshot_download(  # pyrefly: ignore[no-matching-overload]
-        repo_id=f"Qwen/{MODEL_VERSION}",
+        repo_id=MODEL_VERSION,
         local_dir=MODEL_PATH,
         local_dir_use_symlinks=False,
     )
@@ -562,7 +565,7 @@ USE_ROLLOUT_LOGPS = args.use_rollout_logps
 tokenizer_path = MODEL_PATH
 local_files_only = True
 if MODEL_SOURCE == "maxtext" and MODEL_PATH.startswith("gs://"):
-  tokenizer_path = f"Qwen/{MODEL_VERSION}"
+  tokenizer_path = MODEL_VERSION
   local_files_only = False
   print(f"Loading tokenizer from HF Hub: {tokenizer_path}")
 
@@ -769,6 +772,8 @@ if MODEL_SOURCE == "maxtext":
       model_source=ModelSource.MAXTEXT,
       model_path=MODEL_PATH,
       enable_checkpointing=True,
+      allow_split_physical_axes=True,
+      scan_layers=False,
   )
 else:
   qwen_reference = params_lib.create_model_from_safe_tensors(
@@ -808,6 +813,7 @@ else:
       graph_def,
       jax.tree.map(jnp.copy, params),
   )
+
 sft_utils.show_hbm_usage()
 
 # %%
@@ -887,6 +893,28 @@ vllm_rollout_dict = {
     },
 }
 
+if MODEL_SOURCE == "maxtext":
+  vllm_rollout_dict["rollout_vllm_kwargs"]["hf_overrides"] = {
+      "architectures": ["MaxTextForCausalLM"]
+  }
+  vllm_rollout_dict["rollout_vllm_additional_config"] = {
+      "maxtext_config": {
+          "model_name": MODEL_VERSION.lower().split("/")[-1],
+          "model_call_mode": "inference",
+          "enable_dp_attention": False,
+          "allow_split_physical_axes": True,
+          "log_config": False,
+          "weight_dtype": "bfloat16",
+          "prefuse_moe_weights": True,
+      }
+  }
+  # Force no-op mappings for weight sync if both trainer and sampler use MaxText
+  if hasattr(qwen_reference, "use_no_op_mappings"):
+    qwen_reference.use_no_op_mappings = True
+  if hasattr(qwen_actor, "use_no_op_mappings"):
+    qwen_actor.use_no_op_mappings = True
+    logging.info("Forced use_no_op_mappings=True on actor/reference models.")
+
 
 if ROLLOUT_ENGINE == "sglang_jax":
   rollout_engine_config = base_rollout.RolloutConfig(
@@ -907,6 +935,23 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
+
+def filter_logical_rules(rules, mesh):
+  """Filters logical sharding rules to keep only physical axes present in mesh."""
+  valid_axes = set(mesh.shape.keys())
+  filtered_rules = []
+  for logical_axis, physical_axes in rules:
+    if isinstance(physical_axes, (list, tuple)):
+      new_phys = [ax for ax in physical_axes if ax in valid_axes]
+      filtered_rules.append((logical_axis, tuple(new_phys)))
+    else:
+      if physical_axes in valid_axes:
+        filtered_rules.append((logical_axis, physical_axes))
+      else:
+        filtered_rules.append((logical_axis, ()))
+  return tuple(filtered_rules)
+
+
 role_to_logical_axis_rule = None
 logical_rules = getattr(
     getattr(getattr(qwen_reference, "base", None), "config", None),
@@ -916,9 +961,15 @@ logical_rules = getattr(
 if logical_rules:
   print(f"Configuring role_to_logical_axis_rule with: {logical_rules}")
   role_to_logical_axis_rule = {
-      rl_engine_lib.Role.ACTOR: logical_rules,
-      rl_engine_lib.Role.REFERENCE: logical_rules,
-      rl_engine_lib.Role.ROLLOUT: logical_rules,
+      rl_engine_lib.Role.ACTOR: filter_logical_rules(
+          logical_rules, train_mesh
+      ),
+      rl_engine_lib.Role.REFERENCE: filter_logical_rules(
+          logical_rules, train_mesh
+      ),
+      rl_engine_lib.Role.ROLLOUT: filter_logical_rules(
+          logical_rules, rollout_mesh
+      ),
   }
 
 cluster_config = rl_engine_lib.ClusterConfig(
@@ -954,7 +1005,6 @@ rl_engine = rl_engine_lib.RLEngine(
     cluster_config=cluster_config,
 )
 
-
 # %%
 # ==========================================
 # 10. Learner & Agent Setup
@@ -966,7 +1016,7 @@ config_kwargs = {
     "max_response_length": MAX_RESPONSE_LENGTH,
     "beta": BETA,
     "epsilon": EPSILON,
-    "system_prompt": SWE_SYSTEM_PROMPT,
+    "system_prompt": swe_agent.SWE_SYSTEM_PROMPT,
     "max_concurrency": MAX_CONCURRENCY,
     "epsilon_high": EPSILON_HIGH,
     "off_policy_steps": OFF_POLICY_STEPS,
@@ -984,9 +1034,9 @@ grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine=rl_engine,
     reward_fns=None,
-    agent_class=SWEAgent,
+    agent_class=swe_agent.SWEAgent,
     agent_kwargs={},
-    env_class=SWEEnv,
+    env_class=swe_env.SWEEnv,
     env_kwargs={
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
