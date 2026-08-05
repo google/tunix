@@ -477,10 +477,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.temperature = temperature
       if self.config.return_logprobs:
         sampling_params.logprobs = 1  # b/428730696
-        sampling_params.prompt_logprobs = 0  # b/428730696
+        sampling_params.prompt_logprobs = None  # b/428730696
       else:
         sampling_params.logprobs = 0
-        sampling_params.prompt_logprobs = 0
+        sampling_params.prompt_logprobs = None
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
       # Keep the stop token in the returned ``token_ids`` so multi-turn
