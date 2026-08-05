@@ -92,6 +92,10 @@ class AbstractRLEngine(Protocol):
     """Runs a training update for the specified role (e.g. Role.ACTOR, Role.CRITIC)."""
     ...
 
+  def eval_actor(self, eval_ds: Any) -> Any:
+    """Runs an explicit actor evaluation phase over eval micro-batches."""
+    ...
+
   # --- Scoring (feeds advantage / IS math) ----------------------------------
   def per_token_logps(
       self,
