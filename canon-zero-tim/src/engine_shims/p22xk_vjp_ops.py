@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Canonical custom-VJPs whose primals remain the promoted Pallas forwards."""
+
+from __future__ import annotations
+
+from p22xk_contract import preflight
+
+
+def canonical_matmul(x, y):
+    """Pure-JAX replica of fixed BK=256, f32-accumulate, bf16-output matmul."""
+    import jax.numpy as jnp
+    from p22_pallas_matmul import BK
+
+    if x.ndim != 2 or y.ndim != 2 or int(x.shape[1]) != int(y.shape[0]):
+        raise ValueError(f"P22.XK matmul shapes invalid: {x.shape}, {y.shape}")
+    if x.dtype != jnp.bfloat16 or y.dtype != jnp.bfloat16:
+        raise ValueError(f"P22.XK matmul requires bf16, got {x.dtype}, {y.dtype}")
+    m, k, n = int(x.shape[0]), int(x.shape[1]), int(y.shape[1])
+    if k % BK:
+        raise ValueError(f"P22.XK matmul K must divide BK={BK}, got {k}")
+    acc = jnp.zeros((m, n), jnp.float32)
+    for q in range(k // BK):
+        lo, hi = q * BK, (q + 1) * BK
+        acc = acc + jnp.dot(
+            x[:, lo:hi], y[lo:hi, :], preferred_element_type=jnp.float32
+        )
+    return acc.astype(jnp.bfloat16)
+
+
+def canonical_swiglu(gate, up):
+    import jax
+    import jax.numpy as jnp
+
+    if gate.shape != up.shape or gate.dtype != jnp.bfloat16 or up.dtype != jnp.bfloat16:
+        raise ValueError(f"P22.XK SwiGLU contract failed: {gate.shape}/{up.shape} "
+                         f"{gate.dtype}/{up.dtype}")
+    return (jax.nn.silu(gate) * up).astype(jnp.bfloat16)
+
+
+def matmul(x, y, *, forward):
+    """Use ``forward`` verbatim for primal and canonical_matmul only for VJP."""
+    import jax
+
+    preflight(require_enabled=True)
+
+    @jax.custom_vjp
+    def op(a, b):
+        return forward(a, b)
+
+    def fwd(a, b):
+        return forward(a, b), (a, b)
+
+    def bwd(residual, cotangent):
+        a, b = residual
+        _, pullback = jax.vjp(canonical_matmul, a, b)
+        return pullback(cotangent)
+
+    op.defvjp(fwd, bwd)
+    return op(x, y)
+
+
+def swiglu(gate, up, *, forward):
+    """Use promoted padded SwiGLU for primal and canonical_swiglu for VJP."""
+    import jax
+
+    preflight(require_enabled=True)
+
+    @jax.custom_vjp
+    def op(g, u):
+        return forward(g, u)
+
+    def fwd(g, u):
+        return forward(g, u), (g, u)
+
+    def bwd(residual, cotangent):
+        g, u = residual
+        _, pullback = jax.vjp(canonical_swiglu, g, u)
+        return pullback(cotangent)
+
+    op.defvjp(fwd, bwd)
+    return op(gate, up)
+
+
+def rmsnorm(x, weight, *, epsilon: float, forward):
+    """Use promoted Pallas RMSNorm for primal and fixed-BF replica for VJP."""
+    import jax
+    from p22_pallas_rmsnorm import canonical_rmsnorm
+
+    preflight(require_enabled=True)
+
+    def oracle(a, w):
+        return canonical_rmsnorm(a, w, epsilon=epsilon)
+
+    @jax.custom_vjp
+    def op(a, w):
+        return forward(a, w)
+
+    def fwd(a, w):
+        return forward(a, w), (a, w)
+
+    def bwd(residual, cotangent):
+        a, w = residual
+        _, pullback = jax.vjp(oracle, a, w)
+        return pullback(cotangent)
+
+    op.defvjp(fwd, bwd)
+    return op(x, weight)
+
