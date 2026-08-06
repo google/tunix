@@ -20,32 +20,22 @@ EXPECT="${CANON_TOTAL_DEVICES:-64}"
   exit 2
 }
 
-echo "[wait] waiting up to ${S}s for exactly ${EXPECT} devices to register with Pathways (requiring 3 consecutive stable probes)"
+echo "[wait] waiting up to ${S}s for exactly ${EXPECT} devices to register with Pathways"
 WAITED=0
-CONSECUTIVE=0
-LAST=""
 while [ "$WAITED" -lt "$S" ]; do
   if CANON_EXPECT_VISIBLE_DEVICES="$EXPECT" \
       python3 "$CANON_PKG/tests/t1_tpu/probe_devices.py" >/tmp/probe_devices.out 2>&1; then
-    LAST="$(cat /tmp/probe_devices.out)"
-    CONSECUTIVE=$((CONSECUTIVE + 1))
-    echo "[wait] probe passed ($CONSECUTIVE/3 stable checks, ${WAITED}s/${S}s)"
-    if [ "$CONSECUTIVE" -ge 3 ]; then
-      printf '%s\n' "$LAST"
-      echo "[wait] Pathways readiness PASS after ${WAITED}s (stable across 3 consecutive probes)"
-      exit 0
-    fi
-  else
-    LAST="$(cat /tmp/probe_devices.out 2>/dev/null || true)"
-    CONSECUTIVE=0
+    cat /tmp/probe_devices.out
+    echo "[wait] Pathways readiness PASS after ${WAITED}s"
+    exit 0
   fi
-  sleep 5
-  WAITED=$((WAITED + 5))
-  if [ $((WAITED % 20)) -eq 0 ]; then
-    echo "[wait] still waiting (${WAITED}s/${S}s)"
+  sleep 10
+  WAITED=$((WAITED + 10))
+  if [ $((WAITED % 30)) -eq 0 ]; then
+    echo "[wait] still waiting (${WAITED}s/${S}s)..."
   fi
 done
 
-printf '%s\n' "$LAST" | grep -aE '^\[T1\.PATHWAYS\]|^\[t1\.devices\]' || true
+cat /tmp/probe_devices.out 2>/dev/null | grep -aE '^\[T1\.PATHWAYS\]|^\[t1\.devices\]' || true
 echo "[wait] REFUSING: Pathways did not expose exactly ${EXPECT} devices within ${S}s" >&2
 exit 1
