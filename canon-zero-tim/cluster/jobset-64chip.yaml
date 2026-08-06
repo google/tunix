@@ -72,12 +72,7 @@ spec:
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
-            # Native sidecars.  A container-level restartPolicy is only a valid field on an
-            # initContainer -- that pairing IS the sidecar mechanism: start first, stay up, and
-            # do not hold the pod open once the main container exits.  On a regular container
-            # the field is not part of the pod spec, and the pod would never complete because
-            # proxy and rm keep running after jax-tpu returns.
-            initContainers:
+            containers:
             - name: pathways-proxy
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
               args:
@@ -90,7 +85,6 @@ spec:
               resources:
                 requests: {cpu: '16', memory: 100Gi}
                 limits:   {cpu: '32', memory: 350G}
-              restartPolicy: Always
             - name: pathways-rm
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
@@ -107,8 +101,6 @@ spec:
               resources:
                 requests: {cpu: '8', memory: 32Gi}
                 limits:   {cpu: '16', memory: 150G}
-              restartPolicy: Always
-            containers:
             - name: jax-tpu
               # PIN THIS BY DIGEST.  See the header note.
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
