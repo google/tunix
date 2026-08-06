@@ -26,6 +26,7 @@ from typing import Any, Dict
 
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.rl import rl_cluster
 from tunix.rl.agentic.agents import agent_types
 
 ##### Worker-internal datatypes #####
@@ -35,6 +36,7 @@ Trajectory = agent_types.Trajectory
 TrajectoryItem = agent_types.TrajectoryItem
 Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
+Role = rl_cluster.Role
 
 
 ##### Common DTOs (Data Transfer Objects) #####
