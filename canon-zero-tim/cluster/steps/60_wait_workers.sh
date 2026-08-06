@@ -31,6 +31,10 @@ done
 OUT="$(mktemp -t canon_probe_devices.XXXXXX)"
 trap 'rm -f "$OUT"' EXIT
 
+INITIAL_SYNC="${CANON_WORKER_INITIAL_SYNC_SECONDS:-60}"
+echo "[wait] giving all ${EXPECT} devices on 16 TPU worker nodes ${INITIAL_SYNC}s quiet period to boot and register with Pathways RM..."
+sleep "$INITIAL_SYNC"
+
 echo "[wait] waiting up to ${S}s for exactly ${EXPECT} devices, stable across ${STABLE} consecutive probe(s) ${INTERVAL}s apart"
 WAITED=0
 CONSECUTIVE=0
