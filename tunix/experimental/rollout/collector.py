@@ -105,7 +105,7 @@ class TrajectoryCollectorEngine:
     inner_engine = rl_collect_engine.TrajectoryCollectEngine(
         agent=self.agent,
         env=self.env,
-        model_call=model_call,
+        model_call=model_call,  # pyrefly: ignore[bad-argument-type]
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
     )

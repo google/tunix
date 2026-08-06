@@ -625,7 +625,7 @@ def main() -> None:
       trust_remote_code=True,
   )
   chat_parser = VTCRawTextParser()
-  qwen_eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)
+  qwen_eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)  # pyrefly: ignore[missing-attribute]
 
   reference, actor = create_reference_and_actor(shared_mesh)
   show_hbm_usage("after loading qwen_ref / qwen_actor")

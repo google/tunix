@@ -81,14 +81,14 @@ class ShardingConfig:
         o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
         ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
         ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        rms_norm_weight=P('tp',),
-        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),
-        act_btf=P('fsdp', sp, 'tp'),
-        act_btnh=P('fsdp', sp, 'tp', None),
-        score_weight_d1=P(fsdp, None),
-        exp_weight_cdf=P('fsdp', None, 'tp'),
-        exp_weight_cfd=P('fsdp', 'tp', None),
-        qkv_bias=P('tp',),
+        rms_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
+        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', sp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', sp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_cdf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_cfd=P('fsdp', 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        qkv_bias=P('tp',),  # pyrefly: ignore[bad-argument-type]
     )
 
 
