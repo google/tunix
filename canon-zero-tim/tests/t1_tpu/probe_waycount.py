@@ -32,6 +32,10 @@ without it this probe measures a different program family than production.
 import os
 import sys
 
+os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+os.environ["PATHWAYS_ENFORCE_SUBSET_DEVICES_FORM_SUBSLICE"] = "false"
+if "--FLAGS_pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
+    sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
 if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
     sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
 

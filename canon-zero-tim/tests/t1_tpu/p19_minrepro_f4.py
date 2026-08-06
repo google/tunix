@@ -4,6 +4,10 @@ reduction done as an explicit fixed-order ppermute tree inside shard_map."""
 import os as _os
 import sys as _sys
 
+_os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+_os.environ["PATHWAYS_ENFORCE_SUBSET_DEVICES_FORM_SUBSLICE"] = "false"
+if "--FLAGS_pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
+    _sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
 if "--pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
     _sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
 
