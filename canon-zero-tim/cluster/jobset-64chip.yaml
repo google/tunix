@@ -48,7 +48,7 @@ spec:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
             nodeSelector:
-              cloud.google.com/gke-nodepool: pathways-head-c4
+              cloud.google.com/gke-nodepool: cpu-np
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
@@ -86,7 +86,7 @@ spec:
             containers:
             - name: jax-tpu
               # PIN THIS BY DIGEST.  See the header note.
-              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
               imagePullPolicy: Always
               resources:
                 limits: {cpu: '24', memory: 200G}
@@ -106,7 +106,7 @@ spec:
               env:
               # --- what to run -------------------------------------------------------------
               - name: CANON_MODE
-                value: probe-only          # probe-only | install-only | gate-only | run
+                value: gate-only          # probe-only | install-only | gate-only | run
               - name: CANON_PROFILE_FILE
                 value: cluster/profiles/qwen3-1p7b.env
               - name: CANON_STATE
