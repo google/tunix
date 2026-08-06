@@ -9,7 +9,7 @@ if [ -z "${PATHWAYS_HEAD:-}" ]; then
   echo "[wait] no PATHWAYS_HEAD -- nothing to wait for"
   exit 0
 fi
-S="${CANON_WORKER_WAIT_SECONDS:-120}"
+S="${CANON_WORKER_WAIT_SECONDS:-600}"
 EXPECT="${CANON_TOTAL_DEVICES:-64}"
 [[ "$S" =~ ^[1-9][0-9]*$ ]] || {
   echo "[wait] REFUSING: CANON_WORKER_WAIT_SECONDS must be a positive integer" >&2

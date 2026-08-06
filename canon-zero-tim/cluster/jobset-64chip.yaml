@@ -108,7 +108,7 @@ spec:
               env:
               # --- what to run -------------------------------------------------------------
               - name: CANON_MODE
-                value: gate-only          # probe-only | install-only | gate-only | dp-gate-only
+                value: dp-gate-only          # probe-only | install-only | gate-only | dp-gate-only
               - name: CANON_PROFILE_FILE
                 value: cluster/profiles/qwen3-8b-dp16-tp4-admission.env
               - name: CANON_STATE
@@ -119,7 +119,7 @@ spec:
               - name: CANON_EXPECT_TRAIN_MESH_IDS
                 value: ""                  # fill from the first T2-DP MESH line
               - name: CANON_WORKER_WAIT_SECONDS
-                value: "120"
+                value: "600"
               # MIN_TOKEN_BUCKET is a GLOBAL token count.  Under data parallelism the dp=1
               # value silently unpins the bucket; derive it with probe_bucket_contract.py.
               - name: MIN_TOKEN_BUCKET
