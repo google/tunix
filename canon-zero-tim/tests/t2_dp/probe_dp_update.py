@@ -22,6 +22,13 @@ import os
 import sys
 from typing import Any
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "t1_tpu")))
+try:
+  from pathways_bootstrap import initialize_pathways
+  initialize_pathways()
+except Exception:
+  pass
+
 import jax
 import jax.numpy as jnp
 import numpy as np
