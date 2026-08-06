@@ -52,6 +52,10 @@ spec:
     publishNotReadyAddresses: true
   startupPolicy:
     startupPolicyOrder: InOrder
+  successPolicy:
+    operator: Any
+    targetReplicatedJobs:
+    - pathways-head
   replicatedJobs:
 
   # ---------------------------------------------------------------------------
