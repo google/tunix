@@ -1,0 +1,189 @@
+# Runbook
+
+One section per executable task. Each gives prerequisites, the exact command, what you should
+see, what counts as a pass, what counts as red, and what to send back.
+
+Read `START_HERE.md` first if you have not. Do the tasks in order — each one's output decides
+whether the next is worth running.
+
+---
+
+## Task A — CPU gates
+
+Proves the differentiable attention contract is mathematically sound: the pure-JAX function
+whose Jacobian becomes the backward computes the *same function* as a full-prefill oracle.
+
+**Needs:** any machine with Python and JAX. No TPU, no model, no container, no network.
+**Takes:** under a minute.
+
+```bash
+tests/t0_cpu/run.sh
+tests/t0_cpu/negative_control.sh
+```
+
+**Expected**
+
+```
+[selftest] value |chain-oracle| = 0.000e+00
+[selftest] grad rel = 5.039e-16
+[selftest] FD best rel = 1.106e-08
+[selftest] VERDICT: PASS
+[msq] value: ... |Δ|=0.000e+00
+[msq] grad rel: dq=4.492e-17 dk=6.828e-17 dv=5.082e-17
+[msq] VERDICT: PASS
+===== T0 PASS (2 gates, 7 measurements) =====
+
+  REJECTED (exit 1)   N1 silent gate (prints nothing)
+  REJECTED (exit 1)   N2 nonzero value residual
+  REJECTED (exit 1)   N3 gradient error above threshold
+  REJECTED (exit 1)   N4 good numbers but VERDICT: FAIL
+===== NEGATIVE CONTROL PASS -- run.sh rejects all 4 arms =====
+```
+
+**Pass:** both scripts exit 0. Value residuals **exactly** `0.000e+00` — there is no tolerance
+on those. Gradient and FD figures within the thresholds printed in `run.sh`.
+
+**Red:**
+- any exit non-zero;
+- a value residual that is small but not exactly zero — that is a different function, not a
+  rounding difference;
+- the negative control **accepting** any arm. That means the gate is not fail-closed and its
+  green results carry no information. Report this before anything else.
+
+**Does not prove:** anything about the real attention kernel. That is Task B and beyond.
+
+**Send back:** both outputs verbatim, exit codes, `python3 -c "import jax; print(jax.__version__)"`.
+
+---
+
+## Task B — Topology admission probes ← *the next thing that needs doing*
+
+Answers whether the canonical switch set transfers to your hardware at all. Four probes plus
+four historical minimal reproducers.
+
+**Needs:** ≥ 2 TPU chips. **No model, no checkpoint, no engine, no image build.**
+**Takes:** seconds of compute, a few minutes of compilation.
+
+```bash
+tests/t1_tpu/run.sh                       # host with docker: re-enters the pinned image
+CANON_IN_CONTAINER=1 tests/t1_tpu/run.sh  # already inside a TPU-capable container
+```
+
+`XLA_FLAGS` must contain `--xla_allow_excess_precision=false`. The runner sets it and refuses
+to continue without it — without that flag you are measuring a different program family than
+production, and the numbers would not be comparable to anything.
+
+**Expected** — reference values from the 4-chip v5p host where this was developed. **Your
+topology may legitimately differ; that is the point of measuring.**
+
+```
+[waycount] width= 2 depth=  8 XLA-all-reduce  differing_bytes=      0/...  SAME
+[waycount] width= 4 depth=  8 XLA-all-reduce  differing_bytes= ~7000/...  DIFFERS
+[waycount] width= 4 depth=  8 F4-fixed-order  differing_bytes=      0/...  SAME
+[mesh] slice_count=1   MULTI_SLICE=0
+[mesh] create_device_mesh(shape=(4,)) -> ids=[0, 2, 1, 3]   REORDERED=1
+[bucket] SET MIN_TOKEN_BUCKET=<derived for your dp geometry>
+[f4cost] width  ring MiB  F4 MiB  ratio ...
+===== T1 COMPLETE -- all probes produced measurements =====
+```
+
+**How to read it** — this is the part that matters more than the exit code:
+
+| Observation | Meaning |
+|---|---|
+| `F4-fixed-order` is `SAME` at every width you intend to use | The fix works here. |
+| `XLA-all-reduce` is **already** `SAME` at your width | The fixed-order tree is a **no-op** at that width. Green proves the problem was absent, not that the fix works. A 2-chip machine **cannot validate this package**. |
+| `F4-fixed-order` `DIFFERS` at some width | Stop. The fix does not cover that width. Report it — this is a genuine finding; only widths 2 and 4 were ever measured. |
+| `MULTI_SLICE=1` | Collectives cross slices and XLA lowers a hierarchical reduction — a program family with **zero coverage** here. Every bitwise claim on this topology is UNVERIFIED. |
+| `REORDERED=1` | Placement permuted your device order. Use the printed order for `CANON_EXPECT_MODEL_MESH_IDS`; never inherit one from a different mesh shape. |
+| `[bucket] SET MIN_TOKEN_BUCKET=` ≠ 256 | Your dp geometry needs a different global value. Copying 256 would silently unpin the bucket while every switch still reads "on". |
+
+**Pass:** `T1 COMPLETE` (every probe produced measurements) **and** `F4-fixed-order` `SAME` at
+your intended widths. `COMPLETE` alone is not an admission — it only means nothing crashed.
+
+**Red:**
+- `T1 FAIL` — a probe produced no measurement line. It did not run;
+- `REFUSING: XLA_FLAGS lacks ...` — fix the flags, do not work around it;
+- `Device or resource busy` on `/dev/vfio` — something else holds the TPU. **Find out what
+  before killing anything**; it may be someone's multi-hour job.
+
+**Send back:** the full log + `sha256sum`; chip count and kind; `slice_count`; the complete
+`[waycount]` table; the `[mesh]` id list; the `[bucket]` derived value.
+
+---
+
+## Task C — Cluster ladder (Pathways / GKE)
+
+Four staged modes, each answering one question. **Read the previous stage's output before
+promoting** — that is the whole point of the staging.
+
+**Needs:** a GKE cluster with Pathways, and the manifest edited per `cluster/README.md`.
+
+```bash
+kubectl apply -f cluster/jobset-64chip.yaml
+kubectl logs -f jobs/canon-zero-tim-v5p-64-pathways-head-0
+```
+
+| `CANON_MODE` | Costs TPU? | Answers |
+|---|---|---|
+| `probe-only` | no | Is this image's `tpu_inference` the build the patches were cut against? Does it need the RoPE fix? |
+| `install-only` | no | Does the chain build, overlay, and actually load here? |
+| `gate-only` | seconds | Task B, on the cluster. |
+| `run` | yes | The workload in `CANON_RUN_CMD`. |
+
+Start at `probe-only`. Full expected output, the red table, and the reporting format are in
+`cluster/README.md` — that file is the operator guide for this task and supersedes this summary.
+
+**Two things to set before the first apply**, both in the manifest:
+- the `jax-tpu` image, **pinned by digest** — a floating `:latest` means the same manifest runs
+  on a different engine tomorrow, which is incompatible with a bitwise contract;
+- `CANON_EXPECT_MODEL_MESH_IDS`, from Task B's output **on this topology**.
+
+---
+
+## Task D — Round-trip against the signed numbers
+
+The only check that proves the package is *complete*. Code review cannot do it: the failure
+mode of a missing chain member is a silent fallback to stock, which reviews as fine and runs
+as green.
+
+**Needs:** the pinned image, a 4-chip v5p host, and (for D2) a checkpoint and W&B key.
+
+### D1 — cheap arm, ~20 min
+
+Install from this package into a fresh directory, then run the probe gates against it and
+compare to the recorded values.
+
+```bash
+./install.sh /tmp/canon --from-image tunix_frozenlake_image:vllm-tpu0.25.0 --model qwen1p7b
+# then the G1/G2 probe gates, per recipes/README.md, pointed at /tmp/canon
+```
+
+**Pass:** byte-identical to the recorded numbers, not "close":
+
+```
+K2.abc      hidden 0/10240   logits 0/303872
+THIRDPROG   primal 0/303872
+四 boundaries 0 differing bytes; w = r = w*r = 1; clip_hits = tis_hits = 0
+```
+
+### D2 — full arm, ~1 h
+
+One real GSM8K training step (`recipes/README.md`, G1a). Exercises the engine patches, the
+shim chain, the training-side hooks, all four boundaries and the release classifier.
+
+**Pass:**
+
+```
+verdict     P26_GSM8K_G1A_PASS
+N_action    248
+gradient    0.2502315640449524      exactly
+boundaries  three, 0 differing bytes each
+```
+
+**Red for either arm:** any number that differs. That is not a tolerance question — the whole
+contract is bitwise. Before concluding the package is broken, rule out environment drift by
+running the same gate through the original (unpackaged) paths on the same host and comparing.
+
+**Send back:** raw log + `sha256sum`, the classification JSON, and the install directory's
+`sha256sum -c MANIFEST.sha256` output.
