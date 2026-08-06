@@ -3,6 +3,8 @@
 import collections
 import dataclasses
 import enum
+import os
+import threading
 from typing import Any, Callable
 
 from absl import logging
@@ -18,6 +20,12 @@ CluBackend = getattr(metrax_logging, "CluBackend", None)
 
 # User backends MUST be factories (callables) to keep Options pure and copyable.
 BackendFactory = Callable[[], LoggingBackend]
+
+_DIRECT_LOCK = threading.Lock()
+_DIRECT_ACTIVE_LOGGERS = 0
+_DIRECT_LAST_STEP: int | None = None
+_DIRECT_EVENTS = 0
+_DIRECT_REGRESSIONS = 0
 
 
 @dataclasses.dataclass
@@ -120,13 +128,29 @@ class MetricsLogger:
       self,
       metrics_logger_options: MetricsLoggerOptions | None = None,
   ):
+    global _DIRECT_ACTIVE_LOGGERS
+    global _DIRECT_EVENTS
+    global _DIRECT_LAST_STEP
+    global _DIRECT_REGRESSIONS
+
     self._metrics = {}
+    self._monotonic_direct = (
+        os.environ.get("CANON_P31_MONOTONIC_METRICS", "") == "1"
+    )
+    self._closed = False
     self._backends = (
         metrics_logger_options.create_backends()
         if metrics_logger_options
         else []
     )
-    if metrics_logger_options and jax.process_index() == 0:
+    if self._monotonic_direct:
+      with _DIRECT_LOCK:
+        if _DIRECT_ACTIVE_LOGGERS == 0:
+          _DIRECT_LAST_STEP = None
+          _DIRECT_EVENTS = 0
+          _DIRECT_REGRESSIONS = 0
+        _DIRECT_ACTIVE_LOGGERS += 1
+    elif metrics_logger_options and jax.process_index() == 0:
       for backend in self._backends:
         jax.monitoring.register_scalar_listener(backend.log_scalar)
 
@@ -138,16 +162,36 @@ class MetricsLogger:
       mode: Mode | str,
       step: int,
   ):
-    """Logs the scalar metric value to local history and via jax.monitoring."""
+    """Logs the scalar metric value to local history and the active backends."""
     prefix_metrics = self._metrics.setdefault(metrics_prefix, {})
     mode_metrics = prefix_metrics.setdefault(
         mode, collections.defaultdict(list)
     )
     mode_metrics[metric_name].append(scalar_value)
 
-    jax.monitoring.record_scalar(
-        f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step  # pyrefly: ignore[bad-argument-type]
-    )
+    event = f"{metrics_prefix}/{mode}/{metric_name}"
+    if self._monotonic_direct:
+      global _DIRECT_EVENTS
+      global _DIRECT_LAST_STEP
+      global _DIRECT_REGRESSIONS
+      if step is None:
+        raise ValueError("P31 monotonic metrics require an explicit step")
+      step = int(step)
+      with _DIRECT_LOCK:
+        if _DIRECT_LAST_STEP is not None and step < _DIRECT_LAST_STEP:
+          _DIRECT_REGRESSIONS += 1
+          raise RuntimeError(
+              "P31 metric step regression: "
+              f"event={event} step={step} last={_DIRECT_LAST_STEP}"
+          )
+        _DIRECT_LAST_STEP = step
+        _DIRECT_EVENTS += 1
+        for backend in self._backends:
+          backend.log_scalar(event, scalar_value, step=step)
+    else:
+      jax.monitoring.record_scalar(
+          event, scalar_value, step=step  # pyrefly: ignore[bad-argument-type]
+      )
 
   def metric_exists(
       self, metrics_prefix, metric_name: str, mode: Mode | str
@@ -184,8 +228,22 @@ class MetricsLogger:
 
   def close(self):
     """Closes all registered logging backends."""
+    global _DIRECT_ACTIVE_LOGGERS
+    if self._closed:
+      return
+    self._closed = True
     for backend in self._backends:
       backend.close()
+    if self._monotonic_direct:
+      with _DIRECT_LOCK:
+        _DIRECT_ACTIVE_LOGGERS -= 1
+        print(
+            "[CANON_P31_METRICS] monotonic_direct "
+            f"last_step={_DIRECT_LAST_STEP} events={_DIRECT_EVENTS} "
+            f"regressions={_DIRECT_REGRESSIONS}",
+            flush=True,
+        )
+      return
     try:
       jax.monitoring.clear_event_listeners()
     except Exception:  # pylint: disable=broad-exception-caught

@@ -55,6 +55,9 @@ from tunix.cli.utils import data as data_lib
 _CANON_PRELEARNER_ONLY = (
     os.getenv("CANON_L3_CONTRACT_ONLY", "") == "1"
     or os.getenv("CANON_L3_A3_ONLY", "") == "1"
+    or os.getenv("CANON_P28_G3_ONLY", "") == "1"
+    or os.getenv("CANON_P28_G4_ONLY", "") == "1"
+    or os.getenv("CANON_P28_G5_ONLY", "") == "1"
 )
 if not _CANON_PRELEARNER_ONLY:
   from examples.frozenlake.agent import FrozenLakeAgent
@@ -133,6 +136,10 @@ arg_parser.add_argument("--top_k", type=int, default=0)
 # and noticeably degrades steady-state reward. Keep ~4x `max_num_seqs` so the
 # engine has work queued without saturating the cache.
 arg_parser.add_argument("--max_concurrency", type=int, default=256)
+arg_parser.add_argument("--vllm_max_num_seqs", type=int, default=64)
+arg_parser.add_argument("--env_max_steps", type=int, default=8)
+arg_parser.add_argument("--num_test_batches", type=int, default=2)
+arg_parser.add_argument("--eval_every_n_steps", type=int, default=10)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -151,14 +158,91 @@ arg_parser.add_argument(
 args, _ = arg_parser.parse_known_args()
 
 CANON_L3 = os.getenv("CANON_FROZENLAKE_L3", "") == "1"
+CANON_P27 = os.getenv("CANON_FROZENLAKE_P27", "") == "1"
 CANON_CONTRACT_ONLY = os.getenv("CANON_L3_CONTRACT_ONLY", "") == "1"
 CANON_A3_ONLY = os.getenv("CANON_L3_A3_ONLY", "") == "1"
-if CANON_CONTRACT_ONLY and CANON_A3_ONLY:
-  raise ValueError("contract-only and A3-only modes are mutually exclusive")
-if (CANON_CONTRACT_ONLY or CANON_A3_ONLY) and not CANON_L3:
+CANON_P28_G3_ONLY = os.getenv("CANON_P28_G3_ONLY", "") == "1"
+CANON_P28_G4_ONLY = os.getenv("CANON_P28_G4_ONLY", "") == "1"
+CANON_P28_G5_ONLY = os.getenv("CANON_P28_G5_ONLY", "") == "1"
+CANON_P28_G5C_ONLY = os.getenv("CANON_P28_G5C_ONLY", "") == "1"
+CANON_P28_G6_UPDATE = os.getenv("CANON_P28_G6_UPDATE", "") == "1"
+CANON_P29_FULL_TRAIN = os.getenv("CANON_P29_FULL_TRAIN", "") == "1"
+CANON_P31_CONVERGENCE = os.getenv("CANON_P31_CONVERGENCE", "") == "1"
+CANON_P30_OPT_STATE_OFFLOAD = (
+    os.getenv("CANON_P30_OPT_STATE_OFFLOAD", "") == "1"
+)
+prelearner_modes = {
+    "contract-only": CANON_CONTRACT_ONLY,
+    "A3-only": CANON_A3_ONLY,
+    "P28-G3-only": CANON_P28_G3_ONLY,
+    "P28-G4-only": CANON_P28_G4_ONLY,
+    "P28-G5-only": CANON_P28_G5_ONLY,
+}
+active_prelearner_modes = [
+    name for name, active in prelearner_modes.items() if active
+]
+if len(active_prelearner_modes) > 1:
+  raise ValueError(
+      "canonical prelearner modes are mutually exclusive: "
+      f"{active_prelearner_modes}"
+  )
+if active_prelearner_modes and not CANON_L3:
   raise ValueError(
       "canonical prelearner modes require CANON_FROZENLAKE_L3=1"
   )
+if CANON_P27 and not CANON_L3:
+  raise ValueError("CANON_FROZENLAKE_P27=1 requires CANON_FROZENLAKE_L3=1")
+if CANON_P27 and active_prelearner_modes:
+  raise ValueError("P27 cannot be combined with prelearner-only modes")
+if CANON_P28_G5C_ONLY and (CANON_P27 or active_prelearner_modes):
+  raise ValueError("P28 G5c cannot be combined with P27/prelearner modes")
+if CANON_P28_G5C_ONLY and not CANON_L3:
+  raise ValueError("P28 G5c requires CANON_FROZENLAKE_L3=1")
+if CANON_P28_G6_UPDATE and not CANON_P27:
+  raise ValueError("P28 G6 requires CANON_FROZENLAKE_P27=1")
+if CANON_P28_G6_UPDATE and os.getenv(
+    "CANON_ALIGNMENT_UPDATE_CANARY", ""
+) != ("0" if CANON_P31_CONVERGENCE else "1"):
+  raise ValueError("P28 G6 requires update-canary mode")
+if CANON_P31_CONVERGENCE:
+  required_p31 = {
+      "CANON_FROZENLAKE_L3": CANON_L3,
+      "CANON_FROZENLAKE_P27": CANON_P27,
+      "CANON_P28_G6_UPDATE": CANON_P28_G6_UPDATE,
+      "CANON_P29_FULL_TRAIN": CANON_P29_FULL_TRAIN,
+      "CANON_ALIGNMENT_TRAIN": os.getenv("CANON_ALIGNMENT_TRAIN") == "1",
+  }
+  missing_p31 = [name for name, active in required_p31.items() if not active]
+  if missing_p31:
+    raise ValueError(f"P31 convergence prerequisites missing: {missing_p31}")
+  if os.getenv("CANON_ALIGNMENT_UPDATE_CANARY", "") != "0":
+    raise ValueError("P31 requires train mode, not update-canary mode")
+if CANON_P29_FULL_TRAIN and not CANON_P28_G6_UPDATE:
+  raise ValueError("P29 full train requires the attested P28 G6 update path")
+if CANON_P30_OPT_STATE_OFFLOAD and not CANON_P29_FULL_TRAIN:
+  raise ValueError("P30 optimizer offload requires the P29 full-train path")
+if (
+    CANON_P28_G3_ONLY
+    or CANON_P28_G4_ONLY
+    or CANON_P28_G5_ONLY
+    or CANON_P28_G5C_ONLY
+    or (CANON_P28_G6_UPDATE and not CANON_P31_CONVERGENCE)
+):
+  expected_p28_geometry = {
+      "batch_size": (args.batch_size, 4),
+      "mini_batch_size": (args.mini_batch_size, 4),
+      "num_generations": (args.num_generations, 2),
+      "max_prompt_length": (args.max_prompt_length, 2048),
+      "max_response_length": (args.max_response_length, 64),
+      "max_concurrency": (args.max_concurrency, 2),
+  }
+  wrong_p28_geometry = {
+      name: got
+      for name, (got, expected) in expected_p28_geometry.items()
+      if got != expected
+  }
+  if wrong_p28_geometry:
+    raise ValueError(f"P28 frozen geometry mismatch: {wrong_p28_geometry}")
 
 TRAIN_FRACTION = 1.0
 SEED = args.seed
@@ -183,7 +267,7 @@ NUM_GENERATIONS = args.num_generations
 # some headroom without provisioning a huge unused KV-cache pool — on a
 # shared trainer+rollout mesh that KV-cache pool consumes HBM that the
 # trainer needs at peak (logits + activations + optimizer state).
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = (
     256 if CANON_L3 else VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
 )
@@ -209,23 +293,101 @@ ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
+if CANON_P31_CONVERGENCE:
+  expected_geometry = {
+      "batch_size": (BATCH_SIZE, 4),
+      "mini_batch_size": (MINI_BATCH_SIZE, 4),
+      "num_batches": (NUM_BATCHES, 150),
+      "num_generations": (NUM_GENERATIONS, 8),
+      "max_prompt_length": (MAX_PROMPT_LENGTH, 4096),
+      "max_response_length": (MAX_RESPONSE_LENGTH, 2048),
+      "max_concurrency": (args.max_concurrency, 8),
+      "vllm_max_num_seqs": (VLLM_MAX_NUM_SEQS, 16),
+      "env_max_steps": (args.env_max_steps, 5),
+      "num_test_batches": (args.num_test_batches, 25),
+      "eval_every_n_steps": (args.eval_every_n_steps, 25),
+      "learning_rate": (args.learning_rate, 1e-6),
+      "b1": (args.b1, 0.9),
+      "b2": (args.b2, 0.95),
+      "weight_decay": (args.weight_decay, 0.0),
+      "beta": (args.beta, 0.0),
+      "epsilon": (args.epsilon, 0.003),
+      "epsilon_high": (args.epsilon_high, 0.005),
+      "temperature": (args.temperature, 0.7),
+      "top_p": (args.top_p, 1.0),
+      "top_k": (args.top_k, 0),
+      "loss_algo": (args.loss_algo, "gspo-token"),
+      "advantage_estimator": (args.advantage_estimator, "rloo"),
+  }
+  wrong_geometry = {
+      name: got
+      for name, (got, expected) in expected_geometry.items()
+      if got != expected
+  }
+  if wrong_geometry:
+    raise ValueError(f"P31 frozen geometry mismatch: {wrong_geometry}")
+  if os.getenv("CANON_P31_ENABLE_EVAL", "") not in ("0", "1"):
+    raise ValueError("P31 requires explicit CANON_P31_ENABLE_EVAL=0/1")
+elif CANON_P27:
+  expected_geometry = {
+      "batch_size": (BATCH_SIZE, 4),
+      "mini_batch_size": (MINI_BATCH_SIZE, 4),
+      "num_generations": (NUM_GENERATIONS, 2),
+      "max_prompt_length": (MAX_PROMPT_LENGTH, 2048),
+      "max_response_length": (MAX_RESPONSE_LENGTH, 64),
+      "max_concurrency": (args.max_concurrency, 2),
+  }
+  wrong_geometry = {
+      name: got
+      for name, (got, expected) in expected_geometry.items()
+      if got != expected
+  }
+  if wrong_geometry:
+    raise ValueError(f"P27 frozen geometry mismatch: {wrong_geometry}")
+TRAJECTORY_MINI_BATCH_SIZE = (
+    MINI_BATCH_SIZE * NUM_GENERATIONS if CANON_P27 else None
+)
+_P27_TRAJECTORY_MICRO_RAW = os.getenv("CANON_P27_TRAJECTORY_MICRO", "")
+if _P27_TRAJECTORY_MICRO_RAW and not CANON_P27:
+  raise ValueError("CANON_P27_TRAJECTORY_MICRO requires CANON_FROZENLAKE_P27=1")
+if CANON_P27:
+  try:
+    TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = int(
+        _P27_TRAJECTORY_MICRO_RAW or "2"
+    )
+  except ValueError as exc:
+    raise ValueError("CANON_P27_TRAJECTORY_MICRO must be 1 or 2") from exc
+  if TRAIN_TRAJECTORY_MICRO_BATCH_SIZE not in (1, 2):
+    raise ValueError("CANON_P27_TRAJECTORY_MICRO must be 1 or 2")
+else:
+  TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = None
 # Held-out eval pool size in batches. The frozenlake test set ships with 100
 # prompts; NUM_TEST_BATCHES * BATCH_SIZE should be >= 100 to cover one full
 # pass per eval. With the default BATCH_SIZE=64, NUM_TEST_BATCHES=2 is
 # sufficient. Eval wall-time scales linearly with NUM_TEST_BATCHES *
 # BATCH_SIZE * num_generations.
-NUM_TEST_BATCHES = 2
+NUM_TEST_BATCHES = args.num_test_batches
 
-EVAL_EVERY_N_STEPS = 10
+EVAL_EVERY_N_STEPS = args.eval_every_n_steps
 NUM_EPOCHS = 3
 # P21.3 L3 is a one-batch, no-update release gate, not a convergence run.
 # Keeping this decision inside the default-off L3 branch prevents the three
 # dataset epochs from silently producing three alignment records.
-MAX_STEPS = (
-    1
-    if CANON_L3
-    else int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
-)
+if CANON_P31_CONVERGENCE:
+  try:
+    MAX_STEPS = int(os.getenv("CANON_P31_MAX_STEPS", "450"))
+  except ValueError as exc:
+    raise ValueError("CANON_P31_MAX_STEPS must be an integer") from exc
+  if MAX_STEPS < 1 or MAX_STEPS > 450:
+    raise ValueError("CANON_P31_MAX_STEPS must be in [1, 450]")
+else:
+  MAX_STEPS = (
+      NUM_BATCHES
+      if CANON_P27
+      else 1
+      if CANON_L3
+      else int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+  )
 
 MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
@@ -258,7 +420,6 @@ ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 if CANON_L3:
   required_l3_env = {
       "CANON_ALIGNMENT_GATE": "1",
-      "CANON_ALIGNMENT_GATE_ONLY": "1",
       "CANON_ENGINE_MODULE_C": "1",
       "CANON_RPA_VJP2": "1",
       "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
@@ -272,6 +433,30 @@ if CANON_L3:
     raise ValueError(
         "canonical FrozenLake L3 environment is incomplete: "
         f"{bad_l3_env}"
+    )
+  alignment_modes = {
+      "gate-only": os.getenv("CANON_ALIGNMENT_GATE_ONLY") == "1",
+      "update-canary": (
+          os.getenv("CANON_ALIGNMENT_UPDATE_CANARY") == "1"
+      ),
+      "train": os.getenv("CANON_ALIGNMENT_TRAIN") == "1",
+  }
+  active_modes = [name for name, active in alignment_modes.items() if active]
+  if CANON_P31_CONVERGENCE:
+    if active_modes != ["train"]:
+      raise ValueError(
+          f"P31 requires alignment train mode, got {active_modes}"
+      )
+  elif CANON_P27:
+    if active_modes not in (["gate-only"], ["update-canary"]):
+      raise ValueError(
+          "P27 bounded gates require gate-only or update-canary mode, got "
+          f"{active_modes}"
+      )
+  elif active_modes != ["gate-only"]:
+    raise ValueError(
+        "legacy canonical FrozenLake L3 requires gate-only mode, got "
+        f"{active_modes}"
     )
   if ROLLOUT_ENGINE != "vllm":
     raise ValueError("canonical FrozenLake L3 requires ROLLOUT_ENGINE=vllm")
@@ -376,6 +561,30 @@ if CANON_CONTRACT_ONLY or CANON_A3_ONLY:
   print("[CANON_L3] contract-only: dataset I/O skipped", flush=True)
 else:
   train_dataset, test_dataset = create_datasets()
+  if CANON_P31_CONVERGENCE:
+    train_rows = len(train_dataset)
+    test_rows = len(test_dataset)
+    selected_train_rows = min(NUM_BATCHES * BATCH_SIZE, train_rows)
+    available_updates = (
+        selected_train_rows * NUM_EPOCHS // BATCH_SIZE
+    )
+    if (train_rows, test_rows) != (10_000, 100):
+      raise ValueError(
+          "P31 dataset contract requires train/test=10000/100, got "
+          f"{train_rows}/{test_rows}"
+      )
+    if available_updates != 450 or MAX_STEPS > available_updates:
+      raise ValueError(
+          "P31 update capacity mismatch: "
+          f"available={available_updates} requested={MAX_STEPS}"
+      )
+    print(
+        "[CANON_FROZENLAKE_P31] DATA_CONTRACT "
+        f"train_rows={train_rows} test_rows={test_rows} "
+        f"selected_train_rows={selected_train_rows} epochs={NUM_EPOCHS} "
+        f"available_updates={available_updates} requested_updates={MAX_STEPS}",
+        flush=True,
+    )
   train_dataset, val_dataset = data_lib.post_init_dataset(
       train_dataset,
       tokenizer,
@@ -445,10 +654,15 @@ wandb_config.update({
     "mesh_shape": SHARED_MESH_SHAPE,
 })
 metrics_logging_options = None
-if not (CANON_L3 or CANON_CONTRACT_ONLY or CANON_A3_ONLY):
+if CANON_P29_FULL_TRAIN or not (
+    CANON_L3 or CANON_CONTRACT_ONLY or CANON_A3_ONLY
+):
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=TB_LOG_DIR,
-      project_name="tunix-frozenlake",
+      log_dir=os.getenv("CANON_P29_LOG_DIR", TB_LOG_DIR),
+      project_name=os.getenv(
+          "CANON_P29_WANDB_PROJECT", "tunix-frozenlake"
+      ),
+      run_name=os.getenv("CANON_P29_WANDB_RUN_NAME", ""),
       flush_every_n_steps=1,
       backend_kwargs={"wandb": {"config": wandb_config}},
   )
@@ -550,7 +764,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # Stock/release remains 4; the default-off C0 compile discriminator
         # sets both to 1 so one legal two-generation GRPO pair is one JIT call.
         train_micro_batch_size=MINI_BATCH_SIZE,
+        trajectory_mini_batch_size=TRAJECTORY_MINI_BATCH_SIZE,
+        train_trajectory_micro_batch_size=(
+            TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
+        ),
         compute_logps_micro_batch_size=MINI_BATCH_SIZE,
+        optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -607,6 +826,22 @@ if CANON_L3:
     )
     print("[CANON_L3] A3_ONLY_PASS", flush=True)
     raise SystemExit(0)
+  if CANON_P28_G3_ONLY:
+    rl_cluster.rollout.run_p28_segmented_forward_gate()
+    print("[P28.G3] FORWARD_ONLY_PASS no_backward=1 no_optimizer=1", flush=True)
+    raise SystemExit(0)
+  if CANON_P28_G4_ONLY:
+    layer_index = int(os.getenv("CANON_P28_G4_LAYER_INDEX", "0"))
+    rl_cluster.rollout.run_p28_block_vjp_gate(layer_index=layer_index)
+    print("[P28.G4] BLOCK_VJP_ONLY_PASS no_optimizer=1", flush=True)
+    raise SystemExit(0)
+  if CANON_P28_G5_ONLY:
+    rl_cluster.rollout.run_p28_full_chain_gate()
+    print(
+        "[P28.G5B] CHAIN_ONLY_PASS no_loss=1 no_optimizer=1",
+        flush=True,
+    )
+    raise SystemExit(0)
 
 
 _metric_call_idx = 0
@@ -641,7 +876,7 @@ grpo_trainer = GRPOLearner(
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,
-    env_kwargs={"max_steps": 8},
+    env_kwargs={"max_steps": args.env_max_steps},
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],
@@ -655,7 +890,29 @@ grpo_trainer.train(
     train_dataset,
     # P21.3's gate-only trainer rejects evaluation so a second batch cannot
     # consume or reorder the pending host sidecar.
-    eval_dataset=None if CANON_L3 else test_dataset,
+    eval_dataset=(
+        test_dataset
+        if CANON_P31_CONVERGENCE
+        and os.getenv("CANON_P31_ENABLE_EVAL", "") == "1"
+        else None
+        if CANON_L3
+        else test_dataset
+    ),
 )
-if CANON_L3:
+if CANON_P31_CONVERGENCE:
+  print(
+      "[CANON_FROZENLAKE_P31] TRAINING_DONE "
+      f"max_steps={MAX_STEPS} trajectory_mini={TRAJECTORY_MINI_BATCH_SIZE} "
+      f"trajectory_micro={TRAIN_TRAJECTORY_MICRO_BATCH_SIZE} "
+      f"generations={NUM_GENERATIONS} env_max_steps={args.env_max_steps}",
+      flush=True,
+  )
+elif CANON_P27:
+  print(
+      "[CANON_FROZENLAKE_P27] TRAINING_DONE "
+      f"max_steps={MAX_STEPS} trajectory_mini={TRAJECTORY_MINI_BATCH_SIZE} "
+      f"trajectory_micro={TRAIN_TRAJECTORY_MICRO_BATCH_SIZE}",
+      flush=True,
+  )
+elif CANON_L3:
   print("[CANON_L3] FULL_GATE_PASS", flush=True)

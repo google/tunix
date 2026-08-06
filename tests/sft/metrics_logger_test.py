@@ -161,6 +161,34 @@ class MetricLoggerTest(absltest.TestCase):
         logger.get_metric("test_prefix", "perplexity", "eval"), 31.6227766
     )
 
+  @mock.patch.dict(
+      os.environ, {"CANON_P31_MONOTONIC_METRICS": "1"}, clear=False
+  )
+  @mock.patch.object(jax.monitoring, "record_scalar")
+  @mock.patch.object(jax.monitoring, "register_scalar_listener")
+  def test_p31_monotonic_direct_logging(
+      self, mock_register, mock_record_scalar
+  ):
+    backend = mock.Mock(spec=metrax_logging.LoggingBackend)
+    options = metrics_logger.MetricsLoggerOptions(
+        log_dir=self.log_dir,
+        backend_kwargs={"custom_backend": [mock.Mock(return_value=backend)]},
+    )
+    logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
+
+    mock_register.assert_not_called()
+    logger.log("actor", "loss", 1.0, metrics_logger.Mode.TRAIN, 0)
+    logger.log("actor", "loss", 0.5, metrics_logger.Mode.TRAIN, 1)
+    backend.log_scalar.assert_has_calls([
+        mock.call("actor/train/loss", 1.0, step=0),
+        mock.call("actor/train/loss", 0.5, step=1),
+    ])
+    mock_record_scalar.assert_not_called()
+    with self.assertRaisesRegex(RuntimeError, "metric step regression"):
+      logger.log("actor", "loss", 0.75, metrics_logger.Mode.TRAIN, 0)
+    logger.close()
+    backend.close.assert_called_once()
+
   @mock.patch.object(jax, "process_index", return_value=1)
   @mock.patch.object(jax.monitoring, "register_scalar_listener")
   def test_no_backends_on_secondary_process(
