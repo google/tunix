@@ -10,8 +10,8 @@
 .idea
 .vscode
 .envrc
-.env
-.env.*
+/.env
+/.env.*
 
 # virtualenv/venv directories
 /venv/

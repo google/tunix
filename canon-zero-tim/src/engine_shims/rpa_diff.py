@@ -8,7 +8,7 @@ P18.2 established that the engine's `run_model` is the forward we must share bit
 `old_logp` and `new_logp`.  So the trainer needs *that* forward to admit a gradient.
 
 Design (carried over from P14.8, whose code was lost with the /tmp wipe; the reasoning is recorded
-in phase14_shared_kernel.md "设计要点")
+in the design-notes section of phase14_shared_kernel.md)
 -----------------------------------------------------------------------------------------------
 Split the requirement in two:
   * the FORWARD must be bitwise -- so the forward IS the kernel, unchanged.  Nothing is

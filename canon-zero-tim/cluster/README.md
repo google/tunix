@@ -91,6 +91,8 @@ Reference numbers from the validated 4-chip v5p host — **your topology may leg
 differ, which is the point of measuring**:
 
 ```
+[T1.PATHWAYS] required=1 initialized=1 status=ok
+[t1.devices] count=64 kind=TPU v5 platform=proxy
 [waycount] width= 2 depth=  8 XLA-all-reduce  differing_bytes=      0/...  SAME
 [waycount] width= 4 depth=  8 XLA-all-reduce  differing_bytes= ~7000/...  DIFFERS
 [waycount] width= 4 depth=  8 F4-fixed-order  differing_bytes=      0/...  SAME
@@ -138,6 +140,7 @@ Ranked by how easily each is mistaken for success.
 
 | Symptom | Meaning | Action |
 |---|---|---|
+| **Missing successful `[T1.PATHWAYS]` marker** | The proxy backend was not proven initialized before JAX import. A local/direct-TPU fallback would test a different runtime. | **Void the topology run.** In proxy mode, import/initialization failure must exit nonzero. |
 | **No `[PATHTRACE]` lines** | The intervention never executed. The chain is imported by path and by module name; a missing member does not raise — the engine silently uses its stock module while every switch still reads "on". | **Void the run.** Do not report its numbers. |
 | **A gate printed no measurement line** | It did not run. Absence is never a pass. | Investigate before rerunning. |
 | **P32 `run` is refused** | Expected: the current shared mesh would be FSDP16×TP4 and the segmented VJP is not DP-local. | Do not bypass the refusal. Return the T1/T2 artifacts; implement the DP adapter in the next phase. |

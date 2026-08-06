@@ -1,19 +1,9 @@
 """Device-count / mesh-geometry bisection.  2 devices SAME, 4 devices DIFFERS (even replicated)."""
 import os as _os
-import sys as _sys
 
-_os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
-_os.environ["PATHWAYS_ENFORCE_SUBSET_DEVICES_FORM_SUBSLICE"] = "false"
-if "--FLAGS_pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
-    _sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
-if "--pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
-    _sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+from pathways_bootstrap import initialize_pathways
 
-try:
-    import pathwaysutils
-    pathwaysutils.initialize()
-except Exception:
-    pass
+initialize_pathways()
 
 import jax, jax.numpy as jnp, numpy as np
 from jax.experimental import mesh_utils
@@ -43,24 +33,25 @@ def check(tag, mesh, spec_g, spec_d):
     (_, bd), _ = jax.jit(jax.value_and_grad(loss, argnums=0, has_aux=True))(x0, w)
     b = np.asarray(jax.device_get(bd))
     nb = int((np.ascontiguousarray(a).view(np.uint8) != np.ascontiguousarray(b).view(np.uint8)).sum())
-    print(f"[topo] {tag:48s} 差异 {nb:6d} {'SAME ***' if nb==0 else 'DIFFERS'}", flush=True)
+    print(f"[topo] {tag:48s} differing_bytes={nb:6d} "
+          f"{'SAME ***' if nb==0 else 'DIFFERS'}", flush=True)
 
 for nd in (2, 3, 4):
     try:
         m = Mesh(np.array(devs[:nd]).reshape(nd), ("m",))
-        check(f"{nd}-device 1D mesh, TP 分片", m, P(None,"m"), P("m",None))
-        check(f"{nd}-device 1D mesh, 全复制", m, P(None,None), P(None,None))
+        check(f"{nd}-device 1D mesh, TP-sharded", m, P(None,"m"), P("m",None))
+        check(f"{nd}-device 1D mesh, replicated", m, P(None,None), P(None,None))
     except Exception as e:
         print(f"[topo] {nd}-device: EXC {type(e).__name__}: {str(e)[:70]}", flush=True)
 try:
     m22 = Mesh(np.array(devs[:4]).reshape(2,2), ("a","b"))
-    check("4-device 2x2 mesh, TP 在 axis b", m22, P(None,"b"), P("b",None))
-    check("4-device 2x2 mesh, 全复制", m22, P(None,None), P(None,None))
+    check("4-device 2x2 mesh, TP on axis b", m22, P(None,"b"), P("b",None))
+    check("4-device 2x2 mesh, replicated", m22, P(None,None), P(None,None))
 except Exception as e:
     print(f"[topo] 2x2: EXC {type(e).__name__}: {str(e)[:70]}", flush=True)
-# device_order 敏感性(C6a 的回声)
+# Device-order sensitivity (the C6a echo).
 try:
     m_perm = Mesh(np.array([devs[0],devs[2],devs[1],devs[3]]).reshape(4), ("m",))
-    check("4-device 1D mesh, 顺序 [0,2,1,3], TP", m_perm, P(None,"m"), P("m",None))
+    check("4-device 1D mesh, order [0,2,1,3], TP", m_perm, P(None,"m"), P("m",None))
 except Exception as e:
     print(f"[topo] perm: EXC {type(e).__name__}: {str(e)[:70]}", flush=True)

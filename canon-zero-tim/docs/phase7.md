@@ -61,6 +61,28 @@ variance  44aebc5693c8f8f31c377c6dfecfb53ce8cce627a333f0bf4496c8c194a96152
 
 These hashes belong to CPU XLA and are a regression anchor, not expected TPU values.
 
+## Pathways bootstrap hardening
+
+T1 now initializes Pathways through one shared bootstrap before importing JAX.  A proxy run
+(`JAX_PLATFORMS` contains `proxy`, or a Pathways endpoint is configured) fails nonzero if
+`pathwaysutils` cannot be imported or initialized.  Each JAX-based probe emits exactly one
+machine-checkable `[T1.PATHWAYS]` marker, and `run.sh` rejects missing or duplicate markers.
+Directly attached TPU runs remain supported and explicitly report `required=0`.
+The cluster readiness step uses the same probe, requires the exact configured device count, and
+exits nonzero at its deadline instead of treating an expired wait as success.
+
+Local gates:
+
+```bash
+python3 tests/t1_tpu/test_pathways_bootstrap.py
+JAX_PLATFORMS=cpu CANON_REQUIRE_PATHWAYS=0 python3 tests/t1_tpu/probe_devices.py
+```
+
+The unit gate is `5/5`, including two negative controls that reject a missing module and a failed
+initializer when proxy mode is required.  The direct-attached smoke reports one CPU device and an
+explicit optional-Pathways marker.  A source scan also asserts that executable `.py`/`.sh`
+docstrings, comments, and output strings contain no Chinese text.
+
 ## Remote gate and stop rule
 
 Run `probe-only → install-only → dp-gate-only`. Preserve `$CANON_STATE/t2_dp.log`, resolved
@@ -72,4 +94,6 @@ only admits implementation of the real replicated-DP adapter, followed by the si
 in the task phase. Any missing marker, replica mismatch or repeat mismatch is a hard stop.
 
 Rollback: unset/remove the P32 admission profile and step 75; the earlier TP4 profiles and all
-production defaults are unchanged.
+production defaults are unchanged.  The bootstrap refinement can be rolled back independently by
+reverting its single commit; no model, numerical implementation, profile default or cloud state is
+changed.

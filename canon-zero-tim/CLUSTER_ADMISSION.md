@@ -38,6 +38,16 @@ the failure that otherwise presents as a completely green run against the stock 
 
 `tests/t1_tpu/probe_waycount.py`.
 
+Before accepting any numerical row, require exactly one marker from every JAX-based probe:
+
+```
+[T1.PATHWAYS] required=1 initialized=1 status=ok
+```
+
+In proxy mode, a missing marker or `initialized=0` voids the topology run.  The shared bootstrap
+executes before JAX import and exits nonzero if proxy registration fails; it never silently falls
+back to a directly attached backend.
+
 The deciding variable is neither device count nor mesh rank nor device order: it is the width
 of a **single reduction**. Measured on the probe host, in differing bytes out of 262144:
 

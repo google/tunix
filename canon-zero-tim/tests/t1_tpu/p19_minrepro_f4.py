@@ -2,27 +2,16 @@
 Baseline: 1D-4dev TP (XLA's own all-reduce) -> DIFFERS.  Arm: same math, but the row-proj
 reduction done as an explicit fixed-order ppermute tree inside shard_map."""
 import os as _os
-import sys as _sys
 
-_os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
-_os.environ["PATHWAYS_ENFORCE_SUBSET_DEVICES_FORM_SUBSLICE"] = "false"
-if "--FLAGS_pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
-    _sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
-if "--pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
-    _sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+from pathways_bootstrap import initialize_pathways
 
-try:
-    import pathwaysutils
-    pathwaysutils.initialize()
-except Exception:
-    pass
+initialize_pathways()
 
 import jax, jax.numpy as jnp, numpy as np
 from jax.experimental import mesh_utils
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 D, F, T = 512, 2048, 256
-import os as _os
 # N was hardcoded to 4 (the v5p-8 probe host).  The reduction WIDTH is the variable that
 # decides whether the third-program drift appears, so a package targeting other topologies
 # must be able to set it.  Default keeps the documented 4-way behaviour on a 4-chip host.
@@ -82,5 +71,6 @@ for L in (8, 15, 24):
         (_, bd), _ = jax.jit(jax.value_and_grad(loss, argnums=0, has_aux=True))(x0, w)
         b = np.asarray(jax.device_get(bd))
         nb = int((np.ascontiguousarray(a).view(np.uint8)!=np.ascontiguousarray(b).view(np.uint8)).sum())
-        print(f"[f4] L={L:3d} {'F4 固定序树' if fixed else 'XLA all-reduce':18s} "
-              f"差异 {nb:6d}/{a.nbytes} {'SAME ***' if nb==0 else 'DIFFERS'}", flush=True)
+        print(f"[f4] L={L:3d} {'F4 fixed-order tree' if fixed else 'XLA all-reduce':18s} "
+              f"differing_bytes={nb:6d}/{a.nbytes} "
+              f"{'SAME ***' if nb==0 else 'DIFFERS'}", flush=True)

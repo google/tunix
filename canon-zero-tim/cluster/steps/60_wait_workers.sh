@@ -10,18 +10,33 @@ if [ -z "${PATHWAYS_HEAD:-}" ]; then
   exit 0
 fi
 S="${CANON_WORKER_WAIT_SECONDS:-120}"
-echo "[wait] waiting up to ${S}s for TPU workers (64 devices) to register with Pathways..."
+EXPECT="${CANON_TOTAL_DEVICES:-64}"
+[[ "$S" =~ ^[1-9][0-9]*$ ]] || {
+  echo "[wait] REFUSING: CANON_WORKER_WAIT_SECONDS must be a positive integer" >&2
+  exit 2
+}
+[[ "$EXPECT" =~ ^[1-9][0-9]*$ ]] || {
+  echo "[wait] REFUSING: expected device count must be a positive integer" >&2
+  exit 2
+}
 
+echo "[wait] waiting up to ${S}s for exactly ${EXPECT} devices to register with Pathways"
 WAITED=0
+LAST=""
 while [ "$WAITED" -lt "$S" ]; do
-  if python3 -c "import sys, os; os.environ['FLAGS_pathways_enforce_subset_devices_form_subslice']='false'; import pathwaysutils; pathwaysutils.initialize(); import jax; d=jax.devices(); sys.exit(0 if len(d)>=64 else 1)" 2>/dev/null; then
-    echo "[wait] successfully connected to Pathways! Visible TPU devices: $(python3 -c "import pathwaysutils; pathwaysutils.initialize(); import jax; print(len(jax.devices()))" 2>/dev/null)"
-    break
+  if LAST="$(CANON_EXPECT_VISIBLE_DEVICES="$EXPECT" \
+      python3 "$CANON_PKG/tests/t1_tpu/probe_devices.py" 2>&1)"; then
+    printf '%s\n' "$LAST"
+    echo "[wait] Pathways readiness PASS after ${WAITED}s"
+    exit 0
   fi
   sleep 5
   WAITED=$((WAITED + 5))
   if [ $((WAITED % 20)) -eq 0 ]; then
-    echo "[wait] still waiting for workers to register (${WAITED}s/${S}s)..."
+    echo "[wait] still waiting (${WAITED}s/${S}s)"
   fi
 done
-echo "[wait] done"
+
+printf '%s\n' "$LAST" | grep -aE '^\[T1\.PATHWAYS\]|^\[t1\.devices\]' || true
+echo "[wait] REFUSING: Pathways did not expose exactly ${EXPECT} devices within ${S}s" >&2
+exit 1

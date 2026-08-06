@@ -96,3 +96,14 @@ built, and assert it on both sides with `CANON_EXPECT_MODEL_MESH_IDS`.
 The tunix checkout's `git remote` URL has been seen carrying a plaintext `ghp_` token with push
 rights. Existing secret scans cover W&B run trees, not `.git/config`. Never package `.git/`,
 never paste `git remote -v` output into a report, and rotate anything that has been exposed.
+
+### 13. Pathways initialization cannot be best-effort in proxy mode
+
+Importing JAX before `pathwaysutils.initialize()` or swallowing its exception can leave the
+probe on a different backend than the operator requested.  Every JAX-based T1 probe imports the
+shared `tests/t1_tpu/pathways_bootstrap.py` first.  When `JAX_PLATFORMS` contains `proxy`, or a
+Pathways endpoint is configured, import/initialization failure is fatal and a successful run must
+contain exactly one `[T1.PATHWAYS]` marker per JAX probe.  Proxy runs require
+`required=1 initialized=1`; a directly attached TPU may report `required=0 initialized=0`.
+The worker readiness loop uses the same bootstrap and rejects a timeout or the wrong visible
+device count; an elapsed sleep is not readiness evidence.

@@ -5,16 +5,11 @@ on TPU, for a sharded transformer-like stack, the primal returned by value_and_g
 bitwise-DIFFERENT from the standalone jitted forward once the stack exceeds a depth threshold,
 even with --xla_allow_excess_precision=false.  Small dims so each depth costs seconds.
 """
-import os, sys
+import os
 
-if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
-    sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+from pathways_bootstrap import initialize_pathways
 
-try:
-    import pathwaysutils
-    pathwaysutils.initialize()
-except Exception:
-    pass
+initialize_pathways()
 
 import jax, jax.numpy as jnp, numpy as np
 from jax.experimental import mesh_utils
@@ -65,5 +60,6 @@ for L in (4, 8, 12, 14, 15, 16, 20, 24):
     b = np.asarray(jax.device_get(b_dev))
     nb = int((np.ascontiguousarray(a).view(np.uint8) != np.ascontiguousarray(b).view(np.uint8)).sum())
     mx = float(np.abs(a.astype(np.float32) - b.astype(np.float32)).max())
-    print(f"[minrepro] L={L:3d}: primal差异 {nb:6d}/{a.nbytes} bytes  max|Δ|={mx:.3e}  "
+    print(f"[minrepro] L={L:3d}: primal_differing_bytes={nb:6d}/{a.nbytes} "
+          f"max_abs_delta={mx:.3e}  "
           f"{'SAME' if nb == 0 else '<<<<< DIFFERS'}", flush=True)

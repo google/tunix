@@ -1,20 +1,10 @@
 """Mesh geometry is the switch: 1D-4dev TP DIFFERS, 2x2 TP SAME.  Confirm across depth &
 mesh construction (plain reshape vs mesh_utils.create_device_mesh)."""
 import os as _os
-import sys as _sys
 
-_os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
-_os.environ["PATHWAYS_ENFORCE_SUBSET_DEVICES_FORM_SUBSLICE"] = "false"
-if "--FLAGS_pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
-    _sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
-if "--pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
-    _sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+from pathways_bootstrap import initialize_pathways
 
-try:
-    import pathwaysutils
-    pathwaysutils.initialize()
-except Exception:
-    pass
+initialize_pathways()
 
 import jax, jax.numpy as jnp, numpy as np
 from jax.experimental import mesh_utils
@@ -43,7 +33,8 @@ def check(tag, mesh, sg, sd, L):
     (_, bd), _ = jax.jit(jax.value_and_grad(loss, argnums=0, has_aux=True))(x0, w)
     b = np.asarray(jax.device_get(bd))
     nb = int((np.ascontiguousarray(a).view(np.uint8)!=np.ascontiguousarray(b).view(np.uint8)).sum())
-    print(f"[m2d] L={L:3d} {tag:44s} 差异 {nb:6d} {'SAME ***' if nb==0 else 'DIFFERS'}", flush=True)
+    print(f"[m2d] L={L:3d} {tag:44s} differing_bytes={nb:6d} "
+          f"{'SAME ***' if nb==0 else 'DIFFERS'}", flush=True)
 
 m1_plain = Mesh(np.array(devs[:4]).reshape(4), ("m",))
 m1_cdm   = Mesh(mesh_utils.create_device_mesh((4,), devs[:4]), ("m",))

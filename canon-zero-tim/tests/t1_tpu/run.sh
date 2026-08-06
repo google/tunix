@@ -38,6 +38,7 @@ if [ "${CANON_IN_CONTAINER:-0}" != "1" ]; then
     -e CANON_MINREPRO_N="${CANON_MINREPRO_N:-}" \
     -e CANON_EXPECT_MODEL_MESH_IDS="${CANON_EXPECT_MODEL_MESH_IDS:-}" \
     -e CANON_MESH_SHAPE="${CANON_MESH_SHAPE:-}" \
+    -e CANON_REQUIRE_PATHWAYS="${CANON_REQUIRE_PATHWAYS:-}" \
     -e CANON_DP_SIZE="${CANON_DP_SIZE:-}" \
     -e CANON_TARGET_M="${CANON_TARGET_M:-}" \
     -w "$HERE" "$IMAGE" bash "$HERE/run.sh"
@@ -51,8 +52,8 @@ case "$XLA_FLAGS" in
 esac
 
 RC=0
-run_probe() {  # <label> <script> <required-line-regex> [required-min-count]
-  local label="$1" script="$2" need="$3" minc="${4:-1}"
+run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pathways-marker]
+  local label="$1" script="$2" need="$3" minc="${4:-1}" check_pathways="${5:-0}"
   echo
   echo "== $label =="
   local out rc
@@ -68,26 +69,32 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count]
     echo "  FAIL: $label exited $rc" >&2
     RC=1
   fi
+  if [ "$check_pathways" = 1 ]; then
+    local pn bad_required
+    pn=$(echo "$out" | grep -acE '^\[T1\.PATHWAYS\] required=[01] initialized=[01] status=[A-Za-z0-9_-]+$')
+    if [ "$pn" -ne 1 ]; then
+      echo "  FAIL: $label produced $pn Pathways status marker(s), need exactly 1" >&2
+      RC=1
+    fi
+    bad_required=$(echo "$out" | grep -acE '^\[T1\.PATHWAYS\] required=1 initialized=0 ')
+    if [ "$bad_required" -ne 0 ]; then
+      echo "  FAIL: $label required Pathways but did not initialize it" >&2
+      RC=1
+    fi
+  fi
 }
 
-echo "[t1] devices: $(python3 -c 'try:
-    import pathwaysutils
-    pathwaysutils.initialize()
-except Exception:
-    pass
-import jax
-d=jax.devices()
-print(len(d),d[0].device_kind)' 2>&1)"
 echo "[t1] XLA_FLAGS=$XLA_FLAGS"
 
-run_probe "P1  way-count scan (NEW)"        probe_waycount.py        '^\[waycount\] width=' 2
-run_probe "P2  mesh order / slice (NEW)"    probe_mesh_order.py      '^\[mesh\] VERDICT:'   1
+run_probe "P0  Pathways/JAX registration"   probe_devices.py         '^\[t1\.devices\] '   1 1
+run_probe "P1  way-count scan (NEW)"        probe_waycount.py        '^\[waycount\] width=' 2 1
+run_probe "P2  mesh order / slice (NEW)"    probe_mesh_order.py      '^\[mesh\] VERDICT:'   1 1
 run_probe "P3  bucket contract (NEW)"       probe_bucket_contract.py '^\[bucket\] VERDICT:' 1
 run_probe "P4  F4 cost model (NEW)"         probe_f4_cost.py         '^\[f4cost\] +[0-9]'   2
-run_probe "H1  minrepro: F4 tree"           p19_minrepro_f4.py       '^\[f4\] '             2
-run_probe "H2  minrepro: third program"     p19_minrepro_thirdprog.py '差异|DIFFER|SAME'    1
-run_probe "H3  minrepro: device topology"   p19_minrepro_topo.py     '差异|DIFFER|SAME'     1
-run_probe "H4  minrepro: mesh geometry"     p19_minrepro_mesh2d.py   '^\[m2d\] '            2
+run_probe "H1  minrepro: F4 tree"           p19_minrepro_f4.py       '^\[f4\] '             2 1
+run_probe "H2  minrepro: third program"     p19_minrepro_thirdprog.py 'DIFFER|SAME'          1 1
+run_probe "H3  minrepro: device topology"   p19_minrepro_topo.py     'DIFFER|SAME'          1 1
+run_probe "H4  minrepro: mesh geometry"     p19_minrepro_mesh2d.py   '^\[m2d\] '            2 1
 
 echo
 if [ "$RC" = 0 ]; then

@@ -210,9 +210,10 @@ def make_diff_rpa_chunked_ragged(kernel_fn, *, sm_scale, page_size, num_q_heads,
         n_seqs_max = kv_lens.shape[0]
         bpr = page_indices.shape[0] // n_seqs_max
         T = q.shape[0]
-        # 事件 #21(本轮悬挂真因):默认取 n_seqs_max(=64)会把 backward 展开成
-        # 64 序列 × 64 层 = 4096 次 replica VJP,trace 从 0.014s 涨到 151s、编译不收敛。
-        # 默认改为 1(单序列);多序列须显式声明 CANON_VJP2_MAX_SEQS。
+        # Event 21 (root cause of the compile stall): defaulting to n_seqs_max=64 expands
+        # backward to 64 sequences x 64 layers = 4096 replica VJPs. Trace time grew from
+        # 0.014s to 151s and compilation did not converge. Default to one sequence; callers
+        # must explicitly set CANON_VJP2_MAX_SEQS for multi-sequence workloads.
         n_active = int(os.environ.get("CANON_VJP2_MAX_SEQS", "1"))
         n_active = min(n_active, n_seqs_max)
 
@@ -222,8 +223,9 @@ def make_diff_rpa_chunked_ragged(kernel_fn, *, sm_scale, page_size, num_q_heads,
         dcache_attn = jnp.zeros_like(kv_cache)
         dcache_pass = g_cache
 
-        # Multi-sequence:每个序列独立(自有 kv_len / q 区间 / 页表)。静态展开 n_active 次,
-        # 每次用 row mask 把非本序列的行清零 —— 形状全静态,traced 标量只做值运算。
+        # Each sequence has its own kv_len, query interval, and page table. Statically unroll
+        # n_active iterations and mask rows from other sequences. Shapes remain static and
+        # traced scalars participate only in value computations.
         for i in range(n_active):
             kv_len_i = kv_lens[i]
             q0_i = cu_q_lens[i]
@@ -231,8 +233,8 @@ def make_diff_rpa_chunked_ragged(kernel_fn, *, sm_scale, page_size, num_q_heads,
             q_len_i = q1_i - q0_i
             tbl_i = jax.lax.dynamic_slice(page_indices, (i * bpr,), (bpr,))
             rows = jnp.arange(T)
-            sel = (rows >= q0_i) & (rows < q1_i)          # 本序列占用的 q 行
-            # 把本序列的行搬到 [0, q_len_i) 处以复用单序列 replica(gather + 掩码)
+            sel = (rows >= q0_i) & (rows < q1_i)  # Query rows owned by this sequence.
+            # Move this sequence to [0, q_len_i) to reuse the single-sequence replica.
             src = q0_i + rows
             src_ok = rows < q_len_i
             gidx = jnp.where(src_ok, jnp.clip(src, 0, T - 1), 0)
@@ -246,14 +248,14 @@ def make_diff_rpa_chunked_ragged(kernel_fn, *, sm_scale, page_size, num_q_heads,
 
             _, vjp_i = jax.vjp(f_i, qi, ki, vi, kv_cache)
             dqi, dki, dvi, dca_i = vjp_i(goi.astype(q.dtype))
-            # 搬回原行位置
+            # Move cotangents back to their original rows.
             back = jnp.clip(rows - q0_i, 0, T - 1)
             put_ok = sel
             dq = dq + jnp.where(put_ok[:, None, None], dqi[back], 0)
             dk = dk + jnp.where(put_ok[:, None, None], dki[back], 0)
             dv = dv + jnp.where(put_ok[:, None, None], dvi[back], 0)
             dcache_attn = dcache_attn + dca_i
-            # g[1] 路由:本序列写入的槽折入 dk/dv,其余透传
+            # Route g[1]: fold slots written by this sequence into dk/dv; pass others through.
             ctx_i = kv_len_i - q_len_i
             pos_i = ctx_i + jnp.clip(rows - q0_i, 0, T - 1)
             pg_i = tbl_i[pos_i // page_size]
