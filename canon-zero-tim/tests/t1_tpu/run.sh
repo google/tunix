@@ -56,10 +56,13 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pa
   local label="$1" script="$2" need="$3" minc="${4:-1}" check_pathways="${5:-0}"
   echo
   echo "== $label =="
-  sleep 8
-  local out rc
-  out="$(python3 "$HERE/$script" 2>&1)"; rc=$?
-  echo "$out" | sed 's/^/  /'
+  local tmp_out
+  tmp_out="$(mktemp -t canon_probe.XXXXXX)"
+  python3 -u "$HERE/$script" 2>&1 | tee "$tmp_out" | sed 's/^/  /'
+  local rc="${PIPESTATUS[0]}"
+  local out
+  out="$(cat "$tmp_out")"
+  rm -f "$tmp_out"
   local n
   n=$(echo "$out" | grep -acE "$need")
   if [ "$n" -lt "$minc" ]; then

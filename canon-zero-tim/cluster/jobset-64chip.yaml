@@ -151,6 +151,10 @@ spec:
                 value: ""                  # fill from the first T2-DP MESH line
               - name: CANON_WORKER_WAIT_SECONDS
                 value: "600"
+              - name: CANON_WAYCOUNT_WIDTHS
+                value: "2,4"
+              - name: CANON_WAYCOUNT_DEPTHS
+                value: "8,15"
               # MIN_TOKEN_BUCKET is a GLOBAL token count.  Under data parallelism the dp=1
               # value silently unpins the bucket; derive it with probe_bucket_contract.py.
               - name: MIN_TOKEN_BUCKET
