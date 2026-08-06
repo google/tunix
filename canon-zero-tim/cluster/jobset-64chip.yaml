@@ -46,7 +46,7 @@ spec:
     replicas: 1
     template:
       spec:
-        backoffLimit: 0
+        backoffLimit: 3
         template:
           metadata:
             labels:

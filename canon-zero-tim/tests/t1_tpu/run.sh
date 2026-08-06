@@ -56,7 +56,7 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pa
   local label="$1" script="$2" need="$3" minc="${4:-1}" check_pathways="${5:-0}"
   echo
   echo "== $label =="
-  sleep 2
+  sleep 6
   local out rc
   out="$(python3 "$HERE/$script" 2>&1)"; rc=$?
   echo "$out" | sed 's/^/  /'
