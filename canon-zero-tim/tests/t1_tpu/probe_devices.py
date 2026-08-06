@@ -10,16 +10,11 @@ import jax  # noqa: E402  Pathways must register before JAX import.
 
 
 def main() -> int:
-    import time
-    devices = []
-    for attempt in range(15):
-        try:
-            devices = jax.devices()
-            if devices:
-                break
-        except Exception:
-            pass
-        time.sleep(2)
+    try:
+        devices = jax.devices()
+    except Exception as exc:
+        print(f"[t1.devices] REFUSING: jax.devices() failed: {exc}", flush=True)
+        return 1
     if not devices:
         print("[t1.devices] REFUSING: JAX reported zero devices", flush=True)
         return 1

@@ -56,7 +56,7 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pa
   local label="$1" script="$2" need="$3" minc="${4:-1}" check_pathways="${5:-0}"
   echo
   echo "== $label =="
-  sleep 6
+  sleep 8
   local out rc
   out="$(python3 "$HERE/$script" 2>&1)"; rc=$?
   echo "$out" | sed 's/^/  /'
@@ -86,6 +86,7 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pa
 }
 
 echo "[t1] XLA_FLAGS=$XLA_FLAGS"
+sleep 10
 
 run_probe "P0  Pathways/JAX registration"   probe_devices.py         '^\[t1\.devices\] '   1 1
 run_probe "P1  way-count scan (NEW)"        probe_waycount.py        '^\[waycount\] width=' 2 1
