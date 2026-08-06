@@ -214,6 +214,27 @@ jobs:
           done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
         done
 
+        # Frozenlake Tests
+        echo "::group::📦 Executing: frozenlake (gemma4 e2b)"
+        chmod +x ./examples/frozenlake/run_gemma4_e2b.sh
+        if bash ./examples/frozenlake/run_gemma4_e2b.sh \
+            rl_training_config.max_steps=5 \
+            rl_training_config.eval_every_n_steps=1; then
+          echo "✅ Successfully completed: frozenlake (gemma4 e2b)"
+          echo "| frozenlake (gemma4 e2b) | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+        else
+          exit_code=$?
+          echo "❌ Failed to complete: frozenlake (gemma4 e2b) (Exit Code: $exit_code)" >&2
+          echo "| frozenlake (gemma4 e2b) | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+          FINAL_EXIT_CODE=1
+          FAILED_SCRIPTS+=("frozenlake (gemma4 e2b)")
+        fi
+        echo "::endgroup::"
+
+        # Restore Tunix dependencies and numpy
+        python3 -m pip install -e .[dev,test,cli]
+        python3 -m pip install numpy==2.3.5 --force-reinstall
+
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
           echo "🚫 One or more RL scripts failed:" >&2
           for failed_script in "${FAILED_SCRIPTS[@]}"; do
@@ -398,6 +419,13 @@ jobs:
         echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4) ..."
         model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
           bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || { FAILED=1; FAILED_SCRIPTS+=("Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4)"); }
+
+        echo "📦 Executing Frozenlake (gemma4 e2b) ..."
+        chmod +x ./examples/frozenlake/run_gemma4_e2b.sh
+        bash ./examples/frozenlake/run_gemma4_e2b.sh rl_training_config.max_steps=5 rl_training_config.eval_every_n_steps=1 || { FAILED=1; FAILED_SCRIPTS+=("Frozenlake (gemma4 e2b)"); }
+
+        # Restore Tunix dependencies
+        pip install -e .[prod,test,cli]
 
         if [ "$FAILED" -ne 0 ]; then
           echo "❌ One or more run_latest tests failed:" >&2
