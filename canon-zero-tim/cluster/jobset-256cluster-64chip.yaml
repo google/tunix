@@ -96,7 +96,7 @@ spec:
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
                 - --node_type=resource_manager
                 - --instance_count=1
-                - --instance_type=tpuv5:4x4x4
+                - --instance_type=tpuv5:4x8x8
               env:
                 - name: HOST_ADDRESS
                   value: localhost
@@ -215,7 +215,7 @@ spec:
                 - --server_port=29000
                 - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
                 - --node_type=worker
-                - --instance_type=tpuv5:4x4x4
+                - --instance_type=tpuv5:4x8x8
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
               env:
                 - name: TPU_MIN_LOG_LEVEL
