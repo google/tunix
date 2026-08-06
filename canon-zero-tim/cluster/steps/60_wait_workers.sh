@@ -20,15 +20,22 @@ EXPECT="${CANON_TOTAL_DEVICES:-64}"
   exit 2
 }
 
-echo "[wait] waiting up to ${S}s for exactly ${EXPECT} devices to register with Pathways"
+echo "[wait] waiting up to ${S}s for exactly ${EXPECT} devices to register with Pathways (requiring 3 consecutive stable probes)"
 WAITED=0
+CONSECUTIVE=0
 LAST=""
 while [ "$WAITED" -lt "$S" ]; do
   if LAST="$(CANON_EXPECT_VISIBLE_DEVICES="$EXPECT" \
       python3 "$CANON_PKG/tests/t1_tpu/probe_devices.py" 2>&1)"; then
-    printf '%s\n' "$LAST"
-    echo "[wait] Pathways readiness PASS after ${WAITED}s"
-    exit 0
+    CONSECUTIVE=$((CONSECUTIVE + 1))
+    echo "[wait] probe passed ($CONSECUTIVE/3 stable checks, ${WAITED}s/${S}s)"
+    if [ "$CONSECUTIVE" -ge 3 ]; then
+      printf '%s\n' "$LAST"
+      echo "[wait] Pathways readiness PASS after ${WAITED}s (stable across 3 consecutive probes)"
+      exit 0
+    fi
+  else
+    CONSECUTIVE=0
   fi
   sleep 5
   WAITED=$((WAITED + 5))
