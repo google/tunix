@@ -72,7 +72,8 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count]
 
 echo "[t1] devices: $(python3 -c 'try:
     import pathwaysutils
-except ImportError:
+    pathwaysutils.initialize()
+except Exception:
     pass
 import jax
 d=jax.devices()

@@ -36,8 +36,9 @@ if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
     sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
 
 try:
-    import pathwaysutils  # noqa: F401
-except ImportError:
+    import pathwaysutils
+    pathwaysutils.initialize()
+except Exception:
     pass
 
 import jax

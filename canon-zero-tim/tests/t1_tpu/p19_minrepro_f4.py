@@ -1,5 +1,6 @@
 """Does an F4-style fixed-order reduction make the 4-way case bitwise across programs?
 Baseline: 1D-4dev TP (XLA's own all-reduce) -> DIFFERS.  Arm: same math, but the row-proj
+reduction done as an explicit fixed-order ppermute tree inside shard_map."""
 import os as _os
 import sys as _sys
 
@@ -7,8 +8,9 @@ if "--pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
     _sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
 
 try:
-    import pathwaysutils  # noqa: F401
-except ImportError:
+    import pathwaysutils
+    pathwaysutils.initialize()
+except Exception:
     pass
 
 import jax, jax.numpy as jnp, numpy as np
