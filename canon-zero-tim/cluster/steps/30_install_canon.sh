@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Build the canonical chain from patches + shims, in-container.
+#
+# --from-path reads the six stock files straight off this filesystem: no docker, no image on
+# disk, no network.  That is what makes the package work in a pod, and on whatever machine you
+# move to next.
+set -euo pipefail
+source "$CANON_STATE/env.sh"
+SP="$(cat "$CANON_STATE/tpu_inference_path")"
+OUT="${CANON_INSTALL_DIR:-$CANON_STATE/canon}"
+rm -rf "$OUT"
+bash "$CANON_PKG/install.sh" "$OUT" --from-path "$SP" --model "$CANON_MODEL_DIR_NAME"
+echo "$OUT" > "$CANON_STATE/install_dir"
+echo "[install] installed to $OUT ($(find "$OUT" -name '*.py' | wc -l) files)"

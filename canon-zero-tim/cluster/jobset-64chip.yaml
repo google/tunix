@@ -1,0 +1,195 @@
+# canon-zero-tim on Pathways/GKE -- v5p 4x4x4 (64 chips, 16 worker pods x 4).
+#
+# Adapted from experimental/gsm8k_refactor_stream_pack_v5p.yaml.  The only structural change
+# is the jax-tpu container command: everything it used to do inline now lives in
+# canon-zero-tim/cluster/, so behaviour is changed by a git commit you can review rather than
+# by editing an indented heredoc inside YAML.
+#
+#   kubectl apply -f jobset-64chip.yaml
+#   kubectl logs -f jobs/canon-zero-tim-v5p-64-pathways-head-0
+#
+# Start in CANON_MODE=probe-only.  Promote to install-only, then gate-only, then run, and only
+# after reading the previous stage's output against CLUSTER_ADMISSION.md.  A zero exit code is
+# not an admission.
+#
+# BEFORE FIRST USE, set:
+#   * spec.replicatedJobs[0]...containers[jax-tpu].image  -> your image, PINNED BY DIGEST.
+#     A floating :latest tag means the same manifest runs on a different engine tomorrow,
+#     which is incompatible with a bitwise contract.
+#   * CANON_EXPECT_MODEL_MESH_IDS -> the order this topology actually produces.  Get it from
+#     probe_mesh_order.py; an order inherited from a different mesh shape is worse than none.
+#   * the branch name in the sync block, if it is not yuxzhang/canon-zero-tim.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: canon-zero-tim-v5p-64
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  # Head first: workers that dial an unresolvable head DNS fail instantly.
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  replicatedJobs:
+
+  # ---------------------------------------------------------------------------
+  # 1. PATHWAYS COORDINATOR (CPU head)
+  # ---------------------------------------------------------------------------
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: pathways-head-c4
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            initContainers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=localhost:29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
+              env:
+                - name: PATHWAYS_HEAD
+                  value: localhost
+              resources:
+                requests: {cpu: '16', memory: 100Gi}
+                limits:   {cpu: '32', memory: 350G}
+              restartPolicy: Always
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
+                - --node_type=resource_manager
+                - --instance_count=1
+                - --instance_type=tpuv5:4x4x4
+              env:
+                - name: HOST_ADDRESS
+                  value: localhost
+                - name: TPU_SKIP_MDS_QUERY
+                  value: 'true'
+              resources:
+                requests: {cpu: '8', memory: 32Gi}
+                limits:   {cpu: '16', memory: 150G}
+              restartPolicy: Always
+            containers:
+            - name: jax-tpu
+              # PIN THIS BY DIGEST.  See the header note.
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_base_image:latest
+              imagePullPolicy: Always
+              resources:
+                limits: {cpu: '24', memory: 200G}
+              command:
+              - bash
+              - -c
+              - |
+                set -uo pipefail
+                echo "XPK Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                git config --global --add safe.directory "$(pwd)"
+                git init -q
+                git remote set-url origin https://github.com/google/tunix.git 2>/dev/null \
+                  || git remote add origin https://github.com/google/tunix.git
+                git fetch -q origin yuxzhang/canon-zero-tim
+                git reset -q --hard FETCH_HEAD
+                exec bash canon-zero-tim/cluster/entrypoint.sh
+              env:
+              # --- what to run -------------------------------------------------------------
+              - name: CANON_MODE
+                value: probe-only          # probe-only | install-only | gate-only | run
+              - name: CANON_PROFILE_FILE
+                value: cluster/profiles/qwen3-1p7b.env
+              - name: CANON_STATE
+                value: /tmp/canon-state
+              # Only read in CANON_MODE=run.  Kept here so the manifest records exactly what a
+              # promotion would execute.
+              - name: CANON_RUN_CMD
+                value: >-
+                  python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py
+                  --mesh_fsdp 16 --mesh_tp 4 --batch_size 64 --mini_batch_size 64
+                  --train_micro_batch_size 16 --compute_logps_micro_batch_size 16
+                  --max_seq_token_per_tpu 4096
+              # --- topology-specific: MUST be set from probe output, not inherited ----------
+              - name: CANON_EXPECT_MODEL_MESH_IDS
+                value: ""                  # fill from probe_mesh_order.py on THIS topology
+              # MIN_TOKEN_BUCKET is a GLOBAL token count.  Under data parallelism the dp=1
+              # value silently unpins the bucket; derive it with probe_bucket_contract.py.
+              - name: MIN_TOKEN_BUCKET
+                value: "256"
+              # --- pathways ----------------------------------------------------------------
+              - name: PATHWAYS_HEAD
+                value: localhost
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: FLAGS_pathways_enforce_subset_devices_form_subslice
+                value: "False"
+              # --- secrets: inherited only, never written into the manifest -----------------
+              - name: INJECTED_HF_TOKEN
+                valueFrom:
+                  secretKeyRef: {name: yuxzhang-secrets, key: HF_TOKEN, optional: true}
+              - name: INJECTED_WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef: {name: yuxzhang-secrets, key: WANDB_API_KEY, optional: true}
+              - name: HF_HOME
+                value: /tmp/huggingface
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            volumes:
+            - hostPath: {path: /tmp, type: DirectoryOrCreate}
+              name: shared-tmp
+
+  # ---------------------------------------------------------------------------
+  # 2. TPU WORKERS -- 16 pods x 4 chips = 64
+  # ---------------------------------------------------------------------------
+  - name: pathways-worker
+    replicas: 1
+    template:
+      spec:
+        # Fallback if the cluster's JobSet CRD predates startupPolicy (unknown fields are
+        # pruned silently): let workers retry instead of failing the whole JobSet on first dial.
+        backoffLimit: 10
+        completions: 16
+        parallelism: 16
+        completionMode: Indexed
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x4
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              args:
+                - --server_port=29000
+                - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
+                - --node_type=worker
+                - --instance_type=tpuv5:4x4x4
+              env:
+                - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                  value: 'true'
+                - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+                  value: '0.9'
+                - name: ENABLE_PATHWAYS_PERSISTENCE
+                  value: '0'
+              resources:
+                limits:
+                  google.com/tpu: '4'
