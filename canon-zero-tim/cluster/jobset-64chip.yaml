@@ -78,7 +78,7 @@ spec:
             restartPolicy: Never
             containers:
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
               args:
                 - --server_port=29000
                 - --resource_manager_address=localhost:29001
@@ -90,7 +90,7 @@ spec:
                 requests: {cpu: '16', memory: 100Gi}
                 limits:   {cpu: '32', memory: 350G}
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
               args:
                 - --server_port=29001
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
@@ -206,19 +206,52 @@ spec:
             restartPolicy: OnFailure
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
               args:
                 - --server_port=29000
                 - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x4x4
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
               env:
+                - name: TPU_MIN_LOG_LEVEL
+                  value: "0"
+                - name: TF_CPP_MIN_LOG_LEVEL
+                  value: "0"
+                - name: XCLOUD_ENVIRONMENT
+                  value: GCP
+                - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                  value: "false"
+                - name: MEGASCALE_NUM_SLICES
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+                - name: JOBSET_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: MEGASCALE_SLICE_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: MEGASCALE_COORDINATOR_ADDRESS
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
                 - name: XLA_PYTHON_CLIENT_PREALLOCATE
                   value: 'true'
                 - name: XLA_PYTHON_CLIENT_MEM_FRACTION
                   value: '0.9'
                 - name: ENABLE_PATHWAYS_PERSISTENCE
-                  value: '0'
+                  value: '1'
               resources:
                 limits:
                   google.com/tpu: '4'
