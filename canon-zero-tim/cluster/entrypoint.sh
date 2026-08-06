@@ -49,6 +49,21 @@ step() {
 
 log "start $(date -u +%Y-%m-%dT%H:%M:%SZ)  mode=$MODE  pkg=$PKG"
 
+# Retry visibility.  The JobSet restarts on failure, and a red gate IS a failure -- so a log
+# can be from attempt N while `kubectl logs` makes it look like the only run.  Print the
+# attempt so a report can state it.  Unknown is reported as unknown: assuming a first attempt
+# is exactly the mistake this line exists to prevent.
+ATTEMPT="${JOBSET_RESTART_ATTEMPT:-}"
+if [ -z "$ATTEMPT" ]; then
+  log "JOBSET_ATTEMPT unknown  pod=${CANON_POD_NAME:-?}  -- the restart-attempt annotation was"
+  log "JOBSET_ATTEMPT   not exposed here.  A verdict below cannot be shown to be a first attempt."
+elif [ "$ATTEMPT" = "0" ]; then
+  log "JOBSET_ATTEMPT 0 (first attempt)  pod=${CANON_POD_NAME:-?}"
+else
+  log "JOBSET_ATTEMPT $ATTEMPT  pod=${CANON_POD_NAME:-?}  -- THIS IS A RETRY.  A gate verdict from"
+  log "JOBSET_ATTEMPT   a retried run is not evidence of determinism; report the attempt number."
+fi
+
 step 00_env.sh
 step 10_sync_repo.sh
 step 20_probe_image.sh

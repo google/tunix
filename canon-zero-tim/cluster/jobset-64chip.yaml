@@ -30,6 +30,21 @@ metadata:
     kueue.x-k8s.io/queue-name: multislice-queue
 spec:
   failurePolicy:
+    # WARNING -- read this before believing a green run.
+    #
+    # This restarts the whole JobSet on failure, and a gate verdict is a failure: a red gate
+    # exits nonzero, the head Job fails, and the JobSet is recreated.  The two limits multiply
+    # -- the head Job's backoffLimit retries its pod within one JobSet attempt, and maxRestarts
+    # recreates the JobSet -- so with backoffLimit 3 and maxRestarts 100 a gate can run on the
+    # order of 400 times.  `kubectl logs` shows the CURRENT pod.  "It passed" then means "one
+    # attempt out of many passed", which is the opposite of the determinism this manifest
+    # exists to measure.
+    #
+    # The value is left as configured -- this cluster needs restarts for node autoscaling and
+    # evictions.  Instead the attempt is made visible: entrypoint.sh prints
+    # [entrypoint] JOBSET_ATTEMPT, and an admission report must state it.  A verdict from any
+    # attempt after the first is a retry, not a result.  If you want a strict single-shot gate,
+    # set maxRestarts to 0 for that run.
     maxRestarts: 100
     restartStrategy: Recreate
   network:
@@ -57,7 +72,12 @@ spec:
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
-            containers:
+            # Native sidecars.  A container-level restartPolicy is only a valid field on an
+            # initContainer -- that pairing IS the sidecar mechanism: start first, stay up, and
+            # do not hold the pod open once the main container exits.  On a regular container
+            # the field is not part of the pod spec, and the pod would never complete because
+            # proxy and rm keep running after jax-tpu returns.
+            initContainers:
             - name: pathways-proxy
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
               args:
@@ -88,6 +108,7 @@ spec:
                 requests: {cpu: '8', memory: 32Gi}
                 limits:   {cpu: '16', memory: 150G}
               restartPolicy: Always
+            containers:
             - name: jax-tpu
               # PIN THIS BY DIGEST.  See the header note.
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
@@ -108,6 +129,18 @@ spec:
                 git reset -q --hard FETCH_HEAD
                 exec bash canon-zero-tim/cluster/entrypoint.sh
               env:
+              # --- retry visibility --------------------------------------------------------
+              # Downward API.  If the JobSet controller in this cluster uses a different
+              # annotation key the value arrives empty, and entrypoint.sh reports it as unknown
+              # rather than assuming a first attempt.
+              - name: JOBSET_RESTART_ATTEMPT
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/restart-attempt']
+              - name: CANON_POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
               # --- what to run -------------------------------------------------------------
               - name: CANON_MODE
                 value: dp-gate-only          # probe-only | install-only | gate-only | dp-gate-only

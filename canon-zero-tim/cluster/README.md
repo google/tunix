@@ -140,6 +140,7 @@ Ranked by how easily each is mistaken for success.
 
 | Symptom | Meaning | Action |
 |---|---|---|
+| **`JOBSET_ATTEMPT` is not 0, or is unknown** | The JobSet restarts on failure and a red gate is a failure, so this log may be from a later attempt while `kubectl logs` shows only the current pod. A verdict from a retried run is not evidence of determinism -- it is evidence that one attempt out of several passed. | Report the attempt number with the verdict. For a strict single-shot gate set `failurePolicy.maxRestarts: 0` for that run. |
 | **Missing successful `[T1.PATHWAYS]` marker** | The proxy backend was not proven initialized before JAX import. A local/direct-TPU fallback would test a different runtime. | **Void the topology run.** In proxy mode, import/initialization failure must exit nonzero. |
 | **No `[PATHTRACE]` lines** | The intervention never executed. The chain is imported by path and by module name; a missing member does not raise — the engine silently uses its stock module while every switch still reads "on". | **Void the run.** Do not report its numbers. |
 | **A gate printed no measurement line** | It did not run. Absence is never a pass. | Investigate before rerunning. |
@@ -159,10 +160,12 @@ Artifacts, not conclusions. A verdict without its raw log cannot be re-read late
 
 ```
 1. raw log path + sha256sum
-2. CANON_MODE, the resolved /tmp/canon-state/env.sh, and the image DIGEST (not the tag)
-3. probe output verbatim:  [probe] SUMMARY / [rope] ROPE_FIX / [mesh] / [waycount] / [bucket] / [P32.DP]
-4. any override used:      CANON_ALLOW_IMAGE_DRIFT, CANON_ALLOW_UNVERSIONED
-5. exit codes of every step
+2. the [entrypoint] JOBSET_ATTEMPT line verbatim -- without it a verdict cannot be shown
+   to come from a first attempt rather than a retry
+3. CANON_MODE, the resolved /tmp/canon-state/env.sh, and the image DIGEST (not the tag)
+4. probe output verbatim:  [probe] SUMMARY / [rope] ROPE_FIX / [mesh] / [waycount] / [bucket] / [P32.DP]
+5. any override used:      CANON_ALLOW_IMAGE_DRIFT, CANON_ALLOW_UNVERSIONED
+6. exit codes of every step
 ```
 
 Do not paste tokens or `.git/config`. Do not summarise a red gate as "mostly working".
