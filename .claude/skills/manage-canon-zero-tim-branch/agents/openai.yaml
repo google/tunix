@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage canon-zero-tim Branch"
+  short_description: "Audit and safely advance the zero-TIM clean branch"
+  default_prompt: "Use $manage-canon-zero-tim-branch to audit the clean delivery branch, distinguish implemented code from verified evidence, and identify the next safe validation gate."
