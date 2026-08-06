@@ -15,6 +15,8 @@
 #                it, and stop.  Costs no TPU.  Run this first on a new cluster.
 #   gate-only    00..50 + T1 -- install the chain, prove [PATHTRACE] fired, run the topology
 #                admission probes.  No training, no optimizer, no checkpoint.
+#   dp-gate-only 00..50 + T1 + T2-DP -- additionally measure DP reduction, placement
+#                sensitivity and one small AdamW update.  Still no model or training.
 #   run          00..90 -- everything, then the command in CANON_RUN_CMD.
 #
 # Every step is fail-closed and ordered.  A step that produces no output did not run, and a
@@ -66,10 +68,15 @@ if [ "$MODE" = "install-only" ]; then
   exit 0
 fi
 
-if [ "$MODE" = "gate-only" ]; then
+if [ "$MODE" = "gate-only" ] || [ "$MODE" = "dp-gate-only" ]; then
   step 60_wait_workers.sh
   step 70_run_t1.sh
+  if [ "$MODE" = "dp-gate-only" ]; then
+    step 75_run_dp.sh
+  fi
   log "mode=gate-only -- topology admission probes complete.  No training was run."
+  [ "$MODE" = "dp-gate-only" ] && \
+    log "T2-DP complete -- read DECISION/OBSERVATIONS; PASS is fixed-placement only."
   log "Read the numbers against CLUSTER_ADMISSION.md; a zero exit code is not an admission."
   exit 0
 fi

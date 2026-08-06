@@ -57,6 +57,13 @@ fi
 # Preflight: refuse an incomplete canonical set rather than warn inside a log nobody reads.
 fail=0
 req() { [ -n "${!1:-}" ] || { echo "[env] MISSING: $1" >&2; fail=1; }; }
+positive_int() {
+  local key="$1" value="${!1:-}"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "[env] INVALID positive integer: $key=${value@Q}" >&2
+    fail=1
+  }
+}
 for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED CANON_RPA_D CANON_RPA_P CANON_RPA_M \
          CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS CANON_LOGPROB_M CANON_PROMPT_PROCESSED_LOGPROBS \
          MIN_TOKEN_BUCKET NEW_MODEL_DESIGN XLA_FLAGS CANON_PROFILE CANON_MODEL_DIR_NAME \
@@ -69,6 +76,49 @@ if [ -n "${CANON_RPA_VJP:-}" ] && [ "${CANON_RPA_VJP:-}" = "1" ]; then
   echo "[env] NOTE: CANON_RPA_VJP=1 is set alongside VJP2.  VJP2 wins in the engine, but if"
   echo "[env]       VJP2 were ever unset this would silently select the prefill-only contract"
   echo "[env]       whose kv gradients are identically zero.  See KNOWN_FOOTGUNS.md."
+fi
+
+if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
+  for k in CANON_DP_SIZE CANON_TP_SIZE CANON_TOTAL_DEVICES CANON_ENGINE_DP_SIZE \
+           CANON_GLOBAL_PROMPTS CANON_LOCAL_PROMPTS CANON_NUM_GENERATIONS \
+           CANON_LOCAL_TRAJECTORIES CANON_GLOBAL_TRAJECTORIES \
+           CANON_DP_PROBE_LOCAL_SAMPLES CANON_TARGET_M CANON_MAX_BATCHED; do
+    req "$k"
+    positive_int "$k"
+  done
+  req CANON_TRAIN_DP_SHARDING
+  [ "${CANON_TRAIN_DP_SHARDING:-}" = "replicated-params" ] || {
+    echo "[env] P32 requires replicated-params, got ${CANON_TRAIN_DP_SHARDING:-unset}" >&2
+    fail=1
+  }
+  [ "$((CANON_DP_SIZE * CANON_TP_SIZE))" -eq "$CANON_TOTAL_DEVICES" ] || {
+    echo "[env] P32 arithmetic FAIL: dp*tp != total devices" >&2; fail=1;
+  }
+  [ "$CANON_ENGINE_DP_SIZE" -eq "$CANON_DP_SIZE" ] || {
+    echo "[env] P32 arithmetic FAIL: engine dp != trainer dp" >&2; fail=1;
+  }
+  [ "$((CANON_DP_SIZE * CANON_LOCAL_PROMPTS))" -eq "$CANON_GLOBAL_PROMPTS" ] || {
+    echo "[env] P32 arithmetic FAIL: dp*local prompts != global prompts" >&2; fail=1;
+  }
+  [ "$((CANON_LOCAL_PROMPTS * CANON_NUM_GENERATIONS))" -eq "$CANON_LOCAL_TRAJECTORIES" ] || {
+    echo "[env] P32 arithmetic FAIL: local prompts*generations != local trajectories" >&2; fail=1;
+  }
+  [ "$((CANON_GLOBAL_PROMPTS * CANON_NUM_GENERATIONS))" -eq "$CANON_GLOBAL_TRAJECTORIES" ] || {
+    echo "[env] P32 arithmetic FAIL: global prompts*generations != global trajectories" >&2; fail=1;
+  }
+  [ "$CANON_DP_PROBE_LOCAL_SAMPLES" -eq "$CANON_LOCAL_TRAJECTORIES" ] || {
+    echo "[env] P32 probe must measure one local trajectory batch" >&2; fail=1;
+  }
+  [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
+    echo "[env] P32 bucket FAIL: MIN_TOKEN_BUCKET must equal dp*CANON_LOGPROB_M" >&2; fail=1;
+  }
+  [ "${FL_SHARED_MESH:-}" = "1,4" ] || {
+    echo "[env] P32 admission must keep the legacy trainer at TP4-only; 16,4 currently means FSDP" >&2
+    fail=1
+  }
+  echo "[env] P32 admission arithmetic OK: DP${CANON_DP_SIZE}xTP${CANON_TP_SIZE}, "\
+"${CANON_LOCAL_TRAJECTORIES} local / ${CANON_GLOBAL_TRAJECTORIES} global trajectories, "\
+"global M=${MIN_TOKEN_BUCKET}"
 fi
 [ "$fail" = 0 ] || { echo "[env] REFUSING TO CONTINUE: canonical set incomplete" >&2; exit 1; }
 

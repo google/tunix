@@ -6,6 +6,13 @@
 # checked afterwards: an intervention that never fired produces a perfectly green run.
 set -uo pipefail
 source "$CANON_STATE/env.sh"
+if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] && \
+   [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ]; then
+  echo "[run] REFUSING: P32 profile is admission-only." >&2
+  echo "[run] A real (dp,tp) replicated-parameter segmented VJP has not passed remote gates;" >&2
+  echo "[run] FL_SHARED_MESH=16,4 would currently mean FSDP16xTP4, not DP16xTP4." >&2
+  exit 2
+fi
 : "${CANON_RUN_CMD:?CANON_RUN_CMD unset -- nothing to run}"
 LOG="${CANON_RUN_LOG:-$CANON_STATE/run.log}"
 echo "[run] cmd: $CANON_RUN_CMD"

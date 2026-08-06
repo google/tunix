@@ -8,7 +8,8 @@
 #   kubectl apply -f jobset-64chip.yaml
 #   kubectl logs -f jobs/canon-zero-tim-v5p-64-pathways-head-0
 #
-# Start in CANON_MODE=probe-only.  Promote to install-only, then gate-only, then run, and only
+# Start in CANON_MODE=probe-only.  Promote to install-only, then dp-gate-only.  The P32 profile
+# intentionally refuses `run` until replicated-DP segmented training has its own green gate.
 # after reading the previous stage's output against CLUSTER_ADMISSION.md.  A zero exit code is
 # not an admission.
 #
@@ -16,7 +17,7 @@
 #   * spec.replicatedJobs[0]...containers[jax-tpu].image  -> your image, PINNED BY DIGEST.
 #     A floating :latest tag means the same manifest runs on a different engine tomorrow,
 #     which is incompatible with a bitwise contract.
-#   * CANON_EXPECT_MODEL_MESH_IDS -> the order this topology actually produces.  Get it from
+#   * CANON_P32_EXPECT_MODEL_MESH_IDS -> the order this topology actually produces.  Get it from
 #     probe_mesh_order.py; an order inherited from a different mesh shape is worse than none.
 #   * the branch name in the sync block, if it is not yuxzhang/canon-zero-tim.
 apiVersion: jobset.x-k8s.io/v1alpha2
@@ -106,28 +107,22 @@ spec:
               env:
               # --- what to run -------------------------------------------------------------
               - name: CANON_MODE
-                value: gate-only          # probe-only | install-only | gate-only | run
+                value: gate-only          # probe-only | install-only | gate-only | dp-gate-only
               - name: CANON_PROFILE_FILE
-                value: cluster/profiles/qwen3-1p7b.env
+                value: cluster/profiles/qwen3-8b-dp16-tp4-admission.env
               - name: CANON_STATE
                 value: /tmp/canon-state
-              # Only read in CANON_MODE=run.  Kept here so the manifest records exactly what a
-              # promotion would execute.
-              - name: CANON_RUN_CMD
-                value: >-
-                  python3 -X faulthandler -u examples/math_gsm8k/qwen3_grpo_demo.py
-                  --mesh_fsdp 16 --mesh_tp 4 --batch_size 64 --mini_batch_size 64
-                  --train_micro_batch_size 16 --compute_logps_micro_batch_size 16
-                  --max_seq_token_per_tpu 4096
               # --- topology-specific: MUST be set from probe output, not inherited ----------
-              - name: CANON_EXPECT_MODEL_MESH_IDS
+              - name: CANON_P32_EXPECT_MODEL_MESH_IDS
                 value: "0,16,32,48,4,20,36,52,8,24,40,56,12,28,44,60,1,17,33,49,5,21,37,53,9,25,41,57,13,29,45,61,2,18,34,50,6,22,38,54,10,26,42,58,14,30,46,62,3,19,35,51,7,23,39,55,11,27,43,59,15,31,47,63"
+              - name: CANON_EXPECT_TRAIN_MESH_IDS
+                value: ""                  # fill from the first T2-DP MESH line
               - name: CANON_WORKER_WAIT_SECONDS
                 value: "120"
               # MIN_TOKEN_BUCKET is a GLOBAL token count.  Under data parallelism the dp=1
               # value silently unpins the bucket; derive it with probe_bucket_contract.py.
               - name: MIN_TOKEN_BUCKET
-                value: "256"
+                value: "4096"               # 16 DP replicas * per-replica M=256
               # --- pathways ----------------------------------------------------------------
               - name: PATHWAYS_HEAD
                 value: localhost
