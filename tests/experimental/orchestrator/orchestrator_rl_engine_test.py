@@ -36,6 +36,10 @@ class _FakeBaseEngine:
     self.cluster_config = "CLUSTER_CONFIG"
     self.rollout = "ROLLOUT"
 
+  def get_rollout_config(self, mode):
+    del mode
+    return SimpleNamespace(temperature=0.75)
+
   def generate(self, *args):
     self.generate_calls.append(args)
     return "base_generate"
@@ -208,6 +212,7 @@ class OrchestratorRlEngineTest(absltest.TestCase):
         "worker_ref",
     )
     self.assertLen(inference.calls, 1)
+    self.assertEqual(inference.calls[0]["temperature"], 0.75)
     self.assertEmpty(base.ref_calls)
 
     fallback = orchestrator_rl_engine.OrchestratorRLEngine(base)
@@ -248,7 +253,7 @@ class OrchestratorRlEngineTest(absltest.TestCase):
     weight_sync = _FakeWeightSync()
     cluster_config = SimpleNamespace(
         rollout_config={
-            rl_cluster_lib.Mode.TRAIN: "TRAIN_ROLLOUT_CONFIG",
+            rl_cluster_lib.Mode.TRAIN: SimpleNamespace(temperature=0.25),
         }
     )
     cluster = orchestrator_rl_engine.OrchestratorRLEngine(
@@ -265,8 +270,8 @@ class OrchestratorRlEngineTest(absltest.TestCase):
     self.assertEqual(cluster.rollout.pad_id(), 0)
     self.assertEqual(cluster.rollout.eos_id(), 2)
     self.assertEqual(
-        cluster.get_rollout_config(rl_cluster_lib.Mode.TRAIN),
-        "TRAIN_ROLLOUT_CONFIG",
+        cluster.get_rollout_config(rl_cluster_lib.Mode.TRAIN).temperature,
+        0.25,
     )
     self.assertEqual(cluster.generate(["p"]), "worker_generate")
     self.assertEqual(cluster.update_actor(["chunk"], None, False), 7)
@@ -278,6 +283,7 @@ class OrchestratorRlEngineTest(absltest.TestCase):
         cluster.get_ref_per_token_logps("p", "c", pad_id=0, eos_id=2),
         "worker_ref",
     )
+    self.assertEqual(inference.calls[0]["temperature"], 0.25)
     cluster.sync_weights()
     self.assertEqual(weight_sync.syncs, 1)
 

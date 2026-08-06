@@ -20,6 +20,9 @@ REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
 
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+INFERENCE_PORT=${INFERENCE_PORT:-20002}
+RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
+INFERENCE_ADDR=${INFERENCE_ADDR:-}
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
@@ -31,7 +34,7 @@ BATCH_SIZE=${BATCH_SIZE:-2}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
-MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-1}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
@@ -43,10 +46,12 @@ WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
 WAIT_LOG_TAIL_LINES=${WAIT_LOG_TAIL_LINES:-40}
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
+INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 TRAINER_LOG="${DIR}/trainer.log"
 ROLLOUT_LOG="${DIR}/rollout.log"
+INFERENCE_LOG="${DIR}/inference.log"
 ORCHESTRATOR_LOG="${DIR}/orchestrator.log"
 
 print_section() {
@@ -97,7 +102,7 @@ print_port_debug() {
 
 print_related_processes() {
   echo "Related processes:"
-  pgrep -af "run_trainer_node.py|run_rollout_node.py|run_gsm8k_dist_grpo.py|vllm" 2>/dev/null || true
+  pgrep -af "run_trainer_node.py|run_rollout_node.py|run_inference_node.py|run_gsm8k_dist_grpo.py|vllm" 2>/dev/null || true
 }
 
 dump_debug_snapshot() {
@@ -108,13 +113,18 @@ dump_debug_snapshot() {
   if [[ -n "${ROLLOUT_PID:-}" ]]; then
     print_process_debug "rollout" "$ROLLOUT_PID"
   fi
+  if [[ -n "${INFERENCE_PID:-}" ]]; then
+    print_process_debug "inference" "$INFERENCE_PID"
+  fi
   print_related_processes
   print_section "port snapshot"
   print_port_debug "$TRAINER_PORT"
   print_port_debug "$ROLLOUT_PORT"
+  print_port_debug "$INFERENCE_PORT"
   print_section "log snapshot"
   print_file_debug "trainer" "$TRAINER_LOG"
   print_file_debug "rollout" "$ROLLOUT_LOG"
+  print_file_debug "inference" "$INFERENCE_LOG"
   print_file_debug "orchestrator" "$ORCHESTRATOR_LOG"
 }
 
@@ -212,6 +222,9 @@ echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
+echo "  inference:      $RUN_INFERENCE_NODE"
+echo "  inference addr: ${INFERENCE_ADDR:-<none>}"
+echo "  inference chips:${INFERENCE_TPU_CHIPS:-<unset>}"
 echo "  chip bounds:    $TPU_CHIPS_PER_HOST_BOUNDS"
 echo "  host bounds:    $TPU_HOST_BOUNDS"
 echo "  wait timeout:   ${WAIT_TIMEOUT_SECS}s"
@@ -227,6 +240,8 @@ dump_logs() {
   tail -n 200 "$TRAINER_LOG" 2>/dev/null || true
   print_section "rollout.log tail"
   tail -n 200 "$ROLLOUT_LOG" 2>/dev/null || true
+  print_section "inference.log tail"
+  tail -n 200 "$INFERENCE_LOG" 2>/dev/null || true
   print_section "orchestrator.log tail"
   tail -n 200 "$ORCHESTRATOR_LOG" 2>/dev/null || true
 }
@@ -287,6 +302,7 @@ PY
 
 : > "$TRAINER_LOG"
 : > "$ROLLOUT_LOG"
+: > "$INFERENCE_LOG"
 : > "$ORCHESTRATOR_LOG"
 
 print_section "runtime context"
@@ -301,6 +317,7 @@ echo "Initial LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}"
 print_related_processes
 print_port_debug "$TRAINER_PORT"
 print_port_debug "$ROLLOUT_PORT"
+print_port_debug "$INFERENCE_PORT"
 
 echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
 TRAINER_CMD=(
@@ -355,17 +372,46 @@ echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
 cleanup() {
-  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID)..."
-  kill "$TRAINER_PID" "$ROLLOUT_PID" 2>/dev/null || true
-  wait "$TRAINER_PID" "$ROLLOUT_PID" 2>/dev/null || true
+  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID, ${INFERENCE_PID:-})..."
+  kill "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
+  wait "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
   echo "Workers stopped."
 }
 trap on_error ERR
 trap cleanup EXIT
 
+if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
+  if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
+    echo "Error: RUN_INFERENCE_NODE requires INFERENCE_TPU_CHIPS to avoid TPU contention."
+    exit 1
+  fi
+  echo "Launching reference inference node on TPU chips $INFERENCE_TPU_CHIPS..."
+  INFERENCE_CMD=(
+    "$PYTHON_BIN" "${DIR}/run_inference_node.py"
+    --port="$INFERENCE_PORT"
+    --tpu_chips="$INFERENCE_TPU_CHIPS"
+    --tpu_chips_per_host_bounds="$TPU_CHIPS_PER_HOST_BOUNDS"
+    --tpu_host_bounds="$TPU_HOST_BOUNDS"
+    --model_name="$MODEL_NAME"
+    --model_id="$MODEL_ID"
+    --model_dir="$MODEL_DIR"
+    --tokenizer_path="$TOKENIZER_PATH"
+    --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+  )
+  print_command "Inference command" PYTHONUNBUFFERED=1 "${INFERENCE_CMD[@]}"
+  PYTHONUNBUFFERED=1 "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1 &
+  INFERENCE_PID=$!
+  INFERENCE_ADDR="localhost:$INFERENCE_PORT"
+  echo "Inference pid=$INFERENCE_PID log=$INFERENCE_LOG"
+  print_process_debug "inference" "$INFERENCE_PID"
+fi
+
 echo "Waiting for gRPC servers to bind..."
 wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
 wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+if [[ -n "${INFERENCE_PID:-}" ]]; then
+  wait_for_port "inference" "$INFERENCE_PORT" "$INFERENCE_PID" "$INFERENCE_LOG"
+fi
 dump_debug_snapshot
 
 echo "Launching CPU orchestrator..."
@@ -382,6 +428,9 @@ ORCHESTRATOR_CMD=(
   --max_response_length="$MAX_RESPONSE_LENGTH"
   --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
 )
+if [[ -n "$INFERENCE_ADDR" ]]; then
+  ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+fi
 if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
   ORCHESTRATOR_CMD+=(--sync_lora_weights)
 fi

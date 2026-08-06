@@ -48,6 +48,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import grpo_loop  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import grpc_worker_proxies  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator_rl_engine  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_orchestrator  # pylint: disable=g-import-not-at-top
@@ -90,6 +91,15 @@ def _parse_args() -> argparse.Namespace:
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--trainer_addr", type=str, default="localhost:20000")
   parser.add_argument("--rollout_addr", type=str, default="localhost:20001")
+  parser.add_argument(
+      "--inference_addr",
+      type=str,
+      default="",
+      help=(
+          "Optional reference/reward InferenceWorker address. Required when "
+          "--beta is non-zero or force reference KL scoring is enabled."
+      ),
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
@@ -115,15 +125,14 @@ def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
   )
 
 
-def _build_prompts(batch_size: int, num_generations: int) -> tuple[list[str], list[str]]:
+def _build_prompt_groups(batch_size: int) -> tuple[list[str], list[str]]:
   prompts = []
   gold_answers = []
   for i in range(batch_size):
     question, answer = DEMO_TASKS[i % len(DEMO_TASKS)]
     prompt = PROMPT_TEMPLATE.format(question=question)
-    for _ in range(num_generations):
-      prompts.append(prompt)
-      gold_answers.append(answer)
+    prompts.append(prompt)
+    gold_answers.append(answer)
   return prompts, gold_answers
 
 
@@ -138,13 +147,16 @@ def _extract_answer(text: str) -> str | None:
 
 
 def _compute_rewards(
+    prompts: list[str],
     completions: list[str],
     gold_answers: list[str],
     *,
     mode: str,
-    num_generations: int,
+    **kwargs,
 ) -> np.ndarray:
+  del prompts
   if mode == "synthetic":
+    num_generations = int(kwargs["num_generations"])
     per_group = np.linspace(0.0, 1.0, num_generations, dtype=np.float32)
     return np.tile(per_group, len(completions) // num_generations)
 
@@ -152,70 +164,6 @@ def _compute_rewards(
   for completion, gold in zip(completions, gold_answers):
     rewards.append(1.0 if _extract_answer(completion) == gold else 0.0)
   return np.asarray(rewards, dtype=np.float32)
-
-
-def _encode(tokenizer: Any, text: str) -> list[int]:
-  try:
-    return tokenizer.encode(text, add_special_tokens=False)
-  except TypeError:
-    return tokenizer.encode(text)
-
-
-def _slice_or_none(value: Any, start: int, end: int) -> Any:
-  if value is None:
-    return None
-  return value[start:end]
-
-
-def _split_train_example(
-    example: agentic_grpo_learner.TrainExample,
-    micro_batch_size: int,
-) -> list[agentic_grpo_learner.TrainExample]:
-  batch = int(example.prompt_ids.shape[0])
-  if micro_batch_size <= 0:
-    raise ValueError("train_micro_batch_size must be positive.")
-  chunks = []
-  for start in range(0, batch, micro_batch_size):
-    end = min(start + micro_batch_size, batch)
-    chunks.append(
-        example.replace(
-            prompt_ids=example.prompt_ids[start:end],
-            prompt_mask=example.prompt_mask[start:end],
-            completion_ids=example.completion_ids[start:end],
-            completion_mask=example.completion_mask[start:end],
-            advantages=example.advantages[start:end],
-            ref_per_token_logps=_slice_or_none(
-                example.ref_per_token_logps, start, end
-            ),
-            old_per_token_logps=_slice_or_none(
-                example.old_per_token_logps, start, end
-            ),
-            policy_version=_slice_or_none(example.policy_version, start, end),
-            sampler_is_weights=_slice_or_none(
-                example.sampler_is_weights, start, end
-            ),
-        )
-    )
-  return chunks
-
-
-def _maybe_add_ref_logps(
-    orchestrator: rl_orchestrator.RLOrchestrator,
-    example: agentic_grpo_learner.TrainExample,
-    *,
-    beta: float,
-    pad_id: int,
-    eos_id: int,
-) -> agentic_grpo_learner.TrainExample:
-  if beta == 0.0:
-    return example
-  ref_logps = orchestrator.reference_logps(
-      example.prompt_ids,
-      example.completion_ids,
-      pad_id,
-      eos_id,
-  )
-  return example.replace(ref_per_token_logps=ref_logps)
 
 
 def _build_cluster_config(args: argparse.Namespace) -> Any:
@@ -246,6 +194,7 @@ def _build_orchestrator(
     tokenizer: Any,
     trainer_handle: remote_execution.ActorHandle,
     rollout_handle: remote_execution.ActorHandle,
+    inference_handle: remote_execution.ActorHandle | None,
     pad_id: int,
     eos_id: int,
 ) -> rl_orchestrator.RLOrchestrator:
@@ -254,7 +203,11 @@ def _build_orchestrator(
   rollout_proxy = grpc_worker_proxies.GrpcRolloutWorkerProxy(
       rollout_handle, cluster_config
   )
-  inference_proxy = grpc_worker_proxies.GrpcInferenceWorkerProxy(trainer_handle)
+  inference_proxy = (
+      grpc_worker_proxies.GrpcInferenceWorkerProxy(inference_handle)
+      if inference_handle is not None
+      else None
+  )
   weight_sync_proxy = grpc_worker_proxies.GrpcWeightSyncProxy(
       trainer_handle,
       rollout_handle,
@@ -266,6 +219,7 @@ def _build_orchestrator(
       inference_worker=inference_proxy,
       weight_sync=weight_sync_proxy,
       cluster_config=cluster_config,
+      actor_trainer=grpc_worker_proxies.RemoteActorTrainerProxy(trainer_handle),
       tokenizer=tokenizer,
       pad_id=pad_id,
       eos_id=eos_id,
@@ -277,7 +231,7 @@ def _build_orchestrator(
       kl_loss_mode="mse_kl",
       epsilon=args.epsilon,
       max_response_length=args.max_response_length,
-      use_rollout_logps=False,
+      use_rollout_logps=True,
   )
   grpo_config.temperature = args.temperature
   return rl_orchestrator.RLOrchestrator(
@@ -300,6 +254,11 @@ def main() -> None:
   args = _parse_args()
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
+  if args.beta != 0.0 and not args.inference_addr:
+    raise ValueError(
+        "--inference_addr is required when --beta is non-zero because "
+        "reference KL scoring must route to an InferenceWorker."
+    )
 
   logging.basicConfig(
       level=logging.INFO, format="%(asctime)s - [Orchestrator] %(message)s"
@@ -315,82 +274,76 @@ def main() -> None:
 
   trainer_handle = _connect(args.trainer_addr, args.rpc_timeout_s)
   rollout_handle = _connect(args.rollout_addr, args.rpc_timeout_s)
+  inference_handle = (
+      _connect(args.inference_addr, args.rpc_timeout_s)
+      if args.inference_addr
+      else None
+  )
 
   _log_lifecycle("trainer", trainer_handle)
   _log_lifecycle("rollout", rollout_handle)
+  if inference_handle is not None:
+    _log_lifecycle("inference", inference_handle)
   orchestrator = _build_orchestrator(
       args,
       tokenizer,
       trainer_handle,
       rollout_handle,
+      inference_handle,
       pad_id,
       eos_id,
   )
-  logging.info("Configuring trainer-side GRPO loss through RLOrchestrator.")
-  orchestrator.configure_trainer()
-  logging.info("Trainer-side GRPO loss configured.")
+  logging.info("Creating formal GRPO loop on top of RLOrchestrator.")
+  loop = grpo_loop.GRPOLoop(
+      orchestrator,
+      reward_fn=_compute_rewards,
+      tokenizer=tokenizer,
+      num_generations=args.num_generations,
+      max_prompt_length=args.max_prompt_length,
+      max_response_length=args.max_response_length,
+      train_micro_batch_size=args.train_micro_batch_size,
+      pad_id=pad_id,
+      eos_id=eos_id,
+      sync_weights=True,
+  )
+  logging.info("Trainer-side GRPO objective configured.")
 
   for step in range(args.max_steps):
-    prompts, gold_answers = _build_prompts(args.batch_size, args.num_generations)
+    prompt_groups, gold_answers = _build_prompt_groups(args.batch_size)
     logging.info(
-        "Step %d: requesting %d trajectories from rollout worker.",
+        "Step %d: requesting %d prompt groups / %d trajectories.",
         step,
-        len(prompts),
+        len(prompt_groups),
+        len(prompt_groups) * args.num_generations,
     )
-    rollout_output = orchestrator.generate(
-        prompts,
-        max_generation_steps=args.max_response_length,
+    result = loop.train_step(
+        prompt_groups,
+        reward_kwargs={
+            "gold_answers": gold_answers,
+            "mode": args.reward_mode,
+            "num_generations": args.num_generations,
+        },
+        step=step,
+        eval_ds=None,
+        skip_jit=False,
     )
-    logging.info(
-        "Step %d: rollout returned %d completions.",
-        step,
-        len(rollout_output.text),
-    )
-    rewards = _compute_rewards(
-        rollout_output.text,
-        gold_answers,
-        mode=args.reward_mode,
-        num_generations=args.num_generations,
-    )
-    advantages = orchestrator.compute_advantages(
-        rewards, num_generations=args.num_generations
-    )
-    prompt_tokens = [_encode(tokenizer, prompt) for prompt in prompts]
-    train_example = orchestrator.assemble_train_example(
-        prompt_tokens,
-        rollout_output.tokens,
-        advantages,
-        max_prompt_length=args.max_prompt_length,
-        max_response_length=args.max_response_length,
-        pad_id=pad_id,
-        policy_version=np.full(
-            (len(prompts),), orchestrator.global_steps, dtype=np.int32
-        ),
-    )
-    train_example = _maybe_add_ref_logps(
-        orchestrator,
-        train_example,
-        beta=args.beta,
-        pad_id=pad_id,
-        eos_id=eos_id,
-    )
-    chunks = _split_train_example(train_example, args.train_micro_batch_size)
     logging.info(
         "Step %d: reward_mean=%.3f reward_std=%.3f chunks=%d.",
-        step,
-        float(rewards.mean()),
-        float(rewards.std()),
-        len(chunks),
+        result.step,
+        result.reward_mean,
+        result.reward_std,
+        result.num_chunks,
     )
-    train_step = orchestrator.train_step(chunks, eval_ds=None, skip_jit=False)
     logging.info(
-        "Step %d: trainer update finished at train_step=%s.", step, train_step
+        "Step %d: trainer update finished at train_step=%s.",
+        result.step,
+        result.train_step,
     )
-
-    logging.info("Step %d: syncing weights through RLOrchestrator.", step)
-    orchestrator.sync_weights()
-    orchestrator.global_steps += 1
-    logging.info("Step %d: distributed train+sync chain completed.", step)
+    logging.info(
+        "Step %d: distributed train+sync chain completed at global_step=%d.",
+        result.step,
+        result.global_step,
+    )
 
   if args.stop_workers_on_exit:
     rollout_handle.submit("stop")

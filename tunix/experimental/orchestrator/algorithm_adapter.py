@@ -124,10 +124,9 @@ class GRPOAdapter:
     """Single-turn assembly: left-pad prompts, right-pad completions, build masks.
 
     Mirrors the padding/masking `_process_results` performs, for the degenerate
-    single-completion case (no multi-turn conversation). ref/old per-token logps
-    are left None (suitable for on-policy, beta=0 training); a KL/off-policy
-    loop
-    fills them via the scoring primitives before calling this.
+    single-completion case (no multi-turn conversation). The loop may provide
+    ref/old per-token logps from the reference scorer or rollout worker before
+    calling this.
     """
     padded_prompts = []
     padded_completions = []
@@ -174,28 +173,6 @@ class GRPOAdapter:
 
     Reuses the same policy-loss registry entry the agentic GRPO learner uses.
     """
-    configure_grpo_loss = getattr(cluster, "configure_grpo_loss", None)
-    if callable(configure_grpo_loss) and getattr(
-        cluster, "has_trainer_worker", False
-    ):
-      configure_grpo_loss(
-          num_generations=self._algo_config.num_generations,
-          max_response_length=self._algo_config.max_response_length,
-          beta=self._algo_config.beta,
-          epsilon=self._algo_config.epsilon,
-          epsilon_high=self._algo_config.epsilon_high,
-          kl_loss_mode=self._algo_config.kl_loss_mode,
-          force_compute_kl=self._algo_config.force_compute_kl,
-          loss_agg_mode=self._algo_config.loss_agg_mode,
-          loss_algo=self._algo_config.loss_algo,
-          policy_loss_fn=self._algo_config.policy_loss_fn,
-          advantage_estimator=self._algo_config.advantage_estimator,
-          temperature=getattr(self._algo_config, "temperature", None),
-          sampler_is=self._algo_config.sampler_is,
-          sampler_is_threshold=self._algo_config.sampler_is_threshold,
-      )
-      return
-
     self._algo_config.temperature = cluster.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
     ).temperature
@@ -203,15 +180,20 @@ class GRPOAdapter:
         self._algo_config.policy_loss_fn
     )
     algo_config = self._algo_config
+    pad_id = cluster.rollout.pad_id()
+    eos_id = cluster.rollout.eos_id()
+    compute_logps_chunk_size = (
+        cluster.cluster_config.training_config.compute_logps_chunk_size
+    )
 
     def loss_fn(model, train_example, algo_config=algo_config):
       return policy_loss_fn(
           model,
           train_example,
           algo_config=algo_config,
-          pad_id=cluster.rollout.pad_id(),
-          eos_id=cluster.rollout.eos_id(),
-          compute_logps_chunk_size=cluster.cluster_config.training_config.compute_logps_chunk_size,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          compute_logps_chunk_size=compute_logps_chunk_size,
       )
 
     cluster.actor_trainer.with_loss_fn(loss_fn, has_aux=True)

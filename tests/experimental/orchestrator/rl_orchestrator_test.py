@@ -15,6 +15,7 @@
 """Tests for the RLOrchestrator primitive API and the GRPO algorithm adapter."""
 
 from absl.testing import absltest
+from types import SimpleNamespace
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.orchestrator import algorithm_adapter
@@ -76,9 +77,35 @@ class _FakeRemoteEngine(_FakeEngine):
 
   has_trainer_worker = True
 
-  def configure_grpo_loss(self, **kwargs):
-    self.calls["configure_grpo_loss"] = kwargs
-    return {"configured_loss": "grpo"}
+  def __init__(self):
+    super().__init__()
+    self.rollout = SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 1)
+    self.cluster_config = SimpleNamespace(
+        training_config=SimpleNamespace(compute_logps_chunk_size=4)
+    )
+    self.actor_trainer = _FakeActorTrainer()
+
+  def get_rollout_config(self, mode):
+    del mode
+    return SimpleNamespace(temperature=0.5)
+
+
+class _FakeActorTrainer:
+
+  def __init__(self):
+    self.loss_fn = None
+    self.has_aux = None
+    self.gen_model_input_fn = None
+    self.is_managed_externally = False
+
+  def with_loss_fn(self, loss_fn, has_aux=False):
+    self.loss_fn = loss_fn
+    self.has_aux = has_aux
+    return self
+
+  def with_gen_model_input_fn(self, gen_model_input_fn):
+    self.gen_model_input_fn = gen_model_input_fn
+    return self
 
 
 def _make(cluster=None, algorithm=None):
@@ -170,11 +197,11 @@ class RlOrchestratorTest(absltest.TestCase):
 
     orch.configure_trainer()
 
-    config_call = cluster.calls["configure_grpo_loss"]
-    self.assertEqual(config_call["num_generations"], 2)
-    self.assertEqual(config_call["policy_loss_fn"], "grpo")
-    self.assertEqual(config_call["advantage_estimator"], "grpo")
-    self.assertFalse("loss_fn" in config_call)
+    self.assertIsNotNone(cluster.actor_trainer.loss_fn)
+    self.assertIsNotNone(cluster.actor_trainer.gen_model_input_fn)
+    self.assertTrue(cluster.actor_trainer.has_aux)
+    self.assertTrue(cluster.actor_trainer.is_managed_externally)
+    self.assertEqual(algorithm.algo_config.temperature, 0.5)
 
 
 if __name__ == "__main__":

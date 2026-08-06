@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from tunix.rl import rl_cluster as rl_engine_lib
+import uuid
+
+import numpy as np
+from tunix.experimental.common import datatypes
 from tunix.experimental.worker import remote_execution
+from tunix.rl import rl_cluster as rl_engine_lib
 
 
 class RemoteActorTrainerProxy:
@@ -74,6 +78,7 @@ class GrpcRolloutWorkerProxy:
         top_k=rollout_cfg.top_k,
         **kwargs,
     )
+
 
 class GrpcWeightSyncProxy:
   """Orchestrates weight sync from Trainer to Rollout worker over gRPC."""
@@ -143,7 +148,7 @@ class GrpcTrainerWorkerProxy:
 
 
 class GrpcInferenceWorkerProxy:
-  """Proxies reference logprob calls to a remote GRPO trainer worker."""
+  """Proxies reference logprob calls to a remote InferenceWorker."""
 
   def __init__(self, handle: remote_execution.ActorHandle):
     self.handle = handle
@@ -154,12 +159,20 @@ class GrpcInferenceWorkerProxy:
       completion_ids: Any,
       pad_id: int,
       eos_id: int,
+      temperature: float = 1.0,
   ) -> Any:
-    # Routes to the reference model logprob calculation on Trainer worker
-    return self.handle.submit(
-        "reference_logps",
-        prompt_ids=prompt_ids,
-        completion_ids=completion_ids,
-        pad_id=pad_id,
-        eos_id=eos_id,
+    del pad_id, eos_id
+    request = datatypes.LogprobsRequest(
+        request_id=f"ref_logps_{uuid.uuid4().hex}",
+        prompt_tokens=np.asarray(prompt_ids, dtype=np.int32),
+        completion_tokens=np.asarray(completion_ids, dtype=np.int32),
+        temperature=temperature,
+        model_role="reference",
     )
+    response = self.handle.submit("compute_logps", request)
+    if response.error is not None:
+      raise RuntimeError(
+          "remote reference logprob scoring failed "
+          f"[{response.error.error_type}]: {response.error.message}"
+      )
+    return response.per_token_logps

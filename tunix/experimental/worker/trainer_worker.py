@@ -129,17 +129,17 @@ class TrainerWorker(abstract_worker.Worker):
 
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
-  ) -> "TrainerWorker":
+  ) -> datatypes.Response:
     """Sets the loss function used by `fwd_bwd` (and evaluation)."""
     self._trainer.with_loss_fn(loss_fn, has_aux)
-    return self
+    return self._response(loss_fn_configured=True)
 
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
-  ) -> "TrainerWorker":
+  ) -> datatypes.Response:
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
     self._trainer.with_gen_model_input_fn(gen_model_input_fn)
-    return self
+    return self._response(gen_model_input_fn_configured=True)
 
   def fwd_bwd(
       self, payload: datatypes.TrainerPayload, **kwargs
@@ -210,6 +210,16 @@ class TrainerWorker(abstract_worker.Worker):
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
+
+  def get_lora_weights(self) -> Any:
+    """Returns staged LoRA weights for rollout workers to consume."""
+    self._ensure_ready()
+    get_lora_weights = getattr(self._trainer, "get_lora_weights", None)
+    if not callable(get_lora_weights):
+      raise AttributeError(
+          f"{type(self._trainer).__name__} does not expose get_lora_weights()."
+      )
+    return get_lora_weights()
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""

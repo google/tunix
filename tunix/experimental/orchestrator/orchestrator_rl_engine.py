@@ -222,11 +222,13 @@ class OrchestratorRLEngine:
       micro_batch_size: int | None = None,
   ) -> Any:
     if self._inference_worker is not None:
+      rollout_config = self.get_rollout_config(rl_engine_lib.Mode.TRAIN)
       return self._inference_worker.per_token_logps(
           prompt_ids=prompt_tokens,
           completion_ids=completion_tokens,
           pad_id=pad_id,
           eos_id=eos_id,
+          temperature=getattr(rollout_config, "temperature", 1.0),
       )
     return self._require_base("get_ref_per_token_logps").get_ref_per_token_logps(
         prompt_tokens=prompt_tokens,
