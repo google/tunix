@@ -1,0 +1,261 @@
+# canon-zero-tim on Pathways/GKE -- v5p 4x4x4 (64 chips, 16 worker pods x 4).
+#
+# Adapted from experimental/gsm8k_refactor_stream_pack_v5p.yaml.  The only structural change
+# is the jax-tpu container command: everything it used to do inline now lives in
+# canon-zero-tim/cluster/, so behaviour is changed by a git commit you can review rather than
+# by editing an indented heredoc inside YAML.
+#
+#   kubectl apply -f jobset-64chip.yaml
+#   kubectl logs -f jobs/canon-zero-tim-v5p-64-pathways-head-0
+#
+# The checked-in manifest preserves the remote operator's current `gate-only` stage.  On a fresh
+# cluster start at probe-only; after reading T1, promote a fresh label to dp-gate-only.  The P32
+# profile intentionally refuses `run` until replicated-DP segmented training has its own green gate.
+# after reading the previous stage's output against CLUSTER_ADMISSION.md.  A zero exit code is
+# not an admission.
+#
+# BEFORE FIRST USE, set:
+#   * spec.replicatedJobs[0]...containers[jax-tpu].image  -> your image, PINNED BY DIGEST.
+#     A floating :latest tag means the same manifest runs on a different engine tomorrow,
+#     which is incompatible with a bitwise contract.
+#   * CANON_P32_EXPECT_MODEL_MESH_IDS -> the order this topology actually produces.  Get it from
+#     probe_mesh_order.py; an order inherited from a different mesh shape is worse than none.
+#   * the branch name in the sync block, if it is not yuxzhang/canon-zero-tim.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: canon-zero-tim-v5p-64
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  failurePolicy:
+    # WARNING -- read this before believing a green run.
+    #
+    # This restarts the whole JobSet on failure, and a gate verdict is a failure: a red gate
+    # exits nonzero, the head Job fails, and the JobSet is recreated.  The two limits multiply
+    # -- the head Job's backoffLimit retries its pod within one JobSet attempt, and maxRestarts
+    # recreates the JobSet -- so with backoffLimit 3 and maxRestarts 100 a gate can run on the
+    # order of 400 times.  `kubectl logs` shows the CURRENT pod.  "It passed" then means "one
+    # attempt out of many passed", which is the opposite of the determinism this manifest
+    # exists to measure.
+    #
+    # The value is left as configured -- this cluster needs restarts for node autoscaling and
+    # evictions.  Instead the attempt is made visible: entrypoint.sh prints
+    # [entrypoint] JOBSET_ATTEMPT, and an admission report must state it.  A verdict from any
+    # attempt after the first is a retry, not a result.  If you want a strict single-shot gate,
+    # set maxRestarts to 0 for that run.
+    maxRestarts: 100
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: Any
+    targetReplicatedJobs:
+    - pathways-head
+  replicatedJobs:
+
+  # ---------------------------------------------------------------------------
+  # 1. PATHWAYS COORDINATOR (CPU head)
+  # ---------------------------------------------------------------------------
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 3
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: deepswe-cpu-pool
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            containers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+              args:
+                - --server_port=29000
+                - --resource_manager_address=localhost:29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
+              env:
+                - name: PATHWAYS_HEAD
+                  value: localhost
+              resources:
+                requests: {cpu: '16', memory: 100Gi}
+                limits:   {cpu: '32', memory: 350G}
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
+                - --node_type=resource_manager
+                - --instance_count=1
+                - --instance_type=tpuv5:4x4x4
+              env:
+                - name: HOST_ADDRESS
+                  value: localhost
+                - name: TPU_SKIP_MDS_QUERY
+                  value: 'true'
+              resources:
+                requests: {cpu: '8', memory: 32Gi}
+                limits:   {cpu: '16', memory: 150G}
+            - name: jax-tpu
+              # PIN THIS BY DIGEST.  See the header note.
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
+              imagePullPolicy: Always
+              resources:
+                limits: {cpu: '24', memory: 200G}
+              command:
+              - bash
+              - -c
+              - |
+                set -uo pipefail
+                echo "XPK Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                git config --global --add safe.directory "$(pwd)"
+                git init -q
+                git remote set-url origin https://github.com/google/tunix.git 2>/dev/null \
+                  || git remote add origin https://github.com/google/tunix.git
+                git fetch -q origin yuxzhang/canon-zero-tim
+                git reset -q --hard FETCH_HEAD
+                exec bash canon-zero-tim/cluster/entrypoint.sh
+              env:
+              # --- retry visibility --------------------------------------------------------
+              # Downward API.  If the JobSet controller in this cluster uses a different
+              # annotation key the value arrives empty, and entrypoint.sh reports it as unknown
+              # rather than assuming a first attempt.
+              - name: JOBSET_RESTART_ATTEMPT
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/restart-attempt']
+              - name: CANON_POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              # --- what to run -------------------------------------------------------------
+              - name: CANON_MODE
+                value: dp-gate-only          # probe-only | install-only | gate-only | dp-gate-only
+              - name: CANON_PROFILE_FILE
+                value: cluster/profiles/qwen3-8b-dp16-tp4-admission.env
+              - name: CANON_STATE
+                value: /tmp/canon-state
+              # --- topology-specific: MUST be set from probe output, not inherited ----------
+              - name: CANON_P32_EXPECT_MODEL_MESH_IDS
+                value: "144,160,176,192,148,164,180,196,152,168,184,200,156,172,188,204,145,161,177,193,149,165,181,197,153,169,185,201,157,173,189,205,146,162,178,194,150,166,182,198,154,170,186,202,158,174,190,206,147,163,179,195,151,167,183,199,155,171,187,203,159,175,191,207"
+              - name: CANON_EXPECT_TRAIN_MESH_IDS
+                value: ""                  # fill from the first T2-DP MESH line
+              - name: CANON_WORKER_WAIT_SECONDS
+                value: "600"
+              - name: CANON_WAYCOUNT_WIDTHS
+                value: "2,4"
+              - name: CANON_WAYCOUNT_DEPTHS
+                value: "8,15"
+              # MIN_TOKEN_BUCKET is a GLOBAL token count.  Under data parallelism the dp=1
+              # value silently unpins the bucket; derive it with probe_bucket_contract.py.
+              - name: MIN_TOKEN_BUCKET
+                value: "4096"               # 16 DP replicas * per-replica M=256
+              # --- pathways ----------------------------------------------------------------
+              - name: PATHWAYS_HEAD
+                value: localhost
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: FLAGS_pathways_enforce_subset_devices_form_subslice
+                value: "False"
+              # --- secrets: inherited only, never written into the manifest -----------------
+              - name: INJECTED_HF_TOKEN
+                valueFrom:
+                  secretKeyRef: {name: yuxzhang-secrets, key: HF_TOKEN, optional: true}
+              - name: INJECTED_WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef: {name: yuxzhang-secrets, key: WANDB_API_KEY, optional: true}
+              - name: HF_HOME
+                value: /tmp/huggingface
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            volumes:
+            - hostPath: {path: /tmp, type: DirectoryOrCreate}
+              name: shared-tmp
+
+  # ---------------------------------------------------------------------------
+  # 2. TPU WORKERS -- 16 pods x 4 chips = 64
+  # ---------------------------------------------------------------------------
+  - name: pathways-worker
+    replicas: 1
+    template:
+      spec:
+        # Fallback if the cluster's JobSet CRD predates startupPolicy (unknown fields are
+        # pruned silently): let workers retry instead of failing the whole JobSet on first dial.
+        backoffLimit: 10
+        completions: 16
+        parallelism: 16
+        completionMode: Indexed
+        template:
+          metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: multislice-queue
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x8x8
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: OnFailure
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              args:
+                - --server_port=29000
+                - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
+                - --node_type=worker
+                - --instance_type=tpuv5:4x4x4
+                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
+              env:
+                - name: TPU_MIN_LOG_LEVEL
+                  value: "0"
+                - name: TF_CPP_MIN_LOG_LEVEL
+                  value: "0"
+                - name: XCLOUD_ENVIRONMENT
+                  value: GCP
+                - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                  value: "false"
+                - name: MEGASCALE_NUM_SLICES
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+                - name: JOBSET_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: MEGASCALE_SLICE_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: MEGASCALE_COORDINATOR_ADDRESS
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                  value: 'true'
+                - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+                  value: '0.9'
+                - name: ENABLE_PATHWAYS_PERSISTENCE
+                  value: '1'
+              resources:
+                limits:
+                  google.com/tpu: '4'
