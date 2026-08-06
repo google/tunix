@@ -30,10 +30,11 @@ metadata:
     kueue.x-k8s.io/queue-name: multislice-queue
 spec:
   failurePolicy:
-    maxRestarts: 0
-  # Head first: workers that dial an unresolvable head DNS fail instantly.
-  startupPolicy:
-    startupPolicyOrder: InOrder
+    maxRestarts: 100
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
   replicatedJobs:
 
   # ---------------------------------------------------------------------------
