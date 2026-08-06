@@ -51,7 +51,7 @@ spec:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
   startupPolicy:
-    startupPolicyOrder: InOrder
+    startupPolicyOrder: AnyOrder
   successPolicy:
     operator: Any
     targetReplicatedJobs:
