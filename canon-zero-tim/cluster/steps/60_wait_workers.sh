@@ -25,8 +25,9 @@ WAITED=0
 CONSECUTIVE=0
 LAST=""
 while [ "$WAITED" -lt "$S" ]; do
-  if LAST="$(CANON_EXPECT_VISIBLE_DEVICES="$EXPECT" \
-      python3 "$CANON_PKG/tests/t1_tpu/probe_devices.py" 2>&1)"; then
+  if CANON_EXPECT_VISIBLE_DEVICES="$EXPECT" \
+      python3 "$CANON_PKG/tests/t1_tpu/probe_devices.py" >/tmp/probe_devices.out 2>&1; then
+    LAST="$(cat /tmp/probe_devices.out)"
     CONSECUTIVE=$((CONSECUTIVE + 1))
     echo "[wait] probe passed ($CONSECUTIVE/3 stable checks, ${WAITED}s/${S}s)"
     if [ "$CONSECUTIVE" -ge 3 ]; then
@@ -35,6 +36,7 @@ while [ "$WAITED" -lt "$S" ]; do
       exit 0
     fi
   else
+    LAST="$(cat /tmp/probe_devices.out 2>/dev/null || true)"
     CONSECUTIVE=0
   fi
   sleep 5
