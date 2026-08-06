@@ -84,6 +84,18 @@ def _canonical_frozenlake_c0_advantages(advantages: Any) -> np.ndarray:
   return np.asarray([-1.0, 1.0], dtype=np.float32)
 
 
+def _canonical_frozenlake_release_advantages(advantages: Any) -> np.ndarray:
+  """Return four fixed zero-mean cotangents for the P27 4x2 batch."""
+  original = np.asarray(advantages, dtype=np.float32)
+  if original.shape != (8,) or not np.isfinite(original).all():
+    raise alignment.AlignmentGateError(
+        "FrozenLake P27 gradient probe requires the frozen eight finite "
+        "advantages before 4x2 trajectory splitting, "
+        f"got shape={original.shape} values={original.tolist()}"
+    )
+  return np.tile(np.asarray([-1.0, 1.0], dtype=np.float32), 4)
+
+
 @dataclasses.dataclass(kw_only=True)
 class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   """Configuration for GRPO algorithm.
@@ -400,6 +412,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     padded_prompt_masks = []
     padded_completion_ids = []
     padded_completion_masks = []
+    padded_completion_valid_masks = []
     padded_old_logprobs = []
 
     max_response_length = self.algo_config.max_response_length
@@ -417,9 +430,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_masks_list,
         old_logprobs_list,
     ):
-      raw_completion_lengths.append(
-          min(len(completion_tokens), max_response_length)
-      )
+      raw_completion_length = min(len(completion_tokens), max_response_length)
+      raw_completion_lengths.append(raw_completion_length)
       if (
           len(completion_tokens) >= max_response_length
           and completion_mask[-1] != eos_value
@@ -462,6 +474,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               :max_response_length
           ]
       )
+      # The assistant mask above is a loss mask, not a sequence-validity mask.
+      # Multi-turn environment tokens and parser-appended delimiters have loss
+      # mask 0 but remain causal context for every later assistant action.
+      padded_completion_valid_masks.append(
+          agentic_utils.right_pad(
+              np.ones(raw_completion_length, dtype=np.bool_),
+              max_response_length,
+              False,
+          )[:max_response_length]
+      )
       if self.algo_config.use_rollout_logps:
         if old_logprobs is not None:
           padded_old_logprobs.append(
@@ -481,6 +503,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     prompt_mask = jnp.asarray(padded_prompt_masks, dtype=jnp.bool_)
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
+    completion_valid_mask = jnp.asarray(
+        padded_completion_valid_masks, dtype=jnp.bool_
+    )
+    if bool(jnp.any(completion_mask.astype(jnp.bool_) & ~completion_valid_mask)):
+      raise ValueError("assistant completion mask is not a subset of valid tokens")
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
@@ -517,7 +544,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
             prompt_mask=prompt_mask,
-            completion_mask=completion_mask,
+            completion_mask=completion_valid_mask,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -539,7 +566,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           eos_id=eos_value,
           micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
           prompt_mask=prompt_mask,
-          completion_mask=completion_mask,
+          completion_mask=completion_valid_mask,
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -575,7 +602,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
             prompt_mask=prompt_mask,
-            completion_mask=completion_mask,
+            completion_mask=completion_valid_mask,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
@@ -634,15 +661,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     frozenlake_c0_grad_probe = (
         os.environ.get("CANON_FROZENLAKE_GRAD_PROBE", "") == "1"
     )
+    frozenlake_release_grad_probe = (
+        os.environ.get("CANON_FROZENLAKE_RELEASE_GRAD_PROBE", "") == "1"
+    )
     frozenlake_c0 = os.environ.get("CANON_FROZENLAKE_C0", "") == "1"
     if frozenlake_c0_grad_probe != frozenlake_c0:
       raise alignment.AlignmentGateError(
           "CANON_FROZENLAKE_C0 and CANON_FROZENLAKE_GRAD_PROBE must be "
           "enabled or disabled together"
       )
-    if gsm8k_grad_probe and frozenlake_c0_grad_probe:
+    if sum((
+        gsm8k_grad_probe,
+        frozenlake_c0_grad_probe,
+        frozenlake_release_grad_probe,
+    )) > 1:
       raise alignment.AlignmentGateError(
-          "GSM8K and FrozenLake diagnostic cotangents are mutually exclusive"
+          "diagnostic cotangent modes are mutually exclusive"
       )
     if gsm8k_grad_probe:
       if not alignment.enabled():
@@ -676,6 +710,25 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       advantages = _canonical_frozenlake_c0_advantages(original_advantages)
       logging.info(
           "[CANON_FROZENLAKE_C0] diagnostic_advantages original=%s "
+          "injected=%s gate_only=1",
+          original_advantages.tolist(),
+          advantages.tolist(),
+      )
+    elif frozenlake_release_grad_probe:
+      if (
+          os.environ.get("CANON_FROZENLAKE_P27", "") != "1"
+          or not alignment.enabled()
+          or alignment.execution_mode() != "gate-only"
+      ):
+        raise alignment.AlignmentGateError(
+            "CANON_FROZENLAKE_RELEASE_GRAD_PROBE requires P27 gate-only mode"
+        )
+      original_advantages = np.asarray(advantages, dtype=np.float32)
+      advantages = _canonical_frozenlake_release_advantages(
+          original_advantages
+      )
+      logging.info(
+          "[CANON_FROZENLAKE_P27] diagnostic_advantages original=%s "
           "injected=%s gate_only=1",
           original_advantages.tolist(),
           advantages.tolist(),
@@ -883,6 +936,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
+        completion_valid_mask=completion_valid_mask,
     )
     if alignment.enabled():
       if not self.algo_config.use_rollout_logps:

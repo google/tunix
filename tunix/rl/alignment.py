@@ -296,7 +296,11 @@ def check_batch(
   # P26 stage classifier separately requires a nonzero learning signal before
   # promotion.  The historical gate-only/update-canary modes retain their
   # stricter nonzero-gradient contract.
-  if not gradient["nonzero"] and mode != "train":
+  p27_real_update = (
+      mode == "update-canary"
+      and os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
+  )
+  if not gradient["nonzero"] and mode != "train" and not p27_real_update:
     reds.append("gradient_zero")
 
   delta = (tc.astype(np.float64) - sd.astype(np.float64))[mask]

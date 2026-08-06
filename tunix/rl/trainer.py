@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 
 from flax import nnx
 import jax
+import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
 import numpy as np
@@ -62,8 +63,12 @@ class Trainer(peft_trainer.PeftTrainer):
     self._canon_update_before = None
 
   @staticmethod
-  def _canon_fingerprint_state(state: Any, *, max_leaves: int = 12) -> dict:
+  def _canon_fingerprint_state(
+      state: Any, *, max_leaves: int = 12, min_elements: int = 128
+  ) -> dict:
     """Hash a deterministic, bounded sample of small floating state leaves."""
+    if min_elements < 1:
+      raise ValueError("min_elements must be positive")
     flat = jax.tree_util.tree_flatten_with_path(
         state, is_leaf=lambda value: isinstance(value, nnx.Variable)
     )[0]
@@ -73,9 +78,12 @@ class Trainer(peft_trainer.PeftTrainer):
       shape = tuple(getattr(array, "shape", ()))
       dtype = getattr(array, "dtype", None)
       size = int(np.prod(shape, dtype=np.int64)) if shape else 1
-      if dtype is None or not np.issubdtype(np.dtype(dtype), np.floating):
+      # NumPy does not classify ml_dtypes.bfloat16 as ``np.floating`` while
+      # JAX does.  Reference models are intentionally stored in bf16, so use
+      # JAX's dtype lattice for the state-immutability instrument.
+      if dtype is None or not jnp.issubdtype(dtype, jnp.floating):
         continue
-      if not 128 <= size <= 1_048_576:
+      if not min_elements <= size <= 1_048_576:
         continue
       candidates.append((jax.tree_util.keystr(path), array, shape, str(dtype)))
     if not candidates:
@@ -117,25 +125,35 @@ class Trainer(peft_trainer.PeftTrainer):
     if not alignment.enabled():
       return input_data
     mode = alignment.execution_mode()
-    if mode == "update-canary":
-      if self._canon_update_before is not None:
-        raise alignment.AlignmentGateError(
-            "previous update snapshot was not consumed; refusing another update"
+    p27 = os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
+    if mode == "update-canary" or (mode == "gate-only" and p27):
+      if self._canon_update_before is None:
+        self._canon_update_before = {
+            "model": self._canon_fingerprint_state(
+                nnx.state(self.model, nnx.Param)
+            ),
+            "optimizer": self._canon_fingerprint_state(
+                nnx.state(self.optimizer, nnx.optimizer.OptState)
+            ),
+            "train_steps": self.train_steps,
+        }
+        if p27:
+          self._canon_update_before["accumulator"] = (
+              self._canon_fingerprint_state(nnx.state(self.grad_accumulator))
+          )
+        print(
+            "[CANON_FROZENLAKE_P27] pre_state_snapshot "
+            if p27
+            else "[CANON_GSM8K_UPDATE] pre_update_snapshot ",
+            end="",
+            flush=True,
         )
-      self._canon_update_before = {
-          "model": self._canon_fingerprint_state(nnx.state(self.model, nnx.Param)),
-          "optimizer": self._canon_fingerprint_state(
-              nnx.state(self.optimizer, nnx.optimizer.OptState)
-          ),
-          "train_steps": self.train_steps,
-      }
-      print(
-          "[CANON_GSM8K_UPDATE] pre_update_snapshot "
-          f"model_leaves={self._canon_update_before['model']['sampled_leaves']} "
-          f"optimizer_leaves={self._canon_update_before['optimizer']['sampled_leaves']} "
-          f"train_steps={self.train_steps}",
-          flush=True,
-      )
+        print(
+            f"model_leaves={self._canon_update_before['model']['sampled_leaves']} "
+            f"optimizer_leaves={self._canon_update_before['optimizer']['sampled_leaves']} "
+            f"train_steps={self.train_steps}",
+            flush=True,
+        )
     core, sidecar = alignment.unwrap_train_example(input_data)
     if sidecar is None:
       raise alignment.AlignmentGateError(
@@ -180,11 +198,20 @@ class Trainer(peft_trainer.PeftTrainer):
           "canon/T_current",
           "canon/gradient_norm",
           "canon/optimizer_skipped",
+          "canon/is_update_step",
       )
       missing = [key for key in required if key not in aux]
       if missing:
         raise alignment.AlignmentGateError(
             f"value_and_grad aux missing required alignment outputs: {missing}"
+        )
+      expected_red = os.environ.get("CANON_ALIGNMENT_EXPECTED_RED", "") == "1"
+      if expected_red and (
+          alignment.execution_mode() != "gate-only"
+          or os.environ.get("CANON_FROZENLAKE_P27", "") != "1"
+      ):
+        raise alignment.AlignmentGateError(
+            "CANON_ALIGNMENT_EXPECTED_RED is admitted only for P27 gate-only"
         )
       record = alignment.check_batch(
           sidecar,
@@ -192,7 +219,7 @@ class Trainer(peft_trainer.PeftTrainer):
           gradient_norm=jax.device_get(aux["canon/gradient_norm"]),
           optimizer_skipped=jax.device_get(aux["canon/optimizer_skipped"]),
           step=self.train_steps,
-          fail_closed=True,
+          fail_closed=not expected_red,
       )
       if record["execution_mode"] == "train":
         if self._buffered_train_metrics is None:
@@ -246,24 +273,121 @@ class Trainer(peft_trainer.PeftTrainer):
             )
           else:
             entry[0].append(value)
-      if record["execution_mode"] == "update-canary":
+      if (
+          record["execution_mode"] == "gate-only"
+          and os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
+      ):
+        is_update_step = bool(
+            np.asarray(jax.device_get(aux["canon/is_update_step"])).item()
+        )
         before = self._canon_update_before
-        self._canon_update_before = None
+        if before is None:
+          raise alignment.AlignmentGateError(
+              "P27 gate-only state snapshot missing after train step"
+          )
+        if not is_update_step:
+          print(
+              "[CANON_FROZENLAKE_P27] gate_accumulation_pending "
+              f"train_steps={self.train_steps}",
+              flush=True,
+          )
+        else:
+          self._canon_update_before = None
+          after_model = self._canon_fingerprint_state(
+              nnx.state(self.model, nnx.Param)
+          )
+          after_optimizer = self._canon_fingerprint_state(
+              nnx.state(self.optimizer, nnx.optimizer.OptState)
+          )
+          after_accumulator = self._canon_fingerprint_state(
+              nnx.state(self.grad_accumulator)
+          )
+          model_changed = self._canon_changed_paths(
+              before["model"], after_model
+          )
+          optimizer_changed = self._canon_changed_paths(
+              before["optimizer"], after_optimizer
+          )
+          accumulator_changed = self._canon_changed_paths(
+              before["accumulator"], after_accumulator
+          )
+          state_record = {
+              "verdict": (
+                  "PASS"
+                  if not model_changed
+                  and not optimizer_changed
+                  and not accumulator_changed
+                  else "FAIL"
+              ),
+              "model_changed_paths": model_changed,
+              "optimizer_changed_paths": optimizer_changed,
+              "accumulator_changed_paths": accumulator_changed,
+              "train_steps": self.train_steps,
+          }
+          state_path = os.environ.get("CANON_STATE_REPORT", "")
+          if not state_path:
+            raise alignment.AlignmentGateError(
+                "CANON_STATE_REPORT is required for P27 gate-only"
+            )
+          os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+          with open(state_path, "w", encoding="utf-8") as state_file:
+            json.dump(state_record, state_file, indent=2, sort_keys=True)
+            state_file.write("\n")
+          print(
+              "[CANON_FROZENLAKE_P27] gate_state_snapshot "
+              f"verdict={state_record['verdict']} model_changed="
+              f"{len(model_changed)} optimizer_changed="
+              f"{len(optimizer_changed)} accumulator_changed="
+              f"{len(accumulator_changed)}",
+              flush=True,
+          )
+          if state_record["verdict"] != "PASS":
+            raise alignment.AlignmentGateError(
+                f"P27 gate-only mutated state; report={state_path}"
+            )
+      if record["execution_mode"] == "update-canary":
+        is_update_step = bool(
+            np.asarray(jax.device_get(aux["canon/is_update_step"])).item()
+        )
+        before = self._canon_update_before
         if before is None:
           raise alignment.AlignmentGateError("update snapshot missing after train step")
+        if not is_update_step:
+          print(
+              "[CANON_FROZENLAKE_P27] update_accumulation_pending "
+              f"train_steps={self.train_steps}",
+              flush=True,
+          )
+          return
+        self._canon_update_before = None
         after = {
             "model": self._canon_fingerprint_state(nnx.state(self.model, nnx.Param)),
             "optimizer": self._canon_fingerprint_state(
                 nnx.state(self.optimizer, nnx.optimizer.OptState)
             ),
         }
+        if "accumulator" in before:
+          after["accumulator"] = self._canon_fingerprint_state(
+              nnx.state(self.grad_accumulator)
+          )
         model_changed = self._canon_changed_paths(before["model"], after["model"])
         optimizer_changed = self._canon_changed_paths(
             before["optimizer"], after["optimizer"]
         )
+        accumulator_changed = (
+            self._canon_changed_paths(
+                before["accumulator"], after["accumulator"]
+            )
+            if "accumulator" in before
+            else []
+        )
         update_record = {
             "verdict": (
-                "PASS" if model_changed and optimizer_changed else "FAIL"
+                "PASS"
+                if model_changed
+                and optimizer_changed
+                and not accumulator_changed
+                else "FAIL"
             ),
             "alignment_hashes": record["hashes"],
             "train_steps_before": before["train_steps"],
@@ -284,6 +408,7 @@ class Trainer(peft_trainer.PeftTrainer):
                 "before": before["optimizer"]["leaves"],
                 "after": after["optimizer"]["leaves"],
             },
+            "accumulator_changed_paths": accumulator_changed,
             "checkpoint_enabled": self.config.checkpoint_root_directory is not None,
         }
         update_path = os.environ.get("CANON_UPDATE_REPORT", "")
@@ -293,9 +418,13 @@ class Trainer(peft_trainer.PeftTrainer):
         with open(update_path, "w", encoding="utf-8") as update_file:
           json.dump(update_record, update_file, indent=2, sort_keys=True)
           update_file.write("\n")
+        update_marker = (
+            "[CANON_FROZENLAKE_P27] post_update_snapshot "
+            if os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
+            else "[CANON_GSM8K_UPDATE] post_update_snapshot "
+        )
         print(
-            "[CANON_GSM8K_UPDATE] post_update_snapshot "
-            f"verdict={update_record['verdict']} "
+            update_marker + f"verdict={update_record['verdict']} "
             f"model_changed={len(model_changed)}/"
             f"{before['model']['sampled_leaves']} "
             f"optimizer_changed={len(optimizer_changed)}/"

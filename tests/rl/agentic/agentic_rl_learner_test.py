@@ -34,6 +34,48 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 class AgenticRLLearnerTest(parameterized.TestCase):
 
+  def test_p31_segmented_eval_uses_preupdate_step_exactly_once(self):
+    self.assertEqual(
+        agentic_rl_learner._eval_schedule_step(
+            segmented_update=True,
+            pre_update_train_step=0,
+            current_train_step=1,
+        ),
+        0,
+    )
+    self.assertTrue(
+        agentic_rl_learner._should_run_eval(
+            prompt_count=100,
+            schedule_step=0,
+            eval_every_n_steps=25,
+            last_eval_train_step=-1,
+        )
+    )
+    self.assertFalse(
+        agentic_rl_learner._should_run_eval(
+            prompt_count=100,
+            schedule_step=0,
+            eval_every_n_steps=25,
+            last_eval_train_step=0,
+        )
+    )
+    self.assertEqual(
+        agentic_rl_learner._eval_schedule_step(
+            segmented_update=False,
+            pre_update_train_step=0,
+            current_train_step=1,
+        ),
+        1,
+    )
+    self.assertFalse(
+        agentic_rl_learner._should_run_eval(
+            prompt_count=100,
+            schedule_step=1,
+            eval_every_n_steps=25,
+            last_eval_train_step=-1,
+        )
+    )
+
   def test_validate_rollout_config_mismatch_max_tokens(self):
     rl_cluster = mock.Mock()
     rl_cluster.cluster_config = mock.Mock()

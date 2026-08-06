@@ -965,6 +965,564 @@ class PeftTrainerTest(parameterized.TestCase):
         )
     ))
 
+  def test_p28_g6_precomputed_four_microstep_update(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=4,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    baseline_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    baseline_trainer = peft_trainer.PeftTrainer(
+        baseline_model, optax.sgd(1e-3), config
+    )
+    gradient_microbatches = tuple(
+        jax.tree.map(
+            lambda value, scale=scale: type(value)(
+                jnp.full_like(value[...], scale)
+            ),
+            nnx.state(trainer.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        for scale in (1.0, 2.0, 3.0, 4.0)
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      norms = trainer.apply_precomputed_gradient_microbatches(
+          gradient_microbatches
+      )
+      baseline_gradient_microbatches = tuple(
+          jax.tree.map(
+              lambda value: type(value)(jnp.full_like(value[...], 2.5)),
+              nnx.state(baseline_model, nnx.Param),
+              is_leaf=lambda value: isinstance(value, nnx.VariableState),
+          )
+          for _ in range(4)
+      )
+      baseline_trainer.apply_precomputed_gradient_microbatches(
+          baseline_gradient_microbatches
+      )
+
+    self.assertLen(norms, 4)
+    self.assertEqual(trainer.iter_steps, 4)
+    self.assertEqual(trainer.train_steps, 1)
+    for actual, expected in zip(
+        jax.tree.leaves(nnx.state(trainer.model, nnx.Param)),
+        jax.tree.leaves(nnx.state(baseline_model, nnx.Param)),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
+      np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
+
+    with mock.patch.dict(
+        os.environ, {**env, "CANON_P28_G5C_ONLY": "1"}, clear=False
+    ):
+      with self.assertRaisesRegex(ValueError, "exclusive P28 G6"):
+        trainer.apply_precomputed_gradient_microbatches(
+            gradient_microbatches
+        )
+
+  def test_p31_precomputed_sixteen_microstep_update(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=16,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    baseline_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    baseline = peft_trainer.PeftTrainer(
+        baseline_model, optax.sgd(1e-3), config
+    )
+    gradients = tuple(
+        jax.tree.map(
+            lambda value, scale=scale: type(value)(
+                jnp.full_like(value[...], scale)
+            ),
+            nnx.state(trainer.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        for scale in range(1, 17)
+    )
+    baseline_gradients = tuple(
+        jax.tree.map(
+            lambda value: type(value)(jnp.full_like(value[...], 8.5)),
+            nnx.state(baseline.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        for _ in range(16)
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P31_CONVERGENCE": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      norms = trainer.apply_precomputed_gradient_microbatches(gradients)
+      baseline.apply_precomputed_gradient_microbatches(baseline_gradients)
+
+    self.assertLen(norms, 16)
+    self.assertEqual(trainer.iter_steps, 16)
+    self.assertEqual(trainer.train_steps, 1)
+    for actual, expected in zip(
+        jax.tree.leaves(nnx.state(trainer.model, nnx.Param)),
+        jax.tree.leaves(nnx.state(baseline.model, nnx.Param)),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
+      np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
+
+  def test_p30_optimizer_offload_matches_two_device_commits(self):
+    def make_trainer(*, optimizer_offload):
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=2,
+          gradient_accumulation_steps=4,
+          checkpoint_root_directory=None,
+          optimizer_state_dtype=jnp.float32,
+          optimizer_offload=optimizer_offload,
+      )
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      return peft_trainer.PeftTrainer(
+          model, optax.adamw(1e-3), config
+      )
+
+    device_trainer = make_trainer(optimizer_offload=False)
+    offload_trainer = make_trainer(optimizer_offload=True)
+    self.assertEqual(
+        offload_trainer.optimizer_state_memory_kinds(), ("pinned_host",)
+    )
+    self.assertEqual(device_trainer.optimizer_state_memory_kinds(), ("device",))
+
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+    }
+    device_step_impl_ids = []
+    device_commit_impl_ids = []
+    offload_step_impl_ids = []
+    offload_commit_impl_ids = []
+    for commit, scales in enumerate(((1.0, 2.0, 3.0, 4.0),
+                                     (-2.0, -1.0, 1.0, 3.0))):
+      gradient_microbatches = tuple(
+          jax.tree.map(
+              lambda value, scale=scale: type(value)(
+                  jnp.full_like(value[...], scale)
+              ),
+              nnx.state(device_trainer.model, nnx.Param),
+              is_leaf=lambda value: isinstance(value, nnx.VariableState),
+          )
+          for scale in scales
+      )
+      with mock.patch.dict(os.environ, env, clear=False):
+        device_norms = device_trainer.apply_precomputed_gradient_microbatches(
+            gradient_microbatches
+        )
+      with mock.patch.dict(
+          os.environ, {**env, "CANON_P30_POST_COMMIT_GC": "1"}, clear=False
+      ):
+        offload_norms = offload_trainer.apply_precomputed_gradient_microbatches(
+            gradient_microbatches
+        )
+
+      self.assertEqual(device_trainer.train_steps, commit + 1)
+      self.assertEqual(offload_trainer.train_steps, commit + 1)
+      self.assertIsNone(device_trainer._jitted_precomputed_gradient_step_fn)
+      self.assertIsNone(device_trainer._jitted_precomputed_gradient_commit_fn)
+      self.assertIsNone(offload_trainer._jitted_precomputed_gradient_step_fn)
+      self.assertIsNone(offload_trainer._jitted_precomputed_gradient_commit_fn)
+      self.assertIsNotNone(
+          device_trainer._jitted_precomputed_gradient_step_impl
+      )
+      self.assertIsNotNone(
+          device_trainer._jitted_precomputed_gradient_commit_impl
+      )
+      self.assertIsNotNone(
+          offload_trainer._jitted_precomputed_gradient_step_impl
+      )
+      self.assertIsNotNone(
+          offload_trainer._jitted_precomputed_gradient_commit_impl
+      )
+      device_step_impl_ids.append(
+          id(device_trainer._jitted_precomputed_gradient_step_impl)
+      )
+      device_commit_impl_ids.append(
+          id(device_trainer._jitted_precomputed_gradient_commit_impl)
+      )
+      offload_step_impl_ids.append(
+          id(offload_trainer._jitted_precomputed_gradient_step_impl)
+      )
+      offload_commit_impl_ids.append(
+          id(offload_trainer._jitted_precomputed_gradient_commit_impl)
+      )
+      self.assertEqual(
+          offload_trainer.optimizer_state_memory_kinds(), ("pinned_host",)
+      )
+      for actual, expected in zip(device_norms, offload_norms, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+      for device_value, offload_value in zip(
+          jax.tree.leaves(nnx.state(device_trainer.model, nnx.Param)),
+          jax.tree.leaves(nnx.state(offload_trainer.model, nnx.Param)),
+          strict=True,
+      ):
+        np.testing.assert_array_equal(
+            np.asarray(device_value), np.asarray(offload_value)
+        )
+      for device_value, offload_value in zip(
+          jax.tree.leaves(
+              nnx.state(device_trainer.optimizer, nnx.optimizer.OptState)
+          ),
+          jax.tree.leaves(
+              nnx.state(offload_trainer.optimizer, nnx.optimizer.OptState)
+          ),
+          strict=True,
+      ):
+        self.assertEqual(device_value.shape, offload_value.shape)
+        self.assertEqual(device_value.dtype, offload_value.dtype)
+        np.testing.assert_array_equal(
+            np.asarray(device_value), np.asarray(offload_value)
+        )
+    self.assertLen(set(device_step_impl_ids), 1)
+    self.assertLen(set(device_commit_impl_ids), 1)
+    self.assertLen(set(offload_step_impl_ids), 1)
+    self.assertLen(set(offload_commit_impl_ids), 1)
+
+  def test_p30_post_commit_gc_runs_after_cached_bindings_clear(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=4,
+        checkpoint_root_directory=None,
+        optimizer_state_dtype=jnp.float32,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    gradients = tuple(
+        jax.tree.map(
+            lambda value: type(value)(jnp.ones_like(value[...])),
+            nnx.state(trainer.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        for _ in range(4)
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P30_POST_COMMIT_GC": "1",
+    }
+
+    def collect_after_clear():
+      self.assertIsNone(trainer._jitted_precomputed_gradient_step_fn)
+      self.assertIsNone(trainer._jitted_precomputed_gradient_pair_step_fn)
+      self.assertIsNone(trainer._jitted_precomputed_gradient_commit_fn)
+      return 7
+
+    with mock.patch.dict(os.environ, env, clear=False):
+      with mock.patch.object(
+          peft_trainer.gc, "collect", side_effect=collect_after_clear
+      ) as collect_mock:
+        trainer.apply_precomputed_gradient_microbatches(gradients)
+    collect_mock.assert_called_once_with()
+
+  def test_p30_model_donation_matches_two_undonated_commits(self):
+    def make_trainer():
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=2,
+          gradient_accumulation_steps=4,
+          checkpoint_root_directory=None,
+          optimizer_state_dtype=jnp.float32,
+      )
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      return peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+
+    undonated = make_trainer()
+    donated = make_trainer()
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+    }
+    donated_impl_ids = []
+    for scales in ((1.0, 2.0, 3.0, 4.0), (-2.0, -1.0, 1.0, 3.0)):
+      gradients = tuple(
+          jax.tree.map(
+              lambda value, scale=scale: type(value)(
+                  jnp.full_like(value[...], scale)
+              ),
+              nnx.state(undonated.model, nnx.Param),
+              is_leaf=lambda value: isinstance(value, nnx.VariableState),
+          )
+          for scale in scales
+      )
+      with mock.patch.dict(os.environ, env, clear=False):
+        undonated_norms = undonated.apply_precomputed_gradient_microbatches(
+            gradients
+        )
+      with mock.patch.dict(
+          os.environ, {**env, "CANON_P30_DONATE_MODEL": "1"}, clear=False
+      ):
+        donated_norms = donated.apply_precomputed_gradient_microbatches(
+            gradients
+        )
+      donated_impl_ids.append(
+          id(donated._jitted_precomputed_gradient_commit_impl)
+      )
+      for actual, expected in zip(
+          donated_norms, undonated_norms, strict=True
+      ):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+      for actual_tree, expected_tree in (
+          (
+              nnx.state(donated.model, nnx.Param),
+              nnx.state(undonated.model, nnx.Param),
+          ),
+          (
+              nnx.state(donated.optimizer, nnx.optimizer.OptState),
+              nnx.state(undonated.optimizer, nnx.optimizer.OptState),
+          ),
+          (
+              nnx.state(donated.grad_accumulator),
+              nnx.state(undonated.grad_accumulator),
+          ),
+      ):
+        for actual, expected in zip(
+            jax.tree.leaves(actual_tree),
+            jax.tree.leaves(expected_tree),
+            strict=True,
+        ):
+          np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    self.assertLen(set(donated_impl_ids), 1)
+
+  def test_p30_accumulator_reshard_matches_two_unrepaired_commits(self):
+    def make_trainer():
+      model, _ = create_sharded_model(
+          tc.ToyTransformer, nnx.Rngs(0), self.mesh
+      )
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=2,
+          gradient_accumulation_steps=4,
+          checkpoint_root_directory=None,
+          optimizer_state_dtype=jnp.float32,
+      )
+      return peft_trainer.PeftTrainer(
+          model, optax.adamw(1e-3), config
+      )
+
+    with compat.set_mesh(self.mesh):
+      baseline = make_trainer()
+      repaired = make_trainer()
+      env = {
+          "CANON_ALIGNMENT_GATE": "1",
+          "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+          "CANON_ALIGNMENT_GATE_ONLY": "0",
+          "CANON_ALIGNMENT_TRAIN": "0",
+          "CANON_P28_SEGMENTED_TRAIN": "1",
+          "CANON_P28_G5C_ONLY": "0",
+          "CANON_P28_G6_UPDATE": "1",
+      }
+      for scales in ((1.0, 2.0, 3.0, 4.0), (-2.0, -1.0, 1.0, 3.0)):
+        gradients = tuple(
+            jax.tree.map(
+                lambda value, scale=scale: type(value)(
+                    jnp.full_like(value[...], scale)
+                ),
+                nnx.state(baseline.model, nnx.Param),
+                is_leaf=lambda value: isinstance(value, nnx.VariableState),
+            )
+            for scale in scales
+        )
+        with mock.patch.dict(os.environ, env, clear=False):
+          baseline_norms = baseline.apply_precomputed_gradient_microbatches(
+              gradients
+          )
+        with mock.patch.dict(
+            os.environ,
+            {**env, "CANON_P30_RESHARD_ACCUMULATOR": "1"},
+            clear=False,
+        ):
+          repaired_norms = repaired.apply_precomputed_gradient_microbatches(
+              gradients
+          )
+        for actual, expected in zip(
+            repaired_norms, baseline_norms, strict=True
+        ):
+          np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+        for actual_tree, expected_tree in (
+            (
+                nnx.state(repaired.model, nnx.Param),
+                nnx.state(baseline.model, nnx.Param),
+            ),
+            (
+                nnx.state(repaired.optimizer, nnx.optimizer.OptState),
+                nnx.state(baseline.optimizer, nnx.optimizer.OptState),
+            ),
+            (
+                nnx.state(repaired.grad_accumulator),
+                nnx.state(baseline.grad_accumulator),
+            ),
+        ):
+          for actual, expected in zip(
+              jax.tree.leaves(actual_tree),
+              jax.tree.leaves(expected_tree),
+              strict=True,
+          ):
+            np.testing.assert_array_equal(
+                np.asarray(actual), np.asarray(expected)
+            )
+
+      accumulator = repaired.grad_accumulator.grads
+      pspecs = nnx.get_partition_spec(accumulator)
+      for value, pspec in zip(
+          jax.tree.leaves(accumulator),
+          jax.tree.leaves(pspecs),
+          strict=True,
+      ):
+        if isinstance(value, jax.Array):
+          target = peft_trainer.sharding_utils.get_sharding(
+              value,
+              self.mesh,
+              pspec if pspec is not None else shd.PartitionSpec(),
+          )
+          self.assertEqual(value.sharding, target)
+
+  def test_p30_optimizer_offload_transfer_failure_is_loud(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        optimizer_offload=True,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    with mock.patch.object(
+        peft_trainer,
+        "_put_state_on_memory_kind",
+        side_effect=RuntimeError("pinned host unavailable"),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "pinned host unavailable"):
+        peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+
+  def test_p30_fused_pair_accumulation_matches_materialized_update(self):
+    def make_trainer():
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=2,
+          gradient_accumulation_steps=4,
+          checkpoint_root_directory=None,
+          optimizer_state_dtype=jnp.float32,
+      )
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      return peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+
+    materialized = make_trainer()
+    fused = make_trainer()
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P30_FUSED_PAIR_ACCUMULATION": "1",
+    }
+    fused_impl_ids = []
+    for commit in range(2):
+      with mock.patch.dict(os.environ, env, clear=False):
+        for index in range(4):
+          left_scale = float(commit * 8 + index * 2 + 1)
+          right_scale = float(commit * 8 + index * 2 + 2)
+          left = jax.tree.map(
+              lambda value: type(value)(
+                  jnp.full_like(value[...], left_scale)
+              ),
+              nnx.state(materialized.model, nnx.Param),
+              is_leaf=lambda value: isinstance(value, nnx.VariableState),
+          )
+          right = jax.tree.map(
+              lambda value: type(value)(
+                  jnp.full_like(value[...], right_scale)
+              ),
+              nnx.state(materialized.model, nnx.Param),
+              is_leaf=lambda value: isinstance(value, nnx.VariableState),
+          )
+          multiplier = jnp.asarray(0.5, jnp.float32)
+          legacy_gradient = jax.tree.map(
+              lambda a, b: (a + b) * multiplier.astype(a.dtype),
+              left,
+              right,
+          )
+          legacy_norm = materialized.accumulate_precomputed_gradient_microbatch(
+              legacy_gradient, microbatch_index=index
+          )
+          fused_norm = fused.accumulate_precomputed_gradient_pair_microbatch(
+              left, right, multiplier, microbatch_index=index
+          )
+          np.testing.assert_array_equal(
+              np.asarray(fused_norm), np.asarray(legacy_norm)
+          )
+        legacy_commit_norm = materialized.commit_precomputed_gradients()
+        fused_commit_norm = fused.commit_precomputed_gradients()
+      np.testing.assert_array_equal(
+          np.asarray(fused_commit_norm), np.asarray(legacy_commit_norm)
+      )
+      self.assertIsNone(fused._jitted_precomputed_gradient_pair_step_fn)
+      self.assertIsNotNone(fused._jitted_precomputed_gradient_pair_step_impl)
+      fused_impl_ids.append(
+          id(fused._jitted_precomputed_gradient_pair_step_impl)
+      )
+      for actual, expected in zip(
+          jax.tree.leaves(nnx.state(fused.model, nnx.Param)),
+          jax.tree.leaves(nnx.state(materialized.model, nnx.Param)),
+          strict=True,
+      ):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+      for actual, expected in zip(
+          jax.tree.leaves(nnx.state(fused.optimizer, nnx.optimizer.OptState)),
+          jax.tree.leaves(
+              nnx.state(materialized.optimizer, nnx.optimizer.OptState)
+          ),
+          strict=True,
+      ):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    self.assertLen(set(fused_impl_ids), 1)
+
   def test_injected_params(self):
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)

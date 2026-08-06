@@ -40,9 +40,12 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.generate import tokenizer_adapter
 from tunix.rl import algo_core
+from tunix.rl import alignment
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
+from tunix.rl.inference import inference_worker
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import trainer as rl_trainer
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
@@ -224,6 +227,76 @@ class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
 
 
 class AgenticGrpoLearnerTest(parameterized.TestCase):
+
+  def test_p28_g6_reference_fingerprint_accepts_generic_variables(self):
+    class _InferenceReference(nnx.Module):
+
+      def __init__(self):
+        self.weight = nnx.Variable(
+            jnp.arange(256, dtype=jnp.bfloat16).reshape(16, 16)
+        )
+
+    reference = _InferenceReference()
+    self.assertEmpty(jax.tree.leaves(nnx.state(reference, nnx.Param)))
+    worker = inference_worker.InferenceWorker({"reference": reference})
+    cluster = types.SimpleNamespace(
+        reference=None, inference_worker=worker
+    )
+    state = agentic_rl_learner._p28_reference_state(cluster)
+    fingerprint = rl_trainer.Trainer._canon_fingerprint_state(state)
+    self.assertEqual(fingerprint["eligible_leaves"], 1)
+    self.assertEqual(fingerprint["sampled_bytes"], 256 * 2)
+
+  def test_p28_fingerprint_lightweight_accumulator(self):
+    state = {"denom": jnp.asarray(0.0, dtype=jnp.float32)}
+    with self.assertRaisesRegex(
+        alignment.AlignmentGateError,
+        "no bounded floating state leaves",
+    ):
+      rl_trainer.Trainer._canon_fingerprint_state(state)
+    before = rl_trainer.Trainer._canon_fingerprint_state(
+        state, min_elements=1
+    )
+    same = rl_trainer.Trainer._canon_fingerprint_state(
+        {"denom": jnp.asarray(0.0, dtype=jnp.float32)}, min_elements=1
+    )
+    changed = rl_trainer.Trainer._canon_fingerprint_state(
+        {"denom": jnp.asarray(1.0, dtype=jnp.float32)}, min_elements=1
+    )
+    self.assertEqual(before["eligible_leaves"], 1)
+    self.assertEmpty(rl_trainer.Trainer._canon_changed_paths(before, same))
+    self.assertLen(
+        rl_trainer.Trainer._canon_changed_paths(before, changed), 1
+    )
+
+  def test_p30_sharding_inventory_counts_replication_without_value_reads(self):
+    devices = np.asarray(jax.devices())
+    mesh = sharding.Mesh(devices, ("x",))
+    partitioned = jax.device_put(
+        jnp.arange(8, dtype=jnp.float32),
+        sharding.NamedSharding(mesh, sharding.PartitionSpec("x")),
+    )
+    replicated = jax.device_put(
+        jnp.asarray(3.0, dtype=jnp.float32),
+        sharding.NamedSharding(mesh, sharding.PartitionSpec()),
+    )
+    inventory = agentic_rl_learner._p30_sharding_inventory(
+        {"partitioned": partitioned, "replicated": replicated}
+    )
+    expected_logical = 8 * 4 + 4
+    expected_addressable = 8 * 4 + 4 * len(devices)
+    self.assertEqual(inventory["arrays"], 2)
+    self.assertEqual(inventory["logical_bytes"], expected_logical)
+    self.assertEqual(inventory["addressable_bytes"], expected_addressable)
+    self.assertAlmostEqual(
+        inventory["replication_factor"],
+        expected_addressable / expected_logical,
+    )
+    self.assertEqual(
+        sum(inventory["addressable_bytes_by_device"].values()),
+        expected_addressable,
+    )
+    self.assertLen(inventory["by_sharding"], 2)
 
   @classmethod
   def setUpClass(cls):
@@ -724,13 +797,35 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         algo_config.policy_loss_fn
     )
+    model = MockModel(rngs=nnx.Rngs(0))
     loss_output = policy_loss_fn(
-        model=MockModel(rngs=nnx.Rngs(0)),
+        model=model,
         train_example=train_example,
         algo_config=algo_config,
         pad_id=0,
         eos_id=2,
     )
+    graphdef, state = nnx.split(model)
+    per_token_logps, token_entropy = rl_common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=0,
+        eos_id=2,
+        stop_gradient=False,
+        return_entropy=True,
+        temperature=algo_config.temperature,
+    )
+    precomputed = algo_core.grpo_loss_from_precomputed_logps(
+        per_token_logps, token_entropy, train_example, algo_config
+    )
+    for actual, expected in zip(
+        jax.tree.leaves(precomputed),
+        jax.tree.leaves(loss_output),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(actual, expected)
     loss = loss_output.primary_loss.compute()
     aux = loss_output.aux_metrics
     chex.assert_shape(loss, ())
@@ -844,7 +939,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
                 {"role": "assistant", "content": f"msg {index}"},
             ],
             "conversation_tokens": np.array([1, 2, 3]),
-            "conversation_masks": np.array([1, 1, 1]),
+            # The middle token is environment-injected: excluded from the
+            # policy loss but still required as causal context.
+            "conversation_masks": np.array([1, 0, 1]),
             "old_logprobs": None,
             "policy_version": 0,
             "trajectory_reward": 1.0,
@@ -1533,7 +1630,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             # Token id 0 is also this test vocabulary's pad id.  The explicit
             # masks must preserve it as a real prompt/completion token.
             "conversation_tokens": np.array([1, 2, 0]),
-            "conversation_masks": np.array([1, 1, 1]),
+            # Position 1 is environment context, not a policy action.
+            "conversation_masks": np.array([1, 0, 1]),
             "old_logprobs": (
                 np.full(3, 1.0, dtype=np.float32) if return_logprobs else None
             ),
@@ -1565,6 +1663,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
       np.testing.assert_array_equal(
           train_example.completion_mask[:, :3],
+          np.array([[1, 0, 1], [1, 0, 1]], dtype=np.bool_),
+      )
+      np.testing.assert_array_equal(
+          train_example.completion_valid_mask[:, :3],
           np.ones((2, 3), dtype=np.bool_),
       )
 

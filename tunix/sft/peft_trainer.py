@@ -14,10 +14,11 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import contextlib
 import dataclasses
 import functools
+import gc
 import os
 import time
 from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
@@ -99,6 +100,12 @@ class TrainingConfig:
   # uses float32 like optax MultiSteps; set jnp.bfloat16 to trade precision for
   # HBM on the accumulation path.
   gradient_accumulator_dtype: DTypeLike | None = None
+
+  # Keep optimizer state in pinned host memory between updates. The state is
+  # moved to device only for optimizer.update and returned to pinned host after
+  # the update completes. This does not change optimizer-state dtype or update
+  # arithmetic. Disabled by default.
+  optimizer_offload: bool = False
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -288,6 +295,37 @@ def _cast_opt_state_floats(
   )
 
 
+def _put_state_on_memory_kind(state: Any, memory_kind: str) -> Any:
+  """Moves JAX array leaves while preserving their logical shardings."""
+  if memory_kind not in ("device", "pinned_host"):
+    raise ValueError(
+        "optimizer state memory_kind must be device or pinned_host; got "
+        f"{memory_kind!r}"
+    )
+
+  def _move(value):
+    if not isinstance(value, jax.Array):
+      return value
+    sharding = value.sharding
+    if sharding.memory_kind == memory_kind:
+      return value
+    return jax.device_put(value, sharding.with_memory_kind(memory_kind))
+
+  with jax.transfer_guard("allow"):
+    moved = jax.tree.map(_move, state)
+  return jax.block_until_ready(moved)
+
+
+def _state_memory_kinds(state: Any) -> tuple[str, ...]:
+  """Returns the distinct memory kinds of all JAX array leaves."""
+  kinds = {
+      value.sharding.memory_kind
+      for value in jax.tree.leaves(state)
+      if isinstance(value, jax.Array)
+  }
+  return tuple(sorted(kinds))
+
+
 class PeftTrainer:
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -400,9 +438,18 @@ class PeftTrainer:
     self._iter_steps = self._train_steps * self.config.get_with_default(
         "gradient_accumulation_steps", 1
     )
+    if self.config.optimizer_offload:
+      self._put_optimizer_state_on_memory_kind("pinned_host")
 
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
+    self._jitted_precomputed_gradient_step_impl = None
+    self._jitted_precomputed_gradient_pair_step_impl = None
+    self._jitted_precomputed_gradient_commit_impl = None
+    self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_pair_step_fn = None
+    self._jitted_precomputed_gradient_commit_fn = None
+    self._p28_precomputed_microstep = 0
     max_step = None
     if self.config.max_steps is not None:
       max_step = self.config.max_steps * self.config.get_with_default(
@@ -435,6 +482,352 @@ class PeftTrainer:
     """
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
+    self._jitted_precomputed_gradient_step_impl = None
+    self._jitted_precomputed_gradient_pair_step_impl = None
+    self._jitted_precomputed_gradient_commit_impl = None
+    self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_pair_step_fn = None
+    self._jitted_precomputed_gradient_commit_fn = None
+
+  def _precomputed_gradient_step(
+      self,
+      grad_accumulator: GradientAccumulator,
+      grads: Any,
+  ) -> ArrayLike:
+    """Accumulates one externally computed gradient without updating."""
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, jnp.float32))
+    return optax.global_norm(jax.tree.map(
+        lambda value: value.astype(jnp.float32), grads
+    ))
+
+  def _precomputed_gradient_pair_step(
+      self,
+      grad_accumulator: GradientAccumulator,
+      left: Any,
+      right: Any,
+      multiplier: ArrayLike,
+  ) -> ArrayLike:
+    """Adds one materialization-free `(left + right) * multiplier` pair."""
+    paired = jax.tree.map(
+        lambda a, b: (a + b) * multiplier.astype(a.dtype), left, right
+    )
+    grad_accumulator.add(paired, denom=jnp.asarray(1.0, jnp.float32))
+    return optax.global_norm(jax.tree.map(
+        lambda value: value.astype(jnp.float32), paired
+    ))
+
+  def _precomputed_gradient_commit(
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer,
+      grad_accumulator: GradientAccumulator,
+  ) -> ArrayLike:
+    """Commits the already accumulated G6 gradient exactly once."""
+    acc_grads = grad_accumulator.get()
+    norm = optax.global_norm(jax.tree.map(
+        lambda value: value.astype(jnp.float32), acc_grads
+    ))
+    acc_leaves, acc_treedef = jax.tree_util.tree_flatten(acc_grads)
+    param_dtypes = [
+        value.dtype
+        for value in jax.tree.leaves(nnx.state(model, nnx.Param))
+    ]
+    acc_grads = jax.tree_util.tree_unflatten(
+        acc_treedef,
+        [value.astype(dtype) for value, dtype in zip(
+            acc_leaves, param_dtypes, strict=True
+        )],
+    )
+    optimizer.update(model, acc_grads)
+    grad_accumulator.reset()
+    return norm
+
+  def _put_optimizer_state_on_memory_kind(self, memory_kind: str) -> None:
+    """Moves only OptState and verifies that the requested placement landed."""
+    opt_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    moved_state = _put_state_on_memory_kind(opt_state, memory_kind)
+    nnx.update(self.optimizer, moved_state)
+    actual = _state_memory_kinds(
+        nnx.state(self.optimizer, nnx.optimizer.OptState)
+    )
+    if actual != (memory_kind,):
+      raise RuntimeError(
+          "optimizer state memory-kind transfer did not land: "
+          f"requested={memory_kind!r} actual={actual!r}"
+      )
+
+  def _reshard_grad_accumulator(self, mesh: shd.Mesh) -> dict[str, int]:
+    """Restores zeroed accumulator values to their registered shardings."""
+    if mesh.empty:
+      return {"arrays": 0, "logical_bytes": 0}
+
+    def _shard(value, pspec):
+      if not isinstance(value, (jax.Array, np.ndarray)):
+        return value
+      if pspec is None:
+        pspec = shd.PartitionSpec()
+      target = sharding_utils.get_sharding(value, mesh, pspec)
+      if hasattr(value, "sharding") and value.sharding == target:
+        return value
+      with jax.transfer_guard("allow"):
+        return jax.device_put(value, target)
+
+    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
+    resharded = jax.tree.map(
+        _shard, self.grad_accumulator.grads, grad_pspecs
+    )
+    resharded = jax.block_until_ready(resharded)
+    self.grad_accumulator.grads = resharded
+    arrays = [
+        value for value in jax.tree.leaves(resharded)
+        if isinstance(value, jax.Array)
+    ]
+    expected = jax.tree.map(
+        lambda value, pspec: (
+            sharding_utils.get_sharding(
+                value,
+                mesh,
+                pspec if pspec is not None else shd.PartitionSpec(),
+            )
+            if isinstance(value, jax.Array) else None
+        ),
+        resharded,
+        grad_pspecs,
+    )
+    mismatches = [
+        (value.sharding, target)
+        for value, target in zip(
+            jax.tree.leaves(resharded),
+            jax.tree.leaves(expected),
+            strict=True,
+        )
+        if isinstance(value, jax.Array) and value.sharding != target
+    ]
+    if mismatches:
+      raise RuntimeError(
+          "P30 accumulator reshard did not land: "
+          f"mismatches={len(mismatches)} first={mismatches[0]!r}"
+      )
+    return {
+        "arrays": len(arrays),
+        "logical_bytes": sum(
+            int(value.size * value.dtype.itemsize) for value in arrays
+        ),
+    }
+
+  def optimizer_state_memory_kinds(self) -> tuple[str, ...]:
+    """Reports optimizer-state placement for fail-closed capacity gates."""
+    return _state_memory_kinds(
+        nnx.state(self.optimizer, nnx.optimizer.OptState)
+    )
+
+  def apply_precomputed_gradient_microbatches(
+      self, gradient_microbatches: Sequence[Any]
+  ) -> tuple[ArrayLike, ...]:
+    """Applies the default-off segmented gradient transaction.
+
+    This method is deliberately unavailable outside the fully attested G6
+    update canary.  It never invokes ``loss_fn`` or ``value_and_grad``.
+    """
+    expected_microbatches = (
+        16 if os.environ.get("CANON_P31_CONVERGENCE", "") == "1" else 4
+    )
+    if len(gradient_microbatches) != expected_microbatches:
+      raise ValueError(
+          "segmented update gradient count changed: "
+          f"{len(gradient_microbatches)} != {expected_microbatches}"
+      )
+    norms = tuple(
+        self.accumulate_precomputed_gradient_microbatch(
+            gradients, microbatch_index=index
+        )
+        for index, gradients in enumerate(gradient_microbatches)
+    )
+    self.commit_precomputed_gradients()
+    return norms
+
+  def _validate_precomputed_gradient_contract(self) -> None:
+    """Validates the exclusive, default-off G6 update contract."""
+    p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
+    required_env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G6_UPDATE": "1",
+        (
+            "CANON_ALIGNMENT_TRAIN"
+            if p31_convergence
+            else "CANON_ALIGNMENT_UPDATE_CANARY"
+        ): "1",
+    }
+    missing = [
+        key for key, value in required_env.items()
+        if os.environ.get(key, "") != value
+    ]
+    if missing or os.environ.get("CANON_P28_G5C_ONLY", "") == "1":
+      raise ValueError(
+          "precomputed gradient update requires the exclusive P28 G6 "
+          f"canary contract; invalid keys={missing}"
+      )
+    steps = self.config.get_with_default("gradient_accumulation_steps", 1)
+    expected_steps = 16 if p31_convergence else 4
+    if steps != expected_steps:
+      raise ValueError(
+          "segmented update accumulation changed: "
+          f"{steps} != {expected_steps}"
+      )
+    if self.config.checkpoint_root_directory is not None:
+      raise ValueError("P28 G6 canary requires checkpointing disabled")
+
+  def accumulate_precomputed_gradient_microbatch(
+      self, gradients: Any, *, microbatch_index: int
+  ) -> ArrayLike:
+    """Streams one of the four P28 G6 gradient contributions."""
+    self._validate_precomputed_gradient_contract()
+
+    if self._jitted_precomputed_gradient_step_fn is None:
+      if self._jitted_precomputed_gradient_step_impl is None:
+        self._jitted_precomputed_gradient_step_impl = nnx.jit(
+            self._precomputed_gradient_step,
+            donate_argnames=("grad_accumulator",),
+        )
+      self._jitted_precomputed_gradient_step_fn = functools.partial(
+          nnx.cached_partial(
+              self._jitted_precomputed_gradient_step_impl,
+              self.grad_accumulator,
+          )
+      )
+
+    if microbatch_index != self._p28_precomputed_microstep:
+      raise ValueError(
+          "P28 G6 gradient microbatch cadence mismatch: "
+          f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
+      )
+    norm = self._jitted_precomputed_gradient_step_fn(
+        gradients
+    )
+    norm.block_until_ready()
+    self._iter_steps += 1
+    self._p28_precomputed_microstep += 1
+    return norm
+
+  def accumulate_precomputed_gradient_pair_microbatch(
+      self,
+      left: Any,
+      right: Any,
+      multiplier: ArrayLike,
+      *,
+      microbatch_index: int,
+  ) -> ArrayLike:
+    """Fuses pair sum/scale into the existing donated accumulator update."""
+    self._validate_precomputed_gradient_contract()
+    if os.environ.get("CANON_P30_FUSED_PAIR_ACCUMULATION", "") != "1":
+      raise ValueError(
+          "P30 fused pair accumulation requires its explicit env gate"
+      )
+    if self._jitted_precomputed_gradient_pair_step_fn is None:
+      if self._jitted_precomputed_gradient_pair_step_impl is None:
+        self._jitted_precomputed_gradient_pair_step_impl = nnx.jit(
+            self._precomputed_gradient_pair_step,
+            donate_argnames=("grad_accumulator",),
+        )
+      self._jitted_precomputed_gradient_pair_step_fn = functools.partial(
+          nnx.cached_partial(
+              self._jitted_precomputed_gradient_pair_step_impl,
+              self.grad_accumulator,
+          )
+      )
+    if microbatch_index != self._p28_precomputed_microstep:
+      raise ValueError(
+          "P30 pair gradient microbatch cadence mismatch: "
+          f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
+      )
+    norm = self._jitted_precomputed_gradient_pair_step_fn(
+        left, right, jnp.asarray(multiplier, jnp.float32)
+    )
+    norm.block_until_ready()
+    self._iter_steps += 1
+    self._p28_precomputed_microstep += 1
+    return norm
+
+  def commit_precomputed_gradients(self) -> ArrayLike:
+    """Commits after all streamed microbatches and resets the accumulator."""
+    self._validate_precomputed_gradient_contract()
+    expected_microsteps = (
+        16 if os.environ.get("CANON_P31_CONVERGENCE", "") == "1" else 4
+    )
+    if self._p28_precomputed_microstep != expected_microsteps:
+      raise ValueError(
+          "segmented update commit cadence mismatch: "
+          f"{self._p28_precomputed_microstep} != {expected_microsteps}"
+      )
+    if self.config.optimizer_offload:
+      self._put_optimizer_state_on_memory_kind("device")
+      print(
+          "[P30.G1] OPT_STATE before_commit memory_kind=device",
+          flush=True,
+      )
+    if self._jitted_precomputed_gradient_commit_impl is None:
+      self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+      donate_argnames = ("optimizer", "grad_accumulator")
+      if os.environ.get("CANON_P30_DONATE_MODEL", "") == "1":
+        donate_argnames = ("model",) + donate_argnames
+        print(
+            "[P30.G2] DONATE_MODEL on "
+            "alias_contract=model,optimizer,grad_accumulator",
+            flush=True,
+        )
+      self._jitted_precomputed_gradient_commit_impl = nnx.jit(
+          self._precomputed_gradient_commit,
+          donate_argnames=donate_argnames,
+      )
+    if self._jitted_precomputed_gradient_commit_fn is None:
+      self._jitted_precomputed_gradient_commit_fn = functools.partial(
+          nnx.cached_partial(
+              self._jitted_precomputed_gradient_commit_impl,
+              self.model,
+              self.optimizer,
+              self.grad_accumulator,
+          )
+      )
+    norm = self._jitted_precomputed_gradient_commit_fn()
+    norm.block_until_ready()
+    if self.config.optimizer_offload:
+      self._put_optimizer_state_on_memory_kind("pinned_host")
+      print(
+          "[P30.G1] OPT_STATE after_commit memory_kind=pinned_host",
+          flush=True,
+      )
+    if os.environ.get("CANON_P30_RESHARD_ACCUMULATOR", "") == "1":
+      active_mesh = jax.sharding.get_mesh()
+      if active_mesh.empty:
+        active_mesh = pxla.thread_resources.env.physical_mesh
+      summary = self._reshard_grad_accumulator(
+          active_mesh
+      )
+      print(
+          "[P30.G2] RESHARD_ACCUMULATOR on "
+          f"arrays={summary['arrays']} "
+          f"logical_bytes={summary['logical_bytes']} target=metadata_pspecs",
+          flush=True,
+      )
+    # Both cached partials bind mutable NNX objects whose device buffers were
+    # donated by the transaction above.  Reusing either binding in the next
+    # update can therefore submit an invalid (already donated) buffer on TPU.
+    # Rebuild only the NNX bindings; the transformed JIT callables and their
+    # compiled executable caches remain intact.
+    self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_pair_step_fn = None
+    self._jitted_precomputed_gradient_commit_fn = None
+    if os.environ.get("CANON_P30_POST_COMMIT_GC", "") == "1":
+      collected = gc.collect()
+      print(
+          "[P30.G2] POST_COMMIT_GC on "
+          f"collected={collected} cached_bindings=cleared",
+          flush=True,
+      )
+    self._train_steps += 1
+    self._p28_precomputed_microstep = 0
+    return norm
 
   def with_loss_fn(
       self,
@@ -626,6 +1019,9 @@ class PeftTrainer:
         aux.aux_metrics["canon/gradient_norm"] = grad_norm
         aux.aux_metrics["canon/optimizer_skipped"] = jnp.asarray(
             canon_gate_only, dtype=jnp.int32
+        )
+        aux.aux_metrics["canon/is_update_step"] = jnp.asarray(
+            is_update_step, dtype=jnp.bool_
         )
       # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
       return loss_val, aux.aux_metrics, grad_norm
@@ -1087,6 +1483,17 @@ class PeftTrainer:
           ):
             print(
                 "[CANON_GSM8K_UPDATE] update_step_committed "
+                f"train_steps={self._train_steps}",
+              flush=True,
+            )
+          if os.environ.get("CANON_FROZENLAKE_P27", "") == "1":
+            p27_marker = (
+                "gate_boundary_complete"
+                if os.environ.get("CANON_ALIGNMENT_GATE_ONLY", "") == "1"
+                else "update_step_committed"
+            )
+            print(
+                f"[CANON_FROZENLAKE_P27] {p27_marker} "
                 f"train_steps={self._train_steps}",
                 flush=True,
             )

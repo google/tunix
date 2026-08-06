@@ -23,6 +23,7 @@ import contextlib
 import copy
 import dataclasses
 import itertools
+import json
 import os
 import queue
 import threading
@@ -54,6 +55,103 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
+
+
+def _eval_schedule_step(
+    *,
+    segmented_update: bool,
+    pre_update_train_step: int,
+    current_train_step: int,
+) -> int:
+  """Returns the policy step whose rollout weights evaluation will consume.
+
+  The P28/P31 segmented path commits actor gradients before reaching the
+  shared evaluation block, but rollout weights are not synchronized until
+  after that block.  Evaluation therefore still consumes the pre-update
+  rollout policy and must be scheduled/labeled with its pre-update step.
+  """
+  return pre_update_train_step if segmented_update else current_train_step
+
+
+def _should_run_eval(
+    *,
+    prompt_count: int,
+    schedule_step: int,
+    eval_every_n_steps: int,
+    last_eval_train_step: int,
+) -> bool:
+  """Pure exactly-once predicate for the held-out rollout schedule."""
+  return bool(
+      prompt_count
+      and schedule_step % eval_every_n_steps == 0
+      and schedule_step != last_eval_train_step
+  )
+
+
+def _p28_reference_state(rl_cluster):
+  """Returns the authoritative state consumed by reference inference.
+
+  RLCluster splits and transfers the frozen reference into InferenceWorker;
+  reference scoring thereafter consumes the worker's saved graph/state pair.
+  Fingerprinting the module shell or applying the actor-only ``nnx.Param``
+  filter can therefore produce an empty tree.  The immutability gate must hash
+  the exact saved state used by ``get_ref_per_token_logps``.
+  """
+  direct_reference = getattr(rl_cluster, "reference", None)
+  if direct_reference is not None:
+    return flax.nnx.state(direct_reference)
+  worker = getattr(rl_cluster, "inference_worker", None)
+  if worker is None:
+    return None
+  return worker.get_model_state("reference")
+
+
+def _p30_sharding_inventory(tree):
+  """Summarizes logical versus local addressable bytes without reading values."""
+  arrays = [
+      value for value in jax.tree.leaves(tree)
+      if isinstance(value, jax.Array)
+  ]
+  logical_bytes = 0
+  addressable_bytes = 0
+  by_device = {}
+  by_sharding = {}
+  for value in arrays:
+    itemsize = int(value.dtype.itemsize)
+    logical = int(value.size) * itemsize
+    logical_bytes += logical
+    memory_kind = getattr(value.sharding, "memory_kind", None) or "unspecified"
+    spec = getattr(value.sharding, "spec", None)
+    spec_text = repr(spec) if spec is not None else type(value.sharding).__name__
+    key = f"memory_kind={memory_kind}|spec={spec_text}"
+    group = by_sharding.setdefault(
+        key,
+        {
+            "arrays": 0,
+            "logical_bytes": 0,
+            "addressable_bytes": 0,
+            "addressable_shards": 0,
+        },
+    )
+    group["arrays"] += 1
+    group["logical_bytes"] += logical
+    for shard in value.addressable_shards:
+      shard_bytes = int(shard.data.size) * itemsize
+      addressable_bytes += shard_bytes
+      group["addressable_bytes"] += shard_bytes
+      group["addressable_shards"] += 1
+      device_id = str(shard.device.id)
+      by_device[device_id] = by_device.get(device_id, 0) + shard_bytes
+  return {
+      "arrays": len(arrays),
+      "logical_bytes": logical_bytes,
+      "addressable_bytes": addressable_bytes,
+      "replication_factor": (
+          addressable_bytes / logical_bytes if logical_bytes else 0.0
+      ),
+      "addressable_bytes_by_device": dict(sorted(by_device.items())),
+      "by_sharding": dict(sorted(by_sharding.items())),
+  }
 
 
 def _split_train_example_by_trajectory(
@@ -108,6 +206,12 @@ MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   policy_version: np.ndarray | None = None
+  # ``completion_mask`` is the policy/action mask: environment-injected and
+  # parser-appended tokens are excluded from the loss.  They are nevertheless
+  # real causal context for later assistant tokens.  Keep that independent
+  # sequence-validity contract instead of making model execution compact away
+  # every non-action token in a multi-turn trajectory.
+  completion_valid_mask: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -166,6 +270,589 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if item is None:
         raise StopAsyncIteration
       return item
+
+  def _run_p28_g5c_gate(self, observed_train_example) -> bool:
+    """Runs the default-off complete segmented loss gate without an update."""
+    import json  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import alignment  # pylint: disable=g-import-not-at-top
+    from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+
+    train_example, sidecar = alignment.unwrap_train_example(
+        observed_train_example
+    )
+    if sidecar is None:
+      raise alignment.AlignmentGateError(
+          "P28 G5c requires the four-boundary ObservedTrainExample"
+      )
+    actor_trainer = self.rl_cluster.actor_trainer
+    _, trainer_state = nnx.split(actor_trainer.model)
+    adapter = canonical_forward.require_registered()
+    def memory_snapshot():
+      return tuple({
+          "device": int(device.id),
+          "bytes_in_use": (device.memory_stats() or {}).get("bytes_in_use"),
+          "peak_bytes_in_use": (
+              device.memory_stats() or {}
+          ).get("peak_bytes_in_use"),
+          "bytes_limit": (device.memory_stats() or {}).get("bytes_limit"),
+      } for device in jax.local_devices())
+
+    def block_all(tree):
+      for leaf in jax.tree.leaves(tree):
+        if hasattr(leaf, "block_until_ready"):
+          leaf.block_until_ready()
+
+    def tree_exact(left, right):
+      left_leaves = jax.tree.leaves(left)
+      right_leaves = jax.tree.leaves(right)
+      return len(left_leaves) == len(right_leaves) and all(
+          bool(np.asarray(jnp.array_equal(a, b)))
+          for a, b in zip(left_leaves, right_leaves, strict=True)
+      )
+
+    before = {
+        "model": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.model, nnx.Param)
+        ),
+        "optimizer": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+    }
+    hbm_before = memory_snapshot()
+    start = time.perf_counter()
+    first = adapter.segmented_grpo_value_and_grad(
+        trainer_state=trainer_state,
+        train_example=train_example,
+        algo_config=self.algo_config,
+        pad_id=self.rl_cluster.rollout.pad_id(),
+        eos_id=self.rl_cluster.rollout.eos_id(),
+    )
+    block_all((first["loss"], first["per_token_logps"], first["gradients"]))
+    first_seconds = time.perf_counter() - start
+    hbm_after_first = memory_snapshot()
+    start = time.perf_counter()
+    second = adapter.segmented_grpo_value_and_grad(
+        trainer_state=trainer_state,
+        train_example=train_example,
+        algo_config=self.algo_config,
+        pad_id=self.rl_cluster.rollout.pad_id(),
+        eos_id=self.rl_cluster.rollout.eos_id(),
+    )
+    block_all((second["loss"], second["per_token_logps"], second["gradients"]))
+    repeat_seconds = time.perf_counter() - start
+    hbm_after_repeat = memory_snapshot()
+    repeat_exact = (
+        bool(np.asarray(jnp.array_equal(first["loss"], second["loss"])))
+        and bool(np.asarray(jnp.array_equal(
+            first["per_token_logps"], second["per_token_logps"]
+        )))
+        and tree_exact(first["gradients"], second["gradients"])
+    )
+    gradient_sample = actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+        first["gradients"]
+    )
+    grad_norm = jnp.sqrt(sum(
+        jnp.sum(jnp.square(value.astype(jnp.float32)))
+        for value in jax.tree.leaves(first["gradients"])
+    ))
+    reports = []
+    for index in range(8):
+      row_sidecar = jax.tree.map(
+          lambda value: (
+              value[index : index + 1]
+              if hasattr(value, "shape")
+              and value.shape
+              and value.shape[0] == 8
+              else value
+          ),
+          sidecar,
+      )
+      record = alignment.check_batch(
+          row_sidecar,
+          t_current=first["per_token_logps"][index : index + 1],
+          gradient_norm=grad_norm,
+          optimizer_skipped=jnp.asarray(1, jnp.int32),
+          step=index,
+          fail_closed=False,
+      )
+      print(
+          "[P28.G5C] TRAJECTORY " + json.dumps({
+              "alignment": record,
+              "reverse": first["reports"][index],
+          }, sort_keys=True),
+          flush=True,
+      )
+      reports.append(record)
+
+    after = {
+        "model": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.model, nnx.Param)
+        ),
+        "optimizer": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+    }
+    changed = {
+        name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+            before[name], after[name]
+        )
+        for name in before
+    }
+    result = {
+        "trajectories": len(reports),
+        "cadence": tuple(
+            report["boundary"] for report in first["reports"]
+        ),
+        "all_alignment_pass": all(
+            report["verdict"] == "PASS" for report in reports
+        ),
+        "repeat_exact": repeat_exact,
+        "gradient_sha256": tuple(
+            leaf["sha256"] for leaf in gradient_sample["leaves"].values()
+        ),
+        "gradient_sampled_leaves": gradient_sample["sampled_leaves"],
+        "gradient_norm": float(np.asarray(grad_norm)),
+        "first_seconds": first_seconds,
+        "repeat_seconds": repeat_seconds,
+        "state_changed": changed,
+        "hbm_before": hbm_before,
+        "hbm_after_first": hbm_after_first,
+        "hbm_after_repeat": hbm_after_repeat,
+        "shared_logsoftmax": bool(
+            getattr(adapter, "_p28_g5c_shared_logsoftmax", False)
+        ),
+    }
+    print(f"[P28.G5C] RESULT {result}", flush=True)
+    if (
+        not repeat_exact
+        or any(changed.values())
+        or not np.isfinite(result["gradient_norm"])
+        or result["gradient_norm"] <= 0
+    ):
+      raise alignment.AlignmentGateError(f"P28 G5c red: {result}")
+    return result["all_alignment_pass"]
+
+  def _run_p28_g6_update(self, observed_train_example) -> dict[str, Any]:
+    """Streams the proven segmented gradient into an attested real update."""
+    import json  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import alignment  # pylint: disable=g-import-not-at-top
+    from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+
+    p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
+    expected_mode = "train" if p31_convergence else "update-canary"
+    if alignment.execution_mode() != expected_mode:
+      raise alignment.AlignmentGateError(
+          f"segmented update requires alignment mode {expected_mode!r}"
+      )
+    train_example, sidecar = alignment.unwrap_train_example(
+        observed_train_example
+    )
+    if sidecar is None:
+      raise alignment.AlignmentGateError(
+          "P28 G6 requires the four-boundary ObservedTrainExample"
+      )
+    actor_trainer = self.rl_cluster.actor_trainer
+    full_train = os.environ.get("CANON_P29_FULL_TRAIN", "") == "1"
+    num_trajectories = int(train_example.completion_ids.shape[0])
+    trajectory_micro = int(
+        os.environ.get("CANON_P27_TRAJECTORY_MICRO", "2")
+    )
+    if trajectory_micro != 2 or num_trajectories % trajectory_micro:
+      raise alignment.AlignmentGateError(
+          "segmented update requires complete trajectory pairs: "
+          f"trajectories={num_trajectories} micro={trajectory_micro}"
+      )
+    expected_microbatches = num_trajectories // trajectory_micro
+    expected_trajectories = 32 if p31_convergence else 8
+    if num_trajectories != expected_trajectories:
+      raise alignment.AlignmentGateError(
+          "segmented update trajectory contract changed: "
+          f"{num_trajectories} != {expected_trajectories}"
+      )
+    marker_prefix = (
+        "[CANON_FROZENLAKE_P31]"
+        if p31_convergence
+        else "[CANON_FROZENLAKE_P27]"
+    )
+    _, trainer_state = nnx.split(actor_trainer.model)
+    adapter = canonical_forward.require_registered()
+    sharding_profile_enabled = (
+        os.environ.get("CANON_P30_SHARDING_PROFILE", "") == "1"
+    )
+
+    def memory_snapshot():
+      return tuple({
+          "device": int(device.id),
+          "bytes_in_use": (device.memory_stats() or {}).get("bytes_in_use"),
+          "peak_bytes_in_use": (
+              device.memory_stats() or {}
+          ).get("peak_bytes_in_use"),
+          "bytes_limit": (device.memory_stats() or {}).get("bytes_limit"),
+      } for device in jax.local_devices())
+
+    def fingerprint(value, *, min_elements=128):
+      return actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+          value, min_elements=min_elements
+      )
+
+    def emit_sharding_inventory(boundary):
+      if not sharding_profile_enabled:
+        return
+      inventory = {
+          "model": _p30_sharding_inventory(
+              nnx.state(actor_trainer.model, nnx.Param)
+          ),
+          "optimizer": _p30_sharding_inventory(
+              nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+          ),
+          "accumulator": _p30_sharding_inventory(
+              nnx.state(actor_trainer.grad_accumulator)
+          ),
+      }
+      print(
+          "[P30.G2] SHARDING_INVENTORY "
+          f"boundary={boundary} "
+          f"inventory={json.dumps(inventory, sort_keys=True)}",
+          flush=True,
+      )
+
+    ref_state = _p28_reference_state(self.rl_cluster)
+    before = {
+        "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),
+        "optimizer": fingerprint(
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": fingerprint(
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+        "reference": (
+            fingerprint(ref_state) if ref_state is not None else None
+        ),
+        "train_steps": actor_trainer.train_steps,
+    }
+    hbm_before = memory_snapshot()
+    emit_sharding_inventory("before_reverse")
+    optimizer_memory_kinds_before = (
+        actor_trainer.optimizer_state_memory_kinds()
+    )
+    if actor_trainer.config.optimizer_offload:
+      if optimizer_memory_kinds_before != ("pinned_host",):
+        raise alignment.AlignmentGateError(
+            "P30 optimizer state must be pinned-host before reverse: "
+            f"{optimizer_memory_kinds_before!r}"
+        )
+      print(
+          "[P30.G1] OPT_STATE before_reverse memory_kind=pinned_host",
+          flush=True,
+      )
+    micro_norms = []
+    fused_pair_accumulation = (
+        os.environ.get("CANON_P30_FUSED_PAIR_ACCUMULATION", "") == "1"
+    )
+    if fused_pair_accumulation:
+      print(
+          "[P30.G2] FUSED_PAIR_ACCUMULATION on order=(left+right)*scale",
+          flush=True,
+      )
+
+    def consume_microbatch(index, gradients):
+      norm = actor_trainer.accumulate_precomputed_gradient_microbatch(
+          gradients, microbatch_index=index
+      )
+      micro_norms.append(norm)
+      if index < expected_microbatches - 1:
+        print(
+            f"{marker_prefix} update_accumulation_pending "
+            f"train_steps={actor_trainer.train_steps} "
+            f"microstep={index + 1}/{expected_microbatches}",
+            flush=True,
+        )
+
+    def consume_pair(index, left, right, multiplier):
+      norm = actor_trainer.accumulate_precomputed_gradient_pair_microbatch(
+          left,
+          right,
+          multiplier,
+          microbatch_index=index,
+      )
+      micro_norms.append(norm)
+      if index < expected_microbatches - 1:
+        print(
+            f"{marker_prefix} update_accumulation_pending "
+            f"train_steps={actor_trainer.train_steps} "
+            f"microstep={index + 1}/{expected_microbatches}",
+            flush=True,
+        )
+
+    start = time.perf_counter()
+    with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+        rl_cluster_lib.Role.ACTOR
+    ):
+      result = adapter.segmented_grpo_value_and_grad(
+          trainer_state=trainer_state,
+          train_example=train_example,
+          algo_config=self.algo_config,
+          pad_id=self.rl_cluster.rollout.pad_id(),
+          eos_id=self.rl_cluster.rollout.eos_id(),
+          gradient_microbatch_sink=(
+              None if fused_pair_accumulation else consume_microbatch
+          ),
+          gradient_pair_sink=(consume_pair if fused_pair_accumulation else None),
+      )
+    result["loss"].block_until_ready()
+    if (
+        result["gradient_microbatches"] != expected_microbatches
+        or len(micro_norms) != expected_microbatches
+    ):
+      raise alignment.AlignmentGateError(
+          "segmented update gradient microbatch count changed: "
+          f"result={result['gradient_microbatches']} "
+          f"norms={len(micro_norms)} expected={expected_microbatches}"
+      )
+    hbm_after_accumulation = memory_snapshot()
+    emit_sharding_inventory("after_accumulation")
+
+    records = []
+    activity = []
+    for index in range(expected_microbatches):
+      start_row = index * trajectory_micro
+      pair_sidecar = jax.tree.map(
+          lambda value: (
+              value[start_row : start_row + trajectory_micro]
+              if hasattr(value, "shape")
+              and value.shape
+              and value.shape[0] == num_trajectories
+              else value
+          ),
+          sidecar,
+      )
+      active = any(
+          report["loss_cotangent"]["nonzero"] > 0
+          for report in result["reports"][
+              start_row : start_row + trajectory_micro
+          ]
+      )
+      norm_value = float(np.asarray(micro_norms[index]))
+      if (norm_value > 0.0) != active or not np.isfinite(norm_value):
+        raise alignment.AlignmentGateError(
+            "P28 G6 microgradient activity mismatch: "
+            f"index={index} active={active} norm={norm_value}"
+        )
+      activity.append(active)
+      record = alignment.check_batch(
+          pair_sidecar,
+          t_current=result["per_token_logps"][
+              start_row : start_row + trajectory_micro
+          ],
+          gradient_norm=micro_norms[index],
+          optimizer_skipped=jnp.asarray(0, jnp.int32),
+          step=(
+              before["train_steps"] * expected_microbatches + index
+              if full_train
+              else index
+          ),
+          fail_closed=True,
+      )
+      records.append(record)
+    if not any(activity) and not full_train:
+      raise alignment.AlignmentGateError(
+          "INCONCLUSIVE_NO_SIGNAL: all four G6 microgradients are zero"
+      )
+
+    with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+        rl_cluster_lib.Role.ACTOR
+    ):
+      commit_norm = actor_trainer.commit_precomputed_gradients()
+    commit_norm.block_until_ready()
+    elapsed = time.perf_counter() - start
+    hbm_after_commit = memory_snapshot()
+    emit_sharding_inventory("after_commit")
+    memory_profile_path = os.environ.get(
+        "CANON_P30_MEMORY_PROFILE_PATH", ""
+    )
+    if memory_profile_path:
+      if os.path.exists(memory_profile_path):
+        raise alignment.AlignmentGateError(
+            f"P30 memory profile path already exists: {memory_profile_path}"
+        )
+
+      def inventory(tree):
+        arrays = [
+            value for value in jax.tree.leaves(tree)
+            if isinstance(value, jax.Array)
+        ]
+        by_kind = {}
+        for value in arrays:
+          kind = value.sharding.memory_kind
+          by_kind[kind] = by_kind.get(kind, 0) + int(
+              value.size * value.dtype.itemsize
+          )
+        return {
+            "arrays": len(arrays),
+            "logical_bytes": sum(by_kind.values()),
+            "memory_kind_bytes": by_kind,
+        }
+
+      profile_inventory = {
+          "model": inventory(nnx.state(actor_trainer.model, nnx.Param)),
+          "optimizer": inventory(
+              nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+          ),
+          "accumulator": inventory(
+              nnx.state(actor_trainer.grad_accumulator)
+          ),
+          "hbm_after_commit": hbm_after_commit,
+      }
+      jax.profiler.save_device_memory_profile(memory_profile_path)
+      print(
+          "[P30.G2] MEMORY_PROFILE_SAVED "
+          f"path={memory_profile_path} "
+          f"inventory={json.dumps(profile_inventory, sort_keys=True)}",
+          flush=True,
+      )
+    optimizer_memory_kinds_after = (
+        actor_trainer.optimizer_state_memory_kinds()
+    )
+    if actor_trainer.config.optimizer_offload and (
+        optimizer_memory_kinds_after != ("pinned_host",)
+    ):
+      raise alignment.AlignmentGateError(
+          "P30 optimizer state must return to pinned host after commit: "
+          f"{optimizer_memory_kinds_after!r}"
+      )
+    print(
+        f"{marker_prefix} update_step_committed "
+        f"train_steps={actor_trainer.train_steps}",
+        flush=True,
+    )
+
+    after = {
+        "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),
+        "optimizer": fingerprint(
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": fingerprint(
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+        "reference": (
+            fingerprint(_p28_reference_state(self.rl_cluster))
+            if ref_state is not None else None
+        ),
+    }
+    changed = {
+        name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+            before[name], after[name]
+        )
+        for name in ("model", "optimizer", "accumulator")
+    }
+    reference_changed = (
+        actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+            before["reference"], after["reference"]
+        )
+        if before["reference"] is not None else []
+    )
+    has_learning_signal = any(activity)
+    mutation_ok = (
+        bool(changed["model"]) and bool(changed["optimizer"])
+        if has_learning_signal else True
+    )
+    update_record = {
+        "verdict": (
+          "PASS"
+            if mutation_ok
+            and not changed["accumulator"]
+            and not reference_changed
+            and actor_trainer.train_steps == before["train_steps"] + 1
+            else "FAIL"
+        ),
+        "microsteps": expected_microbatches,
+        "commits": 1,
+        "train_steps_before": before["train_steps"],
+        "train_steps_after": actor_trainer.train_steps,
+        "gradient_activity": activity,
+        "has_learning_signal": has_learning_signal,
+        "micro_gradient_norms": [float(np.asarray(x)) for x in micro_norms],
+        "commit_gradient_norm": float(np.asarray(commit_norm)),
+        "model": {
+            "changed_count": len(changed["model"]),
+            "changed_paths": changed["model"],
+        },
+        "optimizer": {
+            "changed_count": len(changed["optimizer"]),
+            "changed_paths": changed["optimizer"],
+        },
+        "accumulator_changed_paths": changed["accumulator"],
+        "reference_present": ref_state is not None,
+        "reference_changed_paths": reference_changed,
+        "checkpoint_enabled": actor_trainer.config.checkpoint_root_directory is not None,
+        "alignment_hashes": [record["hashes"] for record in records],
+        "elapsed_seconds": elapsed,
+        "hbm_before": hbm_before,
+        "hbm_after_accumulation": hbm_after_accumulation,
+        "hbm_after_commit": hbm_after_commit,
+        "optimizer_memory_kinds_before": list(
+            optimizer_memory_kinds_before
+        ),
+        "optimizer_memory_kinds_after": list(
+            optimizer_memory_kinds_after
+        ),
+    }
+    update_path = os.environ.get("CANON_UPDATE_REPORT", "")
+    if not update_path:
+      raise alignment.AlignmentGateError("CANON_UPDATE_REPORT is required")
+    os.makedirs(os.path.dirname(update_path) or ".", exist_ok=True)
+    update_mode = "a" if full_train else "w"
+    with open(update_path, update_mode, encoding="utf-8") as update_file:
+      if full_train:
+        update_file.write(json.dumps(update_record, sort_keys=True) + "\n")
+      else:
+        json.dump(update_record, update_file, indent=2, sort_keys=True)
+        update_file.write("\n")
+    if full_train:
+      max_differing_bytes = max(
+          boundary["differing_bytes"]
+          for record in records
+          for boundary in record["boundaries"].values()
+      )
+      self.rl_cluster.buffer_metrics_async(
+          {
+              "canonical/segmented_loss": (
+                  float(np.asarray(result["loss"])), np.mean
+              ),
+              "canonical/commit_gradient_norm": (
+                  float(np.asarray(commit_norm)), np.mean
+              ),
+              "canonical/alignment_max_differing_bytes": (
+                  max_differing_bytes, np.max
+              ),
+              "canonical/active_microbatches": (
+                  sum(activity), np.mean
+              ),
+          },
+          mode=rl_cluster_lib.Mode.TRAIN,
+          step=before["train_steps"],
+      )
+    print(
+        f"{marker_prefix} post_update_snapshot "
+        f"verdict={update_record['verdict']} "
+        f"model_changed={len(changed['model'])} "
+        f"optimizer_changed={len(changed['optimizer'])} "
+        f"reference_changed={len(reference_changed)}",
+        flush=True,
+    )
+    if update_record["verdict"] != "PASS":
+      raise alignment.AlignmentGateError(
+          f"P28 G6 update transaction red: {update_record}"
+      )
+    return update_record
 
   def __init__(
       self,
@@ -848,6 +1535,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if eval_dataset
         else []
     )
+    p31_eval_rollout_enabled = (
+        os.environ.get("CANON_P31_ENABLE_EVAL", "") == "1"
+    )
+    if p31_eval_rollout_enabled:
+      expected_eval_rewards = len(all_eval_prompts) * self._num_generations()
+      print(
+          "[CANON_FROZENLAKE_P31] eval_input_inventory "
+          f"prompts={len(all_eval_prompts)} "
+          f"generations={self._num_generations()} "
+          f"expected_rewards={expected_eval_rewards}",
+          flush=True,
+      )
 
     training_config = self.rl_cluster.cluster_config.training_config
 
@@ -931,6 +1630,56 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
         )
 
+      # Capture the rollout-policy step before the segmented trainer mutates
+      # actor_trainer.train_steps. Rollout weights are synchronized only after
+      # the evaluation block, so this remains the authoritative eval step.
+      pre_update_train_step = self.rl_cluster.actor_trainer.train_steps
+
+      if os.environ.get("CANON_P28_G5C_ONLY", "") == "1":
+        alignment_pass = self._run_p28_g5c_gate(merged_train_micro_batch)
+        marker = (
+            "GATE_ONLY_PASS" if alignment_pass else "CAUSAL_RED_CAPTURED"
+        )
+        print(
+            f"[P28.G5C] {marker} no_optimizer=1 no_accumulator=1 "
+            "no_checkpoint=1",
+            flush=True,
+        )
+        prompt_queue.put(None)
+        _ = producer_future.result()
+        self.rl_cluster.close()
+        return
+
+      p28_g6_update = os.environ.get("CANON_P28_G6_UPDATE", "") == "1"
+      if p28_g6_update:
+        p31_convergence = (
+            os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
+        )
+        expected_total = 32 if p31_convergence else 8
+        expected_grad_acc = expected_total // 2
+        if (
+            is_packed
+            or trajectory_micro_batch_size != 2
+            or grad_acc_steps != expected_grad_acc
+        ):
+          raise ValueError(
+              "segmented update geometry changed: expected unpacked "
+              f"{expected_total}->{expected_grad_acc}x2 with "
+              f"grad_acc={expected_grad_acc}"
+          )
+        marker_prefix = (
+            "[CANON_FROZENLAKE_P31]"
+            if p31_convergence
+            else "[CANON_FROZENLAKE_P27]"
+        )
+        print(
+            f"{marker_prefix} trajectory_microbatch "
+            f"total={expected_total} size=2 chunks={expected_grad_acc} "
+            f"grad_acc={expected_grad_acc} segmented=1",
+            flush=True,
+        )
+        self._run_p28_g6_update(merged_train_micro_batch)
+
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the
       # optimizer (which fires every ``gradient_accumulation_steps`` micro-
@@ -943,7 +1692,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       seqs_per_chunk = trajectory_micro_batch_size or (
           train_micro_batch_size * self.algo_config.num_generations
       )
-      if trajectory_micro_batch_size is not None:
+      if p28_g6_update:
+        chunked_train_micro_batch = []
+      elif trajectory_micro_batch_size is not None:
         chunked_train_micro_batch = _split_train_example_by_trajectory(
             merged_train_micro_batch,
             total_trajectories=n_total,
@@ -958,6 +1709,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         logging.info(marker)
         if os.environ.get("CANON_ALIGNMENT_TRAIN", "") == "1":
           print(f"[CANON_GSM8K_TRAIN] {marker}", flush=True)
+        elif os.environ.get("CANON_FROZENLAKE_P27", "") == "1":
+          print(f"[CANON_FROZENLAKE_P27] {marker}", flush=True)
       elif n_total > seqs_per_chunk:
         chunked_train_micro_batch = [
             jax.tree_util.tree_map(
@@ -975,16 +1728,26 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       else:
         chunked_train_micro_batch = [merged_train_micro_batch]
 
-      full_batch_chunks.extend(chunked_train_micro_batch)
+      if not p28_g6_update:
+        full_batch_chunks.extend(chunked_train_micro_batch)
 
       # --- Evaluation Logic on FIRST microbatch ---
       current_eval_dataset = None
-      if update_steps_since_last_sync == 0:
-        current_train_step = self.rl_cluster.actor_trainer.train_steps
-        if (
-            all_eval_prompts
-            and current_train_step % training_config.eval_every_n_steps == 0
-            and current_train_step != self._last_eval_train_step
+      p31_eval_rollout = p31_eval_rollout_enabled
+      if (
+          (not p28_g6_update or p31_eval_rollout)
+          and update_steps_since_last_sync == 0
+      ):
+        current_train_step = _eval_schedule_step(
+            segmented_update=p28_g6_update and p31_eval_rollout,
+            pre_update_train_step=pre_update_train_step,
+            current_train_step=self.rl_cluster.actor_trainer.train_steps,
+        )
+        if _should_run_eval(
+            prompt_count=len(all_eval_prompts),
+            schedule_step=current_train_step,
+            eval_every_n_steps=training_config.eval_every_n_steps,
+            last_eval_train_step=self._last_eval_train_step,
         ):
           self._last_eval_train_step = current_train_step
           self._eval_iter_steps = 0
@@ -1008,6 +1771,29 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               _eval_runner_async(eval_orchestrator), self.loop
           )
           eval_examples = eval_future.result()
+          if p31_eval_rollout:
+            expected_eval_rewards = (
+                len(all_eval_prompts) * self._num_generations()
+            )
+            with self._rewards_window_lock:
+              actual_eval_rewards = len(self._eval_rewards_window)
+            if actual_eval_rewards != expected_eval_rewards:
+              raise RuntimeError(
+                  "P31 held-out eval coverage mismatch: "
+                  f"prompts={len(all_eval_prompts)} "
+                  f"generations={self._num_generations()} "
+                  f"rewards={actual_eval_rewards} "
+                  f"expected={expected_eval_rewards}"
+              )
+            print(
+                "[CANON_FROZENLAKE_P31] eval_reward_inventory "
+                f"step={current_train_step} "
+                f"prompts={len(all_eval_prompts)} "
+                f"generations={self._num_generations()} "
+                f"rewards={actual_eval_rewards} "
+                f"expected={expected_eval_rewards} verdict=PASS",
+                flush=True,
+            )
           self._eval_iter_steps += 1
           current_eval_dataset = eval_examples
           did_eval_this_global_step = True
@@ -1017,16 +1803,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # microbatches, and #iterations=K, we will:
       #   1. Train on the m * n microbatches once as we get them from rollout.
       #   2. When we get the full batch, repeat K-1 times on the entire batch.
-      self.rl_cluster.update_actor(
-          chunked_train_micro_batch, current_eval_dataset, skip_jit
-      )
-      if hasattr(self.rl_cluster, "critic_trainer"):
-        self.rl_cluster.update_critic(
+      if not p28_g6_update:
+        self.rl_cluster.update_actor(
             chunked_train_micro_batch, current_eval_dataset, skip_jit
         )
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              chunked_train_micro_batch, current_eval_dataset, skip_jit
+          )
 
       # --- Weight Sync Logic ---
-      if is_packed:
+      if p28_g6_update:
+        is_update = True
+      elif is_packed:
         # `merged_train_micro_batch.is_update_step` is a 0-d jax scalar set
         # by `pack_sequences`; pull the host-side value before deciding.
         is_update = bool(
@@ -1084,6 +1873,27 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             merged_train_micro_batch.completion_mask, dtype=np.float32
         )
         compl_len = cmask.sum(axis=-1).mean() if cmask.size else 0.0
+        valid_mask = np.asarray(
+            getattr(
+                merged_train_micro_batch,
+                "completion_valid_mask",
+                merged_train_micro_batch.completion_mask,
+            ),
+            dtype=np.float32,
+        )
+        raw_lengths = (
+            valid_mask.sum(axis=-1)
+            if valid_mask.size
+            else np.asarray([], dtype=np.float32)
+        )
+        raw_compl_len = raw_lengths.mean() if raw_lengths.size else 0.0
+        trunc_ratio = (
+            float(
+                (raw_lengths >= self.algo_config.max_response_length).mean()
+            )
+            if raw_lengths.size
+            else 0.0
+        )
         adv_abs_mean = float(np.abs(adv).mean()) if adv.size else float("nan")
         train_r_mean = (
             float(train_rewards.mean()) if train_rewards.size else float("nan")
@@ -1142,13 +1952,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           logging.debug("Failed to read trainer buffered metrics: %s", e)
         logging.info(
             "[step %d] train_reward=%.3f train_solve=%.3f n=%d"
-            " adv_abs_mean=%.3f compl_len=%.1f time=%.1fs%s%s",
+            " adv_abs_mean=%.3f compl_len=%.1f raw_compl_len=%.1f"
+            " trunc_ratio=%.3f time=%.1fs%s%s",
             self.rl_cluster.global_steps,
             train_r_mean,
             train_solve,
             int(train_rewards.size),
             adv_abs_mean,
             float(compl_len),
+            float(raw_compl_len),
+            trunc_ratio,
             global_step_time,
             trainer_str,
             eval_str,
@@ -1173,6 +1986,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             ):
               self.rl_cluster.sync_weights()
             self.policy_version += 1
+            if p28_g6_update:
+              print(
+                  "[P28.G6] weight_sync_committed count=1 "
+                  f"policy_version={self.policy_version} "
+                  f"global_steps={self.rl_cluster.global_steps}",
+                  flush=True,
+              )
             logging.info(
                 "Weights synced. Policy version incremented to %d.",
                 self.policy_version,
