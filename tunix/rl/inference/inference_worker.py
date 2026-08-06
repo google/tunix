@@ -98,3 +98,9 @@ class InferenceWorker:
     if role not in self._models:
       raise ValueError(f"Model role {role} is not available.")
     return self._models[role]
+
+  def get_model_state(self, role: str) -> nnx.State:
+    """Returns the authoritative state consumed by inference for ``role``."""
+    if role not in self._model_states:
+      raise ValueError(f"Model role {role} is not available.")
+    return self._model_states[role][1]

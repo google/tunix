@@ -30,10 +30,12 @@ import dataclasses
 import hashlib
 import importlib
 import os
+import time
 from typing import Any, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tunix.generate import utils as generate_utils
 from tunix.rl import canonical_logsoftmax
@@ -214,6 +216,763 @@ class LiveEngineContract:
   compute_logits_fn: str
 
 
+@dataclasses.dataclass(frozen=True)
+class SegmentedForwardContract:
+  """Static attestation for the P28 host-segmented engine forward."""
+
+  implementation_id: str
+  state_leaves: int
+  start_layer: int
+  end_layer: int
+  block_depth: int
+
+
+@dataclasses.dataclass(frozen=True)
+class SegmentedBlockVjpContract:
+  """Static attestation for one independently differentiated real layer."""
+
+  layer_index: int
+  local_state_leaves: int
+  local_state_bytes: int
+  block_depth: int
+
+
+class _P28SegmentedEngineForward:
+  """Host-orchestrated Qwen3 forward with one JIT per real decoder layer.
+
+  This is deliberately not a pytree and must never be enclosed by another
+  JAX transform.  The host is the composition boundary: each compiled layer
+  receives the complete engine state as runtime leaves, but only the selected
+  layer is reachable from that executable.  G3 decides whether these extra JIT
+  boundaries preserve the canonical whole-model value bitwise.
+  """
+
+  def __init__(self, runner):
+    if os.environ.get("CANON_P28_SEGMENTED_FORWARD", "") != "1":
+      raise FunctionalMappingError(
+          "P28 segmented forward requires CANON_P28_SEGMENTED_FORWARD=1"
+      )
+    if not bool(runner.is_first_rank) or not bool(runner.is_last_rank):
+      raise FunctionalMappingError(
+          "P28 segmented forward currently admits no pipeline parallelism"
+      )
+    if not hasattr(runner, "model") or not hasattr(runner, "state"):
+      raise FunctionalMappingError(
+          "live runner does not expose the NNX model/state reconstruction seam"
+      )
+
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    graphdef, live_state = nnx.split(runner.model)
+    live_treedef = jax.tree_util.tree_structure(live_state)
+    runner_treedef = jax.tree_util.tree_structure(runner.state)
+    if live_treedef != runner_treedef:
+      raise FunctionalMappingError(
+          "runner.model and runner.state have different NNX state trees"
+      )
+    live_leaves = tuple(jax.tree_util.tree_leaves(live_state))
+    runner_leaves = tuple(jax.tree_util.tree_leaves(runner.state))
+    if len(live_leaves) != len(runner_leaves):
+      raise FunctionalMappingError(
+          "runner.model and runner.state have different leaf counts"
+      )
+    for index, (live_leaf, runner_leaf) in enumerate(
+        zip(live_leaves, runner_leaves)
+    ):
+      if (
+          tuple(live_leaf.shape) != tuple(runner_leaf.shape)
+          or live_leaf.dtype != runner_leaf.dtype
+      ):
+        raise FunctionalMappingError(
+            "runner.model/state leaf contract differs at index "
+            f"{index}: {live_leaf.shape}/{live_leaf.dtype} != "
+            f"{runner_leaf.shape}/{runner_leaf.dtype}"
+        )
+
+    try:
+      backbone = runner.model.model
+      layers = tuple(backbone.layers)
+      start_layer = int(backbone.start_layer)
+      end_layer = int(backbone.end_layer)
+      embed_tokens = backbone.embed_tokens
+      final_norm = backbone.norm
+    except (AttributeError, TypeError, ValueError) as exc:
+      raise FunctionalMappingError(
+          "live model is not the admitted Qwen3 NNX layer-stack structure"
+      ) from exc
+    if start_layer != 0 or end_layer != len(layers):
+      raise FunctionalMappingError(
+          "P28 requires the complete local Qwen3 layer range: "
+          f"start={start_layer} end={end_layer} layers={len(layers)}"
+      )
+    if len(runner.kv_caches) != len(layers):
+      raise FunctionalMappingError(
+          "P28 layer/cache cardinality differs: "
+          f"layers={len(layers)} caches={len(runner.kv_caches)}"
+      )
+
+    def merge(state_leaves):
+      state = jax.tree_util.tree_unflatten(live_treedef, state_leaves)
+      return nnx.merge(graphdef, state)
+
+    def embed(state_leaves, input_ids):
+      model = merge(state_leaves)
+      return model.model.embed_tokens(input_ids)
+
+    def norm(state_leaves, hidden):
+      model = merge(state_leaves)
+      return model.model.norm(hidden)
+
+    full_leaf_id_to_index = {id(leaf): index for index, leaf in enumerate(live_leaves)}
+    if len(full_leaf_id_to_index) != len(live_leaves):
+      raise FunctionalMappingError(
+          "P28 full engine state contains aliased leaf objects; explicit "
+          "local-to-full gradient assembly is ambiguous"
+      )
+
+    def split_local(module, label):
+      local_graphdef, local_state = nnx.split(module)
+      local_treedef = jax.tree_util.tree_structure(local_state)
+      local_leaves = tuple(jax.tree_util.tree_leaves(local_state))
+      full_indices = []
+      for local_index, leaf in enumerate(local_leaves):
+        full_index = full_leaf_id_to_index.get(id(leaf))
+        if full_index is None:
+          raise FunctionalMappingError(
+              f"P28 {label} local leaf {local_index} is absent from the "
+              "full engine state"
+          )
+        full_indices.append(full_index)
+      if len(set(full_indices)) != len(full_indices):
+        raise FunctionalMappingError(
+            f"P28 {label} local state maps to duplicate full-state leaves"
+        )
+      return (
+          local_graphdef,
+          local_treedef,
+          local_leaves,
+          tuple(full_indices),
+      )
+
+    def merge_local(graphdef, treedef, leaves):
+      return nnx.merge(
+          graphdef, jax.tree_util.tree_unflatten(treedef, leaves)
+      )
+
+    endpoint_contract = None
+    embed_local_fn = None
+    embed_pullback_fn = None
+    norm_local_fn = None
+    norm_pullback_fn = None
+    head_local_fn = None
+    head_pullback_fn = None
+    embed_full_indices = ()
+    norm_full_indices = ()
+    head_full_indices = ()
+    embed_local_leaves = ()
+    norm_local_leaves = ()
+    head_local_leaves = ()
+    if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") == "1":
+      if not hasattr(runner.model, "lm_head"):
+        raise FunctionalMappingError(
+            "P28 G5c currently requires an explicit untied lm_head"
+        )
+      (
+          embed_graphdef,
+          embed_treedef,
+          embed_local_leaves,
+          embed_full_indices,
+      ) = split_local(embed_tokens, "embed")
+      (
+          norm_graphdef,
+          norm_treedef,
+          norm_local_leaves,
+          norm_full_indices,
+      ) = split_local(final_norm, "final norm")
+      (
+          head_graphdef,
+          head_treedef,
+          head_local_leaves,
+          head_full_indices,
+      ) = split_local(runner.model.lm_head, "lm head")
+      if not embed_local_leaves or not norm_local_leaves or not head_local_leaves:
+        raise FunctionalMappingError(
+            "P28 G5c embed/norm/lm-head must each expose parameter leaves"
+        )
+
+      def run_local_embed(leaves, input_ids):
+        module = merge_local(embed_graphdef, embed_treedef, leaves)
+        return module(input_ids)
+
+      def pullback_local_embed(leaves, input_ids, dhidden):
+        _, pullback = jax.vjp(run_local_embed, leaves, input_ids)
+        dleaves, _ = pullback(dhidden)
+        return dleaves
+
+      def run_local_norm(leaves, hidden):
+        module = merge_local(norm_graphdef, norm_treedef, leaves)
+        return module(hidden)
+
+      def pullback_local_norm(leaves, hidden, dnormalized):
+        _, pullback = jax.vjp(run_local_norm, leaves, hidden)
+        return pullback(dnormalized)
+
+      def run_local_head(leaves, hidden):
+        module = merge_local(head_graphdef, head_treedef, leaves)
+        return module(hidden)
+
+      def pullback_local_head(leaves, hidden, dlogits):
+        _, pullback = jax.vjp(run_local_head, leaves, hidden)
+        return pullback(dlogits)
+
+      embed_local_fn = jax.jit(run_local_embed)
+      embed_pullback_fn = jax.jit(pullback_local_embed)
+      norm_local_fn = jax.jit(run_local_norm)
+      norm_pullback_fn = jax.jit(pullback_local_norm)
+      head_local_fn = jax.jit(run_local_head)
+      head_pullback_fn = jax.jit(pullback_local_head)
+      endpoint_contract = {
+          "embed": embed_full_indices,
+          "norm": norm_full_indices,
+          "head": head_full_indices,
+      }
+
+    layer_fns = []
+    local_layer_fns = []
+    local_layer_vjp_fns = []
+    local_layer_pullback_fns = []
+    local_layer_leaves = []
+    local_layer_contracts = []
+    for layer_index in range(start_layer, end_layer):
+
+      def run_layer(
+          state_leaves, cache, hidden, attention_metadata, *, _index=layer_index
+      ):
+        model = merge(state_leaves)
+        return model.model.layers[_index](cache, hidden, attention_metadata)
+
+      layer_fns.append(jax.jit(run_layer))
+
+      layer_graphdef, layer_state = nnx.split(layers[layer_index])
+      layer_treedef = jax.tree_util.tree_structure(layer_state)
+      layer_leaves = tuple(jax.tree_util.tree_leaves(layer_state))
+
+      def run_local_layer(
+          leaves, cache, hidden, attention_metadata,
+          *, _graphdef=layer_graphdef, _treedef=layer_treedef
+      ):
+        state = jax.tree_util.tree_unflatten(_treedef, leaves)
+        layer = nnx.merge(_graphdef, state)
+        return layer(cache, hidden, attention_metadata)
+
+      def block_objective(
+          leaves, cache, hidden, attention_metadata,
+          *, _run=run_local_layer
+      ):
+        next_cache, next_hidden = _run(
+            leaves, cache, hidden, attention_metadata
+        )
+        row_seed = (
+            (jnp.arange(next_hidden.shape[0], dtype=jnp.float32) % 17) + 1
+        ) / 17.0
+        loss = jnp.sum(
+            next_hidden.astype(jnp.float32) * row_seed[:, None]
+        ) / jnp.asarray(next_hidden.size, jnp.float32)
+        return loss, (next_cache, next_hidden)
+
+      def block_pullback(
+          leaves,
+          cache,
+          hidden,
+          attention_metadata,
+          dnext_cache,
+          dnext_hidden,
+          *,
+          _run=run_local_layer,
+      ):
+        def primal(p, c, h):
+          return _run(p, c, h, attention_metadata)
+
+        _, pullback = jax.vjp(primal, leaves, cache, hidden)
+        return pullback((dnext_cache, dnext_hidden))
+
+      local_layer_fns.append(jax.jit(run_local_layer))
+      local_layer_vjp_fns.append(
+          jax.jit(
+              jax.value_and_grad(
+                  block_objective, argnums=(0, 1, 2), has_aux=True
+              )
+          )
+      )
+      local_layer_pullback_fns.append(jax.jit(block_pullback))
+      local_layer_leaves.append(layer_leaves)
+      local_layer_contracts.append(
+          SegmentedBlockVjpContract(
+              layer_index=layer_index,
+              local_state_leaves=len(layer_leaves),
+              local_state_bytes=sum(
+                  int(leaf.size * leaf.dtype.itemsize) for leaf in layer_leaves
+              ),
+              block_depth=1,
+          )
+      )
+
+    local_layer_full_indices = []
+    for layer_index, layer in enumerate(layers):
+      _, _, _, full_indices = split_local(layer, f"layer {layer_index}")
+      local_layer_full_indices.append(full_indices)
+
+    if endpoint_contract is not None:
+      covered = (
+          set(embed_full_indices)
+          | set(norm_full_indices)
+          | set(head_full_indices)
+      )
+      for full_indices in local_layer_full_indices:
+        if covered.intersection(full_indices):
+          raise FunctionalMappingError(
+              "P28 G5c local parameter groups overlap in full engine state"
+          )
+        covered.update(full_indices)
+      expected = set(range(len(live_leaves)))
+      if covered != expected:
+        raise FunctionalMappingError(
+            "P28 G5c local parameter groups do not cover the full engine "
+            f"state: missing={sorted(expected - covered)} "
+            f"extra={sorted(covered - expected)}"
+        )
+
+    self._embed_fn = jax.jit(embed)
+    self._layer_fns = tuple(layer_fns)
+    self._local_layer_fns = tuple(local_layer_fns)
+    self._local_layer_vjp_fns = tuple(local_layer_vjp_fns)
+    self._local_layer_pullback_fns = tuple(local_layer_pullback_fns)
+    self._local_layer_leaves = tuple(local_layer_leaves)
+    self._local_layer_full_indices = tuple(local_layer_full_indices)
+    self._local_layer_contracts = tuple(local_layer_contracts)
+    self._norm_fn = jax.jit(norm)
+    self._embed_local_fn = embed_local_fn
+    self._embed_pullback_fn = embed_pullback_fn
+    self._norm_local_fn = norm_local_fn
+    self._norm_pullback_fn = norm_pullback_fn
+    self._head_local_fn = head_local_fn
+    self._head_pullback_fn = head_pullback_fn
+    self._embed_local_leaves = tuple(embed_local_leaves)
+    self._norm_local_leaves = tuple(norm_local_leaves)
+    self._head_local_leaves = tuple(head_local_leaves)
+    self._embed_full_indices = tuple(embed_full_indices)
+    self._norm_full_indices = tuple(norm_full_indices)
+    self._head_full_indices = tuple(head_full_indices)
+    self._endpoint_contract = endpoint_contract
+    self._full_state_leaves = tuple(live_leaves)
+    self._num_state_leaves = len(live_leaves)
+    self._captured_state_released = False
+    self._p30_sparse_grad_assembly = (
+        os.environ.get("CANON_P30_SPARSE_GRAD_ASSEMBLY", "") == "1"
+    )
+    if self._p30_sparse_grad_assembly:
+      print(
+          "[P30.G2] SPARSE_GRAD_ASSEMBLY on scalar_zero_canonicalization=1",
+          flush=True,
+      )
+    self.contract = SegmentedForwardContract(
+        implementation_id=(
+            f"{type(runner.model).__module__}."
+            f"{type(runner.model).__qualname__}:p28-segmented-layer1"
+        ),
+        state_leaves=len(live_leaves),
+        start_layer=start_layer,
+        end_layer=end_layer,
+        block_depth=1,
+    )
+
+  @staticmethod
+  def _reject_outer_transform(*trees):
+    if any(
+        isinstance(leaf, jax.core.Tracer)
+        for tree in trees
+        for leaf in jax.tree_util.tree_leaves(tree)
+    ):
+      raise FunctionalMappingError(
+          "P28 segmented forward is a host boundary and must not be wrapped "
+          "in jax.jit/value_and_grad"
+      )
+
+  @staticmethod
+  def _state_spec(leaf):
+    """Keeps an array's compile contract without retaining its live buffer."""
+    sharding = getattr(leaf, "sharding", None)
+    if sharding is None:
+      return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype)
+    return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=sharding)
+
+  def release_captured_state(self):
+    """Drops construction-time weights after explicit-state call paths exist."""
+    if self._captured_state_released:
+      raise FunctionalMappingError(
+          "P30 segmented construction state was already released"
+      )
+    released_bytes = sum(
+        int(leaf.size * leaf.dtype.itemsize)
+        for leaf in self._full_state_leaves
+    )
+    self._full_state_leaves = tuple(
+        self._state_spec(leaf) for leaf in self._full_state_leaves
+    )
+    self._local_layer_leaves = tuple(
+        tuple(self._state_spec(leaf) for leaf in leaves)
+        for leaves in self._local_layer_leaves
+    )
+    self._embed_local_leaves = tuple(
+        self._state_spec(leaf) for leaf in self._embed_local_leaves
+    )
+    self._norm_local_leaves = tuple(
+        self._state_spec(leaf) for leaf in self._norm_local_leaves
+    )
+    self._head_local_leaves = tuple(
+        self._state_spec(leaf) for leaf in self._head_local_leaves
+    )
+    self._captured_state_released = True
+    return released_bytes
+
+  def run(
+      self,
+      state_leaves,
+      caches,
+      input_ids,
+      attention_metadata,
+      *,
+      inputs_embeds=None,
+  ):
+    """Runs embed -> real layers -> final norm without an outer JIT."""
+    self._reject_outer_transform(
+        state_leaves,
+        caches,
+        input_ids,
+        attention_metadata,
+        inputs_embeds,
+    )
+    state_leaves = tuple(state_leaves)
+    if len(state_leaves) != self._num_state_leaves:
+      raise FunctionalMappingError(
+          "P28 segmented state leaf count changed: "
+          f"{len(state_leaves)} != {self._num_state_leaves}"
+      )
+    if len(caches) != len(self._layer_fns):
+      raise FunctionalMappingError(
+          "P28 segmented cache count changed: "
+          f"{len(caches)} != {len(self._layer_fns)}"
+      )
+    hidden = (
+        self._embed_fn(state_leaves, input_ids)
+        if inputs_embeds is None
+        else inputs_embeds
+    )
+    next_caches = []
+    for layer_fn, cache in zip(self._layer_fns, caches):
+      cache, hidden = layer_fn(
+          state_leaves, cache, hidden, attention_metadata
+      )
+      next_caches.append(cache)
+    hidden = self._norm_fn(state_leaves, hidden)
+    return next_caches, hidden
+
+  def run_block_vjp(
+      self, layer_index, state_leaves, cache, hidden, attention_metadata
+  ):
+    """Runs one isolated real-layer primal and VJP without an outer transform."""
+    self._reject_outer_transform(
+        state_leaves, cache, hidden, attention_metadata
+    )
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(self._layer_fns):
+      raise FunctionalMappingError(
+          f"P28 block layer index out of range: {layer_index}"
+      )
+    if self._captured_state_released:
+      raise FunctionalMappingError(
+          "P30 run_block_vjp cannot use captured state after it was released"
+      )
+    reference = self._layer_fns[layer_index](
+        tuple(state_leaves), cache, hidden, attention_metadata
+    )
+    local_leaves = self._local_layer_leaves[layer_index]
+    isolated = self._local_layer_fns[layer_index](
+        local_leaves, cache, hidden, attention_metadata
+    )
+    (loss_aux, gradients) = self._local_layer_vjp_fns[layer_index](
+        local_leaves, cache, hidden, attention_metadata
+    )
+    loss, vjp_output = loss_aux
+    return {
+        "contract": self._local_layer_contracts[layer_index],
+        "reference": reference,
+        "isolated": isolated,
+        "loss": loss,
+        "vjp_output": vjp_output,
+        "gradients": gradients,
+    }
+
+  def run_block_forward(
+      self, layer_index, state_leaves, cache, hidden, attention_metadata
+  ):
+    """Returns full-state and isolated-state primals for one layer."""
+    self._reject_outer_transform(
+        state_leaves, cache, hidden, attention_metadata
+    )
+    layer_index = int(layer_index)
+    reference = self._layer_fns[layer_index](
+        tuple(state_leaves), cache, hidden, attention_metadata
+    )
+    state_leaves = tuple(state_leaves)
+    local_leaves = tuple(
+        state_leaves[index]
+        for index in self._local_layer_full_indices[layer_index]
+    )
+    isolated = self._local_layer_fns[layer_index](
+        local_leaves,
+        cache,
+        hidden,
+        attention_metadata,
+    )
+    return reference, isolated
+
+  def run_layer_forward(
+      self, layer_index, state_leaves, cache, hidden, attention_metadata
+  ):
+    """Runs one isolated layer with explicit current engine-state leaves."""
+    self._reject_outer_transform(
+        state_leaves, cache, hidden, attention_metadata
+    )
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(self._local_layer_fns):
+      raise FunctionalMappingError(
+          f"P28 layer index out of range: {layer_index}"
+      )
+    state_leaves = tuple(state_leaves)
+    if len(state_leaves) != self._num_state_leaves:
+      raise FunctionalMappingError(
+          "P28 layer state leaf count changed: "
+          f"{len(state_leaves)} != {self._num_state_leaves}"
+      )
+    local_leaves = tuple(
+        state_leaves[index]
+        for index in self._local_layer_full_indices[layer_index]
+    )
+    return self._local_layer_fns[layer_index](
+        local_leaves, cache, hidden, attention_metadata
+    )
+
+  def run_block_pullback(
+      self,
+      layer_index,
+      cache,
+      hidden,
+      attention_metadata,
+      dnext_cache,
+      dnext_hidden,
+      *,
+      state_leaves=None,
+  ):
+    """Applies one real layer pullback to caller-provided output cotangents."""
+    self._reject_outer_transform(
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(self._local_layer_pullback_fns):
+      raise FunctionalMappingError(
+          f"P28 pullback layer index out of range: {layer_index}"
+      )
+    if state_leaves is None and self._captured_state_released:
+      raise FunctionalMappingError(
+          "P30 pullback requires explicit current state after captured state "
+          "was released"
+      )
+    local_leaves = self._local_layer_leaves[layer_index]
+    if state_leaves is not None:
+      state_leaves = tuple(state_leaves)
+      if len(state_leaves) != self._num_state_leaves:
+        raise FunctionalMappingError(
+            "P28 pullback state leaf count changed: "
+            f"{len(state_leaves)} != {self._num_state_leaves}"
+        )
+      local_leaves = tuple(
+          state_leaves[index]
+          for index in self._local_layer_full_indices[layer_index]
+      )
+    return self._local_layer_pullback_fns[layer_index](
+        local_leaves,
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+
+  def _require_full_loss_endpoints(self):
+    if self._endpoint_contract is None:
+      raise FunctionalMappingError(
+          "P28 full-loss endpoints require CANON_P28_SEGMENTED_TRAIN=1 "
+          "before the segmented engine is built"
+      )
+
+  def _endpoint_leaves(self, state_leaves, indices, captured, label):
+    if state_leaves is None:
+      if self._captured_state_released:
+        raise FunctionalMappingError(
+            f"P30 {label} requires explicit current state after captured "
+            "state was released"
+        )
+      return captured
+    state_leaves = tuple(state_leaves)
+    if len(state_leaves) != self._num_state_leaves:
+      raise FunctionalMappingError(
+          f"P28 G5c {label} state leaf count changed: "
+          f"{len(state_leaves)} != {self._num_state_leaves}"
+      )
+    return tuple(state_leaves[index] for index in indices)
+
+  def run_embed_forward(self, input_ids, *, state_leaves=None):
+    """Runs the isolated embedding endpoint used by the G5c host schedule."""
+    self._reject_outer_transform(input_ids)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._embed_full_indices,
+        self._embed_local_leaves,
+        "embed",
+    )
+    return self._embed_local_fn(leaves, input_ids)
+
+  def run_embed_pullback(self, input_ids, dhidden, *, state_leaves=None):
+    """Returns local embedding parameter cotangents."""
+    self._reject_outer_transform(input_ids, dhidden)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._embed_full_indices,
+        self._embed_local_leaves,
+        "embed",
+    )
+    return self._embed_pullback_fn(leaves, input_ids, dhidden)
+
+  def run_norm_forward(self, hidden, *, state_leaves=None):
+    """Runs the isolated final-norm endpoint used by the G5c host schedule."""
+    self._reject_outer_transform(hidden)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._norm_full_indices,
+        self._norm_local_leaves,
+        "final norm",
+    )
+    return self._norm_local_fn(leaves, hidden)
+
+  def run_norm_pullback(self, hidden, dnormalized, *, state_leaves=None):
+    """Returns final-norm parameter and hidden cotangents."""
+    self._reject_outer_transform(hidden, dnormalized)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._norm_full_indices,
+        self._norm_local_leaves,
+        "final norm",
+    )
+    return self._norm_pullback_fn(leaves, hidden, dnormalized)
+
+  def run_head_forward(self, hidden, *, state_leaves=None):
+    """Runs the isolated untied lm-head endpoint used by G5c."""
+    self._reject_outer_transform(hidden)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._head_full_indices,
+        self._head_local_leaves,
+        "lm head",
+    )
+    return self._head_local_fn(leaves, hidden)
+
+  def run_head_pullback(self, hidden, dlogits, *, state_leaves=None):
+    """Returns lm-head parameter and normalized-hidden cotangents."""
+    self._reject_outer_transform(hidden, dlogits)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._head_full_indices,
+        self._head_local_leaves,
+        "lm head",
+    )
+    return self._head_pullback_fn(leaves, hidden, dlogits)
+
+  def assemble_full_state_gradient(
+      self, *, embed, layers, norm, head
+  ):
+    """Scatters disjoint local cotangents into full engine-state order."""
+    self._reject_outer_transform(embed, layers, norm, head)
+    self._require_full_loss_endpoints()
+    if len(layers) != len(self._local_layer_full_indices):
+      raise FunctionalMappingError(
+          "P28 G5c layer-gradient count changed: "
+          f"{len(layers)} != {len(self._local_layer_full_indices)}"
+      )
+    if self._p30_sparse_grad_assembly:
+      # The endpoint/layer construction already proves exact disjoint cover.
+      # Avoid keeping a second full zero tree alive while the local VJP trees
+      # are assembled.  Scalar +0 deliberately preserves the legacy signed-
+      # zero canonicalization and therefore the optimizer/update bit contract.
+      full = [None] * len(self._full_state_leaves)
+    else:
+      full = [jnp.zeros_like(leaf) for leaf in self._full_state_leaves]
+
+    def add(indices, values, label):
+      values = tuple(jax.tree_util.tree_leaves(values))
+      if len(indices) != len(values):
+        raise FunctionalMappingError(
+            f"P28 G5c {label} cotangent count changed: "
+            f"{len(values)} != {len(indices)}"
+        )
+      for index, value in zip(indices, values, strict=True):
+        target = self._full_state_leaves[index]
+        if value.shape != target.shape:
+          raise FunctionalMappingError(
+              f"P28 G5c {label} cotangent shape changed at full leaf "
+              f"{index}: {value.shape} != {target.shape}"
+          )
+        if self._p30_sparse_grad_assembly:
+          if full[index] is not None:
+            raise FunctionalMappingError(
+                f"P30 G2 duplicate cotangent at full leaf {index}"
+            )
+          cast = value.astype(target.dtype)
+          full[index] = jnp.asarray(0, target.dtype) + cast
+        else:
+          full[index] = full[index] + value.astype(full[index].dtype)
+
+    add(self._embed_full_indices, embed, "embed")
+    for layer_index, (indices, values) in enumerate(
+        zip(self._local_layer_full_indices, layers, strict=True)
+    ):
+      add(indices, values, f"layer {layer_index}")
+    add(self._norm_full_indices, norm, "norm")
+    add(self._head_full_indices, head, "head")
+    if self._p30_sparse_grad_assembly:
+      missing = [index for index, value in enumerate(full) if value is None]
+      if missing:
+        raise FunctionalMappingError(
+            f"P30 G2 missing full-state cotangents: {missing}"
+        )
+    return tuple(full)
+
+
+def build_p28_segmented_engine_forward(runner):
+  """Builds the default-off P28 forward-only depth-segmentation probe."""
+  return _P28SegmentedEngineForward(runner)
+
+
 class Qwen3EngineForwardAdapter:
   """Differentiable fixed-M Qwen3 forward backed by the live engine module."""
 
@@ -343,6 +1102,65 @@ class Qwen3EngineForwardAdapter:
     self._processed_target_logprobs = _make_processed_target_logprob_vjp(
         self._compute_and_gather_logprobs, self._max_logprobs
     )
+    g5c_shared_logsoftmax = os.environ.get(
+        "CANON_P28_G5C_SHARED_LOGSOFTMAX", "1"
+    )
+    if g5c_shared_logsoftmax not in ("0", "1"):
+      raise FunctionalMappingError(
+          "CANON_P28_G5C_SHARED_LOGSOFTMAX must be exactly 0 or 1"
+      )
+    self._p28_g5c_shared_logsoftmax = g5c_shared_logsoftmax == "1"
+    stock_target_logprobs = _make_processed_target_logprob_vjp(
+        compute_and_gather_logprobs, self._max_logprobs
+    )
+    p28_target_logprobs = (
+        self._processed_target_logprobs
+        if self._p28_g5c_shared_logsoftmax
+        else stock_target_logprobs
+    )
+
+    def p28_processed_rows(logits, target_ids, temperature):
+      sampling_metadata = self._sampling_metadata_cls(
+          temperature=jnp.full(
+              (self._bucket,), temperature, dtype=jnp.float32
+          ),
+          top_k=jnp.full((self._bucket,), -1, dtype=jnp.int32),
+          top_p=jnp.ones((self._bucket,), dtype=jnp.float32),
+          do_sampling=True,
+          logprobs=True,
+      )
+      _, processed_logits = self._sample(
+          jax.random.PRNGKey(0),
+          self._runner.mesh,
+          logits.astype(jnp.float32),
+          sampling_metadata,
+      )
+      target_logprobs = p28_target_logprobs(processed_logits, target_ids)
+      normalized = jax.nn.log_softmax(processed_logits, axis=-1)
+      probabilities = jnp.exp(normalized)
+      entropy = -jnp.sum(
+          jnp.where(probabilities > 0, probabilities * normalized, 0.0),
+          axis=-1,
+      )
+      return target_logprobs, entropy
+
+    def p28_processed_rows_pullback(
+        logits,
+        target_ids,
+        temperature,
+        dtarget_logprobs,
+        dentropy,
+    ):
+      def primal(values):
+        return p28_processed_rows(values, target_ids, temperature)
+
+      _, pullback = jax.vjp(primal, logits)
+      return pullback((dtarget_logprobs, dentropy))[0]
+
+    self._p28_processed_rows_fn = jax.jit(p28_processed_rows)
+    self._p28_processed_rows_pullback_fn = jax.jit(
+        p28_processed_rows_pullback
+    )
     print(
         "[CANON_ADAPTER] processed-logprob custom VJP installed "
         f"m={self._bucket} max_logprobs={self._max_logprobs}",
@@ -363,6 +1181,1319 @@ class Qwen3EngineForwardAdapter:
         )
         for _ in self._runner.kv_caches
     ]
+
+  def map_engine_cotangents_to_trainer_state(
+      self, trainer_state, engine_cotangents
+  ):
+    """Applies only the pure trainer->engine mapping adjoint on the host."""
+    _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
+        trainer_state, engine_cotangents
+    )
+    if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") != "1":
+      raise FunctionalMappingError(
+          "P28 mapping adjoint requires CANON_P28_SEGMENTED_TRAIN=1"
+      )
+    model_config = self._runner.model_config
+
+    def mapping(state):
+      return map_trainer_state_to_engine_leaves(
+          trainer_state=state,
+          engine_state_contract=self._engine_state_contract,
+          key_mappings=self._key_mappings,
+          transpose_keys=self._transpose_keys,
+          key_mapping_hook_fns=self._hook_fns,
+          num_kv_heads=model_config.get_total_num_kv_heads(),
+          head_dim=model_config.get_head_size(),
+          tp_size=self._tp_size,
+      ).leaves
+
+    mapped, pullback = jax.vjp(mapping, trainer_state)
+    engine_cotangents = tuple(engine_cotangents)
+    if len(mapped) != len(engine_cotangents):
+      raise FunctionalMappingError(
+          "P28 mapping-adjoint cotangent count changed: "
+          f"{len(engine_cotangents)} != {len(mapped)}"
+      )
+    for index, (value, cotangent) in enumerate(
+        zip(mapped, engine_cotangents, strict=True)
+    ):
+      if value.shape != cotangent.shape:
+        raise FunctionalMappingError(
+            "P28 mapping-adjoint cotangent shape changed at leaf "
+            f"{index}: {cotangent.shape} != {value.shape}"
+        )
+    return pullback(engine_cotangents)[0]
+
+  def _p28_sequence_spec(
+      self,
+      prompt,
+      completion,
+      prompt_valid,
+      completion_valid,
+      temperature,
+  ):
+    """Builds one host-visible fixed-M sequence schedule."""
+    _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
+        prompt, completion, prompt_valid, completion_valid
+    )
+    prompt = jnp.asarray(prompt)
+    completion = jnp.asarray(completion)
+    prompt_valid = jnp.asarray(prompt_valid, dtype=jnp.bool_)
+    completion_valid = jnp.asarray(completion_valid, dtype=jnp.bool_)
+    if prompt.ndim != 1 or completion.ndim != 1:
+      raise FunctionalMappingError("P28 G5c sequence rows must be rank 1")
+    if prompt.shape != prompt_valid.shape:
+      raise FunctionalMappingError("P28 G5c prompt mask shape changed")
+    if completion.shape != completion_valid.shape:
+      raise FunctionalMappingError("P28 G5c completion mask shape changed")
+    full = jnp.concatenate((prompt, completion), axis=0)
+    valid = jnp.concatenate((prompt_valid, completion_valid), axis=0)
+    n_real = int(np.asarray(jax.device_get(jnp.sum(valid, dtype=jnp.int32))))
+    prompt_length = int(
+        np.asarray(jax.device_get(jnp.sum(prompt_valid, dtype=jnp.int32)))
+    )
+    completion_length = int(
+        np.asarray(jax.device_get(jnp.sum(completion_valid, dtype=jnp.int32)))
+    )
+    if n_real < 2 or prompt_length < 1 or completion_length < 1:
+      raise FunctionalMappingError(
+          "P28 G5c requires nonempty prompt/completion and at least two tokens"
+      )
+    if n_real > self._max_model_len:
+      raise FunctionalMappingError(
+          f"P28 G5c sequence length {n_real} exceeds {self._max_model_len}"
+      )
+    num_chunks = (n_real + self._bucket - 1) // self._bucket
+    padded_width = num_chunks * self._bucket
+    order = jnp.nonzero(valid, size=padded_width, fill_value=0)[0]
+    packed_active = jnp.arange(padded_width, dtype=jnp.int32) < n_real
+    packed_ids = jnp.where(
+        packed_active, full[order], jnp.asarray(0, full.dtype)
+    )
+    next_ids = jnp.concatenate(
+        (packed_ids[1:], jnp.zeros((1,), packed_ids.dtype)), axis=0
+    )
+    completion_ordinal = (
+        jnp.cumsum(completion_valid, dtype=jnp.int32) - 1
+    )
+    source_rows = jnp.clip(
+        prompt_length + completion_ordinal - 1, 0, padded_width - 1
+    )
+    return {
+        "packed_ids": packed_ids,
+        "next_ids": next_ids,
+        "source_rows": source_rows,
+        "completion_valid": completion_valid,
+        "n_real": n_real,
+        "num_chunks": num_chunks,
+        "temperature": jnp.asarray(temperature, jnp.float32),
+    }
+
+  def _p28_chunk_inputs(self, spec, chunk_index):
+    """Constructs one real engine metadata/input tuple at fixed M."""
+    chunk_index = int(chunk_index)
+    chunk_start = chunk_index * self._bucket
+    q_len = min(self._bucket, spec["n_real"] - chunk_start)
+    if q_len <= 0:
+      raise FunctionalMappingError("P28 G5c attempted an empty chunk")
+    kv_len = min(spec["n_real"], chunk_start + self._bucket)
+    rows = jnp.arange(self._bucket, dtype=jnp.int32)
+    positions = jnp.where(rows < q_len, chunk_start + rows, 0)
+    query_start = jnp.zeros((self._max_num_reqs + 1,), jnp.int32)
+    query_start = query_start.at[1:].set(q_len)
+    seq_lens = jnp.zeros((self._max_num_reqs,), jnp.int32)
+    seq_lens = seq_lens.at[0].set(kv_len)
+    block_tables = jnp.zeros(
+        (self._max_num_reqs, self._blocks_per_req), jnp.int32
+    ).at[0].set(jnp.arange(self._blocks_per_req, dtype=jnp.int32))
+    metadata = self._metadata_cls(
+        input_positions=self._engine_array(positions),
+        block_tables=self._engine_array(block_tables.reshape(-1)),
+        seq_lens=self._engine_array(seq_lens),
+        query_start_loc=self._engine_array(query_start),
+        request_distribution=self._engine_array(
+            jnp.asarray((0, 0, 1), jnp.int32)
+        ),
+    )
+    metadata.padded_num_reqs = self._max_num_reqs
+    return (
+        self._engine_array(
+            spec["packed_ids"][chunk_start : chunk_start + self._bucket]
+        ),
+        self._engine_array(
+            spec["next_ids"][chunk_start : chunk_start + self._bucket]
+        ),
+        metadata,
+    )
+
+  def _p28_forward_sequence(
+      self, segmented, engine_leaves, spec, *, keep_cache_inputs
+  ):
+    """Runs one sequence and optionally retains only inter-chunk cache states."""
+    caches = tuple(self._fresh_caches())
+    cache_inputs = []
+    chunk_logps = []
+    chunk_entropies = []
+    counts = {"embed_forward": 0, "layer_forward": 0,
+              "norm_forward": 0, "head_forward": 0,
+              "processed_forward": 0}
+    with self._set_forward_context(None, self._runner.vllm_config):
+      for chunk_index in range(spec["num_chunks"]):
+        input_ids, target_ids, metadata = self._p28_chunk_inputs(
+            spec, chunk_index
+        )
+        if keep_cache_inputs:
+          cache_inputs.append(caches)
+        hidden = segmented.run_embed_forward(
+            input_ids, state_leaves=engine_leaves
+        )
+        counts["embed_forward"] += 1
+        next_caches = []
+        for layer_index, cache in enumerate(caches):
+          cache, hidden = segmented.run_layer_forward(
+              layer_index,
+              engine_leaves,
+              cache,
+              hidden,
+              metadata,
+          )
+          next_caches.append(cache)
+          counts["layer_forward"] += 1
+        caches = tuple(next_caches)
+        normalized = segmented.run_norm_forward(
+            hidden, state_leaves=engine_leaves
+        )
+        counts["norm_forward"] += 1
+        raw_logits = segmented.run_head_forward(
+            normalized, state_leaves=engine_leaves
+        )
+        logits = raw_logits.astype(jnp.float32)
+        counts["head_forward"] += 1
+        target_logps, entropy = self._p28_processed_rows_fn(
+            logits, target_ids, spec["temperature"]
+        )
+        counts["processed_forward"] += 1
+        chunk_logps.append(target_logps)
+        chunk_entropies.append(entropy)
+
+    flat_logps = jnp.concatenate(chunk_logps, axis=0)
+    flat_entropies = jnp.concatenate(chunk_entropies, axis=0)
+    completion_valid = spec["completion_valid"]
+    logps = jnp.where(
+        completion_valid,
+        jnp.take(flat_logps, spec["source_rows"], axis=0),
+        jnp.zeros(completion_valid.shape, jnp.float32),
+    )
+    entropy = jnp.where(
+        completion_valid,
+        jnp.take(flat_entropies, spec["source_rows"], axis=0),
+        jnp.zeros(completion_valid.shape, jnp.float32),
+    )
+    return {
+        "logps": logps,
+        "entropy": entropy,
+        "cache_inputs": tuple(cache_inputs),
+        "final_caches": caches,
+        "counts": counts,
+    }
+
+  def _p28_reverse_sequence(
+      self, segmented, engine_leaves, spec, dlogps, dentropy
+  ):
+    """Reverses one fixed-M sequence across chunks and real layer boundaries."""
+    replay = self._p28_forward_sequence(
+        segmented, engine_leaves, spec, keep_cache_inputs=True
+    )
+    padded_width = spec["num_chunks"] * self._bucket
+    completion_valid = spec["completion_valid"]
+    flat_dlogps = jnp.zeros((padded_width,), jnp.float32).at[
+        spec["source_rows"]
+    ].add(jnp.where(completion_valid, dlogps, 0.0))
+    flat_dentropy = jnp.zeros((padded_width,), jnp.float32).at[
+        spec["source_rows"]
+    ].add(jnp.where(completion_valid, dentropy, 0.0))
+
+    tree_zeros = lambda tree: jax.tree.map(jnp.zeros_like, tree)
+    tree_add = lambda left, right: jax.tree.map(
+        lambda a, b: a + b, left, right
+    )
+    layer_grads = [
+        tree_zeros(leaves) for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
+    ]
+    embed_grad = tree_zeros(segmented._embed_local_leaves)  # pylint: disable=protected-access
+    norm_grad = tree_zeros(segmented._norm_local_leaves)  # pylint: disable=protected-access
+    head_grad = tree_zeros(segmented._head_local_leaves)  # pylint: disable=protected-access
+    dcache_carry = tuple(
+        tree_zeros(cache) for cache in replay["final_caches"]
+    )
+    counts = dict(replay["counts"])
+    counts.update({
+        "embed_pullback": 0,
+        "layer_pullback": 0,
+        "norm_pullback": 0,
+        "head_pullback": 0,
+        "processed_pullback": 0,
+    })
+
+    with self._set_forward_context(None, self._runner.vllm_config):
+      for chunk_index in reversed(range(spec["num_chunks"])):
+        input_ids, target_ids, metadata = self._p28_chunk_inputs(
+            spec, chunk_index
+        )
+        caches = replay["cache_inputs"][chunk_index]
+        hidden = segmented.run_embed_forward(
+            input_ids, state_leaves=engine_leaves
+        )
+        counts["embed_forward"] += 1
+        layer_tape = []
+        for layer_index, cache in enumerate(caches):
+          layer_tape.append((cache, hidden))
+          _, hidden = segmented.run_layer_forward(
+              layer_index,
+              engine_leaves,
+              cache,
+              hidden,
+              metadata,
+          )
+          counts["layer_forward"] += 1
+        pre_norm = hidden
+        normalized = segmented.run_norm_forward(
+            pre_norm, state_leaves=engine_leaves
+        )
+        counts["norm_forward"] += 1
+        raw_logits = segmented.run_head_forward(
+            normalized, state_leaves=engine_leaves
+        )
+        logits = raw_logits.astype(jnp.float32)
+        counts["head_forward"] += 1
+        start = chunk_index * self._bucket
+        dchunk_logps = flat_dlogps[start : start + self._bucket]
+        dchunk_entropy = flat_dentropy[start : start + self._bucket]
+        dlogits = self._p28_processed_rows_pullback_fn(
+            logits,
+            target_ids,
+            spec["temperature"],
+            dchunk_logps,
+            dchunk_entropy,
+        )
+        # This is the transpose of the explicit bf16 -> fp32 cast above.
+        # JAX VJPs require a cotangent with the differentiated output's dtype.
+        dlogits = dlogits.astype(raw_logits.dtype)
+        counts["processed_pullback"] += 1
+        local_head_grad, dnormalized = segmented.run_head_pullback(
+            normalized, dlogits, state_leaves=engine_leaves
+        )
+        counts["head_pullback"] += 1
+        head_grad = tree_add(head_grad, local_head_grad)
+        local_norm_grad, dhidden = segmented.run_norm_pullback(
+            pre_norm, dnormalized, state_leaves=engine_leaves
+        )
+        counts["norm_pullback"] += 1
+        norm_grad = tree_add(norm_grad, local_norm_grad)
+
+        previous_cache_carry = [None] * len(layer_tape)
+        for layer_index in reversed(range(len(layer_tape))):
+          cache_in, hidden_in = layer_tape[layer_index]
+          local_grad, dcache, dhidden = segmented.run_block_pullback(
+              layer_index,
+              cache_in,
+              hidden_in,
+              metadata,
+              dcache_carry[layer_index],
+              dhidden,
+              state_leaves=engine_leaves,
+          )
+          layer_grads[layer_index] = tree_add(
+              layer_grads[layer_index], local_grad
+          )
+          previous_cache_carry[layer_index] = dcache
+          counts["layer_pullback"] += 1
+        dcache_carry = tuple(previous_cache_carry)
+        local_embed_grad = segmented.run_embed_pullback(
+            input_ids, dhidden, state_leaves=engine_leaves
+        )
+        embed_grad = tree_add(embed_grad, local_embed_grad)
+        counts["embed_pullback"] += 1
+
+    return {
+        "engine_gradients": segmented.assemble_full_state_gradient(
+            embed=embed_grad,
+            layers=tuple(layer_grads),
+            norm=norm_grad,
+            head=head_grad,
+        ),
+        "initial_cache_cotangents": dcache_carry,
+        "counts": counts,
+        "replay_logps": replay["logps"],
+        "replay_entropy": replay["entropy"],
+    }
+
+  def segmented_grpo_value_and_grad(
+      self,
+      *,
+      trainer_state,
+      train_example,
+      algo_config,
+      pad_id,
+      eos_id,
+      gradient_microbatch_sink=None,
+      gradient_pair_sink=None,
+  ):
+    """Evaluates and reverses the complete GRPO loss without an outer JIT."""
+    del eos_id
+    _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
+        trainer_state, train_example
+    )
+    if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") != "1":
+      raise FunctionalMappingError(
+          "P28 complete loss requires CANON_P28_SEGMENTED_TRAIN=1"
+      )
+    g5c_only = os.environ.get("CANON_P28_G5C_ONLY", "") == "1"
+    g6_update = os.environ.get("CANON_P28_G6_UPDATE", "") == "1"
+    p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
+    if g5c_only == g6_update:
+      raise FunctionalMappingError(
+          "P28 complete loss requires exactly one of "
+          "CANON_P28_G5C_ONLY=1 or CANON_P28_G6_UPDATE=1"
+      )
+    num_sinks = sum(
+        sink is not None
+        for sink in (gradient_microbatch_sink, gradient_pair_sink)
+    )
+    if (g5c_only and num_sinks != 0) or (g6_update and num_sinks != 1):
+      raise FunctionalMappingError(
+          "P28 G5c must retain one aggregate gradient; G6 must provide "
+          "exactly one streaming gradient sink"
+      )
+    if getattr(train_example, "segment_ids", None) is not None:
+      raise FunctionalMappingError(
+          "P28 G5c admits unpacked eight-trajectory input only"
+      )
+    prompts = jnp.asarray(train_example.prompt_ids)
+    completions = jnp.asarray(train_example.completion_ids)
+    prompt_masks = jnp.asarray(train_example.prompt_mask, dtype=jnp.bool_)
+    completion_masks = jnp.asarray(
+        train_example.completion_mask, dtype=jnp.bool_
+    )
+    completion_valid_value = getattr(
+        train_example, "completion_valid_mask", None
+    )
+    completion_valid_masks = (
+        completion_masks
+        if completion_valid_value is None
+        else jnp.asarray(completion_valid_value, dtype=jnp.bool_)
+    )
+    if prompts.shape != prompt_masks.shape:
+      raise FunctionalMappingError("P28 G5c prompt batch/mask mismatch")
+    if completions.shape != completion_masks.shape:
+      raise FunctionalMappingError("P28 G5c completion batch/mask mismatch")
+    if completions.shape != completion_valid_masks.shape:
+      raise FunctionalMappingError(
+          "P28 G5c completion batch/valid-mask mismatch"
+      )
+    if bool(np.asarray(jax.device_get(jnp.any(
+        completion_masks & ~completion_valid_masks
+    )))):
+      raise FunctionalMappingError(
+          "P28 G5c action mask is not a subset of completion validity"
+      )
+    if prompts.shape[0] != completions.shape[0]:
+      raise FunctionalMappingError("P28 G5c prompt/completion batch mismatch")
+    expected_trajectories = 32 if p31_convergence else 8
+    expected_widths = (4096, 2048) if p31_convergence else (2048, 64)
+    if int(prompts.shape[0]) != expected_trajectories:
+      raise FunctionalMappingError(
+          "segmented loss trajectory contract changed: "
+          f"expected {expected_trajectories}, got {prompts.shape[0]}"
+      )
+    if (int(prompts.shape[1]), int(completions.shape[1])) != expected_widths:
+      raise FunctionalMappingError(
+          "segmented loss prompt/response contract changed: expected "
+          f"{expected_widths[0]}/{expected_widths[1]}, got "
+          f"{prompts.shape[1]}/{completions.shape[1]}"
+      )
+    gradient_microbatches = expected_trajectories // 2
+
+    model_config = self._runner.model_config
+    mapped = map_trainer_state_to_engine_leaves(
+        trainer_state=trainer_state,
+        engine_state_contract=self._engine_state_contract,
+        key_mappings=self._key_mappings,
+        transpose_keys=self._transpose_keys,
+        key_mapping_hook_fns=self._hook_fns,
+        num_kv_heads=model_config.get_total_num_kv_heads(),
+        head_dim=model_config.get_head_size(),
+        tp_size=self._tp_size,
+    )
+    engine_leaves = tuple(mapped.leaves)
+    reuse_segmented = (
+        os.environ.get("CANON_P30_REUSE_SEGMENTED_ENGINE", "") == "1"
+    )
+    release_captured_state = (
+        os.environ.get("CANON_P30_RELEASE_CAPTURED_STATE", "") == "1"
+    )
+    if release_captured_state and not reuse_segmented:
+      raise FunctionalMappingError(
+          "CANON_P30_RELEASE_CAPTURED_STATE requires segmented-engine reuse"
+      )
+    segmented = getattr(self, "_p30_segmented_engine", None)
+    if not reuse_segmented or segmented is None:
+      segmented = build_p28_segmented_engine_forward(self._runner)
+      if reuse_segmented:
+        self._p30_segmented_engine = segmented
+        print(
+            "[P30.G2] REUSE_SEGMENTED_ENGINE on weights=explicit",
+            flush=True,
+        )
+        if release_captured_state:
+          released_bytes = segmented.release_captured_state()
+          print(
+              "[P30.G2] RELEASE_CAPTURED_STATE on "
+              f"bytes={released_bytes} current_weights=explicit",
+              flush=True,
+          )
+    specs = tuple(
+        self._p28_sequence_spec(
+            prompts[index],
+            completions[index],
+            prompt_masks[index],
+            completion_valid_masks[index],
+            algo_config.temperature,
+        )
+        for index in range(expected_trajectories)
+    )
+    forwards = tuple(
+        self._p28_forward_sequence(
+            segmented, engine_leaves, spec, keep_cache_inputs=False
+        )
+        for spec in specs
+    )
+    per_token_logps = jnp.stack(
+        tuple(result["logps"] for result in forwards), axis=0
+    ).astype(jnp.float32)
+    token_entropy = jnp.stack(
+        tuple(result["entropy"] for result in forwards), axis=0
+    ).astype(jnp.float32)
+
+    from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
+
+    def unreduced_loss(logps, entropy):
+      return algo_core.grpo_loss_from_precomputed_logps(
+          logps, entropy, train_example, algo_config
+      ).primary_loss.unreduced_sum
+
+    unreduced_value, loss_pullback = jax.vjp(
+        unreduced_loss, per_token_logps, token_entropy
+    )
+    dlogps, dentropy = loss_pullback(
+        jnp.ones_like(unreduced_value)
+    )
+    loss_output = algo_core.grpo_loss_from_precomputed_logps(
+        per_token_logps, token_entropy, train_example, algo_config
+    )
+    scale = loss_output.primary_loss.compute_scale()
+    trainer_gradients = None
+    pair_gradient = None
+    emitted_microbatches = 0
+    reports = []
+    for index, spec in enumerate(specs):
+      loss_cotangent_leaves = (dlogps[index], dentropy[index])
+      loss_cotangent_finite = all(
+          bool(np.asarray(jnp.all(jnp.isfinite(value))))
+          for value in loss_cotangent_leaves
+      )
+      loss_cotangent_nonzero = sum(
+          int(np.asarray(jnp.count_nonzero(value)))
+          for value in loss_cotangent_leaves
+      )
+      reverse = self._p28_reverse_sequence(
+          segmented,
+          engine_leaves,
+          spec,
+          dlogps[index],
+          dentropy[index],
+      )
+      if not bool(np.asarray(jnp.array_equal(
+          reverse["replay_logps"], per_token_logps[index]
+      ))):
+        raise FunctionalMappingError(
+            f"P28 G5c sequence {index} replay logprobs changed"
+        )
+      one_trainer_gradient = self.map_engine_cotangents_to_trainer_state(
+          trainer_state, reverse["engine_gradients"]
+      )
+      one_trainer_gradient = jax.tree.map(
+          lambda value: value.astype(jnp.float32), one_trainer_gradient
+      )
+      trainer_leaves = jax.tree.leaves(one_trainer_gradient)
+      trainer_finite = all(
+          bool(np.asarray(jnp.all(jnp.isfinite(value))))
+          for value in trainer_leaves
+      )
+      trainer_nonzero = sum(
+          int(np.asarray(jnp.count_nonzero(value)))
+          for value in trainer_leaves
+      )
+      engine_groups = {
+          "embed": segmented._embed_full_indices,  # pylint: disable=protected-access
+          "norm": segmented._norm_full_indices,  # pylint: disable=protected-access
+          "head": segmented._head_full_indices,  # pylint: disable=protected-access
+      }
+      engine_groups.update({
+          f"layer_{layer_index}": indices
+          for layer_index, indices in enumerate(
+              segmented._local_layer_full_indices  # pylint: disable=protected-access
+          )
+      })
+      group_health = {}
+      for label, indices in engine_groups.items():
+        leaves = tuple(reverse["engine_gradients"][i] for i in indices)
+        group_health[label] = {
+            "finite": all(
+                bool(np.asarray(jnp.all(jnp.isfinite(value))))
+                for value in leaves
+            ),
+            "nonzero": sum(
+                int(np.asarray(jnp.count_nonzero(value)))
+                for value in leaves
+            ),
+        }
+      cache_leaves = jax.tree.leaves(
+          reverse["initial_cache_cotangents"]
+      )
+      if gradient_microbatch_sink is None and gradient_pair_sink is None:
+        trainer_gradients = (
+            one_trainer_gradient
+            if trainer_gradients is None
+            else jax.tree.map(
+                lambda total, value: total + value,
+                trainer_gradients,
+                one_trainer_gradient,
+            )
+        )
+      else:
+        if pair_gradient is None:
+          pair_gradient = one_trainer_gradient
+        else:
+          # The stock accumulator averages all micro-step gradients. Each
+          # two-trajectory contribution is multiplied by that count so that
+          # mean(N * scale * pair_sum) == scale * full-batch sum.
+          if gradient_pair_sink is not None:
+            gradient_pair_sink(
+                emitted_microbatches,
+                pair_gradient,
+                one_trainer_gradient,
+                scale * jnp.asarray(float(gradient_microbatches), scale.dtype),
+            )
+          else:
+            pair_gradient = jax.tree.map(
+                lambda total, value: total + value,
+                pair_gradient,
+                one_trainer_gradient,
+            )
+            micro_gradient = jax.tree.map(
+                lambda value: value * scale * jnp.asarray(
+                    float(gradient_microbatches), value.dtype
+                ),
+                pair_gradient,
+            )
+            gradient_microbatch_sink(emitted_microbatches, micro_gradient)
+          emitted_microbatches += 1
+          pair_gradient = None
+      reports.append({
+          "trajectory": index,
+          "boundary": (
+              "final" if index == expected_trajectories - 1 else "pending"
+          ),
+          "counts": reverse["counts"],
+          "loss_cotangent": {
+              "finite": loss_cotangent_finite,
+              "nonzero": loss_cotangent_nonzero,
+          },
+          "trainer_gradient": {
+              "finite": trainer_finite,
+              "nonzero": trainer_nonzero,
+              "mapping_adjoint_leaves": len(trainer_leaves),
+          },
+          "engine_groups": group_health,
+          "initial_cache_cotangent": {
+              "finite": all(
+                  bool(np.asarray(jnp.all(jnp.isfinite(value))))
+                  for value in cache_leaves
+              ),
+              "nonzero": sum(
+                  int(np.asarray(jnp.count_nonzero(value)))
+                  for value in cache_leaves
+              ),
+          },
+      })
+    if gradient_microbatch_sink is None:
+      trainer_gradients = jax.tree.map(
+          lambda value: value * scale, trainer_gradients
+      )
+    elif (
+        pair_gradient is not None
+        or emitted_microbatches != gradient_microbatches
+    ):
+      raise FunctionalMappingError(
+          "segmented update emitted the wrong number of complete "
+          "two-trajectory gradients: "
+          f"{emitted_microbatches} != {gradient_microbatches}"
+      )
+    return {
+        "loss_output": loss_output,
+        "loss": loss_output.primary_loss.compute(),
+        "per_token_logps": per_token_logps,
+        "token_entropy": token_entropy,
+        "gradients": trainer_gradients,
+        "gradient_microbatches": emitted_microbatches,
+        "reports": tuple(reports),
+        "forward_counts": tuple(result["counts"] for result in forwards),
+    }
+
+  def run_p28_segmented_forward_gate(self, lengths=(128, 160, 256)):
+    """Compares whole-model and host-segmented real Qwen3 forwards.
+
+    This is a forward-only release probe.  It intentionally consumes the
+    live engine state rather than trainer-mapped leaves: the existing mapping
+    contract already attests those leaves, while G3 isolates only the new JIT
+    boundary.  No result from this method is a backward/update claim.
+    """
+    segmented = build_p28_segmented_engine_forward(self._runner)
+    engine_leaves = tuple(self._runner.state_leaves)
+    block_tables = jnp.zeros(
+        (self._max_num_reqs, self._blocks_per_req), jnp.int32
+    )
+    block_tables = block_tables.at[0].set(
+        jnp.arange(self._blocks_per_req, dtype=jnp.int32)
+    )
+    block_tables_flat = self._engine_array(block_tables.reshape(-1))
+    request_distribution = self._engine_array(
+        jnp.asarray((0, 0, 1), jnp.int32)
+    )
+
+    def digest(value):
+      host = np.asarray(value)
+      return hashlib.sha256(host.view(np.uint8).tobytes()).hexdigest()
+
+    def differing_bytes(left, right):
+      left = np.asarray(left).view(np.uint8)
+      right = np.asarray(right).view(np.uint8)
+      if left.shape != right.shape:
+        raise FunctionalMappingError(
+            f"P28 comparison shape mismatch: {left.shape} != {right.shape}"
+        )
+      return int(np.count_nonzero(left != right)), int(left.size)
+
+    def run_whole(input_ids, positions, metadata):
+      with self._set_forward_context(None, self._runner.vllm_config):
+        next_caches, hidden, _, _ = self._runner.model_fn(
+            engine_leaves,
+            self._fresh_caches(),
+            input_ids,
+            metadata,
+            None,
+            positions,
+            self._static_kv_indices,
+            None,
+            None,
+            bool(self._runner.is_first_rank),
+            bool(self._runner.is_last_rank),
+        )
+      logits = self._runner.compute_logits_fn(
+          engine_leaves, hidden, None
+      ).astype(jnp.float32)
+      return next_caches, hidden, logits
+
+    def run_segmented(input_ids, metadata):
+      with self._set_forward_context(None, self._runner.vllm_config):
+        next_caches, hidden = segmented.run(
+            engine_leaves,
+            self._fresh_caches(),
+            input_ids,
+            metadata,
+        )
+      logits = self._runner.compute_logits_fn(
+          engine_leaves, hidden, None
+      ).astype(jnp.float32)
+      return next_caches, hidden, logits
+
+    results = []
+    for length in lengths:
+      length = int(length)
+      if length < 2 or length > self._bucket:
+        raise FunctionalMappingError(
+            f"P28 probe length must be in [2, {self._bucket}], got {length}"
+        )
+      rows = jnp.arange(self._bucket, dtype=jnp.int32)
+      input_ids = jnp.where(
+          rows < length,
+          1 + (rows % min(self._vocab_size - 1, 1024)),
+          0,
+      )
+      positions = jnp.where(rows < length, rows, 0)
+      query_start = jnp.zeros((self._max_num_reqs + 1,), jnp.int32)
+      query_start = query_start.at[1:].set(length)
+      seq_lens = jnp.zeros((self._max_num_reqs,), jnp.int32)
+      seq_lens = seq_lens.at[0].set(length)
+      input_ids = self._engine_array(input_ids)
+      positions = self._engine_array(positions)
+      metadata = self._metadata_cls(
+          input_positions=positions,
+          block_tables=block_tables_flat,
+          seq_lens=self._engine_array(seq_lens),
+          query_start_loc=self._engine_array(query_start),
+          request_distribution=request_distribution,
+      )
+      metadata.padded_num_reqs = self._max_num_reqs
+
+      _, whole_hidden_1, whole_logits_1 = run_whole(
+          input_ids, positions, metadata
+      )
+      _, segmented_hidden_1, segmented_logits_1 = run_segmented(
+          input_ids, metadata
+      )
+      _, whole_hidden_2, whole_logits_2 = run_whole(
+          input_ids, positions, metadata
+      )
+      _, segmented_hidden_2, segmented_logits_2 = run_segmented(
+          input_ids, metadata
+      )
+      valid_rows = slice(0, length - 1)
+      comparisons = {
+          "hidden_whole_segmented": differing_bytes(
+              whole_hidden_1, segmented_hidden_1
+          ),
+          "hidden_whole_repeat": differing_bytes(
+              whole_hidden_1, whole_hidden_2
+          ),
+          "hidden_segmented_repeat": differing_bytes(
+              segmented_hidden_1, segmented_hidden_2
+          ),
+          "logits_whole_segmented": differing_bytes(
+              whole_logits_1[valid_rows], segmented_logits_1[valid_rows]
+          ),
+          "logits_whole_repeat": differing_bytes(
+              whole_logits_1[valid_rows], whole_logits_2[valid_rows]
+          ),
+          "logits_segmented_repeat": differing_bytes(
+              segmented_logits_1[valid_rows],
+              segmented_logits_2[valid_rows],
+          ),
+      }
+      hashes = {
+          "whole_hidden": digest(whole_hidden_1),
+          "segmented_hidden": digest(segmented_hidden_1),
+          "whole_logits": digest(whole_logits_1[valid_rows]),
+          "segmented_logits": digest(segmented_logits_1[valid_rows]),
+      }
+      print(
+          "[P28.G3] "
+          f"length={length} action_rows={length - 1} "
+          f"comparisons={comparisons} hashes={hashes}",
+          flush=True,
+      )
+      if any(changed != 0 for changed, _ in comparisons.values()):
+        raise FunctionalMappingError(
+            f"P28 G3 segmented forward differs at length {length}: "
+            f"{comparisons}"
+        )
+      results.append((length, comparisons, hashes))
+    print(
+        "[P28.G3] PASS "
+        f"contract={dataclasses.asdict(segmented.contract)} "
+        f"completed={len(results)}/{len(tuple(lengths))}",
+        flush=True,
+    )
+    return tuple(results)
+
+  def run_p28_block_vjp_gate(
+      self, *, layer_index=0, prefix_length=128, chunk_length=32
+  ):
+    """Runs the preregistered P28.G4 one-real-layer cache-consuming VJP."""
+    if os.environ.get("CANON_P28_SEGMENTED_VJP", "") != "1":
+      raise FunctionalMappingError(
+          "P28 block VJP requires CANON_P28_SEGMENTED_VJP=1"
+      )
+    segmented = build_p28_segmented_engine_forward(self._runner)
+    engine_leaves = tuple(self._runner.state_leaves)
+    layer_index = int(layer_index)
+    prefix_length = int(prefix_length)
+    chunk_length = int(chunk_length)
+    extension = os.environ.get("CANON_P28_G4_EXTENSION", "") == "1"
+    if extension:
+      if layer_index not in (1, 17, 35):
+        raise FunctionalMappingError(
+            "P28 G4 extension is frozen at layers 1/17/35"
+        )
+    elif layer_index != 0:
+      raise FunctionalMappingError("P28 G4 baseline is frozen at layer=0")
+    if (prefix_length, chunk_length) != (128, 32):
+      raise FunctionalMappingError(
+          "P28 G4 geometry is frozen at prefix=128,chunk=32"
+      )
+    raw_cap = os.environ.get("CANON_P28_G4_BLOCK_CAP_SECONDS", "").strip()
+    block_cap_seconds = 600.0 if not raw_cap else float(raw_cap)
+    expected_cap = 21.342724 if extension else 600.0
+    if abs(block_cap_seconds - expected_cap) > 1e-6:
+      raise FunctionalMappingError(
+          "P28 G4 block cap changed: "
+          f"{block_cap_seconds} != {expected_cap}"
+      )
+
+    def memory_snapshot():
+      snapshots = []
+      for device in jax.local_devices():
+        stats = device.memory_stats() or {}
+        snapshots.append({
+            "device": int(device.id),
+            "bytes_in_use": stats.get("bytes_in_use"),
+            "peak_bytes_in_use": stats.get("peak_bytes_in_use"),
+            "bytes_limit": stats.get("bytes_limit"),
+        })
+      return tuple(snapshots)
+
+    block_tables = jnp.zeros(
+        (self._max_num_reqs, self._blocks_per_req), jnp.int32
+    ).at[0].set(jnp.arange(self._blocks_per_req, dtype=jnp.int32))
+    block_tables_flat = self._engine_array(block_tables.reshape(-1))
+    request_distribution = self._engine_array(
+        jnp.asarray((0, 0, 1), jnp.int32)
+    )
+
+    def make_inputs(start, q_len, kv_len):
+      rows = jnp.arange(self._bucket, dtype=jnp.int32)
+      ids = jnp.where(rows < q_len, 1 + ((start + rows) % 1024), 0)
+      positions = jnp.where(rows < q_len, start + rows, 0)
+      query_start = jnp.zeros((self._max_num_reqs + 1,), jnp.int32)
+      query_start = query_start.at[1:].set(q_len)
+      seq_lens = jnp.zeros((self._max_num_reqs,), jnp.int32)
+      seq_lens = seq_lens.at[0].set(kv_len)
+      ids = self._engine_array(ids)
+      metadata = self._metadata_cls(
+          input_positions=self._engine_array(positions),
+          block_tables=block_tables_flat,
+          seq_lens=self._engine_array(seq_lens),
+          query_start_loc=self._engine_array(query_start),
+          request_distribution=request_distribution,
+      )
+      metadata.padded_num_reqs = self._max_num_reqs
+      return ids, metadata
+
+    def block_all(value):
+      for leaf in jax.tree_util.tree_leaves(value):
+        if hasattr(leaf, "block_until_ready"):
+          leaf.block_until_ready()
+      return value
+
+    def differing(left, right):
+      equal = bool(np.asarray(jnp.array_equal(left, right)))
+      # G4 needs only a strict bitwise predicate.  Do not host-copy a multi-GB
+      # cache merely to count bytes after the hard gate is already red.
+      return 0 if equal else 1
+
+    def tree_digest(tree, *, cache=False):
+      digest = hashlib.sha256()
+      leaves = jax.tree_util.tree_leaves(tree)
+      finite = True
+      nonzero = 0
+      for leaf_index, leaf in enumerate(leaves):
+        finite = finite and bool(np.asarray(jnp.all(jnp.isfinite(leaf))))
+        nonzero += int(np.asarray(jnp.count_nonzero(leaf)))
+        selected = leaf[:1] if cache and leaf.ndim > 0 else leaf
+        host = np.asarray(selected)
+        digest.update(str((leaf_index, host.shape, host.dtype)).encode())
+        digest.update(host.view(np.uint8).tobytes())
+      return finite, nonzero, digest.hexdigest()
+
+    prefix_ids, prefix_metadata = make_inputs(0, prefix_length, prefix_length)
+    chunk_ids, chunk_metadata = make_inputs(
+        prefix_length, chunk_length, prefix_length + chunk_length
+    )
+    fresh_cache = self._fresh_caches()[layer_index]
+    hbm_before = memory_snapshot()
+    with self._set_forward_context(None, self._runner.vllm_config):
+      prefix_hidden = segmented._embed_fn(engine_leaves, prefix_ids)
+      prefix_reference, prefix_isolated = segmented.run_block_forward(
+          layer_index,
+          engine_leaves,
+          fresh_cache,
+          prefix_hidden,
+          prefix_metadata,
+      )
+      block_all((prefix_reference, prefix_isolated))
+      chunk_hidden = segmented._embed_fn(engine_leaves, chunk_ids)
+      start = time.perf_counter()
+      first = segmented.run_block_vjp(
+          layer_index,
+          engine_leaves,
+          prefix_isolated[0],
+          chunk_hidden,
+          chunk_metadata,
+      )
+      block_all(first)
+      first_seconds = time.perf_counter() - start
+      start = time.perf_counter()
+      second = segmented.run_block_vjp(
+          layer_index,
+          engine_leaves,
+          prefix_isolated[0],
+          chunk_hidden,
+          chunk_metadata,
+      )
+      block_all(second)
+      repeat_seconds = time.perf_counter() - start
+    hbm_after = memory_snapshot()
+
+    primal_diffs = {
+        "prefix_cache": differing(prefix_reference[0], prefix_isolated[0]),
+        "prefix_hidden": differing(prefix_reference[1], prefix_isolated[1]),
+        "chunk_cache": differing(first["reference"][0], first["isolated"][0]),
+        "chunk_hidden": differing(first["reference"][1], first["isolated"][1]),
+    }
+    grad_names = ("parameters", "cache", "hidden")
+    summaries = {
+        name: tree_digest(grad, cache=(name == "cache"))
+        for name, grad in zip(grad_names, first["gradients"])
+    }
+    repeat_summaries = {
+        name: tree_digest(grad, cache=(name == "cache"))
+        for name, grad in zip(grad_names, second["gradients"])
+    }
+    repeat_exact = all(
+        bool(np.asarray(jnp.array_equal(a, b)))
+        for a, b in zip(
+            jax.tree_util.tree_leaves(first["gradients"]),
+            jax.tree_util.tree_leaves(second["gradients"]),
+        )
+    )
+    if any(primal_diffs.values()):
+      raise FunctionalMappingError(f"P28 G4 primal mismatch: {primal_diffs}")
+    if not repeat_exact or summaries != repeat_summaries:
+      raise FunctionalMappingError("P28 G4 gradient repeat mismatch")
+    if any((not finite) or nonzero == 0 for finite, nonzero, _ in summaries.values()):
+      raise FunctionalMappingError(f"P28 G4 dead/nonfinite gradient: {summaries}")
+    if first_seconds > block_cap_seconds:
+      raise FunctionalMappingError(
+          "P28 G4 one-block cap exceeded: "
+          f"{first_seconds:.6f}s > {block_cap_seconds:.6f}s"
+      )
+    result = {
+        "contract": dataclasses.asdict(first["contract"]),
+        "prefix_length": prefix_length,
+        "chunk_length": chunk_length,
+        "primal_diffs": primal_diffs,
+        "gradient_summaries": summaries,
+        "repeat_exact": repeat_exact,
+        "first_seconds": first_seconds,
+        "repeat_seconds": repeat_seconds,
+        "cache_bytes": int(fresh_cache.size * fresh_cache.dtype.itemsize),
+        "hidden_bytes": int(chunk_hidden.size * chunk_hidden.dtype.itemsize),
+        "hbm_before": hbm_before,
+        "hbm_after": hbm_after,
+    }
+    print(f"[P28.G4] PASS {result}", flush=True)
+    return result
+
+  def run_p28_full_chain_gate(self, *, prefix_length=128, chunk_length=32):
+    """Runs the preregistered P28.G5b 36-layer staged pullback gate."""
+    if os.environ.get("CANON_P28_G5_ONLY", "") != "1":
+      raise FunctionalMappingError(
+          "P28 full chain requires CANON_P28_G5_ONLY=1"
+      )
+    if os.environ.get("CANON_P28_SEGMENTED_PULLBACK", "") != "1":
+      raise FunctionalMappingError(
+          "P28 full chain requires CANON_P28_SEGMENTED_PULLBACK=1"
+      )
+    prefix_length = int(prefix_length)
+    chunk_length = int(chunk_length)
+    if (prefix_length, chunk_length) != (128, 32):
+      raise FunctionalMappingError(
+          "P28 G5b geometry is frozen at prefix=128,chunk=32"
+      )
+    first_cap = float(os.environ.get("CANON_P28_G5_FIRST_CAP_SECONDS", "0"))
+    repeat_cap = float(os.environ.get("CANON_P28_G5_REPEAT_CAP_SECONDS", "0"))
+    total_cap = float(os.environ.get("CANON_P28_G5_TOTAL_CAP_SECONDS", "0"))
+    if (first_cap, repeat_cap, total_cap) != (600.0, 300.0, 900.0):
+      raise FunctionalMappingError(
+          "P28 G5b caps changed: "
+          f"{(first_cap, repeat_cap, total_cap)} != (600, 300, 900)"
+      )
+
+    segmented = build_p28_segmented_engine_forward(self._runner)
+    layer_count = len(segmented._local_layer_fns)
+    if layer_count != 36:
+      raise FunctionalMappingError(
+          f"P28 G5b requires 36 real decoder layers, got {layer_count}"
+      )
+    engine_leaves = tuple(self._runner.state_leaves)
+    fresh_caches = tuple(self._fresh_caches())
+    if len(fresh_caches) != layer_count:
+      raise FunctionalMappingError(
+          f"P28 G5b cache count changed: {len(fresh_caches)} != {layer_count}"
+      )
+
+    def memory_snapshot():
+      snapshots = []
+      for device in jax.local_devices():
+        stats = device.memory_stats() or {}
+        snapshots.append({
+            "device": int(device.id),
+            "bytes_in_use": stats.get("bytes_in_use"),
+            "peak_bytes_in_use": stats.get("peak_bytes_in_use"),
+            "bytes_limit": stats.get("bytes_limit"),
+        })
+      return tuple(snapshots)
+
+    block_tables = jnp.zeros(
+        (self._max_num_reqs, self._blocks_per_req), jnp.int32
+    ).at[0].set(jnp.arange(self._blocks_per_req, dtype=jnp.int32))
+    block_tables_flat = self._engine_array(block_tables.reshape(-1))
+    request_distribution = self._engine_array(
+        jnp.asarray((0, 0, 1), jnp.int32)
+    )
+
+    def make_inputs(start, q_len, kv_len):
+      rows = jnp.arange(self._bucket, dtype=jnp.int32)
+      ids = jnp.where(rows < q_len, 1 + ((start + rows) % 1024), 0)
+      positions = jnp.where(rows < q_len, start + rows, 0)
+      query_start = jnp.zeros((self._max_num_reqs + 1,), jnp.int32)
+      query_start = query_start.at[1:].set(q_len)
+      seq_lens = jnp.zeros((self._max_num_reqs,), jnp.int32)
+      seq_lens = seq_lens.at[0].set(kv_len)
+      metadata = self._metadata_cls(
+          input_positions=self._engine_array(positions),
+          block_tables=block_tables_flat,
+          seq_lens=self._engine_array(seq_lens),
+          query_start_loc=self._engine_array(query_start),
+          request_distribution=request_distribution,
+      )
+      metadata.padded_num_reqs = self._max_num_reqs
+      return self._engine_array(ids), metadata
+
+    def block_all(tree):
+      for leaf in jax.tree_util.tree_leaves(tree):
+        if hasattr(leaf, "block_until_ready"):
+          leaf.block_until_ready()
+      return tree
+
+    def tree_summary(tree):
+      finite = True
+      nonzero = 0
+      for leaf in jax.tree_util.tree_leaves(tree):
+        finite = finite and bool(np.asarray(jnp.all(jnp.isfinite(leaf))))
+        nonzero += int(np.asarray(jnp.count_nonzero(leaf)))
+      return finite, nonzero
+
+    def tree_exact(left, right):
+      left_leaves = jax.tree_util.tree_leaves(left)
+      right_leaves = jax.tree_util.tree_leaves(right)
+      if len(left_leaves) != len(right_leaves):
+        return False
+      return all(
+          bool(np.asarray(jnp.array_equal(a, b)))
+          for a, b in zip(left_leaves, right_leaves, strict=True)
+      )
+
+    prefix_ids, prefix_metadata = make_inputs(0, prefix_length, prefix_length)
+    chunk_ids, chunk_metadata = make_inputs(
+        prefix_length, chunk_length, prefix_length + chunk_length
+    )
+    prefix_hidden = segmented._embed_fn(engine_leaves, prefix_ids)
+    chunk_hidden = segmented._embed_fn(engine_leaves, chunk_ids)
+
+    def run_chain():
+      counts = {
+          "prefix_forward": 0,
+          "chunk_forward": 0,
+          "chunk_pullback": 0,
+          "prefix_pullback": 0,
+      }
+      prefix_tape = []
+      prefix_caches = []
+      hidden = prefix_hidden
+      for index, layer_fn in enumerate(segmented._local_layer_fns):
+        prefix_tape.append((fresh_caches[index], hidden))
+        cache_out, hidden = layer_fn(
+            segmented._local_layer_leaves[index],
+            fresh_caches[index],
+            hidden,
+            prefix_metadata,
+        )
+        prefix_caches.append(cache_out)
+        counts["prefix_forward"] += 1
+      prefix_final_hidden = hidden
+
+      chunk_tape = []
+      hidden = chunk_hidden
+      for index, layer_fn in enumerate(segmented._local_layer_fns):
+        chunk_tape.append((prefix_caches[index], hidden))
+        _, hidden = layer_fn(
+            segmented._local_layer_leaves[index],
+            prefix_caches[index],
+            hidden,
+            chunk_metadata,
+        )
+        counts["chunk_forward"] += 1
+
+      row = jnp.arange(hidden.shape[0], dtype=jnp.int32)
+      feature = jnp.arange(hidden.shape[1], dtype=jnp.int32)
+      row_seed = jnp.where(
+          row < chunk_length,
+          ((row % 17).astype(jnp.float32) + 1.0) / 17.0,
+          0.0,
+      )
+      feature_seed = ((feature % 23).astype(jnp.float32) + 1.0) / 23.0
+      dhidden = (
+          row_seed[:, None] * feature_seed[None, :]
+          / jnp.asarray(chunk_length * hidden.shape[1], jnp.float32)
+      ).astype(hidden.dtype)
+
+      chunk_parameter_grads = [None] * layer_count
+      prefix_cache_cotangents = [None] * layer_count
+      for index in reversed(range(layer_count)):
+        cache_in, hidden_in = chunk_tape[index]
+        gradients, dcache, dhidden = segmented.run_block_pullback(
+            index,
+            cache_in,
+            hidden_in,
+            chunk_metadata,
+            jax.tree.map(jnp.zeros_like, cache_in),
+            dhidden,
+        )
+        chunk_parameter_grads[index] = gradients
+        prefix_cache_cotangents[index] = dcache
+        counts["chunk_pullback"] += 1
+      chunk_input_grad = dhidden
+
+      dhidden = jnp.zeros_like(prefix_final_hidden)
+      combined_parameter_grads = [None] * layer_count
+      for index in reversed(range(layer_count)):
+        cache_in, hidden_in = prefix_tape[index]
+        gradients, _, dhidden = segmented.run_block_pullback(
+            index,
+            cache_in,
+            hidden_in,
+            prefix_metadata,
+            prefix_cache_cotangents[index],
+            dhidden,
+        )
+        combined_parameter_grads[index] = jax.tree.map(
+            lambda prefix, chunk: prefix + chunk,
+            gradients,
+            chunk_parameter_grads[index],
+        )
+        counts["prefix_pullback"] += 1
+      prefix_input_grad = dhidden
+      return (
+          tuple(combined_parameter_grads),
+          tuple(prefix_cache_cotangents),
+          prefix_input_grad,
+          chunk_input_grad,
+          counts,
+      )
+
+    hbm_before = memory_snapshot()
+    method_start = time.perf_counter()
+    with self._set_forward_context(None, self._runner.vllm_config):
+      start = time.perf_counter()
+      first = block_all(run_chain())
+      first_seconds = time.perf_counter() - start
+      hbm_after_first = memory_snapshot()
+      start = time.perf_counter()
+      second = block_all(run_chain())
+      repeat_seconds = time.perf_counter() - start
+    total_seconds = time.perf_counter() - method_start
+    hbm_after_repeat = memory_snapshot()
+
+    first_values = first[:4]
+    second_values = second[:4]
+    counts = first[4]
+    parameter_summaries = tuple(
+        tree_summary(gradient) for gradient in first[0]
+    )
+    cache_summaries = tuple(
+        tree_summary(cotangent) for cotangent in first[1]
+    )
+    hidden_summaries = {
+        "prefix_input": tree_summary(first[2]),
+        "chunk_input": tree_summary(first[3]),
+    }
+    repeat_exact = tree_exact(first_values, second_values)
+    expected_counts = {
+        "prefix_forward": 36,
+        "chunk_forward": 36,
+        "chunk_pullback": 36,
+        "prefix_pullback": 36,
+    }
+    if counts != expected_counts or second[4] != expected_counts:
+      raise FunctionalMappingError(
+          f"P28 G5b chain counts changed: {counts}, {second[4]}"
+      )
+    if len(parameter_summaries) != 36 or any(
+        (not finite) or nonzero == 0
+        for finite, nonzero in parameter_summaries
+    ):
+      raise FunctionalMappingError(
+          f"P28 G5b parameter gradient red: {parameter_summaries}"
+      )
+    if len(cache_summaries) != 36 or any(
+        (not finite) or nonzero == 0 for finite, nonzero in cache_summaries
+    ):
+      raise FunctionalMappingError(
+          f"P28 G5b cache cotangent red: {cache_summaries}"
+      )
+    if any(
+        (not finite) or nonzero == 0
+        for finite, nonzero in hidden_summaries.values()
+    ):
+      raise FunctionalMappingError(
+          f"P28 G5b hidden cotangent red: {hidden_summaries}"
+      )
+    if not repeat_exact:
+      raise FunctionalMappingError("P28 G5b repeat is not array-exact")
+    if first_seconds > first_cap or repeat_seconds > repeat_cap:
+      raise FunctionalMappingError(
+          "P28 G5b chain cap exceeded: "
+          f"first={first_seconds:.6f}/{first_cap:.6f} "
+          f"repeat={repeat_seconds:.6f}/{repeat_cap:.6f}"
+      )
+    if total_seconds > total_cap:
+      raise FunctionalMappingError(
+          f"P28 G5b total cap exceeded: {total_seconds:.6f}/{total_cap:.6f}"
+      )
+    for snapshot_name, snapshot in (
+        ("before", hbm_before),
+        ("after_first", hbm_after_first),
+        ("after_repeat", hbm_after_repeat),
+    ):
+      if len(snapshot) != 4 or any(
+          item.get("peak_bytes_in_use") is None
+          or item.get("bytes_limit") is None
+          or item["peak_bytes_in_use"] >= item["bytes_limit"]
+          for item in snapshot
+      ):
+        raise FunctionalMappingError(
+            f"P28 G5b HBM telemetry red at {snapshot_name}: {snapshot}"
+        )
+    result = {
+        "layers": layer_count,
+        "prefix_length": prefix_length,
+        "chunk_length": chunk_length,
+        "counts": counts,
+        "parameter_summaries": parameter_summaries,
+        "cache_summaries": cache_summaries,
+        "hidden_summaries": hidden_summaries,
+        "repeat_exact": repeat_exact,
+        "first_seconds": first_seconds,
+        "repeat_seconds": repeat_seconds,
+        "total_seconds": total_seconds,
+        "hbm_before": hbm_before,
+        "hbm_after_first": hbm_after_first,
+        "hbm_after_repeat": hbm_after_repeat,
+    }
+    print(f"[P28.G5B] PASS {result}", flush=True)
+    return result
 
   def _one_sequence(
       self,

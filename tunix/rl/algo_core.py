@@ -599,6 +599,167 @@ def grpo_loss_fn(
   return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
 
 
+def grpo_loss_from_precomputed_logps(
+    per_token_logps,
+    token_entropy,
+    train_example,
+    algo_config,
+) -> sft_utils.LossOutput:
+  """Builds the stock GRPO loss from an already evaluated policy forward.
+
+  This is the P28 host-segmented differentiation seam.  It intentionally
+  duplicates the scalar/metric portion of ``grpo_loss_fn`` while leaving the
+  default model-forward path untouched.  Exact-image tests compare this seam
+  with the stock formula before it can be used by a live P28 arm.
+  """
+  beta = algo_config.beta
+  epsilon = algo_config.epsilon
+  loss_algo = algo_config.loss_algo
+  epsilon_high = (
+      algo_config.epsilon_high
+      if hasattr(algo_config, "epsilon_high")
+      else epsilon
+  )
+  epsilon_c = getattr(algo_config, "epsilon_c", None)
+  loss_aggregation_mode = algo_config.loss_agg_mode
+  completion_mask = train_example.completion_mask
+  per_token_logps = jnp.astype(per_token_logps, jnp.float32)
+  token_entropy = jnp.astype(token_entropy, jnp.float32)
+  advantages = jnp.astype(train_example.advantages, jnp.float32)
+
+  if train_example.old_per_token_logps is None:
+    old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
+  else:
+    old_per_token_logps = jnp.astype(
+        train_example.old_per_token_logps, jnp.float32
+    )
+
+  seq_importance_ratio = per_token_logps - old_per_token_logps
+  token_denom = jnp.sum(completion_mask)
+  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio * completion_mask)
+  seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
+
+  if loss_algo == "gspo-token":
+    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
+        axis=-1
+    ) / jnp.clip(completion_mask.sum(-1), min=1)
+    seq_importance_ratio = (
+        per_token_logps
+        - jax.lax.stop_gradient(per_token_logps)
+        + jnp.expand_dims(jax.lax.stop_gradient(seq_importance_ratio), axis=-1)
+    )
+    seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
+
+  is_ratio = jnp.exp(seq_importance_ratio)
+  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+  pg_loss_1 = -adv * is_ratio
+  pg_loss_2 = -adv * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
+  per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
+  unreduced_clip_frac = jnp.sum(
+      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32) * completion_mask
+  )
+
+  pg_loss_3 = -epsilon_c * adv if epsilon_c is not None else per_token_loss
+  per_token_pg_clipfrac_lower = (
+      (per_token_loss > pg_loss_3) & (adv < 0.0)
+  ).astype(jnp.float32)
+  pg_clipfrac_lower = common.aggregate_loss(
+      per_token_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+  )
+  pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
+  per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
+
+  sampler_is_weights = getattr(train_example, "sampler_is_weights", None)
+  if sampler_is_weights is not None:
+    per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
+
+  unreduced_pg_loss = common.aggregate_loss(
+      per_token_loss, completion_mask, loss_aggregation_mode
+  )
+  reduced_pg_loss = common.reduced_loss_agg(
+      per_token_loss, completion_mask, loss_aggregation_mode
+  )
+  total_loss = unreduced_pg_loss
+  aux = {
+      "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
+      "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
+      "reduced_pg_loss": reduced_pg_loss,
+      "unreduced_pg_loss": unreduced_pg_loss,
+      "pg_clipfrac": sft_utils.WeightedMetric(
+          unreduced_clip_frac, token_denom, min_denom=1.0
+      ),
+      "ppo_kl": sft_utils.WeightedMetric(
+          unreduced_ppo_kl, token_denom, min_denom=1.0
+      ),
+      "pg_clipfrac_lower": pg_clipfrac_lower,
+      "is_ratio/mean": masked_mean(is_ratio, completion_mask),
+      "is_ratio/max": jnp.max(
+          jnp.where(completion_mask > 0, is_ratio, 0.0)
+      ),
+      "is_ratio/min": jnp.min(
+          jnp.where(completion_mask > 0, is_ratio, jnp.inf)
+      ),
+      "log_ratio/abs_mean": masked_mean(
+          jnp.abs(seq_importance_ratio), completion_mask
+      ),
+      "pg_loss/unclipped_mean": masked_mean(pg_loss_1, completion_mask),
+      "pg_loss/clipped_mean": masked_mean(pg_loss_2, completion_mask),
+  }
+  adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
+  aux.update({
+      "advantage/abs_mean": masked_mean(
+          jnp.abs(adv_broadcast), completion_mask
+      ),
+      "advantage/max": jnp.max(
+          jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf)
+      ),
+      "advantage/min": jnp.min(
+          jnp.where(completion_mask > 0, adv_broadcast, jnp.inf)
+      ),
+      "advantage/nonzero_frac": masked_mean(
+          (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32),
+          completion_mask,
+      ),
+  })
+  if os.environ.get("CANON_ALIGNMENT_GATE", "") == "1":
+    aux["canon/T_current"] = per_token_logps
+  if sampler_is_weights is not None:
+    sis = sampler_is_weights.astype(jnp.float32)
+    aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
+    aux["sampler_is/weight_min"] = jnp.min(
+        jnp.where(completion_mask > 0, sis, jnp.inf)
+    )
+  else:
+    aux["sampler_is/weight_mean"] = jnp.float32(1.0)
+    aux["sampler_is/weight_min"] = jnp.float32(1.0)
+
+  if train_example.ref_per_token_logps is not None:
+    kl = common.compute_kl_divergence(
+        per_token_logps,
+        train_example.ref_per_token_logps,
+        algo_config.kl_loss_mode,
+        clamp_value=algo_config.kl_clamp_value,
+    )
+    unreduced_kl = jnp.astype(jnp.sum(kl * completion_mask), jnp.float32)
+    aux["kl"] = sft_utils.WeightedMetric(
+        unreduced_kl, token_denom, min_denom=1.0
+    )
+    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
+    aux["kl_loss"] = kl_loss
+    if beta is not None and beta != 0.0:
+      total_loss = sft_utils.WeightedMetric(
+          unreduced_pg_loss.unreduced_sum + beta * kl_loss.unreduced_sum,
+          unreduced_pg_loss.denominator,
+          eps=unreduced_pg_loss.eps,
+          min_denom=unreduced_pg_loss.min_denom,
+      )
+
+  aux["entropy"] = common.aggregate_loss(
+      token_entropy, completion_mask, loss_aggregation_mode
+  )
+  return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
+
+
 @function_registry.register_advantage_estimator("grpo")
 def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   """Compute group relative advantages.

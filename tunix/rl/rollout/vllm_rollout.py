@@ -99,6 +99,7 @@ class VllmRollout(base_rollout.BaseRollout):
     state = nnx.state(model)
     self._sampler.load_checkpoint(state)
     self._canonical_engine_contract = None
+    self._canonical_engine_adapter = None
     if os.environ.get("CANON_ENGINE_MODULE_C", "") == "1":
       from tunix.rl import canonical_qwen3_adapter  # pylint: disable=g-import-not-at-top
 
@@ -124,6 +125,7 @@ class VllmRollout(base_rollout.BaseRollout):
           sampler=self._sampler,
           sampling_kwargs=adapter_sampling_kwargs,
       )
+      self._canonical_engine_adapter = adapter
       canonical_forward.register(adapter)
       print(
           "[CANON_ADAPTER] differentiable engine adapter registered "
@@ -139,6 +141,28 @@ class VllmRollout(base_rollout.BaseRollout):
           "CANON_ENGINE_MODULE_C=1 before constructing the rollout"
       )
     return dataclasses.asdict(self._canonical_engine_contract)
+
+  def run_p28_segmented_forward_gate(self):
+    """Runs the default-off P28 forward-only depth-boundary probe."""
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError(
+          "P28 segmented forward requires the canonical engine adapter"
+      )
+    return self._canonical_engine_adapter.run_p28_segmented_forward_gate()
+
+  def run_p28_block_vjp_gate(self, *, layer_index=0):
+    """Runs the default-off P28 one-real-layer VJP probe."""
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError("P28 block VJP requires the canonical engine adapter")
+    return self._canonical_engine_adapter.run_p28_block_vjp_gate(
+        layer_index=layer_index
+    )
+
+  def run_p28_full_chain_gate(self):
+    """Runs the default-off P28 36-layer staged-pullback capacity gate."""
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError("P28 full chain requires the canonical engine adapter")
+    return self._canonical_engine_adapter.run_p28_full_chain_gate()
 
   @property
   def mesh(self) -> jax.sharding.Mesh:

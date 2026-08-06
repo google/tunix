@@ -63,6 +63,28 @@ class _RescoreSampler:
 
 class VllmRolloutCanonicalTest(absltest.TestCase):
 
+  def test_p28_full_chain_is_forwarded(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = mock.Mock()
+    rollout._canonical_engine_adapter.run_p28_full_chain_gate.return_value = (
+        "ok"
+    )
+
+    self.assertEqual(rollout.run_p28_full_chain_gate(), "ok")
+    rollout._canonical_engine_adapter.run_p28_full_chain_gate.assert_called_once_with()
+
+  def test_p28_block_vjp_layer_index_is_forwarded(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = mock.Mock()
+    rollout._canonical_engine_adapter.run_p28_block_vjp_gate.return_value = (
+        "ok"
+    )
+
+    self.assertEqual(rollout.run_p28_block_vjp_gate(layer_index=17), "ok")
+    rollout._canonical_engine_adapter.run_p28_block_vjp_gate.assert_called_once_with(
+        layer_index=17
+    )
+
   def test_sampler_driver_mode_uses_locked_reset_and_driver_generate(self):
     sampler = object.__new__(vllm_sampler.VllmSampler)
     sampler.llm = None
