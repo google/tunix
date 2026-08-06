@@ -38,7 +38,9 @@ class InProcessTrainerWorker:
   Contract driven by ``OrchestratorRLEngine``:
 
       fwd_bwd(payload) -> None
-      update(eval_ds=None, skip_jit=False) -> int
+      update(skip_jit=False) -> int
+      run_eval(eval_ds) -> None
+      eval_step(payload) -> None
       per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
       sync_weights() -> None
   """
@@ -62,8 +64,10 @@ class InProcessTrainerWorker:
     self._pending_payloads = []
     try:
       self._rl_engine.train(
-          rl_engine_lib.Role.ACTOR, chunks, eval_ds, skip_jit
+          rl_engine_lib.Role.ACTOR, chunks, None, skip_jit
       )
+      if eval_ds is not None:
+        self.run_eval(eval_ds)
     except Exception:
       self._pending_payloads = chunks + self._pending_payloads
       raise
@@ -78,6 +82,31 @@ class InProcessTrainerWorker:
     """Compatibility shim for callers that still submit a full train_ds."""
     self.fwd_bwd(train_ds)
     self.update(eval_ds=eval_ds, skip_jit=skip_jit)
+
+  def eval_step(self, payload: Any) -> None:
+    """Runs one actor eval micro-batch."""
+    eval_step = getattr(self._rl_engine.actor_trainer, "eval_step", None)
+    if not callable(eval_step):
+      raise TypeError("actor_trainer must expose eval_step(...).")
+    eval_step(payload)
+
+  def run_eval(self, eval_ds: Any) -> None:
+    """Runs an explicit actor evaluation phase."""
+    actor_trainer = self._rl_engine.actor_trainer
+    run_eval = getattr(actor_trainer, "_run_eval", None)
+    if callable(run_eval):
+      run_eval(eval_ds)
+      return
+
+    eval_context = getattr(actor_trainer, "eval_context", None)
+    if callable(eval_context):
+      with eval_context():
+        for payload in eval_ds:
+          self.eval_step(payload)
+      return
+
+    for payload in eval_ds:
+      self.eval_step(payload)
 
   def train_critic(
       self,

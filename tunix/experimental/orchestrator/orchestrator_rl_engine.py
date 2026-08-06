@@ -31,7 +31,9 @@ loads the model or initializes TPU.
 
 Handle contracts (all optional; absent -> in-process fallback):
     trainer_worker.fwd_bwd(chunk) -> Response
-    trainer_worker.update(eval_ds=..., skip_jit=...) -> int
+    trainer_worker.update(skip_jit=...) -> int
+    trainer_worker.run_eval(eval_ds) -> Response
+    trainer_worker.eval_step(chunk) -> Response
     trainer_worker.per_token_logps(prompt_ids, completion_ids,
                                    pad_id, eos_id) -> array   # optional method
     rollout_worker.generate(prompts, apply_chat_template, mode,
@@ -186,7 +188,10 @@ class OrchestratorRLEngine:
       if callable(fwd_bwd) and callable(update):
         for chunk in train_ds:
           fwd_bwd(chunk)
-        return update(eval_ds=eval_ds, skip_jit=skip_jit)
+        train_step = update(skip_jit=skip_jit)
+        if eval_ds is not None:
+          self.eval_actor(eval_ds)
+        return train_step
       else:
         train = getattr(self._trainer_worker, "train", None)
         if not callable(train):
@@ -198,6 +203,37 @@ class OrchestratorRLEngine:
       return self._require_base("update_actor").update_actor(
           train_ds, eval_ds, skip_jit
       )
+
+  def eval_actor(self, eval_ds: Any) -> Any:
+    """Runs an explicit actor evaluation phase on the trainer worker."""
+    if eval_ds is None:
+      return None
+    if self._trainer_worker is not None:
+      run_eval = getattr(self._trainer_worker, "run_eval", None)
+      if callable(run_eval):
+        return run_eval(eval_ds)
+      eval_step = getattr(self._trainer_worker, "eval_step", None)
+      if not callable(eval_step):
+        raise TypeError(
+            "trainer_worker must expose run_eval(...) or eval_step(...)."
+        )
+      for chunk in eval_ds:
+        eval_step(chunk)
+      return None
+
+    base = self._require_base("eval_actor")
+    actor_trainer = getattr(base, "actor_trainer", None)
+    run_eval = getattr(actor_trainer, "_run_eval", None)
+    if callable(run_eval):
+      return run_eval(eval_ds)
+    eval_step = getattr(actor_trainer, "eval_step", None)
+    if not callable(eval_step):
+      raise TypeError(
+          "base actor_trainer must expose _run_eval(...) or eval_step(...)."
+      )
+    for chunk in eval_ds:
+      eval_step(chunk)
+    return None
 
   def update_critic(
       self, train_ds: Any, eval_ds: Any, skip_jit: bool = False

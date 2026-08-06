@@ -85,7 +85,17 @@ class RLOrchestrator:
       self, batch: Any, eval_ds: Any = None, skip_jit: bool = False
   ) -> Any:
     """Runs one actor trainer pass over the (chunked) micro-batch."""
-    return self._cluster.update_actor(batch, eval_ds, skip_jit)
+    train_step = self._cluster.update_actor(batch, None, skip_jit)
+    if eval_ds is not None:
+      self.evaluate(eval_ds)
+    return train_step
+
+  def evaluate(self, eval_ds: Any) -> Any:
+    """Runs an explicit actor evaluation phase."""
+    eval_actor = getattr(self._cluster, "eval_actor", None)
+    if not callable(eval_actor):
+      raise TypeError("cluster must expose eval_actor(eval_ds) for evaluation.")
+    return eval_actor(eval_ds)
 
   # --- Weight sync ----------------------------------------------------------
 

@@ -124,12 +124,31 @@ class GrpcTrainerWorkerProxy:
     return self.handle.submit("fwd_bwd", chunk)
 
   def update(self, eval_ds: Any = None, skip_jit: bool = False) -> int:
-    return self.handle.submit("update", eval_ds=eval_ds, skip_jit=skip_jit)
+    if eval_ds is not None:
+      raise ValueError(
+          "GrpcTrainerWorkerProxy.update() no longer accepts eval_ds. "
+          "Run evaluation through run_eval() so eval is an explicit "
+          "orchestrator phase."
+      )
+    return self.handle.submit("update", skip_jit=skip_jit)
 
-  def train(self, chunks: list[Any], eval_ds: Any = None, skip_jit: bool = False) -> None:
+  def train(
+      self,
+      chunks: list[Any],
+      eval_ds: Any = None,
+      skip_jit: bool = False,
+  ) -> None:
     for chunk in chunks:
       self.fwd_bwd(chunk)
-    self.update(eval_ds=eval_ds, skip_jit=skip_jit)
+    self.update(skip_jit=skip_jit)
+    if eval_ds is not None:
+      self.run_eval(eval_ds)
+
+  def eval_step(self, chunk: Any) -> Any:
+    return self.handle.submit("eval_step", chunk)
+
+  def run_eval(self, eval_ds: Any) -> Any:
+    return self.handle.submit("run_eval", eval_ds)
 
   def per_token_logps(
       self,

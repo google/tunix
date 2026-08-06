@@ -356,7 +356,9 @@ class GRPOLoop:
     )
     train_example = self._maybe_add_ref_logps(train_example)
     chunks = split_train_example(train_example, self._train_micro_batch_size)
-    train_step = self._orch.train_step(chunks, eval_ds=eval_ds, skip_jit=skip_jit)
+    train_step = self._orch.train_step(chunks, skip_jit=skip_jit)
+    if eval_ds is not None:
+      self._orch.evaluate(eval_ds)
 
     start_global_step = self._orch.global_steps
     if self._sync_weights:

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import math
 import os
@@ -303,6 +304,12 @@ class _MeshBoundTrainer:
   def eval_step(self, *args, **kwargs) -> None:
     with self._mesh:
       self._trainer.eval_step(*args, **kwargs)
+
+  @contextlib.contextmanager
+  def eval_context(self):
+    with self._mesh:
+      with self._trainer.eval_context():
+        yield
 
   def compile(self, *args, **kwargs) -> None:
     with self._mesh:

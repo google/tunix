@@ -14,6 +14,7 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
+import contextlib
 from typing import Any, Callable
 
 from tunix.experimental.common import datatypes
@@ -176,6 +177,34 @@ class TrainerWorker(abstract_worker.Worker):
       self._trainer.eval_step(payload, **kwargs)
       self._last_error = None
       return self._response(evaluated=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
+    """Runs an explicit evaluation phase over eval micro-batches."""
+    self._ensure_ready()
+    if eval_ds is None:
+      return self._response(evaluated=True, eval_batches=0)
+    try:
+      run_eval = getattr(self._trainer, "run_eval", None)
+      if callable(run_eval):
+        run_eval(eval_ds, **kwargs)
+        self._last_error = None
+        return self._response(evaluated=True)
+
+      eval_context = getattr(self._trainer, "eval_context", None)
+      context = (
+          eval_context() if callable(eval_context) else contextlib.nullcontext()
+      )
+      eval_batches = 0
+      with context:
+        for payload in eval_ds:
+          self._trainer.eval_step(payload, **kwargs)
+          eval_batches += 1
+      self._last_error = None
+      return self._response(evaluated=True, eval_batches=eval_batches)
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
