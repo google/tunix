@@ -171,6 +171,7 @@ patches/tpu_inference/  six real diffs, one per file
 src/engine_shims/       the shim chain + promoted Pallas ops + model-specific modules
 tests/t0_cpu/           CPU gates
 tests/t1_tpu/           topology admission probes
+tests/t2_dp/            DP reduction/update admission + negative control
 cluster/                Pathways/GKE entry point, steps, profiles, manifest
 recipes/                T2/T3 reproduction recipes and expected outputs
 docs/                   the phase-by-phase record of how this package was built

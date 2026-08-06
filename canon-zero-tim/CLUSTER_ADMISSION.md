@@ -110,6 +110,25 @@ never been measured. If that is unaffordable, the tree only needs to be *rank-or
 linear: recursive doubling gives the same rank-fixed order in `log2(n)` rounds. That is a new
 implementation and would have to re-clear the full THIRDPROG and `A=B` gate set first.
 
+## Step 7 — Is the DP update repeatable under a frozen placement?
+
+`tests/t2_dp/run.sh`, or `CANON_MODE=dp-gate-only` on GKE.
+
+For P32 the exact geometry is DP16×TP4 with 16 trajectories per DP replica. The hard admission
+contract is:
+
+- two executions with the same sample→rank mapping produce array-exact gradients;
+- every DP replica sees the same post-reduction gradient;
+- the injected rank-dependent negative is rejected;
+- one AdamW arithmetic step emits stable SHA-256s for gradient, parameter and both moments;
+- the measured mesh id sequence can be pinned and reproduced in a fresh run.
+
+The probe also redistributes the same global samples across DP ranks. This is an observation, not
+an initial hard gate. Local CPU evidence already shows the regrouped gradient changes even under
+the fixed-order reference, because local partial sums were grouped differently *before* the
+collective. Therefore fixed DP all-reduce order alone cannot provide arbitrary placement
+invariance. Either freeze placement or accumulate canonical per-example contributions.
+
 ---
 
 ## Not covered by any probe
@@ -123,6 +142,9 @@ Say these out loud in any report from a new topology.
   them per layer in the forward. That is another collective in the forward path, and it has
   never been characterised here. Isolate it: run gates before training.
 - **Cross-slice hierarchical reduction.** See step 4.
+- **Replicated DP16 segmented VJP.** The current trainer's first mesh axis is `fsdp` and its
+  segmented adapter walks the global trajectory list. The P32 profile refuses training until a
+  true `(dp,tp)` adapter proves local-16 reverse, one DP reduction and one global commit.
 
 ## Reporting
 

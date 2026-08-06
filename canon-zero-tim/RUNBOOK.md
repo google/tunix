@@ -129,15 +129,20 @@ kubectl logs -f jobs/canon-zero-tim-v5p-64-pathways-head-0
 | `probe-only` | no | Is this image's `tpu_inference` the build the patches were cut against? Does it need the RoPE fix? |
 | `install-only` | no | Does the chain build, overlay, and actually load here? |
 | `gate-only` | seconds | Task B, on the cluster. |
-| `run` | yes | The workload in `CANON_RUN_CMD`. |
+| `dp-gate-only` | minutes | Task B plus DP16×TP4 gradient/update repeatability and placement sensitivity. |
+| `run` | yes | The workload in `CANON_RUN_CMD`; refused by the P32 admission-only profile. |
 
 Start at `probe-only`. Full expected output, the red table, and the reporting format are in
 `cluster/README.md` — that file is the operator guide for this task and supersedes this summary.
 
+For P32 use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env` and promote only through
+`dp-gate-only`. First measure the 64-id train mesh, then set `CANON_EXPECT_TRAIN_MESH_IDS` and
+repeat under a fresh label. Return `$CANON_STATE/t2_dp.log`; do not bypass the run refusal.
+
 **Two things to set before the first apply**, both in the manifest:
 - the `jax-tpu` image, **pinned by digest** — a floating `:latest` means the same manifest runs
   on a different engine tomorrow, which is incompatible with a bitwise contract;
-- `CANON_EXPECT_MODEL_MESH_IDS`, from Task B's output **on this topology**.
+- `CANON_P32_EXPECT_MODEL_MESH_IDS`, from Task B's output **on this topology**.
 
 ---
 

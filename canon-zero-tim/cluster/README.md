@@ -37,7 +37,7 @@ Before the first apply, edit `jobset-64chip.yaml`:
 | Field | Why |
 |---|---|
 | `jax-tpu` container `image` | **Pin by digest.** A floating `:latest` means the same manifest runs on a different engine tomorrow — incompatible with a bitwise contract. |
-| `CANON_EXPECT_MODEL_MESH_IDS` | Leave empty for the first probe; fill from `probe_mesh_order.py` output on **this** topology. An order inherited from a different mesh shape is worse than none. |
+| `CANON_P32_EXPECT_MODEL_MESH_IDS` | Leave empty for the first probe; fill from `probe_mesh_order.py` output on **this** topology. The profile maps it to the engine assertion without inheriting the four-chip default. |
 | branch name in the sync block | If it is not `yuxzhang/canon-zero-tim`. |
 
 ### Promote one stage at a time
@@ -50,7 +50,8 @@ promoting.**
 | `probe-only` | 00–25 | no | Is this image's `tpu_inference` the one the patches were cut against? Does this build need the RoPE fix? |
 | `install-only` | 00–50 | no | Does the chain build, overlay and *load* here? |
 | `gate-only` | 00–70 | yes, seconds | Does the drift appear at this reduction width? What device order did placement pick? Is this multi-slice? |
-| `run` | 00–90 | yes | The workload in `CANON_RUN_CMD`. |
+| `dp-gate-only` | 00–75 | yes, minutes | In addition to T1, does DP16×TP4 repeat exactly under a fixed sample→rank mapping, and are all replicas synchronized after gradient reduction? |
+| `run` | 00–90 | yes | The workload in `CANON_RUN_CMD`; the P32 admission profile deliberately refuses this mode. |
 
 ### Secrets
 
@@ -102,6 +103,27 @@ The reading that matters: **at every width you intend to use, `F4-fixed-order` m
 If `XLA-all-reduce` is already SAME at your width, the fixed-order tree is a no-op there — a
 green result then proves nothing about the mechanism, only that the problem was absent.
 
+### `dp-gate-only`
+
+Use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env`. The expected terminal markers are:
+
+```
+[P32.DP] CONFIG dp=16 tp=4 local_samples=16 global_samples=256
+[P32.DP] MESH ids=(...64 ids...)
+[P32.DP] CHECKS {...}
+[P32.DP] OBSERVATIONS {...}
+[P32.DP] UPDATE {...four SHA-256s...}
+[P32.DP] DECISION ...
+[P32.DP] VERDICT PASS
+```
+
+`PASS` means fixed-placement repeatability and replica equality only. Read
+`auto_regroup_exact`: if false, the same samples assigned to different DP ranks are not bitwise
+invariant. Do not relabel that as a failed fixed-placement run or as arbitrary batch invariance.
+
+The first run leaves `CANON_EXPECT_TRAIN_MESH_IDS` empty to measure placement. Pin the printed ids
+and rerun. Only the pinned rerun is admission evidence.
+
 ### `run`
 
 ```
@@ -118,6 +140,8 @@ Ranked by how easily each is mistaken for success.
 |---|---|---|
 | **No `[PATHTRACE]` lines** | The intervention never executed. The chain is imported by path and by module name; a missing member does not raise — the engine silently uses its stock module while every switch still reads "on". | **Void the run.** Do not report its numbers. |
 | **A gate printed no measurement line** | It did not run. Absence is never a pass. | Investigate before rerunning. |
+| **P32 `run` is refused** | Expected: the current shared mesh would be FSDP16×TP4 and the segmented VJP is not DP-local. | Do not bypass the refusal. Return the T1/T2 artifacts; implement the DP adapter in the next phase. |
+| **T2-DP fixed repeat/replica check is false** | DP reduction or placement is not deterministic on this topology. | Stop before model initialization. |
 | **`THIRDPROG` red** | The forward-only and forward+backward programs are not the same family. Every downstream number in that run is meaningless. | Void the whole run, fix the config, rerun. |
 | **`ROPE_FIX=unknown_version`** | Neither the old nor the new RoPE form was found. Somebody is about to patch a build nobody has looked at. | Stop. Inspect the file. Do not guess. |
 | **`[probe] VERSION DRIFT`** | The image's `tpu_inference` differs from the patch anchor. Results can no longer be byte-identical to the signed evidence. | Decide deliberately; if you proceed with `CANON_ALLOW_IMAGE_DRIFT=1`, say so in the report. |
@@ -133,7 +157,7 @@ Artifacts, not conclusions. A verdict without its raw log cannot be re-read late
 ```
 1. raw log path + sha256sum
 2. CANON_MODE, the resolved /tmp/canon-state/env.sh, and the image DIGEST (not the tag)
-3. probe output verbatim:  [probe] SUMMARY / [rope] ROPE_FIX / [mesh] / [waycount] / [bucket]
+3. probe output verbatim:  [probe] SUMMARY / [rope] ROPE_FIX / [mesh] / [waycount] / [bucket] / [P32.DP]
 4. any override used:      CANON_ALLOW_IMAGE_DRIFT, CANON_ALLOW_UNVERSIONED
 5. exit codes of every step
 ```
@@ -151,7 +175,8 @@ cluster/
 ├── profiles/
 │   ├── _canonical_engine.env  the switch set; shared by every profile
 │   ├── qwen3-1p7b.env         model geometry (GSM8K release)
-│   └── qwen3-8b.env           model geometry (FrozenLake)
+│   ├── qwen3-8b.env           model geometry (FrozenLake)
+│   └── qwen3-8b-dp16-tp4-admission.env  P32 arithmetic + fail-closed contract
 └── steps/
     ├── 00_env.sh              resolve config, strip secrets, refuse an incomplete set
     ├── 10_sync_repo.sh        verify the checkout is where it should be
@@ -162,6 +187,7 @@ cluster/
     ├── 50_verify_overlay.sh   byte identity + live import of the chain
     ├── 60_wait_workers.sh     let TPU workers register
     ├── 70_run_t1.sh           topology admission probes
+    ├── 75_run_dp.sh           DP gradient/update admission probe
     └── 90_run.sh              the workload, then the PATHTRACE tally
 ```
 

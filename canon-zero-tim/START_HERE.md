@@ -24,11 +24,14 @@ It is packaging of work already done, not a new result. What is signed and what 
 | Chain installs and loads outside its original directory | **verified** — in-image, off `/mnt/disks` |
 | CPU mathematical gates | **pass** — plus a negative control that rejects 4 kinds of bad run |
 | **Topology admission probes on real TPU** | **NOT RUN** — the probe host's TPU was busy |
+| DP gradient/update probe on CPU | **PASS** — fixed placement repeats; regrouped samples change bits |
+| **DP16×TP4 on Pathways/GKE** | **NOT RUN** — use `dp-gate-only`; training intentionally refused |
 | **Round-trip: install from this package, reproduce signed numbers** | **NOT RUN** |
 | Anything on a cluster, on Pathways, or at a width other than 4 | **NOT RUN** |
 
-**The next useful action is Task B in `RUNBOOK.md`** — the topology probes. They take seconds
-and they decide whether any of this transfers to your hardware.
+**The next useful action on the 64-chip target is Task C in `RUNBOOK.md`** — run the staged
+cluster ladder through `dp-gate-only`. It decides whether the topology and fixed-placement DP
+update contract transfer before any model is allocated.
 
 ---
 

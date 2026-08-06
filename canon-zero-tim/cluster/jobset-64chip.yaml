@@ -8,8 +8,9 @@
 #   kubectl apply -f jobset-64chip.yaml
 #   kubectl logs -f jobs/canon-zero-tim-v5p-64-pathways-head-0
 #
-# Start in CANON_MODE=probe-only.  Promote to install-only, then dp-gate-only.  The P32 profile
-# intentionally refuses `run` until replicated-DP segmented training has its own green gate.
+# The checked-in manifest preserves the remote operator's current `gate-only` stage.  On a fresh
+# cluster start at probe-only; after reading T1, promote a fresh label to dp-gate-only.  The P32
+# profile intentionally refuses `run` until replicated-DP segmented training has its own green gate.
 # after reading the previous stage's output against CLUSTER_ADMISSION.md.  A zero exit code is
 # not an admission.
 #

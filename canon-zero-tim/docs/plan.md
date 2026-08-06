@@ -1,6 +1,6 @@
 # Plan — canon-zero-tim 可分发包
 
-Status: **计划已批准(2026-08-05),执行中**
+Status: **P0–P5 complete; P32 admission extension active (2026-08-06)**
 Owner: Claude(plan.md 归 Claude,已获用户批准)
 
 ## 1. 为什么做
@@ -53,7 +53,7 @@ zero-TIM(`A = B = C` 逐比特)这套改动目前的存在形态是**不可分�
 
 估时 ≈ 5–6 小时,其中 P6b 是唯一长跑。
 
-## 5. 交付结构(实际,77 个文件)
+## 5. 交付结构(持续扩展;精确清单以 Git tree 为准)
 
 ```
 canon-zero-tim/
@@ -67,7 +67,7 @@ canon-zero-tim/
 ├── src/engine_shims/             25 个 .py + models/{qwen1p7b,qwen8b}/
 ├── tests/t0_cpu/                 run.sh + negative_control.sh
 ├── tests/t1_tpu/                 4 个 minrepro + 4 个准入探针 + run.sh
-├── cluster/                      entrypoint + 10 个 step + 3 个 profile + jobset-64chip.yaml + README
+├── cluster/                      entrypoint + staged steps/profiles + jobset-64chip.yaml + README
 ├── recipes/                      T2/T3 配方与预期输出
 ├── evidence/artifacts.sha256     8 条 release artifact
 └── docs/                         plan/design/phase0-5
@@ -81,10 +81,10 @@ canon-zero-tim/
 
 ## 7. 边界
 
-**全程不做**
+**P0–P6 原始工作不做**
 - 不动任何冻结 runner(只在包内提供修正 wrapper)
 - 不改生产默认 / 模型数学 / loss / GRPO 语义 / reward / 权重 / tokenizer
-- 不 commit、不 push(P0 建分支 ≠ commit;落盘后等用户批准)
+- 不在当时 commit/push(P0 建分支 ≠ commit;当时等用户批准)
 - 不删除任何历史证据
 
 **非目标**
@@ -118,6 +118,12 @@ canon-zero-tim/
       ROPE 正确判 `not_needed`、overlay 字节+活体 import 双通道全绿。详见 `phase5.md`
 - [ ] P6a round-trip 便宜层
 - [ ] P6b round-trip 完整层(等单独批准)
+- [~] **P7 DP16×TP4 admission** — CPU probe + negative control PASS; 64-chip Pathways NOT RUN.
+      The P32 profile is fail-closed and does not admit training. See `phase7.md`.
+
+P7 authorization supersedes only the historical no-push boundary above: on 2026-08-06 the user
+explicitly approved committing and pushing P31+P32 to `yuxzhang/canon-zero-tim`. It does not
+authorize a PR, main mutation, production-default change or cloud execution by this agent.
 
 ## 9. 交付的 CL(分支 `yuxzhang/canon-zero-tim`,基点 `3a00d951`)
 
