@@ -44,9 +44,28 @@ class Role(enum.Enum):
 
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
-TrajectoryItem = agent_types.TrajectoryItem
 Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
+
+
+# TODO: Unify this extended TrajectoryItem back into agent_types.TrajectoryItem
+# so that all agentic workflows share the same strict token array fields.
+@dataclasses.dataclass(kw_only=True)
+class TrajectoryItem(agent_types.TrajectoryItem):
+  """Extended TrajectoryItem for Orchestrator with token arrays."""
+  prompt_tokens: np.ndarray | None = None
+  completion_tokens: np.ndarray | None = None
+  action_mask: np.ndarray | None = None
+  policy_version: int = 0
+
+
+class Role(str, enum.Enum):
+  """Orchestrator worker roles."""
+  ACTOR = "actor"
+  CRITIC = "critic"
+  ROLLOUT = "rollout"
+  REFERENCE = "reference"
+  REWARD = "reward"
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -377,11 +396,13 @@ class TrainerPayload:
     token_mask: [B, T] token mask to differentiate padding tokens from valid
       tokens.
     segment_ids: Optional [B, T] packing segment ids.
+    segment_positions: Optional [B, T] position indices within each segment.
   """
 
   token_ids: ArrayLike
   token_mask: ArrayLike
   segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
 
 ##### Weight Sync DTOs #####
 
@@ -468,16 +489,32 @@ class RLTrainerPayload(TrainerPayload):
   Attributes:
     advantages: [B] or [B, C] advantages.
     loss_mask: [B, T], 1 where the position contributes to the loss.
+    action_mask: Optional [B, T] or [B, C] mask of policy actions.
+    prompt_ids: Optional [B, P] prompt token ids.
+    prompt_mask: Optional [B, P] prompt mask.
+    completion_ids: Optional [B, C] completion token ids.
+    completion_mask: Optional [B, C] completion loss mask.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
+    returns: Optional [B, C] value baseline returns (for PPO / Critic).
+    old_values: Optional [B, C] critic value estimates (for PPO / Critic).
+    metadata: Extra payload metadata dictionary.
   """
 
   advantages: ArrayLike
   loss_mask: ArrayLike
+  action_mask: ArrayLike | None = None
+  prompt_ids: ArrayLike | None = None
+  prompt_mask: ArrayLike | None = None
+  completion_ids: ArrayLike | None = None
+  completion_mask: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
+  returns: ArrayLike | None = None
+  old_values: ArrayLike | None = None
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(kw_only=True)

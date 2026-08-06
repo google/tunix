@@ -12,349 +12,247 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Algorithm-specific hooks for the RL orchestrator (the pluggable seam).
+"""Layer 2B: AlgorithmAdapter Math & Loss Wiring (algorithm_adapter.py).
 
-`RLOrchestrator` (the primitive API a learner loop is built on) is deliberately
-algorithm-agnostic: generation, training, weight sync, and scoring are the same
-regardless of algorithm. The pieces that genuinely differ between algorithms --
-how rewards become advantages, how a group is assembled into a train example,
-and
-how the trainer's loss is wired -- live behind this adapter, so one orchestrator
-and one loop can serve GRPO, PPO, and future algorithms by swapping the adapter.
-
-Each hook reuses the shared implementations (advantage-estimator / policy-loss
-registries, padding helpers) rather than reimplementing them, so the
-orchestrator
-stack stays numerically identical to the agentic learner.
+Encapsulates RL returns, GAE / GRPO advantages, loss functions, and
+RLTrainerPayload assembly matching Orchestrator V2 and delegating loss
+computations directly to `tunix.rl.algo_core`.
 """
 
-from typing import Any, Protocol, runtime_checkable
+import abc
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
-from tunix.rl import function_registry
-from tunix.rl import rl_cluster as rl_engine_lib
-from tunix.rl import utils as rl_utils
-from tunix.rl.agentic import agentic_rl_learner
-from tunix.rl.agentic import utils as agentic_utils
+from tunix.experimental.common import datatypes
+from tunix.rl import algo_core
 
 
-@runtime_checkable
-class AlgorithmAdapter(Protocol):
-  """The algorithm-specific bits an otherwise-generic RL loop needs."""
+class AlgorithmAdapter(abc.ABC):
+  """Abstract algorithm adapter for returns math, advantages, and loss functions."""
 
-  algo_config: Any
+  def __init__(
+      self,
+      group_size: int = 8,
+      batch_size_groups: int = 4,
+      max_turns: int = 1,
+      max_packed_len: int = 8192,
+  ):
+    self.group_size = group_size
+    self.batch_size_groups = batch_size_groups
+    self.max_turns = max_turns
+    self.max_packed_len = max_packed_len
+    self.requires_reference_kl = False
+    self.has_critic = False
+    self.requires_old_logprobs = False
 
-  def compute_advantages(self, rewards: Any, *, num_generations: int) -> Any:
-    """Turns per-completion rewards into per-completion advantages."""
+  @abc.abstractmethod
+  def compute_advantages(
+      self, rewards: np.ndarray | jnp.ndarray | Sequence[float], **kwargs: Any
+  ) -> Any:
+    """Computes returns and advantages from rewards."""
     ...
 
-  def assemble_train_example(
+  @abc.abstractmethod
+  def create_trainer_payloads(
       self,
-      prompt_token_lists: Any,
-      completion_token_lists: Any,
-      advantages: Any,
-      *,
-      max_prompt_length: int,
-      max_response_length: int,
-      pad_id: int,
+      group: Any,
+      rewards: Sequence[float],
+      ref_logps: Any | None = None,
       **kwargs: Any,
-  ) -> Any:
-    """Pads/masks a group of (prompt, completion) pairs into a train example."""
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Assembles scored trajectories and computed advantages into typed RLTrainerPayloads."""
     ...
 
-  def configure_trainer(self, cluster: Any) -> None:
-    """Wires the algorithm's loss + model-input adapter onto the cluster trainer."""
-    ...
-
-  def postprocess_group(
-      self,
-      orchestrator: Any,
-      trajectories: Any,
-      *,
-      compute_rewards: Any,
-      mode: Any,
-      expected_step: int | None = None,
-  ) -> Any:
-    """Turns a group of raw trajectories into train example(s).
-
-    The algorithm's whole postprocess, expressed on the orchestrator primitives
-    (scoring, metrics) + the shared registries -- the new-API form of the
-    agentic
-    `_process_results`.
-    """
+  @abc.abstractmethod
+  def loss_fn(self) -> Callable[..., Any]:
+    """Returns the JIT-compiled loss function executed on TrainerWorker."""
     ...
 
 
-class GRPOAdapter:
-  """GRPO hooks, reusing the shared advantage/loss registries and padding.
+class GRPOAdapter(AlgorithmAdapter):
+  """Group Relative Policy Optimization (GRPO) adapter."""
 
-  Holds the `GRPOConfig` (algorithm knobs) and dispatches to the same registry
-  functions the agentic GRPO learner uses -- no reimplementation of the group
-  math, the loss, or the padding.
-  """
-
-  def __init__(self, algo_config: Any):
-    self._algo_config = algo_config
-
-  @property
-  def algo_config(self) -> Any:
-    return self._algo_config
-
-  def compute_advantages(self, rewards: Any, *, num_generations: int) -> Any:
-    estimator = function_registry.get_advantage_estimator(
-        self._algo_config.advantage_estimator
-    )
-    return estimator(rewards=rewards, num_generations=num_generations)
-
-  def assemble_train_example(
+  def __init__(
       self,
-      prompt_token_lists: Any,
-      completion_token_lists: Any,
-      advantages: Any,
-      *,
-      max_prompt_length: int,
-      max_response_length: int,
-      pad_id: int,
-      policy_version: Any = None,
-      ref_per_token_logps: Any = None,
-      old_per_token_logps: Any = None,
-      sampler_is_weights: Any = None,
-  ) -> agentic_rl_learner.TrainExample:
-    """Single-turn assembly: left-pad prompts, right-pad completions, build masks.
-
-    Mirrors the padding/masking `_process_results` performs, for the degenerate
-    single-completion case (no multi-turn conversation). The loop may provide
-    ref/old per-token logps from the reference scorer or rollout worker before
-    calling this.
-    """
-    padded_prompts = []
-    padded_completions = []
-    completion_masks = []
-    for prompt_tokens, completion_tokens in zip(
-        prompt_token_lists, completion_token_lists
-    ):
-      prompt_tokens = [int(t) for t in prompt_tokens]
-      completion_tokens = [int(t) for t in completion_tokens]
-      left_prompt, right_completion, _ = (
-          agentic_utils.pad_prompt_and_completion(
-              prompt_tokens,
-              completion_tokens,
-              max_prompt_length,
-              max_response_length,
-              pad_id,
-          )
-      )
-      padded_prompts.append(left_prompt)
-      padded_completions.append(right_completion[:max_response_length])
-      real_len = min(len(completion_tokens), max_response_length)
-      mask = agentic_utils.right_pad([1] * real_len, max_response_length, 0)[
-          :max_response_length
-      ]
-      completion_masks.append(mask)
-
-    prompt_ids = np.asarray(np.stack(padded_prompts), dtype=np.int32)
-    completion_ids = np.asarray(np.stack(padded_completions), dtype=np.int32)
-    completion_mask = np.asarray(np.stack(completion_masks), dtype=np.int32)
-    return agentic_rl_learner.TrainExample(
-        prompt_ids=prompt_ids,
-        prompt_mask=(prompt_ids != pad_id),
-        completion_ids=completion_ids,
-        completion_mask=completion_mask,
-        advantages=np.asarray(advantages, dtype=np.float32),
-        ref_per_token_logps=ref_per_token_logps,
-        old_per_token_logps=old_per_token_logps,
-        policy_version=policy_version,
-        sampler_is_weights=sampler_is_weights,
+      group_size: int = 8,
+      batch_size_groups: int = 4,
+      max_turns: int = 1,
+      max_packed_len: int = 8192,
+      clip_epsilon: float = 0.2,
+      beta_kl: float = 0.04,
+  ):
+    super().__init__(
+        group_size=group_size,
+        batch_size_groups=batch_size_groups,
+        max_turns=max_turns,
+        max_packed_len=max_packed_len,
     )
+    self.clip_epsilon = clip_epsilon
+    self.beta_kl = beta_kl
 
-  def configure_trainer(self, cluster: Any) -> None:
-    """Wires GRPO's policy loss + model-input adapter onto the actor trainer.
-
-    Reuses the same policy-loss registry entry the agentic GRPO learner uses.
-    """
-    self._algo_config.temperature = cluster.get_rollout_config(
-        mode=rl_engine_lib.Mode.TRAIN
-    ).temperature
-    policy_loss_fn = function_registry.get_policy_loss_fn(
-        self._algo_config.policy_loss_fn
-    )
-    algo_config = self._algo_config
-    pad_id = cluster.rollout.pad_id()
-    eos_id = cluster.rollout.eos_id()
-    compute_logps_chunk_size = (
-        cluster.cluster_config.training_config.compute_logps_chunk_size
-    )
-
-    def loss_fn(model, train_example, algo_config=algo_config):
-      return policy_loss_fn(
-          model,
-          train_example,
-          algo_config=algo_config,
-          pad_id=pad_id,
-          eos_id=eos_id,
-          compute_logps_chunk_size=compute_logps_chunk_size,
-      )
-
-    cluster.actor_trainer.with_loss_fn(loss_fn, has_aux=True)
-    cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {"train_example": x, "algo_config": algo_config}
-    )
-    cluster.actor_trainer.is_managed_externally = True
-
-  def postprocess_group(
+  def compute_advantages(
       self,
-      orchestrator: Any,
-      trajectories: Any,
-      *,
-      compute_rewards: Any,
-      mode: Any,
-      expected_step: int | None = None,
-  ) -> list[agentic_rl_learner.TrainExample]:
-    """GRPO postprocess re-expressed on the orchestrator primitives.
+      rewards: np.ndarray | jnp.ndarray | Sequence[float],
+      num_generations: int | None = None,
+      **kwargs: Any,
+  ) -> jnp.ndarray:
+    """Computes group-normalized advantages: (r - mean(group)) / (std(group) + 1e-6)."""
+    del kwargs
+    g = num_generations or self.group_size
+    r = jnp.asarray(rewards, dtype=jnp.float32).reshape(-1, g)
+    mean = jnp.mean(r, axis=-1, keepdims=True)
+    std = jnp.std(r, axis=-1, keepdims=True)
+    advs = (r - mean) / (std + 1e-6)
+    return advs.reshape(-1)
 
-    The new-API form of `GRPOLearner._process_results` for the on-policy path:
-    extract -> pad/mask -> score (reference/actor via orchestrator primitives)
-    ->
-    reward (caller-supplied) -> advantage (shared estimator) -> assemble. Reuses
-    the same padding helpers and registries, so it stays faithful to the agentic
-    learner. (The extensive diagnostic metrics and the sampler-IS/off-policy
-    paths
-    of `_process_results` are omitted here; those layer on next.)
-    """
-    algo = self._algo_config
-    pad_value = orchestrator.rollout.pad_id()
-    eos_value = orchestrator.rollout.eos_id()
-    rollout_config = orchestrator.get_rollout_config(mode)
-    max_prompt_length = rollout_config.max_prompt_length
-    max_response_length = algo.max_response_length
-    micro_batch_size = (
-        orchestrator.cluster_config.training_config.compute_logps_micro_batch_size
+  def create_trainer_payloads(
+      self,
+      group: Sequence[datatypes.TrajectoryItem],
+      rewards: Sequence[float],
+      ref_logps: Any | None = None,
+      **kwargs: Any,
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Packages group trajectories, advantages, and tool observation masks into unbatched RLTrainerPayloads."""
+    del kwargs
+    advs = self.compute_advantages(rewards, num_generations=self.group_size)
+    payloads = []
+
+    for i, item in enumerate(group):
+      prompt_tokens = item.prompt_tokens if item.prompt_tokens is not None else np.zeros(0, dtype=np.int32)
+      completion_tokens = item.completion_tokens if item.completion_tokens is not None else np.zeros(0, dtype=np.int32)
+      action_mask = item.action_mask if item.action_mask is not None else np.zeros(0, dtype=np.float32)
+
+      adv_val = float(advs[i]) if i < len(advs) else 0.0
+      ref_lp = ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+
+      p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
+      c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
+      act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
+
+      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
+      seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
+      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
+
+      payload = datatypes.RLTrainerPayload(
+          token_ids=seq_tokens,
+          token_mask=seq_loss_mask,
+          loss_mask=seq_loss_mask,
+          advantages=seq_adv,
+          action_mask=seq_loss_mask,
+          prompt_ids=p_arr,
+          prompt_mask=np.ones(len(p_arr), dtype=np.float32),
+          completion_ids=c_arr,
+          completion_mask=act_arr,
+          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
+      )
+      payloads.append(payload)
+    return payloads
+
+  def loss_fn(self) -> Callable[..., Any]:
+    """GRPO loss function delegating directly to `algo_core.grpo_loss_fn`."""
+    return algo_core.grpo_loss_fn
+
+
+class PPOAdapter(AlgorithmAdapter):
+  """Generalized Advantage Estimation (GAE) and PPO Actor-Critic adapter."""
+
+  def __init__(
+      self,
+      group_size: int = 1,
+      batch_size_groups: int = 4,
+      max_turns: int = 1,
+      max_packed_len: int = 8192,
+      gamma: float = 0.99,
+      lam: float = 0.95,
+      clip_epsilon: float = 0.2,
+  ):
+    super().__init__(
+        group_size=group_size,
+        batch_size_groups=batch_size_groups,
+        max_turns=max_turns,
+        max_packed_len=max_packed_len,
     )
+    self.gamma = gamma
+    self.lam = lam
+    self.clip_epsilon = clip_epsilon
+    self.has_critic = True
+    self.requires_reference_kl = True
+    self.requires_old_logprobs = True
 
-    completion_texts = []
-    prompt_tokens_list = []
-    completion_tokens_list = []
-    completion_masks_list = []
-    old_logprobs_list = []
-    policy_versions_list = []
-    trajectory_rewards_list = []
-    original_inputs_list = []
-    for item in trajectories:
-      traj = item.traj
-      conversation = traj.get("conversation_text") or []
-      assistant_text = next(
-          (m["content"] for m in conversation if m["role"] == "assistant"), ""
-      )
-      completion_texts.append(assistant_text)
-      prompt_tokens_list.append(traj.get("prompt_tokens"))
-      completion_tokens_list.append(traj.get("conversation_tokens"))
-      completion_masks_list.append(traj.get("conversation_masks"))
-      old_logprobs_list.append(traj.get("old_logprobs"))
-      policy_version = traj.get("policy_version")
-      if policy_version is None:
-        raise ValueError("policy_version is missing from trajectory task.")
-      policy_versions_list.append(policy_version)
-      trajectory_rewards_list.append(traj.get("trajectory_reward"))
-      original_inputs_list.append(traj["original_input"])
-
-    padded_prompt_ids = []
-    padded_completion_ids = []
-    padded_completion_masks = []
-    padded_old_logprobs = []
-    for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
-        prompt_tokens_list,
-        completion_tokens_list,
-        completion_masks_list,
-        old_logprobs_list,
-    ):
-      padded_prompt, padded_completion, _ = (
-          agentic_utils.pad_prompt_and_completion(
-              prompt_tokens,
-              completion_tokens,
-              max_prompt_length,
-              max_response_length,
-              pad_value,
-          )
-      )
-      padded_prompt_ids.append(padded_prompt)
-      padded_completion_ids.append(padded_completion[:max_response_length])
-      padded_completion_masks.append(
-          agentic_utils.right_pad(completion_mask, max_response_length, 0)[
-              :max_response_length
-          ]
-      )
-      if algo.use_rollout_logps:
-        if old_logprobs is not None:
-          padded_old_logprobs.append(
-              agentic_utils.right_pad(
-                  old_logprobs,
-                  length=max_response_length,
-                  pad=0.0,
-                  dtype=old_logprobs.dtype,
-              )[:max_response_length]
-          )
-        else:
-          padded_old_logprobs.append(
-              np.zeros(max_response_length, dtype=np.float32)
-          )
-
-    prompt_ids = jnp.asarray(padded_prompt_ids)
-    prompt_mask = prompt_ids != pad_value
-    completion_ids = jnp.asarray(padded_completion_ids)
-    completion_mask = jnp.asarray(padded_completion_masks)
-
-    if algo.use_rollout_logps and padded_old_logprobs:
-      old_per_token_logps = jnp.asarray(padded_old_logprobs)
-    elif algo.use_rollout_logps:
-      old_per_token_logps = None
+  def compute_advantages(
+      self,
+      rewards: np.ndarray | jnp.ndarray | Sequence[float],
+      values: np.ndarray | jnp.ndarray | None = None,
+      **kwargs: Any,
+  ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Computes GAE advantages and value function regression targets."""
+    del kwargs
+    r = jnp.asarray(rewards, dtype=jnp.float32)
+    if values is None:
+      values = jnp.zeros_like(r)
     else:
-      old_per_token_logps = orchestrator.actor_logps(
-          prompt_ids, completion_ids, pad_value, eos_value, micro_batch_size
+      values = jnp.asarray(values, dtype=jnp.float32)
+
+    # 1-step / scalar GAE fallback for sequence-level rewards
+    deltas = r - values
+    gae_advantages = deltas
+    value_targets = r
+    return gae_advantages, value_targets
+
+  def create_trainer_payloads(
+      self,
+      group: Any,
+      rewards: Sequence[float],
+      ref_logps: Any | None = None,
+      values: Any | None = None,
+      old_logps: Any | None = None,
+      **kwargs: Any,
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Builds unbatched RLTrainerPayloads with GAE advantages, value targets, and old_logprobs."""
+    del kwargs
+    advs, val_targets = self.compute_advantages(rewards, values=values)
+    payloads = []
+    trajectories = getattr(group, "trajectories", None) or (
+        group if isinstance(group, (list, tuple)) else [group]
+    )
+
+    for i, item in enumerate(trajectories):
+      prompt_tokens = item.prompt_tokens if item.prompt_tokens is not None else np.zeros(0, dtype=np.int32)
+      completion_tokens = item.completion_tokens if item.completion_tokens is not None else np.zeros(0, dtype=np.int32)
+      action_mask = item.action_mask if item.action_mask is not None else np.ones(len(completion_tokens), dtype=np.float32)
+
+      adv_val = float(advs[i]) if i < len(advs) else 0.0
+      vt_val = float(val_targets[i]) if i < len(val_targets) else 0.0
+      ref_lp = ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+      old_lp = old_logps[i] if old_logps is not None and i < len(old_logps) else None
+
+      p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
+      c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
+      act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
+
+      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
+      seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
+      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
+
+      payload = datatypes.RLTrainerPayload(
+          token_ids=seq_tokens,
+          token_mask=seq_loss_mask,
+          loss_mask=seq_loss_mask,
+          advantages=seq_adv,
+          action_mask=seq_loss_mask,
+          prompt_ids=p_arr,
+          prompt_mask=np.ones(len(p_arr), dtype=np.float32),
+          completion_ids=c_arr,
+          completion_mask=act_arr,
+          old_per_token_logps=np.asarray(old_lp, dtype=np.float32) if old_lp is not None else None,
+          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
+          returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),
       )
+      payloads.append(payload)
+    return payloads
 
-    if algo.force_compute_kl or algo.beta != 0.0:
-      ref_per_token_logps = orchestrator.reference_logps(
-          prompt_ids, completion_ids, pad_value, eos_value, micro_batch_size
-      )
-    else:
-      ref_per_token_logps = None
-
-    original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
-    reward_kwargs = {
-        key: value for key, value in original_inputs.items() if key != "prompts"
-    }
-    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
-    rewards = compute_rewards(
-        prompts=original_inputs["prompts"],
-        completions=completion_texts,
-        mode=mode,
-        expected_step=expected_step,
-        **reward_kwargs,
-    )
-    advantages = self.compute_advantages(
-        rewards, num_generations=algo.num_generations
-    )
-
-    orchestrator.buffer_metrics_async(
-        {
-            "rewards/advantage/mean": (np.mean(advantages), np.mean),
-            "rewards/advantage/max": (np.max(advantages), np.max),
-            "rewards/advantage/min": (np.min(advantages), np.min),
-        },
-        mode=mode,
-        step=expected_step,
-    )
-
-    return [
-        agentic_rl_learner.TrainExample(
-            prompt_ids=prompt_ids,
-            prompt_mask=prompt_mask,
-            completion_ids=completion_ids,
-            completion_mask=completion_mask,
-            ref_per_token_logps=ref_per_token_logps,
-            advantages=advantages,
-            old_per_token_logps=old_per_token_logps,
-            policy_version=np.array(policy_versions_list, dtype=np.int32),
-        )
-    ]
+  def loss_fn(self) -> Callable[..., Any]:
+    """PPO policy loss function delegating directly to `algo_core.ppo_policy_loss_fn`."""
+    return algo_core.ppo_policy_loss_fn
