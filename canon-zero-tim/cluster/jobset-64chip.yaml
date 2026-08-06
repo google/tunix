@@ -26,6 +26,8 @@ kind: JobSet
 metadata:
   name: canon-zero-tim-v5p-64
   namespace: default
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: "cloud.google.com/gke-nodepool"
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
 spec:
@@ -205,6 +207,15 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
               cloud.google.com/gke-tpu-topology: 4x4x4
+              cloud.google.com/reservation-name: cloudtpu-20240716121201-595617744
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: OnFailure
@@ -256,6 +267,11 @@ spec:
                   value: '0.9'
                 - name: ENABLE_PATHWAYS_PERSISTENCE
                   value: '1'
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
               resources:
+                requests:
+                  google.com/tpu: '4'
                 limits:
                   google.com/tpu: '4'
