@@ -1,5 +1,16 @@
 """Mesh geometry is the switch: 1D-4dev TP DIFFERS, 2x2 TP SAME.  Confirm across depth &
 mesh construction (plain reshape vs mesh_utils.create_device_mesh)."""
+import os as _os
+import sys as _sys
+
+if "--pathways_enforce_subset_devices_form_subslice=false" not in _sys.argv:
+    _sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+
+try:
+    import pathwaysutils  # noqa: F401
+except ImportError:
+    pass
+
 import jax, jax.numpy as jnp, numpy as np
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P

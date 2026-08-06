@@ -26,6 +26,14 @@ Environment:
 import os
 import sys
 
+if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
+    sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+
+try:
+    import pathwaysutils  # noqa: F401
+except ImportError:
+    pass
+
 import jax
 import numpy as np
 from jax.experimental import mesh_utils

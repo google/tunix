@@ -70,7 +70,13 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count]
   fi
 }
 
-echo "[t1] devices: $(python3 -c 'import jax;d=jax.devices();print(len(d),d[0].device_kind)' 2>&1)"
+echo "[t1] devices: $(python3 -c 'try:
+    import pathwaysutils
+except ImportError:
+    pass
+import jax
+d=jax.devices()
+print(len(d),d[0].device_kind)' 2>&1)"
 echo "[t1] XLA_FLAGS=$XLA_FLAGS"
 
 run_probe "P1  way-count scan (NEW)"        probe_waycount.py        '^\[waycount\] width=' 2

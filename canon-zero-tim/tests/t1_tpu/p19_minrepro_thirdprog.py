@@ -6,6 +6,15 @@ bitwise-DIFFERENT from the standalone jitted forward once the stack exceeds a de
 even with --xla_allow_excess_precision=false.  Small dims so each depth costs seconds.
 """
 import os, sys
+
+if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
+    sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+
+try:
+    import pathwaysutils  # noqa: F401
+except ImportError:
+    pass
+
 import jax, jax.numpy as jnp, numpy as np
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
