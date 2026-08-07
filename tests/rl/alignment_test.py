@@ -31,6 +31,7 @@ from tunix.rl import canonical_forward
 
 @flax.struct.dataclass(frozen=True)
 class _Example:
+  prompt_ids: object
   completion_ids: object
   completion_mask: object
   advantages: object
@@ -79,6 +80,7 @@ class AlignmentTest(absltest.TestCase):
     mask = np.ones_like(ids, dtype=np.bool_)
     values = np.arange(rows * 3, dtype=np.float32).reshape(rows, 3) / 8
     example = _Example(
+        prompt_ids=jnp.asarray(ids + 100),
         completion_ids=jnp.asarray(ids),
         completion_mask=jnp.asarray(mask),
         advantages=jnp.ones((rows,), dtype=jnp.float32),
@@ -96,6 +98,13 @@ class AlignmentTest(absltest.TestCase):
         top_k=0,
         top_p=1.0,
         s_prefill_source=_real_rescore,
+    )
+
+  def test_observed_example_proxies_prompt_ids_before_unwrap(self):
+    wrapped = self._wrapped()
+    np.testing.assert_array_equal(
+        np.asarray(wrapped.prompt_ids),
+        np.asarray(wrapped.train_example.prompt_ids),
     )
 
   def test_exact_gate_passes_and_writes_report(self):
@@ -128,12 +137,14 @@ class AlignmentTest(absltest.TestCase):
     drift = wrapped.t_old.copy()
     drift[0, 0] = np.nextafter(drift[0, 0], np.float32(np.inf))
     with tempfile.TemporaryDirectory() as tmpdir:
+      debug_path = os.path.join(tmpdir, "debug.npz")
       with mock.patch.dict(
           os.environ,
           {
               alignment.ALIGN_ENV: "1",
               alignment.GATE_ONLY_ENV: "1",
               alignment.REPORT_ENV: os.path.join(tmpdir, "report.jsonl"),
+              alignment.DEBUG_ARRAYS_ENV: debug_path,
           },
           clear=False,
       ):
@@ -147,6 +158,11 @@ class AlignmentTest(absltest.TestCase):
               optimizer_skipped=np.asarray(1, np.int32),
               step=0,
           )
+      with np.load(debug_path) as debug:
+        np.testing.assert_array_equal(debug["t_old"], wrapped.t_old)
+        np.testing.assert_array_equal(debug["t_current"], drift)
+        np.testing.assert_array_equal(debug["action_mask"], wrapped.action_mask)
+        np.testing.assert_array_equal(debug["tokens"], wrapped.tokens)
 
   def test_rejects_cached_alias_and_missing_skip_attestation(self):
     wrapped = self._wrapped()
@@ -206,6 +222,41 @@ class AlignmentTest(absltest.TestCase):
             t_current=wrapped.t_old,
             gradient_norm=np.asarray(2.0, np.float32),
             optimizer_skipped=np.asarray(1, np.int32),
+            step=0,
+        )
+
+  def test_forward_only_requires_no_backward_or_optimizer(self):
+    wrapped = self._wrapped()
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.FORWARD_ONLY_ENV: "1",
+            alignment.GATE_ONLY_ENV: "0",
+            alignment.UPDATE_CANARY_ENV: "0",
+            alignment.TRAIN_ENV: "0",
+            alignment.REPORT_ENV: os.path.join(tmpdir, "report.jsonl"),
+        },
+        clear=False,
+    ):
+      result = alignment.check_batch(
+          wrapped,
+          t_current=wrapped.t_old,
+          gradient_norm=np.asarray(0.0, np.float32),
+          optimizer_skipped=np.asarray(1, np.int32),
+          backward_executed=np.asarray(0, np.int32),
+          step=0,
+      )
+      self.assertEqual(result["execution_mode"], "forward-only")
+      self.assertFalse(result["gradient"]["executed"])
+      with self.assertRaisesRegex(
+          alignment.AlignmentGateError, "backward attestation mismatch"
+      ):
+        alignment.check_batch(
+            wrapped,
+            t_current=wrapped.t_old,
+            gradient_norm=np.asarray(0.0, np.float32),
+            optimizer_skipped=np.asarray(1, np.int32),
+            backward_executed=np.asarray(1, np.int32),
             step=0,
         )
 
@@ -281,6 +332,84 @@ class AlignmentTest(absltest.TestCase):
     )
     self.assertGreater(count, 0)
     self.assertEqual(first["masked_index"], 0)
+
+  def _d2b_inputs(self):
+    vocab = 8
+    raw = np.arange(2 * vocab, dtype=np.float32).reshape(2, vocab) / 8
+    processed = raw / np.float32(0.7)
+    target_logps = np.asarray([-1.0, -2.0], np.float32)
+    engine = {
+        "generated_tokens": np.asarray([[1, 2], [3, 4]], np.int32),
+        "decode_target_logps": target_logps.copy(),
+        "prefill_target_logps": target_logps.copy(),
+        "decode": {
+            "raw_rows": raw.copy(),
+            "processed_rows": processed.copy(),
+            "dp_ranks": (0, 1),
+        },
+        "prefill": {
+            "raw_rows": raw.copy(),
+            "processed_rows": processed.copy(),
+            "dp_ranks": (0, 1),
+        },
+        "sampling": {"temperature": 0.7, "top_k": 0, "top_p": 1.0},
+    }
+    diagnostics = {
+        "raw_rows": np.stack((np.zeros_like(raw), raw), axis=1),
+        "processed_rows": np.stack(
+            (np.zeros_like(processed), processed), axis=1
+        ),
+        "target_ids": np.asarray([[0, 2], [0, 4]], np.int32),
+    }
+    logps = np.stack((np.zeros_like(target_logps), target_logps), axis=1)
+    return engine, logps, diagnostics
+
+  def test_p32_d2b_full_distribution_positive_and_negative(self):
+    engine, logps, diagnostics = self._d2b_inputs()
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P32_D2B_FULL_DISTRIBUTION": "1",
+            alignment.D2B_REPORT_ENV: os.path.join(tmpdir, "positive.json"),
+            alignment.D2B_ARRAYS_ENV: os.path.join(tmpdir, "positive.npz"),
+        },
+        clear=False,
+    ):
+      report = alignment.check_p32_d2b_full_distribution(
+          engine_result=engine,
+          t_old_logps=logps,
+          t_old_diagnostics=diagnostics,
+          t_current_logps=logps.copy(),
+          t_current_diagnostics=jax.tree.map(np.copy, diagnostics),
+      )
+      self.assertEqual(report["verdict"], "P32_DP2TP2_D2B_PASS")
+      self.assertEqual(report["comparison_count"], 15)
+      self.assertTrue(os.path.isfile(report["artifact_npz"]))
+
+    engine, logps, diagnostics = self._d2b_inputs()
+    bad = jax.tree.map(np.copy, diagnostics)
+    bad["processed_rows"][0, 1, 0] = np.nextafter(
+        bad["processed_rows"][0, 1, 0], np.float32(np.inf)
+    )
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P32_D2B_FULL_DISTRIBUTION": "1",
+            alignment.D2B_REPORT_ENV: os.path.join(tmpdir, "negative.json"),
+            alignment.D2B_ARRAYS_ENV: os.path.join(tmpdir, "negative.npz"),
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          alignment.AlignmentGateError, "T_current.processed"
+      ):
+        alignment.check_p32_d2b_full_distribution(
+            engine_result=engine,
+            t_old_logps=logps,
+            t_old_diagnostics=diagnostics,
+            t_current_logps=logps.copy(),
+            t_current_diagnostics=bad,
+        )
 
 
 if __name__ == "__main__":

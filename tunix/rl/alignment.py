@@ -34,9 +34,13 @@ import numpy as np
 
 ALIGN_ENV = "CANON_ALIGNMENT_GATE"
 GATE_ONLY_ENV = "CANON_ALIGNMENT_GATE_ONLY"
+FORWARD_ONLY_ENV = "CANON_ALIGNMENT_FORWARD_ONLY"
 UPDATE_CANARY_ENV = "CANON_ALIGNMENT_UPDATE_CANARY"
 TRAIN_ENV = "CANON_ALIGNMENT_TRAIN"
 REPORT_ENV = "CANON_ALIGN_REPORT"
+DEBUG_ARRAYS_ENV = "CANON_ALIGNMENT_DEBUG_NPZ"
+D2B_REPORT_ENV = "CANON_P32_D2B_REPORT"
+D2B_ARRAYS_ENV = "CANON_P32_D2B_NPZ"
 
 
 class AlignmentGateError(RuntimeError):
@@ -60,6 +64,10 @@ class ObservedTrainExample:
   )
 
   # AgenticRLLearner reads these attributes before Trainer unwraps the object.
+  @property
+  def prompt_ids(self):
+    return self.train_example.prompt_ids
+
   @property
   def completion_ids(self):
     return self.train_example.completion_ids
@@ -91,6 +99,7 @@ def execution_mode() -> str:
   changing the safety contract.
   """
   modes = {
+      "forward-only": os.environ.get(FORWARD_ONLY_ENV, "") == "1",
       "gate-only": os.environ.get(GATE_ONLY_ENV, "") == "1",
       "update-canary": os.environ.get(UPDATE_CANARY_ENV, "") == "1",
       "train": os.environ.get(TRAIN_ENV, "") == "1",
@@ -195,6 +204,180 @@ def _masked_bytes_differ(a: Any, b: Any, mask: Any) -> tuple[int, dict | None]:
   }
 
 
+def _full_bytes_differ(a: Any, b: Any) -> int:
+  aa = np.ascontiguousarray(np.asarray(a))
+  bb = np.ascontiguousarray(np.asarray(b))
+  if aa.shape != bb.shape or aa.dtype != bb.dtype:
+    return -1
+  return int(np.count_nonzero(aa.view(np.uint8) != bb.view(np.uint8)))
+
+
+def _reference_processed_logprobs(processed_logits: Any) -> np.ndarray:
+  """Materializes the full categorical distribution for the D2b artifact."""
+  values = np.asarray(processed_logits, dtype=np.float64)
+  support = np.isfinite(values)
+  if not np.all(np.any(support, axis=-1)):
+    raise AlignmentGateError("D2b processed row has empty finite support")
+  masked = np.where(support, values, -np.inf)
+  maximum = np.max(masked, axis=-1, keepdims=True)
+  normalizer = maximum + np.log(
+      np.sum(np.exp(masked - maximum), axis=-1, keepdims=True)
+  )
+  return np.where(support, masked - normalizer, -np.inf).astype(np.float32)
+
+
+def check_p32_d2b_full_distribution(
+    *,
+    engine_result: dict[str, Any],
+    t_old_logps: Any,
+    t_old_diagnostics: dict[str, Any],
+    t_current_logps: Any,
+    t_current_diagnostics: dict[str, Any],
+    fail_closed: bool = True,
+) -> dict[str, Any]:
+  """Checks two DP-covering full-vocabulary sentinels at all four boundaries."""
+  if os.environ.get("CANON_P32_D2B_FULL_DISTRIBUTION", "") != "1":
+    raise AlignmentGateError(
+        "P32 D2b requires CANON_P32_D2B_FULL_DISTRIBUTION=1"
+    )
+  tokens = np.asarray(engine_result["generated_tokens"], dtype=np.int32)
+  if tokens.shape != (2, 2):
+    raise AlignmentGateError(f"D2b generated token shape {tokens.shape} != (2, 2)")
+  arms = {
+      "S_decode": {
+          "raw": np.asarray(engine_result["decode"]["raw_rows"]),
+          "processed": np.asarray(engine_result["decode"]["processed_rows"]),
+          "target_logps": np.asarray(engine_result["decode_target_logps"]),
+      },
+      "S_prefill": {
+          "raw": np.asarray(engine_result["prefill"]["raw_rows"]),
+          "processed": np.asarray(engine_result["prefill"]["processed_rows"]),
+          "target_logps": np.asarray(engine_result["prefill_target_logps"]),
+      },
+      "T_old": {
+          "raw": np.asarray(t_old_diagnostics["raw_rows"])[:, 1, :],
+          "processed": np.asarray(t_old_diagnostics["processed_rows"])[:, 1, :],
+          "target_logps": np.asarray(t_old_logps)[:, 1],
+          "target_ids": np.asarray(t_old_diagnostics["target_ids"])[:, 1],
+      },
+      "T_current": {
+          "raw": np.asarray(t_current_diagnostics["raw_rows"])[:, 1, :],
+          "processed": np.asarray(t_current_diagnostics["processed_rows"])[:, 1, :],
+          "target_logps": np.asarray(t_current_logps)[:, 1],
+          "target_ids": np.asarray(t_current_diagnostics["target_ids"])[:, 1],
+      },
+  }
+  vocab = arms["S_decode"]["processed"].shape[-1]
+  expected_row_shape = (2, vocab)
+  reasons = []
+  for name, arm in arms.items():
+    for field in ("raw", "processed"):
+      value = arm[field]
+      if value.shape != expected_row_shape or value.dtype != np.float32:
+        reasons.append(
+            f"{name}_{field}_contract={value.shape}/{value.dtype}"
+        )
+    if arm["target_logps"].shape != (2,) or arm["target_logps"].dtype != np.float32:
+      reasons.append(
+          f"{name}_target_contract={arm['target_logps'].shape}/"
+          f"{arm['target_logps'].dtype}"
+      )
+    if name in ("T_old", "T_current") and not np.array_equal(
+        arm["target_ids"].astype(np.int32), tokens[:, 1]
+    ):
+      reasons.append(f"{name}_target_ids")
+    arm["support"] = np.isfinite(arm["processed"])
+    arm["distribution"] = _reference_processed_logprobs(arm["processed"])
+    target_from_distribution = np.take_along_axis(
+        arm["distribution"], tokens[:, 1, None], axis=-1
+    )[:, 0]
+    arm["reference_target_logps"] = target_from_distribution
+
+  baseline = arms["S_decode"]
+  comparisons = {}
+  expected_comparisons = 0
+  for name in ("S_prefill", "T_old", "T_current"):
+    other = arms[name]
+    for field in ("raw", "processed", "support", "distribution", "target_logps"):
+      key = f"S_decode_vs_{name}.{field}"
+      comparisons[key] = _full_bytes_differ(baseline[field], other[field])
+      expected_comparisons += 1
+      if comparisons[key] != 0:
+        reasons.append(key)
+  if expected_comparisons != 15 or len(comparisons) != 15:
+    reasons.append(
+        f"comparison_count={len(comparisons)} expected=15"
+    )
+  dp_coverage = {
+      name: list(map(int, engine_result[name]["dp_ranks"]))
+      for name in ("decode", "prefill")
+  }
+  if any(sorted(ranks) != [0, 1] for ranks in dp_coverage.values()):
+    reasons.append(f"dp_coverage={dp_coverage}")
+  target_consistency = {}
+  for name, arm in arms.items():
+    diff = _full_bytes_differ(
+        arm["target_logps"], arm["reference_target_logps"]
+    )
+    target_consistency[name] = diff
+    # The host reference uses float64 normalization and is a semantic artifact,
+    # not the deployed scorer. Keep its delta visible without using it as a
+    # bitwise execution gate; the deployed target logps are compared above.
+
+  report = {
+      "schema_version": 1,
+      "status": "pass" if not reasons else "fail",
+      "verdict": (
+          "P32_DP2TP2_D2B_PASS" if not reasons else "P32_DP2TP2_D2B_FAIL"
+      ),
+      "reasons": reasons,
+      "sentinel_count": 2,
+      "vocab_size": int(vocab),
+      "dp_coverage": dp_coverage,
+      "comparison_count": len(comparisons),
+      "comparisons": comparisons,
+      "target_reference_differing_bytes": target_consistency,
+      "sampling": dict(engine_result["sampling"]),
+      "hashes": {
+          f"{name}.{field}": _hash(arm[field])
+          for name, arm in arms.items()
+          for field in ("raw", "processed", "support", "distribution", "target_logps")
+      },
+  }
+  arrays_path = os.environ.get(D2B_ARRAYS_ENV, "")
+  report_path = os.environ.get(D2B_REPORT_ENV, "")
+  if not arrays_path or not report_path:
+    raise AlignmentGateError(
+        "P32 D2b requires CANON_P32_D2B_NPZ and CANON_P32_D2B_REPORT"
+    )
+  os.makedirs(os.path.dirname(arrays_path) or ".", exist_ok=True)
+  os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+  with open(arrays_path, "xb") as arrays_file:
+    np.savez_compressed(
+        arrays_file,
+        generated_tokens=tokens,
+        **{
+            f"{name}_{field}": arm[field]
+            for name, arm in arms.items()
+            for field in ("raw", "processed", "support", "distribution", "target_logps")
+        },
+    )
+  report["artifact_npz"] = arrays_path
+  with open(report_path, "x", encoding="utf-8") as report_file:
+    report_file.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+  print(
+      "[P32.D2B] "
+      f"verdict={report['verdict']} sentinels=2 vocab={vocab} "
+      f"comparisons={len(comparisons)} dp={dp_coverage}",
+      flush=True,
+  )
+  if reasons and fail_closed:
+    raise AlignmentGateError(
+        f"P32 D2b full-distribution gate RED: {reasons}; report={report_path}"
+    )
+  return report
+
+
 def check_batch(
     sidecar: ObservedTrainExample,
     *,
@@ -202,16 +385,25 @@ def check_batch(
     gradient_norm: Any,
     optimizer_skipped: Any,
     step: int,
+    backward_executed: Any = 1,
     fail_closed: bool = True,
 ) -> dict[str, Any]:
   """Check four boundaries and two ratios after one value_and_grad call."""
   mode = execution_mode()
   skipped = int(np.asarray(optimizer_skipped).item())
-  expected_skipped = 1 if mode == "gate-only" else 0
+  expected_skipped = 1 if mode in ("forward-only", "gate-only") else 0
   if skipped != expected_skipped:
     raise AlignmentGateError(
         "compiled train step optimizer attestation mismatch: "
         f"mode={mode} optimizer_skipped={skipped} expected={expected_skipped}"
+    )
+  backward = int(np.asarray(backward_executed).item())
+  expected_backward = 0 if mode == "forward-only" else 1
+  if backward != expected_backward:
+    raise AlignmentGateError(
+        "compiled train step backward attestation mismatch: "
+        f"mode={mode} backward_executed={backward} "
+        f"expected={expected_backward}"
     )
 
   sd = np.asarray(sidecar.s_decode)
@@ -285,6 +477,7 @@ def check_batch(
   grad_norm = float(np.asarray(gradient_norm))
   gradient = {
       "norm": grad_norm,
+      "executed": bool(backward),
       "finite": bool(np.isfinite(grad_norm)),
       "nonzero": bool(grad_norm > 0.0),
   }
@@ -300,7 +493,11 @@ def check_batch(
       mode == "update-canary"
       and os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
   )
-  if not gradient["nonzero"] and mode != "train" and not p27_real_update:
+  if (
+      not gradient["nonzero"]
+      and mode not in ("forward-only", "train")
+      and not p27_real_update
+  ):
     reds.append("gradient_zero")
 
   delta = (tc.astype(np.float64) - sd.astype(np.float64))[mask]
@@ -348,6 +545,22 @@ def check_batch(
       },
   }
   record["context"]["canonical_c"] = canonical_c
+  debug_path = os.environ.get(DEBUG_ARRAYS_ENV, "")
+  if debug_path:
+    os.makedirs(os.path.dirname(debug_path) or ".", exist_ok=True)
+    with open(debug_path, "xb") as debug_file:
+      np.savez_compressed(
+          debug_file,
+          s_decode=sd,
+          s_prefill=sp,
+          t_old=to,
+          t_current=tc,
+          action_mask=mask,
+          tokens=np.asarray(sidecar.tokens),
+          policy_version=np.asarray(sidecar.policy_version),
+          sampling_values=sampling_values,
+      )
+    record["context"]["debug_npz"] = debug_path
   report_path = os.environ.get(
       REPORT_ENV,
       "/mnt/disks/tunix-data/frozenlake/logs/alignment_report.jsonl",

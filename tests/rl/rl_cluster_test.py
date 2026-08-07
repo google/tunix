@@ -60,6 +60,55 @@ class RlClusterTest(parameterized.TestCase):
     print(f'Setting up test with {cls.num_cpus} CPU devices before JAX init')
     cls.device_count = jax.device_count()
 
+  def test_p32_d2b_bounded_prefixes_preserve_real_prompt_order(self):
+    prompt_ids = np.zeros((32, 12), dtype=np.int32)
+    prompt_mask = np.zeros_like(prompt_ids, dtype=np.bool_)
+    prompt_ids[0, 2:] = np.arange(100, 110, dtype=np.int32)
+    prompt_mask[0, 2:] = True
+    prompt_ids[16, 4:] = np.arange(200, 208, dtype=np.int32)
+    prompt_mask[16, 4:] = True
+
+    prefixes, original_lengths, budget = (
+        rl_cluster_lib._p32_d2b_bounded_prefixes(
+            prompt_ids, prompt_mask, local_m=8
+        )
+    )
+
+    self.assertEqual(prefixes, [list(range(100, 106)), list(range(200, 206))])
+    self.assertEqual(original_lengths, (10, 8))
+    self.assertEqual(budget, 6)
+
+  def test_p32_d2b_bounded_prefixes_reject_missing_sentinel(self):
+    prompt_ids = np.zeros((32, 4), dtype=np.int32)
+    prompt_mask = np.zeros_like(prompt_ids, dtype=np.bool_)
+    prompt_mask[0, :2] = True
+    prompt_mask[16, :1] = True
+
+    with self.assertRaisesRegex(ValueError, "fewer than two prompt tokens"):
+      rl_cluster_lib._p32_d2b_bounded_prefixes(
+          prompt_ids, prompt_mask, local_m=8
+      )
+
+  def test_p32_d2b_reads_data_replicas_from_engine_axis_names(self):
+    engine_contract = {
+        "mesh_shape": (
+            ("data", 2),
+            ("attn_dp", 1),
+            ("expert", 1),
+            ("model", 2),
+        )
+    }
+
+    self.assertEqual(
+        rl_cluster_lib._p32_d2b_engine_data_replicas(engine_contract), 2
+    )
+
+  def test_p32_d2b_rejects_trainer_only_mesh_axis_names(self):
+    trainer_contract = {"mesh_shape": (("fsdp", 2), ("tp", 2))}
+
+    with self.assertRaisesRegex(ValueError, "unique data axis"):
+      rl_cluster_lib._p32_d2b_engine_data_replicas(trainer_contract)
+
   def test_model_loading_with_resharding(self):
     split_index = self.device_count // 2
 

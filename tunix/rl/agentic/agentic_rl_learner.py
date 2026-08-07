@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import copy
 import dataclasses
+import gc
+import hashlib
 import itertools
 import json
 import os
@@ -55,6 +57,58 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
+
+
+def _p32_compact_d3b0_output(output: dict[str, Any]):
+  """Copies D3b0 comparison values to host and releases transaction arrays."""
+  compact = {
+      "loss": np.array(
+          jax.device_get(output["loss"]), copy=True, order="C"
+      ),
+      "per_token_logps": np.array(
+          jax.device_get(output["per_token_logps"]), copy=True, order="C"
+      ),
+      "reports": output["reports"],
+      "gradient_microbatches": output["gradient_microbatches"],
+  }
+  deleted_arrays = 0
+  deleted_bytes = 0
+  seen = set()
+  for value in jax.tree.leaves(output):
+    if not isinstance(value, jax.Array) or id(value) in seen:
+      continue
+    seen.add(id(value))
+    deleted_arrays += 1
+    deleted_bytes += int(value.size * value.dtype.itemsize)
+    if not value.is_deleted():
+      value.delete()
+  gc.collect()
+  return compact, deleted_arrays, deleted_bytes
+
+
+def _p32_prompt_placement(prompt_ids: Any) -> dict[str, Any]:
+  """Attests four prompt-major groups remain intact across two DP ranks."""
+  prompts = np.ascontiguousarray(np.asarray(jax.device_get(prompt_ids)))
+  if prompts.ndim != 2 or prompts.shape[0] != 32:
+    raise ValueError(
+        f"P32 D2 expected prompt_ids [32, T], got {prompts.shape}"
+    )
+  group_hashes = []
+  for group in range(4):
+    start = group * 8
+    rows = prompts[start : start + 8]
+    if not np.all(rows == rows[:1]):
+      raise ValueError(
+          f"P32 D2 prompt group {group} is not contiguous across 8 generations"
+      )
+    group_hashes.append(hashlib.sha256(rows[:1].tobytes()).hexdigest())
+  return {
+      "groups": 4,
+      "generations_per_group": 8,
+      "rank_counts": [16, 16],
+      "rank_group_ids": [[0, 1], [2, 3]],
+      "group_hashes": group_hashes,
+  }
 
 
 def _eval_schedule_step(
@@ -270,6 +324,278 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if item is None:
         raise StopAsyncIteration
       return item
+
+  def _run_p32_d3b0_gate(self, observed_train_example) -> dict[str, Any]:
+    """Runs grouped segmented DP2 backward twice without committing state."""
+    import json  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import alignment  # pylint: disable=g-import-not-at-top
+    from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+
+    train_example, sidecar = alignment.unwrap_train_example(
+        observed_train_example
+    )
+    if sidecar is None:
+      raise alignment.AlignmentGateError(
+          "P32 D3b0 requires the four-boundary ObservedTrainExample"
+      )
+    actor_trainer = self.rl_cluster.actor_trainer
+    _, trainer_state = nnx.split(actor_trainer.model)
+    adapter = canonical_forward.require_registered()
+
+    def memory_snapshot():
+      return tuple({
+          "device": int(device.id),
+          "bytes_in_use": (device.memory_stats() or {}).get("bytes_in_use"),
+          "peak_bytes_in_use": (
+              device.memory_stats() or {}
+          ).get("peak_bytes_in_use"),
+          "bytes_limit": (device.memory_stats() or {}).get("bytes_limit"),
+      } for device in jax.local_devices())
+
+    def full_accumulator_fingerprint():
+      """Hashes every logical accumulator leaf without retaining a copy."""
+      flat = jax.tree_util.tree_flatten_with_path(
+          actor_trainer.grad_accumulator.grads,
+          is_leaf=lambda value: isinstance(value, nnx.Variable),
+      )[0]
+      digest = hashlib.sha256()
+      finite = True
+      nonzero = 0
+      norm_squared = 0.0
+      logical_bytes = 0
+      arrays = 0
+      for path, value in flat:
+        array = value[...] if isinstance(value, nnx.Variable) else value
+        if not isinstance(array, jax.Array):
+          continue
+        host = np.ascontiguousarray(np.asarray(jax.device_get(array)))
+        header = json.dumps({
+            "path": jax.tree_util.keystr(path),
+            "shape": list(host.shape),
+            "dtype": str(host.dtype),
+        }, sort_keys=True).encode("utf-8")
+        digest.update(len(header).to_bytes(8, "big"))
+        digest.update(header)
+        digest.update(host.tobytes())
+        numeric = host.astype(np.float64, copy=False)
+        finite = finite and bool(np.all(np.isfinite(numeric)))
+        nonzero += int(np.count_nonzero(host))
+        norm_squared += float(np.sum(np.square(numeric), dtype=np.float64))
+        logical_bytes += int(host.nbytes)
+        arrays += 1
+      denominator = float(np.asarray(jax.device_get(
+          actor_trainer.grad_accumulator.denom[...]
+      )))
+      if denominator <= 0.0:
+        raise alignment.AlignmentGateError(
+            f"P32 D3b accumulator denominator is not positive: {denominator}"
+        )
+      return {
+          "sha256": digest.hexdigest(),
+          "arrays": arrays,
+          "logical_bytes": logical_bytes,
+          "finite": finite,
+          "nonzero": nonzero,
+          "denominator": denominator,
+          "norm": float(np.sqrt(norm_squared) / denominator),
+      }
+
+    def run_once(pass_index):
+      if actor_trainer._p32_d3b_microstep != 0:  # pylint: disable=protected-access
+        raise alignment.AlignmentGateError(
+            "P32 D3b accumulator transaction did not start at group zero"
+        )
+      denominator = float(np.asarray(jax.device_get(
+          actor_trainer.grad_accumulator.denom[...]
+      )))
+      if denominator != 0.0:
+        raise alignment.AlignmentGateError(
+            f"P32 D3b accumulator did not start empty: {denominator}"
+        )
+      micro_norms = []
+
+      def consume(group_index, gradients, multiplier):
+        norm = actor_trainer.accumulate_p32_d3b_gradient_group(
+            gradients, multiplier, group_index=group_index
+        )
+        value = float(np.asarray(norm))
+        if not np.isfinite(value) or value <= 0.0:
+          raise alignment.AlignmentGateError(
+              "P32 D3b emitted a non-finite or zero group norm: "
+              f"group={group_index} norm={value}"
+          )
+        micro_norms.append(value)
+        print(
+            "[P32.D3B0] accumulation_group_done "
+            f"pass={pass_index} group={group_index + 1}/16 norm={value}",
+            flush=True,
+        )
+
+      start = time.perf_counter()
+      output = adapter.segmented_dp2_grpo_value_and_grad(
+          trainer_state=trainer_state,
+          train_example=train_example,
+          algo_config=self.algo_config,
+          pad_id=self.rl_cluster.rollout.pad_id(),
+          eos_id=self.rl_cluster.rollout.eos_id(),
+          gradient_microbatch_sink=consume,
+      )
+      output["loss"].block_until_ready()
+      output["per_token_logps"].block_until_ready()
+      if output["gradient_microbatches"] != 16 or len(micro_norms) != 16:
+        raise alignment.AlignmentGateError(
+            "P32 D3b streamed the wrong number of gradient groups: "
+          f"output={output['gradient_microbatches']} norms={len(micro_norms)}"
+        )
+      # D3b0 compares two complete no-commit transactions.  Retaining the
+      # first transaction's loss tree until the second reverse leaves only a
+      # few MiB of HBM headroom on Qwen3-8B.  Preserve the two values used by
+      # the gate on host, retain only the host-only reports, and release every
+      # device array owned by the transaction before starting the repeat.
+      compact, deleted_arrays, deleted_bytes = _p32_compact_d3b0_output(
+          output
+      )
+      del output
+      print(
+          "[P32.D3B0] output_compacted "
+          f"pass={pass_index} device_arrays_deleted={deleted_arrays} "
+          f"logical_bytes={deleted_bytes}",
+          flush=True,
+      )
+      fingerprint = full_accumulator_fingerprint()
+      print(
+          "[P32.D3B0] gradient_fingerprint "
+          f"pass={pass_index} sha256={fingerprint['sha256']} "
+          f"arrays={fingerprint['arrays']} bytes={fingerprint['logical_bytes']} "
+          f"denominator={fingerprint['denominator']}",
+          flush=True,
+      )
+      actor_trainer.reset_p32_d3b_gradients_without_commit()
+      return compact, fingerprint, tuple(micro_norms), time.perf_counter() - start
+
+    before = {
+        "model": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.model, nnx.Param)
+        ),
+        "optimizer": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+        "train_steps": actor_trainer.train_steps,
+    }
+    def run_transaction(pass_index):
+      original_accumulator = (
+          actor_trainer.install_p32_d3b_temporary_accumulator()
+      )
+      try:
+        return run_once(pass_index)
+      finally:
+        actor_trainer.restore_p32_d3b_temporary_accumulator(
+            original_accumulator
+        )
+
+    hbm_before = memory_snapshot()
+    first, first_gradient, first_norms, first_seconds = run_transaction(1)
+    hbm_after_first = memory_snapshot()
+    second, second_gradient, second_norms, repeat_seconds = run_transaction(2)
+    hbm_after_repeat = memory_snapshot()
+
+    repeat_exact = (
+        bool(np.array_equal(first["loss"], second["loss"]))
+        and bool(np.array_equal(
+            first["per_token_logps"], second["per_token_logps"]
+        ))
+        and first_gradient["sha256"] == second_gradient["sha256"]
+        and first_gradient["arrays"] == second_gradient["arrays"]
+        and first_gradient["logical_bytes"] == second_gradient["logical_bytes"]
+        and first_gradient["denominator"] == second_gradient["denominator"]
+        and first_norms == second_norms
+    )
+    gradient_finite = first_gradient["finite"]
+    gradient_nonzero = first_gradient["nonzero"]
+    gradient_norm = jnp.asarray(first_gradient["norm"], jnp.float32)
+    alignment_record = alignment.check_batch(
+        sidecar,
+        t_current=jnp.asarray(first["per_token_logps"]),
+        gradient_norm=gradient_norm,
+        optimizer_skipped=jnp.asarray(1, jnp.int32),
+        step=0,
+        fail_closed=True,
+    )
+    after = {
+        "model": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.model, nnx.Param)
+        ),
+        "optimizer": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+        "train_steps": actor_trainer.train_steps,
+    }
+    changed = {
+        name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+            before[name], after[name]
+        )
+        for name in ("model", "optimizer", "accumulator")
+    }
+    train_steps_unchanged = before["train_steps"] == after["train_steps"]
+    result = {
+        "verdict": "P32_DP2TP2_D3B0_SEGMENTED_REVERSE_PASS",
+        "groups": len(first["reports"]),
+        "trajectory_rows": tuple(
+            report["trajectory_rows"] for report in first["reports"]
+        ),
+        "alignment": alignment_record["verdict"],
+        "gradient_finite": gradient_finite,
+        "gradient_nonzero": gradient_nonzero,
+        "gradient_norm": float(np.asarray(gradient_norm)),
+        "repeat_exact": repeat_exact,
+        "gradient_repeat_mode": "full_accumulator_sha256",
+        "gradient_sha256": first_gradient["sha256"],
+        "gradient_arrays": first_gradient["arrays"],
+        "gradient_logical_bytes": first_gradient["logical_bytes"],
+        "gradient_denominator": first_gradient["denominator"],
+        "state_changed": changed,
+        "train_steps_unchanged": train_steps_unchanged,
+        "first_seconds": first_seconds,
+        "repeat_seconds": repeat_seconds,
+        "hbm_before": hbm_before,
+        "hbm_after_first": hbm_after_first,
+        "hbm_after_repeat": hbm_after_repeat,
+        "rank_local_gradient_fingerprints": "NOT_MEASURED",
+        "dp_reduction_visibility": "NOT_MEASURED",
+        "post_reduction_replica_equality": "NOT_MEASURED",
+        "optimizer_commits": 0,
+        "d3_promoted": False,
+    }
+    if (
+        result["groups"] != 16
+        or result["trajectory_rows"]
+        != tuple((index, index + 16) for index in range(16))
+        or alignment_record["verdict"] != "PASS"
+        or not gradient_finite
+        or gradient_nonzero <= 0
+        or not np.isfinite(result["gradient_norm"])
+        or result["gradient_norm"] <= 0.0
+        or not repeat_exact
+        or result["gradient_repeat_mode"] != "full_accumulator_sha256"
+        or len(result["gradient_sha256"]) != 64
+        or result["gradient_arrays"] <= 0
+        or result["gradient_logical_bytes"] <= 0
+        or result["gradient_denominator"] != 16.0
+        or any(changed.values())
+        or not train_steps_unchanged
+    ):
+      result["verdict"] = "P32_DP2TP2_D3B0_SEGMENTED_REVERSE_FAIL"
+      print(f"[P32.D3B0] RESULT {json.dumps(result, sort_keys=True)}", flush=True)
+      raise alignment.AlignmentGateError(f"P32 D3b0 red: {result}")
+    print(f"[P32.D3B0] RESULT {json.dumps(result, sort_keys=True)}", flush=True)
+    return result
 
   def _run_p28_g5c_gate(self, observed_train_example) -> bool:
     """Runs the default-off complete segmented loss gate without an update."""
@@ -1689,6 +2015,47 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # and pass the list to ``update_actor``; ``peft_trainer.train``
       # iterates the list and calls ``train_step`` once per chunk.
       n_total = merged_train_micro_batch.completion_ids.shape[0]
+      p32_forward_only = (
+          os.environ.get("CANON_P32_DP2TP2_FORWARD_ONLY", "") == "1"
+      )
+      p32_backward_no_commit = (
+          os.environ.get(
+              "CANON_P32_DP2TP2_BACKWARD_NO_COMMIT", ""
+          ) == "1"
+      )
+      p32_d3b0_segmented = (
+          p32_backward_no_commit
+          and os.environ.get("CANON_P32_D3B_SEGMENTED", "") == "1"
+      )
+      if p32_forward_only or p32_backward_no_commit:
+        placement = _p32_prompt_placement(merged_train_micro_batch.prompt_ids)
+        marker = (
+            "[P32.D3B0]"
+            if p32_d3b0_segmented
+            else "[P32.D3A]"
+            if p32_backward_no_commit
+            else "[P32.D2]"
+        )
+        print(
+            f"{marker} prompt_placement {json.dumps(placement, sort_keys=True)}",
+            flush=True,
+        )
+        if (
+            p32_forward_only
+            and os.environ.get(
+                "CANON_P32_D2B_FULL_DISTRIBUTION", ""
+            ) == "1"
+        ):
+          d2b_report = self.rl_cluster.run_p32_d2b_full_distribution_gate(
+              merged_train_micro_batch
+          )
+          print(
+              "[P32.D2B] learner_gate_done "
+              f"verdict={d2b_report['verdict']} "
+              f"sentinels={d2b_report['sentinel_count']} "
+              f"vocab={d2b_report['vocab_size']}",
+              flush=True,
+          )
       seqs_per_chunk = trajectory_micro_batch_size or (
           train_micro_batch_size * self.algo_config.num_generations
       )
@@ -1711,6 +2078,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           print(f"[CANON_GSM8K_TRAIN] {marker}", flush=True)
         elif os.environ.get("CANON_FROZENLAKE_P27", "") == "1":
           print(f"[CANON_FROZENLAKE_P27] {marker}", flush=True)
+        elif p32_forward_only:
+          print(f"[P32.D2] {marker}", flush=True)
+        elif p32_backward_no_commit:
+          d3_marker = "[P32.D3B0]" if p32_d3b0_segmented else "[P32.D3A]"
+          print(f"{d3_marker} {marker}", flush=True)
       elif n_total > seqs_per_chunk:
         chunked_train_micro_batch = [
             jax.tree_util.tree_map(
@@ -1803,14 +2175,73 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # microbatches, and #iterations=K, we will:
       #   1. Train on the m * n microbatches once as we get them from rollout.
       #   2. When we get the full batch, repeat K-1 times on the entire batch.
+      if p32_d3b0_segmented:
+        d3b0_result = self._run_p32_d3b0_gate(merged_train_micro_batch)
+        if self.rl_cluster.actor_trainer.train_steps != pre_update_train_step:
+          raise RuntimeError(
+              "P32 D3b0 segmented reverse changed actor trainer update steps"
+          )
+        prompt_queue.put(None)
+        _ = producer_future.result()
+        print(
+            "[P32.D3B0] learner_backward_done "
+            f"verdict={d3b0_result['verdict']} "
+            f"train_steps={self.rl_cluster.actor_trainer.train_steps} "
+            "backward=1 commits=0 d3_promoted=0",
+            flush=True,
+        )
+        return
+
       if not p28_g6_update:
+        p32_d3a_split_outer_jit = (
+            p32_backward_no_commit
+            and os.environ.get(
+                "CANON_P32_D3A_SPLIT_OUTER_JIT", ""
+            ) == "1"
+        )
+        actor_skip_jit = skip_jit or p32_d3a_split_outer_jit
+        if p32_d3a_split_outer_jit:
+          print(
+              "[P32.D3A] compilation_boundary outer_train_jit=0 "
+              "inner_engine_jit=1 semantic_batch=32 local_batch=16",
+              flush=True,
+          )
         self.rl_cluster.update_actor(
-            chunked_train_micro_batch, current_eval_dataset, skip_jit
+            chunked_train_micro_batch, current_eval_dataset, actor_skip_jit
         )
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
               chunked_train_micro_batch, current_eval_dataset, skip_jit
           )
+
+      if p32_forward_only:
+        if self.rl_cluster.actor_trainer.train_steps != pre_update_train_step:
+          raise RuntimeError(
+              "P32 D2 forward-only changed actor trainer update steps"
+          )
+        prompt_queue.put(None)
+        _ = producer_future.result()
+        print(
+            "[P32.D2] learner_forward_only_done "
+            f"train_steps={self.rl_cluster.actor_trainer.train_steps} "
+            "backward=0 commits=0",
+            flush=True,
+        )
+        return
+      if p32_backward_no_commit:
+        if self.rl_cluster.actor_trainer.train_steps != pre_update_train_step:
+          raise RuntimeError(
+              "P32 D3a backward-no-commit changed actor trainer update steps"
+          )
+        prompt_queue.put(None)
+        _ = producer_future.result()
+        print(
+            "[P32.D3A] learner_backward_done "
+            f"train_steps={self.rl_cluster.actor_trainer.train_steps} "
+            "backward=1 commits=0",
+            flush=True,
+        )
+        return
 
       # --- Weight Sync Logic ---
       if p28_g6_update:

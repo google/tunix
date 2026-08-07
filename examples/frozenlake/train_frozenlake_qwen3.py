@@ -7,6 +7,7 @@ is selected via the ``ROLLOUT_ENGINE`` environment variable ("vllm" or
 """
 
 import contextlib
+import json
 import logging
 import math
 import os
@@ -58,6 +59,7 @@ _CANON_PRELEARNER_ONLY = (
     or os.getenv("CANON_P28_G3_ONLY", "") == "1"
     or os.getenv("CANON_P28_G4_ONLY", "") == "1"
     or os.getenv("CANON_P28_G5_ONLY", "") == "1"
+    or os.getenv("CANON_P32_DP2TP2_INIT_ONLY", "") == "1"
 )
 if not _CANON_PRELEARNER_ONLY:
   from examples.frozenlake.agent import FrozenLakeAgent
@@ -168,6 +170,22 @@ CANON_P28_G5C_ONLY = os.getenv("CANON_P28_G5C_ONLY", "") == "1"
 CANON_P28_G6_UPDATE = os.getenv("CANON_P28_G6_UPDATE", "") == "1"
 CANON_P29_FULL_TRAIN = os.getenv("CANON_P29_FULL_TRAIN", "") == "1"
 CANON_P31_CONVERGENCE = os.getenv("CANON_P31_CONVERGENCE", "") == "1"
+CANON_P32_DP2TP2 = os.getenv("CANON_P32_DP2TP2", "") == "1"
+CANON_P32_DP2TP2_INIT_ONLY = (
+    os.getenv("CANON_P32_DP2TP2_INIT_ONLY", "") == "1"
+)
+CANON_P32_DP2TP2_FORWARD_ONLY = (
+    os.getenv("CANON_P32_DP2TP2_FORWARD_ONLY", "") == "1"
+)
+CANON_P32_DP2TP2_BACKWARD_NO_COMMIT = (
+    os.getenv("CANON_P32_DP2TP2_BACKWARD_NO_COMMIT", "") == "1"
+)
+CANON_P32_D3A_SPLIT_OUTER_JIT = (
+    os.getenv("CANON_P32_D3A_SPLIT_OUTER_JIT", "") == "1"
+)
+CANON_P32_D3B_SEGMENTED = (
+    os.getenv("CANON_P32_D3B_SEGMENTED", "") == "1"
+)
 CANON_P30_OPT_STATE_OFFLOAD = (
     os.getenv("CANON_P30_OPT_STATE_OFFLOAD", "") == "1"
 )
@@ -177,6 +195,7 @@ prelearner_modes = {
     "P28-G3-only": CANON_P28_G3_ONLY,
     "P28-G4-only": CANON_P28_G4_ONLY,
     "P28-G5-only": CANON_P28_G5_ONLY,
+    "P32-DP2TP2-init-only": CANON_P32_DP2TP2_INIT_ONLY,
 }
 active_prelearner_modes = [
     name for name, active in prelearner_modes.items() if active
@@ -190,6 +209,75 @@ if active_prelearner_modes and not CANON_L3:
   raise ValueError(
       "canonical prelearner modes require CANON_FROZENLAKE_L3=1"
   )
+if CANON_P32_DP2TP2_INIT_ONLY and not CANON_P32_DP2TP2:
+  raise ValueError("P32 DP2xTP2 init-only requires CANON_P32_DP2TP2=1")
+if CANON_P32_DP2TP2_FORWARD_ONLY and not CANON_P32_DP2TP2:
+  raise ValueError("P32 DP2xTP2 forward-only requires CANON_P32_DP2TP2=1")
+if CANON_P32_DP2TP2_BACKWARD_NO_COMMIT and not CANON_P32_DP2TP2:
+  raise ValueError(
+      "P32 DP2xTP2 backward-no-commit requires CANON_P32_DP2TP2=1"
+  )
+if (
+    CANON_P32_D3A_SPLIT_OUTER_JIT
+    and not CANON_P32_DP2TP2_BACKWARD_NO_COMMIT
+):
+  raise ValueError(
+      "P32 D3a split-outer-JIT mode requires backward-no-commit"
+  )
+if CANON_P32_D3B_SEGMENTED and not CANON_P32_DP2TP2_BACKWARD_NO_COMMIT:
+  raise ValueError("P32 D3b0 segmented mode requires backward-no-commit")
+if CANON_P32_D3B_SEGMENTED and CANON_P32_D3A_SPLIT_OUTER_JIT:
+  raise ValueError("P32 D3b0 and the rejected D3a split-JIT mode are exclusive")
+if (
+    CANON_P32_DP2TP2_FORWARD_ONLY
+    and CANON_P32_DP2TP2_BACKWARD_NO_COMMIT
+):
+  raise ValueError(
+      "P32 DP2xTP2 forward-only and backward-no-commit are exclusive"
+  )
+if (
+    CANON_P32_DP2TP2_FORWARD_ONLY
+    and os.getenv("CANON_P32_D1_ADMITTED", "") != "1"
+):
+  raise ValueError("P32 DP2xTP2 forward-only requires D1 admission")
+if CANON_P32_DP2TP2_BACKWARD_NO_COMMIT and (
+    os.getenv("CANON_P32_D1_ADMITTED", "") != "1"
+    or os.getenv("CANON_P32_D2_ADMITTED", "") != "1"
+):
+  raise ValueError(
+      "P32 DP2xTP2 backward-no-commit requires D1 and D2 admission"
+  )
+if CANON_P32_DP2TP2:
+  from tunix.rl import dp_training
+
+  _P32_CONTRACT = dp_training.DPTrainingContract(
+      dp_size=2,
+      tp_size=2,
+      global_prompts=4,
+      num_generations=8,
+      local_trajectories=16,
+  )
+  _P32_CONTRACT.validate()
+  if not CANON_L3:
+    raise ValueError("P32 DP2xTP2 requires CANON_FROZENLAKE_L3=1")
+  if jax.device_count() != _P32_CONTRACT.total_devices:
+    raise ValueError(
+        "P32 DP2xTP2 requires exactly four devices: "
+        f"got {jax.device_count()}"
+    )
+  if os.getenv("MIN_TOKEN_BUCKET") != "512":
+    raise ValueError("P32 DP2xTP2 requires MIN_TOKEN_BUCKET=512")
+  if os.getenv("CANON_LOGPROB_M") != "512":
+    raise ValueError("P32 DP2xTP2 requires CANON_LOGPROB_M=512")
+  if (
+      not CANON_P32_DP2TP2_INIT_ONLY
+      and not CANON_P32_DP2TP2_FORWARD_ONLY
+      and not CANON_P32_DP2TP2_BACKWARD_NO_COMMIT
+      and os.getenv("CANON_P32_TRAIN_ADMITTED", "") != "1"
+  ):
+    raise ValueError(
+        "P32 DP2xTP2 training is not admitted; run the init-only gate first"
+    )
 if CANON_P27 and not CANON_L3:
   raise ValueError("CANON_FROZENLAKE_P27=1 requires CANON_FROZENLAKE_L3=1")
 if CANON_P27 and active_prelearner_modes:
@@ -219,8 +307,12 @@ if CANON_P31_CONVERGENCE:
     raise ValueError("P31 requires train mode, not update-canary mode")
 if CANON_P29_FULL_TRAIN and not CANON_P28_G6_UPDATE:
   raise ValueError("P29 full train requires the attested P28 G6 update path")
-if CANON_P30_OPT_STATE_OFFLOAD and not CANON_P29_FULL_TRAIN:
-  raise ValueError("P30 optimizer offload requires the P29 full-train path")
+if CANON_P30_OPT_STATE_OFFLOAD and not (
+    CANON_P29_FULL_TRAIN or CANON_P32_DP2TP2
+):
+  raise ValueError(
+      "optimizer offload requires the P29 or P32 memory-bounded path"
+  )
 if (
     CANON_P28_G3_ONLY
     or CANON_P28_G4_ONLY
@@ -251,8 +343,12 @@ SEED = args.seed
 # Single shared mesh across actor / reference / rollout. Pure tensor-parallel
 # (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
 # fsdp axis.
-SHARED_MESH_SHAPE = (1, jax.device_count())
-SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
+if CANON_P32_DP2TP2:
+  SHARED_MESH_SHAPE = (2, 2)
+  SHARED_MESH_AXIS_NAMES = ("dp", "tp")
+else:
+  SHARED_MESH_SHAPE = (1, jax.device_count())
+  SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
@@ -345,12 +441,20 @@ elif CANON_P27:
   if wrong_geometry:
     raise ValueError(f"P27 frozen geometry mismatch: {wrong_geometry}")
 TRAJECTORY_MINI_BATCH_SIZE = (
-    MINI_BATCH_SIZE * NUM_GENERATIONS if CANON_P27 else None
+    MINI_BATCH_SIZE * NUM_GENERATIONS
+    if CANON_P27 or CANON_P32_DP2TP2 else None
 )
 _P27_TRAJECTORY_MICRO_RAW = os.getenv("CANON_P27_TRAJECTORY_MICRO", "")
 if _P27_TRAJECTORY_MICRO_RAW and not CANON_P27:
   raise ValueError("CANON_P27_TRAJECTORY_MICRO requires CANON_FROZENLAKE_P27=1")
-if CANON_P27:
+if CANON_P32_DP2TP2:
+  if _P27_TRAJECTORY_MICRO_RAW:
+    raise ValueError(
+        "P32 DP2xTP2 derives its local trajectory batch; "
+        "CANON_P27_TRAJECTORY_MICRO must be unset"
+    )
+  TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = 32
+elif CANON_P27:
   try:
     TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = int(
         _P27_TRAJECTORY_MICRO_RAW or "2"
@@ -435,6 +539,7 @@ if CANON_L3:
         f"{bad_l3_env}"
     )
   alignment_modes = {
+      "forward-only": os.getenv("CANON_ALIGNMENT_FORWARD_ONLY") == "1",
       "gate-only": os.getenv("CANON_ALIGNMENT_GATE_ONLY") == "1",
       "update-canary": (
           os.getenv("CANON_ALIGNMENT_UPDATE_CANARY") == "1"
@@ -442,7 +547,18 @@ if CANON_L3:
       "train": os.getenv("CANON_ALIGNMENT_TRAIN") == "1",
   }
   active_modes = [name for name, active in alignment_modes.items() if active]
-  if CANON_P31_CONVERGENCE:
+  if CANON_P32_DP2TP2_FORWARD_ONLY:
+    if active_modes != ["forward-only"]:
+      raise ValueError(
+        f"P32 D2 requires alignment forward-only mode, got {active_modes}"
+      )
+  elif CANON_P32_DP2TP2_BACKWARD_NO_COMMIT:
+    if active_modes != ["gate-only"]:
+      raise ValueError(
+          "P32 D3a requires alignment gate-only mode, got "
+          f"{active_modes}"
+      )
+  elif CANON_P31_CONVERGENCE:
     if active_modes != ["train"]:
       raise ValueError(
           f"P31 requires alignment train mode, got {active_modes}"
@@ -614,6 +730,10 @@ if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
   oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
 
 config = model_lib.ModelConfig.qwen3_8b()
+if CANON_P32_DP2TP2:
+  config.shd_config = model_lib.ShardingConfig.get_data_parallel_sharding(
+      "dp"
+  )
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
@@ -654,15 +774,22 @@ wandb_config.update({
     "mesh_shape": SHARED_MESH_SHAPE,
 })
 metrics_logging_options = None
-if CANON_P29_FULL_TRAIN or not (
+if CANON_P32_DP2TP2 or CANON_P29_FULL_TRAIN or not (
     CANON_L3 or CANON_CONTRACT_ONLY or CANON_A3_ONLY
 ):
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=os.getenv("CANON_P29_LOG_DIR", TB_LOG_DIR),
-      project_name=os.getenv(
-          "CANON_P29_WANDB_PROJECT", "tunix-frozenlake"
+      log_dir=os.getenv(
+          "CANON_P32_LOG_DIR",
+          os.getenv("CANON_P29_LOG_DIR", TB_LOG_DIR),
       ),
-      run_name=os.getenv("CANON_P29_WANDB_RUN_NAME", ""),
+      project_name=os.getenv(
+          "CANON_P32_WANDB_PROJECT",
+          os.getenv("CANON_P29_WANDB_PROJECT", "tunix-frozenlake"),
+      ),
+      run_name=os.getenv(
+          "CANON_P32_WANDB_RUN_NAME",
+          os.getenv("CANON_P29_WANDB_RUN_NAME", ""),
+      ),
       flush_every_n_steps=1,
       backend_kwargs={"wandb": {"config": wandb_config}},
   )
@@ -701,7 +828,9 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.20,
+    "rollout_vllm_hbm_utilization": (
+        0.40 if CANON_P32_DP2TP2 else 0.20
+    ),
     "rollout_vllm_tpu_backend_type": "jax",
     # AgenticRLLearner requires the in-process continuous-batching driver.
     # Canonical C accesses that driver's live model runner through the same
@@ -769,6 +898,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
             TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
         ),
         compute_logps_micro_batch_size=MINI_BATCH_SIZE,
+        data_sharding_axis=("dp",) if CANON_P32_DP2TP2 else ("fsdp",),
         optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
@@ -810,6 +940,107 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 show_hbm_usage("after RLCluster creation")
+if CANON_P32_DP2TP2_INIT_ONLY:
+  actor_trainer = rl_cluster.actor_trainer
+
+  def _p32_inventory(state, label):
+    specs = nnx.get_partition_spec(state)
+    summary = dp_training.validate_dp_replicated_partition_specs(
+        specs, label=label
+    )
+    arrays = [
+        value for value in jax.tree.leaves(state)
+        if isinstance(value, jax.Array)
+    ]
+    actual_violations = [
+        index for index, value in enumerate(arrays)
+        if "dp" in repr(getattr(value.sharding, "spec", None))
+    ]
+    if actual_violations:
+      raise ValueError(
+          f"{label} arrays are sharded over dp: {actual_violations[:8]}"
+      )
+    return {
+        **summary,
+        "arrays": len(arrays),
+        "logical_bytes": sum(
+            int(value.size * value.dtype.itemsize) for value in arrays
+        ),
+        "memory_kinds": sorted({
+            value.sharding.memory_kind for value in arrays
+        }),
+    }
+
+  p32_inventory = {
+      "model": _p32_inventory(
+          nnx.state(actor_trainer.model, nnx.Param), "model"
+      ),
+      "optimizer": _p32_inventory(
+          nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState),
+          "optimizer",
+      ),
+      "accumulator": _p32_inventory(
+          nnx.state(actor_trainer.grad_accumulator), "accumulator"
+      ),
+  }
+  p32_mesh_ids = [int(device.id) for device in shared_mesh.devices.flat]
+  if actor_trainer.train_steps != 0:
+    raise ValueError(
+        f"P32 init-only mutated train_steps: {actor_trainer.train_steps}"
+    )
+  p32_memory = []
+  for device in jax.local_devices():
+    stats = device.memory_stats()
+    if not stats or "bytes_in_use" not in stats or "bytes_limit" not in stats:
+      raise ValueError(f"P32 init-only missing HBM stats for {device}")
+    p32_memory.append({
+        "device_id": int(device.id),
+        "bytes_in_use": int(stats["bytes_in_use"]),
+        "bytes_limit": int(stats["bytes_limit"]),
+    })
+  p32_resident_limit = 80 * 1024**3
+  if max(item["bytes_in_use"] for item in p32_memory) >= p32_resident_limit:
+    raise ValueError(
+        "P32 init-only resident HBM exceeded the registered limit: "
+        f"measurements={p32_memory} limit={p32_resident_limit}"
+    )
+  p32_cleanup = dp_training.detach_jax_vllm_cleanup_finalizer(
+      rl_cluster.rollout
+  )
+  p32_report = {
+      "status": "pass",
+      "mesh": {
+          "shape": list(SHARED_MESH_SHAPE),
+          "axes": list(SHARED_MESH_AXIS_NAMES),
+          "device_ids": p32_mesh_ids,
+      },
+      "batch": {
+          "global_prompts": _P32_CONTRACT.global_prompts,
+          "local_prompts": _P32_CONTRACT.local_prompts,
+          "num_generations": _P32_CONTRACT.num_generations,
+          "global_trajectories": _P32_CONTRACT.global_trajectories,
+          "local_trajectories": _P32_CONTRACT.local_trajectories,
+      },
+      "inventory": p32_inventory,
+      "hbm": p32_memory,
+      "resident_limit_bytes": p32_resident_limit,
+      "optimizer_commits": 0,
+      "cleanup": p32_cleanup,
+      "rollout_hbm_utilization": 0.40,
+      "m_contract": {"global": 512, "local_per_dp_rank": 256},
+      "wandb": {
+          "enabled": metrics_logging_options is not None,
+          "project": os.getenv(
+              "CANON_P32_WANDB_PROJECT", "tunix-frozenlake"
+          ),
+          "run_name": os.getenv("CANON_P32_WANDB_RUN_NAME", ""),
+      },
+  }
+  print(
+      f"[P32.D1] JSON {json.dumps(p32_report, sort_keys=True)}",
+      flush=True,
+  )
+  raise SystemExit(0)
 if CANON_L3:
   contract = rl_cluster.rollout.canonical_engine_contract_attestation()
   print(f"[CANON_L3] engine contract admitted: {contract}", flush=True)
@@ -899,7 +1130,70 @@ grpo_trainer.train(
         else test_dataset
     ),
 )
-if CANON_P31_CONVERGENCE:
+if CANON_P32_DP2TP2_FORWARD_ONLY:
+  p32_cleanup = dp_training.detach_jax_vllm_cleanup_finalizer(
+      rl_cluster.rollout
+  )
+  rl_cluster.close()
+  print(
+      "[P32.D2] FORWARD_ONLY_DONE "
+      f"global_trajectories={_P32_CONTRACT.global_trajectories} "
+      f"local_trajectories={_P32_CONTRACT.local_trajectories} "
+      f"cleanup={p32_cleanup} backward=0 commits=0",
+      flush=True,
+  )
+elif CANON_P32_DP2TP2_BACKWARD_NO_COMMIT:
+  p32_d3_marker = "[P32.D3B0]" if CANON_P32_D3B_SEGMENTED else "[P32.D3A]"
+  p32_d3_label = "D3b0" if CANON_P32_D3B_SEGMENTED else "D3a"
+  p32_memory = []
+  for device in jax.local_devices():
+    stats = device.memory_stats()
+    required = ("bytes_in_use", "peak_bytes_in_use", "bytes_limit")
+    if not stats or any(name not in stats for name in required):
+      raise ValueError(f"P32 {p32_d3_label} missing HBM stats for {device}")
+    p32_memory.append({
+        "device_id": int(device.id),
+        **{name: int(stats[name]) for name in required},
+    })
+  p32_resident_limit = 80 * 1024**3
+  if max(item["bytes_in_use"] for item in p32_memory) >= p32_resident_limit:
+    raise ValueError(
+        f"P32 {p32_d3_label} resident HBM exceeded the registered limit: "
+        f"measurements={p32_memory} limit={p32_resident_limit}"
+    )
+  if any(
+      item["peak_bytes_in_use"] >= item["bytes_limit"]
+      for item in p32_memory
+  ):
+    raise ValueError(
+        f"P32 {p32_d3_label} peak HBM reached the physical limit: "
+        f"measurements={p32_memory}"
+    )
+  p32_cleanup = dp_training.detach_jax_vllm_cleanup_finalizer(
+      rl_cluster.rollout
+  )
+  rl_cluster.close()
+  print(
+      f"{p32_d3_marker} JSON "
+      + json.dumps({
+          "status": "pass",
+          "hbm": p32_memory,
+          "resident_limit_bytes": p32_resident_limit,
+          "global_trajectories": _P32_CONTRACT.global_trajectories,
+          "local_trajectories": _P32_CONTRACT.local_trajectories,
+          "backward_executed": True,
+          "optimizer_commits": 0,
+          "cleanup": p32_cleanup,
+      }, sort_keys=True),
+      flush=True,
+  )
+  print(
+      f"{p32_d3_marker} BACKWARD_NO_COMMIT_DONE "
+      "global_trajectories=32 local_trajectories=16 "
+      "backward=1 commits=0",
+      flush=True,
+  )
+elif CANON_P31_CONVERGENCE:
   print(
       "[CANON_FROZENLAKE_P31] TRAINING_DONE "
       f"max_steps={MAX_STEPS} trajectory_mini={TRAJECTORY_MINI_BATCH_SIZE} "

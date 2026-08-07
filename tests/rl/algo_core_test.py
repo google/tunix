@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import types
+
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
@@ -20,6 +22,24 @@ from tunix.rl import algo_core
 
 
 class AlgoCoreTest(absltest.TestCase):
+
+  def test_completion_context_mask_keeps_non_action_tokens(self):
+    action_mask = jnp.asarray([[True, False, True, False]])
+    valid_mask = jnp.asarray([[True, True, True, False]])
+    example = types.SimpleNamespace(
+        completion_mask=action_mask,
+        completion_valid_mask=valid_mask,
+    )
+
+    np.testing.assert_array_equal(
+        algo_core._completion_context_mask(example), valid_mask
+    )
+    np.testing.assert_array_equal(
+        algo_core._completion_context_mask(
+            types.SimpleNamespace(completion_mask=action_mask)
+        ),
+        action_mask,
+    )
 
   def test_compute_rloo_advantages(self):
     rewards = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])

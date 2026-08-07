@@ -446,10 +446,15 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_step_impl = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
+    self._jitted_p32_gradient_step_impl = None
+    self._jitted_p32_gradient_reset_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
+    self._jitted_p32_gradient_step_fn = None
+    self._jitted_p32_gradient_reset_fn = None
     self._p28_precomputed_microstep = 0
+    self._p32_d3b_microstep = 0
     max_step = None
     if self.config.max_steps is not None:
       max_step = self.config.max_steps * self.config.get_with_default(
@@ -485,9 +490,13 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_step_impl = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
+    self._jitted_p32_gradient_step_impl = None
+    self._jitted_p32_gradient_reset_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
+    self._jitted_p32_gradient_step_fn = None
+    self._jitted_p32_gradient_reset_fn = None
 
   def _precomputed_gradient_step(
       self,
@@ -515,6 +524,28 @@ class PeftTrainer:
     return optax.global_norm(jax.tree.map(
         lambda value: value.astype(jnp.float32), paired
     ))
+
+  def _p32_scaled_gradient_step(
+      self,
+      grad_accumulator: GradientAccumulator,
+      grads: Any,
+      multiplier: ArrayLike,
+  ) -> ArrayLike:
+    """Adds one scaled D3b group into the donated accumulator."""
+    scaled = jax.tree.map(
+        lambda value: value * multiplier.astype(value.dtype), grads
+    )
+    grad_accumulator.add(scaled, denom=jnp.asarray(1.0, jnp.float32))
+    return optax.global_norm(jax.tree.map(
+        lambda value: value.astype(jnp.float32), scaled
+    ))
+
+  def _p32_reset_gradient_accumulator(
+      self, grad_accumulator: GradientAccumulator
+  ) -> ArrayLike:
+    """Resets the donated D3b accumulator without an optimizer commit."""
+    grad_accumulator.reset()
+    return grad_accumulator.denom[...]
 
   def _precomputed_gradient_commit(
       self,
@@ -749,6 +780,139 @@ class PeftTrainer:
     self._p28_precomputed_microstep += 1
     return norm
 
+  def _validate_p32_d3b_accumulation_contract(
+      self, *, require_allocated: bool = True
+  ) -> None:
+    """Validates the default-off, no-commit D3b accumulator contract."""
+    required = {
+        "CANON_P32_DP2TP2": "1",
+        "CANON_P32_D3B_SEGMENTED": "1",
+        "CANON_P32_DP2TP2_BACKWARD_NO_COMMIT": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    invalid = [
+        key for key, expected in required.items()
+        if os.environ.get(key, "") != expected
+    ]
+    if invalid:
+      raise ValueError(
+          "P32 D3b accumulation contract is incomplete: "
+          f"invalid keys={invalid}"
+      )
+    if require_allocated and not jax.tree.leaves(
+        self.grad_accumulator.grads
+    ):
+      raise ValueError("P32 D3b requires an allocated gradient accumulator")
+
+  def install_p32_d3b_temporary_accumulator(
+      self,
+  ) -> GradientAccumulator | None:
+    """Installs a full fp32 accumulator for the depth-one D3b gate."""
+    self._validate_p32_d3b_accumulation_contract(require_allocated=False)
+    if jax.tree.leaves(self.grad_accumulator.grads):
+      return None
+    original = self.grad_accumulator
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self.grad_accumulator = GradientAccumulator(
+        self.model,
+        wrt_target,
+        allocate_grads=True,
+        accumulator_dtype=jnp.float32,
+    )
+    self._jitted_p32_gradient_step_fn = None
+    self._jitted_p32_gradient_reset_fn = None
+    self._p32_d3b_microstep = 0
+    print(
+        "[P32.D3B0] TEMP_ACCUMULATOR on "
+        "dtype=float32 reason=depth1_fast_path",
+        flush=True,
+    )
+    return original
+
+  def restore_p32_d3b_temporary_accumulator(
+      self, original: GradientAccumulator | None
+  ) -> None:
+    """Restores the depth-one accumulator after a no-commit D3b gate."""
+    if original is None:
+      return
+    temporary = self.grad_accumulator
+    self._jitted_p32_gradient_step_fn = None
+    self._jitted_p32_gradient_reset_fn = None
+    for value in jax.tree.leaves(nnx.state(temporary)):
+      if isinstance(value, jax.Array) and not value.is_deleted():
+        value.delete()
+    self.grad_accumulator = original
+    self._p32_d3b_microstep = 0
+    gc.collect()
+    print(
+        "[P32.D3B0] TEMP_ACCUMULATOR off restored=depth1_fast_path",
+        flush=True,
+    )
+
+  def accumulate_p32_d3b_gradient_group(
+      self,
+      gradients: Any,
+      multiplier: ArrayLike,
+      *,
+      group_index: int,
+  ) -> ArrayLike:
+    """Streams one of sixteen D3b group gradients without committing."""
+    self._validate_p32_d3b_accumulation_contract()
+    if group_index != self._p32_d3b_microstep or not 0 <= group_index < 16:
+      raise ValueError(
+          "P32 D3b gradient group cadence mismatch: "
+          f"expected {self._p32_d3b_microstep}, got {group_index}"
+      )
+    if self._jitted_p32_gradient_step_fn is None:
+      if self._jitted_p32_gradient_step_impl is None:
+        self._jitted_p32_gradient_step_impl = nnx.jit(
+            self._p32_scaled_gradient_step,
+            donate_argnames=("grad_accumulator", "grads"),
+        )
+      self._jitted_p32_gradient_step_fn = functools.partial(
+          nnx.cached_partial(
+              self._jitted_p32_gradient_step_impl,
+              self.grad_accumulator,
+          )
+      )
+    norm = self._jitted_p32_gradient_step_fn(
+        gradients, jnp.asarray(multiplier, jnp.float32)
+    )
+    norm.block_until_ready()
+    self._p32_d3b_microstep += 1
+    return norm
+
+  def reset_p32_d3b_gradients_without_commit(self) -> None:
+    """Donates and clears a complete D3b accumulator transaction."""
+    self._validate_p32_d3b_accumulation_contract()
+    if self._p32_d3b_microstep != 16:
+      raise ValueError(
+          "P32 D3b reset requires sixteen groups: "
+          f"{self._p32_d3b_microstep} != 16"
+      )
+    if self._jitted_p32_gradient_reset_fn is None:
+      if self._jitted_p32_gradient_reset_impl is None:
+        self._jitted_p32_gradient_reset_impl = nnx.jit(
+            self._p32_reset_gradient_accumulator,
+            donate_argnames=("grad_accumulator",),
+        )
+      self._jitted_p32_gradient_reset_fn = functools.partial(
+          nnx.cached_partial(
+              self._jitted_p32_gradient_reset_impl,
+              self.grad_accumulator,
+          )
+      )
+    zero = self._jitted_p32_gradient_reset_fn()
+    zero.block_until_ready()
+    if float(np.asarray(zero)) != 0.0:
+      raise RuntimeError("P32 D3b accumulator reset did not produce zero")
+    # The donated reset invalidates every partial that bound the previous
+    # accumulator buffers. Keep transformed callables and compiled programs,
+    # but bind the current buffers on the next transaction.
+    self._jitted_p32_gradient_step_fn = None
+    self._jitted_p32_gradient_reset_fn = None
+    self._p32_d3b_microstep = 0
+
   def commit_precomputed_gradients(self) -> ArrayLike:
     """Commits after all streamed microbatches and resets the accumulator."""
     self._validate_precomputed_gradient_contract()
@@ -895,6 +1059,41 @@ class PeftTrainer:
       else:
         return out, None
 
+    canon_alignment = os.environ.get("CANON_ALIGNMENT_GATE", "") == "1"
+    canon_forward_only_requested = (
+        os.environ.get("CANON_ALIGNMENT_FORWARD_ONLY", "") == "1"
+    )
+    if canon_forward_only_requested and not canon_alignment:
+      raise ValueError(
+          "CANON_ALIGNMENT_FORWARD_ONLY=1 requires CANON_ALIGNMENT_GATE=1"
+      )
+    if canon_forward_only_requested:
+      conflicting = (
+          os.environ.get("CANON_ALIGNMENT_GATE_ONLY", "") == "1"
+          or os.environ.get("CANON_ALIGNMENT_UPDATE_CANARY", "") == "1"
+          or os.environ.get("CANON_ALIGNMENT_TRAIN", "") == "1"
+      )
+      if conflicting:
+        raise ValueError("forward-only alignment mode must be exclusive")
+      loss_val, aux = diff_fn(model, **inputs)
+      zero = jnp.asarray(0.0, jnp.float32)
+      if isinstance(aux, utils.LossOutput):
+        loss_val = aux.primary_loss.compute()
+        aux.aux_metrics["canon/gradient_norm"] = zero
+        aux.aux_metrics["canon/optimizer_skipped"] = jnp.asarray(1, jnp.int32)
+        aux.aux_metrics["canon/backward_executed"] = jnp.asarray(0, jnp.int32)
+        aux.aux_metrics["canon/is_update_step"] = jnp.asarray(
+            is_update_step, dtype=jnp.bool_
+        )
+        return loss_val, aux.aux_metrics, zero
+      if self._has_aux:
+        aux["canon/gradient_norm"] = zero
+        aux["canon/optimizer_skipped"] = jnp.asarray(1, jnp.int32)
+        aux["canon/backward_executed"] = jnp.asarray(0, jnp.int32)
+        aux["canon/is_update_step"] = jnp.asarray(is_update_step, jnp.bool_)
+        return loss_val, aux, zero
+      raise ValueError("forward-only alignment requires a loss aux mapping")
+
     grad_fn = nnx.value_and_grad(
         diff_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
@@ -941,7 +1140,6 @@ class PeftTrainer:
     # live gradient to the host gate without changing params OR the gradient
     # accumulator.  The host comparison necessarily happens after this
     # compiled call, so skipping only the optimizer would not be sufficient.
-    canon_alignment = os.environ.get("CANON_ALIGNMENT_GATE", "") == "1"
     canon_gate_only_requested = (
         os.environ.get("CANON_ALIGNMENT_GATE_ONLY", "") == "1"
     )
@@ -1019,6 +1217,9 @@ class PeftTrainer:
         aux.aux_metrics["canon/gradient_norm"] = grad_norm
         aux.aux_metrics["canon/optimizer_skipped"] = jnp.asarray(
             canon_gate_only, dtype=jnp.int32
+        )
+        aux.aux_metrics["canon/backward_executed"] = jnp.asarray(
+            1, dtype=jnp.int32
         )
         aux.aux_metrics["canon/is_update_step"] = jnp.asarray(
             is_update_step, dtype=jnp.bool_
@@ -1115,7 +1316,20 @@ class PeftTrainer:
     train_step = self.create_train_step_fn()
     eval_step = self.create_eval_step_fn()
     if skip_jit:
-      return train_step, eval_step
+      # The compiled path binds these mutable NNX objects below. Keep the
+      # eager path's public call signature identical: Trainer.train supplies
+      # only (inputs, is_update_step) for train and (inputs,) for evaluation.
+      # Returning the raw methods here leaves three required arguments
+      # unbound and makes skip_jit unusable before any model computation.
+      return (
+          functools.partial(
+              train_step,
+              self.model,
+              self.optimizer,
+              self.grad_accumulator,
+          ),
+          functools.partial(eval_step, self.model),
+      )
 
     if self._jitted_train_step_fn is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
@@ -1469,6 +1683,18 @@ class PeftTrainer:
         )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
+
+        if (
+            is_update_step_val
+            and os.environ.get("CANON_ALIGNMENT_FORWARD_ONLY", "") == "1"
+        ):
+          print(
+              "[P32.D2] forward_boundary_complete "
+              f"train_steps={self._train_steps} backward=0 commits=0",
+              flush=True,
+          )
+          self._write_train_metrics()
+          continue
 
         if is_update_step_val:
           self._train_steps += 1

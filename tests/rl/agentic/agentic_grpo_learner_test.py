@@ -269,6 +269,22 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         rl_trainer.Trainer._canon_changed_paths(before, changed), 1
     )
 
+  def test_p32_accumulator_fingerprint_includes_scalar_denom(self):
+    class _Accumulator(nnx.Module):
+
+      def __init__(self):
+        self.grads = nnx.data({})
+        self.denom = nnx.Variable(jnp.asarray(0.0, dtype=jnp.float32))
+
+    trainer = object.__new__(rl_trainer.Trainer)
+    trainer.grad_accumulator = _Accumulator()
+    before = trainer._canon_fingerprint_accumulator()
+    trainer.grad_accumulator.denom.set_value(jnp.asarray(1.0, jnp.float32))
+    after = trainer._canon_fingerprint_accumulator()
+
+    self.assertEqual(before["eligible_leaves"], 1)
+    self.assertLen(rl_trainer.Trainer._canon_changed_paths(before, after), 1)
+
   def test_p30_sharding_inventory_counts_replication_without_value_reads(self):
     devices = np.asarray(jax.devices())
     mesh = sharding.Mesh(devices, ("x",))

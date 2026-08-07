@@ -294,6 +294,67 @@ class _CompleteSegmentedRunner:
 
 class CanonicalQwen3AdapterTest(absltest.TestCase):
 
+  def test_logprob_bucket_contract_is_topology_specific(self):
+    default_env = {
+        "CANON_P32_DP2TP2": "0",
+        "CANON_LOGPROB_M": "256",
+        "MIN_TOKEN_BUCKET": "256",
+    }
+    with mock.patch.dict(os.environ, default_env, clear=False):
+      self.assertEqual(
+          canonical_qwen3_adapter._canonical_logprob_bucket(), 256
+      )
+
+    p32_env = {
+        "CANON_P32_DP2TP2": "1",
+        "CANON_LOGPROB_M": "512",
+        "MIN_TOKEN_BUCKET": "512",
+    }
+    with mock.patch.dict(os.environ, p32_env, clear=False):
+      self.assertEqual(
+          canonical_qwen3_adapter._canonical_logprob_bucket(), 512
+      )
+
+    with mock.patch.dict(
+        os.environ,
+        {**p32_env, "CANON_LOGPROB_M": "256"},
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "P32 DP2xTP2 requires",
+      ):
+        canonical_qwen3_adapter._canonical_logprob_bucket()
+
+  def test_logprob_row_spec_is_data_sharded_only_for_p32(self):
+    mesh = types.SimpleNamespace(
+        axis_names=("data", "model"), shape={"data": 2, "model": 2}
+    )
+    with mock.patch.dict(
+        os.environ, {"CANON_P32_DP2TP2": "0"}, clear=False
+    ):
+      self.assertEqual(
+          canonical_qwen3_adapter._canonical_logprob_row_spec(mesh),
+          jax.sharding.PartitionSpec(None, None),
+      )
+    with mock.patch.dict(
+        os.environ, {"CANON_P32_DP2TP2": "1"}, clear=False
+    ):
+      self.assertEqual(
+          canonical_qwen3_adapter._canonical_logprob_row_spec(mesh),
+          jax.sharding.PartitionSpec("data", None),
+      )
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "engine mesh data=2",
+      ):
+        canonical_qwen3_adapter._canonical_logprob_row_spec(
+            types.SimpleNamespace(
+                axis_names=("data", "model"),
+                shape={"data": 1, "model": 4},
+            )
+        )
+
   def setUp(self):
     super().setUp()
     self.target = _state({
@@ -1205,6 +1266,52 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             ),
         )
 
+  def test_dp_grouping_and_attention_metadata_are_rank_major(self):
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._data_size = 2
+    values = jnp.arange(32 * 3, dtype=jnp.int32).reshape(32, 3)
+    grouped = adapter._group_batch_rows(values)
+    self.assertEqual(grouped.shape, (16, 2, 3))
+    np.testing.assert_array_equal(np.asarray(grouped[:, 0]), np.asarray(values[:16]))
+    np.testing.assert_array_equal(np.asarray(grouped[:, 1]), np.asarray(values[16:]))
+    np.testing.assert_array_equal(
+        np.asarray(adapter._ungroup_batch_rows(grouped)), np.asarray(values)
+    )
+
+    metadata = canonical_qwen3_adapter._canonical_dp_attention_metadata_arrays(
+        data_size=2,
+        max_num_reqs=32,
+        blocks_per_req=25,
+        q_len=jnp.asarray([129, 0], jnp.int32),
+        kv_len=jnp.asarray([385, 0], jnp.int32),
+    )
+    block_tables, seq_lens, query_start, distribution = map(
+        np.asarray, metadata
+    )
+    self.assertEqual(block_tables.shape, (800,))
+    self.assertEqual(seq_lens.shape, (32,))
+    self.assertEqual(query_start.shape, (34,))
+    self.assertEqual(distribution.shape, (6,))
+    np.testing.assert_array_equal(block_tables[:25], np.arange(25))
+    np.testing.assert_array_equal(block_tables[400:425], np.arange(25))
+    np.testing.assert_array_equal(seq_lens[[0, 16]], [385, 0])
+    np.testing.assert_array_equal(
+        query_start[[0, 1, 17, 18]], [0, 129, 0, 0]
+    )
+    np.testing.assert_array_equal(distribution, [0, 0, 1, 0, 0, 0])
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError, "divisible"
+    ):
+      canonical_qwen3_adapter._canonical_dp_attention_metadata_arrays(
+          data_size=2,
+          max_num_reqs=33,
+          blocks_per_req=25,
+          q_len=jnp.asarray([1, 1], jnp.int32),
+          kv_len=jnp.asarray([1, 1], jnp.int32),
+      )
+
   def test_live_adapter_primal_and_vjp(self):
     names = (
         "data",
@@ -1482,6 +1589,145 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             pad_id=0,
             eos_id=7,
         )
+
+  def test_p32_d2b_capture_selects_decode_and_prefill_rows(self):
+    req_ids = ["a", "b"]
+    input_batch = types.SimpleNamespace(
+        req_ids=req_ids,
+        num_reqs=2,
+        req_id_to_index={"a": 0, "b": 1},
+        num_computed_tokens_cpu=np.asarray([4, 4], np.int32),
+        num_prompt_tokens=np.asarray([4, 4], np.int32),
+        num_prompt_logprobs={},
+    )
+    scheduler = types.SimpleNamespace(
+        assigned_dp_rank={"a": 0, "b": 1},
+        num_scheduled_tokens={"a": 1, "b": 1},
+    )
+    runner = types.SimpleNamespace(
+        input_batch=input_batch,
+        execute_model_state=types.SimpleNamespace(
+            logits_indices_selector=[0, 2],
+            scheduler_output=scheduler,
+            req_ids_dp={0: ["a"], 1: ["b"]},
+            padded_num_scheduled_tokens_per_dp_rank=4,
+        ),
+        requests={},
+    )
+
+    def stock_sample(key, mesh, logits, metadata):
+      del key, mesh, metadata
+      return jnp.zeros((logits.shape[0],), jnp.int32), logits + 1
+
+    capture = canonical_qwen3_adapter._P32D2BProcessedRowCapture(  # pylint: disable=protected-access
+        runner, stock_sample
+    )
+    decode_logits = jnp.arange(20, dtype=jnp.float32).reshape(4, 5)
+    capture.set_sample_context(
+        scheduler_output=scheduler,
+        logits_indices_selector=[0, 2],
+        req_ids_dp={0: ["a"], 1: ["b"]},
+        padded_num_scheduled_tokens_per_dp_rank=4,
+    )
+    capture.arm("decode")
+    capture(None, None, decode_logits, None)
+    decoded = capture.finish()
+    capture.clear_sample_context()
+    np.testing.assert_array_equal(
+        decoded["raw_rows"], np.asarray(decode_logits)[[0, 2]]
+    )
+    np.testing.assert_array_equal(
+        decoded["processed_rows"], np.asarray(decode_logits + 1)[[0, 2]]
+    )
+    self.assertEqual(decoded["dp_ranks"], (0, 1))
+
+    input_batch.num_computed_tokens_cpu = np.asarray([0, 0], np.int32)
+    input_batch.num_prompt_tokens = np.asarray([3, 4], np.int32)
+    input_batch.num_prompt_logprobs = {"a": 1, "b": 1}
+    scheduler.num_scheduled_tokens = {"a": 3, "b": 4}
+    runner.requests = {
+        "a": types.SimpleNamespace(num_computed_tokens=0, num_prompt_tokens=3),
+        "b": types.SimpleNamespace(num_computed_tokens=0, num_prompt_tokens=4),
+    }
+    prefill_logits = jnp.arange(40, dtype=jnp.float32).reshape(8, 5)
+    capture.set_sample_context(
+        scheduler_output=scheduler,
+        logits_indices_selector=None,
+        req_ids_dp={0: ["a"], 1: ["b"]},
+        padded_num_scheduled_tokens_per_dp_rank=4,
+    )
+    with mock.patch.dict(os.environ, {"CANON_LOGPROB_M": "8"}, clear=False):
+      capture.arm("prefill")
+      capture(None, None, prefill_logits, None)
+      prefilled = capture.finish()
+    capture.clear_sample_context()
+    np.testing.assert_array_equal(
+        prefilled["raw_rows"], np.asarray(prefill_logits)[[1, 6]]
+    )
+    self.assertEqual(prefilled["dp_ranks"], (0, 1))
+
+    capture.arm("decode")
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError, "capture count 0"
+    ):
+      capture.finish()
+
+    input_batch.num_computed_tokens_cpu = np.asarray([4, 4], np.int32)
+    input_batch.num_prompt_tokens = np.asarray([4, 4], np.int32)
+    capture.arm("decode")
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "no active _sample_from_logits context",
+    ):
+      capture(None, None, decode_logits, None)
+    capture.abort()
+
+  def test_p32_group_spec_preserves_rank_local_sequence_order(self):
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._data_size = 2  # pylint: disable=protected-access
+    adapter._sequence_bucket = 4  # pylint: disable=protected-access
+    adapter._max_model_len = 16  # pylint: disable=protected-access
+    prompt = jnp.asarray([[10, 11, 0], [20, 21, 22]], jnp.int32)
+    completion = jnp.asarray([[12, 13, 0], [23, 24, 25]], jnp.int32)
+    prompt_valid = prompt != 0
+    completion_valid = completion != 0
+
+    spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt_valid,
+        completion_valid,
+        0.7,
+    )
+
+    self.assertEqual(spec["host_n_real"], (4, 6))
+    self.assertEqual(spec["num_chunks"], 2)
+    np.testing.assert_array_equal(
+        np.asarray(spec["packed_ids"]),
+        np.asarray(
+            [[10, 11, 12, 13, 0, 0, 0, 0],
+             [20, 21, 22, 23, 24, 25, 0, 0]],
+            np.int32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(spec["source_rows"]),
+        np.asarray([[1, 2, 2], [2, 3, 4]], np.int32),
+    )
+
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "one row per DP rank",
+    ):
+      adapter._p32_group_spec(  # pylint: disable=protected-access
+          prompt[:1],
+          completion[:1],
+          prompt_valid[:1],
+          completion_valid[:1],
+          0.7,
+      )
 
 if __name__ == "__main__":
   absltest.main()

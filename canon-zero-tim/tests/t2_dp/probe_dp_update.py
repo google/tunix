@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -51,6 +52,29 @@ def _rows_exact(value: Any) -> bool:
 
 def _make_mesh(devices: np.ndarray, dp: int, tp: int) -> Mesh:
   return Mesh(devices.reshape(dp, tp), ("dp", "tp"))
+
+
+def _select_devices(
+    devices: list[jax.Device], requested_ids: tuple[int, ...], required: int
+) -> list[jax.Device]:
+  if not requested_ids:
+    if len(devices) != required:
+      raise RuntimeError(
+          f"P32 DP probe requires exactly dp*tp={required} devices, got {len(devices)}"
+      )
+    return devices
+  if len(requested_ids) != required or len(set(requested_ids)) != required:
+    raise ValueError(
+        "device-ids must contain exactly dp*tp unique device ids: "
+        f"required={required} requested={requested_ids}"
+    )
+  by_id = {int(device.id): device for device in devices}
+  missing = tuple(device_id for device_id in requested_ids if device_id not in by_id)
+  if missing:
+    raise ValueError(
+        f"device-ids contains unavailable ids {missing}; available={tuple(by_id)}"
+    )
+  return [by_id[device_id] for device_id in requested_ids]
 
 
 def _topology_mesh(devices: list[jax.Device], dp: int, tp: int) -> Mesh:
@@ -179,6 +203,21 @@ def main() -> int:
       default=int(os.getenv("CANON_DP_PROBE_LOCAL_SAMPLES", "16")),
   )
   parser.add_argument(
+      "--device-ids",
+      default=os.getenv("CANON_DP_PROBE_DEVICE_IDS", ""),
+      help="optional comma-separated subset of the visible JAX device ids",
+  )
+  parser.add_argument(
+      "--output-npz",
+      type=Path,
+      default=(
+          Path(os.environ["CANON_DP_PROBE_OUTPUT_NPZ"])
+          if os.getenv("CANON_DP_PROBE_OUTPUT_NPZ")
+          else None
+      ),
+      help="optional path for the measured gradient and AdamW arrays",
+  )
+  parser.add_argument(
       "--inject-rank-fault",
       action="store_true",
       help="negative control: substitute a rank-dependent result for stock",
@@ -188,11 +227,9 @@ def main() -> int:
   if args.dp <= 1 or args.tp <= 0 or args.local_samples <= 0:
     raise ValueError("dp must be >1; tp and local-samples must be positive")
   required = args.dp * args.tp
-  devices = list(jax.devices())
-  if len(devices) != required:
-    raise RuntimeError(
-        f"P32 DP probe requires exactly dp*tp={required} devices, got {len(devices)}"
-    )
+  available_devices = list(jax.devices())
+  requested_ids = _csv_ints(args.device_ids)
+  devices = _select_devices(available_devices, requested_ids, required)
 
   mesh = _topology_mesh(devices, args.dp, args.tp)
   mesh_ids = tuple(int(device.id) for device in mesh.devices.flat)
@@ -277,6 +314,15 @@ def main() -> int:
       "moment_sha256": _sha(moment),
       "variance_sha256": _sha(variance),
   }
+  if args.output_npz is not None:
+    args.output_npz.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        args.output_npz,
+        gradient=np.asarray(jax.device_get(auto_first)),
+        parameter=np.asarray(jax.device_get(next_weight)),
+        moment=np.asarray(jax.device_get(moment)),
+        variance=np.asarray(jax.device_get(variance)),
+    )
   required_checks = all(checks.values())
   decision = (
       "FIXED_TOPOLOGY_STOCK_ADMISSIBLE"
@@ -293,6 +339,8 @@ def main() -> int:
       "tp": args.tp,
       "local_samples": args.local_samples,
       "global_samples": global_samples,
+      "available_device_ids": tuple(int(device.id) for device in available_devices),
+      "selected_device_ids": tuple(int(device.id) for device in devices),
       "mesh_ids": mesh_ids,
       "mapping_sha256": hashlib.sha256(
           np.arange(global_samples, dtype=np.int32).tobytes()

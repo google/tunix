@@ -29,7 +29,25 @@ INTERMEDIATE_SIZE = 12288
 NUM_ATTENTION_HEADS = 32
 NUM_KV_HEADS = 8
 HEAD_DIM = 128
-TP_SIZE = 4
+
+
+def _read_tp_size() -> int:
+    raw = os.environ.get("CANON_QWEN3_TP_SIZE", "4")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"CANON_QWEN3_TP_SIZE must be an integer, got {raw!r}"
+        ) from exc
+    if value not in (2, 4):
+        raise RuntimeError(
+            "Qwen3-8B P22.XK supports only the registered TP2/TP4 families, "
+            f"got TP{value}"
+        )
+    return value
+
+
+TP_SIZE = _read_tp_size()
 
 _MODEL_ENV = {
     "CANON_QWEN3_HIDDEN_SIZE": str(HIDDEN_SIZE),
@@ -51,14 +69,27 @@ class Site:
     contract_parallel: bool
 
 
+def _expected_shapes(tp_size: int) -> dict[str, tuple[int, int]]:
+    return {
+        "q_proj": (HIDDEN_SIZE, HIDDEN_SIZE // tp_size),
+        "k_proj": (HIDDEN_SIZE, NUM_KV_HEADS * HEAD_DIM // tp_size),
+        "v_proj": (HIDDEN_SIZE, NUM_KV_HEADS * HEAD_DIM // tp_size),
+        "o_proj": (HIDDEN_SIZE // tp_size, HIDDEN_SIZE),
+        "gate_proj": (HIDDEN_SIZE, INTERMEDIATE_SIZE // tp_size),
+        "up_proj": (HIDDEN_SIZE, INTERMEDIATE_SIZE // tp_size),
+        "down_proj": (INTERMEDIATE_SIZE // tp_size, HIDDEN_SIZE),
+    }
+
+
+_SHAPES = _expected_shapes(TP_SIZE)
 SITES = (
-    Site(".q_proj", "q_proj", ("TD,DNH->TNH", "TD,NDH->TNH"), 4096, 1024, False),
-    Site(".k_proj", "k_proj", ("TD,DKH->TKH",), 4096, 256, False),
-    Site(".v_proj", "v_proj", ("TD,DKH->TKH",), 4096, 256, False),
-    Site(".o_proj", "o_proj", ("TNH,NHD->TD",), 1024, 4096, True),
-    Site(".gate_proj", "gate_proj", ("mn,np->mp",), 4096, 3072, False),
-    Site(".up_proj", "up_proj", ("mn,np->mp",), 4096, 3072, False),
-    Site(".down_proj", "down_proj", ("mn,np->mp",), 3072, 4096, True),
+    Site(".q_proj", "q_proj", ("TD,DNH->TNH", "TD,NDH->TNH"), *_SHAPES["q_proj"], False),
+    Site(".k_proj", "k_proj", ("TD,DKH->TKH",), *_SHAPES["k_proj"], False),
+    Site(".v_proj", "v_proj", ("TD,DKH->TKH",), *_SHAPES["v_proj"], False),
+    Site(".o_proj", "o_proj", ("TNH,NHD->TD",), *_SHAPES["o_proj"], True),
+    Site(".gate_proj", "gate_proj", ("mn,np->mp",), *_SHAPES["gate_proj"], False),
+    Site(".up_proj", "up_proj", ("mn,np->mp",), *_SHAPES["up_proj"], False),
+    Site(".down_proj", "down_proj", ("mn,np->mp",), *_SHAPES["down_proj"], True),
 )
 
 
@@ -83,20 +114,12 @@ def validate_manifest(sites) -> None:
         raise ValueError("projection suffixes/families must be unique")
     if sum(site.contract_parallel for site in sites) != 2:
         raise ValueError("expected exactly o/down contract-parallel sites")
-    expected_shapes = {
-        "q_proj": (4096, 1024),
-        "k_proj": (4096, 256),
-        "v_proj": (4096, 256),
-        "o_proj": (1024, 4096),
-        "gate_proj": (4096, 3072),
-        "up_proj": (4096, 3072),
-        "down_proj": (3072, 4096),
-    }
+    expected_shapes = _expected_shapes(TP_SIZE)
     for site in sites:
         if (site.k_local, site.n_local) != expected_shapes[site.family]:
             raise ValueError(
                 f"{site.family} shape {(site.k_local, site.n_local)} does not "
-                f"match Qwen3-8B TP4 {expected_shapes[site.family]}"
+                f"match Qwen3-8B TP{TP_SIZE} {expected_shapes[site.family]}"
             )
         if site.k_local % BK or site.n_local % BN:
             raise ValueError(
@@ -146,8 +169,12 @@ def self_test() -> None:
         os.environ["CANON_FIXED_AR"] = "1"
         preflight(require_enabled=True)
         assert len(SITES) == 7
-        assert match_site("model.layers.0.self_attn.q_proj", "TD,DNH->TNH").n_local == 1024
-        assert match_site("model.layers.0.mlp.down_proj", "mn,np->mp").k_local == 3072
+        assert match_site(
+            "model.layers.0.self_attn.q_proj", "TD,DNH->TNH"
+        ).n_local == HIDDEN_SIZE // TP_SIZE
+        assert match_site(
+            "model.layers.0.mlp.down_proj", "mn,np->mp"
+        ).k_local == INTERMEDIATE_SIZE // TP_SIZE
         os.environ["CANON_QWEN3_HIDDEN_SIZE"] = "5120"
         try:
             preflight(require_enabled=True)
@@ -169,7 +196,10 @@ def self_test() -> None:
             os.environ.pop("CANON_FIXED_AR", None)
         else:
             os.environ["CANON_FIXED_AR"] = old_fixed_ar
-    print("P21_QWEN8B_P22XF_CONTRACT_SELFTEST_PASS cases=4/4")
+    print(
+        "P21_QWEN8B_P22XF_CONTRACT_SELFTEST_PASS "
+        f"tp={TP_SIZE} cases=4/4"
+    )
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ import dataclasses
 import hashlib
 import importlib
 import os
+import threading
 import time
 from typing import Any, Mapping, Sequence
 
@@ -45,26 +46,397 @@ class FunctionalMappingError(ValueError):
   """Raised when a trainer-to-engine weight map is not a bijection."""
 
 
+class _P32D2BProcessedRowCapture:
+  """Captures bounded full-vocabulary rows after the live sampling transform."""
+
+  def __init__(self, runner, stock_sample):
+    self._runner = runner
+    self._stock_sample = stock_sample
+    self._lock = threading.Lock()
+    self._thread_context = threading.local()
+    self._mode = None
+    self._records = []
+
+  def set_sample_context(
+      self,
+      *,
+      scheduler_output,
+      logits_indices_selector,
+      req_ids_dp,
+      padded_num_scheduled_tokens_per_dp_rank,
+  ):
+    self._thread_context.value = {
+        "scheduler_output": scheduler_output,
+        "logits_indices_selector": logits_indices_selector,
+        "req_ids_dp": req_ids_dp,
+        "padded_num_scheduled_tokens_per_dp_rank": int(
+            padded_num_scheduled_tokens_per_dp_rank
+        ),
+    }
+
+  def clear_sample_context(self):
+    if hasattr(self._thread_context, "value"):
+      del self._thread_context.value
+
+  def _sample_context(self):
+    context = getattr(self._thread_context, "value", None)
+    if context is None:
+      raise FunctionalMappingError(
+          "D2b capture observed no active _sample_from_logits context"
+      )
+    return context
+
+  def arm(self, mode):
+    if mode not in ("decode", "prefill"):
+      raise FunctionalMappingError(f"unsupported D2b capture mode: {mode!r}")
+    with self._lock:
+      if self._mode is not None:
+        raise FunctionalMappingError(
+            f"D2b capture is already armed for {self._mode}"
+        )
+      self._mode = mode
+      self._records = []
+
+  def finish(self):
+    with self._lock:
+      mode = self._mode
+      records = tuple(self._records)
+      self._mode = None
+      self._records = []
+    if mode is None:
+      raise FunctionalMappingError("D2b capture was not armed")
+    if len(records) != 1:
+      raise FunctionalMappingError(
+          f"D2b {mode} capture count {len(records)} != 1"
+      )
+    return records[0]
+
+  def abort(self):
+    with self._lock:
+      self._mode = None
+      self._records = []
+
+  def _request_phases(self, req_ids):
+    phases = []
+    for req_id in req_ids:
+      req_index = self._runner.input_batch.req_id_to_index[req_id]
+      computed = int(
+          self._runner.input_batch.num_computed_tokens_cpu[req_index]
+      )
+      prompt = int(self._runner.input_batch.num_prompt_tokens[req_index])
+      phases.append("prefill" if computed < prompt else "decode")
+    return tuple(phases)
+
+  def _decode_indices(self, req_ids):
+    selector = self._sample_context()["logits_indices_selector"]
+    if selector is None:
+      selector = tuple(range(len(req_ids)))
+    else:
+      selector = tuple(int(index) for index in selector)
+    if len(selector) != len(req_ids):
+      raise FunctionalMappingError(
+          "D2b decode selector count differs from the live request count: "
+          f"{len(selector)} != {len(req_ids)}"
+      )
+    return selector
+
+  def _prefill_indices(self, req_ids):
+    context = self._sample_context()
+    scheduler = context["scheduler_output"]
+    stride = context["padded_num_scheduled_tokens_per_dp_rank"]
+    req_ids_dp = context["req_ids_dp"]
+    if stride <= 0 or req_ids_dp is None:
+      raise FunctionalMappingError("D2b prefill metadata is incomplete")
+    by_request = {}
+    dp_ranks = {}
+    for dp_rank, rank_req_ids in req_ids_dp.items():
+      local_offset = 0
+      for req_id in rank_req_ids:
+        scheduled = int(scheduler.num_scheduled_tokens[req_id])
+        req_state = self._runner.requests[req_id]
+        if int(req_state.num_computed_tokens) != 0:
+          raise FunctionalMappingError(
+              f"D2b prefill request {req_id} did not start from an empty cache"
+          )
+        if scheduled != int(req_state.num_prompt_tokens):
+          raise FunctionalMappingError(
+              "D2b sentinel prompt was chunked; choose a prompt shorter than "
+              f"the local fixed-M domain: request={req_id} "
+              f"scheduled={scheduled} prompt={req_state.num_prompt_tokens}"
+          )
+        if scheduled < 2:
+          raise FunctionalMappingError(
+              f"D2b request {req_id} has fewer than two prompt tokens"
+          )
+        by_request[req_id] = (
+            int(dp_rank) * stride + local_offset + scheduled - 2
+        )
+        dp_ranks[req_id] = int(dp_rank)
+        local_offset += scheduled
+    missing = [req_id for req_id in req_ids if req_id not in by_request]
+    if missing:
+      raise FunctionalMappingError(
+          f"D2b prefill rows missing requests: {missing}"
+      )
+    return tuple(by_request[req_id] for req_id in req_ids), tuple(
+        dp_ranks[req_id] for req_id in req_ids
+    )
+
+  def __call__(self, key, mesh, logits, sampling_metadata):
+    sampled, processed = self._stock_sample(
+        key, mesh, logits, sampling_metadata
+    )
+    with self._lock:
+      mode = self._mode
+    if mode is None:
+      return sampled, processed
+    if processed is None:
+      raise FunctionalMappingError("D2b capture observed no processed logits")
+
+    req_ids = tuple(
+        self._runner.input_batch.req_ids[
+            : self._runner.input_batch.num_reqs
+        ]
+    )
+    if not req_ids or any(req_id is None for req_id in req_ids):
+      raise FunctionalMappingError("D2b capture observed invalid request ids")
+    phases = self._request_phases(req_ids)
+    indices = None
+    dp_ranks = None
+    if mode == "decode" and phases and all(
+        phase == "decode" for phase in phases
+    ):
+      indices = self._decode_indices(req_ids)
+      scheduler = self._sample_context()["scheduler_output"]
+      dp_ranks = tuple(
+          int(scheduler.assigned_dp_rank[req_id]) for req_id in req_ids
+      )
+    elif (
+        mode == "prefill"
+        and phases
+        and all(phase == "prefill" for phase in phases)
+        and int(processed.shape[0])
+        == int(os.environ.get("CANON_LOGPROB_M", "0"))
+        and self._runner.input_batch.num_prompt_logprobs
+    ):
+      indices, dp_ranks = self._prefill_indices(req_ids)
+
+    if indices is not None:
+      raw_rows = np.asarray(jax.device_get(logits[jnp.asarray(indices)]))
+      processed_rows = np.asarray(
+          jax.device_get(processed[jnp.asarray(indices)])
+      )
+      record = {
+          "mode": mode,
+          "request_ids": req_ids,
+          "dp_ranks": dp_ranks,
+          "row_indices": indices,
+          "raw_rows": raw_rows,
+          "processed_rows": processed_rows,
+      }
+      with self._lock:
+        self._records.append(record)
+    return sampled, processed
+
+
+def _install_p32_d2b_capture(runner, stock_sample):
+  """Installs the default-off bounded row tap around the live runner sample."""
+  if os.environ.get("CANON_P32_D2B_FULL_DISTRIBUTION", "") != "1":
+    return None
+  runner_module = importlib.import_module(type(runner).__module__)
+  existing = getattr(runner, "_canonical_p32_d2b_capture", None)
+  if existing is not None:
+    return existing
+  current = getattr(runner_module, "sample", None)
+  if current is not stock_sample:
+    raise FunctionalMappingError(
+        "refusing to wrap an unknown live runner sampling function"
+    )
+  capture = _P32D2BProcessedRowCapture(runner, stock_sample)
+  stock_sample_from_logits = runner._sample_from_logits
+
+  def sample_from_logits_with_capture(
+      scheduler_output,
+      attn_metadata,
+      tpu_sampling_metadata,
+      input_ids,
+      hidden_states,
+      logits,
+      aux_hidden_states,
+      spec_decode_metadata,
+      kv_connector_output,
+      logits_indices_selector=None,
+      padded_num_reqs=None,
+      expert_indices=None,
+      full_hidden_states=None,
+      full_logits=None,
+      req_ids_dp=None,
+      padded_num_scheduled_tokens_per_dp_rank=0,
+  ):
+    capture.set_sample_context(
+        scheduler_output=scheduler_output,
+        logits_indices_selector=logits_indices_selector,
+        req_ids_dp=req_ids_dp,
+        padded_num_scheduled_tokens_per_dp_rank=(
+            padded_num_scheduled_tokens_per_dp_rank
+        ),
+    )
+    try:
+      return stock_sample_from_logits(
+          scheduler_output,
+          attn_metadata,
+          tpu_sampling_metadata,
+          input_ids,
+          hidden_states,
+          logits,
+          aux_hidden_states,
+          spec_decode_metadata,
+          kv_connector_output,
+          logits_indices_selector,
+          padded_num_reqs,
+          expert_indices,
+          full_hidden_states,
+          full_logits,
+          req_ids_dp,
+          padded_num_scheduled_tokens_per_dp_rank,
+      )
+    finally:
+      capture.clear_sample_context()
+
+  runner_module.sample = capture
+  runner._sample_from_logits = sample_from_logits_with_capture
+  runner._canonical_p32_d2b_capture = capture
+  print(
+      "[P32.D2B] bounded live processed-row capture installed default_off=1",
+      flush=True,
+  )
+  return capture
+
+
+def _canonical_logprob_bucket() -> int:
+  """Returns the fixed global M admitted by the selected topology."""
+  expected = 512 if os.environ.get("CANON_P32_DP2TP2", "") == "1" else 256
+  raw_logprob = os.environ.get("CANON_LOGPROB_M", "0")
+  raw_token = os.environ.get("MIN_TOKEN_BUCKET", "")
+  try:
+    logprob_bucket = int(raw_logprob)
+    token_bucket = int(raw_token)
+  except ValueError as exc:
+    raise FunctionalMappingError(
+        "canonical adapter requires integer CANON_LOGPROB_M and "
+        "MIN_TOKEN_BUCKET values"
+    ) from exc
+  if logprob_bucket != expected or token_bucket != expected:
+    mode = "P32 DP2xTP2" if expected == 512 else "default TP path"
+    raise FunctionalMappingError(
+        f"canonical adapter {mode} requires "
+        f"CANON_LOGPROB_M=MIN_TOKEN_BUCKET={expected}; got "
+        f"CANON_LOGPROB_M={logprob_bucket} MIN_TOKEN_BUCKET={token_bucket}"
+    )
+  return expected
+
+
+def _canonical_logprob_row_spec(mesh) -> jax.sharding.PartitionSpec:
+  """Returns the topology-specific global-row sharding for log-softmax."""
+  if os.environ.get("CANON_P32_DP2TP2", "") != "1":
+    return jax.sharding.PartitionSpec(None, None)
+  axis_names = tuple(mesh.axis_names)
+  data_size = int(mesh.shape.get("data", 0))
+  if "data" not in axis_names or data_size != 2:
+    raise FunctionalMappingError(
+        "P32 log-softmax requires engine mesh data=2; "
+        f"axes={axis_names} shape={dict(mesh.shape)}"
+    )
+  return jax.sharding.PartitionSpec("data", None)
+
+
+def _canonical_dp_attention_metadata_arrays(
+    *,
+    data_size,
+    max_num_reqs,
+    blocks_per_req,
+    q_len,
+    kv_len,
+):
+  """Builds rank-major RPA metadata with one request per data rank."""
+  data_size = int(data_size)
+  max_num_reqs = int(max_num_reqs)
+  blocks_per_req = int(blocks_per_req)
+  if data_size < 1 or max_num_reqs % data_size:
+    raise FunctionalMappingError(
+        "RPA metadata requires max_num_reqs divisible by data size"
+    )
+  if q_len.shape != (data_size,) or kv_len.shape != (data_size,):
+    raise FunctionalMappingError(
+        "RPA metadata lengths must contain one scalar per data rank"
+    )
+  local_max_num_reqs = max_num_reqs // data_size
+  active = q_len > 0
+  block_tables = jnp.zeros(
+      (data_size, local_max_num_reqs, blocks_per_req), jnp.int32
+  ).at[:, 0, :].set(
+      jnp.broadcast_to(
+          jnp.arange(blocks_per_req, dtype=jnp.int32),
+          (data_size, blocks_per_req),
+      )
+  )
+  query_start = jnp.where(
+      jnp.arange(local_max_num_reqs + 1)[None, :] == 0,
+      0,
+      q_len[:, None],
+  ).astype(jnp.int32)
+  seq_lens = jnp.zeros(
+      (data_size, local_max_num_reqs), jnp.int32
+  ).at[:, 0].set(jnp.where(active, kv_len, 0))
+  request_distribution = jnp.stack(
+      (
+          jnp.zeros_like(q_len),
+          jnp.zeros_like(q_len),
+          active.astype(jnp.int32),
+      ),
+      axis=1,
+  )
+  return (
+      block_tables.reshape(-1),
+      seq_lens.reshape(-1),
+      query_start.reshape(-1),
+      request_distribution.reshape(-1),
+  )
+
+
 def _make_canonical_compute_and_gather(gather_logprobs, mesh):
   """Builds the one shared rollout/trainer logprob function object."""
 
+  p32_data_rows = os.environ.get("CANON_P32_DP2TP2", "") == "1"
+
   def local_log_softmax(logits):
+    if p32_data_rows:
+      if logits.shape[0] != 512:
+        raise FunctionalMappingError(
+            f"P32 log-softmax expected global M512, got {logits.shape}"
+        )
+      data_rank = jax.lax.axis_index("data")
+      logits = jax.lax.dynamic_slice_in_dim(
+          logits, data_rank * 256, 256, axis=0
+      )
     return canonical_logsoftmax.log_softmax(logits)
 
+  row_spec = _canonical_logprob_row_spec(mesh)
+  input_spec = jax.sharding.PartitionSpec(None, None)
   try:
     mapped_log_softmax = jax.shard_map(
         local_log_softmax,
         mesh=mesh,
-        in_specs=jax.sharding.PartitionSpec(None, None),
-        out_specs=jax.sharding.PartitionSpec(None, None),
+        in_specs=input_spec,
+        out_specs=row_spec,
         check_vma=False,
     )
   except TypeError:
     mapped_log_softmax = jax.shard_map(
         local_log_softmax,
         mesh=mesh,
-        in_specs=jax.sharding.PartitionSpec(None, None),
-        out_specs=jax.sharding.PartitionSpec(None, None),
+        in_specs=input_spec,
+        out_specs=row_spec,
         check_rep=False,
     )
 
@@ -996,11 +1368,7 @@ class Qwen3EngineForwardAdapter:
           "canonical adapter executes one sequence per model_fn call; "
           "CANON_VJP2_MAX_SEQS must be explicitly 1"
       )
-    bucket = int(os.environ.get("CANON_LOGPROB_M", "0"))
-    if bucket != 256 or os.environ.get("MIN_TOKEN_BUCKET", "") != "256":
-      raise FunctionalMappingError(
-          "canonical adapter requires CANON_LOGPROB_M=MIN_TOKEN_BUCKET=256"
-      )
+    bucket = _canonical_logprob_bucket()
     sampling_kwargs = dict(sampling_kwargs or {})
     top_k = sampling_kwargs.get("top_k", 0)
     top_p = sampling_kwargs.get("top_p", 1.0)
@@ -1051,7 +1419,7 @@ class Qwen3EngineForwardAdapter:
 
     self.implementation_id = (
         f"{type(runner).__module__}.{type(runner).__qualname__}:"
-        "qwen3-canonical-m256-vjp2"
+        f"qwen3-canonical-m{bucket}-vjp2"
     )
     self._runner = runner
     self._engine_state_contract = runner.state
@@ -1062,17 +1430,42 @@ class Qwen3EngineForwardAdapter:
         getattr(sampler, "args", {}).get("tensor_parallel_size", 1)
     )
     self._bucket = bucket
+    self._data_size = int(runner.mesh.shape.get("data", 1))
+    if self._data_size not in (1, 2):
+      raise FunctionalMappingError(
+          "canonical adapter admits only data size 1 or the P32 data size 2 "
+          f"contract, got {self._data_size}"
+      )
+    if self._data_size == 2 and os.environ.get(
+        "CANON_P32_DP2TP2", ""
+    ) != "1":
+      raise FunctionalMappingError(
+          "data size 2 requires the explicit CANON_P32_DP2TP2 contract"
+      )
+    if bucket % self._data_size:
+      raise FunctionalMappingError(
+          f"global M {bucket} is not divisible by data size {self._data_size}"
+      )
+    self._sequence_bucket = bucket // self._data_size
     self._max_model_len = int(runner.model_config.max_model_len)
     runner_vocab_size = getattr(runner, "vocab_size", None)
     if runner_vocab_size is None:
       runner_vocab_size = runner.model_config.get_vocab_size()
     self._vocab_size = int(runner_vocab_size)
     self._max_num_reqs = int(runner.max_num_reqs)
+    if self._max_num_reqs % self._data_size:
+      raise FunctionalMappingError(
+          "max_num_reqs must be divisible by the engine data size: "
+          f"{self._max_num_reqs} vs {self._data_size}"
+      )
+    self._local_max_num_reqs = self._max_num_reqs // self._data_size
     self._block_size = int(runner.block_size)
     self._blocks_per_req = (
         int(runner.model_config.max_model_len) + self._block_size - 1
     ) // self._block_size
-    self._cache_shape = (self._blocks_per_req,) + tuple(cache0.shape[1:])
+    self._cache_shape = (
+        self._data_size * self._blocks_per_req,
+    ) + tuple(cache0.shape[1:])
     self._cache_dtype = cache0.dtype
     self._cache_sharding = cache0.sharding
     self._input_sharding = jax.sharding.NamedSharding(
@@ -1088,6 +1481,9 @@ class Qwen3EngineForwardAdapter:
         runner, "_canonical_set_forward_context", set_forward_context
     )
     self._sample = getattr(runner, "_canonical_sample", sample)
+    self._p32_d2b_capture = _install_p32_d2b_capture(
+        runner, self._sample
+    )
     self._sampling_metadata_cls = getattr(
         runner,
         "_canonical_sampling_metadata_cls",
@@ -1170,6 +1566,25 @@ class Qwen3EngineForwardAdapter:
         runner.layer_name_to_kvcache_index.items()
     )
 
+  def arm_p32_d2b_capture(self, mode):
+    """Arms one bounded live-runner full-vocabulary capture."""
+    if self._p32_d2b_capture is None:
+      raise FunctionalMappingError(
+          "P32 D2b capture requires CANON_P32_D2B_FULL_DISTRIBUTION=1"
+      )
+    self._p32_d2b_capture.arm(mode)
+
+  def finish_p32_d2b_capture(self):
+    """Returns the only captured live-runner record or fails closed."""
+    if self._p32_d2b_capture is None:
+      raise FunctionalMappingError("P32 D2b capture is not installed")
+    return self._p32_d2b_capture.finish()
+
+  def abort_p32_d2b_capture(self):
+    """Disarms a failed diagnostic request without retaining partial rows."""
+    if self._p32_d2b_capture is not None:
+      self._p32_d2b_capture.abort()
+
   def _engine_array(self, value):
     return jax.lax.with_sharding_constraint(value, self._input_sharding)
 
@@ -1181,6 +1596,31 @@ class Qwen3EngineForwardAdapter:
         )
         for _ in self._runner.kv_caches
     ]
+
+  def _group_batch_rows(self, value):
+    """Groups a global batch into one independent row per data rank."""
+    if value.shape[0] % self._data_size:
+      raise FunctionalMappingError(
+          "global batch must be divisible by the engine data size: "
+          f"{value.shape[0]} vs {self._data_size}"
+      )
+    local_batch = value.shape[0] // self._data_size
+    reshaped = value.reshape(
+        (self._data_size, local_batch) + value.shape[1:]
+    )
+    return jnp.swapaxes(reshaped, 0, 1)
+
+  def _ungroup_batch_rows(self, value):
+    """Restores data-rank-major global batch row order."""
+    if value.shape[1] != self._data_size:
+      raise FunctionalMappingError(
+          "grouped batch does not match the engine data size: "
+          f"{value.shape[1]} vs {self._data_size}"
+      )
+    transposed = jnp.swapaxes(value, 0, 1)
+    return transposed.reshape(
+        (transposed.shape[0] * transposed.shape[1],) + value.shape[2:]
+    )
 
   def map_engine_cotangents_to_trainer_state(
       self, trainer_state, engine_cotangents
@@ -1526,6 +1966,638 @@ class Qwen3EngineForwardAdapter:
         "counts": counts,
         "replay_logps": replay["logps"],
         "replay_entropy": replay["entropy"],
+    }
+
+  def _p32_group_spec(
+      self,
+      prompt,
+      completion,
+      prompt_valid,
+      completion_valid,
+      temperature,
+  ):
+    """Builds one fixed-M schedule with one sequence per DP rank."""
+    _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
+        prompt, completion, prompt_valid, completion_valid
+    )
+    if self._data_size != 2:
+      raise FunctionalMappingError(
+          f"P32 grouped reverse requires data size 2, got {self._data_size}"
+      )
+    prompt = jnp.asarray(prompt)
+    completion = jnp.asarray(completion)
+    prompt_valid = jnp.asarray(prompt_valid, dtype=jnp.bool_)
+    completion_valid = jnp.asarray(completion_valid, dtype=jnp.bool_)
+    expected_prefix = (self._data_size,)
+    values = {
+        "prompt": prompt,
+        "completion": completion,
+        "prompt_valid": prompt_valid,
+        "completion_valid": completion_valid,
+    }
+    for label, value in values.items():
+      if value.ndim != 2 or value.shape[:1] != expected_prefix:
+        raise FunctionalMappingError(
+            f"P32 {label} group must have one row per DP rank: "
+            f"shape={value.shape} data={self._data_size}"
+        )
+    if prompt.shape != prompt_valid.shape:
+      raise FunctionalMappingError("P32 grouped prompt mask shape changed")
+    if completion.shape != completion_valid.shape:
+      raise FunctionalMappingError("P32 grouped completion mask shape changed")
+
+    full = jnp.concatenate((prompt, completion), axis=1)
+    valid = jnp.concatenate((prompt_valid, completion_valid), axis=1)
+    n_real = jnp.sum(valid, axis=1, dtype=jnp.int32)
+    prompt_length = jnp.sum(prompt_valid, axis=1, dtype=jnp.int32)
+    completion_length = jnp.sum(
+        completion_valid, axis=1, dtype=jnp.int32
+    )
+    host_n_real = np.asarray(jax.device_get(n_real), dtype=np.int32)
+    host_prompt_length = np.asarray(
+        jax.device_get(prompt_length), dtype=np.int32
+    )
+    host_completion_length = np.asarray(
+        jax.device_get(completion_length), dtype=np.int32
+    )
+    if np.any(host_n_real < 2) or np.any(host_prompt_length < 1) or np.any(
+        host_completion_length < 1
+    ):
+      raise FunctionalMappingError(
+          "P32 grouped reverse requires nonempty prompt/completion on every "
+          f"rank: n={host_n_real.tolist()} "
+          f"prompt={host_prompt_length.tolist()} "
+          f"completion={host_completion_length.tolist()}"
+      )
+    if np.any(host_n_real > self._max_model_len):
+      raise FunctionalMappingError(
+          "P32 grouped sequence exceeds the model limit: "
+          f"n={host_n_real.tolist()} max={self._max_model_len}"
+      )
+    num_chunks = int(
+        (int(host_n_real.max()) + self._sequence_bucket - 1)
+        // self._sequence_bucket
+    )
+    padded_width = num_chunks * self._sequence_bucket
+
+    def pack_row(full_row, valid_row, count):
+      order = jnp.nonzero(valid_row, size=padded_width, fill_value=0)[0]
+      active = jnp.arange(padded_width, dtype=jnp.int32) < count
+      return jnp.where(
+          active, full_row[order], jnp.asarray(0, full_row.dtype)
+      )
+
+    packed_ids = jax.vmap(pack_row)(full, valid, n_real)
+    next_ids = jnp.concatenate(
+        (
+            packed_ids[:, 1:],
+            jnp.zeros((self._data_size, 1), packed_ids.dtype),
+        ),
+        axis=1,
+    )
+    completion_ordinal = (
+        jnp.cumsum(completion_valid, axis=1, dtype=jnp.int32) - 1
+    )
+    source_rows = jnp.clip(
+        prompt_length[:, None] + completion_ordinal - 1,
+        0,
+        padded_width - 1,
+    )
+    return {
+        "packed_ids": packed_ids,
+        "next_ids": next_ids,
+        "source_rows": source_rows,
+        "completion_valid": completion_valid,
+        "n_real": n_real,
+        "host_n_real": tuple(int(value) for value in host_n_real),
+        "num_chunks": num_chunks,
+        "temperature": jnp.asarray(temperature, jnp.float32),
+    }
+
+  def _p32_group_chunk_inputs(self, spec, chunk_index):
+    """Constructs one global-M engine call from two local-M sequences."""
+    chunk_index = int(chunk_index)
+    chunk_start = chunk_index * self._sequence_bucket
+    rows = jnp.arange(self._sequence_bucket, dtype=jnp.int32)
+    q_len = jnp.clip(
+        spec["n_real"] - chunk_start, 0, self._sequence_bucket
+    )
+    kv_len = jnp.where(
+        q_len > 0,
+        jnp.minimum(spec["n_real"], chunk_start + self._sequence_bucket),
+        0,
+    )
+    chunk_ids_group = spec["packed_ids"][
+        :, chunk_start : chunk_start + self._sequence_bucket
+    ]
+    chunk_targets_group = spec["next_ids"][
+        :, chunk_start : chunk_start + self._sequence_bucket
+    ]
+    positions_group = jnp.where(
+        rows[None, :] < q_len[:, None], chunk_start + rows[None, :], 0
+    )
+    (
+        block_tables,
+        seq_lens,
+        query_start,
+        request_distribution,
+    ) = _canonical_dp_attention_metadata_arrays(
+        data_size=self._data_size,
+        max_num_reqs=self._max_num_reqs,
+        blocks_per_req=self._blocks_per_req,
+        q_len=q_len,
+        kv_len=kv_len,
+    )
+    metadata = self._metadata_cls(
+        input_positions=self._engine_array(positions_group.reshape(-1)),
+        block_tables=self._engine_array(block_tables),
+        seq_lens=self._engine_array(seq_lens),
+        query_start_loc=self._engine_array(query_start),
+        request_distribution=self._engine_array(request_distribution),
+    )
+    metadata.padded_num_reqs = self._max_num_reqs
+    return (
+        self._engine_array(chunk_ids_group.reshape(-1)),
+        self._engine_array(chunk_targets_group.reshape(-1)),
+        metadata,
+    )
+
+  def _p32_forward_group(
+      self, segmented, engine_leaves, spec, *, keep_cache_inputs
+  ):
+    """Runs two independent DP-rank sequences through segmented Qwen."""
+    caches = tuple(self._fresh_caches())
+    cache_inputs = []
+    chunk_logps = []
+    chunk_entropies = []
+    counts = {
+        "embed_forward": 0,
+        "layer_forward": 0,
+        "norm_forward": 0,
+        "head_forward": 0,
+        "processed_forward": 0,
+    }
+    with self._set_forward_context(None, self._runner.vllm_config):
+      for chunk_index in range(spec["num_chunks"]):
+        input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
+            spec, chunk_index
+        )
+        if keep_cache_inputs:
+          cache_inputs.append(caches)
+        hidden = segmented.run_embed_forward(
+            input_ids, state_leaves=engine_leaves
+        )
+        counts["embed_forward"] += 1
+        next_caches = []
+        for layer_index, cache in enumerate(caches):
+          cache, hidden = segmented.run_layer_forward(
+              layer_index,
+              engine_leaves,
+              cache,
+              hidden,
+              metadata,
+          )
+          next_caches.append(cache)
+          counts["layer_forward"] += 1
+        caches = tuple(next_caches)
+        normalized = segmented.run_norm_forward(
+            hidden, state_leaves=engine_leaves
+        )
+        counts["norm_forward"] += 1
+        raw_logits = segmented.run_head_forward(
+            normalized, state_leaves=engine_leaves
+        )
+        logits = raw_logits.astype(jnp.float32)
+        counts["head_forward"] += 1
+        target_logps, entropy = self._p28_processed_rows_fn(
+            logits, target_ids, spec["temperature"]
+        )
+        counts["processed_forward"] += 1
+        chunk_logps.append(
+            target_logps.reshape(self._data_size, self._sequence_bucket)
+        )
+        chunk_entropies.append(
+            entropy.reshape(self._data_size, self._sequence_bucket)
+        )
+
+    flat_logps = jnp.concatenate(chunk_logps, axis=1)
+    flat_entropies = jnp.concatenate(chunk_entropies, axis=1)
+    completion_valid = spec["completion_valid"]
+    logps = jnp.where(
+        completion_valid,
+        jnp.take_along_axis(flat_logps, spec["source_rows"], axis=1),
+        jnp.zeros(completion_valid.shape, jnp.float32),
+    )
+    entropy = jnp.where(
+        completion_valid,
+        jnp.take_along_axis(flat_entropies, spec["source_rows"], axis=1),
+        jnp.zeros(completion_valid.shape, jnp.float32),
+    )
+    return {
+        "logps": logps,
+        "entropy": entropy,
+        "cache_inputs": tuple(cache_inputs),
+        "final_caches": caches if keep_cache_inputs else (),
+        "counts": counts,
+    }
+
+  def _p32_reverse_group(
+      self, segmented, engine_leaves, spec, dlogps, dentropy
+  ):
+    """Reverses one pair of rank-local sequences by layer and chunk."""
+    replay = self._p32_forward_group(
+        segmented, engine_leaves, spec, keep_cache_inputs=True
+    )
+    padded_width = spec["num_chunks"] * self._sequence_bucket
+    completion_valid = spec["completion_valid"]
+    rank_rows = jnp.arange(self._data_size, dtype=jnp.int32)[:, None]
+    flat_dlogps = jnp.zeros(
+        (self._data_size, padded_width), jnp.float32
+    ).at[rank_rows, spec["source_rows"]].add(
+        jnp.where(completion_valid, dlogps, 0.0)
+    )
+    flat_dentropy = jnp.zeros(
+        (self._data_size, padded_width), jnp.float32
+    ).at[rank_rows, spec["source_rows"]].add(
+        jnp.where(completion_valid, dentropy, 0.0)
+    )
+
+    tree_zeros = lambda tree: jax.tree.map(jnp.zeros_like, tree)
+    tree_add = lambda left, right: jax.tree.map(
+        lambda a, b: a + b, left, right
+    )
+    layer_grads = [
+        tree_zeros(leaves)
+        for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
+    ]
+    embed_grad = tree_zeros(segmented._embed_local_leaves)  # pylint: disable=protected-access
+    norm_grad = tree_zeros(segmented._norm_local_leaves)  # pylint: disable=protected-access
+    head_grad = tree_zeros(segmented._head_local_leaves)  # pylint: disable=protected-access
+    dcache_carry = tuple(
+        tree_zeros(cache) for cache in replay["final_caches"]
+    )
+    counts = dict(replay["counts"])
+    counts.update({
+        "embed_pullback": 0,
+        "layer_pullback": 0,
+        "norm_pullback": 0,
+        "head_pullback": 0,
+        "processed_pullback": 0,
+    })
+
+    with self._set_forward_context(None, self._runner.vllm_config):
+      for chunk_index in reversed(range(spec["num_chunks"])):
+        input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
+            spec, chunk_index
+        )
+        caches = replay["cache_inputs"][chunk_index]
+        hidden = segmented.run_embed_forward(
+            input_ids, state_leaves=engine_leaves
+        )
+        counts["embed_forward"] += 1
+        layer_tape = []
+        for layer_index, cache in enumerate(caches):
+          layer_tape.append((cache, hidden))
+          _, hidden = segmented.run_layer_forward(
+              layer_index,
+              engine_leaves,
+              cache,
+              hidden,
+              metadata,
+          )
+          counts["layer_forward"] += 1
+        pre_norm = hidden
+        normalized = segmented.run_norm_forward(
+            pre_norm, state_leaves=engine_leaves
+        )
+        counts["norm_forward"] += 1
+        raw_logits = segmented.run_head_forward(
+            normalized, state_leaves=engine_leaves
+        )
+        logits = raw_logits.astype(jnp.float32)
+        counts["head_forward"] += 1
+        start = chunk_index * self._sequence_bucket
+        dchunk_logps = flat_dlogps[
+            :, start : start + self._sequence_bucket
+        ].reshape(-1)
+        dchunk_entropy = flat_dentropy[
+            :, start : start + self._sequence_bucket
+        ].reshape(-1)
+        dlogits = self._p28_processed_rows_pullback_fn(
+            logits,
+            target_ids,
+            spec["temperature"],
+            dchunk_logps,
+            dchunk_entropy,
+        ).astype(raw_logits.dtype)
+        counts["processed_pullback"] += 1
+        local_head_grad, dnormalized = segmented.run_head_pullback(
+            normalized, dlogits, state_leaves=engine_leaves
+        )
+        counts["head_pullback"] += 1
+        head_grad = tree_add(head_grad, local_head_grad)
+        local_norm_grad, dhidden = segmented.run_norm_pullback(
+            pre_norm, dnormalized, state_leaves=engine_leaves
+        )
+        counts["norm_pullback"] += 1
+        norm_grad = tree_add(norm_grad, local_norm_grad)
+
+        previous_cache_carry = [None] * len(layer_tape)
+        for layer_index in reversed(range(len(layer_tape))):
+          cache_in, hidden_in = layer_tape[layer_index]
+          local_grad, dcache, dhidden = segmented.run_block_pullback(
+              layer_index,
+              cache_in,
+              hidden_in,
+              metadata,
+              dcache_carry[layer_index],
+              dhidden,
+              state_leaves=engine_leaves,
+          )
+          layer_grads[layer_index] = tree_add(
+              layer_grads[layer_index], local_grad
+          )
+          previous_cache_carry[layer_index] = dcache
+          counts["layer_pullback"] += 1
+        dcache_carry = tuple(previous_cache_carry)
+        local_embed_grad = segmented.run_embed_pullback(
+            input_ids, dhidden, state_leaves=engine_leaves
+        )
+        embed_grad = tree_add(embed_grad, local_embed_grad)
+        counts["embed_pullback"] += 1
+
+    return {
+        "engine_gradients": segmented.assemble_full_state_gradient(
+            embed=embed_grad,
+            layers=tuple(layer_grads),
+            norm=norm_grad,
+            head=head_grad,
+        ),
+        "initial_cache_cotangents": dcache_carry,
+        "counts": counts,
+        "replay_logps": replay["logps"],
+        "replay_entropy": replay["entropy"],
+    }
+
+  def segmented_dp2_grpo_value_and_grad(
+      self,
+      *,
+      trainer_state,
+      train_example,
+      algo_config,
+      pad_id,
+      eos_id,
+      gradient_microbatch_sink=None,
+  ):
+    """Runs the D3b0 grouped segmented reverse without an optimizer commit.
+
+    With a sink, every two-trajectory group is streamed into an external
+    donated accumulator and its device buffers are released before the next
+    reverse. Without a sink, the method retains the legacy materialized sum
+    for small tests only. D3b0 deliberately makes no claim that rank-local
+    contributions or the final DP reduction are observable; those remain the
+    separate D3b1 gate.
+    """
+    del eos_id
+    _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
+        trainer_state, train_example
+    )
+    if os.environ.get("CANON_P32_D3B_SEGMENTED", "") != "1":
+      raise FunctionalMappingError(
+          "P32 D3b0 requires CANON_P32_D3B_SEGMENTED=1"
+      )
+    if os.environ.get("CANON_P32_DP2TP2", "") != "1" or self._data_size != 2:
+      raise FunctionalMappingError(
+          "P32 D3b0 requires the admitted DP2xTP2 engine contract"
+      )
+    if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") != "1":
+      raise FunctionalMappingError(
+          "P32 D3b0 requires CANON_P28_SEGMENTED_TRAIN=1"
+      )
+    if getattr(train_example, "segment_ids", None) is not None:
+      raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
+
+    prompts = jnp.asarray(train_example.prompt_ids)
+    completions = jnp.asarray(train_example.completion_ids)
+    prompt_masks = jnp.asarray(train_example.prompt_mask, dtype=jnp.bool_)
+    completion_masks = jnp.asarray(
+        train_example.completion_mask, dtype=jnp.bool_
+    )
+    completion_valid_value = getattr(
+        train_example, "completion_valid_mask", None
+    )
+    completion_valid_masks = (
+        completion_masks
+        if completion_valid_value is None
+        else jnp.asarray(completion_valid_value, dtype=jnp.bool_)
+    )
+    if prompts.shape != prompt_masks.shape:
+      raise FunctionalMappingError("P32 D3b0 prompt batch/mask mismatch")
+    if completions.shape != completion_masks.shape:
+      raise FunctionalMappingError("P32 D3b0 completion batch/mask mismatch")
+    if completions.shape != completion_valid_masks.shape:
+      raise FunctionalMappingError(
+          "P32 D3b0 completion batch/valid-mask mismatch"
+      )
+    if bool(np.asarray(jax.device_get(jnp.any(
+        completion_masks & ~completion_valid_masks
+    )))):
+      raise FunctionalMappingError(
+          "P32 D3b0 action mask is not a subset of completion validity"
+      )
+    if prompts.shape[0] != completions.shape[0]:
+      raise FunctionalMappingError("P32 D3b0 prompt/completion batch mismatch")
+    if int(prompts.shape[0]) != 32:
+      raise FunctionalMappingError(
+          f"P32 D3b0 requires 32 trajectories, got {prompts.shape[0]}"
+      )
+    if (int(prompts.shape[1]), int(completions.shape[1])) != (4096, 2048):
+      raise FunctionalMappingError(
+          "P32 D3b0 requires the FrozenLake 4096/2048 token contract, got "
+          f"{prompts.shape[1]}/{completions.shape[1]}"
+      )
+
+    grouped_inputs = jax.tree.map(
+        self._group_batch_rows,
+        (
+            prompts,
+            completions,
+            prompt_masks,
+            completion_valid_masks,
+        ),
+    )
+    if grouped_inputs[0].shape[:2] != (16, 2):
+      raise FunctionalMappingError(
+          "P32 D3b0 rank-major grouping changed: "
+          f"{grouped_inputs[0].shape[:2]} != (16, 2)"
+      )
+
+    model_config = self._runner.model_config
+    mapped = map_trainer_state_to_engine_leaves(
+        trainer_state=trainer_state,
+        engine_state_contract=self._engine_state_contract,
+        key_mappings=self._key_mappings,
+        transpose_keys=self._transpose_keys,
+        key_mapping_hook_fns=self._hook_fns,
+        num_kv_heads=model_config.get_total_num_kv_heads(),
+        head_dim=model_config.get_head_size(),
+        tp_size=self._tp_size,
+    )
+    engine_leaves = tuple(mapped.leaves)
+    segmented = getattr(self, "_p32_d3b_segmented_engine", None)
+    if segmented is None:
+      segmented = build_p28_segmented_engine_forward(self._runner)
+      self._p32_d3b_segmented_engine = segmented
+      print(
+          "[P32.D3B0] segmented_engine_ready data=2 groups=16 "
+          "local_batch=16 local_M=256 global_M=512",
+          flush=True,
+      )
+
+    specs = tuple(
+        self._p32_group_spec(
+            grouped_inputs[0][index],
+            grouped_inputs[1][index],
+            grouped_inputs[2][index],
+            grouped_inputs[3][index],
+            algo_config.temperature,
+        )
+        for index in range(16)
+    )
+    forwards = []
+    for index, spec in enumerate(specs):
+      forward = self._p32_forward_group(
+          segmented, engine_leaves, spec, keep_cache_inputs=False
+      )
+      forward["logps"].block_until_ready()
+      forwards.append(forward)
+      print(
+          "[P32.D3B0] forward_group_done "
+          f"group={index + 1}/16 rows=({index},{index + 16}) "
+          f"n_real={spec['host_n_real']}",
+          flush=True,
+      )
+    forwards = tuple(forwards)
+    grouped_logps = jnp.stack(
+        tuple(result["logps"] for result in forwards), axis=0
+    ).astype(jnp.float32)
+    grouped_entropy = jnp.stack(
+        tuple(result["entropy"] for result in forwards), axis=0
+    ).astype(jnp.float32)
+    per_token_logps = self._ungroup_batch_rows(grouped_logps)
+    token_entropy = self._ungroup_batch_rows(grouped_entropy)
+
+    from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
+
+    def unreduced_loss(logps, entropy):
+      return algo_core.grpo_loss_from_precomputed_logps(
+          logps, entropy, train_example, algo_config
+      ).primary_loss.unreduced_sum
+
+    unreduced_value, loss_pullback = jax.vjp(
+        unreduced_loss, per_token_logps, token_entropy
+    )
+    dlogps, dentropy = loss_pullback(jnp.ones_like(unreduced_value))
+    grouped_dlogps = self._group_batch_rows(dlogps)
+    grouped_dentropy = self._group_batch_rows(dentropy)
+    loss_output = algo_core.grpo_loss_from_precomputed_logps(
+        per_token_logps, token_entropy, train_example, algo_config
+    )
+    scale = loss_output.primary_loss.compute_scale()
+
+    trainer_gradients = None
+    reports = []
+    for index, spec in enumerate(specs):
+      reverse = self._p32_reverse_group(
+          segmented,
+          engine_leaves,
+          spec,
+          grouped_dlogps[index],
+          grouped_dentropy[index],
+      )
+      if not bool(np.asarray(jnp.array_equal(
+          reverse["replay_logps"], grouped_logps[index]
+      ))):
+        raise FunctionalMappingError(
+            f"P32 D3b0 group {index} replay logprobs changed"
+        )
+      one_gradient = self.map_engine_cotangents_to_trainer_state(
+          trainer_state, reverse["engine_gradients"]
+      )
+      one_gradient = jax.tree.map(
+          lambda value: value.astype(jnp.float32), one_gradient
+      )
+      leaves = jax.tree.leaves(one_gradient)
+      cache_leaves = jax.tree.leaves(reverse["initial_cache_cotangents"])
+      reports.append({
+          "group": index,
+          "trajectory_rows": (index, index + 16),
+          "n_real": spec["host_n_real"],
+          "counts": reverse["counts"],
+          "gradient_finite": all(
+              bool(np.asarray(jnp.all(jnp.isfinite(value))))
+              for value in leaves
+          ),
+          "gradient_nonzero": sum(
+              int(np.asarray(jnp.count_nonzero(value))) for value in leaves
+          ),
+          "initial_cache_cotangent_nonzero": sum(
+              int(np.asarray(jnp.count_nonzero(value)))
+              for value in cache_leaves
+          ),
+      })
+      print(
+          "[P32.D3B0] reverse_group_done "
+          f"group={index + 1}/16 rows=({index},{index + 16}) "
+          f"gradient_nonzero={reports[-1]['gradient_nonzero']}",
+          flush=True,
+      )
+      if gradient_microbatch_sink is None:
+        trainer_gradients = (
+            one_gradient
+            if trainer_gradients is None
+            else jax.tree.map(
+                lambda total, value: total + value,
+                trainer_gradients,
+                one_gradient,
+            )
+        )
+      else:
+        gradient_microbatch_sink(
+            index,
+            one_gradient,
+            scale * jnp.asarray(16.0, scale.dtype),
+        )
+        # The sink blocks after donating the persistent accumulator. The
+        # per-group gradient and reverse tape are now dead; explicit deletion
+        # prevents Python reference lifetime from retaining an entire second
+        # 32B gradient tree into the next group.
+        seen = set()
+        for value in jax.tree.leaves((one_gradient, reverse)):
+          if isinstance(value, jax.Array) and id(value) not in seen:
+            seen.add(id(value))
+            if not value.is_deleted():
+              value.delete()
+    if gradient_microbatch_sink is None:
+      if trainer_gradients is None:
+        raise FunctionalMappingError("P32 D3b0 emitted no grouped gradient")
+      trainer_gradients = jax.tree.map(
+          lambda value: value * scale, trainer_gradients
+      )
+    return {
+        "loss_output": loss_output,
+        "loss": loss_output.primary_loss.compute(),
+        "per_token_logps": per_token_logps,
+      "token_entropy": token_entropy,
+      "gradients": trainer_gradients,
+      "gradient_microbatches": (
+          0 if gradient_microbatch_sink is None else len(reports)
+      ),
+        "reports": tuple(reports),
+        "forward_counts": tuple(result["counts"] for result in forwards),
+        "dp_reduction_visibility": "NOT_MEASURED",
+        "rank_local_gradient_fingerprints": "NOT_MEASURED",
+        "replica_equality": "NOT_MEASURED",
     }
 
   def segmented_grpo_value_and_grad(
@@ -2495,7 +3567,7 @@ class Qwen3EngineForwardAdapter:
     print(f"[P28.G5B] PASS {result}", flush=True)
     return result
 
-  def _one_sequence(
+  def _sequence_group(
       self,
       engine_leaves,
       prompt,
@@ -2507,37 +3579,46 @@ class Qwen3EngineForwardAdapter:
       *,
       return_diagnostics=False,
   ):
-    """Runs one packed sequence as cache-carried fixed-M engine chunks.
+    """Runs one independent packed sequence on every engine data rank.
 
-    The static trainer widths may exceed M=256, but every engine call keeps the
-    admitted M=256 program.  Prediction targets are indexed from the packed
-    *full* sequence so the final row of one chunk predicts the first token of
-    the next chunk rather than wrapping within the chunk.
+    The group axis is ordered by data rank. Each rank receives one local-M
+    sequence, local cache pages, and local request metadata. The global engine
+    call retains the admitted M contract and never mixes attention contexts.
     """
-    full = jnp.concatenate((prompt, completion), axis=0)
-    valid = jnp.concatenate((prompt_valid, completion_valid), axis=0)
-    n_real = jnp.sum(valid, dtype=jnp.int32)
-    num_chunks = (full.shape[0] + self._bucket - 1) // self._bucket
-    padded_width = num_chunks * self._bucket
-    order = jnp.nonzero(valid, size=padded_width, fill_value=0)[0]
-    packed_active = jnp.arange(padded_width, dtype=jnp.int32) < n_real
-    packed_ids = jnp.where(
-        packed_active, full[order], jnp.asarray(0, full.dtype)
-    )
+    if prompt.ndim != 2 or prompt.shape[0] != self._data_size:
+      raise FunctionalMappingError(
+          "sequence group must contain one row per engine data rank: "
+          f"{prompt.shape} vs data={self._data_size}"
+      )
+    full = jnp.concatenate((prompt, completion), axis=1)
+    valid = jnp.concatenate((prompt_valid, completion_valid), axis=1)
+    n_real = jnp.sum(valid, axis=1, dtype=jnp.int32)
+    num_chunks = (
+        full.shape[1] + self._sequence_bucket - 1
+    ) // self._sequence_bucket
+    padded_width = num_chunks * self._sequence_bucket
+
+    def pack_row(full_row, valid_row, count):
+      order = jnp.nonzero(valid_row, size=padded_width, fill_value=0)[0]
+      active = jnp.arange(padded_width, dtype=jnp.int32) < count
+      return jnp.where(
+          active, full_row[order], jnp.asarray(0, full_row.dtype)
+      )
+
+    packed_ids = jax.vmap(pack_row)(full, valid, n_real)
     next_ids = jnp.concatenate(
-        (packed_ids[1:], jnp.zeros((1,), packed_ids.dtype)), axis=0
+        (
+            packed_ids[:, 1:],
+            jnp.zeros((self._data_size, 1), packed_ids.dtype),
+        ),
+        axis=1,
     )
 
-    block_tables = jnp.zeros(
-        (self._max_num_reqs, self._blocks_per_req), jnp.int32
+    prompt_len = jnp.sum(prompt_valid, axis=1, dtype=jnp.int32)
+    completion_ordinal = (
+        jnp.cumsum(completion_valid, axis=1, dtype=jnp.int32) - 1
     )
-    block_tables = block_tables.at[0].set(
-        jnp.arange(self._blocks_per_req, dtype=jnp.int32)
-    )
-    request_distribution = jnp.asarray((0, 0, 1), jnp.int32)
-    prompt_len = jnp.sum(prompt_valid, dtype=jnp.int32)
-    completion_ordinal = jnp.cumsum(completion_valid, dtype=jnp.int32) - 1
-    token_positions = prompt_len + completion_ordinal
+    token_positions = prompt_len[:, None] + completion_ordinal
     source_rows = jnp.clip(token_positions - 1, 0, padded_width - 1)
 
     sampling_metadata = self._sampling_metadata_cls(
@@ -2553,47 +3634,71 @@ class Qwen3EngineForwardAdapter:
         do_sampling=True,
         logprobs=True,
     )
-    block_tables_flat = self._engine_array(block_tables.reshape(-1))
-    request_distribution = self._engine_array(request_distribution)
     caches = self._fresh_caches()
     chunk_logps = []
     chunk_entropies = []
     if return_diagnostics:
-      completion_width = completion.shape[0]
+      completion_width = completion.shape[1]
       raw_rows = jnp.zeros(
-          (completion_width, self._vocab_size), jnp.float32
+          (self._data_size, completion_width, self._vocab_size),
+          jnp.float32,
       )
       processed_rows = jnp.zeros_like(raw_rows)
-      diagnostic_target_ids = jnp.zeros((completion_width,), jnp.int32)
-      raw_targets = jnp.zeros((completion_width,), jnp.float32)
-      processed_targets = jnp.zeros((completion_width,), jnp.float32)
+      diagnostic_target_ids = jnp.zeros(
+          (self._data_size, completion_width), jnp.int32
+      )
+      raw_targets = jnp.zeros(
+          (self._data_size, completion_width), jnp.float32
+      )
+      processed_targets = jnp.zeros_like(raw_targets)
 
     print(
-        "[PATHTRACE] CANON_ADAPTER_FIXED_M_CHUNKS "
-        f"static_width={full.shape[0]} chunks={num_chunks} M={self._bucket}",
+        "[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS "
+        f"data={self._data_size} static_width={full.shape[1]} "
+        f"chunks={num_chunks} global_M={self._bucket} "
+        f"local_M={self._sequence_bucket}",
         flush=True,
     )
     for chunk_index in range(num_chunks):
-      chunk_start = chunk_index * self._bucket
-      rows = jnp.arange(self._bucket, dtype=jnp.int32)
-      q_len = jnp.clip(n_real - chunk_start, 0, self._bucket)
-      kv_len = jnp.minimum(n_real, chunk_start + self._bucket)
-      chunk_ids = packed_ids[chunk_start : chunk_start + self._bucket]
-      chunk_targets = next_ids[chunk_start : chunk_start + self._bucket]
-      positions = jnp.where(rows < q_len, chunk_start + rows, 0)
-      query_start = jnp.zeros((self._max_num_reqs + 1,), jnp.int32)
-      query_start = query_start.at[1:].set(q_len)
-      seq_lens = jnp.zeros((self._max_num_reqs,), jnp.int32)
-      seq_lens = seq_lens.at[0].set(kv_len)
-      chunk_ids = self._engine_array(chunk_ids)
-      chunk_targets = self._engine_array(chunk_targets)
-      positions = self._engine_array(positions)
+      chunk_start = chunk_index * self._sequence_bucket
+      rows = jnp.arange(self._sequence_bucket, dtype=jnp.int32)
+      q_len = jnp.clip(
+          n_real - chunk_start, 0, self._sequence_bucket
+      )
+      active = q_len > 0
+      kv_len = jnp.where(
+          active, jnp.minimum(n_real, chunk_start + self._sequence_bucket), 0
+      )
+      chunk_ids_group = packed_ids[
+          :, chunk_start : chunk_start + self._sequence_bucket
+      ]
+      chunk_targets_group = next_ids[
+          :, chunk_start : chunk_start + self._sequence_bucket
+      ]
+      positions_group = jnp.where(
+          rows[None, :] < q_len[:, None], chunk_start + rows[None, :], 0
+      )
+      (
+          block_tables,
+          seq_lens,
+          query_start,
+          request_distribution,
+      ) = _canonical_dp_attention_metadata_arrays(
+          data_size=self._data_size,
+          max_num_reqs=self._max_num_reqs,
+          blocks_per_req=self._blocks_per_req,
+          q_len=q_len,
+          kv_len=kv_len,
+      )
+      chunk_ids = self._engine_array(chunk_ids_group.reshape(-1))
+      chunk_targets = self._engine_array(chunk_targets_group.reshape(-1))
+      positions = self._engine_array(positions_group.reshape(-1))
       metadata = self._metadata_cls(
           input_positions=positions,
-          block_tables=block_tables_flat,
+          block_tables=self._engine_array(block_tables),
           seq_lens=self._engine_array(seq_lens),
           query_start_loc=self._engine_array(query_start),
-          request_distribution=request_distribution,
+          request_distribution=self._engine_array(request_distribution),
       )
       metadata.padded_num_reqs = self._max_num_reqs
 
@@ -2629,36 +3734,46 @@ class Qwen3EngineForwardAdapter:
         )
         target_logprobs = self._processed_target_logprobs(
             processed_logits, chunk_targets
-        )
+        ).reshape(self._data_size, self._sequence_bucket)
         normalized = jax.nn.log_softmax(processed_logits, axis=-1)
         probabilities = jnp.exp(normalized)
         entropy_rows = -jnp.sum(
             jnp.where(probabilities > 0, probabilities * normalized, 0.0),
-            axis=-1,
-        )
+          axis=-1,
+        ).reshape(self._data_size, self._sequence_bucket)
         if not return_diagnostics:
           return next_caches, (target_logprobs, entropy_rows)
 
         local_rows = jnp.clip(
-            source_rows - chunk_start, 0, self._bucket - 1
+            source_rows - chunk_start, 0, self._sequence_bucket - 1
         )
         belongs = (
             completion_valid
             & (source_rows >= chunk_start)
-            & (source_rows < chunk_start + self._bucket)
+            & (source_rows < chunk_start + self._sequence_bucket)
         )
-        row_mask = belongs[:, None]
-        selected_raw = jnp.take(logits, local_rows, axis=0)
-        selected_processed = jnp.take(
-            processed_logits, local_rows, axis=0
+        row_mask = belongs[..., None]
+        logits_group = logits.reshape(
+            self._data_size, self._sequence_bucket, self._vocab_size
         )
-        selected_target_ids = jnp.take(chunk_targets, local_rows, axis=0)
+        processed_group = processed_logits.reshape(
+            self._data_size, self._sequence_bucket, self._vocab_size
+        )
+        selected_raw = jax.vmap(lambda values, index: values[index])(
+            logits_group, local_rows
+        )
+        selected_processed = jax.vmap(
+            lambda values, index: values[index]
+        )(processed_group, local_rows)
+        selected_target_ids = jax.vmap(
+            lambda values, index: values[index]
+        )(chunk_targets_group, local_rows)
         selected_raw_targets = jnp.take_along_axis(
-            selected_raw, selected_target_ids[:, None], axis=-1
-        )[:, 0]
+            selected_raw, selected_target_ids[..., None], axis=-1
+        )[..., 0]
         selected_processed_targets = jnp.take_along_axis(
-            selected_processed, selected_target_ids[:, None], axis=-1
-        )[:, 0]
+            selected_processed, selected_target_ids[..., None], axis=-1
+        )[..., 0]
         return next_caches, (
             target_logprobs,
             entropy_rows,
@@ -2670,25 +3785,36 @@ class Qwen3EngineForwardAdapter:
         )
 
       def skip_empty(inactive_caches):
-        zero_rows = jnp.zeros((self._bucket,), jnp.float32)
+        zero_rows = jnp.zeros(
+            (self._data_size, self._sequence_bucket), jnp.float32
+        )
         if not return_diagnostics:
           return inactive_caches, (zero_rows, zero_rows)
         zero_action_rows = jnp.zeros(
-            (completion.shape[0], self._vocab_size), jnp.float32
+            (
+                self._data_size,
+                completion.shape[1],
+                self._vocab_size,
+            ),
+            jnp.float32,
         )
-        zero_actions = jnp.zeros((completion.shape[0],), jnp.float32)
+        zero_actions = jnp.zeros(
+            (self._data_size, completion.shape[1]), jnp.float32
+        )
         return inactive_caches, (
             zero_rows,
             zero_rows,
             zero_action_rows,
             zero_action_rows,
-            jnp.zeros((completion.shape[0],), jnp.int32),
+            jnp.zeros(
+                (self._data_size, completion.shape[1]), jnp.int32
+            ),
             zero_actions,
             zero_actions,
         )
 
       caches, chunk_output = jax.lax.cond(
-          q_len > 0, run_nonempty, skip_empty, caches
+          jnp.any(active), run_nonempty, skip_empty, caches
       )
       chunk_logps.append(chunk_output[0])
       chunk_entropies.append(chunk_output[1])
@@ -2699,17 +3825,17 @@ class Qwen3EngineForwardAdapter:
         raw_targets = raw_targets + chunk_output[5]
         processed_targets = processed_targets + chunk_output[6]
 
-    target_logprobs = jnp.concatenate(chunk_logps, axis=0)
-    entropy_rows = jnp.concatenate(chunk_entropies, axis=0)
-    logps = jnp.take(target_logprobs, source_rows, axis=0)
-    entropy = jnp.take(entropy_rows, source_rows, axis=0)
+    target_logprobs = jnp.concatenate(chunk_logps, axis=1)
+    entropy_rows = jnp.concatenate(chunk_entropies, axis=1)
+    logps = jnp.take_along_axis(target_logprobs, source_rows, axis=1)
+    entropy = jnp.take_along_axis(entropy_rows, source_rows, axis=1)
     zeros = jnp.zeros_like(logps)
     masked_logps = jnp.where(completion_valid, logps, zeros)
     masked_entropy = jnp.where(completion_valid, entropy, zeros)
     if not return_diagnostics:
       return masked_logps, masked_entropy
 
-    row_mask = completion_valid[:, None]
+    row_mask = completion_valid[..., None]
     diagnostics = {
         "target_ids": jnp.where(
             completion_valid, diagnostic_target_ids, 0
@@ -2725,6 +3851,42 @@ class Qwen3EngineForwardAdapter:
         ),
     }
     return masked_logps, masked_entropy, diagnostics
+
+  def _one_sequence(
+      self,
+      engine_leaves,
+      prompt,
+      completion,
+      prompt_valid,
+      completion_valid,
+      pad_id,
+      temperature,
+      *,
+      return_diagnostics=False,
+  ):
+    """Runs the retained data-size-one adapter contract."""
+    if self._data_size != 1:
+      raise FunctionalMappingError(
+          "one-sequence execution is invalid on a multi-rank data mesh"
+      )
+    result = self._sequence_group(
+        engine_leaves,
+        prompt[None, :],
+        completion[None, :],
+        prompt_valid[None, :],
+        completion_valid[None, :],
+        pad_id,
+        temperature,
+        return_diagnostics=return_diagnostics,
+    )
+    if not return_diagnostics:
+      return result[0][0], result[1][0]
+    logps, entropy, diagnostics = result
+    return (
+        logps[0],
+        entropy[0],
+        jax.tree.map(lambda value: value[0], diagnostics),
+    )
 
   def compute_per_token_logps(
       self,
@@ -2796,21 +3958,52 @@ class Qwen3EngineForwardAdapter:
         tp_size=self._tp_size,
     )
 
-    def body(rows):
-      prompt, completion, prompt_valid, completion_valid = rows
-      return self._one_sequence(
-          mapped.leaves,
-          prompt,
-          completion,
-          prompt_valid,
-          completion_valid,
-          pad_id,
-          temperature,
+    if self._data_size == 1:
+
+      def body(rows):
+        prompt, completion, prompt_valid, completion_valid = rows
+        return self._one_sequence(
+            mapped.leaves,
+            prompt,
+            completion,
+            prompt_valid,
+            completion_valid,
+            pad_id,
+            temperature,
+        )
+
+      logps, entropy = jax.lax.map(
+          body,
+          (prompt_tokens, completion_tokens, prompt_mask, completion_mask),
+      )
+    else:
+      grouped_inputs = jax.tree.map(
+          self._group_batch_rows,
+          (prompt_tokens, completion_tokens, prompt_mask, completion_mask),
       )
 
-    logps, entropy = jax.lax.map(
-        body, (prompt_tokens, completion_tokens, prompt_mask, completion_mask)
-    )
+      def grouped_body(rows):
+        prompt, completion, prompt_valid, completion_valid = rows
+        return self._sequence_group(
+            mapped.leaves,
+            prompt,
+            completion,
+            prompt_valid,
+            completion_valid,
+            pad_id,
+            temperature,
+        )
+
+      grouped_logps, grouped_entropy = jax.lax.map(
+          grouped_body, grouped_inputs
+      )
+      logps = self._ungroup_batch_rows(grouped_logps)
+      entropy = self._ungroup_batch_rows(grouped_entropy)
+      output_sharding = jax.sharding.NamedSharding(
+          self._runner.mesh, jax.sharding.PartitionSpec("data", None)
+      )
+      logps = jax.lax.with_sharding_constraint(logps, output_sharding)
+      entropy = jax.lax.with_sharding_constraint(entropy, output_sharding)
     if stop_gradient:
       logps = jax.lax.stop_gradient(logps)
       entropy = jax.lax.stop_gradient(entropy)
@@ -2890,9 +4083,34 @@ class Qwen3EngineForwardAdapter:
         tp_size=self._tp_size,
     )
 
-    def body(rows):
+    if self._data_size == 1:
+
+      def body(rows):
+        prompt, completion, prompt_valid, completion_valid = rows
+        return self._one_sequence(
+            mapped.leaves,
+            prompt,
+            completion,
+            prompt_valid,
+            completion_valid,
+            pad_id,
+            temperature,
+            return_diagnostics=True,
+        )
+
+      return jax.lax.map(
+          body,
+          (prompt_tokens, completion_tokens, prompt_mask, completion_mask),
+      )
+
+    grouped_inputs = jax.tree.map(
+        self._group_batch_rows,
+        (prompt_tokens, completion_tokens, prompt_mask, completion_mask),
+    )
+
+    def grouped_body(rows):
       prompt, completion, prompt_valid, completion_valid = rows
-      return self._one_sequence(
+      return self._sequence_group(
           mapped.leaves,
           prompt,
           completion,
@@ -2903,9 +4121,8 @@ class Qwen3EngineForwardAdapter:
           return_diagnostics=True,
       )
 
-    return jax.lax.map(
-        body, (prompt_tokens, completion_tokens, prompt_mask, completion_mask)
-    )
+    grouped = jax.lax.map(grouped_body, grouped_inputs)
+    return jax.tree.map(self._ungroup_batch_rows, grouped)
 
 
 def _flat_path(path: Sequence[Any]) -> str:

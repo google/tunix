@@ -21,6 +21,8 @@ from unittest import mock
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
+import jax.numpy as jnp
+import numpy as np
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
@@ -33,6 +35,52 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 
 class AgenticRLLearnerTest(parameterized.TestCase):
+
+  def test_p32_compact_d3b0_output_preserves_values_and_deletes_arrays(self):
+    loss = jnp.asarray(1.25, jnp.float32)
+    logps = jnp.arange(12, dtype=jnp.float32).reshape(3, 4)
+    entropy = jnp.ones((3, 4), jnp.float32)
+    scratch = jnp.arange(17, dtype=jnp.float32)
+    output = {
+        "loss": loss,
+        "per_token_logps": logps,
+        "token_entropy": entropy,
+        "loss_output": {"scratch": scratch},
+        "reports": ({"group": 0},),
+        "gradient_microbatches": 16,
+    }
+
+    compact, deleted_arrays, deleted_bytes = (
+        agentic_rl_learner._p32_compact_d3b0_output(output)
+    )
+
+    self.assertTrue(np.array_equal(compact["loss"], np.asarray(1.25)))
+    self.assertTrue(
+        np.array_equal(
+            compact["per_token_logps"],
+            np.arange(12, dtype=np.float32).reshape(3, 4),
+        )
+    )
+    self.assertEqual(compact["reports"], ({"group": 0},))
+    self.assertEqual(compact["gradient_microbatches"], 16)
+    self.assertEqual(deleted_arrays, 4)
+    self.assertEqual(deleted_bytes, (1 + 12 + 12 + 17) * 4)
+    self.assertTrue(all(value.is_deleted() for value in (
+        loss, logps, entropy, scratch
+    )))
+
+  def test_p32_prompt_placement_accepts_four_intact_groups(self):
+    prompts = np.repeat(np.arange(4, dtype=np.int32)[:, None], 8, axis=0)
+    report = agentic_rl_learner._p32_prompt_placement(prompts)
+    self.assertEqual(report["rank_counts"], [16, 16])
+    self.assertEqual(report["rank_group_ids"], [[0, 1], [2, 3]])
+    self.assertLen(report["group_hashes"], 4)
+
+  def test_p32_prompt_placement_rejects_split_group(self):
+    prompts = np.repeat(np.arange(4, dtype=np.int32)[:, None], 8, axis=0)
+    prompts[[7, 8]] = prompts[[8, 7]]
+    with self.assertRaisesRegex(ValueError, "prompt group 0 is not contiguous"):
+      agentic_rl_learner._p32_prompt_placement(prompts)
 
   def test_p31_segmented_eval_uses_preupdate_step_exactly_once(self):
     self.assertEqual(

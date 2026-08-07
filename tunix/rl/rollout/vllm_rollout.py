@@ -164,6 +164,201 @@ class VllmRollout(base_rollout.BaseRollout):
       raise RuntimeError("P28 full chain requires the canonical engine adapter")
     return self._canonical_engine_adapter.run_p28_full_chain_gate()
 
+  def run_p32_d2b_engine_sentinels(self, prefixes):
+    """Captures q=1 decode and independent prefill full-vocabulary sentinels."""
+    if os.environ.get("CANON_P32_D2B_FULL_DISTRIBUTION", "") != "1":
+      raise RuntimeError(
+          "P32 D2b requires CANON_P32_D2B_FULL_DISTRIBUTION=1"
+      )
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError("P32 D2b requires the canonical engine adapter")
+    if self._last_sampling_transforms is None:
+      raise RuntimeError("P32 D2b must follow a real rollout")
+    prefixes = [tuple(int(token) for token in prefix) for prefix in prefixes]
+    if len(prefixes) != 2:
+      raise ValueError(f"P32 D2b requires exactly two sentinels, got {len(prefixes)}")
+    local_m = int(os.environ.get("CANON_LOGPROB_M", "0")) // 2
+    if local_m <= 0 or any(len(prefix) + 2 > local_m for prefix in prefixes):
+      raise ValueError(
+          "P32 D2b sentinel prefixes must fit one local fixed-M prefill: "
+          f"lengths={[len(prefix) for prefix in prefixes]} local_m={local_m}"
+      )
+
+    temperature = float(self._last_sampling_transforms.get("temperature", 1.0))
+    top_p_value = self._last_sampling_transforms.get("top_p", 1.0)
+    top_k_value = self._last_sampling_transforms.get("top_k", 0)
+    top_p = 1.0 if top_p_value is None else float(top_p_value)
+    top_k = 0 if top_k_value is None else int(top_k_value)
+    unsupported_defaults = {
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0,
+        "min_tokens": 0,
+        "logit_bias": None,
+        "allowed_token_ids": None,
+        "bad_words": None,
+        "bad_words_token_ids": None,
+    }
+    active_unsupported = {
+        key: self._last_sampling_transforms.get(key, neutral)
+        for key, neutral in unsupported_defaults.items()
+        if self._last_sampling_transforms.get(key, neutral)
+        not in (neutral, None, (), [], {})
+    }
+    if active_unsupported:
+      raise NotImplementedError(
+          "P32 D2b supports only temperature/top-k/top-p transforms; "
+          f"active unsupported transforms: {sorted(active_unsupported)}"
+      )
+
+    decode_params = SamplingParams(
+        max_tokens=2,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        logprobs=1,
+        detokenize=False,
+        ignore_eos=True,
+    )
+    self._canonical_engine_adapter.arm_p32_d2b_capture("decode")
+    try:
+      decode_outputs = self._sampler.generate_request_outputs(
+          [TokensPrompt(prompt_token_ids=list(prefix)) for prefix in prefixes],
+          decode_params,
+          reset_prefix_cache=True,
+      )
+      decode_capture = (
+          self._canonical_engine_adapter.finish_p32_d2b_capture()
+      )
+    except BaseException:
+      self._canonical_engine_adapter.abort_p32_d2b_capture()
+      raise
+
+    generated = []
+    decode_target_logps = []
+    for row_index, output in enumerate(decode_outputs):
+      if len(output.outputs) != 1:
+        raise RuntimeError(
+            f"P32 D2b row {row_index} returned {len(output.outputs)} samples"
+        )
+      sample_output = output.outputs[0]
+      token_ids = [int(token) for token in sample_output.token_ids]
+      if len(token_ids) != 2:
+        raise RuntimeError(
+            f"P32 D2b row {row_index} generated {len(token_ids)} tokens, expected 2"
+        )
+      if sample_output.logprobs is None:
+        raise RuntimeError(f"P32 D2b row {row_index} has no decode logprobs")
+      sampled_logps = generate_utils.get_logprobs_from_vllm_output(
+          token_ids, sample_output.logprobs
+      )
+      if len(sampled_logps) != 2:
+        raise RuntimeError(
+            f"P32 D2b row {row_index} has {len(sampled_logps)} decode logprobs"
+        )
+      generated.append(token_ids)
+      decode_target_logps.append(float(sampled_logps[1]))
+
+    extended = [
+        [*prefix, *tokens]
+        for prefix, tokens in zip(prefixes, generated, strict=True)
+    ]
+    prefill_params = SamplingParams(
+        max_tokens=1,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        prompt_logprobs=1,
+        detokenize=False,
+        ignore_eos=True,
+    )
+    self._canonical_engine_adapter.arm_p32_d2b_capture("prefill")
+    try:
+      prefill_outputs = self._sampler.generate_request_outputs(
+          [TokensPrompt(prompt_token_ids=sequence) for sequence in extended],
+          prefill_params,
+          reset_prefix_cache=True,
+      )
+      prefill_capture = (
+          self._canonical_engine_adapter.finish_p32_d2b_capture()
+      )
+    except BaseException:
+      self._canonical_engine_adapter.abort_p32_d2b_capture()
+      raise
+
+    prefill_target_logps = []
+    for row_index, (output, sequence) in enumerate(
+        zip(prefill_outputs, extended, strict=True)
+    ):
+      prompt_logprobs = output.prompt_logprobs
+      if prompt_logprobs is None or len(prompt_logprobs) != len(sequence):
+        raise RuntimeError(
+            f"P32 D2b row {row_index} prompt logprob count mismatch"
+        )
+      value = generate_utils.get_logprobs_from_vllm_output(
+          [sequence[-1]], [prompt_logprobs[-1]]
+      )
+      if len(value) != 1:
+        raise RuntimeError(
+            f"P32 D2b row {row_index} final prompt logprob is missing"
+        )
+      prefill_target_logps.append(float(value[0]))
+
+    for name, capture in (
+        ("decode", decode_capture),
+        ("prefill", prefill_capture),
+    ):
+      if tuple(sorted(capture["dp_ranks"])) != (0, 1):
+        raise RuntimeError(
+            f"P32 D2b {name} did not cover both DP ranks: "
+            f"{capture['dp_ranks']}"
+        )
+      expected_shape = (2, int(self._canonical_engine_adapter._vocab_size))
+      for field in ("raw_rows", "processed_rows"):
+        if tuple(capture[field].shape) != expected_shape:
+          raise RuntimeError(
+              f"P32 D2b {name} {field} shape {capture[field].shape} "
+              f"!= {expected_shape}"
+          )
+    return {
+        "prefixes": prefixes,
+        "generated_tokens": np.asarray(generated, np.int32),
+        "decode_target_logps": np.asarray(decode_target_logps, np.float32),
+        "prefill_target_logps": np.asarray(prefill_target_logps, np.float32),
+        "decode": decode_capture,
+        "prefill": prefill_capture,
+        "sampling": {
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
+        },
+    }
+
+  def compute_p32_d2b_trainer_sentinels(
+      self,
+      *,
+      state,
+      prompt_tokens,
+      completion_tokens,
+      prompt_mask,
+      completion_mask,
+      temperature,
+  ):
+    """Runs the trainer-state canonical program and exports two sentinel rows."""
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError("P32 D2b requires the canonical engine adapter")
+    return self._canonical_engine_adapter.compute_per_token_diagnostics(
+        graphdef=None,
+        state=state,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        prompt_mask=prompt_mask,
+        completion_mask=completion_mask,
+        pad_id=self.pad_id(),
+        eos_id=self.eos_id(),
+        temperature=temperature,
+    )
+
   @property
   def mesh(self) -> jax.sharding.Mesh:
     return self._sampler.mesh

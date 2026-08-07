@@ -31,6 +31,14 @@ registry = function_registry.default_registry
 # ==============================================================================
 
 
+def _completion_context_mask(train_example):
+  """Returns all valid completion tokens, including environment tokens."""
+  valid_mask = getattr(train_example, "completion_valid_mask", None)
+  if valid_mask is None:
+    return train_example.completion_mask
+  return valid_mask
+
+
 @registry.register("advantage_estimator", "gae")
 @jax.jit
 def compute_gae_advantages(
@@ -180,6 +188,7 @@ def ppo_policy_loss_fn(
 
   completion_ids = train_example.completion_ids
   completion_mask = train_example.completion_mask
+  completion_context_mask = _completion_context_mask(train_example)
 
   return_entropy = entropy_coef is not None and entropy_coef != 0.0
   graphdef, state = nnx.split(model)
@@ -196,7 +205,7 @@ def ppo_policy_loss_fn(
       segment_positions=getattr(train_example, "segment_positions", None),
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       prompt_mask=getattr(train_example, "prompt_mask", None),
-      completion_mask=completion_mask,
+      completion_mask=completion_context_mask,
   )
   if return_entropy:
     per_token_logps, token_entropy = outputs
@@ -406,6 +415,7 @@ def grpo_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
+  completion_context_mask = _completion_context_mask(train_example)
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
@@ -424,7 +434,7 @@ def grpo_loss_fn(
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       canonical_actor=True,
       prompt_mask=getattr(train_example, "prompt_mask", None),
-      completion_mask=completion_mask,
+      completion_mask=completion_context_mask,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.

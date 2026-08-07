@@ -58,6 +58,60 @@ from tunix.sft import utils as sft_utils
 
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
+
+
+def _p32_d2b_bounded_prefixes(
+    prompt_ids,
+    prompt_mask,
+    *,
+    local_m: int,
+    sentinel_indices: tuple[int, int] = (0, 16),
+):
+  """Selects two real prompt prefixes that fit one fixed-M execution."""
+  ids = np.asarray(prompt_ids)
+  mask = np.asarray(prompt_mask, dtype=np.bool_)
+  if ids.shape != mask.shape or ids.ndim != 2:
+    raise ValueError(
+        "P32 D2b prompt ids and masks must be matching rank-2 arrays: "
+        f"ids={ids.shape} mask={mask.shape}"
+    )
+  if local_m < 4:
+    raise ValueError(f"P32 D2b local fixed-M must be at least 4, got {local_m}")
+  budget = local_m - 2
+  prefixes = []
+  original_lengths = []
+  for row_index in sentinel_indices:
+    if row_index < 0 or row_index >= ids.shape[0]:
+      raise ValueError(
+          f"P32 D2b sentinel row {row_index} is outside batch size {ids.shape[0]}"
+      )
+    prefix = ids[row_index][mask[row_index]]
+    if prefix.size < 2:
+      raise ValueError(
+          f"P32 D2b sentinel row {row_index} has fewer than two prompt tokens"
+      )
+    original_lengths.append(int(prefix.size))
+    prefixes.append(prefix[:budget].astype(np.int32).tolist())
+  return prefixes, tuple(original_lengths), budget
+
+
+def _p32_d2b_engine_data_replicas(engine_contract) -> int:
+  """Reads the data replica count from the live engine mesh attestation."""
+  mesh_shape = tuple(engine_contract.get("mesh_shape", ()))
+  if not mesh_shape:
+    raise ValueError("P32 D2b live engine contract has no mesh shape")
+  mesh = dict(mesh_shape)
+  if len(mesh) != len(mesh_shape) or "data" not in mesh:
+    raise ValueError(
+        "P32 D2b live engine mesh must contain one unique data axis: "
+        f"mesh_shape={mesh_shape}"
+    )
+  data_replicas = int(mesh["data"])
+  if data_replicas <= 0:
+    raise ValueError(
+        f"P32 D2b live engine data replicas must be positive, got {data_replicas}"
+    )
+  return data_replicas
 MetricsBuffer = perf_metrics.MetricsBuffer
 
 
@@ -1253,6 +1307,125 @@ class RLCluster:
             self.actor_trainer.model, self._default_memory_kind
         )
       return actor_per_token_logps
+
+  def run_p32_d2b_full_distribution_gate(self, observed_batch):
+    """Runs the two-sentinel DP2 full-vocabulary forward-only gate."""
+    if os.environ.get("CANON_P32_D2B_FULL_DISTRIBUTION", "") != "1":
+      raise RuntimeError(
+          "P32 D2b requires CANON_P32_D2B_FULL_DISTRIBUTION=1"
+      )
+    if self._anchor_policy_state is None:
+      raise RuntimeError("P32 D2b requires a synchronized anchor policy")
+    from tunix.rl import alignment  # pylint: disable=g-import-not-at-top
+
+    train_example, sidecar = alignment.unwrap_train_example(observed_batch)
+    if sidecar is None:
+      raise alignment.AlignmentGateError(
+          "P32 D2b requires the four-boundary alignment sidecar"
+      )
+    prompt_ids = np.asarray(train_example.prompt_ids)
+    prompt_mask = np.asarray(train_example.prompt_mask, dtype=np.bool_)
+    if prompt_ids.shape != prompt_mask.shape or prompt_ids.shape[0] != 32:
+      raise alignment.AlignmentGateError(
+          "P32 D2b requires the admitted 32-trajectory prompt batch; "
+          f"ids={prompt_ids.shape} mask={prompt_mask.shape}"
+      )
+    sentinel_indices = (0, 16)
+    engine_contract = self.rollout.canonical_engine_contract_attestation()
+    try:
+      data_replicas = _p32_d2b_engine_data_replicas(engine_contract)
+    except ValueError as error:
+      raise alignment.AlignmentGateError(str(error)) from error
+    global_m = int(os.environ.get("CANON_LOGPROB_M", "0"))
+    if data_replicas != 2 or global_m <= 0 or global_m % data_replicas:
+      raise alignment.AlignmentGateError(
+          "P32 D2b requires admitted DP2 fixed-M geometry: "
+          f"data_replicas={data_replicas} global_m={global_m}"
+      )
+    try:
+      prefixes, original_lengths, prefix_budget = _p32_d2b_bounded_prefixes(
+          prompt_ids,
+          prompt_mask,
+          local_m=global_m // data_replicas,
+          sentinel_indices=sentinel_indices,
+      )
+    except ValueError as error:
+      raise alignment.AlignmentGateError(str(error)) from error
+    print(
+        "[P32.D2B] sentinel_prefixes "
+        f"indices={sentinel_indices} original_lengths={original_lengths} "
+        f"bounded_lengths={tuple(map(len, prefixes))} budget={prefix_budget}",
+        flush=True,
+    )
+
+    engine_result = self.rollout.run_p32_d2b_engine_sentinels(prefixes)
+    completion = np.asarray(engine_result["generated_tokens"], np.int32)
+    pad_id = int(self.rollout.pad_id())
+    max_prompt = max(len(prefix) for prefix in prefixes)
+    prompt = np.full((2, max_prompt), pad_id, np.int32)
+    valid_prompt = np.zeros(prompt.shape, np.bool_)
+    for row_index, prefix in enumerate(prefixes):
+      prompt[row_index, -len(prefix) :] = np.asarray(prefix, np.int32)
+      valid_prompt[row_index, -len(prefix) :] = True
+    valid_completion = np.ones(completion.shape, np.bool_)
+    temperature = float(engine_result["sampling"]["temperature"])
+
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      dest_prompt = sharding_utils.shard_input(
+          jnp.asarray(prompt),
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion = sharding_utils.shard_input(
+          jnp.asarray(completion),
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_prompt_mask = sharding_utils.shard_input(
+          jnp.asarray(valid_prompt),
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion_mask = sharding_utils.shard_input(
+          jnp.asarray(valid_completion),
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+
+      def diagnostics(state):
+        return self.rollout.compute_p32_d2b_trainer_sentinels(
+            state=state,
+            prompt_tokens=dest_prompt,
+            completion_tokens=dest_completion,
+            prompt_mask=dest_prompt_mask,
+            completion_mask=dest_completion_mask,
+            temperature=temperature,
+        )
+
+      diagnostics_jit = jax.jit(diagnostics)
+      anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
+      if anchor_on_device:
+        anchor_state = self._anchor_policy_state
+      else:
+        anchor_state = rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
+        )
+      t_old = jax.device_get(diagnostics_jit(anchor_state))
+      if not anchor_on_device:
+        del anchor_state
+        gc.collect()
+
+      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+      current_state = nnx.state(self.actor_trainer.model)
+      t_current = jax.device_get(diagnostics_jit(current_state))
+      del current_state
+      gc.collect()
+
+    old_logps, _, old_diagnostics = t_old
+    current_logps, _, current_diagnostics = t_current
+    return alignment.check_p32_d2b_full_distribution(
+        engine_result=engine_result,
+        t_old_logps=old_logps,
+        t_old_diagnostics=old_diagnostics,
+        t_current_logps=current_logps,
+        t_current_diagnostics=current_diagnostics,
+    )
 
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""

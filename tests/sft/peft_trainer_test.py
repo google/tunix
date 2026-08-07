@@ -101,6 +101,34 @@ class PeftTrainerTest(parameterized.TestCase):
     chex.set_n_cpu_devices(self.num_cpus)
 
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
+
+  def test_skip_jit_binds_mutable_trainer_objects(self):
+    """The eager train/eval callables retain the compiled-path signature."""
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    def train_step(bound_model, optimizer, accumulator, inputs, update):
+      return bound_model, optimizer, accumulator, inputs, update
+
+    def eval_step(bound_model, inputs):
+      return bound_model, inputs
+
+    with mock.patch.object(
+        trainer, "create_train_step_fn", return_value=train_step
+    ), mock.patch.object(
+        trainer, "create_eval_step_fn", return_value=eval_step
+    ):
+      eager_train, eager_eval = trainer.jit_train_and_eval_step(skip_jit=True)
+
+    train_result = eager_train("batch", "update")
+    eval_result = eager_eval("eval_batch")
+    self.assertIs(train_result[0], trainer.model)
+    self.assertIs(train_result[1], trainer.optimizer)
+    self.assertIs(train_result[2], trainer.grad_accumulator)
+    self.assertEqual(train_result[3:], ("batch", "update"))
+    self.assertIs(eval_result[0], trainer.model)
+    self.assertEqual(eval_result[1], "eval_batch")
     total_devices = jax.device_count()
     self.mesh = shd.Mesh(
         devices=np.array(jax.devices()).reshape(2, total_devices // 2),
@@ -906,6 +934,70 @@ class PeftTrainerTest(parameterized.TestCase):
     ):
       np.testing.assert_array_equal(before, after)
 
+  def test_alignment_forward_only_skips_backward_and_state_mutation(self):
+
+    def loss_fn(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.sum(logits), jnp.array(1.0, jnp.float32)
+          ),
+          aux_metrics={"canon/T_current": jnp.asarray([1.0], jnp.float32)},
+      )
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn).with_loss_fn(loss_fn)
+
+    def copy_state(value):
+      return jax.tree.map(lambda x: np.asarray(x).copy(), nnx.state(value))
+
+    before = {
+        "model": copy_state(trainer.model),
+        "optimizer": copy_state(trainer.optimizer),
+        "accumulator": copy_state(trainer.grad_accumulator),
+    }
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CANON_ALIGNMENT_GATE": "1",
+            "CANON_ALIGNMENT_FORWARD_ONLY": "1",
+            "CANON_ALIGNMENT_GATE_ONLY": "0",
+            "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+            "CANON_ALIGNMENT_TRAIN": "0",
+        },
+        clear=False,
+    ), mock.patch.object(
+        nnx, "value_and_grad", side_effect=AssertionError("backward constructed")
+    ):
+      _, aux, grad_norm = trainer._train_step(
+          trainer.model,
+          trainer.optimizer,
+          trainer.grad_accumulator,
+          self.train_ds[0],
+          jnp.array(True),
+      )
+
+    self.assertEqual(int(aux["canon/optimizer_skipped"]), 1)
+    self.assertEqual(int(aux["canon/backward_executed"]), 0)
+    self.assertEqual(float(grad_norm), 0.0)
+    for name, value in (
+        ("model", trainer.model),
+        ("optimizer", trainer.optimizer),
+        ("accumulator", trainer.grad_accumulator),
+    ):
+      for expected, actual in zip(
+          jax.tree.leaves(before[name]),
+          jax.tree.leaves(copy_state(value)),
+          strict=True,
+      ):
+        np.testing.assert_array_equal(expected, actual)
+
   def test_alignment_gate_only_without_host_gate_is_rejected(self):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
@@ -1522,6 +1614,101 @@ class PeftTrainerTest(parameterized.TestCase):
       ):
         np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
     self.assertLen(set(fused_impl_ids), 1)
+
+  def test_p32_d3b_scaled_groups_reset_without_commit(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=1,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    before_model = jax.tree.map(
+        lambda value: np.asarray(value).copy(),
+        nnx.state(trainer.model, nnx.Param),
+    )
+    before_optimizer = jax.tree.map(
+        lambda value: np.asarray(value).copy(),
+        nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+    )
+    env = {
+        "CANON_P32_DP2TP2": "1",
+        "CANON_P32_D3B_SEGMENTED": "1",
+        "CANON_P32_DP2TP2_BACKWARD_NO_COMMIT": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    step_impl_ids = []
+    reset_impl_ids = []
+    original_accumulator = trainer.grad_accumulator
+    with mock.patch.dict(os.environ, env, clear=False):
+      for _ in range(2):
+        transaction_original = (
+            trainer.install_p32_d3b_temporary_accumulator()
+        )
+        self.assertIs(transaction_original, original_accumulator)
+        for index in range(16):
+          gradients = jax.tree.map(
+              lambda value, scale=float(index + 1): type(value)(
+                  jnp.full_like(value[...], scale)
+              ),
+              nnx.state(trainer.model, nnx.Param),
+              is_leaf=lambda value: isinstance(value, nnx.VariableState),
+          )
+          gradient_arrays = [
+              value[...] if isinstance(value, nnx.Variable) else value
+              for value in jax.tree.leaves(
+                  gradients,
+                  is_leaf=lambda value: isinstance(value, nnx.Variable),
+              )
+          ]
+          norm = trainer.accumulate_p32_d3b_gradient_group(
+              gradients,
+              jnp.asarray(0.25, jnp.float32),
+              group_index=index,
+          )
+          self.assertGreater(float(np.asarray(norm)), 0.0)
+          self.assertTrue(all(value.is_deleted() for value in gradient_arrays))
+        self.assertEqual(
+            float(np.asarray(trainer.grad_accumulator.denom[...])), 16.0
+        )
+        for value in jax.tree.leaves(trainer.grad_accumulator.grads):
+          np.testing.assert_array_equal(
+              np.asarray(value[...]), jnp.full_like(value[...], 34.0)
+          )
+        trainer.reset_p32_d3b_gradients_without_commit()
+        self.assertEqual(
+            float(np.asarray(trainer.grad_accumulator.denom[...])), 0.0
+        )
+        for value in jax.tree.leaves(trainer.grad_accumulator.grads):
+          np.testing.assert_array_equal(
+              np.asarray(value[...]), np.zeros_like(np.asarray(value[...]))
+          )
+        self.assertIsNone(trainer._jitted_p32_gradient_step_fn)
+        self.assertIsNone(trainer._jitted_p32_gradient_reset_fn)
+        step_impl_ids.append(id(trainer._jitted_p32_gradient_step_impl))
+        reset_impl_ids.append(id(trainer._jitted_p32_gradient_reset_impl))
+        trainer.restore_p32_d3b_temporary_accumulator(transaction_original)
+        self.assertIs(trainer.grad_accumulator, original_accumulator)
+
+    self.assertLen(set(step_impl_ids), 1)
+    self.assertLen(set(reset_impl_ids), 1)
+    self.assertIs(trainer.grad_accumulator, original_accumulator)
+    self.assertEmpty(jax.tree.leaves(trainer.grad_accumulator.grads))
+    self.assertEqual(trainer.train_steps, 0)
+    self.assertEqual(trainer.iter_steps, 0)
+    for actual, expected in zip(
+        jax.tree.leaves(nnx.state(trainer.model, nnx.Param)),
+        jax.tree.leaves(before_model),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), expected)
+    for actual, expected in zip(
+        jax.tree.leaves(nnx.state(trainer.optimizer, nnx.optimizer.OptState)),
+        jax.tree.leaves(before_optimizer),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), expected)
 
   def test_injected_params(self):
 

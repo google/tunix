@@ -120,13 +120,73 @@ class Trainer(peft_trainer.PeftTrainer):
         != after["leaves"][path]["sha256"]
     ]
 
+  def _canon_fingerprint_accumulator(self) -> dict:
+    """Fingerprint the accumulator, including its scalar denominator."""
+    return self._canon_fingerprint_state(
+        nnx.state(self.grad_accumulator), min_elements=1
+    )
+
+  @staticmethod
+  def _canon_dp_batch_shards(value: Any) -> dict[str, Any]:
+    """Attest the global-32 result is split into two local-16 DP slices."""
+    shape = tuple(getattr(value, "shape", ()))
+    if not shape or shape[0] != 32:
+      raise alignment.AlignmentGateError(
+          f"P32 D2 expected global batch 32, got shape={shape}"
+      )
+    shards = list(getattr(value, "addressable_shards", ()))
+    intervals: dict[tuple[int, int], list[int]] = {}
+    for shard in shards:
+      first = shard.index[0]
+      if not isinstance(first, slice):
+        raise alignment.AlignmentGateError(
+            f"P32 D2 expected a sliced batch axis, got index={shard.index}"
+        )
+      start = 0 if first.start is None else int(first.start)
+      stop = shape[0] if first.stop is None else int(first.stop)
+      intervals.setdefault((start, stop), []).append(int(shard.device.id))
+    expected = {(0, 16): 2, (16, 32): 2}
+    observed = {key: len(devices) for key, devices in intervals.items()}
+    if observed != expected:
+      raise alignment.AlignmentGateError(
+          "P32 D2 DP sharding mismatch: "
+          f"observed={observed} expected={expected}"
+      )
+    return {
+        "global_rows": 32,
+        "local_rows": 16,
+        "intervals": [
+            {
+                "start": start,
+                "stop": stop,
+                "device_ids": sorted(intervals[(start, stop)]),
+            }
+            for start, stop in sorted(intervals)
+        ],
+    }
+
   @override
   def _prepare_inputs(self, input_data: Any) -> Any:
     if not alignment.enabled():
       return input_data
     mode = alignment.execution_mode()
     p27 = os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
-    if mode == "update-canary" or (mode == "gate-only" and p27):
+    p32_forward_only = (
+        mode == "forward-only"
+        and os.environ.get("CANON_P32_DP2TP2_FORWARD_ONLY", "") == "1"
+    )
+    p32_backward_no_commit = (
+        mode == "gate-only"
+        and os.environ.get(
+            "CANON_P32_DP2TP2_BACKWARD_NO_COMMIT", ""
+        ) == "1"
+    )
+    if (
+        mode == "update-canary"
+        or (mode == "gate-only" and p27)
+        or p32_forward_only
+        or p32_backward_no_commit
+    ):
       if self._canon_update_before is None:
         self._canon_update_before = {
             "model": self._canon_fingerprint_state(
@@ -137,17 +197,19 @@ class Trainer(peft_trainer.PeftTrainer):
             ),
             "train_steps": self.train_steps,
         }
-        if p27:
+        if p27 or p32_forward_only or p32_backward_no_commit:
           self._canon_update_before["accumulator"] = (
-              self._canon_fingerprint_state(nnx.state(self.grad_accumulator))
+              self._canon_fingerprint_accumulator()
           )
-        print(
-            "[CANON_FROZENLAKE_P27] pre_state_snapshot "
-            if p27
-            else "[CANON_GSM8K_UPDATE] pre_update_snapshot ",
-            end="",
-            flush=True,
-        )
+        if p32_forward_only:
+          snapshot_marker = "[P32.D2] pre_state_snapshot "
+        elif p32_backward_no_commit:
+          snapshot_marker = "[P32.D3A] pre_state_snapshot "
+        elif p27:
+          snapshot_marker = "[CANON_FROZENLAKE_P27] pre_state_snapshot "
+        else:
+          snapshot_marker = "[CANON_GSM8K_UPDATE] pre_update_snapshot "
+        print(snapshot_marker, end="", flush=True)
         print(
             f"model_leaves={self._canon_update_before['model']['sampled_leaves']} "
             f"optimizer_leaves={self._canon_update_before['optimizer']['sampled_leaves']} "
@@ -198,6 +260,7 @@ class Trainer(peft_trainer.PeftTrainer):
           "canon/T_current",
           "canon/gradient_norm",
           "canon/optimizer_skipped",
+          "canon/backward_executed",
           "canon/is_update_step",
       )
       missing = [key for key in required if key not in aux]
@@ -213,12 +276,33 @@ class Trainer(peft_trainer.PeftTrainer):
         raise alignment.AlignmentGateError(
             "CANON_ALIGNMENT_EXPECTED_RED is admitted only for P27 gate-only"
         )
+      forward_sharding = None
+      p32_backward_no_commit = (
+          alignment.execution_mode() == "gate-only"
+          and os.environ.get(
+              "CANON_P32_DP2TP2_BACKWARD_NO_COMMIT", ""
+          ) == "1"
+      )
+      if (
+          alignment.execution_mode() == "forward-only"
+          or p32_backward_no_commit
+      ):
+        forward_sharding = self._canon_dp_batch_shards(aux["canon/T_current"])
+        marker = "[P32.D3A]" if p32_backward_no_commit else "[P32.D2]"
+        print(
+            f"{marker} dp_batch_sharding "
+            f"global={forward_sharding['global_rows']} "
+            f"local={forward_sharding['local_rows']} "
+            f"intervals={forward_sharding['intervals']}",
+            flush=True,
+        )
       record = alignment.check_batch(
           sidecar,
           t_current=jax.device_get(aux["canon/T_current"]),
           gradient_norm=jax.device_get(aux["canon/gradient_norm"]),
           optimizer_skipped=jax.device_get(aux["canon/optimizer_skipped"]),
           step=self.train_steps,
+          backward_executed=jax.device_get(aux["canon/backward_executed"]),
           fail_closed=not expected_red,
       )
       if record["execution_mode"] == "train":
@@ -273,6 +357,135 @@ class Trainer(peft_trainer.PeftTrainer):
             )
           else:
             entry[0].append(value)
+      if record["execution_mode"] == "forward-only":
+        if os.environ.get("CANON_P32_DP2TP2_FORWARD_ONLY", "") != "1":
+          raise alignment.AlignmentGateError(
+              "forward-only state gate requires P32 D2 admission"
+          )
+        is_update_step = bool(
+            np.asarray(jax.device_get(aux["canon/is_update_step"])).item()
+        )
+        if not is_update_step:
+          raise alignment.AlignmentGateError(
+              "P32 D2 requires one complete global trajectory micro-batch"
+          )
+        before = self._canon_update_before
+        if before is None:
+          raise alignment.AlignmentGateError(
+              "P32 D2 state snapshot missing after forward-only step"
+          )
+        self._canon_update_before = None
+        after = {
+            "model": self._canon_fingerprint_state(
+                nnx.state(self.model, nnx.Param)
+            ),
+            "optimizer": self._canon_fingerprint_state(
+                nnx.state(self.optimizer, nnx.optimizer.OptState)
+            ),
+            "accumulator": self._canon_fingerprint_accumulator(),
+        }
+        changed = {
+            name: self._canon_changed_paths(before[name], after[name])
+            for name in ("model", "optimizer", "accumulator")
+        }
+        state_record = {
+            "verdict": (
+                "PASS" if not any(changed.values()) else "FAIL"
+            ),
+            "execution_mode": "forward-only",
+            "backward_executed": False,
+            "optimizer_commits": 0,
+            "alignment_hashes": record["hashes"],
+            "dp_batch_sharding": forward_sharding,
+            "train_steps_before": before["train_steps"],
+            "model_changed_paths": changed["model"],
+            "optimizer_changed_paths": changed["optimizer"],
+            "accumulator_changed_paths": changed["accumulator"],
+        }
+        state_path = os.environ.get("CANON_STATE_REPORT", "")
+        if not state_path:
+          raise alignment.AlignmentGateError(
+              "CANON_STATE_REPORT is required for P32 D2"
+          )
+        os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+        with open(state_path, "w", encoding="utf-8") as state_file:
+          json.dump(state_record, state_file, indent=2, sort_keys=True)
+          state_file.write("\n")
+        print(
+            "[P32.D2] state_snapshot "
+            f"verdict={state_record['verdict']} model_changed="
+            f"{len(changed['model'])} optimizer_changed="
+            f"{len(changed['optimizer'])} accumulator_changed="
+            f"{len(changed['accumulator'])} backward=0 commits=0",
+            flush=True,
+        )
+        if state_record["verdict"] != "PASS":
+          raise alignment.AlignmentGateError(
+              f"P32 D2 forward-only mutated state; report={state_path}"
+          )
+      if p32_backward_no_commit:
+        is_update_step = bool(
+            np.asarray(jax.device_get(aux["canon/is_update_step"])).item()
+        )
+        if not is_update_step:
+          raise alignment.AlignmentGateError(
+              "P32 D3a requires one complete global trajectory micro-batch"
+          )
+        before = self._canon_update_before
+        if before is None:
+          raise alignment.AlignmentGateError(
+              "P32 D3a state snapshot missing after backward"
+          )
+        self._canon_update_before = None
+        after = {
+            "model": self._canon_fingerprint_state(
+                nnx.state(self.model, nnx.Param)
+            ),
+            "optimizer": self._canon_fingerprint_state(
+                nnx.state(self.optimizer, nnx.optimizer.OptState)
+            ),
+            "accumulator": self._canon_fingerprint_accumulator(),
+        }
+        changed = {
+            name: self._canon_changed_paths(before[name], after[name])
+            for name in ("model", "optimizer", "accumulator")
+        }
+        state_record = {
+            "verdict": "PASS" if not any(changed.values()) else "FAIL",
+            "execution_mode": "gate-only",
+            "backward_executed": True,
+            "optimizer_commits": 0,
+            "alignment_hashes": record["hashes"],
+            "dp_batch_sharding": forward_sharding,
+            "train_steps_before": before["train_steps"],
+            "train_steps_after": self.train_steps,
+            "model_changed_paths": changed["model"],
+            "optimizer_changed_paths": changed["optimizer"],
+            "accumulator_changed_paths": changed["accumulator"],
+        }
+        if self.train_steps != before["train_steps"]:
+          state_record["verdict"] = "FAIL"
+        state_path = os.environ.get("CANON_STATE_REPORT", "")
+        if not state_path:
+          raise alignment.AlignmentGateError(
+              "CANON_STATE_REPORT is required for P32 D3a"
+          )
+        os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+        with open(state_path, "w", encoding="utf-8") as state_file:
+          json.dump(state_record, state_file, indent=2, sort_keys=True)
+          state_file.write("\n")
+        print(
+            "[P32.D3A] state_snapshot "
+            f"verdict={state_record['verdict']} model_changed="
+            f"{len(changed['model'])} optimizer_changed="
+            f"{len(changed['optimizer'])} accumulator_changed="
+            f"{len(changed['accumulator'])} backward=1 commits=0",
+            flush=True,
+        )
+        if state_record["verdict"] != "PASS":
+          raise alignment.AlignmentGateError(
+              f"P32 D3a backward mutated state; report={state_path}"
+          )
       if (
           record["execution_mode"] == "gate-only"
           and os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
@@ -299,9 +512,7 @@ class Trainer(peft_trainer.PeftTrainer):
           after_optimizer = self._canon_fingerprint_state(
               nnx.state(self.optimizer, nnx.optimizer.OptState)
           )
-          after_accumulator = self._canon_fingerprint_state(
-              nnx.state(self.grad_accumulator)
-          )
+          after_accumulator = self._canon_fingerprint_accumulator()
           model_changed = self._canon_changed_paths(
               before["model"], after_model
           )
@@ -367,9 +578,7 @@ class Trainer(peft_trainer.PeftTrainer):
             ),
         }
         if "accumulator" in before:
-          after["accumulator"] = self._canon_fingerprint_state(
-              nnx.state(self.grad_accumulator)
-          )
+          after["accumulator"] = self._canon_fingerprint_accumulator()
         model_changed = self._canon_changed_paths(before["model"], after["model"])
         optimizer_changed = self._canon_changed_paths(
             before["optimizer"], after["optimizer"]

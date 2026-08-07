@@ -16,6 +16,7 @@
 
 from absl.testing import absltest
 import numpy as np
+import os
 import types
 from unittest import mock
 
@@ -62,6 +63,78 @@ class _RescoreSampler:
 
 
 class VllmRolloutCanonicalTest(absltest.TestCase):
+
+  def test_p32_d2b_runs_decode_and_prefill_captures(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    adapter = mock.Mock()
+    adapter._vocab_size = 8
+    adapter.finish_p32_d2b_capture.side_effect = [
+        {
+            "raw_rows": np.ones((2, 8), np.float32),
+            "processed_rows": np.full((2, 8), 2.0, np.float32),
+            "dp_ranks": (0, 1),
+        },
+        {
+            "raw_rows": np.ones((2, 8), np.float32),
+            "processed_rows": np.full((2, 8), 2.0, np.float32),
+            "dp_ranks": (0, 1),
+        },
+    ]
+    rollout._canonical_engine_adapter = adapter
+    rollout._last_sampling_transforms = {
+        "temperature": 0.7,
+        "top_k": 0,
+        "top_p": 1.0,
+    }
+    decode_outputs = [
+        types.SimpleNamespace(
+            outputs=[
+                types.SimpleNamespace(token_ids=[5, 6], logprobs=object())
+            ]
+        ),
+        types.SimpleNamespace(
+            outputs=[
+                types.SimpleNamespace(token_ids=[7, 4], logprobs=object())
+            ]
+        ),
+    ]
+    prefill_outputs = [
+        types.SimpleNamespace(prompt_logprobs=[None, object(), object(), object()]),
+        types.SimpleNamespace(prompt_logprobs=[None, object(), object(), object()]),
+    ]
+    sampler = mock.Mock()
+    sampler.generate_request_outputs.side_effect = [decode_outputs, prefill_outputs]
+    rollout._sampler = sampler
+
+    def fake_logprobs(token_ids, rows):
+      del rows
+      return [-float(token) for token in token_ids]
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P32_D2B_FULL_DISTRIBUTION": "1",
+            "CANON_LOGPROB_M": "8",
+        },
+        clear=False,
+    ), mock.patch.object(
+        vllm_rollout.generate_utils,
+        "get_logprobs_from_vllm_output",
+        side_effect=fake_logprobs,
+    ):
+      result = rollout.run_p32_d2b_engine_sentinels([[1, 2], [2, 3]])
+
+    np.testing.assert_array_equal(
+        result["generated_tokens"], np.asarray([[5, 6], [7, 4]], np.int32)
+    )
+    np.testing.assert_array_equal(
+        result["decode_target_logps"], np.asarray([-6.0, -4.0], np.float32)
+    )
+    self.assertEqual(
+        [call.args[0] for call in adapter.arm_p32_d2b_capture.call_args_list],
+        ["decode", "prefill"],
+    )
+    self.assertEqual(sampler.generate_request_outputs.call_count, 2)
 
   def test_p28_full_chain_is_forwarded(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)
