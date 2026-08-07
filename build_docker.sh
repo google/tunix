@@ -9,6 +9,15 @@
 
 set -e
 
+INSTALL_DEEPSWE_DEPS=false
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
+        *) echo "Unknown parameter: $1"; exit 1 ;;
+    esac
+done
+
 DOCKERFILE=./Dockerfile
 
 if [ ! -f "$DOCKERFILE" ]; then
@@ -53,6 +62,7 @@ MSG
 
     $DOCKER_COMMAND build \
         --network=host \
+        --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }
