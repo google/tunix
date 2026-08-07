@@ -255,10 +255,6 @@ spec:
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
-                - name: PATHWAYS_HEAD
-                  valueFrom:
-                    fieldRef:
-                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
                 - name: MEGASCALE_COORDINATOR_ADDRESS
                   valueFrom:
                     fieldRef:
