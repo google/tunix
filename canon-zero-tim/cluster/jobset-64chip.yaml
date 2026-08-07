@@ -53,9 +53,7 @@ spec:
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:
-    operator: Any
-    targetReplicatedJobs:
-    - pathways-head
+    operator: All
   replicatedJobs:
 
   # ---------------------------------------------------------------------------
