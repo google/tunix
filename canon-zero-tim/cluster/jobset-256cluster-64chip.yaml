@@ -219,7 +219,6 @@ spec:
                 - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x8x8
-                - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
               env:
                 - name: TPU_MIN_LOG_LEVEL
                   value: "0"
@@ -258,7 +257,7 @@ spec:
                 - name: XLA_PYTHON_CLIENT_MEM_FRACTION
                   value: '0.9'
                 - name: ENABLE_PATHWAYS_PERSISTENCE
-                  value: '1'
+                  value: '0'
               resources:
                 limits:
                   google.com/tpu: '4'
