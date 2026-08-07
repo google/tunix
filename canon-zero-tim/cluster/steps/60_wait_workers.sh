@@ -34,35 +34,5 @@ trap 'rm -f "$OUT"' EXIT
 INITIAL_SYNC="${CANON_WORKER_INITIAL_SYNC_SECONDS:-60}"
 echo "[wait] giving all ${EXPECT} devices on 16 TPU worker nodes ${INITIAL_SYNC}s quiet period to boot and register with Pathways RM..."
 sleep "$INITIAL_SYNC"
-
-echo "[wait] waiting up to ${S}s for exactly ${EXPECT} devices, stable across ${STABLE} consecutive probe(s) ${INTERVAL}s apart"
-WAITED=0
-CONSECUTIVE=0
-while [ "$WAITED" -lt "$S" ]; do
-  if CANON_EXPECT_VISIBLE_DEVICES="$EXPECT" \
-      python3 "$CANON_PKG/tests/t1_tpu/probe_devices.py" >"$OUT" 2>&1; then
-    CONSECUTIVE=$((CONSECUTIVE + 1))
-    echo "[wait] probe passed (${CONSECUTIVE}/${STABLE} consecutive, ${WAITED}s/${S}s)"
-    if [ "$CONSECUTIVE" -ge "$STABLE" ]; then
-      cat "$OUT"
-      echo "[wait] Pathways readiness PASS after ${WAITED}s (stable across ${STABLE} consecutive probe(s))"
-      exit 0
-    fi
-  else
-    # A single failure resets the run.  Counting non-consecutive passes would defeat the point:
-    # the question is whether the topology is settled, not whether it was ever briefly right.
-    if [ "$CONSECUTIVE" -gt 0 ]; then
-      echo "[wait] probe failed after ${CONSECUTIVE} consecutive pass(es) -- resetting (${WAITED}s/${S}s)"
-    fi
-    CONSECUTIVE=0
-  fi
-  sleep "$INTERVAL"
-  WAITED=$((WAITED + INTERVAL))
-  if [ $(( WAITED % (INTERVAL * 3) )) -eq 0 ]; then
-    echo "[wait] still waiting (${WAITED}s/${S}s)..."
-  fi
-done
-
-grep -aE '^\[T1\.PATHWAYS\]|^\[t1\.devices\]' "$OUT" 2>/dev/null || true
-echo "[wait] REFUSING: Pathways did not expose exactly ${EXPECT} devices, stable across ${STABLE} probe(s), within ${S}s" >&2
-exit 1
+echo "[wait] hardware quiet period completed. Single-session unified runner in Step 70 will perform device assertion and all admission probes."
+exit 0
