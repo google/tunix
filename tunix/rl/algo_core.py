@@ -636,29 +636,40 @@ def grpo_loss_fn(
 
 
 @function_registry.register_advantage_estimator("grpo")
-def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
+def compute_advantages(
+    rewards: np.ndarray | jax.Array,
+    num_generations: int,
+    **kwargs,
+) -> np.ndarray | jax.Array:
   """Compute group relative advantages.
 
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    **kwargs: Additional keyword arguments, e.g. `use_leave_one_out_baseline`.
 
   Returns:
     Group relative advantages.
   """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
-  std_grouped_rewards = rewards.reshape(-1, num_generations).std(
-      axis=-1, ddof=1
-  )
+  use_leave_one_out_baseline = kwargs.get("use_leave_one_out_baseline", False)
+  reshaped_rewards = rewards.reshape(-1, num_generations)
+  if use_leave_one_out_baseline and num_generations > 1:
+    mean_grouped_rewards = (
+        reshaped_rewards.sum(axis=-1, keepdims=True) - reshaped_rewards
+    ) / (num_generations - 1)
+  else:
+    mean_grouped_rewards = reshaped_rewards.mean(axis=-1, keepdims=True)
 
-  mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
-  std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
+  std_grouped_rewards = reshaped_rewards.std(axis=-1, ddof=1, keepdims=True)
+  advantages = (reshaped_rewards - mean_grouped_rewards) / (
+      std_grouped_rewards + 1e-6
+  )
+  return advantages.reshape(rewards.shape)
 
 
 @function_registry.register_advantage_estimator("rloo")
 def compute_rloo_advantages(
-    rewards: jax.Array, num_generations: int
+    rewards: jax.Array, num_generations: int, **kwargs
 ) -> jax.Array:
   """Compute RLOO (REINFORCE Leave-One-Out) advantages.
 
@@ -668,6 +679,7 @@ def compute_rloo_advantages(
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    **kwargs: Additional unused keyword arguments for forward compatibility.
 
   Returns:
     RLOO advantages.
@@ -682,7 +694,7 @@ def compute_rloo_advantages(
   ) / (num_generations - 1)
   rloo_advantages = reshaped_rewards - loo_mean
 
-  return rloo_advantages.flatten()
+  return rloo_advantages.reshape(rewards.shape)
 
 
 # ==============================================================================
@@ -692,16 +704,18 @@ def compute_rloo_advantages(
 
 @function_registry.register_advantage_estimator("drgrpo")
 def compute_drgrpo_advantages(
-    rewards: jax.Array, num_generations: int
+    rewards: jax.Array, num_generations: int, **kwargs
 ) -> jax.Array:
   """Group relative advantages -- done right.
 
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    **kwargs: Additional unused keyword arguments for forward compatibility.
 
   Returns:
     Group relative advantages.
   """
   mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=1)
   return rewards - mean_grouped_rewards.repeat(num_generations)
+
