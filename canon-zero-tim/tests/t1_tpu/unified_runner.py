@@ -24,6 +24,35 @@ def run_all_probes() -> int:
     print("[t1.unified] Pathways initialized in single session. Starting probes...", flush=True)
 
     # -------------------------------------------------------------------------
+    # Overlay verification (Section B)
+    # -------------------------------------------------------------------------
+    print("\n== Overlay promotion verification ==", flush=True)
+    import importlib
+    CHECKS = [
+        ("tpu_inference.layers.jax.linear", "P22XK_MATMUL_ACTIVE", True),
+        ("tpu_inference.layers.jax.linear", "P22XK_LINEAR_BASE",   None),
+        ("tpu_inference.layers.jax.embed",  "_CANON_F4E_ANNOUNCED", None),
+        ("tpu_inference.models.jax.qwen3",  "P22XK_RMSNORM_ACTIVE", True),
+        ("tpu_inference.models.jax.qwen2",  "P22XK_SWIGLU_ACTIVE",  True),
+    ]
+    for mod, attr, want in CHECKS:
+        try:
+            m = importlib.import_module(mod)
+            if not hasattr(m, attr):
+                print(f"[verify]   FAIL {mod}.{attr} absent", file=sys.stderr)
+                overall_rc = 1
+                continue
+            got = getattr(m, attr)
+            if want is not None and got is not want and got != want:
+                print(f"[verify]   FAIL {mod}.{attr}={got!r}, expected {want!r}", file=sys.stderr)
+                overall_rc = 1
+                continue
+            print(f"[verify]   OK   {mod}.{attr}" + (f"={got!r}" if want is not None else ""), flush=True)
+        except Exception as exc:
+            print(f"[verify]   FAIL {mod}: {exc}", file=sys.stderr)
+            overall_rc = 1
+
+    # -------------------------------------------------------------------------
     # P0: Pathways / JAX registration
     # -------------------------------------------------------------------------
     print("\n== P0  Pathways/JAX registration ==", flush=True)
