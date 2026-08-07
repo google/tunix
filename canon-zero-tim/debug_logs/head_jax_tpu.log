@@ -1,18 +1,21 @@
-XPK Start: 2026-08-07T06:13:12Z
-[entrypoint] start 2026-08-07T06:13:14Z  mode=dp-gate-only  pkg=/app/canon-zero-tim
-[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-zero-tim-v5p-64-pathways-head-0-0-dpjpm
+XPK Start: 2026-08-07T08:05:04Z
+[entrypoint] start 2026-08-07T08:05:06Z  mode=dp-gate-only  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-zero-tim-v5p-64-pathways-head-0-0-4vcg8
 [entrypoint] --> 00_env.sh
 [env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
 [env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
 [env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P32 train mesh pin DISCOVERY: no release placement assertion
 [env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
 [env] profile=qwen3-8b-dp16-tp4-admission model_dir=qwen8b
-[env] resolved configuration written to /tmp/canon-state/env.sh (77 lines)
+[env] resolved configuration written to /tmp/canon-state/env.sh (78 lines)
 [entrypoint] <-- 00_env.sh ok
 [entrypoint] --> 10_sync_repo.sh
-[sync] HEAD=f13e3650904a30f58a9b3199aadcf49875ba228d
-[sync] describe=f13e3650 Gate Pathways Mosaic compatibility before topology scans
-[sync] dirty_files=5
+[sync] HEAD=26396fd16aa4ebd1444a39215d64793d4719a6d1
+[sync] describe=26396fd1 Revert train mesh to dynamic auto-discovery and restore restart tolerance
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
 [sync] provenance ok
 [entrypoint] <-- 10_sync_repo.sh ok
 [entrypoint] --> 20_probe_image.sh
@@ -99,41 +102,41 @@ WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Arr
 [t1.unified] Pathways initialized in one fail-stop session. Starting probes...
 
 == Overlay promotion verification ==
-WARNING 08-07 06:16:17 [tpu_platform.py:408] Pin memory is not supported on TPU.
-INFO 08-07 06:16:23 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
-WARNING 08-07 06:16:23 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
-INFO 08-07 06:16:23 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
-INFO 08-07 06:16:23 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
-INFO 08-07 06:16:23 [__init__.py:53] Module pathwaysutils is imported.
-INFO 08-07 06:16:23 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
-INFO 08-07 06:16:23 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+WARNING 08-07 08:08:10 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-07 08:08:15 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-07 08:08:15 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-07 08:08:15 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+INFO 08-07 08:08:16 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+INFO 08-07 08:08:16 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-07 08:08:16 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-07 08:08:16 [__init__.py:65] vLLM platform resolved to: TpuPlatform
 [verify] OK tpu_inference.layers.jax.linear.P22XK_MATMUL_ACTIVE=True
 [verify] OK tpu_inference.layers.jax.linear.P22XK_LINEAR_BASE
 [verify] OK tpu_inference.layers.jax.embed._CANON_F4E_ANNOUNCED
-INFO 08-07 06:16:24 [attention_interface.py:58] Using default RPA kernel
-WARNING 08-07 06:16:24 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-WARNING 08-07 06:16:24 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-WARNING 08-07 06:16:24 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-WARNING 08-07 06:16:24 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-INFO 08-07 06:16:25 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
-INFO 08-07 06:16:25 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
-INFO 08-07 06:16:25 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
-WARNING 08-07 06:16:25 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
-INFO 08-07 06:16:25 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+INFO 08-07 08:08:16 [attention_interface.py:58] Using default RPA kernel
+WARNING 08-07 08:08:17 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-07 08:08:17 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-07 08:08:17 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-07 08:08:17 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 08-07 08:08:18 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 08-07 08:08:18 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 08-07 08:08:18 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 08-07 08:08:18 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 08-07 08:08:18 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
 [verify] OK tpu_inference.models.jax.qwen3.P22XK_RMSNORM_ACTIVE=True
 [verify] OK tpu_inference.models.jax.qwen2.P22XK_SWIGLU_ACTIVE=True
-I0807 06:16:25.428802     234 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
-I0807 06:16:25.428830     234 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
-I0807 06:16:25.428838     234 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
-I0807 06:16:25.430712     234 grpc_client_session.cc:264]   Established channel.
-I0807 06:16:25.430729     234 grpc_client_session.cc:269]   Created stub.
-I0807 06:16:25.447113     234 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
-I0807 06:16:25.516118     234 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
-I0807 06:16:25.516196     234 grpc_client_session.cc:264]   Established channel.
-I0807 06:16:25.516210     234 grpc_client_session.cc:269]   Created stub.
-I0807 06:16:25.517272     234 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
-I0807 06:16:25.544853     234 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
-I0807 06:16:25.544881     234 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+I0807 08:08:18.262456     243 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0807 08:08:18.262491     243 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0807 08:08:18.262504     243 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 08:08:18.264489     243 grpc_client_session.cc:264]   Established channel.
+I0807 08:08:18.264509     243 grpc_client_session.cc:269]   Created stub.
+I0807 08:08:18.281312     243 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0807 08:08:18.360054     243 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 08:08:18.360133     243 grpc_client_session.cc:264]   Established channel.
+I0807 08:08:18.360148     243 grpc_client_session.cc:269]   Created stub.
+I0807 08:08:18.361178     243 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0807 08:08:18.390557     243 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0807 08:08:18.390586     243 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
 
 == P0  Pathways/JAX registration ==
 [t1.devices] count=64 kind=TPU v5p platform=tpu
@@ -163,7 +166,7 @@ I0807 06:16:25.544881     234 pjrt_client.cc:583] Addressable PjRt-IFRT device: 
 [bucket] next_power_of_2(dp*kv_packing)=16  (engine raises the floor to at least this)
 [bucket] SET MIN_TOKEN_BUCKET=4096
 [bucket] WARNING: copying MIN_TOKEN_BUCKET=256 from the dp=1 recipe would give each replica a bucket of 16, not 256.  Every canonical switch would still read 'on'.
-INFO 08-07 06:16:25 [utils.py:210] Prepared token paddings: [4096]
+INFO 08-07 08:08:18 [utils.py:210] Prepared token paddings: [4096]
 [bucket] impl=tpu_inference.runner.utils
 [bucket] global_paddings=[4096]
 [bucket] per_dp_paddings=[256]

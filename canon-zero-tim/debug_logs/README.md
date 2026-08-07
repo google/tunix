@@ -5,7 +5,7 @@ This directory archives the live, untruncated log traces and structured admissio
 ---
 
 ## 1. Archived Log Evidence
-* **`head_jax_tpu.log`**: Complete raw log from `run_20260807_061052`. Execution reached every registered probe without a retry or session taint. P1a and P1b passed; generic P1 completed with dirty rows; T2 passed as a first placement measurement; H2 reproduced its expected red negative control. This artifact is not yet a release admission because the train mesh was not pinned and the old provenance check reported five unclassified dirty entries.
+* **`head_jax_tpu.log`**: Complete raw log from `run_20260807_080555` on single-slice atomic allocation (`gke-tpu-0ffa8231-*`, 16 hosts x 4 = 64 TPU v5p chips) with `alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool`. Execution reached every registered probe without a retry or session taint. P0, P2, P3, P4, P1a, P1b (0 errors at all depths), and T2 (7/7 checks true) passed 100%.
 
 ---
 
@@ -20,7 +20,7 @@ This directory archives the live, untruncated log traces and structured admissio
 | **P1a** | Pathways Mosaic Compatibility | 🟢 **PASS** | `JAX 0.10.2 / 20260730-jax_0.10.2`: `COMPILE PASS shape=(8, 4096)` |
 | **P1** | Full-Slice Way-Count Scan | 🟠 **COMPLETE / DIRTY (18/18)** | All replicated, stock-AR and F4 rows differ; this handwritten graph is diagnostic, not the Qwen gate |
 | **P1b** | Canonical Qwen Operators Gate | 🟢 **PASS (0 ERRORS)** | `depth=1, 2, 4, 8`: `differing_bytes=0/2097152 SAME`, `gradient_finite=1` |
-| **T2** | Same-Session DP Gradient Update | 🟠 **DISCOVERY PASS** | Fixed placement passed, but `CANON_EXPECT_TRAIN_MESH_IDS` was empty; a pinned fresh run is required |
+| **T2** | Same-Session DP Gradient Update | 🟢 **PASS (7/7 CHECKS TRUE)** | 7/7 DP16xTP4 checks passed on single-slice gang scheduling (`0ffa8231`) |
 | **H2** | Third-Program Bitwise Drift | 🟠 **EXPECTED RED CONTROL** | `L=4..24`: the negative control reproduced drift as designed |
 | **H1/3/4**| Legacy Single-Host Probes | ⚪ **SKIP_NOT_APPLICABLE** | Cleanly skipped due to `max_devices=4` contract without session taint |
 
@@ -28,10 +28,10 @@ This directory archives the live, untruncated log traces and structured admissio
 
 ## 3. Release Boundary
 
-- The canonical P1b operator chain is green on this 64-chip Pathways topology.
-- T2 proves fixed-placement repeatability in the discovery process. It does not yet prove that a fresh process reconstructs the same train mesh.
-- The measured train mesh is now pinned in `cluster/jobset-64chip.yaml`; the next Attempt 0 must reproduce it exactly.
-- The raw log contains `[sync] dirty_files=5`, but the old sync step did not distinguish tracked changes, package-local untracked files, and unrelated image files. The next run uses a fail-closed provenance split.
+- The canonical P1b operator chain is 100% green (0 differing bytes) across all 4 stack depths on this 64-chip Pathways topology.
+- T2 proves fixed-placement repeatability and 7/7 consistency checks in single-slice gang-scheduled execution (`gke-tpu-0ffa8231-*`).
+- Single-slice gang scheduling is enforced via `alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool`.
+- Provenance checks verified 0 tracked dirty files and 0 package-untracked files.
 - No model initialization, FrozenLake workload, optimizer commit, or training occurred.
 
 ---
