@@ -224,11 +224,13 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
                 - --server_port=29000
-                - --resource_manager_address=$(PATHWAYS_HEAD):29001
+                - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x4x4
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
               env:
+                - name: PATHWAYS_HEAD
+                  value: canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64
                 - name: TPU_MIN_LOG_LEVEL
                   value: "0"
                 - name: TF_CPP_MIN_LOG_LEVEL
