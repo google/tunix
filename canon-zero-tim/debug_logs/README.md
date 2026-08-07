@@ -79,3 +79,16 @@ python3 -m unittest -v tests/t0_cpu/test_64chip_admission_evidence.py
 | **8** | 8 | 15 | `replicated` | 106,963 / 262,144 | 8.551e-03 | 3.656e-05 | 3.906e-02 |
 | **8** | 8 | 15 | `stock-ar` | 109,774 / 262,144 | 1.008e-02 | 5.079e-05 | 3.906e-02 |
 | **8** | 8 | 15 | `f4-fixed` | 108,164 / 262,144 | 8.980e-03 | 4.032e-05 | 4.688e-02 |
+---
+
+## 6. Phase 9 Qwen3-8B 36-Layer State Materialization Gate (64 Physical Chips)
+
+| Structure | Leaf Count | Logical Size | Sharding Mode | Memory Kind | DP-Sharded Leaves | Physical Bytes / Chip | Verdict |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Actor Model** | 399 | 32.76 GB | Pure Replicated DP16 x TP4 | `device` (HBM) | **0 (No FSDP)** | 8.19 GB | 🟢 **PASS** |
+| **AdamW Optimizer** | 799 | 65.53 GB | Pure Replicated DP16 x TP4 | `pinned_host` | **0 (No FSDP)** | 16.38 GB | 🟢 **PASS** |
+| **Accumulator** | 399 | 32.76 GB | Pure Replicated DP16 x TP4 | `device` (HBM) | **0 (No FSDP)** | 8.19 GB | 🟢 **PASS** |
+
+* **Total Physical Leaves Verified**: 1,597 leaves across 64 TPU v5p chips.
+* **FSDP Sharded Leaves**: **0 (Strict Pure Replicated Data Parallelism enforced)**.
+* **Deterministic Classification**: `debug_logs/model_init.classification.json` status: `PASS`.

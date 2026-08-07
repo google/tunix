@@ -86,8 +86,8 @@ spec:
                 - name: PATHWAYS_HEAD
                   value: localhost
               resources:
-                requests: {cpu: '2', memory: 8Gi}
-                limits:   {cpu: '4', memory: 32Gi}
+                requests: {cpu: '16', memory: 100Gi}
+                limits:   {cpu: '32', memory: 350G}
               restartPolicy: Always
             - name: pathways-rm
               # 20260730-jax_0.10.2, matched to the canonical client image.
@@ -104,8 +104,8 @@ spec:
                 - name: TPU_SKIP_MDS_QUERY
                   value: 'true'
               resources:
-                requests: {cpu: '2', memory: 8Gi}
-                limits:   {cpu: '4', memory: 32Gi}
+                requests: {cpu: '8', memory: 32Gi}
+                limits:   {cpu: '16', memory: 150G}
               restartPolicy: Always
             containers:
             - name: jax-tpu
@@ -113,8 +113,7 @@ spec:
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
               imagePullPolicy: Always
               resources:
-                requests: {cpu: '4', memory: 16Gi}
-                limits:   {cpu: '8', memory: 64Gi}
+                limits: {cpu: '24', memory: 200G}
               command:
               - bash
               - -c

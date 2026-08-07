@@ -1,0 +1,90 @@
+{
+  "reasons": [],
+  "record": {
+    "attempt": 0,
+    "execution": {
+      "backward": 0,
+      "forward": 0,
+      "optimizer_updates": 0,
+      "training_steps": 0
+    },
+    "inventory": {
+      "accumulator": {
+        "arrays": 399,
+        "dp_partitioned_leaves": 0,
+        "leaves": 399,
+        "logical_bytes": 32762941440,
+        "memory_kinds": [
+          "device"
+        ],
+        "tp_partitioned_leaves": 399
+      },
+      "model": {
+        "arrays": 399,
+        "dp_partitioned_leaves": 0,
+        "leaves": 399,
+        "logical_bytes": 32762941440,
+        "memory_kinds": [
+          "device"
+        ],
+        "tp_partitioned_leaves": 399
+      },
+      "optimizer": {
+        "arrays": 799,
+        "dp_partitioned_leaves": 0,
+        "leaves": 799,
+        "logical_bytes": 65525882884,
+        "memory_kinds": [
+          "pinned_host"
+        ],
+        "tp_partitioned_leaves": 798
+      }
+    },
+    "model": {
+      "checkpoint_loaded": false,
+      "compute_dtype": "<class 'jax.numpy.bfloat16'>",
+      "embed": 4096,
+      "head_dim": 128,
+      "heads": 32,
+      "hidden": 12288,
+      "kv_heads": 8,
+      "layers": 36,
+      "name": "qwen3-8b",
+      "param_dtype": "<class 'jax.numpy.float32'>",
+      "state_kind": "zero-structural",
+      "vocab": 151936
+    },
+    "optimizer": {
+      "b1": 0.9,
+      "b2": 0.95,
+      "commits": 0,
+      "learning_rate": 1e-06,
+      "memory_kind": "pinned_host",
+      "name": "adamw",
+      "weight_decay": 0.0
+    },
+    "physical_bytes_per_device": {
+      "accumulator": 8190735360,
+      "model": 8190735360,
+      "optimizer": 16381470724
+    },
+    "topology": {
+      "devices": 64,
+      "dp": 16,
+      "full_slice": true,
+      "mesh_shape": [
+        16,
+        4
+      ],
+      "tp": 4,
+      "unique_devices": 64
+    },
+    "wandb": {
+      "group": "qwen3-8b-dp16-tp4-model-init",
+      "network_initialized": false,
+      "project": "canon-zero-tim-p32",
+      "run_name": "p32-model-init-attempt-0"
+    }
+  },
+  "status": "PASS"
+}
