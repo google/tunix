@@ -41,6 +41,7 @@ export TPU_MIN_LOG_LEVEL="${TPU_MIN_LOG_LEVEL:-0}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-0}"
 export TPU_STDERR_LOG_LEVEL="${TPU_STDERR_LOG_LEVEL:-0}"
 export PYTHONDONTWRITEBYTECODE=1
+export CANON_TPU_INFERENCE_PATH="${CANON_TPU_INFERENCE_PATH:-/usr/local/lib/python3.12/site-packages/tpu_inference}"
 
 # Pathways backend, when present.  Absent on a direct-attached host, and that difference is
 # itself untested territory for the bitwise results -- see CLUSTER_ADMISSION.md.

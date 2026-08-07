@@ -12,7 +12,7 @@ source "$CANON_STATE/env.sh"
 
 find_tpu_inference() {
   if [ -n "${CANON_TPU_INFERENCE_PATH:-}" ]; then echo "$CANON_TPU_INFERENCE_PATH"; return; fi
-  python3 - <<'PY' 2>/dev/null || true
+  PATHWAYS_HEAD="" JAX_BACKEND_TARGET="" JAX_PLATFORMS=cpu python3 - <<'PY' 2>/dev/null || true
 import importlib.util, os
 spec = importlib.util.find_spec("tpu_inference")
 if spec and spec.submodule_search_locations:
