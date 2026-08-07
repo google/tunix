@@ -1,17 +1,17 @@
-XPK Start: 2026-08-07T02:46:55Z
-[entrypoint] start 2026-08-07T02:46:56Z  mode=dp-gate-only  pkg=/app/canon-zero-tim
-[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-zero-tim-v5p-64-pathways-head-0-0-m6vsr
+XPK Start: 2026-08-07T03:34:18Z
+[entrypoint] start 2026-08-07T03:34:19Z  mode=dp-gate-only  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-zero-tim-v5p-64-pathways-head-0-0-5qvv2
 [entrypoint] --> 00_env.sh
 [env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
 [env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
 [env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
 [env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
 [env] profile=qwen3-8b-dp16-tp4-admission model_dir=qwen8b
-[env] resolved configuration written to /tmp/canon-state/env.sh (75 lines)
+[env] resolved configuration written to /tmp/canon-state/env.sh (74 lines)
 [entrypoint] <-- 00_env.sh ok
 [entrypoint] --> 10_sync_repo.sh
-[sync] HEAD=2f3048f5119f188a82bee6702e54e93604114fec
-[sync] describe=2f3048f5 Support 64-chip multi-node full-slice mesh in minrepro probes
+[sync] HEAD=df323c5fde90264679499bdd536ca86d787e2963
+[sync] describe=df323c5f Measure Pathways TP drift on full-slice DP-by-TP meshes
 [sync] dirty_files=5
 [sync] provenance ok
 [entrypoint] <-- 10_sync_repo.sh ok
@@ -94,71 +94,51 @@ and the only proof that the intervention took is the [PATHTRACE] lines -- never 
 [entrypoint] --> 70_run_t1.sh
 [t1] activating Pathways backend: JAX_PLATFORMS=proxy,cpu target=grpc://localhost:29000
 [t1] XLA_FLAGS=--xla_cpu_max_isa=AVX2 --xla_allow_excess_precision=false
-WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
 [T1.PATHWAYS] required=1 initialized=1 status=ok
-[t1.unified] Pathways initialized in single session. Starting probes...
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[t1.unified] Pathways initialized in one fail-stop session. Starting probes...
 
 == Overlay promotion verification ==
-WARNING 08-07 02:50:00 [tpu_platform.py:408] Pin memory is not supported on TPU.
-INFO 08-07 02:50:05 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
-WARNING 08-07 02:50:05 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
-INFO 08-07 02:50:05 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
-INFO 08-07 02:50:06 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
-INFO 08-07 02:50:06 [__init__.py:53] Module pathwaysutils is imported.
-INFO 08-07 02:50:06 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
-INFO 08-07 02:50:06 [__init__.py:65] vLLM platform resolved to: TpuPlatform
-[verify]   OK   tpu_inference.layers.jax.linear.P22XK_MATMUL_ACTIVE=True
-[verify]   OK   tpu_inference.layers.jax.linear.P22XK_LINEAR_BASE
-[verify]   OK   tpu_inference.layers.jax.embed._CANON_F4E_ANNOUNCED
-INFO 08-07 02:50:06 [attention_interface.py:58] Using default RPA kernel
-WARNING 08-07 02:50:07 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-WARNING 08-07 02:50:07 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-WARNING 08-07 02:50:07 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-WARNING 08-07 02:50:07 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-INFO 08-07 02:50:08 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
-INFO 08-07 02:50:08 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
-INFO 08-07 02:50:08 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
-WARNING 08-07 02:50:08 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
-INFO 08-07 02:50:08 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
-[verify]   OK   tpu_inference.models.jax.qwen3.P22XK_RMSNORM_ACTIVE=True
-[verify]   OK   tpu_inference.models.jax.qwen2.P22XK_SWIGLU_ACTIVE=True
+WARNING 08-07 03:37:23 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-07 03:37:28 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-07 03:37:28 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-07 03:37:28 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+INFO 08-07 03:37:29 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+INFO 08-07 03:37:29 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-07 03:37:29 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-07 03:37:29 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+[verify] OK tpu_inference.layers.jax.linear.P22XK_MATMUL_ACTIVE=True
+[verify] OK tpu_inference.layers.jax.linear.P22XK_LINEAR_BASE
+[verify] OK tpu_inference.layers.jax.embed._CANON_F4E_ANNOUNCED
+INFO 08-07 03:37:30 [attention_interface.py:58] Using default RPA kernel
+WARNING 08-07 03:37:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-07 03:37:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-07 03:37:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-07 03:37:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 08-07 03:37:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 08-07 03:37:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 08-07 03:37:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 08-07 03:37:31 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 08-07 03:37:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+[verify] OK tpu_inference.models.jax.qwen3.P22XK_RMSNORM_ACTIVE=True
+[verify] OK tpu_inference.models.jax.qwen2.P22XK_SWIGLU_ACTIVE=True
+I0807 03:37:31.281445     233 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0807 03:37:31.281482     233 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0807 03:37:31.281494     233 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 03:37:31.283256     233 grpc_client_session.cc:264]   Established channel.
+I0807 03:37:31.283276     233 grpc_client_session.cc:269]   Created stub.
+I0807 03:37:31.299771     233 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0807 03:37:31.380260     233 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 03:37:31.380419     233 grpc_client_session.cc:264]   Established channel.
+I0807 03:37:31.380438     233 grpc_client_session.cc:269]   Created stub.
+I0807 03:37:31.381414     233 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0807 03:37:31.408562     233 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0807 03:37:31.408590     233 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
 
 == P0  Pathways/JAX registration ==
-I0807 02:50:08.180337     233 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
-I0807 02:50:08.180371     233 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
-I0807 02:50:08.180381     233 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
-I0807 02:50:08.182254     233 grpc_client_session.cc:264]   Established channel.
-I0807 02:50:08.182271     233 grpc_client_session.cc:269]   Created stub.
-I0807 02:50:08.196649     233 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
-I0807 02:50:08.262357     233 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
-I0807 02:50:08.262445     233 grpc_client_session.cc:264]   Established channel.
-I0807 02:50:08.262460     233 grpc_client_session.cc:269]   Created stub.
-I0807 02:50:08.263419     233 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
-I0807 02:50:08.290403     233 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
-I0807 02:50:08.290429     233 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
 [t1.devices] count=64 kind=TPU v5p platform=tpu
 
-== P1  way-count scan (NEW) ==
-[waycount] devices=64 kind=TPU v5p widths=[2, 4] depths=[8, 15]
-[waycount] width= 2 depth=  8 XLA-all-reduce  differing_bytes=  90582/262144 DIFFERS
-[waycount] width= 2 depth=  8 F4-fixed-order  differing_bytes=  91371/262144 DIFFERS
-[waycount] width= 2 depth= 15 XLA-all-reduce  differing_bytes= 107524/262144 DIFFERS
-[waycount] width= 2 depth= 15 F4-fixed-order  differing_bytes= 107844/262144 DIFFERS
-W0807 02:50:51.734639     782 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-Traceback (most recent call last):
-  File "/app/canon-zero-tim/tests/t1_tpu/unified_runner.py", line 75, in run_all_probes
-    rc_p1 = probe_waycount.main()
-            ^^^^^^^^^^^^^^^^^^^^^
-  File "/app/canon-zero-tim/tests/t1_tpu/probe_waycount.py", line 149, in main
-    a = np.asarray(jax.device_get(jax.jit(fwd)(x0, w)))
-                                  ^^^^^^^^^^^^^^^^^^^
-jax.errors.JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
---------------------
-For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
-
-== P2  mesh order / slice (NEW) ==
+== P2  mesh order / slice ==
 [mesh] visible_devices=64 kind=TPU v5p platform=tpu
 [mesh] raw_device_ids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
 [mesh]   id=0 process=0 slice=0 coords=[0, 0, 0]
@@ -177,20 +157,20 @@ For simplicity, JAX has removed its internal frames from the traceback of the fo
 [mesh] expected_ids=[0, 16, 32, 48, 4, 20, 36, 52, 8, 24, 40, 56, 12, 28, 44, 60, 1, 17, 33, 49, 5, 21, 37, 53, 9, 25, 41, 57, 13, 29, 45, 61, 2, 18, 34, 50, 6, 22, 38, 54, 10, 26, 42, 58, 14, 30, 46, 62, 3, 19, 35, 51, 7, 23, 39, 55, 11, 27, 43, 59, 15, 31, 47, 63]
 [mesh] VERDICT: MATCH
 
-== P3  bucket contract (NEW) ==
+== P3  bucket contract ==
 [bucket] dp_size=16 target_per_replica_M=256 max_num_batched_tokens=256 kv_packing=1
 [bucket] required_global_MIN_TOKEN_BUCKET=4096  (= target_per_replica_M * dp_size)
 [bucket] next_power_of_2(dp*kv_packing)=16  (engine raises the floor to at least this)
 [bucket] SET MIN_TOKEN_BUCKET=4096
 [bucket] WARNING: copying MIN_TOKEN_BUCKET=256 from the dp=1 recipe would give each replica a bucket of 16, not 256.  Every canonical switch would still read 'on'.
-INFO 08-07 02:50:51 [utils.py:210] Prepared token paddings: [4096]
+INFO 08-07 03:37:31 [utils.py:210] Prepared token paddings: [4096]
 [bucket] impl=tpu_inference.runner.utils
 [bucket] global_paddings=[4096]
 [bucket] per_dp_paddings=[256]
 [bucket] target_per_replica_M_reachable=True
 [bucket] VERDICT: OK
 
-== P4  F4 cost model (NEW) ==
+== P4  F4 cost model ==
 [f4cost] out_bytes_per_site=2621440 (2.50 MiB) layers=64 sites_per_layer=2
 [f4cost] model: ring=2(n-1)/n*B moved, 1 buffer live; F4=(n-1)*B moved, n buffers live
 [f4cost] width   ring MiB     F4 MiB   ratio  F4 live MiB  F4 per-step GiB  recdbl MiB
@@ -201,21 +181,75 @@ INFO 08-07 02:50:51 [utils.py:210] Prepared token paddings: [4096]
 [f4cost]    32       4.84      77.50   16.00        80.00             9.69       12.50
 [f4cost] VERDICT: ANALYTIC -- derived from the implementation, not measured. A width whose ratio you are unwilling to pay needs either a measurement or the recursive-doubling variant (which must re-clear THIRDPROG and A=B first).
 
-== H1  minrepro: F4 tree ==
-W0807 02:50:52.168889     779 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-Traceback (most recent call last):
-  File "/app/canon-zero-tim/tests/t1_tpu/unified_runner.py", line 131, in run_all_probes
-    import p19_minrepro_f4
-  File "/app/canon-zero-tim/tests/t1_tpu/p19_minrepro_f4.py", line 72, in <module>
-    a = np.asarray(jax.device_get(jax.jit(fwd)(x0, w)))
-                                  ^^^^^^^^^^^^^^^^^^^
-jax.errors.JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
---------------------
-For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+== P1  full-slice way-count scan ==
+[waycount] devices=64 kind=TPU v5p widths=[2, 4] depths=[8, 15] arms=['replicated', 'stock-ar', 'f4-fixed']
+[waycount.mesh] width=2 shape=(32, 2) devices=64 unique=64 full_slice=1
+[waycount.mesh] width=2 group=00 ids=[0, 1] coords=[[0, 0, 0], [1, 0, 0]]
+[waycount.mesh] width=2 group=01 ids=[16, 17] coords=[[0, 0, 1], [1, 0, 1]]
+[waycount.mesh] width=2 group=02 ids=[32, 33] coords=[[0, 0, 2], [1, 0, 2]]
+[waycount.mesh] width=2 group=03 ids=[48, 49] coords=[[0, 0, 3], [1, 0, 3]]
+[waycount.mesh] width=2 group=04 ids=[4, 5] coords=[[0, 1, 0], [1, 1, 0]]
+[waycount.mesh] width=2 group=05 ids=[20, 21] coords=[[0, 1, 1], [1, 1, 1]]
+[waycount.mesh] width=2 group=06 ids=[36, 37] coords=[[0, 1, 2], [1, 1, 2]]
+[waycount.mesh] width=2 group=07 ids=[52, 53] coords=[[0, 1, 3], [1, 1, 3]]
+[waycount.mesh] width=2 group=08 ids=[8, 9] coords=[[0, 2, 0], [1, 2, 0]]
+[waycount.mesh] width=2 group=09 ids=[24, 25] coords=[[0, 2, 1], [1, 2, 1]]
+[waycount.mesh] width=2 group=10 ids=[40, 41] coords=[[0, 2, 2], [1, 2, 2]]
+[waycount.mesh] width=2 group=11 ids=[56, 57] coords=[[0, 2, 3], [1, 2, 3]]
+[waycount.mesh] width=2 group=12 ids=[12, 13] coords=[[0, 3, 0], [1, 3, 0]]
+[waycount.mesh] width=2 group=13 ids=[28, 29] coords=[[0, 3, 1], [1, 3, 1]]
+[waycount.mesh] width=2 group=14 ids=[44, 45] coords=[[0, 3, 2], [1, 3, 2]]
+[waycount.mesh] width=2 group=15 ids=[60, 61] coords=[[0, 3, 3], [1, 3, 3]]
+[waycount.mesh] width=2 group=16 ids=[2, 3] coords=[[2, 0, 0], [3, 0, 0]]
+[waycount.mesh] width=2 group=17 ids=[18, 19] coords=[[2, 0, 1], [3, 0, 1]]
+[waycount.mesh] width=2 group=18 ids=[34, 35] coords=[[2, 0, 2], [3, 0, 2]]
+[waycount.mesh] width=2 group=19 ids=[50, 51] coords=[[2, 0, 3], [3, 0, 3]]
+[waycount.mesh] width=2 group=20 ids=[6, 7] coords=[[2, 1, 0], [3, 1, 0]]
+[waycount.mesh] width=2 group=21 ids=[22, 23] coords=[[2, 1, 1], [3, 1, 1]]
+[waycount.mesh] width=2 group=22 ids=[38, 39] coords=[[2, 1, 2], [3, 1, 2]]
+[waycount.mesh] width=2 group=23 ids=[54, 55] coords=[[2, 1, 3], [3, 1, 3]]
+[waycount.mesh] width=2 group=24 ids=[10, 11] coords=[[2, 2, 0], [3, 2, 0]]
+[waycount.mesh] width=2 group=25 ids=[26, 27] coords=[[2, 2, 1], [3, 2, 1]]
+[waycount.mesh] width=2 group=26 ids=[42, 43] coords=[[2, 2, 2], [3, 2, 2]]
+[waycount.mesh] width=2 group=27 ids=[58, 59] coords=[[2, 2, 3], [3, 2, 3]]
+[waycount.mesh] width=2 group=28 ids=[14, 15] coords=[[2, 3, 0], [3, 3, 0]]
+[waycount.mesh] width=2 group=29 ids=[30, 31] coords=[[2, 3, 1], [3, 3, 1]]
+[waycount.mesh] width=2 group=30 ids=[46, 47] coords=[[2, 3, 2], [3, 3, 2]]
+[waycount.mesh] width=2 group=31 ids=[62, 63] coords=[[2, 3, 3], [3, 3, 3]]
+[waycount] width= 2 replicas=32 depth=  8 arm=replicated differing_bytes=  89647/262144 rel_l2=5.563061e-03 one_minus_cos=1.547369e-05 max_abs=3.125000e-02 DIFFERS
+[waycount] width= 2 replicas=32 depth=  8 arm=stock-ar   differing_bytes=  90582/262144 rel_l2=6.138138e-03 one_minus_cos=1.883851e-05 max_abs=3.125000e-02 DIFFERS
+[waycount] width= 2 replicas=32 depth=  8 arm=f4-fixed   differing_bytes=  91371/262144 rel_l2=5.869698e-03 one_minus_cos=1.722674e-05 max_abs=3.125000e-02 DIFFERS
+[waycount] width= 2 replicas=32 depth= 15 arm=replicated differing_bytes= 106787/262144 rel_l2=8.618181e-03 one_minus_cos=3.713538e-05 max_abs=4.687500e-02 DIFFERS
+[waycount] width= 2 replicas=32 depth= 15 arm=stock-ar   differing_bytes= 107524/262144 rel_l2=9.391562e-03 one_minus_cos=4.410168e-05 max_abs=3.906250e-02 DIFFERS
+[waycount] width= 2 replicas=32 depth= 15 arm=f4-fixed   differing_bytes= 107844/262144 rel_l2=9.002913e-03 one_minus_cos=4.051837e-05 max_abs=3.906250e-02 DIFFERS
+[waycount.mesh] width=4 shape=(16, 4) devices=64 unique=64 full_slice=1
+[waycount.mesh] width=4 group=00 ids=[0, 1, 2, 3] coords=[[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]]
+[waycount.mesh] width=4 group=01 ids=[16, 17, 18, 19] coords=[[0, 0, 1], [1, 0, 1], [2, 0, 1], [3, 0, 1]]
+[waycount.mesh] width=4 group=02 ids=[32, 33, 34, 35] coords=[[0, 0, 2], [1, 0, 2], [2, 0, 2], [3, 0, 2]]
+[waycount.mesh] width=4 group=03 ids=[48, 49, 50, 51] coords=[[0, 0, 3], [1, 0, 3], [2, 0, 3], [3, 0, 3]]
+[waycount.mesh] width=4 group=04 ids=[4, 5, 6, 7] coords=[[0, 1, 0], [1, 1, 0], [2, 1, 0], [3, 1, 0]]
+[waycount.mesh] width=4 group=05 ids=[20, 21, 22, 23] coords=[[0, 1, 1], [1, 1, 1], [2, 1, 1], [3, 1, 1]]
+[waycount.mesh] width=4 group=06 ids=[36, 37, 38, 39] coords=[[0, 1, 2], [1, 1, 2], [2, 1, 2], [3, 1, 2]]
+[waycount.mesh] width=4 group=07 ids=[52, 53, 54, 55] coords=[[0, 1, 3], [1, 1, 3], [2, 1, 3], [3, 1, 3]]
+[waycount.mesh] width=4 group=08 ids=[8, 9, 10, 11] coords=[[0, 2, 0], [1, 2, 0], [2, 2, 0], [3, 2, 0]]
+[waycount.mesh] width=4 group=09 ids=[24, 25, 26, 27] coords=[[0, 2, 1], [1, 2, 1], [2, 2, 1], [3, 2, 1]]
+[waycount.mesh] width=4 group=10 ids=[40, 41, 42, 43] coords=[[0, 2, 2], [1, 2, 2], [2, 2, 2], [3, 2, 2]]
+[waycount.mesh] width=4 group=11 ids=[56, 57, 58, 59] coords=[[0, 2, 3], [1, 2, 3], [2, 2, 3], [3, 2, 3]]
+[waycount.mesh] width=4 group=12 ids=[12, 13, 14, 15] coords=[[0, 3, 0], [1, 3, 0], [2, 3, 0], [3, 3, 0]]
+[waycount.mesh] width=4 group=13 ids=[28, 29, 30, 31] coords=[[0, 3, 1], [1, 3, 1], [2, 3, 1], [3, 3, 1]]
+[waycount.mesh] width=4 group=14 ids=[44, 45, 46, 47] coords=[[0, 3, 2], [1, 3, 2], [2, 3, 2], [3, 3, 2]]
+[waycount.mesh] width=4 group=15 ids=[60, 61, 62, 63] coords=[[0, 3, 3], [1, 3, 3], [2, 3, 3], [3, 3, 3]]
+[waycount] width= 4 replicas=16 depth=  8 arm=replicated differing_bytes=  90118/262144 rel_l2=5.673997e-03 one_minus_cos=1.609719e-05 max_abs=3.125000e-02 DIFFERS
+[waycount] width= 4 replicas=16 depth=  8 arm=stock-ar   differing_bytes=  92714/262144 rel_l2=6.433564e-03 one_minus_cos=2.069538e-05 max_abs=3.125000e-02 DIFFERS
+[waycount] width= 4 replicas=16 depth=  8 arm=f4-fixed   differing_bytes=  92397/262144 rel_l2=5.930231e-03 one_minus_cos=1.758305e-05 max_abs=3.125000e-02 DIFFERS
+[waycount] width= 4 replicas=16 depth= 15 arm=replicated differing_bytes= 106632/262144 rel_l2=8.576624e-03 one_minus_cos=3.677453e-05 max_abs=4.687500e-02 DIFFERS
+[waycount] width= 4 replicas=16 depth= 15 arm=stock-ar   differing_bytes= 108526/262144 rel_l2=9.678544e-03 one_minus_cos=4.683712e-05 max_abs=4.687500e-02 DIFFERS
+[waycount] width= 4 replicas=16 depth= 15 arm=f4-fixed   differing_bytes= 108060/262144 rel_l2=8.985496e-03 one_minus_cos=4.037034e-05 max_abs=3.906250e-02 DIFFERS
+[waycount] measurements=12 expected=12
+[waycount] VERDICT: COMPLETE
+[t1.unified] SKIP_NOT_APPLICABLE probe=H1 visible_devices=64 max_devices=4 reason=legacy-subset-mesh
 
-== H2  minrepro: third program ==
+== H2  legacy minrepro: third program ==
 [minrepro] devices=64 dims T=256 D=512 F=2048 XLA_FLAGS='--xla_cpu_max_isa=AVX2 --xla_cpu_max_isa=AVX2 --xla_allow_excess_precision=false'
 [minrepro] L=  4: primal_differing_bytes= 77754/262144 max_abs_delta=3.125e-02  <<<<< DIFFERS
 [minrepro] L=  8: primal_differing_bytes= 96734/262144 max_abs_delta=3.125e-02  <<<<< DIFFERS
@@ -225,84 +259,26 @@ For simplicity, JAX has removed its internal frames from the traceback of the fo
 [minrepro] L= 16: primal_differing_bytes=111632/262144 max_abs_delta=4.688e-02  <<<<< DIFFERS
 [minrepro] L= 20: primal_differing_bytes=115130/262144 max_abs_delta=6.250e-02  <<<<< DIFFERS
 [minrepro] L= 24: primal_differing_bytes=118022/262144 max_abs_delta=6.250e-02  <<<<< DIFFERS
-[minrepro] devices=64 dims T=256 D=512 F=2048 XLA_FLAGS='--xla_cpu_max_isa=AVX2 --xla_cpu_max_isa=AVX2 --xla_allow_excess_precision=false'
-[minrepro] L=  4: primal_differing_bytes= 77754/262144 max_abs_delta=3.125e-02  <<<<< DIFFERS
-[minrepro] L=  8: primal_differing_bytes= 96734/262144 max_abs_delta=3.125e-02  <<<<< DIFFERS
-[minrepro] L= 12: primal_differing_bytes=106303/262144 max_abs_delta=4.688e-02  <<<<< DIFFERS
-[minrepro] L= 14: primal_differing_bytes=109236/262144 max_abs_delta=3.906e-02  <<<<< DIFFERS
-[minrepro] L= 15: primal_differing_bytes=110501/262144 max_abs_delta=4.688e-02  <<<<< DIFFERS
-[minrepro] L= 16: primal_differing_bytes=111632/262144 max_abs_delta=4.688e-02  <<<<< DIFFERS
-[minrepro] L= 20: primal_differing_bytes=115130/262144 max_abs_delta=6.250e-02  <<<<< DIFFERS
-[minrepro] L= 24: primal_differing_bytes=118022/262144 max_abs_delta=6.250e-02  <<<<< DIFFERS
-
-== H3  minrepro: device topology ==
-[topo] 2-device 1D mesh, TP-sharded                     differing_bytes= 90582 DIFFERS
-[topo] 2-device 1D mesh, replicated                     differing_bytes= 90121 DIFFERS
-[topo] 3-device: EXC IndivisibleError: Sharding NamedSharding(mesh=Mesh('m': 3, axis_types=(Auto,)), spec=P(N
-W0807 02:51:17.088464     815 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[topo] 4-device: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:17.765442     782 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[topo] 2x2: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:18.137269     816 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[topo] perm: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-[topo] 2-device 1D mesh, TP-sharded                     differing_bytes= 90582 DIFFERS
-[topo] 2-device 1D mesh, replicated                     differing_bytes= 90121 DIFFERS
-[topo] 3-device: EXC IndivisibleError: Sharding NamedSharding(mesh=Mesh('m': 3, axis_types=(Auto,)), spec=P(N
-W0807 02:51:19.645098     822 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[topo] 4-device: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:20.044641     820 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[topo] 2x2: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:20.412369     811 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[topo] perm: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-
-== H4  minrepro: mesh geometry ==
-W0807 02:51:20.826451     781 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L=  8: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:21.576427     781 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L= 15: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:23.185870     782 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L= 24: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:24.785761     819 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L= 32: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:25.201888     818 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L=  8: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:25.936449     780 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L= 15: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:27.116308     778 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L= 24: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
-W0807 02:51:28.646707     821 rpc_helper.cc:436] compile: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1
-	Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
-[m2d] L= 32: EXC JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host 
+[t1.unified] SKIP_NOT_APPLICABLE probe=H3 visible_devices=64 max_devices=4 reason=legacy-subset-mesh
+[t1.unified] SKIP_NOT_APPLICABLE probe=H4 visible_devices=64 max_devices=4 reason=legacy-subset-mesh
 
 ============================================================
-===== T1 FAIL -- a probe did not run or exited nonzero =====
-I0807 02:51:29.921612     233 client.cc:221] Client::~Client() starting.
-I0807 02:51:29.923133     233 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
-I0807 02:51:29.923141     233 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
-I0807 02:51:29.923495     233 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
-I0807 02:51:29.923518     233 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
-I0807 02:51:29.923522     233 grpc_client_session.cc:202] GrpcClientSession: Finish(): calling context_->TryCancel();
-I0807 02:51:29.923706     233 grpc_client_session.cc:205] GrpcClientSession: Waiting for reader thread to stop.
-I0807 02:51:29.923686     509 grpc_client_session.cc:176] GrpcClientSession: reader loop is exiting.
-I0807 02:51:29.923775     509 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status OK
-I0807 02:51:29.923816     233 grpc_client_session.cc:209] GrpClientSession: Attempting to call stream->Finish()
-I0807 02:51:29.923820     233 grpc_client_session.cc:213] GrpClientSession: Attempting to call stream->Finish(), mutex acquired
-I0807 02:51:29.923865     233 grpc_client_session.cc:216] GrpClientSession: stream->Finish() returned server status CANCELLED: CANCELLED
-I0807 02:51:29.923877     233 grpc_client_session.cc:237] GrpClientSession::Finish(): calling terminated cb with CANCELLED: CANCELLED
-W0807 02:51:29.923882     233 grpc_client.cc:91] IFRT proxy server disconnected: CANCELLED: CANCELLED; Stack trace: *** Begin stack trace ***
+===== T1 COMPLETE -- all applicable probes produced measurements =====
+NOTE: COMPLETE proves execution coverage only. Admission still requires interpreting the paired-arm metrics in CLUSTER_ADMISSION.md.
+I0807 03:38:36.170524     233 client.cc:221] Client::~Client() starting.
+I0807 03:38:36.172129     233 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 03:38:36.172137     233 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0807 03:38:36.172489     233 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0807 03:38:36.172514     233 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 03:38:36.172519     233 grpc_client_session.cc:202] GrpcClientSession: Finish(): calling context_->TryCancel();
+I0807 03:38:36.172756     233 grpc_client_session.cc:205] GrpcClientSession: Waiting for reader thread to stop.
+I0807 03:38:36.172687     509 grpc_client_session.cc:176] GrpcClientSession: reader loop is exiting.
+I0807 03:38:36.172810     509 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status OK
+I0807 03:38:36.172824     233 grpc_client_session.cc:209] GrpClientSession: Attempting to call stream->Finish()
+I0807 03:38:36.172831     233 grpc_client_session.cc:213] GrpClientSession: Attempting to call stream->Finish(), mutex acquired
+I0807 03:38:36.172883     233 grpc_client_session.cc:216] GrpClientSession: stream->Finish() returned server status CANCELLED: CANCELLED
+I0807 03:38:36.172894     233 grpc_client_session.cc:237] GrpClientSession::Finish(): calling terminated cb with CANCELLED: CANCELLED
+W0807 03:38:36.172900     233 grpc_client.cc:91] IFRT proxy server disconnected: CANCELLED: CANCELLED; Stack trace: *** Begin stack trace ***
 	
 	
 	
@@ -328,23 +304,39 @@ W0807 02:51:29.923882     233 grpc_client.cc:91] IFRT proxy server disconnected:
 	_start
 *** End stack trace ***
 
-I0807 02:51:29.924185     233 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
-I0807 02:51:29.924188     233 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
-I0807 02:51:29.924192     233 client.cc:223] Client::~Client(): rpc_helper_->Disconnect() is done.
-I0807 02:51:29.924205     509 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
-I0807 02:51:29.924530     233 rpc_helper.cc:509] RpcHelper::~RpcHelper() starting.
-I0807 02:51:29.924580     233 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
-I0807 02:51:29.924584     233 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
-I0807 02:51:29.924586     233 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
-I0807 02:51:29.924589     233 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
-I0807 02:51:29.924591     233 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
-I0807 02:51:29.924593     233 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
-I0807 02:51:29.924595     233 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
-I0807 02:51:29.924599     233 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
-I0807 02:51:29.924893     233 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
-I0807 02:51:29.924966     233 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
-I0807 02:51:29.924972     233 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
-I0807 02:51:29.924975     233 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
-I0807 02:51:29.925317     233 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
-I0807 02:51:29.927757     233 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
-[entrypoint] FATAL: 70_run_t1.sh exited 1
+I0807 03:38:36.173246     233 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 03:38:36.173250     233 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0807 03:38:36.173254     233 client.cc:223] Client::~Client(): rpc_helper_->Disconnect() is done.
+I0807 03:38:36.173277     509 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 03:38:36.173630     233 rpc_helper.cc:509] RpcHelper::~RpcHelper() starting.
+I0807 03:38:36.173723     233 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 03:38:36.173729     233 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0807 03:38:36.173732     233 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0807 03:38:36.173735     233 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 03:38:36.173739     233 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 03:38:36.173742     233 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0807 03:38:36.173746     233 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
+I0807 03:38:36.173752     233 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
+I0807 03:38:36.174088     233 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
+I0807 03:38:36.174200     233 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
+I0807 03:38:36.174209     233 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
+I0807 03:38:36.174213     233 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 03:38:36.174567     233 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0807 03:38:36.176302     233 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
+[entrypoint] <-- 70_run_t1.sh ok
+[entrypoint] --> 75_run_dp.sh
+[dp-gate] dp=16 tp=4 local_samples=16
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[T1.PATHWAYS] required=1 initialized=1 status=ok
+I0807 03:38:38.026457     835 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0807 03:38:38.026495     835 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0807 03:38:38.026504     835 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 03:38:38.028288     835 grpc_client_session.cc:264]   Established channel.
+I0807 03:38:38.028310     835 grpc_client_session.cc:269]   Created stub.
+I0807 03:38:38.039513     835 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0807 03:38:38.095676     835 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 03:38:38.095807     835 grpc_client_session.cc:264]   Established channel.
+I0807 03:38:38.095821     835 grpc_client_session.cc:269]   Created stub.
+I0807 03:38:38.096654     835 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0807 03:38:38.125667     835 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0807 03:38:38.125696     835 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
