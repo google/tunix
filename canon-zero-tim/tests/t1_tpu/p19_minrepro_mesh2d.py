@@ -50,8 +50,11 @@ except (TypeError, NotImplementedError):
     d22_cdm = np.array(devs[:4]).reshape(2, 2)
 m22_cdm = Mesh(d22_cdm, ("a", "b"))
 for L in (8, 15, 24, 32):
-    check("1D-4dev(plain reshape) TP", m1_plain, P(None,"m"), P("m",None), L)
-    check("1D-4dev(create_device_mesh) TP", m1_cdm, P(None,"m"), P("m",None), L)
-    check("2x2(plain) TP on b", m22_plain, P(None,"b"), P("b",None), L)
-    check("2x2(cdm) TP on b", m22_cdm, P(None,"b"), P("b",None), L)
-    check("2x2(plain) 2D-TP on (a,b)", m22_plain, P(None,("a","b")), P(("a","b"),None), L)
+    try:
+        check("1D-4dev(plain reshape) TP", m1_plain, P(None,"m"), P("m",None), L)
+        check("1D-4dev(create_device_mesh) TP", m1_cdm, P(None,"m"), P("m",None), L)
+        check("2x2(plain) TP on b", m22_plain, P(None,"b"), P("b",None), L)
+        check("2x2(cdm) TP on b", m22_cdm, P(None,"b"), P("b",None), L)
+        check("2x2(plain) 2D-TP on (a,b)", m22_plain, P(None,("a","b")), P(("a","b"),None), L)
+    except Exception as exc:
+        print(f"[m2d] L={L:3d}: EXC {type(exc).__name__}: {str(exc)[:70]}", flush=True)

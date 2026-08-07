@@ -16,7 +16,7 @@ D, F, T = 512, 2048, 256
 # decides whether the third-program drift appears, so a package targeting other topologies
 # must be able to set it.  Default keeps the documented 4-way behaviour on a 4-chip host.
 devs = jax.devices()
-N = int(_os.environ.get("CANON_MINREPRO_N") or min(4, len(devs)))
+N = int(_os.environ.get("CANON_MINREPRO_N") or len(devs))
 assert N <= len(devs), f"CANON_MINREPRO_N={N} exceeds {len(devs)} visible devices"
 try:
     dmesh = mesh_utils.create_device_mesh((N,), devs[:N], allow_split_physical_axes=True)
