@@ -151,6 +151,8 @@ spec:
                 value: ""                  # fill from the first T2-DP MESH line
               - name: CANON_WORKER_WAIT_SECONDS
                 value: "600"
+              - name: CANON_WORKER_STABLE_PROBES
+                value: "1"
               - name: CANON_WAYCOUNT_WIDTHS
                 value: "2,4"
               - name: CANON_WAYCOUNT_DEPTHS
