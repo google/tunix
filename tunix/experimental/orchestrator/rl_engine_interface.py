@@ -41,7 +41,7 @@ comments.
 
 from typing import Any, Mapping, Protocol, runtime_checkable
 from jax.typing import ArrayLike
-from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.experimental.common import datatypes
 
 
 @runtime_checkable
@@ -84,7 +84,7 @@ class AbstractRLEngine(Protocol):
   # --- Training (train_step) ------------------------------------------------
   def train(
       self,
-      role: rl_engine_lib.Role,
+      role: datatypes.Role,
       train_ds: Any,
       eval_ds: Any,
       skip_jit: bool = False,
@@ -95,7 +95,7 @@ class AbstractRLEngine(Protocol):
   # --- Scoring (feeds advantage / IS math) ----------------------------------
   def per_token_logps(
       self,
-      role: rl_engine_lib.Role,
+      role: datatypes.Role,
       prompt_tokens: ArrayLike,
       completion_tokens: ArrayLike,
       pad_id: int,
