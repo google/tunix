@@ -17,12 +17,13 @@ def _devices(count: int):
 
 class WayCountContractTest(unittest.TestCase):
     def test_default_widths_are_bounded_and_divisible(self):
-        self.assertEqual(target._default_widths(64), [2, 4])
+        self.assertEqual(target._default_widths(64), [2, 4, 8])
+        self.assertEqual(target._default_widths(8), [2, 4, 8])
         self.assertEqual(target._default_widths(2), [2])
         self.assertEqual(target._default_widths(3), [])
 
     def test_schedule_rejects_invalid_and_duplicate_values(self):
-        target._validate_schedule(64, [2, 4], [8, 15])
+        target._validate_schedule(64, [2, 4, 8], [8, 15])
         with self.assertRaisesRegex(ValueError, "exactly divide"):
             target._validate_schedule(64, [3], [8])
         with self.assertRaisesRegex(ValueError, "at least 2"):
@@ -73,9 +74,9 @@ class WayCountContractTest(unittest.TestCase):
         self.assertGreater(rel_l2, 0.0)
         self.assertGreater(one_minus_cos, 0.0)
         self.assertEqual(max_abs, 1.0)
-        self.assertEqual(target._expected_measurements([2, 4], [8, 15]), 12)
-        self.assertTrue(target._measurements_complete(12, 12))
-        self.assertFalse(target._measurements_complete(11, 12))
+        self.assertEqual(target._expected_measurements([2, 4, 8], [8, 15]), 18)
+        self.assertTrue(target._measurements_complete(18, 18))
+        self.assertFalse(target._measurements_complete(17, 18))
 
 
 if __name__ == "__main__":

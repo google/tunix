@@ -42,6 +42,7 @@ PROBES = (
     Probe("P2", "mesh order / slice", "probe_mesh_order"),
     Probe("P3", "bucket contract", "probe_bucket_contract"),
     Probe("P4", "F4 cost model", "probe_f4_cost"),
+    Probe("P1a", "Pathways Mosaic compatibility", "probe_mosaic_compat"),
     Probe("P1", "generic full-slice way-count diagnostic", "probe_waycount"),
     Probe("P1b", "canonical Qwen operator admission", "probe_canonical_ops"),
     # These three historical scripts deliberately form device prefixes and tiny 2x2 meshes.

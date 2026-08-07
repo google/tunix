@@ -82,6 +82,9 @@ topology may legitimately differ; that is the point of measuring.**
 [waycount] width= 2 replicas= 2 depth=  8 arm=replicated ... SAME
 [waycount] width= 4 replicas= 1 depth=  8 arm=stock-ar   ... DIFFERS
 [waycount] width= 4 replicas= 1 depth=  8 arm=f4-fixed   ... <MEASURED>
+[waycount] width= 8 replicas= 8 depth=  8 arm=f4-fixed   ... <MEASURED>
+[mosaic.compat] VERSIONS jax=... jaxlib=... pathwaysutils=...
+[mosaic.compat] VERDICT: PASS
 [canonical-op] depth= 1 ... differing_bytes=0/... SAME
 [canonical-op] depth= 2 ... differing_bytes=0/... SAME
 [canonical-op] depth= 4 ... differing_bytes=0/... SAME
@@ -96,6 +99,9 @@ topology may legitimately differ; that is the point of measuring.**
 
 **How to read it** — this is the part that matters more than the exit code:
 
+On 64 devices, generic P1 scans TP widths `2,4,8`. The TP8 rows are future-facing platform
+diagnostics. The installed Qwen8B production P1b and T2 contracts remain DP16xTP4.
+
 | Observation | Meaning |
 |---|---|
 | `(16,4)` full-slice attestation is absent on 64 devices | TP4 was not measured. A partial prefix mesh is not a substitute. |
@@ -103,6 +109,7 @@ topology may legitimately differ; that is the point of measuring.**
 | `replicated DIFFERS` | A Pathways/compiler carrier exists without TP reduction; do not attribute stock/F4 byte-count differences solely to all-reduce. |
 | `stock-ar` is **already** `SAME` | The fixed-order tree repairs nothing at that point. |
 | `f4-fixed` `DIFFERS` in generic P1 | F4 alone does not close the handwritten diagnostic graph. This is platform evidence, not a production-Qwen verdict. Continue only to the fail-closed P1b gate. |
+| P1a reports an unsupported stable-Mosaic version | The JAX client and Pathways service release are incompatible. Stop before P1b/T2 and align the `jax-<version>` release family. |
 | P1b is missing or `[canonical-op] VERDICT: FAIL` | Stop before T2. The promoted Qwen operator chain was not admitted on this topology. |
 | `MULTI_SLICE=1` | Collectives cross slices and XLA lowers a hierarchical reduction — a program family with **zero coverage** here. Every bitwise claim on this topology is UNVERIFIED. |
 | `REORDERED=1` | Placement permuted your device order. Use the printed order for `CANON_EXPECT_MODEL_MESH_IDS`; never inherit one from a different mesh shape. |

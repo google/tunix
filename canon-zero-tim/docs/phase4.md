@@ -1,7 +1,7 @@
 # Phase 4 — T1 层 + 新集群准入探针
 
-Status: **generic full-slice P1 complete/dirty; canonical P1b and same-session T2 implemented,
-GKE rerun pending**
+Status: **generic P1 Attempt 0 complete/dirty; P1b blocked by Mosaic v15/server<=13;
+TP2/4/8 scan and P1a compatibility gate implemented locally**
 Date: 2026-08-07
 
 ---
@@ -30,11 +30,13 @@ Date: 2026-08-07
 - [x] **P4.6** Replace device-prefix probes with full-slice `(replica,tp)` P1 arms; add
       replicated/stock/F4 paired inputs, physical group attestation, magnitude metrics, strict
       measurement counts, and unified-runner fail-stop semantics
-- [ ] **P4.7** GATE: fresh 64-chip Pathways rerun of `(32,2)` and `(16,4)`
+- [ ] **P4.7** GATE: fresh 64-chip Pathways rerun of `(32,2)`, `(16,4)` and diagnostic `(8,8)`
 - [x] **P4.8** Add a hard P1b gate that calls the live P22.XK Qwen MLP operator chain at the
       installed model dimensions and differentiates weights on the full `(replica, model)` mesh
 - [x] **P4.9** Move optional T2 into the unified Python client after P1b; make Step 75 a pure
       persisted-marker validator so it cannot create a second IFRT proxy client
+- [x] **P4.9a** Add P1a: report client JAX/JAXLIB/PathwaysUtils versions and compile the exact
+      promoted RMSNorm through Mosaic before P1b
 - [ ] **P4.10** GATE: fresh 64-chip P1b depths `1,2,4,8`, then same-session DP16×TP4 T2
 
 ## GATE 状态
@@ -108,3 +110,18 @@ fail-closed 行为得到实证)。
 - Local status before GKE: 22 T1 unit tests and 5 T2 unit tests pass; Python/Bash syntax and
   `git diff --check` pass.  This is implementation evidence only; P1b/T2 hardware status remains
   NOT RUN.
+
+**2026-08-07 — Mosaic compatibility and TP8 diagnostic extension**
+
+- Attempt 0 reached P1b but produced no numerical row. The client emitted stable Mosaic v15 and
+  the Pathways service rejected versions above 13; T2 was correctly tainted and skipped.
+- P1a now logs JAX/JAXLIB/PathwaysUtils versions and compiles the exact promoted RMSNorm on a
+  minimal full-slice input before generic P1 and P1b. It normalizes a version mismatch to one
+  fail-closed marker instead of dumping hundreds of MLIR lines.
+- Generic P1 now registers widths `2,4,8`; on 64 devices and depths `8,15`, completeness requires
+  18 rows. TP8 is diagnostic only; P1b/T2 remain on the explicit TP4 model contract.
+- The pinned client image reports JAX/JAXLIB `0.10.2`. Official registry lookup resolved the
+  matching `20260730-jax_0.10.2` server/proxy tags; both JobSets now use their immutable digests.
+- Local gates: T1 `26/26`, T2/validator `5/5`, profile widths positive and `2,4` negative,
+  Python/Bash/diff/English-output checks PASS.
+- Hardware status: TP8 generic P1, P1a, P1b and T2 are NOT RUN after this extension.

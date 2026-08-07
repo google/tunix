@@ -113,6 +113,8 @@ class UnifiedRunnerTest(unittest.TestCase):
         with_t2 = target._configured_probes({"CANON_RUN_T2_DP": "1"})
         self.assertNotIn("T2", [probe.name for probe in without_t2])
         names = [probe.name for probe in with_t2]
+        self.assertLess(names.index("P1a"), names.index("P1"))
+        self.assertLess(names.index("P1"), names.index("P1b"))
         self.assertEqual(names[names.index("P1b") + 1], "T2")
 
     def test_invalid_t2_switch_is_rejected(self):

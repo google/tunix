@@ -18,7 +18,7 @@ cause.  ``differing_bytes`` is only a bitwise yes/no gate; rel-L2, one-minus-cos
 quantify magnitude without relying on a saturating byte count.
 
 Environment:
-    CANON_WAYCOUNT_WIDTHS  comma-separated TP widths (default: supported members of 2,4)
+    CANON_WAYCOUNT_WIDTHS  comma-separated TP widths (default: supported members of 2,4,8)
     CANON_WAYCOUNT_DEPTHS  comma-separated stack depths (default: 8,15,24)
 
 XLA_FLAGS must contain ``--xla_allow_excess_precision=false``.
@@ -64,7 +64,7 @@ def _parse_int_list(raw: str, *, name: str) -> list[int]:
 def _default_widths(num_devices: int) -> list[int]:
     """Return the historically relevant widths that exactly divide the full slice."""
 
-    return [width for width in (2, 4) if num_devices % width == 0]
+    return [width for width in (2, 4, 8) if num_devices % width == 0]
 
 
 def _validate_schedule(num_devices: int, widths: Sequence[int], depths: Sequence[int]) -> None:

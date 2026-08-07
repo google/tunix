@@ -97,6 +97,10 @@ differ, which is the point of measuring**:
 [waycount] width= 4 replicas=16 depth=  8 arm=replicated ...
 [waycount] width= 4 replicas=16 depth=  8 arm=stock-ar   ...
 [waycount] width= 4 replicas=16 depth=  8 arm=f4-fixed   ...
+[waycount.mesh] width=8 shape=(8, 8) devices=64 unique=64 full_slice=1
+[waycount] width= 8 replicas= 8 depth=  8 arm=f4-fixed   ...
+[mosaic.compat] VERSIONS jax=... jaxlib=... pathwaysutils=...
+[mosaic.compat] VERDICT: PASS
 [canonical-op] depth= 1 ... differing_bytes=0/... SAME
 [canonical-op] depth= 2 ... differing_bytes=0/... SAME
 [canonical-op] depth= 4 ... differing_bytes=0/... SAME
@@ -113,6 +117,10 @@ even a dirty F4 row cannot reject the production path by itself.  The hard gate 
 `[canonical-op] VERDICT: PASS` requires exact primals and live gradients at all four depths.
 Byte counts are a binary gate and saturate; use rel-L2 / one-minus-cosine / max-abs only to compare
 dirty generic arms.
+The generic scan includes TP8, but the installed Qwen8B production gate and T2 remain TP4. P1a
+must also prove that the Pathways service accepts the client's Mosaic module before P1b starts.
+The canonical client is JAX/JAXLIB `0.10.2`; the committed JobSets pin the matching official
+`20260730-jax_0.10.2` proxy/server digests. Do not substitute a `jax_0.9.1` Pathways release.
 
 ### `dp-gate-only`
 

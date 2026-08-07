@@ -78,7 +78,8 @@ spec:
             restartPolicy: Never
             containers:
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260730-jax_0.9.1
+              # 20260730-jax_0.10.2, matched to the canonical client image.
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@sha256:7bdf61492b723c970b597812a90335a87358d279f92770d3ca11fc86ad15e312
               args:
                 - --server_port=29000
                 - --resource_manager_address=localhost:29001
@@ -90,7 +91,8 @@ spec:
                 requests: {cpu: '16', memory: 100Gi}
                 limits:   {cpu: '32', memory: 350G}
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260730-jax_0.9.1
+              # 20260730-jax_0.10.2, matched to the canonical client image.
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:3d9a6523f2262e6881c700542a9d89a4032103a79ee2851a72ca353d24ad5f95
               args:
                 - --server_port=29001
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
@@ -208,7 +210,8 @@ spec:
             restartPolicy: OnFailure
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260730-jax_0.9.1
+              # 20260730-jax_0.10.2, matched to the canonical client image.
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:3d9a6523f2262e6881c700542a9d89a4032103a79ee2851a72ca353d24ad5f95
               args:
                 - --server_port=29000
                 - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001

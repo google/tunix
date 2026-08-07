@@ -83,6 +83,9 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
     positive_int "$k"
   done
   req CANON_CANONICAL_DEPTHS
+  req CANON_WAYCOUNT_WIDTHS
+  req CANON_EXPECT_JAX_VERSION
+  req CANON_EXPECT_PATHWAYS_RELEASE
   req CANON_TRAIN_DP_SHARDING
   [ "${CANON_TRAIN_DP_SHARDING:-}" = "replicated-params" ] || {
     echo "[env] P32 requires replicated-params, got ${CANON_TRAIN_DP_SHARDING:-unset}" >&2
@@ -111,6 +114,18 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
   }
   [ "$CANON_CANONICAL_DEPTHS" = "1,2,4,8" ] || {
     echo "[env] P32 canonical-op depths must remain 1,2,4,8" >&2
+    fail=1
+  }
+  [ "$CANON_WAYCOUNT_WIDTHS" = "2,4,8" ] || {
+    echo "[env] P32 generic way-count widths must remain 2,4,8" >&2
+    fail=1
+  }
+  [ "$CANON_EXPECT_JAX_VERSION" = "0.10.2" ] || {
+    echo "[env] P32 canonical client JAX must remain 0.10.2" >&2
+    fail=1
+  }
+  [ "$CANON_EXPECT_PATHWAYS_RELEASE" = "20260730-jax_0.10.2" ] || {
+    echo "[env] P32 Pathways release must remain 20260730-jax_0.10.2" >&2
     fail=1
   }
   [ "${FL_SHARED_MESH:-}" = "1,4" ] || {

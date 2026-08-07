@@ -116,8 +116,9 @@ tests/t1_tpu/run.sh                       # host: re-enters the pinned image
 CANON_IN_CONTAINER=1 tests/t1_tpu/run.sh  # already inside a TPU container
 ```
 
-Four topology diagnostics, the production-operator P1b hard gate, plus the historical minimal
-reproducers. **Run this first on any new cluster.** Generic P1 detects platform drift; only P1b
+Topology diagnostics, the Mosaic compatibility P1a gate, the production-operator P1b hard gate,
+plus the historical minimal reproducers. **Run this first on any new cluster.** Generic P1 scans
+TP widths `2,4,8` and detects platform drift; only P1b
 decides whether the installed P22.XK Qwen operator chain is admitted. See
 `CLUSTER_ADMISSION.md`.
 

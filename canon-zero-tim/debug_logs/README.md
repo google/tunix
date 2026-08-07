@@ -42,5 +42,9 @@ This directory contains the original, raw logs and structured triage reference f
 ---
 
 ## 4. Key Production Learnings
-* **Mosaic MLIR Versioning**: JAX client emitting `stable_mosaic.version = 15` requires Pathways Server image matching the compiler version, or standard Pallas/XLA fallback.
+* **Mosaic MLIR Versioning**: JAX client emitting `stable_mosaic.version = 15` requires a matching Pathways release. A fallback changes the program family and must not be treated as equivalent without rerunning every numerical admission gate.
 * **Single Session**: In Pathways on GKE, multiple independent Python executions in sequence (`70_run_t1.sh` -> `75_run_dp.sh`) require explicit proxy reconnect or shared singleton sessions.
+
+The post-artifact fix pins the official `20260730-jax_0.10.2` proxy/server digests to match the
+canonical client image's JAX/JAXLIB `0.10.2`, and adds a minimal promoted-RMSNorm Mosaic gate.
+Those changes are not exercised by this archived log.

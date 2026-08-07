@@ -62,12 +62,14 @@ also dirty, so reduction was not necessary for that observation.
 
 The release probe now uses every visible device. For TP width `w`, it constructs the
 topology-aware mesh `(num_devices / w, w)` with axes `(replica, tp)`. On 64 devices this means
-`(32,2)` and the production `(16,4)`, not the invalid multi-host subset `devices[:2]` or
+`(32,2)`, the production `(16,4)`, and the future-facing diagnostic `(8,8)`, not an invalid
+multi-host subset such as `devices[:2]` or
 `devices[:4]`. Require these attestation lines before reading a numerical row:
 
 ```
 [waycount.mesh] width=4 shape=(16, 4) devices=64 unique=64 full_slice=1
 [waycount.mesh] width=4 group=00 ids=[...] coords=[...]
+[waycount.mesh] width=8 shape=(8, 8) devices=64 unique=64 full_slice=1
 ...
 ```
 
@@ -94,7 +96,9 @@ Historical directly-attached four-device observations, in differing bytes out of
 not be used to rank two dirty arms. Use `rel_l2`, `one_minus_cos`, and `max_abs` for magnitude.
 In particular, `91371 > 90582` does not show that F4 made anything worse.
 
-Only widths 2 and 4 were ever measured. **8 is unknown**, and 8 is a width people reach for.
+The archived Attempt 0 measured only widths 2 and 4. The next registered schedule is `2,4,8`, so
+it must produce 18 rows for depths `8,15` and three arms. TP8 here is a generic platform
+diagnostic only. The installed Qwen8B production contract, P1b and T2 remain TP4.
 
 Read the generic P1 table as a paired diagnostic:
 
@@ -110,6 +114,19 @@ Read the generic P1 table as a paired diagnostic:
 The probe exits zero only after all `widths × depths × 3` rows complete. A partial table is
 `INCONCLUSIVE`, not a numerical verdict.
 
+Before P1b, P1a must compile the exact promoted RMSNorm through Mosaic and emit:
+
+```
+[mosaic.compat] VERSIONS jax=... jaxlib=... pathwaysutils=...
+[mosaic.compat] COMPILE PASS ...
+[mosaic.compat] VERDICT: PASS
+```
+
+An unsupported stable-Mosaic version is an infrastructure failure, not a numerical P1b red.
+The canonical client image contains JAX/JAXLIB `0.10.2`. Both JobSet manifests therefore pin the
+official `20260730-jax_0.10.2` Pathways proxy and server by immutable digest. A tag that merely
+contains `jax_0.9.1` is not compatible, even if generic non-Mosaic XLA probes complete.
+
 The production-operator gate must then print exactly one row at each registered depth:
 
 ```
@@ -122,7 +139,7 @@ The production-operator gate must then print exactly one row at each registered 
 ```
 
 Any missing row, dead/nonfinite gradient, promotion-sentinel failure or nonzero byte difference
-is a hard red.  A P1b red taints T2 and stops the single Pathways session.  A P1b green admits
+is a hard red. A P1a or P1b red taints T2 and stops the single Pathways session. A P1b green admits
 only this bounded canonical MLP operator chain; it is not a full-model or training claim.
 
 ## Step 4 — What order did placement actually pick, and is this multi-slice?
