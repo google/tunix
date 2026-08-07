@@ -208,6 +208,8 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
               cloud.google.com/gke-tpu-topology: 4x4x4
+              cloud.google.com/reservation-name: cloudtpu-20240716121201-595617744
+              cloud.google.com/gke-tpu-slice-4x4x4-id: 9dfd27447f1855deccb455ea8d1a5e4b
             tolerations:
             - key: google.com/tpu
               operator: Exists
