@@ -44,7 +44,7 @@ RUN uv pip install .
 # Install SFT/MaxText dependencies (unconditional)
 RUN pip install --upgrade flax && \
     pip install torchax aqtp tokamax && \
-    pip install git+https://github.com/google/maxtext.git
+    pip install git+https://github.com/google/maxtext.git@440d1c085b9c8647b0e7bba0d18f6882b5c90997
 
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
