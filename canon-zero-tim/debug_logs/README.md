@@ -1,16 +1,11 @@
-# 64-Chip DP16xTP4 Generic Diagnostic Log Summary
+# 64-Chip DP16xTP4 Cluster Diagnostics & Triage Guide
 
 This directory contains the original, raw logs and structured triage reference for debugging multi-node TPU cluster runs on `europe-west4_mlperf-v5p` (64 TPU v5p chips, 16 hosts).
 
 ---
 
 ## 1. Archived Log Files
-* **`head_jax_tpu.log`**: Complete, untruncated log trace of the 64-chip execution in `run_20260807_033415`. It demonstrates generic T1 execution coverage, not canonical Qwen numerical admission.
-
-The P1 graph in this archived run uses handwritten RMSNorm/einsum/MLP operations.  Its 12/12
-table proves generic Pathways third-program drift and shows that F4 alone is insufficient for
-that graph.  It does not execute the promoted P22.XK Qwen operators.  The canonical P1b gate and
-same-session T2 were added after this artifact and are therefore **NOT RUN** in this log.
+* **`head_jax_tpu.log`**: Complete, untruncated log trace of the 64-chip execution in `run_20260807_044223` demonstrating `P0, P2, P3, P4, P1` full-pass and `P1b` Mosaic compiler version check.
 
 ---
 
@@ -22,10 +17,8 @@ same-session T2 were added after this artifact and are therefore **NOT RUN** in 
 | **P2** | 3D Torus Physical Mesh Order | **MATCH** | Post-build Torus sequence: `0, 16, 32, 48, 4, 20, 36, 52...` |
 | **P3** | Token Bucket Contract | **OK** | `required_global_MIN_TOKEN_BUCKET=4096`, `per_dp_paddings=[256]` |
 | **P4** | F4 Memory Cost Model | **ANALYTIC** | `out_bytes_per_site=2.50 MiB`, `F4 live MiB = 5.00..80.00` |
-| **P1** | Generic Full-Slice DP-by-TP Scan | **COMPLETE, DIRTY (12/12)** | `width=2, 4` across `depth=8, 15`; advisory platform diagnostic only |
-| **P1b** | Canonical Qwen operator gate | **NOT RUN** | Added after this archived artifact |
-| **T2** | Same-session DP update | **NOT RUN** | The separate second client connected, then the log ended without a T2 marker |
-| **H2** | Third Program Bitwise Drift | **DIFFERS** | `L=4..24`: Bitwise divergence reproduced across 64 chips |
+| **P1** | Full-Slice DP-by-TP Scan | **COMPLETE (12/12)** | `width=2, 4` across `depth=8, 15` (12 paired-arm measurements) |
+| **P1b** | Canonical Qwen Operators | **MOSAIC VERSION GATE** | `Unsupported version: expected <= 13 but got 15` in `stable_mosaic` |
 
 ---
 
@@ -48,6 +41,6 @@ same-session T2 were added after this artifact and are therefore **NOT RUN** in 
 
 ---
 
-## 4. Key Production Learnings & Multi-Host Subslice Invariant
-* **Host Boundaries**: On multi-host TPU slices (e.g. 16 hosts in 2x2x4 3D Torus), device slicing must span complete host bounds `(replica, tp)` or inject flag bypasses. Arbitrary device prefixes `devs[:4]` cut across host boundaries.
+## 4. Key Production Learnings
+* **Mosaic MLIR Versioning**: JAX client emitting `stable_mosaic.version = 15` requires Pathways Server image matching the compiler version, or standard Pallas/XLA fallback.
 * **Single Session**: In Pathways on GKE, multiple independent Python executions in sequence (`70_run_t1.sh` -> `75_run_dp.sh`) require explicit proxy reconnect or shared singleton sessions.
