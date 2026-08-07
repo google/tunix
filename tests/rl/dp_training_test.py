@@ -1,0 +1,243 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for fixed-placement replicated data-parallel contracts."""
+
+import functools
+
+from absl.testing import absltest
+from flax import nnx
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
+
+from tunix.rl import dp_training
+
+
+class DPTrainingTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.contract = dp_training.DPTrainingContract(
+        dp_size=16,
+        tp_size=4,
+        global_prompts=32,
+        num_generations=8,
+        local_trajectories=16,
+    )
+
+  def test_production_contract_uses_fixed_prompt_major_placement(self):
+    self.contract.validate()
+    self.assertEqual(self.contract.total_devices, 64)
+    self.assertEqual(self.contract.global_trajectories, 256)
+    self.assertEqual(self.contract.local_prompts, 2)
+    ranks = self.contract.trajectory_ranks()
+    np.testing.assert_array_equal(ranks[:16], np.zeros(16, np.int32))
+    np.testing.assert_array_equal(ranks[-16:], np.full(16, 15, np.int32))
+    self.assertEqual(
+        tuple(len(indices) for indices in self.contract.rank_indices()),
+        (16,) * 16,
+    )
+
+  def test_rank_major_groups_cover_all_trajectories_once(self):
+    groups = self.contract.rank_major_reverse_groups()
+    self.assertLen(groups, 16)
+    self.assertEqual(groups[0], tuple(range(0, 256, 16)))
+    self.assertEqual(groups[-1], tuple(range(15, 256, 16)))
+    self.assertEqual(
+        sorted(index for group in groups for index in group), list(range(256))
+    )
+
+  def test_contract_rejects_partial_prompt_group(self):
+    with self.assertRaisesRegex(ValueError, 'complete prompt groups'):
+      dp_training.DPTrainingContract(
+          dp_size=16,
+          tp_size=4,
+          global_prompts=32,
+          num_generations=8,
+          local_trajectories=15,
+      ).validate()
+
+  def test_group_validation_rejects_split_group(self):
+    valid = np.repeat(np.arange(32), 8)
+    self.contract.validate_prompt_groups(valid)
+    split = valid.copy()
+    split[15], split[16] = split[16], split[15]
+    with self.assertRaisesRegex(ValueError, 'split across DP ranks'):
+      self.contract.validate_prompt_groups(split)
+
+  def test_partition_inventory_rejects_dp_parameter_shard(self):
+    summary = dp_training.validate_dp_replicated_partition_specs(
+        {'left': P(None, 'tp'), 'right': P('tp', None)}, label='params'
+    )
+    self.assertEqual(summary, {'leaves': 2, 'dp_partitioned_leaves': 0})
+    with self.assertRaisesRegex(ValueError, 'not replicated'):
+      dp_training.validate_dp_replicated_partition_specs(
+          {'bad': P('dp', 'tp')}, label='params'
+      )
+
+  def test_initialized_training_state_inventory_is_dp_replicated(self):
+    mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ('dp', 'tp'))
+    sharding = jax.sharding.NamedSharding(mesh, P(None, 'tp'))
+
+    class StateModule(nnx.Module):
+
+      def __init__(self, offset):
+        value = jax.device_put(
+            jnp.arange(8, dtype=jnp.float32).reshape(2, 4) + offset,
+            sharding,
+        )
+        self.value = nnx.Param(value, sharding=(None, 'tp'))
+
+    states = [nnx.state(StateModule(offset)) for offset in (0.0, 1.0, 2.0)]
+    inventory = dp_training.inspect_training_state_inventories(
+        model=states[0], optimizer=states[1], accumulator=states[2]
+    )
+    self.assertEqual(set(inventory), {'model', 'optimizer', 'accumulator'})
+    for summary in inventory.values():
+      self.assertEqual(summary['arrays'], 1)
+      self.assertEqual(summary['dp_partitioned_leaves'], 0)
+      self.assertEqual(summary['tp_partitioned_leaves'], 1)
+      self.assertEqual(summary['logical_bytes'], 32)
+
+  def test_initialized_state_inventory_rejects_actual_dp_shard(self):
+    if len(jax.devices()) < 2:
+      self.skipTest('requires at least two forced CPU or accelerator devices')
+    mesh = Mesh(np.asarray(jax.devices()[:2]).reshape(2, 1), ('dp', 'tp'))
+    sharding = jax.sharding.NamedSharding(mesh, P('dp', None))
+
+    class BadState(nnx.Module):
+
+      def __init__(self):
+        value = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+        self.value = nnx.Param(value, sharding=('dp', None))
+
+    with self.assertRaisesRegex(ValueError, 'not replicated'):
+      dp_training.inspect_dp_replicated_state(
+          nnx.state(BadState()), label='bad-state'
+      )
+
+  def test_dp16_tree_has_four_reduce_and_four_broadcast_rounds(self):
+    reduce_rounds, broadcast_rounds = (
+        dp_training.fixed_dp_tree_permutations(16)
+    )
+    self.assertLen(reduce_rounds, 4)
+    self.assertLen(broadcast_rounds, 4)
+    self.assertEqual(dp_training.fixed_dp_collective_count(16), 8)
+    self.assertEqual(reduce_rounds[0][0], (1, 0))
+    self.assertEqual(reduce_rounds[-1], ((8, 0),))
+    self.assertEqual(broadcast_rounds[0], ((0, 8),))
+    self.assertEqual(broadcast_rounds[-1][0], (0, 1))
+
+  def test_tree_rejects_non_power_of_two_dp(self):
+    for dp_size in (1, 3, 6, 15):
+      with self.subTest(dp_size=dp_size):
+        with self.assertRaisesRegex(ValueError, 'power-of-two'):
+          dp_training.fixed_dp_tree_permutations(dp_size)
+
+  def test_fixed_dp2_compatibility_order_is_unchanged(self):
+    left = {'g': jnp.asarray([1.0e8, 1.0], jnp.float32)}
+    right = {'g': jnp.asarray([-1.0e8, 2.0], jnp.float32)}
+    expected = jax.tree.map(
+        lambda x, y: (
+            jax.lax.optimization_barrier(x)
+            + jax.lax.optimization_barrier(y)
+        ),
+        left,
+        right,
+    )
+    actual = dp_training.fixed_dp2_sum(left, right)
+    np.testing.assert_array_equal(actual['g'], expected['g'])
+
+  def test_fixed_dp16_sum_uses_registered_tree_not_left_fold(self):
+    values = [1.0e8, 1.0, -1.0e8, 2.0] + [0.0] * 12
+    contributions = [jnp.asarray(value, jnp.float32) for value in values]
+    tree_result = dp_training.fixed_dp_sum(contributions)
+    left_fold = contributions[0]
+    for contribution in contributions[1:]:
+      left_fold = left_fold + contribution
+    self.assertEqual(float(tree_result), 0.0)
+    self.assertEqual(float(left_fold), 2.0)
+
+  def test_rank_isolation_reconstructs_dp16_group_cotangent(self):
+    cotangent = jnp.arange(48, dtype=jnp.float32).reshape(16, 3)
+    isolated = [
+        dp_training.isolate_dp_rank_cotangent(
+            cotangent, rank=rank, dp_size=16
+        )
+        for rank in range(16)
+    ]
+    np.testing.assert_array_equal(sum(isolated), cotangent)
+
+  def test_replica_gate_rejects_rank_dependent_result(self):
+    replicas = np.broadcast_to(np.arange(4, dtype=np.float32), (16, 4)).copy()
+    self.assertEqual(
+        dp_training.assert_dp_replicas_equal(
+            replicas, dp_size=16, label='gradient'
+        ),
+        {'dp_replicas': 16, 'mismatched_replicas': 0},
+    )
+    replicas[7, 2] += np.float32(1.0)
+    with self.assertRaisesRegex(ValueError, 'DP ranks'):
+      dp_training.assert_dp_replicas_equal(
+          replicas, dp_size=16, label='gradient'
+      )
+
+  def test_dp16_collective_is_exact_on_all_replicas(self):
+    if len(jax.devices()) != 64:
+      self.skipTest('requires exactly 64 forced CPU or accelerator devices')
+    mesh = Mesh(np.asarray(jax.devices()).reshape(16, 4), ('dp', 'tp'))
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=P('dp', 'tp'),
+        out_specs=P('dp', 'tp'),
+        check_vma=False,
+    )
+    def reduce_rows(value):
+      return dp_training.fixed_dp_collective(value, dp_size=16)
+
+    values = np.arange(64, dtype=np.float32).reshape(16, 4)
+    values[0, 0] = np.float32(1.0e8)
+    values[1, 0] = np.float32(1.0)
+    values[2, 0] = np.float32(-1.0e8)
+    values[3, 0] = np.float32(2.0)
+    compiled = jax.jit(reduce_rows)
+    stablehlo = str(
+        compiled.lower(jnp.asarray(values)).compiler_ir(dialect='stablehlo')
+    )
+    self.assertEqual(stablehlo.count('stablehlo.collective_permute'), 8)
+    result = compiled(jnp.asarray(values))
+    expected = np.stack(
+        [
+            np.asarray(
+                dp_training.fixed_dp_sum(
+                    [jnp.asarray(values[rank, column]) for rank in range(16)]
+                )
+            )
+            for column in range(4)
+        ]
+    )
+    host = np.asarray(result)
+    np.testing.assert_array_equal(host, np.broadcast_to(expected, (16, 4)))
+    dp_training.assert_dp_replicas_equal(
+        host, dp_size=16, label='post-reduction gradient'
+    )
+
+
+if __name__ == '__main__':
+  absltest.main()

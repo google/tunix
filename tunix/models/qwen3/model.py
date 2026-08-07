@@ -131,6 +131,30 @@ class ShardingConfig:
         exp_weight_efd=P('fsdp', 'tp', None),
     )
 
+  @staticmethod
+  def get_data_parallel_sharding(data_axis: str = 'dp'):
+    """Returns TP-sharded weights with activations sharded over DP."""
+    if not data_axis or data_axis in ('fsdp', 'tp'):
+      raise ValueError(
+          'data_axis must name a dedicated data-parallel mesh axis'
+      )
+    return ShardingConfig(
+        emb_vd=P('tp', None),
+        emb_dv=P(None, 'tp'),
+        q_weight_dnh=P(None, 'tp', None),
+        kv_weight_dnh=P(None, 'tp', None),
+        o_weight_nhd=P('tp', None, None),
+        ffw_weight_df=P(None, 'tp'),
+        ffw_weight_fd=P('tp', None),
+        rms_norm_weight=P('tp',),
+        act_btd=P(data_axis, None, 'tp'),
+        act_btf=P(data_axis, None, 'tp'),
+        act_btnh=P(data_axis, None, 'tp', None),
+        score_weight_d1=P(None, None),
+        exp_weight_edf=P(None, None, 'tp'),
+        exp_weight_efd=P(None, 'tp', None),
+    )
+
 
 @dataclasses.dataclass(slots=True)
 class ModelConfig:
