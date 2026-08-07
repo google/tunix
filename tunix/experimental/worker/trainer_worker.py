@@ -144,7 +144,7 @@ class TrainerWorker(abstract_worker.Worker):
 
   def fwd_bwd(
       self,
-      payload: datatypes.TrainerPayload | None = None,
+      payload: Any | None = None,
       **kwargs,
   ) -> datatypes.Response | dict[str, Any]:
     """Executes forward/backward and optionally applies an optimizer update."""

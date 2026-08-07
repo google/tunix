@@ -85,9 +85,49 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.train_step.assert_called_once()
     self.mock_engine.sync_weights.assert_called_once_with(role=datatypes.Role.ACTOR)
     self.assertEqual(program.step, 1)
+    self.assertIsNotNone(program.last_step_result)
+    self.assertEqual(program.last_step_result.num_microbatches, 1)
 
     self.assertEqual(begin_calls, [0])
     self.assertEqual(end_calls, [(1, "mock_train_result")])
+
+  def test_step_once_accumulates_and_updates_once_for_multiple_microbatches(self):
+    payload1 = datatypes.RLTrainerPayload(
+        token_ids=np.array([1, 2], dtype=np.int32),
+        token_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.ones(2, dtype=np.float32),
+    )
+    payload2 = datatypes.RLTrainerPayload(
+        token_ids=np.array([3, 4], dtype=np.int32),
+        token_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.ones(2, dtype=np.float32),
+    )
+
+    class SplitAssembler:
+
+      def pack(self, items):
+        del items
+        return [payload1, payload2]
+
+    program = rl_program.RLProgram(
+        engine=self.mock_engine,
+        algo=self.mock_algo,
+        assembler=SplitAssembler(),
+        sync_weights=False,
+    )
+
+    program.step_once(prompts=["prompt1"])
+
+    self.assertEqual(self.mock_engine.train_step.await_count, 2)
+    first_call, second_call = self.mock_engine.train_step.await_args_list
+    self.assertEqual(first_call.kwargs["accumulate_gradients"], True)
+    self.assertEqual(first_call.kwargs["apply_optimizer"], False)
+    self.assertEqual(second_call.kwargs["accumulate_gradients"], True)
+    self.assertEqual(second_call.kwargs["apply_optimizer"], True)
+    self.mock_engine.sync_weights.assert_not_called()
+    self.assertEqual(program.last_step_result.num_microbatches, 2)
 
   def test_eval_step_once_flow(self):
     program = rl_program.RLProgram(

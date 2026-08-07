@@ -55,7 +55,7 @@ class AbstractRLEngine(Protocol):
 
   async def train_step(
       self,
-      payload: datatypes.RLTrainerPayload,
+      payload: Any,
       role: datatypes.Role = datatypes.Role.ACTOR,
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,

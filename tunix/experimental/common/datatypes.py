@@ -31,17 +31,6 @@ from tunix.rl.agentic.agents import agent_types
 ##### Worker-internal datatypes #####
 
 
-# TODO(noghabi): Consolidate Role with rl_cluster.Role.
-class Role(enum.Enum):
-  """Role of the model."""
-
-  ACTOR = "actor"  # policy model
-  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
-  REFERENCE = "reference"  # kept fixed during training
-  REWARD = "reward"
-  ROLLOUT = "rollout"
-
-
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
 Step = agent_types.Step

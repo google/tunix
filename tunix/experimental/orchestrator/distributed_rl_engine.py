@@ -147,7 +147,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       raise AttributeError(f"Worker {worker} has no method {method_name}")
 
     sig = inspect.signature(method)
-    call_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    accepts_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in sig.parameters.values()
+    )
+    call_kwargs = (
+        kwargs
+        if accepts_var_kwargs
+        else {k: v for k, v in kwargs.items() if k in sig.parameters}
+    )
     res = method(**call_kwargs)
     if inspect.isawaitable(res):
       return await res
@@ -318,7 +326,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
   async def train_step(
       self,
-      payload: datatypes.RLTrainerPayload,
+      payload: Any,
       role: datatypes.Role = datatypes.Role.ACTOR,
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
@@ -350,8 +358,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if trainer is None:
       return 0
     sync_metadata = await self._invoke_worker(trainer, "prepare_weight_sync")
+
+    async def _sync_rollout(worker: Any) -> Any:
+      if hasattr(worker, "pre_weight_sync") or hasattr(worker, "asubmit"):
+        await self._invoke_worker(
+            worker, "pre_weight_sync", metadata=sync_metadata
+        )
+      result = await self._invoke_worker(
+          worker, "weight_sync", metadata=sync_metadata
+      )
+      if hasattr(worker, "post_weight_sync") or hasattr(worker, "asubmit"):
+        await self._invoke_worker(
+            worker, "post_weight_sync", metadata=sync_metadata
+        )
+      return result
+
     tasks = [
-        self._invoke_worker(w, "weight_sync", metadata=sync_metadata)
+        _sync_rollout(w)
         for w in self._rollout_workers
         if hasattr(w, "weight_sync") or hasattr(w, "asubmit")
     ]
