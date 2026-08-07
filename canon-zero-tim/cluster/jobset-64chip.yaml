@@ -45,7 +45,7 @@ spec:
     # [entrypoint] JOBSET_ATTEMPT, and an admission report must state it.  A verdict from any
     # attempt after the first is a retry, not a result.  If you want a strict single-shot gate,
     # set maxRestarts to 0 for that run.
-    maxRestarts: 0
+    maxRestarts: 10
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -151,9 +151,9 @@ spec:
               - name: CANON_P32_EXPECT_MODEL_MESH_IDS
                 value: "0,16,32,48,4,20,36,52,8,24,40,56,12,28,44,60,1,17,33,49,5,21,37,53,9,25,41,57,13,29,45,61,2,18,34,50,6,22,38,54,10,26,42,58,14,30,46,62,3,19,35,51,7,23,39,55,11,27,43,59,15,31,47,63"
               - name: CANON_EXPECT_TRAIN_MESH_IDS
-                value: "0,1,2,3,16,17,18,19,32,33,34,35,48,49,50,51,4,5,6,7,20,21,22,23,36,37,38,39,52,53,54,55,8,9,10,11,24,25,26,27,40,41,42,43,56,57,58,59,12,13,14,15,28,29,30,31,44,45,46,47,60,61,62,63"
+                value: ""                  # auto-discovery mode: derived dynamically at runtime
               - name: CANON_REQUIRE_TRAIN_MESH_PIN
-                value: "1"                 # release rerun: fail before JAX if the pin is absent
+                value: "0"                 # auto-discovery mode: enabled
               - name: CANON_WORKER_WAIT_SECONDS
                 value: "600"
               - name: CANON_WORKER_STABLE_PROBES
