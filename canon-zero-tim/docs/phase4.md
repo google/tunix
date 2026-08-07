@@ -1,6 +1,7 @@
 # Phase 4 — T1 层 + 新集群准入探针
 
-Status: **64-chip Attempt 0 INCONCLUSIVE; full-slice rewrite implemented, GKE rerun pending**
+Status: **generic full-slice P1 complete/dirty; canonical P1b and same-session T2 implemented,
+GKE rerun pending**
 Date: 2026-08-07
 
 ---
@@ -30,6 +31,11 @@ Date: 2026-08-07
       replicated/stock/F4 paired inputs, physical group attestation, magnitude metrics, strict
       measurement counts, and unified-runner fail-stop semantics
 - [ ] **P4.7** GATE: fresh 64-chip Pathways rerun of `(32,2)` and `(16,4)`
+- [x] **P4.8** Add a hard P1b gate that calls the live P22.XK Qwen MLP operator chain at the
+      installed model dimensions and differentiates weights on the full `(replica, model)` mesh
+- [x] **P4.9** Move optional T2 into the unified Python client after P1b; make Step 75 a pure
+      persisted-marker validator so it cannot create a second IFRT proxy client
+- [ ] **P4.10** GATE: fresh 64-chip P1b depths `1,2,4,8`, then same-session DP16×TP4 T2
 
 ## GATE 状态
 
@@ -84,3 +90,21 @@ fail-closed 行为得到实证)。
   row-count negative controls, Pathways bootstrap, probe ordering, fail-stop behavior, and the
   T2 full-slice mesh contract. The T2 positive gate and rank-fault negative control also pass.
 - Hardware status: NOT RUN after the rewrite. A fresh GKE Attempt 0 is the next gate.
+
+**2026-08-07 — full-slice artifact reconciliation and P1b design**
+
+- The rewritten generic P1 completed all 12 rows.  Every replicated, stock-AR and F4 row is
+  dirty.  This proves a generic Pathways forward-vs-gradient-program carrier and that F4 alone
+  does not close that handwritten graph.
+- Source review found that P1 still used local `_rms`, `jnp.einsum` and a handwritten MLP.  It
+  never called the promoted production Qwen operators, so its dirty F4 rows cannot reject the
+  canonical P22.XK path.
+- P1b now imports the live overlay, attests the terminal P22.XK functions, and executes the exact
+  RMSNorm, gate/up projections, SwiGLU, down projection and F4 reduction at model dimensions.
+  Any byte drift, dead gradient, missing row or inactive promotion is a hard red.
+- The old Step 75 launched a second Python process.  The archived log shows a second IFRT proxy
+  client connection and then ends with zero T2 markers.  Optional T2 now runs immediately after
+  P1b in the existing unified client; Step 75 only validates the persisted artifact.
+- Local status before GKE: 22 T1 unit tests and 5 T2 unit tests pass; Python/Bash syntax and
+  `git diff --check` pass.  This is implementation evidence only; P1b/T2 hardware status remains
+  NOT RUN.

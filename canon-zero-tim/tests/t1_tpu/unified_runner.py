@@ -9,9 +9,10 @@ evidence.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import ModuleType
 
@@ -20,6 +21,11 @@ from pathways_bootstrap import initialize_pathways
 initialize_pathways()
 
 import jax
+
+
+T2_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "t2_dp"))
+if T2_DIR not in sys.path:
+    sys.path.insert(0, T2_DIR)
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,8 @@ PROBES = (
     Probe("P2", "mesh order / slice", "probe_mesh_order"),
     Probe("P3", "bucket contract", "probe_bucket_contract"),
     Probe("P4", "F4 cost model", "probe_f4_cost"),
-    Probe("P1", "full-slice way-count scan", "probe_waycount"),
+    Probe("P1", "generic full-slice way-count diagnostic", "probe_waycount"),
+    Probe("P1b", "canonical Qwen operator admission", "probe_canonical_ops"),
     # These three historical scripts deliberately form device prefixes and tiny 2x2 meshes.
     # They remain useful on the original directly attached <=4-device host, but are not valid
     # Pathways full-slice probes.  P1 supersedes their topology questions on larger slices.
@@ -45,6 +52,8 @@ PROBES = (
     Probe("H3", "legacy minrepro: device topology", "p19_minrepro_topo", False, 4),
     Probe("H4", "legacy minrepro: mesh geometry", "p19_minrepro_mesh2d", False, 4),
 )
+
+T2_PROBE = Probe("T2", "same-session DP gradient/update admission", "probe_dp_update")
 
 OVERLAY_CHECKS = (
     ("tpu_inference.layers.jax.linear", "P22XK_MATMUL_ACTIVE", True),
@@ -58,6 +67,19 @@ OVERLAY_CHECKS = (
 def _tainted_marker(after: str, remaining: Sequence[Probe]) -> str:
     skipped = ",".join(probe.name for probe in remaining) or "none"
     return f"[t1.unified] SKIP_TAINTED after={after} skipped={skipped}"
+
+
+def _configured_probes(environ: Mapping[str, str] | None = None) -> tuple[Probe, ...]:
+    env = os.environ if environ is None else environ
+    value = env.get("CANON_RUN_T2_DP", "0").strip()
+    if value not in ("0", "1"):
+        raise ValueError(f"CANON_RUN_T2_DP must be 0 or 1, got {value!r}")
+    if value == "0":
+        return PROBES
+    insertion = next(
+        index + 1 for index, probe in enumerate(PROBES) if probe.name == "P1b"
+    )
+    return PROBES[:insertion] + (T2_PROBE,) + PROBES[insertion:]
 
 
 def _verify_overlay(
@@ -146,14 +168,19 @@ def run_all_probes() -> int:
         "[t1.unified] Pathways initialized in one fail-stop session. Starting probes...",
         flush=True,
     )
+    try:
+        probes = _configured_probes()
+    except ValueError as exc:
+        print(f"[t1.unified] REFUSING: {exc}", file=sys.stderr, flush=True)
+        return 2
     print("\n== Overlay promotion verification ==", flush=True)
     if not _verify_overlay():
-        print(_tainted_marker("overlay", PROBES), flush=True)
+        print(_tainted_marker("overlay", probes), flush=True)
         print("===== T1 FAIL -- overlay verification failed =====", flush=True)
         return 1
 
     return_code = _run_probe_sequence(
-        PROBES, num_devices=len(jax.devices()), emit=lambda line: print(line, flush=True)
+        probes, num_devices=len(jax.devices()), emit=lambda line: print(line, flush=True)
     )
     print("\n" + ("=" * 60), flush=True)
     if return_code == 0:

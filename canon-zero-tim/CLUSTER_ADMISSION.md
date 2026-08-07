@@ -34,9 +34,16 @@ not that it reproduces anything. Decide deliberately; record the override.
 This is the check that catches a shim chain whose sibling resolution landed somewhere empty —
 the failure that otherwise presents as a completely green run against the stock engine.
 
-## Step 3 — Does the drift appear on the production DP×TP mesh? (`gate-only`, minutes of TPU)
+## Step 3 — Separate platform drift from the production operator path (`gate-only`, minutes of TPU)
 
-`tests/t1_tpu/probe_waycount.py`.
+`tests/t1_tpu/probe_waycount.py` is a generic diagnostic.  It deliberately uses a handwritten
+RMSNorm/einsum/MLP chain, so it can show that Pathways has a forward-only versus gradient-program
+carrier without proving that the promoted production Qwen operators have the same carrier.
+
+`tests/t1_tpu/probe_canonical_ops.py` is the hard admission gate.  It imports the live overlay and
+calls the exact P22.XK RMSNorm, gate/up projections, SwiGLU, down projection and F4 reduction at
+the installed model dimensions.  It uses the full production `(replica, model)` mesh and
+differentiates the weights, not a convenient no-weight surrogate.
 
 Before accepting any numerical row, require exactly one marker from every JAX-based probe:
 
@@ -89,7 +96,7 @@ In particular, `91371 > 90582` does not show that F4 made anything worse.
 
 Only widths 2 and 4 were ever measured. **8 is unknown**, and 8 is a width people reach for.
 
-Read it as a paired intervention:
+Read the generic P1 table as a paired diagnostic:
 
 - `replicated SAME`, `stock-ar DIFFERS`, `f4-fixed SAME`: TP reduction order is a sufficient
   carrier here and F4 removes it.
@@ -97,11 +104,26 @@ Read it as a paired intervention:
   remove an additional TP component, but stock-versus-F4 alone cannot identify it.
 - `replicated SAME`, `stock-ar SAME`: reduction-order drift was absent at this point; a green
   F4 arm proves no repair.
-- `f4-fixed DIFFERS`: production TP4 is **not admitted**, regardless of whether its error is
-  numerically smaller.
+- `f4-fixed DIFFERS`: F4 alone does not close the generic JAX graph.  This does **not** yet decide
+  the promoted Qwen path because the generic graph did not execute the P22.XK operators.
 
 The probe exits zero only after all `widths × depths × 3` rows complete. A partial table is
 `INCONCLUSIVE`, not a numerical verdict.
+
+The production-operator gate must then print exactly one row at each registered depth:
+
+```
+[canonical-op] depth= 1 ... differing_bytes=0/... gradient_finite=1 gradient_nonzero=... SAME
+[canonical-op] depth= 2 ... differing_bytes=0/... gradient_finite=1 gradient_nonzero=... SAME
+[canonical-op] depth= 4 ... differing_bytes=0/... gradient_finite=1 gradient_nonzero=... SAME
+[canonical-op] depth= 8 ... differing_bytes=0/... gradient_finite=1 gradient_nonzero=... SAME
+[canonical-op] measurements=4 expected=4
+[canonical-op] VERDICT: PASS
+```
+
+Any missing row, dead/nonfinite gradient, promotion-sentinel failure or nonzero byte difference
+is a hard red.  A P1b red taints T2 and stops the single Pathways session.  A P1b green admits
+only this bounded canonical MLP operator chain; it is not a full-model or training claim.
 
 ## Step 4 — What order did placement actually pick, and is this multi-slice?
 
@@ -152,7 +174,9 @@ implementation and would have to re-clear the full THIRDPROG and `A=B` gate set 
 
 ## Step 7 — Is the DP update repeatable under a frozen placement?
 
-`tests/t2_dp/run.sh`, or `CANON_MODE=dp-gate-only` on GKE.
+`tests/t2_dp/run.sh`, or `CANON_MODE=dp-gate-only` on GKE.  On GKE the DP probe is imported by
+the T1 unified runner after P1b, so it reuses the already initialized Pathways client.  Step 75
+only validates the persisted same-session markers; it must not create a second IFRT proxy client.
 
 For P32 the exact geometry is DP16×TP4 with 16 trajectories per DP replica. The hard admission
 contract is:

@@ -49,8 +49,8 @@ promoting.**
 |---|---|---|---|
 | `probe-only` | 00–25 | no | Is this image's `tpu_inference` the one the patches were cut against? Does this build need the RoPE fix? |
 | `install-only` | 00–50 | no | Does the chain build, overlay and *load* here? |
-| `gate-only` | 00–70 | yes, seconds | Does the drift appear at this reduction width? What device order did placement pick? Is this multi-slice? |
-| `dp-gate-only` | 00–75 | yes, minutes | In addition to T1, does DP16×TP4 repeat exactly under a fixed sample→rank mapping, and are all replicas synchronized after gradient reduction? |
+| `gate-only` | 00–70 | yes, minutes | Does generic Pathways drift reproduce, and does the real canonical Qwen MLP operator chain remain bitwise across the third program? |
+| `dp-gate-only` | 00–75 | yes, minutes | In the same Pathways client, does DP16×TP4 repeat exactly under a fixed sample→rank mapping, and are all replicas synchronized after gradient reduction? |
 | `run` | 00–90 | yes | The workload in `CANON_RUN_CMD`; the P32 admission profile deliberately refuses this mode. |
 
 ### Secrets
@@ -97,15 +97,22 @@ differ, which is the point of measuring**:
 [waycount] width= 4 replicas=16 depth=  8 arm=replicated ...
 [waycount] width= 4 replicas=16 depth=  8 arm=stock-ar   ...
 [waycount] width= 4 replicas=16 depth=  8 arm=f4-fixed   ...
+[canonical-op] depth= 1 ... differing_bytes=0/... SAME
+[canonical-op] depth= 2 ... differing_bytes=0/... SAME
+[canonical-op] depth= 4 ... differing_bytes=0/... SAME
+[canonical-op] depth= 8 ... differing_bytes=0/... SAME
+[canonical-op] VERDICT: PASS
 [mesh] slice_count=1  MULTI_SLICE=0
 [mesh] create_device_mesh(shape=(4,)) -> ids=[0, 2, 1, 3]   REORDERED=1
 [bucket] SET MIN_TOKEN_BUCKET=<value for your dp geometry>
 ```
 
-The reading that matters: **at every width you intend to use, `f4-fixed` must be SAME.** The
-`replicated` arm determines whether a dirty Pathways result requires TP reduction at all. If it
-is dirty, do not attribute a stock-versus-F4 difference solely to all-reduce. Byte counts are a
-binary gate and saturate; use rel-L2 / one-minus-cosine / max-abs to compare dirty magnitudes.
+The generic way-count table is diagnostic: its `replicated` arm determines whether a dirty
+Pathways result requires TP reduction at all.  It does not call the promoted Qwen operators, so
+even a dirty F4 row cannot reject the production path by itself.  The hard gate is P1b:
+`[canonical-op] VERDICT: PASS` requires exact primals and live gradients at all four depths.
+Byte counts are a binary gate and saturate; use rel-L2 / one-minus-cosine / max-abs only to compare
+dirty generic arms.
 
 ### `dp-gate-only`
 
@@ -119,6 +126,7 @@ Use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env`. The expected terminal ma
 [P32.DP] UPDATE {...four SHA-256s...}
 [P32.DP] DECISION ...
 [P32.DP] VERDICT PASS
+[dp-gate] SAME_SESSION PASS artifact=...
 ```
 
 `PASS` means fixed-placement repeatability and replica equality only. Read
@@ -148,6 +156,8 @@ Ranked by how easily each is mistaken for success.
 | **A gate printed no measurement line** | It did not run. Absence is never a pass. | Investigate before rerunning. |
 | **`SKIP_TAINTED` appears** | The named earlier probe failed or raised; all later probes were intentionally suppressed because the Pathways session may be contaminated. | Fix the first failure and rerun from a fresh JobSet attempt. Never reuse earlier downstream rows from the failed session. |
 | **P1 has no `shape=(16, 4) ... full_slice=1` row** | Production DP16×TP4 was not measured. A `devices[:4]` subset may also violate host boundaries. | Stop. Use the full-slice probe; do not disable Pathways subslice safety to force the subset through. |
+| **P1b is missing or `[canonical-op] VERDICT: FAIL`** | The real promoted Qwen operator chain was absent, incomplete, had a dead gradient, or changed primal bits in the gradient program. | Stop before T2. Generic P1 numbers cannot override this hard gate. |
+| **Step 75 starts another Pathways client** | The old split-process orchestration is active; the 64-chip attempt stalled after the second IFRT proxy connection. | Stop. T2 must run inside Step 70's unified Python session; Step 75 only validates its artifact. |
 | **P32 `run` is refused** | Expected: the current shared mesh would be FSDP16×TP4 and the segmented VJP is not DP-local. | Do not bypass the refusal. Return the T1/T2 artifacts; implement the DP adapter in the next phase. |
 | **T2-DP fixed repeat/replica check is false** | DP reduction or placement is not deterministic on this topology. | Stop before model initialization. |
 | **T2-DP mesh lacks `shape=(16, 4) full_slice=1`** | The DP update probe did not attest the production topology. | Stop. Logical reshape fallback is forbidden; fix topology-aware construction. |
@@ -197,8 +207,8 @@ cluster/
     ├── 40_overlay_engine.sh   copy the six files over the engine's paths
     ├── 50_verify_overlay.sh   byte identity + live import of the chain
     ├── 60_wait_workers.sh     let TPU workers register
-    ├── 70_run_t1.sh           topology admission probes
-    ├── 75_run_dp.sh           DP gradient/update admission probe
+    ├── 70_run_t1.sh           topology + canonical-op + optional same-session DP probes
+    ├── 75_run_dp.sh           validate same-session DP markers; no new Pathways client
     └── 90_run.sh              the workload, then the PATHTRACE tally
 ```
 

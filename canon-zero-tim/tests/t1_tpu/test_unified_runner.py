@@ -108,6 +108,17 @@ class UnifiedRunnerTest(unittest.TestCase):
         self.assertEqual(output, [])
         self.assertEqual(len(errors), len(target.OVERLAY_CHECKS))
 
+    def test_t2_is_inserted_after_the_canonical_hard_gate_only_when_requested(self):
+        without_t2 = target._configured_probes({"CANON_RUN_T2_DP": "0"})
+        with_t2 = target._configured_probes({"CANON_RUN_T2_DP": "1"})
+        self.assertNotIn("T2", [probe.name for probe in without_t2])
+        names = [probe.name for probe in with_t2]
+        self.assertEqual(names[names.index("P1b") + 1], "T2")
+
+    def test_invalid_t2_switch_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+            target._configured_probes({"CANON_RUN_T2_DP": "yes"})
+
 
 if __name__ == "__main__":
     unittest.main()

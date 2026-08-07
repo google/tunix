@@ -81,7 +81,12 @@ topology may legitimately differ; that is the point of measuring.**
 [waycount.mesh] width=4 shape=(1, 4) devices=4 unique=4 full_slice=1
 [waycount] width= 2 replicas= 2 depth=  8 arm=replicated ... SAME
 [waycount] width= 4 replicas= 1 depth=  8 arm=stock-ar   ... DIFFERS
-[waycount] width= 4 replicas= 1 depth=  8 arm=f4-fixed   ... SAME
+[waycount] width= 4 replicas= 1 depth=  8 arm=f4-fixed   ... <MEASURED>
+[canonical-op] depth= 1 ... differing_bytes=0/... SAME
+[canonical-op] depth= 2 ... differing_bytes=0/... SAME
+[canonical-op] depth= 4 ... differing_bytes=0/... SAME
+[canonical-op] depth= 8 ... differing_bytes=0/... SAME
+[canonical-op] VERDICT: PASS
 [mesh] slice_count=1   MULTI_SLICE=0
 [mesh] create_device_mesh(shape=(4,)) -> ids=[0, 2, 1, 3]   REORDERED=1
 [bucket] SET MIN_TOKEN_BUCKET=<derived for your dp geometry>
@@ -97,7 +102,8 @@ topology may legitimately differ; that is the point of measuring.**
 | `replicated SAME`, `stock-ar DIFFERS`, `f4-fixed SAME` | TP reduction order is a sufficient carrier and F4 removes it at this point. |
 | `replicated DIFFERS` | A Pathways/compiler carrier exists without TP reduction; do not attribute stock/F4 byte-count differences solely to all-reduce. |
 | `stock-ar` is **already** `SAME` | The fixed-order tree repairs nothing at that point. |
-| `f4-fixed` `DIFFERS` at an intended width | Stop. The fix does not cover that production mesh. |
+| `f4-fixed` `DIFFERS` in generic P1 | F4 alone does not close the handwritten diagnostic graph. This is platform evidence, not a production-Qwen verdict. Continue only to the fail-closed P1b gate. |
+| P1b is missing or `[canonical-op] VERDICT: FAIL` | Stop before T2. The promoted Qwen operator chain was not admitted on this topology. |
 | `MULTI_SLICE=1` | Collectives cross slices and XLA lowers a hierarchical reduction — a program family with **zero coverage** here. Every bitwise claim on this topology is UNVERIFIED. |
 | `REORDERED=1` | Placement permuted your device order. Use the printed order for `CANON_EXPECT_MODEL_MESH_IDS`; never inherit one from a different mesh shape. |
 | `[bucket] SET MIN_TOKEN_BUCKET=` ≠ 256 | Your dp geometry needs a different global value. Copying 256 would silently unpin the bucket while every switch still reads "on". |
@@ -106,8 +112,10 @@ topology may legitimately differ; that is the point of measuring.**
 with `rel_l2`, `one_minus_cos`, and `max_abs`; never infer that one arm is worse because it has
 slightly more differing bytes.
 
-**Pass:** `T1 COMPLETE` (every applicable probe produced measurements), full-slice attestation,
-and `f4-fixed` `SAME` at intended widths. `COMPLETE` alone is not an admission.
+**Pass:** generic P1 must print `T1 COMPLETE` and a full-slice attestation, but its numeric rows
+are diagnostic and may be dirty. Production numerical admission additionally requires exactly
+one `[canonical-op] VERDICT: PASS` after all registered depths report zero differing bytes and a
+finite, nonzero weight gradient. `T1 COMPLETE` alone is not an admission.
 
 **Red:**
 - `T1 FAIL` — a probe produced no measurement line. It did not run;

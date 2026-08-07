@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# P32 DP16xTP4 update admission.  This is a small synthetic gradient/update probe: no model,
-# checkpoint, optimizer state allocation or training data.
+# Validate the T2 result emitted by the same Pathways client as T1.  Starting another Python
+# process here created a second IFRT proxy client and stalled on the 64-chip deployment.
 set -euo pipefail
 source "$CANON_STATE/env.sh"
-export JAX_PLATFORMS="proxy,cpu"
-export JAX_BACKEND_TARGET="grpc://localhost:29000"
-export PATHWAYS_HEAD="localhost"
-export CANON_IN_CONTAINER=1
-export CANON_DP_PROBE_LOG="${CANON_DP_PROBE_LOG:-$CANON_STATE/t2_dp.log}"
+LOG="${CANON_T1_LOG:-$CANON_STATE/t1_t2.log}"
 
 echo "[dp-gate] dp=$CANON_DP_SIZE tp=$CANON_TP_SIZE local_samples=$CANON_DP_PROBE_LOCAL_SAMPLES"
-bash "$CANON_PKG/tests/t2_dp/run.sh"
-echo "[dp-gate] artifact=$CANON_DP_PROBE_LOG"
+python3 "$CANON_PKG/tests/t2_dp/validate_same_session.py" "$LOG"

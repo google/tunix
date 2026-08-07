@@ -82,6 +82,7 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
     req "$k"
     positive_int "$k"
   done
+  req CANON_CANONICAL_DEPTHS
   req CANON_TRAIN_DP_SHARDING
   [ "${CANON_TRAIN_DP_SHARDING:-}" = "replicated-params" ] || {
     echo "[env] P32 requires replicated-params, got ${CANON_TRAIN_DP_SHARDING:-unset}" >&2
@@ -107,6 +108,10 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
   }
   [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
     echo "[env] P32 bucket FAIL: MIN_TOKEN_BUCKET must equal dp*CANON_LOGPROB_M" >&2; fail=1;
+  }
+  [ "$CANON_CANONICAL_DEPTHS" = "1,2,4,8" ] || {
+    echo "[env] P32 canonical-op depths must remain 1,2,4,8" >&2
+    fail=1
   }
   [ "${FL_SHARED_MESH:-}" = "1,4" ] || {
     echo "[env] P32 admission must keep the legacy trainer at TP4-only; 16,4 currently means FSDP" >&2

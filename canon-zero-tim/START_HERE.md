@@ -25,13 +25,15 @@ It is packaging of work already done, not a new result. What is signed and what 
 | CPU mathematical gates | **pass** — plus a negative control that rejects 4 kinds of bad run |
 | **Direct-attached 4-chip T1 rerun from this package** | **NOT RUN** — the probe host's TPU was busy |
 | DP gradient/update probe on CPU | **PASS** — fixed placement repeats; regrouped samples change bits |
-| **DP16×TP4 on Pathways/GKE** | **INCONCLUSIVE** — Attempt 0 proved the connection/overlay chain, but P1 used an invalid `devices[:4]` subslice and never measured TP4; rerun the full-slice probe before T2 |
+| **Generic DP16×TP4 diagnostic on Pathways/GKE** | **COMPLETE, DIRTY** — 12/12 full-slice rows completed; replicated, stock and F4 arms all show third-program drift. This is platform evidence, not a production-Qwen verdict. |
+| **Canonical Qwen operator P1b on Pathways/GKE** | **NOT RUN** — the new hard gate directly executes promoted RMSNorm/projections/SwiGLU/F4 at model dimensions. |
+| **Same-session T2 on Pathways/GKE** | **NOT RUN** — the old second Python process connected a second IFRT client and the log ended without a T2 marker. |
 | **Round-trip: install from this package, reproduce signed numbers** | **NOT RUN** |
-| Pathways numerical admission | **NOT PASSED** — no complete full-slice paired-arm table yet |
+| Pathways numerical admission | **NOT PASSED** — requires canonical P1b PASS followed by same-session T2 PASS |
 
-**The next useful action on the 64-chip target is Task C in `RUNBOOK.md`** — run the staged
-cluster ladder through `dp-gate-only`. It decides whether the topology and fixed-placement DP
-update contract transfer before any model is allocated.
+**The next useful action on the 64-chip target is Task C in `RUNBOOK.md`** — rerun the staged
+cluster ladder through `dp-gate-only` with the canonical P1b and same-session T2 changes.  A P1b
+red stops T2; a P1b green permits the DP fixed-placement gate without starting another client.
 
 ---
 

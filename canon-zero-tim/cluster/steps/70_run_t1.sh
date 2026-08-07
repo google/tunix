@@ -10,5 +10,11 @@ export JAX_PLATFORMS="proxy,cpu"
 export JAX_BACKEND_TARGET="grpc://localhost:29000"
 export PATHWAYS_HEAD="localhost"
 export CANON_IN_CONTAINER=1
+export CANON_T1_LOG="${CANON_T1_LOG:-$CANON_STATE/t1_t2.log}"
 echo "[t1] activating Pathways backend: JAX_PLATFORMS=$JAX_PLATFORMS target=$JAX_BACKEND_TARGET"
-bash "$CANON_PKG/tests/t1_tpu/run.sh"
+set +e
+bash "$CANON_PKG/tests/t1_tpu/run.sh" 2>&1 | tee "$CANON_T1_LOG"
+rc=${PIPESTATUS[0]}
+set -e
+echo "[t1] artifact=$CANON_T1_LOG"
+exit "$rc"

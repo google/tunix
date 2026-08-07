@@ -116,8 +116,9 @@ tests/t1_tpu/run.sh                       # host: re-enters the pinned image
 CANON_IN_CONTAINER=1 tests/t1_tpu/run.sh  # already inside a TPU container
 ```
 
-Four topology admission probes plus the four historical minimal reproducers. **Run this first
-on any new cluster** — it decides in seconds whether the switch set transfers at all. See
+Four topology diagnostics, the production-operator P1b hard gate, plus the historical minimal
+reproducers. **Run this first on any new cluster.** Generic P1 detects platform drift; only P1b
+decides whether the installed P22.XK Qwen operator chain is admitted. See
 `CLUSTER_ADMISSION.md`.
 
 ### T2 / T3 — need the pinned image, a checkpoint, and a 4-chip host

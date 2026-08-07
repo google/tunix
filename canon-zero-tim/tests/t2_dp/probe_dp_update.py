@@ -187,7 +187,7 @@ def _regroup_rows(x: np.ndarray, dp: int, local_samples: int) -> np.ndarray:
   return grouped.transpose(1, 0, 2).reshape(x.shape)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--dp", type=int, default=int(os.getenv("CANON_DP_SIZE", "4")))
   parser.add_argument("--tp", type=int, default=int(os.getenv("CANON_TP_SIZE", "1")))
@@ -201,7 +201,7 @@ def main() -> int:
       action="store_true",
       help="negative control: substitute a rank-dependent result for stock",
   )
-  args = parser.parse_args()
+  args = parser.parse_args(argv)
 
   if args.dp <= 1 or args.tp <= 0 or args.local_samples <= 0:
     raise ValueError("dp must be >1; tp and local-samples must be positive")

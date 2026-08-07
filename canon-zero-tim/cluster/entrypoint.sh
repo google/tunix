@@ -85,6 +85,11 @@ fi
 
 if [ "$MODE" = "gate-only" ] || [ "$MODE" = "dp-gate-only" ]; then
   step 60_wait_workers.sh
+  if [ "$MODE" = "dp-gate-only" ]; then
+    export CANON_RUN_T2_DP=1
+  else
+    export CANON_RUN_T2_DP=0
+  fi
   step 70_run_t1.sh
   if [ "$MODE" = "dp-gate-only" ]; then
     step 75_run_dp.sh
