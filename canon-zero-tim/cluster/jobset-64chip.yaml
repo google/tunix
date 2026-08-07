@@ -141,8 +141,10 @@ spec:
                   fieldRef:
                     fieldPath: metadata.name
               # --- what to run -------------------------------------------------------------
+              # Real-checkpoint RC: set mode=dp16-rc, use the *-rc.env profile, and add
+              # CANON_P32_RC_STAGE=checkpoint-forward|backward|one-update|three-update.
               - name: CANON_MODE
-                value: model-init-only          # probe-only | install-only | gate-only | dp-gate-only
+                value: model-init-only          # also: model-init-only | dp16-rc | run
               - name: CANON_PROFILE_FILE
                 value: cluster/profiles/qwen3-8b-dp16-tp4-model-init.env
               - name: CANON_STATE

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed classifier for the DP16 checkpoint-forward stage."""
+"""Fail-closed classifier for one DP16xTP4 release-candidate stage."""
 
 from __future__ import annotations
 
@@ -11,11 +11,31 @@ from typing import Any
 
 
 _JSON_RE = re.compile(r"^\[P32\.RC\] JSON (\{.*\})$", re.MULTILINE)
-_COUNTS = {
-    "forward": 2,
-    "backward": 0,
-    "optimizer_updates": 0,
-    "training_steps": 0,
+_STAGE_COUNTS = {
+    "checkpoint-forward": {
+        "forward": 2,
+        "backward": 0,
+        "optimizer_updates": 0,
+        "training_steps": 0,
+    },
+    "backward": {
+        "forward": 36,
+        "backward": 32,
+        "optimizer_updates": 0,
+        "training_steps": 0,
+    },
+    "one-update": {
+        "forward": 19,
+        "backward": 16,
+        "optimizer_updates": 1,
+        "training_steps": 1,
+    },
+    "three-update": {
+        "forward": 53,
+        "backward": 48,
+        "optimizer_updates": 3,
+        "training_steps": 3,
+    },
 }
 
 
@@ -56,22 +76,23 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
       reasons.append(f"json: invalid record: {exc}")
       record = {}
   stage = record.get("stage") if record else expected_stage
-  if stage != "checkpoint-forward":
-    reasons.append(f"stage: expected checkpoint-forward, got {stage!r}")
   if expected_stage is not None and stage != expected_stage:
     reasons.append(f"stage: expected {expected_stage}, got {stage}")
-  _exactly_one(
-      text,
-      r"^\[P32\.RC\] START stage=checkpoint\-forward .*",
-      "start",
-      reasons,
-  )
-  _exactly_one(
-      text,
-      r"^\[P32\.RC\] VERDICT PASS stage=checkpoint\-forward$",
-      "verdict",
-      reasons,
-  )
+  if stage not in _STAGE_COUNTS:
+    reasons.append(f"stage: unsupported value {stage!r}")
+  if stage:
+    _exactly_one(
+        text,
+        rf"^\[P32\.RC\] START stage={re.escape(stage)} .*",
+        "start",
+        reasons,
+    )
+    _exactly_one(
+        text,
+        rf"^\[P32\.RC\] VERDICT PASS stage={re.escape(stage)}$",
+        "verdict",
+        reasons,
+    )
   if record:
     if record.get("attempt") != 0:
       reasons.append("attempt: release evidence must be attempt 0")
@@ -105,7 +126,7 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
         or checkpoint.get("bytes", 0) <= 0
         or not re.fullmatch(r"[0-9a-f]{64}", checkpoint.get("manifest_sha256", ""))
     ):
-      reasons.append("checkpoint: manifest identity is incomplete")
+      reasons.append("checkpoint: immutable identity is incomplete")
     inventory = model.get("inventory", {})
     if (
         inventory.get("leaves") != 399
@@ -119,16 +140,97 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
       reasons.append("forward: repeat was not bitwise exact")
     if record.get("forward_shape") != [256, 151936]:
       reasons.append("forward: processed row shape changed")
-    if record.get("execution") != _COUNTS:
-      reasons.append("execution: exact checkpoint-forward counters changed")
+    if record.get("execution") != _STAGE_COUNTS.get(stage):
+      reasons.append("execution: exact stage counters changed")
     before = record.get("parameter_sample_sha256_before", "")
     after = record.get("parameter_sample_sha256_after", "")
     if not re.fullmatch(r"[0-9a-f]{64}", before):
       reasons.append("parameters: before fingerprint is invalid")
     if not re.fullmatch(r"[0-9a-f]{64}", after):
       reasons.append("parameters: after fingerprint is invalid")
-    if before != after:
-      reasons.append("parameters: checkpoint-forward mutated the model")
+    if stage in ("checkpoint-forward", "backward") and before != after:
+      reasons.append("parameters: no-commit stage mutated the model")
+    if stage in ("one-update", "three-update") and before == after:
+      reasons.append("parameters: update stage did not mutate the model")
+    if stage == "checkpoint-forward":
+      forbidden_work = (
+          record.get("third_program_exact"),
+          record.get("gradient_health"),
+          record.get("post_reduction_replicas_exact"),
+      )
+      if forbidden_work != (None, None, None):
+        reasons.append("forward: backward-only fields were populated")
+    else:
+      if not isinstance(record.get("third_program_exact"), bool):
+        reasons.append("THIRDPROG: observation is missing")
+      health = record.get("gradient_health") or {}
+      if (
+          health.get("finite") is not True
+          or health.get("nonzero", 0) <= 0
+          or not isinstance(health.get("norm"), (int, float))
+          or health.get("norm", 0.0) <= 0.0
+      ):
+        reasons.append("gradient: health contract failed")
+      if record.get("rank_local_stats_distinct") is not True:
+        reasons.append("gradient: rank-local contribution was not observed")
+      if record.get("post_reduction_replicas_exact") is not True:
+        reasons.append("gradient: reduced replicas were not exact")
+      expected_transactions = {
+          "backward": 2,
+          "one-update": 1,
+          "three-update": 3,
+      }[stage]
+      if record.get("dp_reduction_transactions") != expected_transactions:
+        reasons.append("reducer: transaction count changed")
+      if record.get("dp_rank_pullbacks_per_transaction") != 16:
+        reasons.append("reducer: every DP rank must contribute exactly once")
+      if record.get("dp_rank_ordered_additions_per_transaction") != 15:
+        reasons.append("reducer: DP16 serial reference must perform 15 additions")
+      if record.get("dp_reduction_rounds_per_transaction") != 15:
+        reasons.append("reducer: registered rank-order depth changed")
+      if stage == "backward" and record.get("gradient_repeat_exact") is not True:
+        reasons.append("gradient: repeated backward changed bits")
+    if stage != "checkpoint-forward":
+      steps = record.get("step_records", [])
+      expected_steps = (
+          2 if stage == "backward" else _STAGE_COUNTS[stage]["training_steps"]
+      )
+      if len(steps) != expected_steps:
+        reasons.append("gradient: step record count changed")
+      third_program_observations = [
+          entry.get("third_program_exact") for entry in steps
+      ]
+      if any(not isinstance(value, bool) for value in third_program_observations):
+        reasons.append("THIRDPROG: per-transaction observation is missing")
+      elif record.get("third_program_exact") != all(
+          third_program_observations
+      ):
+        reasons.append("THIRDPROG: aggregate does not match transaction records")
+      for index, entry in enumerate(steps):
+        contributions = entry.get("rank_contribution_signature_sha256", [])
+        if (
+            len(contributions) != 16
+            or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in contributions)
+            or len(set(contributions)) != 16
+        ):
+          reasons.append(
+              f"gradient: step {index} rank contribution signatures invalid"
+          )
+    if stage in ("one-update", "three-update"):
+      if record.get("optimizer_state_memory_between_commits") != ["pinned_host"]:
+        reasons.append("optimizer: state is not pinned-host between commits")
+      if record.get("optimizer_state_memory_during_commit") != ["device"]:
+        reasons.append("optimizer: state was not on device during commit")
+      steps = record.get("step_records", [])
+      if len(steps) != _STAGE_COUNTS[stage]["training_steps"]:
+        reasons.append("updates: step record count changed")
+      elif [entry.get("step") for entry in steps] != list(range(len(steps))):
+        reasons.append("updates: step ids are not monotonic and contiguous")
+      for index, entry in enumerate(steps):
+        if not re.fullmatch(r"[0-9a-f]{64}", entry.get("parameter_sample_sha256", "")):
+          reasons.append(f"updates: step {index} parameter fingerprint invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", entry.get("optimizer_sample_sha256", "")):
+          reasons.append(f"updates: step {index} optimizer fingerprint invalid")
   return {
       "status": "PASS" if not reasons else "INCONCLUSIVE",
       "reasons": reasons,
@@ -139,7 +241,7 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("log", type=Path)
-  parser.add_argument("--stage", choices=("checkpoint-forward",))
+  parser.add_argument("--stage", choices=tuple(_STAGE_COUNTS))
   parser.add_argument("--output", type=Path)
   args = parser.parse_args()
   result = classify_text(

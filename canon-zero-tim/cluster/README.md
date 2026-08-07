@@ -52,6 +52,7 @@ promoting.**
 | `gate-only` | 00–70 | yes, minutes | Does generic Pathways drift reproduce, and does the real canonical Qwen MLP operator chain remain bitwise across the third program? |
 | `dp-gate-only` | 00–75 | yes, minutes | In the same Pathways client, does DP16×TP4 repeat exactly under a fixed sample→rank mapping, and are all replicas synchronized after gradient reduction? |
 | `model-init-only` | 00–60 + 80 | yes, minutes | Can the exact Qwen3-8B actor, pinned-host AdamW state, and FP32 accumulator materialize as DP-replicated/TP-sharded state on all 64 devices? |
+| `dp16-rc` | 00–60 + 85 | yes | Run one default-off real-checkpoint systems stage: `checkpoint-forward`, `backward`, `one-update`, or `three-update`. This mode never initializes rollout, admits production training, or claims zero-TIM. |
 | `run` | 00–90 | yes | The workload in `CANON_RUN_CMD`; the P32 admission profile deliberately refuses this mode. |
 
 ### Secrets
@@ -169,6 +170,54 @@ execution counter makes the result inconclusive.
 This gate closes model/state allocation only. It does not promote the forward, backward,
 gradient-reduction, update, or training gates.
 
+### `dp16-rc`
+
+Use `cluster/profiles/qwen3-8b-dp16-tp4-rc.env` and set exactly one
+`CANON_P32_RC_STAGE`. Each stage must run in a fresh Attempt 0. The recommended promotion order is:
+
+1. `checkpoint-forward`: load the safetensors checkpoint and repeat the real Qwen3-8B forward.
+2. `backward`: repeat two no-commit gradient transactions and require exact gradient equality.
+3. `one-update`: initialize AdamW in pinned-host memory and perform one measured commit.
+4. `three-update`: perform three monotonic commits and verify state movement on every step.
+
+For example, edit the two manifest values before a fresh apply:
+
+```yaml
+- name: CANON_MODE
+  value: dp16-rc
+- name: CANON_PROFILE_FILE
+  value: cluster/profiles/qwen3-8b-dp16-tp4-rc.env
+- name: CANON_P32_RC_STAGE
+  value: checkpoint-forward
+```
+
+The backward reference deliberately trades throughput for a deterministic DP16 contract. It
+executes one rank objective at a time in rank order `0..15`. Each pullback has one nonzero DP
+contributor, so its internal collective has no floating-point ordering choice; the 16 replicated
+contributions are then added with 15 separately fenced additions in that same order. This is a
+systems release reference, not the eventual production-throughput reducer.
+
+Expected terminal markers are:
+
+```text
+[P32.RC] START stage=<stage> attempt=0 dp=16 tp=4 ...
+[P32.RC] JSON {...}
+[P32.RC] VERDICT PASS stage=<stage>
+[dp16-rc] classification=/tmp/canon-state/p32_rc_<stage>.classification.json
+```
+
+The classifier requires the real checkpoint manifest identity, exactly 399 model leaves, no DP-sharded
+model leaf, fixed global/local trajectory counts `256/16`, the exact stage execution counters,
+live finite gradients, 16 distinct rank-contribution signatures, and bit-exact samples across DP
+replicas after the fixed-rank reduction. Update stages additionally require AdamW state to be on
+`pinned_host` between commits and on `device` only during the commit.
+
+`third_program_exact` is recorded truthfully but is not promoted by this runner. The canonical
+engine adapter owns the standalone-forward versus forward-plus-backward gate; this RC does not
+initialize that adapter's rollout engine. A PASS here therefore means only the named systems
+stage passed. It does not establish A=B=C, FrozenLake semantics, W&B training, or production
+admission.
+
 The archived 64-chip run measured the train mesh as:
 
 ```
@@ -212,7 +261,9 @@ Ranked by how easily each is mistaken for success.
 | **T2-DP mesh lacks `shape=(16, 4) full_slice=1`** | The DP update probe did not attest the production topology. | Stop. Logical reshape fallback is forbidden; fix topology-aware construction. |
 | **`model-init-only` loads a checkpoint or reports any forward/backward/update count** | The structural capacity gate performed work outside its registered scope. | Reject the artifact. Run the dedicated profile and preserve zero execution counters. |
 | **P32 model-init state has any DP-sharded leaf or device-resident optimizer state** | The requested replicated-DP and optimizer-offload contract was not materialized. | Stop before the forward gate. Do not relabel FSDP as DP. |
-| **`THIRDPROG` red** | The forward-only and forward+backward programs are not the same family. Every downstream number in that run is meaningless. | Void the whole run, fix the config, rerun. |
+| **A `dp16-rc` report claims rollout, zero-TIM, or production admission** | The bounded systems runner escaped its registered scope. | Reject the artifact. Its scope must remain `rollout_engine_initialized=false`, `zero_tim_alignment=NOT_MEASURED`, and `production_training_admitted=false`. |
+| **A `dp16-rc` stage has fewer than 16 contribution signatures per transaction** | A DP rank was skipped, duplicated, or the rank-ordered reference was not measured. | Reject the stage. Missing contributions are never inferred from an aggregate gradient. |
+| **A hard-gated canonical run reports `THIRDPROG` red** | The forward-only and forward+backward programs are not the same family. Every downstream number in that canonical alignment run is meaningless. The bounded `dp16-rc` runner records this only as an observation because it does not initialize the canonical rollout adapter. | Void the canonical alignment run, fix the config, and rerun. Do not promote an RC observation into A=B=C evidence. |
 | **`ROPE_FIX=unknown_version`** | Neither the old nor the new RoPE form was found. Somebody is about to patch a build nobody has looked at. | Stop. Inspect the file. Do not guess. |
 | **`[probe] VERSION DRIFT`** | The image's `tpu_inference` differs from the patch anchor. Results can no longer be byte-identical to the signed evidence. | Decide deliberately; if you proceed with `CANON_ALLOW_IMAGE_DRIFT=1`, say so in the report. |
 | **`MULTI_SLICE=1`** | Collectives cross slices, so XLA lowers a hierarchical reduction. This program family has **zero** coverage in this work. | Treat every bitwise claim on this topology as UNVERIFIED until re-measured here. |
@@ -249,7 +300,8 @@ cluster/
 │   ├── qwen3-1p7b.env         model geometry (GSM8K release)
 │   ├── qwen3-8b.env           model geometry (FrozenLake)
 │   ├── qwen3-8b-dp16-tp4-admission.env  P32 arithmetic + fail-closed contract
-│   └── qwen3-8b-dp16-tp4-model-init.env  P32 structural allocation only
+│   ├── qwen3-8b-dp16-tp4-model-init.env  P32 structural allocation only
+│   └── qwen3-8b-dp16-tp4-rc.env          P32 real-checkpoint systems stages
 └── steps/
     ├── 00_env.sh              resolve config, strip secrets, refuse an incomplete set
     ├── 10_sync_repo.sh        verify the checkout is where it should be
@@ -262,6 +314,7 @@ cluster/
     ├── 70_run_t1.sh           topology + canonical-op + optional same-session DP probes
     ├── 75_run_dp.sh           validate same-session DP markers; no new Pathways client
     ├── 80_model_init.sh       materialize exact state shapes; zero execution/commits
+    ├── 85_run_dp16_rc.sh      run and classify one bounded real-checkpoint RC stage
     └── 90_run.sh              the workload, then the PATHTRACE tally
 ```
 
