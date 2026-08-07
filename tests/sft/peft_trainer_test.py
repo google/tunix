@@ -845,11 +845,16 @@ class PeftTrainerTest(parameterized.TestCase):
         float(common.mean_of_means([aux['foo'], aux['foo']])), 2.0, places=5
     )  # mean(10/5, 10/5)
     self.assertAlmostEqual(
-        float(common.global_weighted_mean([aux['bar'], aux['bar']])), 3.0,
+        float(common.global_weighted_mean([aux['bar'], aux['bar']])),
+        3.0,
         places=5,
     )  # (6+6)/(2+2)
 
-  def test_train_step_denom_is_global_weighted(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='integer_denoms', d1=2.0, d2=6.0),
+      dict(testcase_name='fractional_denoms', d1=0.2, d2=0.3),
+  )
+  def test_train_step_denom_is_global_weighted(self, d1, d2):
     # Two micro-batches with UNEQUAL denominators on the SAME input (so both
     # gradients equal g = d(sum_logits)/dparam) accumulate into one accumulator
     # WITHOUT applying (is_update=False, so the model is unchanged between the
@@ -857,8 +862,6 @@ class PeftTrainerTest(parameterized.TestCase):
     # so acc.get() == (g + g) / (d1 + d2) [global weighted], NOT
     # (g/d1 + g/d2) / 2 [the old mean-of-means, which pre-scaled by 1/denom and
     # accumulated with denom=1]. Fails on the pre-fix code.
-    d1, d2 = 2.0, 6.0
-
     def make_loss(denom):
       def loss_fn(
           model,
@@ -990,7 +993,7 @@ class GradientAccumulatorTest(parameterized.TestCase):
     Matches ``optax.MultiSteps`` semantics: K micro-steps of size B/K are
     equivalent to a single step on a batch of size B when the loss
     function returns a per-batch scalar (mean) value. ``get()`` returns
-    ``(Σ_i grads_i) / max(Σ_i 1, 1)``; here K=2 and the per-step grads
+    ``(Σ_i grads_i) / Σ_i 1``; here K=2 and the per-step grads
     have scale 1.0 and 2.0, so the mean is 1.5.
     """
     model, acc = self._make_accumulator()
@@ -1026,14 +1029,13 @@ class GradientAccumulatorTest(parameterized.TestCase):
     )
 
   def test_single_add_weighted_is_grads_over_denom(self):
-    """A single add(grads, denom=d) then get() returns grads / max(d, 1).
+    """A single add(grads, denom=d) then get() returns grads / d.
 
     The weighted (denom != 1) case of a one-micro-batch update: the global-
-    weighted mean ``Sum grads / Sum denom`` collapses to ``grads / max(denom,
-    1)``
+    weighted mean ``Sum grads / Sum denom`` collapses to ``grads / denom``
     for a single add. This is the premise the depth-1 fast path relies on when
     ``gradient_accumulation_steps == 1`` -- updating directly from
-    ``grads / max(denom, 1)`` (skipping the accumulator + nnx.cond) must equal
+    ``grads / denom`` (skipping the accumulator + nnx.cond) must equal
     the accumulator path. Here grads=6.0 and denom=4.0, so get()=6/4=1.5;
     the "pre-scale by 1/d then divide again" bug would give a different value.
     """
@@ -1052,6 +1054,7 @@ class GradientAccumulatorTest(parameterized.TestCase):
       dict(testcase_name='equal_denoms', denoms=(4.0, 4.0, 4.0, 4.0)),
       dict(testcase_name='varying_denoms', denoms=(1.0, 7.0, 3.0, 5.0)),
       dict(testcase_name='extreme_variance', denoms=(1.0, 1.0, 100.0, 1.0)),
+      dict(testcase_name='fractional_denoms', denoms=(0.05, 0.1, 0.2, 0.25)),
   )
   def test_explicit_denom_matches_single_step_baseline(self, denoms):
     """Passing explicit denom matches the equivalent single-step batch.
@@ -1110,6 +1113,18 @@ class GradientAccumulatorTest(parameterized.TestCase):
               'is degenerate.'
           ),
       )
+
+  def test_zero_denom_returns_zero_grads(self):
+    model, acc = self._make_accumulator()
+    acc.add(self._ones_like_params(model), denom=jnp.asarray(0.0, jnp.float32))
+
+    jax.tree_util.tree_map(
+        lambda value: np.testing.assert_array_equal(
+            value[...], jnp.zeros_like(value[...])
+        ),
+        acc.get(),
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
 
   def test_reset_clears_denom(self):
     model, acc = self._make_accumulator()
@@ -1594,6 +1609,37 @@ class Depth1FastPathTest(parameterized.TestCase):
         _unwrap(trainer.grad_accumulator.grads),
     )
     np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
+
+  def test_zero_denom_produces_zero_update(self):
+    def zero_weight_loss(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.sum(logits), jnp.asarray(0.0, jnp.float32)
+          ),
+          aux_metrics={},
+      )
+
+    trainer = self._make_trainer().with_loss_fn(zero_weight_loss)
+    before = _unwrap(nnx.state(trainer.model, nnx.Param))
+    loss, _, grad_norm = trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        dummy_datasets(batch_size=4)[0],
+        jnp.array(True),
+    )
+
+    np.testing.assert_array_equal(loss, 0.0)
+    np.testing.assert_array_equal(grad_norm, 0.0)
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        before,
+        _unwrap(nnx.state(trainer.model, nnx.Param)),
+    )
 
   def test_depth1_jaxpr_has_no_cond(self):
     """Sentinel: the depth-1 step jaxpr must contain no `cond` primitive."""
