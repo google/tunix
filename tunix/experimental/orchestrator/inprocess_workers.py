@@ -29,7 +29,7 @@ behavioral reference to match.
 
 from typing import Any, Mapping
 
-from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.experimental.common import datatypes
 
 
 class InProcessTrainerWorker:
@@ -47,7 +47,7 @@ class InProcessTrainerWorker:
 
   def train(
       self,
-      role: rl_engine_lib.Role,
+      role: datatypes.Role,
       train_ds: Any,
       eval_ds: Any,
       skip_jit: bool = False,
@@ -83,7 +83,7 @@ class InProcessTrainerWorker:
     if segment_ids is not None:
       call_kwargs["segment_ids"] = segment_ids
     return self._rl_engine.per_token_logps(
-        rl_engine_lib.Role.ACTOR, **call_kwargs
+        datatypes.Role.ACTOR, **call_kwargs
     )
 
   def sync_weights(self) -> None:
@@ -166,5 +166,5 @@ class InProcessInferenceWorker:
     if segment_ids is not None:
       call_kwargs["segment_ids"] = segment_ids
     return self._rl_engine.per_token_logps(
-        rl_engine_lib.Role.REFERENCE, **call_kwargs
+        datatypes.Role.REFERENCE, **call_kwargs
     )

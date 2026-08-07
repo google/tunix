@@ -16,8 +16,8 @@
 
 from unittest import mock
 from absl.testing import absltest
+from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import inprocess_workers
-from tunix.rl import rl_cluster as rl_engine_lib
 
 
 class InProcessWorkersTest(absltest.TestCase):
@@ -32,23 +32,23 @@ class InProcessWorkersTest(absltest.TestCase):
   def test_trainer_worker_train(self):
     worker = inprocess_workers.InProcessTrainerWorker(self.mock_engine)
     worker.train(
-        rl_engine_lib.Role.ACTOR,
+        datatypes.Role.ACTOR,
         train_ds="chunks_data",
         eval_ds="eval_data",
         skip_jit=True,
     )
     self.mock_engine.train.assert_called_once_with(
-        rl_engine_lib.Role.ACTOR, "chunks_data", "eval_data", True
+        datatypes.Role.ACTOR, "chunks_data", "eval_data", True
     )
 
     worker.train(
-        rl_engine_lib.Role.CRITIC,
+        datatypes.Role.CRITIC,
         train_ds="chunks_data",
         eval_ds="eval_data",
         skip_jit=False,
     )
     self.mock_engine.train.assert_called_with(
-        rl_engine_lib.Role.CRITIC, "chunks_data", "eval_data", False
+        datatypes.Role.CRITIC, "chunks_data", "eval_data", False
     )
 
   def test_trainer_worker_per_token_logps(self):
@@ -64,7 +64,7 @@ class InProcessWorkersTest(absltest.TestCase):
 
     self.assertEqual(result, "logp_result")
     self.mock_engine.per_token_logps.assert_called_once_with(
-        rl_engine_lib.Role.ACTOR,
+        datatypes.Role.ACTOR,
         prompt_tokens="prompts",
         completion_tokens="completions",
         pad_id=0,
@@ -134,7 +134,7 @@ class InProcessWorkersTest(absltest.TestCase):
 
     self.assertEqual(result, "ref_logp_result")
     self.mock_engine.per_token_logps.assert_called_once_with(
-        rl_engine_lib.Role.REFERENCE,
+        datatypes.Role.REFERENCE,
         prompt_tokens="prompts",
         completion_tokens="completions",
         pad_id=0,
