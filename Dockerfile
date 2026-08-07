@@ -25,17 +25,27 @@ RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
 RUN pip install wandb
+RUN pip install uv
 
 # Set the working directory
 WORKDIR /app
 
-# Copy the project files to the image
+# Copy scripts and requirements first to leverage Docker cache
+COPY scripts/install_tunix_vllm_requirement.sh scripts/
+COPY requirements/ requirements/
+
+RUN bash scripts/install_tunix_vllm_requirement.sh
+
+# Copy pyproject.toml and README.md to install dependencies first
+COPY pyproject.toml README.md /app/
+RUN mkdir /app/tunix && touch /app/tunix/__init__.py
+RUN uv pip install .
+
+# Copy the rest of the project files
 COPY . .
 
-# Install the project in editable mode
-RUN pip install -e .
-
-RUN bash /app/scripts/install_tunix_vllm_requirement.sh
+# Install the project in editable mode (without dependencies, as they are already installed)
+RUN pip install --no-deps -e .
 
 # Set the default command to bash
 CMD ["bash"]
