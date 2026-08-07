@@ -260,7 +260,7 @@ class Tokenizer(TokenizerAdapter):
         options.append('eos')
 
       extra_options_str = ':'.join(options)
-      if extra_options_str:
+      if extra_options_str and hasattr(tokenizer, 'SetEncodeExtraOptions'):
         tokenizer.SetEncodeExtraOptions(extra_options_str)
     else:
       raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
