@@ -143,13 +143,31 @@ class TrainerWorker(abstract_worker.Worker):
     return self._response(gen_model_input_fn_configured=True)
 
   def fwd_bwd(
-      self, payload: datatypes.TrainerPayload, **kwargs
-  ) -> datatypes.Response:
-    """Executes forward and backward passes."""
+      self,
+      payload: datatypes.TrainerPayload | None = None,
+      **kwargs,
+  ) -> datatypes.Response | dict[str, Any]:
+    """Executes forward/backward and optionally applies an optimizer update."""
     self._ensure_ready()
+    if payload is None:
+      payload = kwargs.pop("batch", None)
+    if payload is None:
+      raise ValueError("fwd_bwd requires `payload` or v2 `batch`.")
+    accumulate_gradients = bool(kwargs.pop("accumulate_gradients", False))
+    apply_optimizer = bool(kwargs.pop("apply_optimizer", False))
+    kwargs.pop("skip_jit", None)
     try:
       self._trainer.fwd_bwd(payload, **kwargs)
+      train_step = None
+      if apply_optimizer:
+        train_step = self._trainer.update()
       self._last_error = None
+      if accumulate_gradients or apply_optimizer:
+        return {
+            "queued": True,
+            "updated": apply_optimizer,
+            "train_step": train_step,
+        }
       return self._response(queued=True)
     except Exception as exc:
       self._last_error = str(exc)

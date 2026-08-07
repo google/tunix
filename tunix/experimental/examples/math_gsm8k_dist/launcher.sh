@@ -35,6 +35,7 @@ NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
+COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-0}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
@@ -219,6 +220,7 @@ echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
+echo "  logps chunk:    $COMPUTE_LOGPS_CHUNK_SIZE"
 echo "  use lora:       $USE_LORA"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
@@ -334,6 +336,7 @@ TRAINER_CMD=(
   --max_response_length="$MAX_RESPONSE_LENGTH"
   --mini_batch_size="$MINI_BATCH_SIZE"
   --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+  --compute_logps_chunk_size="$COMPUTE_LOGPS_CHUNK_SIZE"
   --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
   --lora_rank="$LORA_RANK"
   --lora_alpha="$LORA_ALPHA"
@@ -414,7 +417,7 @@ if [[ -n "${INFERENCE_PID:-}" ]]; then
 fi
 dump_debug_snapshot
 
-echo "Launching CPU orchestrator..."
+echo "Launching CPU orchestrator v2..."
 ORCHESTRATOR_CMD=(
   "$PYTHON_BIN" "${DIR}/run_gsm8k_dist_grpo.py"
   --trainer_addr="localhost:$TRAINER_PORT"
@@ -427,6 +430,7 @@ ORCHESTRATOR_CMD=(
   --max_prompt_length="$MAX_PROMPT_LENGTH"
   --max_response_length="$MAX_RESPONSE_LENGTH"
   --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+  --compute_logps_chunk_size="$COMPUTE_LOGPS_CHUNK_SIZE"
 )
 if [[ -n "$INFERENCE_ADDR" ]]; then
   ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")

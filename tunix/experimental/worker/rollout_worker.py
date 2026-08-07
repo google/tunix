@@ -291,20 +291,91 @@ class RolloutWorker(abstract_worker.Worker):
       )
     return item
 
+  def _sampling_to_rollout_response(
+      self,
+      request: datatypes.RolloutRequest,
+      text: str,
+      token_ids: Any,
+      logprobs: Any | None,
+  ) -> datatypes.RolloutResponse:
+    """Builds the v2 rollout DTO for the direct single-turn sampler path."""
+    completion_tokens = np.asarray(token_ids, dtype=np.int32).reshape(-1)
+    completion_logps = (
+        np.asarray(logprobs, dtype=np.float32).reshape(-1)
+        if logprobs is not None
+        else None
+    )
+    if completion_logps is not None and completion_logps.shape != completion_tokens.shape:
+      completion_logps = None
+    metadata = dict(request.metadata or {})
+    metadata.setdefault("text", text)
+    return datatypes.RolloutResponse(
+        request_id=request.request_id,
+        prompt_id=request.prompt_id,
+        status="COMPLETED",
+        prompt_tokens=self._encode_prompt(str(request.prompt)),
+        segments=[
+            datatypes.TokenSegment(
+                source="assistant",
+                tokens=completion_tokens,
+                loss_mask=np.ones(completion_tokens.shape, dtype=np.float32),
+                logps=completion_logps,
+            )
+        ],
+        env_reward=0.0,
+        policy_version=self._policy_version,
+        metadata=metadata,
+    )
+
+  async def _generate_rollout_requests_direct(
+      self,
+      requests: Sequence[datatypes.RolloutRequest],
+      **generation_kwargs,
+  ) -> list[datatypes.RolloutResponse]:
+    """Runs RolloutRequest batches through the direct string sampler."""
+    prompts = [str(req.prompt) for req in requests]
+    output = await self.sample_prompts(prompts, **generation_kwargs)
+    return [
+        self._sampling_to_rollout_response(
+            request=req,
+            text=output.text[i],
+            token_ids=output.tokens[i],
+            logprobs=output.logprobs[i] if output.logprobs is not None else None,
+        )
+        for i, req in enumerate(requests)
+    ]
+
   async def generate(
       self,
       requests: (
           datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest] | Any
-      ),
+      ) = None,
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
+      prompts: Any = None,
       **generation_kwargs,
   ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse] | Any:
     """Coroutine method for single or batched generate requests."""
+    if requests is None:
+      requests = prompts
+    if requests is None:
+      raise ValueError("generate requires `requests` or v2 `prompts`.")
     if isinstance(requests, str) or (
         isinstance(requests, (list, tuple))
         and all(isinstance(req, str) for req in requests)
     ):
       return await self.sample_prompts(requests, **generation_kwargs)
+    if isinstance(requests, datatypes.RolloutRequest):
+      return (
+          await self._generate_rollout_requests_direct(
+              [requests], **generation_kwargs
+          )
+      )[0]
+    if isinstance(requests, (list, tuple)) and all(
+        isinstance(req, datatypes.RolloutRequest) for req in requests
+    ):
+      return await self._generate_rollout_requests_direct(
+          list(requests), **generation_kwargs
+      )
 
     cb = None
     if on_complete is not None:
@@ -342,7 +413,9 @@ class RolloutWorker(abstract_worker.Worker):
       self.initialize()
     self.state = WorkerState.SYNCING
     try:
-      result = await self.manager.weight_sync(sync_request, **kwargs)
+      metadata = kwargs.pop("metadata", None)
+      request = sync_request if sync_request is not None else metadata
+      result = await self.manager.weight_sync(request, **kwargs)
       self._policy_version += 1
       return result
     finally:
