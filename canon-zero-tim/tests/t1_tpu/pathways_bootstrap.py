@@ -54,6 +54,9 @@ def pathways_required(environ: Mapping[str, str]) -> bool:
     )
 
 
+_PATHWAYS_INITIALIZED = False
+
+
 def initialize_pathways(
     *,
     environ: MutableMapping[str, str] | None = None,
@@ -68,6 +71,9 @@ def initialize_pathways(
     Exception messages are intentionally omitted from the marker so credentials or endpoint
     strings cannot leak into logs.
     """
+    global _PATHWAYS_INITIALIZED
+    if _PATHWAYS_INITIALIZED:
+        return True
 
     env = os.environ if environ is None else environ
     args = sys.argv if argv is None else argv
@@ -115,5 +121,6 @@ def initialize_pathways(
             raise RuntimeError("Pathways is required but initialization failed") from exc
         return False
 
+    _PATHWAYS_INITIALIZED = True
     emit(f"[T1.PATHWAYS] required={int(required)} initialized=1 status=ok")
     return True
