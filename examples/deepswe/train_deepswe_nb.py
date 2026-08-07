@@ -25,12 +25,17 @@ import optax
 from orbax import checkpoint as ocp
 import qwix
 from transformers import AutoTokenizer
+from pydantic import ValidationError
 from tunix.cli.utils import data as data_lib
 from tunix.rl.agentic.agents import agent_types
 from tunix.utils import compat
 import vllm  # pytype: disable=import-error
 
+
+
 faulthandler.register(signal.SIGINT, all_threads=True)
+
+
 
 Dataset = datasets_lib.Dataset
 # ==========================================
@@ -45,16 +50,16 @@ parser.add_argument("--models_base_dir", type=str, default="models")
 parser.add_argument(
     "--model_source",
     type=str,
-    default="huggingface",
+    default="maxtext",
     choices=["huggingface", "maxtext"],
 )
 parser.add_argument(
     "--model_absolute_path",
     type=str,
-    default=None,
+    default="gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/scanned/0/items",
 )
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--model_version", type=str, default="Qwen/Qwen3-32B")
+parser.add_argument("--model_version", type=str, default="Qwen3.5-35B-A3B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--dataset_path", type=str, default=None)
 
@@ -543,6 +548,7 @@ VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 VLLM_UTILIZATION = args.vllm_utilization
 VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
+
 # Max number of tokens to be processed in parallel by vllm.
 VLLM_MAX_BATCHED_TOKENS = args.max_num_batched_tokens
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
@@ -565,7 +571,10 @@ USE_ROLLOUT_LOGPS = args.use_rollout_logps
 tokenizer_path = MODEL_PATH
 local_files_only = True
 if MODEL_SOURCE == "maxtext" and MODEL_PATH.startswith("gs://"):
-  tokenizer_path = MODEL_VERSION
+  if MODEL_VERSION.startswith("Qwen/"):
+    tokenizer_path = MODEL_VERSION
+  else:
+    tokenizer_path = f"Qwen/{MODEL_VERSION}"
   local_files_only = False
   print(f"Loading tokenizer from HF Hub: {tokenizer_path}")
 
@@ -775,6 +784,7 @@ if MODEL_SOURCE == "maxtext":
       allow_split_physical_axes=True,
       scan_layers=False,
   )
+
 else:
   qwen_reference = params_lib.create_model_from_safe_tensors(
       MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
@@ -813,6 +823,7 @@ else:
       graph_def,
       jax.tree.map(jnp.copy, params),
   )
+
 
 sft_utils.show_hbm_usage()
 
@@ -885,6 +896,7 @@ vllm_rollout_dict = {
     "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+    "rollout_vllm_reshard_chunk_size": VLLM_RESHARD_CHUNK_SIZE,
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
@@ -938,7 +950,6 @@ elif ROLLOUT_ENGINE == "vanilla":
   rollout_engine_config = base_rollout.RolloutConfig(**base_rollout_dict)
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
-
 
 def filter_logical_rules(rules, mesh):
   """Filters logical sharding rules to keep only physical axes present in mesh."""
@@ -1002,14 +1013,70 @@ cluster_config = rl_engine_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
-rl_engine = rl_engine_lib.RLEngine(
-    actor=qwen_actor,
-    reference=qwen_reference,
-    tokenizer=tokenizer,
-    cluster_config=cluster_config,
-)
+try:
+  rl_engine = rl_engine_lib.RLEngine(
+      actor=qwen_actor,
+      reference=qwen_reference,
+      tokenizer=tokenizer,
+      cluster_config=cluster_config,
+  )
+except ValidationError as e:
+  print("Failed to initialize RLEngine due to ValidationError:", flush=True)
+  import pprint
+  pprint.pprint(e.errors())
+  raise
+
 
 # %%
+def deepswe_format_reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
+  """Evaluates the formatting of agent responses to bootstrap correct tool-calling syntax."""
+  import re
+  rewards = []
+  allowed_functions = {"file_editor", "execute_bash", "search"}
+  
+  for prompt, completion in zip(prompts, completions):
+    score = 0.0
+    
+    # 1. Reward Thinking Tag Presence
+    if "<think>" in completion and "</think>" in completion:
+      think_content = completion.split("<think>")[1].split("</think>")[0].strip()
+      if len(think_content) > 5:
+        score += 0.1
+        
+    # 2. Extract function calls
+    func_calls = re.findall(r"<function=(\w+)>", completion)
+    
+    if len(func_calls) == 1:
+      func_name = func_calls[0]
+      score += 0.2
+      
+      if func_name in allowed_functions:
+        score += 0.1
+        
+      # Check for matching closing tag
+      if "</function>" in completion:
+        if completion.count("</function>") == 1:
+          score += 0.2
+          if completion.strip().endswith("</function>"):
+            score += 0.3
+            
+      # Basic check for parameter format
+      param_matches = re.findall(r"<(\w+)=([^>]+)>", completion)
+      param_names = [p[0] for p in param_matches if p[0] != "function"]
+      if param_names:
+        score += 0.1
+        
+    elif len(func_calls) > 1:
+      score = 0.0
+      
+    if "<details>" in completion or "<summary>" in completion:
+      score = 0.0
+      
+    rewards.append(score)
+    
+  return rewards
+
+
 # ==========================================
 # 10. Learner & Agent Setup
 # ==========================================
@@ -1037,7 +1104,7 @@ grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine=rl_engine,
-    reward_fns=None,
+    reward_fns=[deepswe_format_reward_fn],
     agent_class=swe_agent.SWEAgent,
     agent_kwargs={},
     env_class=swe_env.SWEEnv,
@@ -1045,6 +1112,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
+        "verbose": True,
     },
     algo_config=grpo_config,
     # Disabling the custom chat parser is required to fallback to the tokenizer's

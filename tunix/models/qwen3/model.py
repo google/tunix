@@ -115,13 +115,13 @@ class ShardingConfig:
     fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),
-        emb_dv=P(fsdp, 'tp'),
-        q_weight_dnh=P(fsdp, 'tp', None),
-        kv_weight_dnh=P(fsdp, 'tp', None),
-        o_weight_nhd=P('tp', None, fsdp),
-        ffw_weight_df=P(fsdp, 'tp'),
-        ffw_weight_fd=P('tp', fsdp),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_dv=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        q_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
         rms_norm_weight=P('tp',),
         act_btd=P('fsdp', sp, None if is_sampling else 'tp'),
         act_btf=P('fsdp', sp, 'tp'),

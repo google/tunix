@@ -64,7 +64,10 @@ class TrainingConfig:
   # contains the model params and the train data iterator state.
   checkpoint_root_directory: str | None = None
   # Checkpoint configurations. If None, the default options will be used.
-  checkpointing_options: checkpoint_options.CheckpointingOptions | None = None
+  checkpointing_options: (
+      checkpoint_options.CheckpointingOptions
+      | None
+  ) = None
 
   # Configs for the metrics logger.
   metrics_logging_options: MetricsLoggerOptions | None = None
@@ -134,6 +137,7 @@ class MetricsBuffer:
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
     return np.mean(np.array([np.array(x) for x in self.losses]))
+
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -608,6 +612,48 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
+    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
+
+    from flax.linen import get_logical_axis_rules
+    from flax.linen import partitioning as nn_partitioning
+    from tunix.utils import compat
+
+    def _is_logical_spec(spec):
+      for name in spec:
+        if name is not None:
+          names = name if isinstance(name, tuple) else (name,)
+          for n in names:
+            if n not in mesh.shape:
+              return True
+      return False
+
+    import threading
+    print(f"JETS_DEBUG: _shard_optimizer thread: {threading.current_thread().name}")
+    print(f"JETS_DEBUG: get_logical_axis_rules() = {get_logical_axis_rules()}")
+    print(f"JETS_DEBUG: mesh shape keys = {list(mesh.shape.keys())}")
+
+    def _resolve_spec(spec):
+      if isinstance(spec, shd.PartitionSpec):
+        rules = get_logical_axis_rules()
+        is_logical = _is_logical_spec(spec)
+        if rules and is_logical:
+          resolved = nn_partitioning.logical_to_mesh_axes(spec)
+          resolved = sharding_utils.filter_spec(resolved, mesh)
+          print(f"JETS_DEBUG: Resolved and filtered {spec} -> {resolved}")
+          return resolved
+        elif is_logical:
+          print(
+              f"JETS_DEBUG: WARNING: spec {spec} is logical but rules are empty"
+              " or None! Filtering anyway."
+          )
+          filtered = sharding_utils.filter_spec(spec, mesh)
+          return filtered
+      return spec
+
+    with compat.set_mesh(mesh):
+      optimizer_pspecs = jax.tree.map(_resolve_spec, optimizer_pspecs)
+
 
     def _shard(x, p):
       if not isinstance(x, jax.Array):
@@ -622,23 +668,25 @@ class PeftTrainer:
           return jax.device_put(x, sharding)
       return x
 
-    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
-    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
     optimizer_sharded_state = jax.tree.map(
         _shard, optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-    # Partition Gradients same as the model
-    grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
-    self.grad_accumulator.grads = jax.tree.map(
-        _shard, self.grad_accumulator.grads, grad_pspecs
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    model_state = nnx.state(self.model, wrt_target)
+    model_pspecs = nnx.get_partition_spec(model_state)
+    model_pspecs = jax.tree.map(_resolve_spec, model_pspecs)
+
+    # Partition Gradients similar to the model
+    grads_sharded = jax.lax.with_sharding_constraint(
+        self.grad_accumulator.grads, model_pspecs
     )
+    self.grad_accumulator.grads = grads_sharded
 
     # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.device_put(
-        self.grad_accumulator.denom[...],
-        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+    self.grad_accumulator.denom[...] = jax.lax.with_sharding_constraint(
+        self.grad_accumulator.denom[...], jax.sharding.PartitionSpec()
     )
 
   def jit_train_and_eval_step(
@@ -796,10 +844,7 @@ class PeftTrainer:
 
     def _apply_op(v, op):
       if isinstance(v, list) and v and isinstance(v[0], utils.WeightedMetric):
-        if getattr(op, "__name__", "") in (
-            "global_weighted_mean",
-            "mean_of_means",
-        ):
+        if getattr(op, "__name__", "") in ("global_weighted_mean", "mean_of_means"):
           return op(v)
         v = [x.compute() for x in v]
       return op(_to_np_array(v))
