@@ -51,7 +51,7 @@ spec:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
   startupPolicy:
-    startupPolicyOrder: AnyOrder
+    startupPolicyOrder: InOrder
   successPolicy:
     operator: All
   replicatedJobs:
@@ -74,9 +74,9 @@ spec:
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
-            containers:
+            initContainers:
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260507-jax_0.9.1
               args:
                 - --server_port=29000
                 - --resource_manager_address=localhost:29001
@@ -87,8 +87,9 @@ spec:
               resources:
                 requests: {cpu: '16', memory: 100Gi}
                 limits:   {cpu: '32', memory: 350G}
+              restartPolicy: Always
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
                 - --server_port=29001
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
@@ -103,6 +104,8 @@ spec:
               resources:
                 requests: {cpu: '8', memory: 32Gi}
                 limits:   {cpu: '16', memory: 150G}
+              restartPolicy: Always
+            containers:
             - name: jax-tpu
               # PIN THIS BY DIGEST.  See the header note.
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
@@ -193,7 +196,7 @@ spec:
       spec:
         # Fallback if the cluster's JobSet CRD predates startupPolicy (unknown fields are
         # pruned silently): let workers retry instead of failing the whole JobSet on first dial.
-        backoffLimit: 0
+        backoffLimit: 10
         completions: 16
         parallelism: 16
         completionMode: Indexed
@@ -217,13 +220,13 @@ spec:
               name: shared-tmp
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
-            restartPolicy: OnFailure
+            restartPolicy: Never
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260507-jax_0.9.1
               args:
                 - --server_port=29000
-                - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
+                - --resource_manager_address=$(PATHWAYS_HEAD):29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x4x4
                 - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim
