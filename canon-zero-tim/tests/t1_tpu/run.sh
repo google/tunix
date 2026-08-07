@@ -86,6 +86,7 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pa
       RC=1
     fi
   fi
+  sleep 5
 }
 
 echo "[t1] XLA_FLAGS=$XLA_FLAGS"
