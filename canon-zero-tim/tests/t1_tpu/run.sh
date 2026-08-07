@@ -90,24 +90,6 @@ run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pa
 }
 
 echo "[t1] XLA_FLAGS=$XLA_FLAGS"
-sleep 10
-
-run_probe "P0  Pathways/JAX registration"   probe_devices.py         '^\[t1\.devices\] '   1 1
-run_probe "P1  way-count scan (NEW)"        probe_waycount.py        '^\[waycount\] width=' 2 1
-run_probe "P2  mesh order / slice (NEW)"    probe_mesh_order.py      '^\[mesh\] VERDICT:'   1 1
-run_probe "P3  bucket contract (NEW)"       probe_bucket_contract.py '^\[bucket\] VERDICT:' 1
-run_probe "P4  F4 cost model (NEW)"         probe_f4_cost.py         '^\[f4cost\] +[0-9]'   2
-run_probe "H1  minrepro: F4 tree"           p19_minrepro_f4.py       '^\[f4\] '             2 1
-run_probe "H2  minrepro: third program"     p19_minrepro_thirdprog.py 'DIFFER|SAME'          1 1
-run_probe "H3  minrepro: device topology"   p19_minrepro_topo.py     'DIFFER|SAME'          1 1
-run_probe "H4  minrepro: mesh geometry"     p19_minrepro_mesh2d.py   '^\[m2d\] '            2 1
-
-echo
-if [ "$RC" = 0 ]; then
-  echo "===== T1 COMPLETE -- all probes produced measurements ====="
-  echo "NOTE: 'complete' means every probe ran and reported.  Whether the numbers ADMIT this"
-  echo "topology is a judgement against CLUSTER_ADMISSION.md, not an exit code."
-else
-  echo "===== T1 FAIL -- a probe did not run or exited nonzero ====="
-fi
+python3 -u "$HERE/unified_runner.py"
+RC=$?
 exit $RC
