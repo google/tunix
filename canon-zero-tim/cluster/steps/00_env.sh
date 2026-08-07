@@ -176,6 +176,34 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
 "${CANON_LOCAL_TRAJECTORIES} local / ${CANON_GLOBAL_TRAJECTORIES} global trajectories, "\
 "global M=${MIN_TOKEN_BUCKET}"
 fi
+if [ "${CANON_MODE:-}" = "model-init-only" ]; then
+  for k in CANON_P32_MODEL_INIT_ONLY CANON_P32_MODEL_STATE_KIND \
+           CANON_P32_OPTIMIZER_MEMORY_KIND CANON_WANDB_PROJECT \
+           CANON_WANDB_GROUP CANON_WANDB_RUN_NAME; do
+    req "$k"
+  done
+  [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] || {
+    echo "[env] model-init-only requires the P32 DP admission contract" >&2
+    fail=1
+  }
+  [ "${CANON_P32_MODEL_INIT_ONLY:-0}" = "1" ] || {
+    echo "[env] model-init-only requires CANON_P32_MODEL_INIT_ONLY=1" >&2
+    fail=1
+  }
+  [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "0" ] || {
+    echo "[env] model-init-only must keep training refused" >&2
+    fail=1
+  }
+  [ "${CANON_P32_MODEL_STATE_KIND:-}" = "zero-structural" ] || {
+    echo "[env] model-init-only state kind must remain zero-structural" >&2
+    fail=1
+  }
+  [ "${CANON_P32_OPTIMIZER_MEMORY_KIND:-}" = "pinned_host" ] || {
+    echo "[env] model-init-only requires pinned-host optimizer state" >&2
+    fail=1
+  }
+  echo "[env] P32 model-init-only contract OK: structural state, zero commits"
+fi
 [ "$fail" = 0 ] || { echo "[env] REFUSING TO CONTINUE: canonical set incomplete" >&2; exit 1; }
 
 # Emit the resolved configuration.  Secrets are re-exported by later steps from the process

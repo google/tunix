@@ -17,6 +17,8 @@
 #                admission probes.  No training, no optimizer, no checkpoint.
 #   dp-gate-only 00..50 + T1 + T2-DP -- additionally measure DP reduction, placement
 #                sensitivity and one small AdamW update.  Still no model or training.
+#   model-init-only 00..60 + P32 model/optimizer/accumulator materialization.  No
+#                checkpoint load, forward, backward, update or training.
 #   run          00..90 -- everything, then the command in CANON_RUN_CMD.
 #
 # Every step is fail-closed and ordered.  A step that produces no output did not run, and a
@@ -34,9 +36,15 @@ export CANON_CLUSTER="$HERE"
 export CANON_STATE="${CANON_STATE:-/tmp/canon-state}"
 mkdir -p "$CANON_STATE"
 MODE="${CANON_MODE:-gate-only}"
+export CANON_MODE="$MODE"
 
 log() { echo "[entrypoint] $*"; }
 die() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
+
+case "$MODE" in
+  probe-only|install-only|gate-only|dp-gate-only|model-init-only|run) ;;
+  *) die "unknown CANON_MODE: $MODE" ;;
+esac
 
 step() {
   local s="$HERE/steps/$1"
@@ -98,6 +106,13 @@ if [ "$MODE" = "gate-only" ] || [ "$MODE" = "dp-gate-only" ]; then
   [ "$MODE" = "dp-gate-only" ] && \
     log "T2-DP complete -- read DECISION/OBSERVATIONS; PASS is fixed-placement only."
   log "Read the numbers against CLUSTER_ADMISSION.md; a zero exit code is not an admission."
+  exit 0
+fi
+
+if [ "$MODE" = "model-init-only" ]; then
+  step 60_wait_workers.sh
+  step 80_model_init.sh
+  log "mode=model-init-only -- structural state materialized; no checkpoint, forward, backward, update or training was run."
   exit 0
 fi
 

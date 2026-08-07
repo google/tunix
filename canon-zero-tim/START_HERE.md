@@ -30,12 +30,14 @@ It is packaging of work already done, not a new result. What is signed and what 
 | **Same-session toy T2 on Pathways/GKE** | **TARGET PASS** — all 7 fixed-placement checks passed on the topology-aware `(16,4)` mesh; arbitrary regrouping remains bitwise-sensitive. |
 | **Round-trip: install from this package, reproduce signed numbers** | **NOT RUN** |
 | Pathways topology/operator/toy-update admission | **TARGET PASS** — single-slice 64-chip Attempt 0, clean package provenance, P1a/P1b and T2 all passed; the raw log is machine-classified and hash-pinned. |
+| DP16×TP4 Qwen3 adapter and abstract state inventory | **LOCAL CPU PASS** — fixed placement, grouped segmented adapter, deterministic DP16 tree and exact Qwen3-8B state shapes; no target materialization claim. |
 | Full Qwen3-8B model initialization, segmented backward, optimizer commit, training | **TARGET NOT RUN** |
 
 **Do not spend another 64-chip run repeating the same bounded admission.** The next useful
-action is to implement the real replicated DP16×TP4 Qwen3-8B adapter and promote it through
-model-init, forward, backward-no-commit, one-update and steady-state gates. TP8 remains a generic
-platform diagnostic until it has a separate Qwen8B production contract.
+action is `model-init-only`: materialize the exact actor/AdamW/accumulator states without a
+checkpoint, forward, backward or update. Only after that target gate passes should the adapter
+advance through forward, backward-no-commit, one-update and steady-state gates. TP8 remains a
+generic platform diagnostic until it has a separate Qwen8B production contract.
 
 ---
 

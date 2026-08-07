@@ -154,6 +154,7 @@ kubectl logs -f jobs/canon-zero-tim-v5p-64-pathways-head-0
 | `install-only` | no | Does the chain build, overlay, and actually load here? |
 | `gate-only` | seconds | Task B, on the cluster. |
 | `dp-gate-only` | minutes | Task B plus DP16×TP4 gradient/update repeatability and placement sensitivity. |
+| `model-init-only` | minutes | Materialize Qwen3-8B actor, pinned-host AdamW and FP32 accumulator state only; no checkpoint/forward/backward/update. |
 | `run` | yes | The workload in `CANON_RUN_CMD`; refused by the P32 admission-only profile. |
 
 Start at `probe-only`. Full expected output, the red table, and the reporting format are in
@@ -166,6 +167,13 @@ train mesh is topology-discovered rather than pinned to one global id list. A va
 cover exactly one single slice, use every visible device exactly once in a topology-aware
 `(16,4)` mesh, and pass every same-session T2 check. Return `$CANON_STATE/t2_dp.log`; do not
 bypass the run refusal.
+
+After the bounded `dp-gate-only` artifact is green, use the dedicated
+`cluster/profiles/qwen3-8b-dp16-tp4-model-init.env` with `CANON_MODE=model-init-only` in a fresh
+Attempt 0. Return both `$CANON_STATE/model_init.log` and
+`$CANON_STATE/model_init.classification.json`. A PASS proves only exact-shape materialization,
+DP replication, TP sharding, pinned-host optimizer state, and zero commits. The zero-valued
+structural state is intentional; checkpoint loading belongs to the later forward gate.
 
 **Two things to set before the first apply**, both in the manifest:
 - the `jax-tpu` image, **pinned by digest** — a floating `:latest` means the same manifest runs

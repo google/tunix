@@ -51,6 +51,7 @@ promoting.**
 | `install-only` | 00–50 | no | Does the chain build, overlay and *load* here? |
 | `gate-only` | 00–70 | yes, minutes | Does generic Pathways drift reproduce, and does the real canonical Qwen MLP operator chain remain bitwise across the third program? |
 | `dp-gate-only` | 00–75 | yes, minutes | In the same Pathways client, does DP16×TP4 repeat exactly under a fixed sample→rank mapping, and are all replicas synchronized after gradient reduction? |
+| `model-init-only` | 00–60 + 80 | yes, minutes | Can the exact Qwen3-8B actor, pinned-host AdamW state, and FP32 accumulator materialize as DP-replicated/TP-sharded state on all 64 devices? |
 | `run` | 00–90 | yes | The workload in `CANON_RUN_CMD`; the P32 admission profile deliberately refuses this mode. |
 
 ### Secrets
@@ -141,6 +142,33 @@ Use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env`. The expected terminal ma
 `auto_regroup_exact`: if false, the same samples assigned to different DP ranks are not bitwise
 invariant. Do not relabel that as a failed fixed-placement run or as arbitrary batch invariance.
 
+### `model-init-only`
+
+Use `cluster/profiles/qwen3-8b-dp16-tp4-model-init.env`. This is a structural materialization
+gate: it builds the exact 36-layer Qwen3-8B actor state in FP32, the complete AdamW state in
+pinned-host memory, and the FP32 gradient accumulator on the topology-aware `(16,4)` mesh. It
+deliberately initializes parameter values to zero and does not load a checkpoint, open a W&B
+network run, execute a forward or backward, commit an optimizer update, or start training.
+
+Expected terminal markers:
+
+```
+[P32.INIT] START dp=16 tp=4 devices=64 checkpoint_loaded=0 forward=0 backward=0 update=0
+[P32.INIT] MESH shape=(16, 4) unique=64 full_slice=1
+[P32.INIT] JSON {...}
+[P32.INIT] VERDICT PASS
+[model-init] classification=/tmp/canon-state/model_init.classification.json
+```
+
+The classifier requires exactly 399 actor leaves, 799 AdamW leaves and 399 accumulator leaves.
+Every state must be DP-replicated and have TP-sharded leaves. Actor and accumulator memory kinds
+must be `device`; optimizer state must be `pinned_host`; commits and every execution counter must
+remain zero. A retry, missing marker, traceback, wrong memory kind, DP-sharded leaf, or nonzero
+execution counter makes the result inconclusive.
+
+This gate closes model/state allocation only. It does not promote the forward, backward,
+gradient-reduction, update, or training gates.
+
 The archived 64-chip run measured the train mesh as:
 
 ```
@@ -182,6 +210,8 @@ Ranked by how easily each is mistaken for success.
 | **P32 `run` is refused** | Expected: the current shared mesh would be FSDP16×TP4 and the segmented VJP is not DP-local. | Do not bypass the refusal. Return the T1/T2 artifacts; implement the DP adapter in the next phase. |
 | **T2-DP fixed repeat/replica check is false** | DP reduction or placement is not deterministic on this topology. | Stop before model initialization. |
 | **T2-DP mesh lacks `shape=(16, 4) full_slice=1`** | The DP update probe did not attest the production topology. | Stop. Logical reshape fallback is forbidden; fix topology-aware construction. |
+| **`model-init-only` loads a checkpoint or reports any forward/backward/update count** | The structural capacity gate performed work outside its registered scope. | Reject the artifact. Run the dedicated profile and preserve zero execution counters. |
+| **P32 model-init state has any DP-sharded leaf or device-resident optimizer state** | The requested replicated-DP and optimizer-offload contract was not materialized. | Stop before the forward gate. Do not relabel FSDP as DP. |
 | **`THIRDPROG` red** | The forward-only and forward+backward programs are not the same family. Every downstream number in that run is meaningless. | Void the whole run, fix the config, rerun. |
 | **`ROPE_FIX=unknown_version`** | Neither the old nor the new RoPE form was found. Somebody is about to patch a build nobody has looked at. | Stop. Inspect the file. Do not guess. |
 | **`[probe] VERSION DRIFT`** | The image's `tpu_inference` differs from the patch anchor. Results can no longer be byte-identical to the signed evidence. | Decide deliberately; if you proceed with `CANON_ALLOW_IMAGE_DRIFT=1`, say so in the report. |
@@ -218,7 +248,8 @@ cluster/
 │   ├── _canonical_engine.env  the switch set; shared by every profile
 │   ├── qwen3-1p7b.env         model geometry (GSM8K release)
 │   ├── qwen3-8b.env           model geometry (FrozenLake)
-│   └── qwen3-8b-dp16-tp4-admission.env  P32 arithmetic + fail-closed contract
+│   ├── qwen3-8b-dp16-tp4-admission.env  P32 arithmetic + fail-closed contract
+│   └── qwen3-8b-dp16-tp4-model-init.env  P32 structural allocation only
 └── steps/
     ├── 00_env.sh              resolve config, strip secrets, refuse an incomplete set
     ├── 10_sync_repo.sh        verify the checkout is where it should be
@@ -230,6 +261,7 @@ cluster/
     ├── 60_wait_workers.sh     let TPU workers register
     ├── 70_run_t1.sh           topology + canonical-op + optional same-session DP probes
     ├── 75_run_dp.sh           validate same-session DP markers; no new Pathways client
+    ├── 80_model_init.sh       materialize exact state shapes; zero execution/commits
     └── 90_run.sh              the workload, then the PATHTRACE tally
 ```
 
