@@ -3,6 +3,9 @@
 # checkpoint, optimizer state allocation or training data.
 set -euo pipefail
 source "$CANON_STATE/env.sh"
+export JAX_PLATFORMS="proxy,cpu"
+export JAX_BACKEND_TARGET="grpc://localhost:29000"
+export PATHWAYS_HEAD="localhost"
 export CANON_IN_CONTAINER=1
 export CANON_DP_PROBE_LOG="${CANON_DP_PROBE_LOG:-$CANON_STATE/t2_dp.log}"
 

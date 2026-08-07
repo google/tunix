@@ -43,17 +43,13 @@ export TPU_STDERR_LOG_LEVEL="${TPU_STDERR_LOG_LEVEL:-0}"
 export PYTHONDONTWRITEBYTECODE=1
 export CANON_TPU_INFERENCE_PATH="${CANON_TPU_INFERENCE_PATH:-/usr/local/lib/python3.12/site-packages/tpu_inference}"
 
-# Pathways backend, when present.  Absent on a direct-attached host, and that difference is
-# itself untested territory for the bitwise results -- see CLUSTER_ADMISSION.md.
-if [ -n "${PATHWAYS_HEAD:-}" ]; then
-  export JAX_PLATFORMS="${JAX_PLATFORMS:-proxy,cpu}"
-  export JAX_BACKEND_TARGET="${JAX_BACKEND_TARGET:-grpc://127.0.0.1:29000}"
-  export ENABLE_PATHWAYS_PERSISTENCE="${ENABLE_PATHWAYS_PERSISTENCE:-1}"
-  export FLAGS_pathways_enforce_subset_devices_form_subslice="${FLAGS_pathways_enforce_subset_devices_form_subslice:-False}"
-  echo "[env] pathways backend: JAX_PLATFORMS=$JAX_PLATFORMS target=$JAX_BACKEND_TARGET"
-else
-  echo "[env] no PATHWAYS_HEAD -- assuming direct-attached TPU"
-fi
+# Pathways backend configuration is activated in Step 70/90 to keep preflight 00..60 100% CPU isolated.
+export JAX_PLATFORMS="cpu"
+export JAX_BACKEND_TARGET=""
+export PATHWAYS_HEAD=""
+export ENABLE_PATHWAYS_PERSISTENCE="${ENABLE_PATHWAYS_PERSISTENCE:-1}"
+export FLAGS_pathways_enforce_subset_devices_form_subslice="${FLAGS_pathways_enforce_subset_devices_form_subslice:-False}"
+echo "[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)"
 
 # Preflight: refuse an incomplete canonical set rather than warn inside a log nobody reads.
 fail=0

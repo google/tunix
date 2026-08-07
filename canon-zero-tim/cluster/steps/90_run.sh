@@ -6,6 +6,9 @@
 # checked afterwards: an intervention that never fired produces a perfectly green run.
 set -uo pipefail
 source "$CANON_STATE/env.sh"
+export JAX_PLATFORMS="proxy,cpu"
+export JAX_BACKEND_TARGET="grpc://localhost:29000"
+export PATHWAYS_HEAD="localhost"
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] && \
    [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ]; then
   echo "[run] REFUSING: P32 profile is admission-only." >&2
