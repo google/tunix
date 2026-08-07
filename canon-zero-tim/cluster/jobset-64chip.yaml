@@ -26,6 +26,8 @@ kind: JobSet
 metadata:
   name: canon-zero-tim-v5p-64
   namespace: default
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
 spec:
