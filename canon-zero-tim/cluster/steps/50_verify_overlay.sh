@@ -35,7 +35,7 @@ check qwen3_p22xk.py         models/jax/qwen3.py
 check qwen2_p22xk.py         models/jax/qwen2.py
 
 echo "[verify] B. live import of the promoted chain"
-JAX_PLATFORMS=cpu python3 - <<'PY' || rc=1
+PATHWAYS_HEAD="" JAX_BACKEND_TARGET="" JAX_PLATFORMS=cpu python3 - <<'PY' || rc=1
 import importlib, sys
 
 # (module, attribute, expectation)  -- expectation None means "attribute must exist"
