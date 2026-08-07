@@ -81,8 +81,12 @@ class _ForwardRunner(_Runner):
     cache_sharding = jax.sharding.NamedSharding(
         mesh, jax.sharding.PartitionSpec(None, None, "model", None, None)
     )
+    model_width = int(mesh.shape.get("model", 1))
     self.kv_caches = [
-        jax.device_put(jnp.zeros((4, 2, 1, 2, 2), jnp.bfloat16), cache_sharding)
+        jax.device_put(
+            jnp.zeros((4, 2, model_width, 2, 2), jnp.bfloat16),
+            cache_sharding,
+        )
     ]
     self.max_num_reqs = 2
     self.block_size = 2
@@ -293,6 +297,620 @@ class _CompleteSegmentedRunner:
 
 
 class CanonicalQwen3AdapterTest(absltest.TestCase):
+
+  def _make_p32_group_adapter(self, *, sequence_bucket=4):
+    runner = _CompleteSegmentedRunner()
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._runner = runner  # pylint: disable=protected-access
+    adapter._data_size = 16  # pylint: disable=protected-access
+    adapter._tp_size = 4  # pylint: disable=protected-access
+    adapter._sequence_bucket = sequence_bucket  # pylint: disable=protected-access
+    adapter._bucket = 16 * sequence_bucket  # pylint: disable=protected-access
+    adapter._max_model_len = 64  # pylint: disable=protected-access
+    adapter._max_num_reqs = 16  # pylint: disable=protected-access
+    adapter._blocks_per_req = 4  # pylint: disable=protected-access
+    adapter._engine_state_contract = runner.state  # pylint: disable=protected-access
+    adapter._key_mappings = {}  # pylint: disable=protected-access
+    adapter._transpose_keys = None  # pylint: disable=protected-access
+    adapter._hook_fns = None  # pylint: disable=protected-access
+    adapter._set_forward_context = (  # pylint: disable=protected-access
+        lambda *_: contextlib.nullcontext()
+    )
+    adapter._fresh_caches = types.MethodType(  # pylint: disable=protected-access
+        lambda self: [jnp.asarray(0.0), jnp.asarray(0.0)], adapter
+    )
+
+    def group_chunk_inputs(self, spec, chunk_index):
+      start = chunk_index * self._sequence_bucket
+      end = start + self._sequence_bucket
+      return (
+          spec["packed_ids"][:, start:end].reshape(-1),
+          spec["next_ids"][:, start:end].reshape(-1),
+          jnp.asarray(0.125, jnp.float32),
+      )
+
+    adapter._p32_group_chunk_inputs = types.MethodType(  # pylint: disable=protected-access
+        group_chunk_inputs, adapter
+    )
+
+    def processed_rows(logits, target_ids, temperature):
+      normalized = jax.nn.log_softmax(logits / temperature, axis=-1)
+      selected = jnp.take_along_axis(
+          normalized, target_ids[:, None], axis=-1
+      )[:, 0]
+      probabilities = jnp.exp(normalized)
+      entropy = -jnp.sum(probabilities * normalized, axis=-1)
+      return selected, entropy
+
+    def processed_rows_pullback(
+        logits, target_ids, temperature, dlogps, dentropy
+    ):
+      _, pullback = jax.vjp(
+          lambda values: processed_rows(values, target_ids, temperature),
+          logits,
+      )
+      return pullback((dlogps, dentropy))[0]
+
+    adapter._p28_processed_rows_fn = jax.jit(  # pylint: disable=protected-access
+        processed_rows
+    )
+    adapter._p28_processed_rows_pullback_fn = jax.jit(  # pylint: disable=protected-access
+        processed_rows_pullback
+    )
+    return adapter, runner
+
+  def test_p32_dp16_grouped_forward_and_reverse_replay_exactly(self):
+    adapter, runner = self._make_p32_group_adapter()
+    row = jnp.arange(16, dtype=jnp.int32)[:, None]
+    prompt = jnp.concatenate(
+        (1 + row % 2, 2 + row % 2, jnp.zeros_like(row)), axis=1
+    )
+    completion = jnp.concatenate(
+        (2 + row % 2, 1 + row % 2, jnp.zeros_like(row)), axis=1
+    )
+    prompt_valid = prompt != 0
+    completion_valid = completion != 0
+    spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt_valid,
+        completion_valid,
+        1.0,
+    )
+    env = {
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      segmented = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+          runner
+      )
+      forward = adapter._p32_forward_group(  # pylint: disable=protected-access
+          segmented, tuple(runner.state_leaves), spec, keep_cache_inputs=False
+      )
+      reverse = adapter._p32_reverse_group(  # pylint: disable=protected-access
+          segmented,
+          tuple(runner.state_leaves),
+          spec,
+          jnp.ones_like(forward["logps"]),
+          jnp.zeros_like(forward["entropy"]),
+      )
+
+    self.assertEqual(forward["logps"].shape, (16, 3))
+    np.testing.assert_array_equal(
+        np.asarray(reverse["replay_logps"]), np.asarray(forward["logps"])
+    )
+    gradient_leaves = [
+        np.asarray(value) for value in reverse["engine_gradients"]
+    ]
+    self.assertTrue(all(np.isfinite(value).all() for value in gradient_leaves))
+    self.assertGreater(sum(np.count_nonzero(value) for value in gradient_leaves), 0)
+    self.assertGreater(
+        sum(
+            np.count_nonzero(np.asarray(value))
+            for value in jax.tree.leaves(
+                reverse["initial_cache_cotangents"]
+            )
+        ),
+        0,
+    )
+
+  def test_p32_dp16_group_spec_preserves_rank_local_order(self):
+    adapter, _ = self._make_p32_group_adapter()
+    prompt = jnp.zeros((16, 3), jnp.int32)
+    completion = jnp.zeros((16, 3), jnp.int32)
+    prompt = prompt.at[:, :2].set(
+        jnp.arange(16, dtype=jnp.int32)[:, None] * 10
+        + jnp.asarray([1, 2], jnp.int32)
+    )
+    completion = completion.at[:, :2].set(
+        jnp.arange(16, dtype=jnp.int32)[:, None] * 10
+        + jnp.asarray([3, 4], jnp.int32)
+    )
+    spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt != 0,
+        completion != 0,
+        0.7,
+    )
+    self.assertEqual(spec["host_n_real"], (4,) * 16)
+    self.assertEqual(spec["num_chunks"], 1)
+    np.testing.assert_array_equal(
+        np.asarray(spec["packed_ids"][:, :4]),
+        np.asarray(
+            jnp.arange(16, dtype=jnp.int32)[:, None] * 10
+            + jnp.asarray([1, 2, 3, 4], jnp.int32)
+        ),
+    )
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "one row per DP rank",
+    ):
+      adapter._p32_group_spec(  # pylint: disable=protected-access
+          prompt[:15],
+          completion[:15],
+          prompt[:15] != 0,
+          completion[:15] != 0,
+          0.7,
+      )
+
+  def test_p32_dp16_segmented_transaction_streams_sixteen_groups(self):
+    adapter, runner = self._make_p32_group_adapter(sequence_bucket=256)
+    adapter._max_model_len = 6144  # pylint: disable=protected-access
+    adapter._p32_d3b_segmented_engine = object()  # pylint: disable=protected-access
+    adapter.map_engine_cotangents_to_trainer_state = types.MethodType(
+        lambda self, state, cotangents: tuple(cotangents), adapter
+    )
+
+    def forward_group(self, segmented, leaves, spec, *, keep_cache_inputs):
+      del segmented, leaves, keep_cache_inputs
+      shape = spec["completion_valid"].shape
+      return {
+          "logps": jnp.zeros(shape, jnp.float32),
+          "entropy": jnp.zeros(shape, jnp.float32),
+          "counts": {"forward": 1},
+      }
+
+    def reverse_group(self, segmented, leaves, spec, dlogps, dentropy):
+      del segmented, leaves, dentropy
+      signal = jnp.sum(dlogps).astype(jnp.float32)
+      return {
+          "engine_gradients": (signal[None],),
+          "initial_cache_cotangents": (jnp.asarray([1.0]),),
+          "counts": {"reverse": 1},
+          "replay_logps": jnp.zeros(
+              spec["completion_valid"].shape, jnp.float32
+          ),
+          "replay_entropy": jnp.zeros(
+              spec["completion_valid"].shape, jnp.float32
+          ),
+      }
+
+    adapter._p32_forward_group = types.MethodType(  # pylint: disable=protected-access
+        forward_group, adapter
+    )
+    adapter._p32_reverse_group = types.MethodType(  # pylint: disable=protected-access
+        reverse_group, adapter
+    )
+
+    prompt_ids = jnp.zeros((256, 4096), jnp.int32).at[:, :2].set(
+        jnp.asarray([1, 2], jnp.int32)
+    )
+    completion_ids = jnp.zeros((256, 2048), jnp.int32).at[:, :2].set(
+        jnp.asarray([2, 1], jnp.int32)
+    )
+    prompt_mask = prompt_ids != 0
+    completion_mask = completion_ids != 0
+    train_example = types.SimpleNamespace(
+        prompt_ids=prompt_ids,
+        prompt_mask=prompt_mask,
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        completion_valid_mask=completion_mask,
+        old_per_token_logps=jnp.zeros((256, 2048), jnp.float32),
+        ref_per_token_logps=None,
+        advantages=jnp.linspace(-1.0, 1.0, 256, dtype=jnp.float32),
+        sampler_is_weights=None,
+        segment_ids=None,
+    )
+    algo_config = types.SimpleNamespace(
+        beta=0.0,
+        epsilon=0.2,
+        epsilon_high=0.2,
+        epsilon_c=None,
+        loss_algo="grpo",
+        loss_agg_mode="sequence-mean-token-mean",
+        temperature=1.0,
+        kl_loss_mode="k1",
+        kl_clamp_value=None,
+    )
+    mapped = canonical_qwen3_adapter.FunctionalEngineLeaves(
+        paths=(), leaves=(jnp.asarray([1.0]),), source_to_target=()
+    )
+    streamed = []
+
+    def consume(index, gradient, multiplier):
+      streamed.append((
+          index,
+          tuple(np.asarray(value).copy() for value in jax.tree.leaves(gradient)),
+          float(np.asarray(multiplier)),
+      ))
+
+    env = {
+        "CANON_P32_DP16_SEGMENTED": "1",
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    with (
+        mock.patch.dict(os.environ, env, clear=False),
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "map_trainer_state_to_engine_leaves",
+            return_value=mapped,
+        ),
+    ):
+      result = adapter.segmented_dp_grpo_value_and_grad(
+          trainer_state=(jnp.asarray([1.0]),),
+          train_example=train_example,
+          algo_config=algo_config,
+          pad_id=0,
+          eos_id=2,
+          gradient_microbatch_sink=consume,
+      )
+
+    self.assertIsNone(result["gradients"])
+    self.assertEqual(result["gradient_microbatches"], 16)
+    self.assertEqual([item[0] for item in streamed], list(range(16)))
+    self.assertTrue(all(item[2] > 0.0 for item in streamed))
+    self.assertEqual(
+        tuple(report["trajectory_rows"] for report in result["reports"]),
+        tuple(
+            tuple(local + 16 * rank for rank in range(16))
+            for local in range(16)
+        ),
+    )
+    self.assertEqual(result["dp_reduction_visibility"], "NOT_MEASURED")
+    self.assertEqual(result["replica_equality"], "NOT_MEASURED")
+
+  def test_p32_dp16_rejects_the_legacy_data1_segmented_reverse(self):
+    adapter, _ = self._make_p32_group_adapter(sequence_bucket=256)
+    with (
+        mock.patch.dict(
+            os.environ, {"CANON_P28_SEGMENTED_TRAIN": "1"}, clear=False
+        ),
+        self.assertRaisesRegex(
+            canonical_qwen3_adapter.FunctionalMappingError,
+            "data1 segmented reverse cannot run on a DP mesh",
+        ),
+    ):
+      adapter.segmented_grpo_value_and_grad(
+          trainer_state=(jnp.asarray([1.0]),),
+          train_example=types.SimpleNamespace(),
+          algo_config=types.SimpleNamespace(),
+          pad_id=0,
+          eos_id=2,
+      )
+
+  def test_dp16_topology_contract_uses_global_m4096_and_local_m256(self):
+    env = {
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_DP_SIZE": "16",
+        "CANON_TP_SIZE": "4",
+        "CANON_LOGPROB_M": "256",
+        "CANON_TARGET_M": "256",
+        "MIN_TOKEN_BUCKET": "4096",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      self.assertEqual(
+          canonical_qwen3_adapter._canonical_topology_contract(),
+          (16, 4, 256, 4096),
+      )
+      self.assertEqual(
+          canonical_qwen3_adapter._canonical_logprob_bucket(), 4096
+      )
+      mesh = types.SimpleNamespace(
+          axis_names=("data", "model"),
+          shape={"data": 16, "model": 4},
+      )
+      self.assertEqual(
+          canonical_qwen3_adapter._canonical_logprob_row_spec(mesh),
+          jax.sharding.PartitionSpec("data", None),
+      )
+
+    with mock.patch.dict(
+        os.environ, {**env, "MIN_TOKEN_BUCKET": "256"}, clear=False
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          r"dp\*CANON_LOGPROB_M",
+      ):
+        canonical_qwen3_adapter._canonical_topology_contract()
+
+  def test_default_data1_adapter_retains_live_tp4(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires at least four forced CPU or accelerator devices")
+    names = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    mesh = jax.make_mesh(
+        (1, 1, 1, 1, 4, 1),
+        names,
+        devices=jax.devices()[:4],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    runner = _ForwardRunner(self.target, mesh)
+    sampler = _Sampler(runner, self.mapping)
+    sampler.args["tensor_parallel_size"] = 4
+    env = {
+        "CANON_P32_TRAIN_ADMITTED": "0",
+        "CANON_LOGPROB_M": "256",
+        "MIN_TOKEN_BUCKET": "256",
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
+          sampler=sampler
+      )
+    self.assertEqual(adapter._data_size, 1)
+    self.assertEqual(adapter._tp_size, 4)
+    self.assertEqual(adapter._bucket, 256)
+
+  def test_dp16_grouping_and_metadata_are_rank_major(self):
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._data_size = 16
+    values = jnp.arange(256 * 3, dtype=jnp.int32).reshape(256, 3)
+    grouped = adapter._group_batch_rows(values)
+    self.assertEqual(grouped.shape, (16, 16, 3))
+    np.testing.assert_array_equal(
+        np.asarray(grouped[:, 0]), np.asarray(values[:16])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(grouped[:, 15]), np.asarray(values[-16:])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(adapter._ungroup_batch_rows(grouped)), np.asarray(values)
+    )
+
+    q_len = jnp.asarray([256] * 15 + [0], jnp.int32)
+    kv_len = jnp.asarray([512] * 15 + [0], jnp.int32)
+    metadata = canonical_qwen3_adapter._canonical_dp_attention_metadata_arrays(
+        data_size=16,
+        max_num_reqs=256,
+        blocks_per_req=32,
+        q_len=q_len,
+        kv_len=kv_len,
+    )
+    block_tables, seq_lens, query_start, distribution = map(
+        np.asarray, metadata
+    )
+    self.assertEqual(block_tables.shape, (8192,))
+    self.assertEqual(seq_lens.shape, (256,))
+    self.assertEqual(query_start.shape, (272,))
+    self.assertEqual(distribution.shape, (48,))
+    np.testing.assert_array_equal(block_tables[:32], np.arange(32))
+    np.testing.assert_array_equal(block_tables[-512:-480], np.arange(32))
+    self.assertEqual(seq_lens[0], 512)
+    self.assertEqual(seq_lens[-16], 0)
+    np.testing.assert_array_equal(distribution[-3:], [0, 0, 0])
+
+  def test_dp16_grouping_rejects_partial_global_batch(self):
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._data_size = 16
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError, "divisible"
+    ):
+      adapter._group_batch_rows(jnp.zeros((255, 3), jnp.int32))
+
+  def test_dp16_live_adapter_admits_only_the_frozen_mesh_contract(self):
+    if len(jax.devices()) != 64:
+      self.skipTest("requires exactly 64 forced CPU or accelerator devices")
+    names = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    mesh = jax.make_mesh(
+        (16, 1, 1, 1, 4, 1),
+        names,
+        devices=jax.devices(),
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    runner = _ForwardRunner(self.target, mesh)
+    runner.max_num_reqs = 256
+    sampler = _Sampler(runner, self.mapping)
+    sampler.args["tensor_parallel_size"] = 4
+    env = {
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_DP_SIZE": "16",
+        "CANON_TP_SIZE": "4",
+        "CANON_LOGPROB_M": "256",
+        "CANON_TARGET_M": "256",
+        "MIN_TOKEN_BUCKET": "4096",
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
+          sampler=sampler
+      )
+      self.assertEqual(adapter._data_size, 16)
+      self.assertEqual(adapter._tp_size, 4)
+      self.assertEqual(adapter._bucket, 4096)
+      self.assertEqual(adapter._sequence_bucket, 256)
+      self.assertEqual(adapter._local_max_num_reqs, 16)
+      self.assertEqual(adapter._cache_shape[0], 8192)
+
+      sampler.args["tensor_parallel_size"] = 2
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "TP sizes differ",
+      ):
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter(sampler=sampler)
+
+  def test_dp16_grouped_forward_and_vjp_are_exactly_repeatable(self):
+    if len(jax.devices()) != 64:
+      self.skipTest("requires exactly 64 forced CPU or accelerator devices")
+    names = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    mesh = jax.make_mesh(
+        (16, 1, 1, 1, 4, 1),
+        names,
+        devices=jax.devices(),
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    runner = _ForwardRunner(self.target, mesh)
+    runner.max_num_reqs = 256
+    cache_sharding = jax.sharding.NamedSharding(
+        mesh,
+        jax.sharding.PartitionSpec("data", None, "model", None, None),
+    )
+    runner.kv_caches = [
+        jax.device_put(
+            jnp.zeros((8192, 2, 4, 2, 2), jnp.bfloat16), cache_sharding
+        )
+    ]
+
+    def grouped_model_fn(
+        leaves,
+        caches,
+        input_ids,
+        metadata,
+        inputs_embeds,
+        positions,
+        static_kv_indices,
+        lora_metadata,
+        intermediate_tensors,
+        is_first_rank,
+        is_last_rank,
+    ):
+      del (
+          metadata,
+          inputs_embeds,
+          positions,
+          static_kv_indices,
+          lora_metadata,
+          intermediate_tensors,
+          is_first_rank,
+          is_last_rank,
+      )
+      scale = leaves[1][0].astype(jnp.float32)
+      return caches, input_ids.astype(jnp.float32)[:, None] * scale, None, None
+
+    runner.model_fn = grouped_model_fn
+    sampler = _Sampler(runner, self.mapping)
+    sampler.args["tensor_parallel_size"] = 4
+    env = {
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_DP_SIZE": "16",
+        "CANON_TP_SIZE": "4",
+        "CANON_LOGPROB_M": "256",
+        "CANON_TARGET_M": "256",
+        "MIN_TOKEN_BUCKET": "4096",
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+    }
+    prompts = jnp.tile(jnp.asarray([[1, 2, 3]], jnp.int32), (16, 1))
+    completions = jnp.tile(jnp.asarray([[4, 5]], jnp.int32), (16, 1))
+    valid_prompt = jnp.ones_like(prompts, jnp.bool_)
+    valid_completion = jnp.ones_like(completions, jnp.bool_)
+    with mock.patch.dict(os.environ, env, clear=False):
+      adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
+          sampler=sampler
+      )
+      engine_leaves = tuple(jax.tree.leaves(self.target))
+
+      def loss(leaves):
+        logps, entropy = adapter._sequence_group(
+            leaves,
+            prompts,
+            completions,
+            valid_prompt,
+            valid_completion,
+            0,
+            1.0,
+        )
+        return jnp.sum(logps + entropy), (logps, entropy)
+
+      compiled = jax.jit(jax.value_and_grad(loss, has_aux=True))
+      (value, outputs), gradients = compiled(engine_leaves)
+      (repeat_value, repeat_outputs), repeat_gradients = compiled(engine_leaves)
+    self.assertTrue(np.isfinite(np.asarray(value)))
+    self.assertEqual(outputs[0].shape, (16, 2))
+    self.assertEqual(outputs[1].shape, (16, 2))
+    np.testing.assert_array_equal(np.asarray(value), np.asarray(repeat_value))
+    for actual, repeated in zip(outputs, repeat_outputs, strict=True):
+      np.testing.assert_array_equal(np.asarray(actual), np.asarray(repeated))
+      self.assertTrue(np.isfinite(np.asarray(actual)).all())
+    gradient_arrays = [np.asarray(value) for value in jax.tree.leaves(gradients)]
+    repeat_arrays = [
+        np.asarray(value) for value in jax.tree.leaves(repeat_gradients)
+    ]
+    self.assertGreater(sum(np.count_nonzero(value) for value in gradient_arrays), 0)
+    for actual, repeated in zip(
+        gradient_arrays, repeat_arrays, strict=True
+    ):
+      np.testing.assert_array_equal(actual, repeated)
+
+  def test_dp16_logprob_pipeline_reassembles_all_local_m256_rows(self):
+    if len(jax.devices()) != 64:
+      self.skipTest("requires exactly 64 forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()).reshape(16, 4), ("data", "model")
+    )
+    env = {
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_DP_SIZE": "16",
+        "CANON_TP_SIZE": "4",
+        "CANON_LOGPROB_M": "256",
+        "CANON_TARGET_M": "256",
+        "MIN_TOKEN_BUCKET": "4096",
+    }
+
+    def return_logprobs(logprobs, next_tokens, max_logprobs):
+      del next_tokens, max_logprobs
+      return logprobs
+
+    logits = jnp.arange(4096 * 8, dtype=jnp.float32).reshape(4096, 8)
+    logits = jnp.mod(logits, 17.0) / 7.0
+    def local_log_softmax(value):
+      return value + jnp.float32(1.0)
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+        canonical_qwen3_adapter.canonical_logsoftmax,
+        "log_softmax",
+        local_log_softmax,
+    ):
+      scorer = canonical_qwen3_adapter._make_canonical_compute_and_gather(
+          return_logprobs, mesh
+      )
+      actual = scorer(logits, jnp.zeros((4096,), jnp.int32), 1)
+    expected = logits + jnp.float32(1.0)
+    self.assertEqual(actual.shape, (4096, 8))
+    self.assertEqual(
+        actual.sharding.spec, jax.sharding.PartitionSpec("data")
+    )
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
 
   def setUp(self):
     super().setUp()
