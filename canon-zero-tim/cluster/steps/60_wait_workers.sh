@@ -31,7 +31,7 @@ done
 OUT="$(mktemp -t canon_probe_devices.XXXXXX)"
 trap 'rm -f "$OUT"' EXIT
 
-INITIAL_SYNC="${CANON_WORKER_INITIAL_SYNC_SECONDS:-60}"
+INITIAL_SYNC="${CANON_WORKER_INITIAL_SYNC_SECONDS:-90}"
 echo "[wait] giving all ${EXPECT} devices on 16 TPU worker nodes ${INITIAL_SYNC}s quiet period to boot and register with Pathways RM..."
 sleep "$INITIAL_SYNC"
 echo "[wait] hardware quiet period completed. Single-session unified runner in Step 70 will perform device assertion and all admission probes."
