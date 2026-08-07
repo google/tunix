@@ -23,15 +23,14 @@ import sys
 from typing import Any
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "t1_tpu")))
-try:
-  from pathways_bootstrap import initialize_pathways
-  initialize_pathways()
-except Exception:
-  pass
+from pathways_bootstrap import initialize_pathways
+
+initialize_pathways()
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -62,17 +61,29 @@ def _make_mesh(devices: np.ndarray, dp: int, tp: int) -> Mesh:
 
 def _topology_mesh(devices: list[jax.Device], dp: int, tp: int) -> Mesh:
   try:
-    arranged = jax._src.mesh_utils.create_device_mesh(  # pylint: disable=protected-access
-        (dp, tp), devices
+    arranged = mesh_utils.create_device_mesh(
+        (dp, tp), devices, allow_split_physical_axes=True
     )
-  except Exception as exc:  # topology support varies by backend
-    print(
-        "[P32.DP] topology-aware mesh unavailable; using logical reshape: "
-        f"{type(exc).__name__}: {exc}",
-        flush=True,
+  except TypeError as exc:
+    raise RuntimeError(
+        "this JAX build lacks allow_split_physical_axes; refusing a logical reshape "
+        "because it would not validate the Pathways DP-by-TP topology"
+    ) from exc
+
+  array = np.asarray(arranged, dtype=object)
+  if array.shape != (dp, tp):
+    raise RuntimeError(
+        f"topology-aware mesh shape {array.shape} does not equal {(dp, tp)}"
     )
-    arranged = np.asarray(devices, dtype=object).reshape(dp, tp)
-  return _make_mesh(np.asarray(arranged, dtype=object), dp, tp)
+  source_ids = [int(device.id) for device in devices]
+  arranged_ids = [int(device.id) for device in array.flat]
+  if len(set(source_ids)) != len(source_ids):
+    raise RuntimeError("visible device ids are not unique")
+  if len(set(arranged_ids)) != len(arranged_ids):
+    raise RuntimeError("topology-aware mesh repeats at least one device")
+  if set(arranged_ids) != set(source_ids):
+    raise RuntimeError("topology-aware mesh does not cover the full visible slice")
+  return _make_mesh(array, dp, tp)
 
 
 def _build_reducer(mesh: Mesh, dp: int, global_samples: int):
@@ -314,7 +325,10 @@ def main() -> int:
       f"local_samples={args.local_samples} global_samples={global_samples}",
       flush=True,
   )
-  print(f"[P32.DP] MESH ids={mesh_ids}", flush=True)
+  print(
+      f"[P32.DP] MESH ids={mesh_ids} shape={mesh.devices.shape} full_slice=1",
+      flush=True,
+  )
   print(f"[P32.DP] CHECKS {json.dumps(checks, sort_keys=True)}", flush=True)
   print(
       f"[P32.DP] OBSERVATIONS {json.dumps(observations, sort_keys=True)}",

@@ -14,11 +14,11 @@ This directory contains the original, raw logs and structured triage reference f
 | Probe | Component | 64-Chip Verdict | Key Metric / Signature |
 | :--- | :--- | :--- | :--- |
 | **P0** | Pathways/JAX Registration | **PASSED** | `[t1.devices] count=64 kind=TPU v5p platform=tpu` |
-| **P2** | 3D Torus Physical Mesh Order | **MATCH** | Post-build Torus sequence: `0, 16, 32, 48, 4, 20, 36, 52...` |
-| **P3** | Token Bucket Contract | **OK** | `required_global_MIN_TOKEN_BUCKET=4096`, `per_dp_paddings=[256]` |
-| **P4** | F4 Memory Cost Model | **ANALYTIC** | `out_bytes_per_site=2.50 MiB`, `F4 live MiB = 5.00..80.00` |
-| **H2** | Third Program Bitwise Drift | **DIFFERS** | `L=4..24`: Bitwise divergence reproduced across 64 chips |
-| **H3** | Topology Bisection | **DIFFERS** | `2-device 1D mesh`: `differing_bytes=90582 DIFFERS` |
+| **P1** | Way-count numerical probe | **INCONCLUSIVE** | Four width-2 rows printed, then width-4 failed on an invalid `devices[:4]` subslice. The required table did not complete. |
+| **P2** | 3D Torus Physical Mesh Order | **TAINTED** | The 1D order matched, but this ran after the P1 JAX runtime error in the same Pathways session. It also did not attest `(16,4)`. |
+| **P3** | Token Bucket Contract | **TAINTED** | Arithmetic reported global 4096 / per-DP 256, but release evidence requires a clean rerun. |
+| **P4** | F4 Memory Cost Model | **TAINTED** | The analytic rows printed after P1 failed; rerun in the new fail-stop sequence. |
+| **H2/H3** | Historical diagnostics | **TAINTED** | They ran after P1 failed. H3's replicated arm was also dirty, so reduction was not necessary for that observation. |
 
 ---
 
@@ -30,9 +30,17 @@ This directory contains the original, raw logs and structured triage reference f
   jax.errors.JaxRuntimeError: INTERNAL: Not a valid subslice size because bounds are not along host boundaries. Proposed subslice size: 4,1,1, host bounds: 2,2,1. Set --FLAGS_pathways_enforce_subset_devices_form_subslice to false at the Pathways client to disable this check.
   ```
 * **Root Cause**:
-  On a multi-node cluster (16 hosts in a 2x2x4 3D Torus), allocating a sub-mesh of shape `(4,)` across physical host bounds without the subslice flag is rejected by Pathways boundary defense.
+  The probe used `devices[:4]`. On a 16-host slice this is neither a production TP4 mesh nor a valid host-aligned Pathways subslice. The attempted client flag injection did not change the live runtime behavior.
 * **Resolution**:
-  Set mesh dimension `N = len(jax.devices())` (i.e. `64`) to test full-slice reductions across all 64 devices, or inject `--pathways_enforce_subset_devices_form_subslice=false` in `sys.argv`.
+  Do not weaken the subslice guard. Build the topology-aware full-slice `(DP,TP)` mesh directly: `(32,2)` for TP2 and `(16,4)` for production TP4. Attest all 64 unique device ids and print every TP group before compiling.
+
+### Evidence discipline for Attempt 0
+
+The four width-2 P1 rows are preserved as observations, not verdicts. `differing_bytes` is
+saturated and cannot rank the stock and F4 arms. Width 4 never ran. Because the old unified
+runner continued after the P1 runtime exception, every later P2-P4/H row is tainted for release
+purposes. The replacement runner stops at the first error and emits `SKIP_TAINTED` with the exact
+suppressed probe list.
 
 ---
 

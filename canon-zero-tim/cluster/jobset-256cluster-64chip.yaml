@@ -166,8 +166,6 @@ spec:
                 value: proxy
               - name: JAX_BACKEND_TARGET
                 value: grpc://$(PATHWAYS_HEAD):29000
-              - name: FLAGS_pathways_enforce_subset_devices_form_subslice
-                value: "False"
               # --- secrets: inherited only, never written into the manifest -----------------
               - name: INJECTED_HF_TOKEN
                 valueFrom:

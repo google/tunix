@@ -107,3 +107,29 @@ contain exactly one `[T1.PATHWAYS]` marker per JAX probe.  Proxy runs require
 `required=1 initialized=1`; a directly attached TPU may report `required=0 initialized=0`.
 The worker readiness loop uses the same bootstrap and rejects a timeout or the wrong visible
 device count; an elapsed sleep is not readiness evidence.
+
+### 14. A device prefix is not a production TP mesh on Pathways
+
+`devices[:4]` was a convenient TP4 probe on the original directly attached host. On a 64-device,
+16-host Pathways slice it requested a physical `4,1,1` subset that crossed `2,2,1` host bounds,
+then failed at compile time. Even if a client flag forced it through, it would still not attest
+the production DP16×TP4 placement. Construct the topology-aware full-slice `(16,4)` mesh, prove
+all 64 device ids occur exactly once, and print the actual TP groups. Never use a reshape fallback
+for topology admission.
+
+### 15. A JAX runtime failure taints the rest of a shared Pathways session
+
+The first 64-device runner caught the P1 exception and continued into P2-P4 and H1-H4. Those
+rows were useful for triage but are not release evidence: the client session had already failed,
+several legacy probes failed again internally, and some scripts swallowed their own exceptions.
+The unified runner now stops at the first nonzero exit or exception and prints
+`SKIP_TAINTED after=<probe> skipped=<list>`. Fix the first failure and rerun in a fresh JobSet
+attempt; never promote downstream rows from the contaminated session.
+
+### 16. Backend flags do not belong in application `sys.argv`
+
+The first Pathways bootstrap appended two speculative subslice flags to `sys.argv`. They did not
+change the live client guard, and `probe_dp_update.py` later rejected them as unknown argparse
+arguments before any DP measurement ran. The bootstrap no longer mutates application arguments.
+More importantly, the probes no longer need the flag: they construct host-valid full-slice
+meshes. A runtime safety check should be satisfied structurally, not disabled speculatively.

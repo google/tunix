@@ -34,7 +34,7 @@ not that it reproduces anything. Decide deliberately; record the override.
 This is the check that catches a shim chain whose sibling resolution landed somewhere empty —
 the failure that otherwise presents as a completely green run against the stock engine.
 
-## Step 3 — Does the drift appear at *this* reduction width? (`gate-only`, seconds of TPU)
+## Step 3 — Does the drift appear on the production DP×TP mesh? (`gate-only`, minutes of TPU)
 
 `tests/t1_tpu/probe_waycount.py`.
 
@@ -48,8 +48,31 @@ In proxy mode, a missing marker or `initialized=0` voids the topology run.  The 
 executes before JAX import and exits nonzero if proxy registration fails; it never silently falls
 back to a directly attached backend.
 
-The deciding variable is neither device count nor mesh rank nor device order: it is the width
-of a **single reduction**. Measured on the probe host, in differing bytes out of 262144:
+The old four-device probe established that TP reduction width can carry a third-program
+difference. It did **not** establish that reduction is the only carrier on Pathways. The first
+64-device attempt made this distinction mandatory: a replicated two-device diagnostic arm was
+also dirty, so reduction was not necessary for that observation.
+
+The release probe now uses every visible device. For TP width `w`, it constructs the
+topology-aware mesh `(num_devices / w, w)` with axes `(replica, tp)`. On 64 devices this means
+`(32,2)` and the production `(16,4)`, not the invalid multi-host subset `devices[:2]` or
+`devices[:4]`. Require these attestation lines before reading a numerical row:
+
+```
+[waycount.mesh] width=4 shape=(16, 4) devices=64 unique=64 full_slice=1
+[waycount.mesh] width=4 group=00 ids=[...] coords=[...]
+...
+```
+
+Every `(width, depth)` point reuses exactly the same host arrays across three arms:
+
+| arm | purpose |
+|---|---|
+| `replicated` | Detect Pathways/compiler third-program drift that does not require TP reduction. |
+| `stock-ar` | Measure the production-shaped TP reduction path. |
+| `f4-fixed` | Replace only the TP reduction order with the fixed global-rank tree. |
+
+Historical directly-attached four-device observations, in differing bytes out of 262144:
 
 | configuration | forward-only vs forward+backward primal |
 |---|---|
@@ -60,20 +83,25 @@ of a **single reduction**. Measured on the probe host, in differing bytes out of
 | 2-device 1D mesh, TP over 2 (plain reshape) | **320** |
 | 4 devices, fully replicated | **0** |
 
-**Read the magnitudes, not a SAME/DIFFERS label.** Four-way sits stably at 7000–8000 bytes.
-Two-way is usually zero but not reliably so — the 320 and 946 above are real, one to two
-orders of magnitude smaller than four-way and not explained. So the honest statement is that
-reduction width is the *dominant* variable, not that two-way is guaranteed exact. This is why
-`probe_waycount` prints byte counts: a reader who collapses them to a label loses precisely the
-information that separates these cases.
+`differing_bytes` is a **binary bitwise gate only**. It saturates as differences spread and must
+not be used to rank two dirty arms. Use `rel_l2`, `one_minus_cos`, and `max_abs` for magnitude.
+In particular, `91371 > 90582` does not show that F4 made anything worse.
 
 Only widths 2 and 4 were ever measured. **8 is unknown**, and 8 is a width people reach for.
 
-Read it this way: at every width you intend to use, the `F4-fixed-order` arm must be zero, or
-at least an order of magnitude below its `XLA-all-reduce` counterpart at the same width.
-And note the trap — if the `XLA-all-reduce` arm is *already* `SAME` at your width, the
-fixed-order tree is a no-op there. A green result then tells you the problem was absent, not
-that the fix works. A configuration at width 2 cannot validate this package.
+Read it as a paired intervention:
+
+- `replicated SAME`, `stock-ar DIFFERS`, `f4-fixed SAME`: TP reduction order is a sufficient
+  carrier here and F4 removes it.
+- `replicated DIFFERS`: a non-reduction Pathways/compiler carrier is present. F4 may still
+  remove an additional TP component, but stock-versus-F4 alone cannot identify it.
+- `replicated SAME`, `stock-ar SAME`: reduction-order drift was absent at this point; a green
+  F4 arm proves no repair.
+- `f4-fixed DIFFERS`: production TP4 is **not admitted**, regardless of whether its error is
+  numerically smaller.
+
+The probe exits zero only after all `widths × depths × 3` rows complete. A partial table is
+`INCONCLUSIVE`, not a numerical verdict.
 
 ## Step 4 — What order did placement actually pick, and is this multi-slice?
 
@@ -86,6 +114,8 @@ Two independent hazards:
 So rollout and trainer "using the same expression" does not make their orders agree. Print the
 order **after** the mesh is built and assert it on both sides with
 `CANON_EXPECT_MODEL_MESH_IDS`. An order copied from a different mesh shape is worse than none.
+The one-dimensional P2 order does not attest the `(16,4)` training mesh; the full TP-group
+listing from P1 is the authoritative placement record for that shape.
 
 **Slice structure.** `MULTI_SLICE=1` means collectives cross slices and XLA lowers a
 hierarchical reduction — intra-slice, then inter-slice. That is a **new program-splitting

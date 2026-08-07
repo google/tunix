@@ -58,8 +58,9 @@ on those. Gradient and FD figures within the thresholds printed in `run.sh`.
 
 ## Task B — Topology admission probes ← *the next thing that needs doing*
 
-Answers whether the canonical switch set transfers to your hardware at all. Four probes plus
-four historical minimal reproducers.
+Answers whether the canonical switch set transfers to your hardware at all. The release probes
+run in one fail-stop Pathways session. Historical subset-mesh reproducers are skipped on slices
+larger than four devices because they are not valid full-slice experiments there.
 
 **Needs:** ≥ 2 TPU chips. **No model, no checkpoint, no engine, no image build.**
 **Takes:** seconds of compute, a few minutes of compilation.
@@ -77,9 +78,10 @@ production, and the numbers would not be comparable to anything.
 topology may legitimately differ; that is the point of measuring.**
 
 ```
-[waycount] width= 2 depth=  8 XLA-all-reduce  differing_bytes=      0/...  SAME
-[waycount] width= 4 depth=  8 XLA-all-reduce  differing_bytes= ~7000/...  DIFFERS
-[waycount] width= 4 depth=  8 F4-fixed-order  differing_bytes=      0/...  SAME
+[waycount.mesh] width=4 shape=(1, 4) devices=4 unique=4 full_slice=1
+[waycount] width= 2 replicas= 2 depth=  8 arm=replicated ... SAME
+[waycount] width= 4 replicas= 1 depth=  8 arm=stock-ar   ... DIFFERS
+[waycount] width= 4 replicas= 1 depth=  8 arm=f4-fixed   ... SAME
 [mesh] slice_count=1   MULTI_SLICE=0
 [mesh] create_device_mesh(shape=(4,)) -> ids=[0, 2, 1, 3]   REORDERED=1
 [bucket] SET MIN_TOKEN_BUCKET=<derived for your dp geometry>
@@ -91,18 +93,25 @@ topology may legitimately differ; that is the point of measuring.**
 
 | Observation | Meaning |
 |---|---|
-| `F4-fixed-order` is `SAME` at every width you intend to use | The fix works here. |
-| `XLA-all-reduce` is **already** `SAME` at your width | The fixed-order tree is a **no-op** at that width. Green proves the problem was absent, not that the fix works. A 2-chip machine **cannot validate this package**. |
-| `F4-fixed-order` `DIFFERS` at some width | Stop. The fix does not cover that width. Report it — this is a genuine finding; only widths 2 and 4 were ever measured. |
+| `(16,4)` full-slice attestation is absent on 64 devices | TP4 was not measured. A partial prefix mesh is not a substitute. |
+| `replicated SAME`, `stock-ar DIFFERS`, `f4-fixed SAME` | TP reduction order is a sufficient carrier and F4 removes it at this point. |
+| `replicated DIFFERS` | A Pathways/compiler carrier exists without TP reduction; do not attribute stock/F4 byte-count differences solely to all-reduce. |
+| `stock-ar` is **already** `SAME` | The fixed-order tree repairs nothing at that point. |
+| `f4-fixed` `DIFFERS` at an intended width | Stop. The fix does not cover that production mesh. |
 | `MULTI_SLICE=1` | Collectives cross slices and XLA lowers a hierarchical reduction — a program family with **zero coverage** here. Every bitwise claim on this topology is UNVERIFIED. |
 | `REORDERED=1` | Placement permuted your device order. Use the printed order for `CANON_EXPECT_MODEL_MESH_IDS`; never inherit one from a different mesh shape. |
 | `[bucket] SET MIN_TOKEN_BUCKET=` ≠ 256 | Your dp geometry needs a different global value. Copying 256 would silently unpin the bucket while every switch still reads "on". |
 
-**Pass:** `T1 COMPLETE` (every probe produced measurements) **and** `F4-fixed-order` `SAME` at
-your intended widths. `COMPLETE` alone is not an admission — it only means nothing crashed.
+`differing_bytes` answers only bitwise SAME/DIFFERS and saturates. Compare dirty-arm magnitudes
+with `rel_l2`, `one_minus_cos`, and `max_abs`; never infer that one arm is worse because it has
+slightly more differing bytes.
+
+**Pass:** `T1 COMPLETE` (every applicable probe produced measurements), full-slice attestation,
+and `f4-fixed` `SAME` at intended widths. `COMPLETE` alone is not an admission.
 
 **Red:**
 - `T1 FAIL` — a probe produced no measurement line. It did not run;
+- `SKIP_TAINTED` — a prior probe failed; every named later probe was deliberately not run;
 - `REFUSING: XLA_FLAGS lacks ...` — fix the flags, do not work around it;
 - `Device or resource busy` on `/dev/vfio` — something else holds the TPU. **Find out what
   before killing anything**; it may be someone's multi-hour job.

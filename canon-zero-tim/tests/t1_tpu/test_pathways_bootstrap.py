@@ -67,13 +67,13 @@ class PathwaysBootstrapTest(unittest.TestCase):
                 emit=markers.append,
             )
         )
-        self.assertEqual(len(args), 2)
+        self.assertEqual(args, [])
         self.assertEqual(
             markers,
             ["[T1.PATHWAYS] required=0 initialized=0 status=import-ModuleNotFoundError"],
         )
 
-    def test_success_is_marked_and_flag_is_idempotent(self):
+    def test_success_is_marked_without_mutating_argv(self):
         markers = []
         calls = []
         args = []
@@ -88,18 +88,7 @@ class PathwaysBootstrapTest(unittest.TestCase):
             )
         )
         self.assertEqual(calls, ["initialize"])
-        self.assertEqual(
-            args.count("--FLAGS_pathways_enforce_subset_devices_form_subslice=false"), 1
-        )
-        self.assertEqual(
-            args.count("--pathways_enforce_subset_devices_form_subslice=false"), 1
-        )
-        self.assertEqual(
-            env["FLAGS_pathways_enforce_subset_devices_form_subslice"], "false"
-        )
-        self.assertEqual(
-            env["PATHWAYS_ENFORCE_SUBSET_DEVICES_FORM_SUBSLICE"], "false"
-        )
+        self.assertEqual(args, [])
         self.assertEqual(
             markers, ["[T1.PATHWAYS] required=1 initialized=1 status=ok"]
         )

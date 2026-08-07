@@ -12,19 +12,10 @@ from __future__ import annotations
 
 import importlib
 import os
-import sys
 from collections.abc import Callable, Mapping, MutableMapping, MutableSequence
 from types import ModuleType
 
 
-_SUBSLICE_FLAGS = (
-    "--FLAGS_pathways_enforce_subset_devices_form_subslice=false",
-    "--pathways_enforce_subset_devices_form_subslice=false",
-)
-_SUBSLICE_ENV = (
-    "FLAGS_pathways_enforce_subset_devices_form_subslice",
-    "PATHWAYS_ENFORCE_SUBSET_DEVICES_FORM_SUBSLICE",
-)
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off"})
 
@@ -69,22 +60,16 @@ def initialize_pathways(
     Returns ``True`` after successful initialization.  A directly attached local run may
     return ``False`` when Pathways is unavailable.  A proxy/Pathways run raises instead.
     Exception messages are intentionally omitted from the marker so credentials or endpoint
-    strings cannot leak into logs.
+    strings cannot leak into logs.  ``argv`` is retained for call compatibility and is never
+    mutated; client flags injected there broke downstream argparse and did not affect the live
+    Pathways subslice guard.
     """
     global _PATHWAYS_INITIALIZED
     if _PATHWAYS_INITIALIZED:
         return True
 
     env = os.environ if environ is None else environ
-    args = sys.argv if argv is None else argv
     required = pathways_required(env)
-
-    for key in _SUBSLICE_ENV:
-        env[key] = "false"
-    for flag in _SUBSLICE_FLAGS:
-        if flag not in args:
-            args.append(flag)
-
     try:
         module = importer("pathwaysutils")
     except Exception as exc:
@@ -97,21 +82,6 @@ def initialize_pathways(
                 "Pathways is required but pathwaysutils could not be imported"
             ) from exc
         return False
-
-    try:
-        from absl import flags as _absl_flags
-        try:
-            _absl_flags.FLAGS(["prog", "--pathways_enforce_subset_devices_form_subslice=false", "--FLAGS_pathways_enforce_subset_devices_form_subslice=false"], known_only=True)
-        except Exception:
-            try:
-                _absl_flags.FLAGS(["prog"])
-            except Exception:
-                pass
-        if hasattr(_absl_flags.FLAGS, "pathways_enforce_subset_devices_form_subslice"):
-            _absl_flags.FLAGS.set_default("pathways_enforce_subset_devices_form_subslice", False)
-            _absl_flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
-    except Exception:
-        pass
 
     try:
         module.initialize()

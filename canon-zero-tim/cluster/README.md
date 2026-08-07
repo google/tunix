@@ -93,17 +93,19 @@ differ, which is the point of measuring**:
 ```
 [T1.PATHWAYS] required=1 initialized=1 status=ok
 [t1.devices] count=64 kind=TPU v5 platform=proxy
-[waycount] width= 2 depth=  8 XLA-all-reduce  differing_bytes=      0/...  SAME
-[waycount] width= 4 depth=  8 XLA-all-reduce  differing_bytes= ~7000/...  DIFFERS
-[waycount] width= 4 depth=  8 F4-fixed-order  differing_bytes=      0/...  SAME
+[waycount.mesh] width=4 shape=(16, 4) devices=64 unique=64 full_slice=1
+[waycount] width= 4 replicas=16 depth=  8 arm=replicated ...
+[waycount] width= 4 replicas=16 depth=  8 arm=stock-ar   ...
+[waycount] width= 4 replicas=16 depth=  8 arm=f4-fixed   ...
 [mesh] slice_count=1  MULTI_SLICE=0
 [mesh] create_device_mesh(shape=(4,)) -> ids=[0, 2, 1, 3]   REORDERED=1
 [bucket] SET MIN_TOKEN_BUCKET=<value for your dp geometry>
 ```
 
-The reading that matters: **at every width you intend to use, `F4-fixed-order` must be SAME.**
-If `XLA-all-reduce` is already SAME at your width, the fixed-order tree is a no-op there — a
-green result then proves nothing about the mechanism, only that the problem was absent.
+The reading that matters: **at every width you intend to use, `f4-fixed` must be SAME.** The
+`replicated` arm determines whether a dirty Pathways result requires TP reduction at all. If it
+is dirty, do not attribute a stock-versus-F4 difference solely to all-reduce. Byte counts are a
+binary gate and saturate; use rel-L2 / one-minus-cosine / max-abs to compare dirty magnitudes.
 
 ### `dp-gate-only`
 
@@ -111,7 +113,7 @@ Use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env`. The expected terminal ma
 
 ```
 [P32.DP] CONFIG dp=16 tp=4 local_samples=16 global_samples=256
-[P32.DP] MESH ids=(...64 ids...)
+[P32.DP] MESH ids=(...64 ids...) shape=(16, 4) full_slice=1
 [P32.DP] CHECKS {...}
 [P32.DP] OBSERVATIONS {...}
 [P32.DP] UPDATE {...four SHA-256s...}
@@ -144,8 +146,11 @@ Ranked by how easily each is mistaken for success.
 | **Missing successful `[T1.PATHWAYS]` marker** | The proxy backend was not proven initialized before JAX import. A local/direct-TPU fallback would test a different runtime. | **Void the topology run.** In proxy mode, import/initialization failure must exit nonzero. |
 | **No `[PATHTRACE]` lines** | The intervention never executed. The chain is imported by path and by module name; a missing member does not raise — the engine silently uses its stock module while every switch still reads "on". | **Void the run.** Do not report its numbers. |
 | **A gate printed no measurement line** | It did not run. Absence is never a pass. | Investigate before rerunning. |
+| **`SKIP_TAINTED` appears** | The named earlier probe failed or raised; all later probes were intentionally suppressed because the Pathways session may be contaminated. | Fix the first failure and rerun from a fresh JobSet attempt. Never reuse earlier downstream rows from the failed session. |
+| **P1 has no `shape=(16, 4) ... full_slice=1` row** | Production DP16×TP4 was not measured. A `devices[:4]` subset may also violate host boundaries. | Stop. Use the full-slice probe; do not disable Pathways subslice safety to force the subset through. |
 | **P32 `run` is refused** | Expected: the current shared mesh would be FSDP16×TP4 and the segmented VJP is not DP-local. | Do not bypass the refusal. Return the T1/T2 artifacts; implement the DP adapter in the next phase. |
 | **T2-DP fixed repeat/replica check is false** | DP reduction or placement is not deterministic on this topology. | Stop before model initialization. |
+| **T2-DP mesh lacks `shape=(16, 4) full_slice=1`** | The DP update probe did not attest the production topology. | Stop. Logical reshape fallback is forbidden; fix topology-aware construction. |
 | **`THIRDPROG` red** | The forward-only and forward+backward programs are not the same family. Every downstream number in that run is meaningless. | Void the whole run, fix the config, rerun. |
 | **`ROPE_FIX=unknown_version`** | Neither the old nor the new RoPE form was found. Somebody is about to patch a build nobody has looked at. | Stop. Inspect the file. Do not guess. |
 | **`[probe] VERSION DRIFT`** | The image's `tpu_inference` differs from the patch anchor. Results can no longer be byte-identical to the signed evidence. | Decide deliberately; if you proceed with `CANON_ALLOW_IMAGE_DRIFT=1`, say so in the report. |

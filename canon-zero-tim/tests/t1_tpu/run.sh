@@ -7,8 +7,8 @@
 # Run this FIRST on any new cluster.  It costs seconds and it answers the questions that
 # decide whether the canonical switch set transfers at all:
 #
-#   probe_waycount    does the third-program drift appear at THIS reduction width, and does
-#                     the fixed-order tree remove it?  (only widths 2 and 4 were ever measured)
+#   probe_waycount    on full-slice (replica,tp) meshes, compare replicated, stock-AR and F4
+#                     arms using identical arrays; never infer TP4 from devices[:4]
 #   probe_mesh_order  what order did topology-aware placement actually pick, and is this
 #                     topology multi-slice (a collective family with zero coverage)?
 #   probe_bucket      what MIN_TOKEN_BUCKET does this dp geometry need?  (it is a GLOBAL
@@ -50,44 +50,6 @@ case "$XLA_FLAGS" in
   *) echo "[t1] REFUSING: XLA_FLAGS lacks --xla_allow_excess_precision=false -- every number "\
 "below would belong to a different program family than a canonical run." >&2; exit 2;;
 esac
-
-RC=0
-run_probe() {  # <label> <script> <required-line-regex> [required-min-count] [pathways-marker]
-  local label="$1" script="$2" need="$3" minc="${4:-1}" check_pathways="${5:-0}"
-  echo
-  echo "== $label =="
-  local tmp_out
-  tmp_out="$(mktemp -t canon_probe.XXXXXX)"
-  python3 -u "$HERE/$script" 2>&1 | tee "$tmp_out" | sed 's/^/  /'
-  local rc="${PIPESTATUS[0]}"
-  local out
-  out="$(cat "$tmp_out")"
-  rm -f "$tmp_out"
-  local n
-  n=$(echo "$out" | grep -acE "$need")
-  if [ "$n" -lt "$minc" ]; then
-    echo "  FAIL: $label produced $n measurement line(s) matching /$need/, need >= $minc" >&2
-    RC=1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    echo "  FAIL: $label exited $rc" >&2
-    RC=1
-  fi
-  if [ "$check_pathways" = 1 ]; then
-    local pn bad_required
-    pn=$(echo "$out" | grep -acE '^\[T1\.PATHWAYS\] required=[01] initialized=[01] status=[A-Za-z0-9_-]+$')
-    if [ "$pn" -ne 1 ]; then
-      echo "  FAIL: $label produced $pn Pathways status marker(s), need exactly 1" >&2
-      RC=1
-    fi
-    bad_required=$(echo "$out" | grep -acE '^\[T1\.PATHWAYS\] required=1 initialized=0 ')
-    if [ "$bad_required" -ne 0 ]; then
-      echo "  FAIL: $label required Pathways but did not initialize it" >&2
-      RC=1
-    fi
-  fi
-  sleep 5
-}
 
 echo "[t1] XLA_FLAGS=$XLA_FLAGS"
 python3 -u "$HERE/unified_runner.py"

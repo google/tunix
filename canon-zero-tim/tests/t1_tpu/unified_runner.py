@@ -1,183 +1,177 @@
-"""Unified single-session test runner for T1 topology admission gates.
+"""Fail-stop single-session runner for the T1 topology admission gates.
 
-Initializes Pathways once, holding a single client session, and sequentially
-executes all 9 admission probes (P0..P4, H1..H4) without multi-session churn
-or lease reclamation collisions on the Resource Manager.
+Pathways initialization is intentionally shared, but failure state is not.  The first probe
+that raises or exits nonzero stops the sequence and emits a machine-readable ``SKIP_TAINTED``
+marker.  Results produced after a JAX runtime error in the same client session are not release
+evidence.
 """
+
 from __future__ import annotations
 
-import os
+import importlib
 import sys
 import traceback
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from types import ModuleType
 
 from pathways_bootstrap import initialize_pathways
 
 initialize_pathways()
 
 import jax
-import jax.numpy as jnp
-import numpy as np
+
+
+@dataclass(frozen=True)
+class Probe:
+    name: str
+    title: str
+    module: str
+    call_main: bool = True
+    max_devices: int | None = None
+
+
+PROBES = (
+    Probe("P0", "Pathways/JAX registration", "probe_devices"),
+    Probe("P2", "mesh order / slice", "probe_mesh_order"),
+    Probe("P3", "bucket contract", "probe_bucket_contract"),
+    Probe("P4", "F4 cost model", "probe_f4_cost"),
+    Probe("P1", "full-slice way-count scan", "probe_waycount"),
+    # These three historical scripts deliberately form device prefixes and tiny 2x2 meshes.
+    # They remain useful on the original directly attached <=4-device host, but are not valid
+    # Pathways full-slice probes.  P1 supersedes their topology questions on larger slices.
+    Probe("H1", "legacy minrepro: F4 tree", "p19_minrepro_f4", False, 4),
+    Probe("H2", "legacy minrepro: third program", "p19_minrepro_thirdprog", False),
+    Probe("H3", "legacy minrepro: device topology", "p19_minrepro_topo", False, 4),
+    Probe("H4", "legacy minrepro: mesh geometry", "p19_minrepro_mesh2d", False, 4),
+)
+
+OVERLAY_CHECKS = (
+    ("tpu_inference.layers.jax.linear", "P22XK_MATMUL_ACTIVE", True),
+    ("tpu_inference.layers.jax.linear", "P22XK_LINEAR_BASE", None),
+    ("tpu_inference.layers.jax.embed", "_CANON_F4E_ANNOUNCED", None),
+    ("tpu_inference.models.jax.qwen3", "P22XK_RMSNORM_ACTIVE", True),
+    ("tpu_inference.models.jax.qwen2", "P22XK_SWIGLU_ACTIVE", True),
+)
+
+
+def _tainted_marker(after: str, remaining: Sequence[Probe]) -> str:
+    skipped = ",".join(probe.name for probe in remaining) or "none"
+    return f"[t1.unified] SKIP_TAINTED after={after} skipped={skipped}"
+
+
+def _verify_overlay(
+    *,
+    importer: Callable[[str], ModuleType] = importlib.import_module,
+    emit: Callable[[str], None] = print,
+    emit_error: Callable[[str], None] | None = None,
+) -> bool:
+    """Verify every promoted module and return one aggregate fail-closed result."""
+
+    if emit_error is None:
+        emit_error = lambda message: print(message, file=sys.stderr)
+    ok = True
+    for module_name, attribute, expected in OVERLAY_CHECKS:
+        try:
+            module = importer(module_name)
+            if not hasattr(module, attribute):
+                emit_error(f"[verify] FAIL {module_name}.{attribute} absent")
+                ok = False
+                continue
+            actual = getattr(module, attribute)
+            if expected is not None and actual is not expected and actual != expected:
+                emit_error(
+                    f"[verify] FAIL {module_name}.{attribute}={actual!r}, "
+                    f"expected {expected!r}"
+                )
+                ok = False
+                continue
+            suffix = f"={actual!r}" if expected is not None else ""
+            emit(f"[verify] OK {module_name}.{attribute}{suffix}")
+        except Exception as exc:
+            emit_error(
+                f"[verify] FAIL {module_name}: {type(exc).__name__}: {exc}"
+            )
+            ok = False
+    return ok
+
+
+def _run_probe_sequence(
+    probes: Sequence[Probe],
+    *,
+    num_devices: int,
+    importer: Callable[[str], ModuleType] = importlib.import_module,
+    emit: Callable[[str], None] = print,
+    emit_error: Callable[[str], None] | None = None,
+    print_traceback: Callable[[], None] = traceback.print_exc,
+) -> int:
+    """Run applicable probes and stop at the first failure or exception."""
+
+    if emit_error is None:
+        emit_error = lambda message: print(message, file=sys.stderr)
+
+    for index, probe in enumerate(probes):
+        if probe.max_devices is not None and num_devices > probe.max_devices:
+            emit(
+                f"[t1.unified] SKIP_NOT_APPLICABLE probe={probe.name} "
+                f"visible_devices={num_devices} max_devices={probe.max_devices} "
+                "reason=legacy-subset-mesh"
+            )
+            continue
+
+        emit(f"\n== {probe.name}  {probe.title} ==")
+        try:
+            module = importer(probe.module)
+            if probe.call_main:
+                return_code = module.main()
+                if return_code != 0:
+                    emit_error(
+                        f"[t1.unified] FAIL probe={probe.name} exit={return_code}"
+                    )
+                    emit(_tainted_marker(probe.name, probes[index + 1 :]))
+                    return 1
+        except Exception as exc:
+            print_traceback()
+            emit_error(
+                f"[t1.unified] FAIL probe={probe.name} "
+                f"exception={type(exc).__name__}"
+            )
+            emit(_tainted_marker(probe.name, probes[index + 1 :]))
+            return 1
+    return 0
 
 
 def run_all_probes() -> int:
-    overall_rc = 0
-    print("[t1.unified] Pathways initialized in single session. Starting probes...", flush=True)
-
-    # -------------------------------------------------------------------------
-    # Overlay verification (Section B)
-    # -------------------------------------------------------------------------
+    print(
+        "[t1.unified] Pathways initialized in one fail-stop session. Starting probes...",
+        flush=True,
+    )
     print("\n== Overlay promotion verification ==", flush=True)
-    import importlib
-    CHECKS = [
-        ("tpu_inference.layers.jax.linear", "P22XK_MATMUL_ACTIVE", True),
-        ("tpu_inference.layers.jax.linear", "P22XK_LINEAR_BASE",   None),
-        ("tpu_inference.layers.jax.embed",  "_CANON_F4E_ANNOUNCED", None),
-        ("tpu_inference.models.jax.qwen3",  "P22XK_RMSNORM_ACTIVE", True),
-        ("tpu_inference.models.jax.qwen2",  "P22XK_SWIGLU_ACTIVE",  True),
-    ]
-    for mod, attr, want in CHECKS:
-        try:
-            m = importlib.import_module(mod)
-            if not hasattr(m, attr):
-                print(f"[verify]   FAIL {mod}.{attr} absent", file=sys.stderr)
-                overall_rc = 1
-                continue
-            got = getattr(m, attr)
-            if want is not None and got is not want and got != want:
-                print(f"[verify]   FAIL {mod}.{attr}={got!r}, expected {want!r}", file=sys.stderr)
-                overall_rc = 1
-                continue
-            print(f"[verify]   OK   {mod}.{attr}" + (f"={got!r}" if want is not None else ""), flush=True)
-        except Exception as exc:
-            print(f"[verify]   FAIL {mod}: {exc}", file=sys.stderr)
-            overall_rc = 1
+    if not _verify_overlay():
+        print(_tainted_marker("overlay", PROBES), flush=True)
+        print("===== T1 FAIL -- overlay verification failed =====", flush=True)
+        return 1
 
-    # -------------------------------------------------------------------------
-    # P0: Pathways / JAX registration
-    # -------------------------------------------------------------------------
-    print("\n== P0  Pathways/JAX registration ==", flush=True)
-    try:
-        import probe_devices
-        rc_p0 = probe_devices.main()
-        if rc_p0 != 0:
-            print(f"  FAIL: P0 exited {rc_p0}", file=sys.stderr)
-            overall_rc = 1
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # P1: way-count scan (NEW)
-    # -------------------------------------------------------------------------
-    print("\n== P1  way-count scan (NEW) ==", flush=True)
-    try:
-        import probe_waycount
-        rc_p1 = probe_waycount.main()
-        if rc_p1 != 0:
-            print(f"  FAIL: P1 exited {rc_p1}", file=sys.stderr)
-            overall_rc = 1
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # P2: mesh order / slice (NEW)
-    # -------------------------------------------------------------------------
-    print("\n== P2  mesh order / slice (NEW) ==", flush=True)
-    try:
-        import probe_mesh_order
-        rc_p2 = probe_mesh_order.main()
-        if rc_p2 != 0:
-            print(f"  FAIL: P2 exited {rc_p2}", file=sys.stderr)
-            overall_rc = 1
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # P3: bucket contract (NEW)
-    # -------------------------------------------------------------------------
-    print("\n== P3  bucket contract (NEW) ==", flush=True)
-    try:
-        import probe_bucket_contract
-        rc_p3 = probe_bucket_contract.main()
-        if rc_p3 != 0:
-            print(f"  FAIL: P3 exited {rc_p3}", file=sys.stderr)
-            overall_rc = 1
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # P4: F4 cost model (NEW)
-    # -------------------------------------------------------------------------
-    print("\n== P4  F4 cost model (NEW) ==", flush=True)
-    try:
-        import probe_f4_cost
-        rc_p4 = probe_f4_cost.main()
-        if rc_p4 != 0:
-            print(f"  FAIL: P4 exited {rc_p4}", file=sys.stderr)
-            overall_rc = 1
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # H1: minrepro: F4 tree
-    # -------------------------------------------------------------------------
-    print("\n== H1  minrepro: F4 tree ==", flush=True)
-    try:
-        import importlib
-        import p19_minrepro_f4
-        importlib.reload(p19_minrepro_f4)
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # H2: minrepro: third program
-    # -------------------------------------------------------------------------
-    print("\n== H2  minrepro: third program ==", flush=True)
-    try:
-        import importlib
-        import p19_minrepro_thirdprog
-        importlib.reload(p19_minrepro_thirdprog)
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # H3: minrepro: device topology
-    # -------------------------------------------------------------------------
-    print("\n== H3  minrepro: device topology ==", flush=True)
-    try:
-        import importlib
-        import p19_minrepro_topo
-        importlib.reload(p19_minrepro_topo)
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
-    # -------------------------------------------------------------------------
-    # H4: minrepro: mesh geometry
-    # -------------------------------------------------------------------------
-    print("\n== H4  minrepro: mesh geometry ==", flush=True)
-    try:
-        import importlib
-        import p19_minrepro_mesh2d
-        importlib.reload(p19_minrepro_mesh2d)
-    except Exception as exc:
-        traceback.print_exc()
-        overall_rc = 1
-
+    return_code = _run_probe_sequence(
+        PROBES, num_devices=len(jax.devices()), emit=lambda line: print(line, flush=True)
+    )
     print("\n" + ("=" * 60), flush=True)
-    if overall_rc == 0:
-        print("===== T1 COMPLETE -- all probes produced measurements =====", flush=True)
-        print("NOTE: 'complete' means every probe ran and reported.  Whether the numbers ADMIT this", flush=True)
-        print("topology is a judgement against CLUSTER_ADMISSION.md, not an exit code.", flush=True)
+    if return_code == 0:
+        print(
+            "===== T1 COMPLETE -- all applicable probes produced measurements =====",
+            flush=True,
+        )
+        print(
+            "NOTE: COMPLETE proves execution coverage only. Admission still requires "
+            "interpreting the paired-arm metrics in CLUSTER_ADMISSION.md.",
+            flush=True,
+        )
     else:
-        print("===== T1 FAIL -- a probe did not run or exited nonzero =====", flush=True)
-    return overall_rc
+        print(
+            "===== T1 FAIL -- the first failing probe tainted all later probes =====",
+            flush=True,
+        )
+    return return_code
 
 
 if __name__ == "__main__":
