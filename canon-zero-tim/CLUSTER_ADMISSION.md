@@ -96,8 +96,8 @@ Historical directly-attached four-device observations, in differing bytes out of
 not be used to rank two dirty arms. Use `rel_l2`, `one_minus_cos`, and `max_abs` for magnitude.
 In particular, `91371 > 90582` does not show that F4 made anything worse.
 
-The archived Attempt 0 measured only widths 2 and 4. The next registered schedule is `2,4,8`, so
-it must produce 18 rows for depths `8,15` and three arms. TP8 here is a generic platform
+The current 64-chip discovery artifact completed widths `2,4,8`: 18 rows for depths `8,15` and
+three arms. Every row is dirty, including the replicated arms. TP8 here is a generic platform
 diagnostic only. The installed Qwen8B production contract, P1b and T2 remain TP4.
 
 Read the generic P1 table as a paired diagnostic:
@@ -204,6 +204,11 @@ contract is:
 - one AdamW arithmetic step emits stable SHA-256s for gradient, parameter and both moments;
 - the measured mesh id sequence can be pinned and reproduced in a fresh run.
 
+The first 64-chip T2 process measured an exact `(16,4)` order and passed the numerical checks, but
+the expected-id variable was empty in that process. `jobset-64chip.yaml` now pins the observed
+order and requires it at preflight. Only a fresh run that reproduces the pin upgrades T2 from
+discovery evidence to admission evidence. Other manifests must measure and pin their own ids.
+
 The probe also redistributes the same global samples across DP ranks. This is an observation, not
 an initial hard gate. Local CPU evidence already shows the regrouped gradient changes even under
 the fixed-order reference, because local partial sums were grouped differently *before* the
@@ -216,9 +221,9 @@ invariance. Either freeze placement or accumulate canonical per-example contribu
 
 Say these out loud in any report from a new topology.
 
-- **Pathways proxy backend.** Every result here was measured against a directly-attached TPU.
-  Pathways is a different runtime with its own compilation and dispatch path. Whether program
-  identity behaves the same under it is simply unknown.
+- **Full-model Pathways behavior.** One single-slice 64-device Pathways discovery process now
+  covers the bounded P1a/P1b operator chain and T2 arithmetic. The train-mesh pin still needs an
+  independent process repeat, and no full model, rollout or training step has run there.
 - **FSDP parameter sharding.** A mesh axis named `fsdp` may shard parameters and all-gather
   them per layer in the forward. That is another collective in the forward path, and it has
   never been characterised here. Isolate it: run gates before training.

@@ -118,8 +118,10 @@ canon-zero-tim/
       ROPE 正确判 `not_needed`、overlay 字节+活体 import 双通道全绿。详见 `phase5.md`
 - [ ] P6a round-trip 便宜层
 - [ ] P6b round-trip 完整层(等单独批准)
-- [~] **P7 DP16×TP4 admission** — CPU probe + negative control PASS; 64-chip Pathways NOT RUN.
-      The P32 profile is fail-closed and does not admit training. See `phase7.md`.
+- [~] **P7 DP16×TP4 admission** — first 64-chip process completed: P1b and T2 discovery checks
+      pass, while generic P1 is complete/dirty. A fresh process must reproduce the pinned train
+      mesh under strict provenance before admission. The P32 profile remains admission-only and
+      does not admit training. See `phase4.md` and `phase7.md`.
 
 P7 authorization supersedes only the historical no-push boundary above: on 2026-08-06 the user
 explicitly approved committing and pushing P31+P32 to `yuxzhang/canon-zero-tim`. It does not

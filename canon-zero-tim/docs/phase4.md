@@ -1,7 +1,7 @@
 # Phase 4 — T1 层 + 新集群准入探针
 
-Status: **generic P1 Attempt 0 complete/dirty; P1b blocked by Mosaic v15/server<=13;
-TP2/4/8 scan and P1a compatibility gate implemented locally**
+Status: **64-chip discovery process complete; P1a/P1b green; T2 discovery green;
+fresh pinned/provenance-clean rerun pending**
 Date: 2026-08-07
 
 ---
@@ -30,14 +30,14 @@ Date: 2026-08-07
 - [x] **P4.6** Replace device-prefix probes with full-slice `(replica,tp)` P1 arms; add
       replicated/stock/F4 paired inputs, physical group attestation, magnitude metrics, strict
       measurement counts, and unified-runner fail-stop semantics
-- [ ] **P4.7** GATE: fresh 64-chip Pathways rerun of `(32,2)`, `(16,4)` and diagnostic `(8,8)`
+- [x] **P4.7** GATE: fresh 64-chip Pathways rerun of `(32,2)`, `(16,4)` and diagnostic `(8,8)`
 - [x] **P4.8** Add a hard P1b gate that calls the live P22.XK Qwen MLP operator chain at the
       installed model dimensions and differentiates weights on the full `(replica, model)` mesh
 - [x] **P4.9** Move optional T2 into the unified Python client after P1b; make Step 75 a pure
       persisted-marker validator so it cannot create a second IFRT proxy client
 - [x] **P4.9a** Add P1a: report client JAX/JAXLIB/PathwaysUtils versions and compile the exact
       promoted RMSNorm through Mosaic before P1b
-- [ ] **P4.10** GATE: fresh 64-chip P1b depths `1,2,4,8`, then same-session DP16×TP4 T2
+- [~] **P4.10** GATE: P1b and same-session T2 measured; pinned fresh-process repeat pending
 
 ## GATE 状态
 
@@ -125,3 +125,20 @@ fail-closed 行为得到实证)。
 - Local gates: T1 `26/26`, T2/validator `5/5`, profile widths positive and `2,4` negative,
   Python/Bash/diff/English-output checks PASS.
 - Hardware status: TP8 generic P1, P1a, P1b and T2 are NOT RUN after this extension.
+
+**2026-08-07 — first complete 64-chip discovery process**
+
+- Artifact: `debug_logs/head_jax_tpu.log`, SHA-256
+  `cfe47420b7b95f64ab45ce3fe1b631616ebfde96837c6f80301177895d3afd72`.
+- Attempt 0 completed P1a, all 18 generic P1 rows, P1b at depths `1,2,4,8`, and same-session T2.
+  P1b is bitwise with live gradients. Generic P1 is complete but all arms are dirty and remains
+  advisory. H2 is an expected-red negative control.
+- T2 fixed-placement checks passed and measured the exact train mesh. Because the expected pin
+  was empty in that process, this is discovery evidence rather than release admission.
+- The old sync step printed `dirty_files=5` without classifying the entries. The next revision
+  fails on tracked drift or package-local untracked files and reports unrelated image files
+  separately.
+- The standard 64-chip manifest now pins the measured order and requires it. The 256-cluster
+  manifest remains discovery-only because its 144..207 device range requires an independent pin.
+- Next gate: a fresh Attempt 0 with exact train-mesh reproduction and clean package provenance.
+  No model initialization or training is admitted by this result.

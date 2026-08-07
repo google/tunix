@@ -25,17 +25,16 @@ It is packaging of work already done, not a new result. What is signed and what 
 | CPU mathematical gates | **pass** — plus a negative control that rejects 4 kinds of bad run |
 | **Direct-attached 4-chip T1 rerun from this package** | **NOT RUN** — the probe host's TPU was busy |
 | DP gradient/update probe on CPU | **PASS** — fixed placement repeats; regrouped samples change bits |
-| **Generic DP16×TP4 diagnostic on Pathways/GKE** | **COMPLETE, DIRTY** — 12/12 full-slice rows completed; replicated, stock and F4 arms all show third-program drift. This is platform evidence, not a production-Qwen verdict. |
-| **Canonical Qwen operator P1b on Pathways/GKE** | **INFRASTRUCTURE INCONCLUSIVE** — the first promoted RMSNorm emitted stable Mosaic v15, while the service accepted only <=13; no numerical row was produced. |
-| **Same-session T2 on Pathways/GKE** | **NOT RUN** — P1b failed before measurement and correctly tainted/skipped T2. |
+| **Generic DP16×TP4 diagnostic on Pathways/GKE** | **COMPLETE, DIRTY** — 18/18 TP2/4/8 rows completed; replicated, stock and F4 arms all show third-program drift. This is platform evidence, not a production-Qwen verdict. |
+| **Canonical Qwen operator P1b on Pathways/GKE** | **PASS in first process** — depths 1/2/4/8 are bitwise with live gradients after matching JAX/Pathways releases. |
+| **Same-session T2 on Pathways/GKE** | **DISCOVERY PASS** — fixed-placement checks passed, but the first process had no expected train-mesh pin. A fresh pinned Attempt 0 is required. |
 | **Round-trip: install from this package, reproduce signed numbers** | **NOT RUN** |
-| Pathways numerical admission | **NOT PASSED** — requires canonical P1b PASS followed by same-session T2 PASS |
+| Pathways numerical admission | **PENDING PINNED REPEAT** — the first process measured the pin; provenance and exact train-mesh order must pass in a fresh process |
 
-**The next useful action on the 64-chip target is Task C in `RUNBOOK.md`** — align the
-JAX/Pathways release family, then rerun `dp-gate-only`. Generic P1 now scans TP widths `2,4,8`;
-P1a records client versions and compiles the exact promoted RMSNorm before P1b. A P1a/P1b red
-stops T2; a P1b green permits the DP fixed-placement gate without starting another client. TP8
-remains diagnostic until a separate Qwen8B TP8 production contract exists.
+**The next useful action on the 64-chip target is Task C in `RUNBOOK.md`** — rerun
+`dp-gate-only` with the measured train mesh pinned and the strict provenance split enabled.
+P1a/P1b and T2 must remain green in that fresh process. TP8 remains diagnostic until a separate
+Qwen8B TP8 production contract exists.
 
 ---
 

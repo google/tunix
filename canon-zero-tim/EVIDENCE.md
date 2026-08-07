@@ -48,8 +48,9 @@ strongly-supported rather than proven.
   configuration*. The mechanism behind cross-bucket drift is still unknown; pinning avoids it
   rather than fixing it, and pinning is not a production posture (decode pays for a 256-token
   bucket regardless of how few tokens it has).
-- **Anything on another topology.** Every number here comes from one directly-attached 4-chip
-  v5p host, single slice, TP4. Pathways, multi-slice, and any other reduction width are
-  untested — see `CLUSTER_ADMISSION.md`.
+- **A full-model or training claim on another topology.** The signed release numbers above still
+  come from one directly-attached 4-chip v5p host. A separate 64-chip single-slice Pathways
+  discovery process passed bounded P1b/T2 probes, but its pinned-repeat gate, full model,
+  multi-slice behavior and training remain unverified — see `CLUSTER_ADMISSION.md`.
 - **The production `nnx` training forward.** The signed `C` is the engine-module differentiable
   forward. The production tunix `nnx` path still differs by `0.0267`.

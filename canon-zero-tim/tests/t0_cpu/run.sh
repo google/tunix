@@ -72,6 +72,13 @@ done
 echo "$OUT2" | grep -aq '^\[msq\] VERDICT: PASS' || fail "multiseq verdict is not PASS"
 
 echo
-if [ "$RC" = 0 ]; then echo "===== T0 PASS (3 gates, 7 numeric measurements + shim-root unit) ====="
+echo "== T0.3  cluster pin and provenance contracts =="
+OUT3="$(python3 -m unittest -v "$HERE/test_cluster_contracts.py" 2>&1)" || fail "cluster contract tests exited nonzero"
+echo "$OUT3" | sed 's/^/  /'
+need '^Ran 7 tests in ' "$OUT3"
+need '^OK$' "$OUT3"
+
+echo
+if [ "$RC" = 0 ]; then echo "===== T0 PASS (4 gates, 7 numeric measurements + 8 unit tests) ====="
 else echo "===== T0 FAIL ====="; fi
 exit $RC

@@ -160,8 +160,10 @@ Start at `probe-only`. Full expected output, the red table, and the reporting fo
 `cluster/README.md` — that file is the operator guide for this task and supersedes this summary.
 
 For P32 use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env` and promote only through
-`dp-gate-only`. First measure the 64-id train mesh, then set `CANON_EXPECT_TRAIN_MESH_IDS` and
-repeat under a fresh label. Return `$CANON_STATE/t2_dp.log`; do not bypass the run refusal.
+`dp-gate-only`. The first 64-chip process measured the train mesh and the standard manifest now
+pins it with `CANON_REQUIRE_TRAIN_MESH_PIN=1`. Run a fresh Attempt 0 and require the same 64-id
+sequence. The 256-cluster manifest remains discovery-only until independently measured. Return
+`$CANON_STATE/t2_dp.log`; do not bypass the run refusal.
 
 **Two things to set before the first apply**, both in the manifest:
 - the `jax-tpu` image, **pinned by digest** — a floating `:latest` means the same manifest runs

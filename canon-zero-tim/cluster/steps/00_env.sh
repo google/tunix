@@ -60,6 +60,31 @@ positive_int() {
     fail=1
   }
 }
+validate_train_mesh_pin() {
+  local value="$1"
+  local -a ids=()
+  local id unique_count
+  IFS=',' read -r -a ids <<< "$value"
+  if [ "${#ids[@]}" -ne "$CANON_TOTAL_DEVICES" ]; then
+    echo "[env] P32 train mesh pin must contain exactly $CANON_TOTAL_DEVICES ids; got ${#ids[@]}" >&2
+    fail=1
+    return
+  fi
+  for id in "${ids[@]}"; do
+    if [[ ! "$id" =~ ^[0-9]+$ ]]; then
+      echo "[env] P32 train mesh pin contains a non-integer id" >&2
+      fail=1
+      return
+    fi
+  done
+  unique_count="$(printf '%s\n' "${ids[@]}" | sort -un | wc -l | tr -d '[:space:]')"
+  if [ "$unique_count" -ne "$CANON_TOTAL_DEVICES" ]; then
+    echo "[env] P32 train mesh pin must contain $CANON_TOTAL_DEVICES unique ids; got $unique_count" >&2
+    fail=1
+    return
+  fi
+  echo "[env] P32 train mesh pin OK: $unique_count unique ids"
+}
 for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED CANON_RPA_D CANON_RPA_P CANON_RPA_M \
          CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS CANON_LOGPROB_M CANON_PROMPT_PROCESSED_LOGPROBS \
          MIN_TOKEN_BUCKET NEW_MODEL_DESIGN XLA_FLAGS CANON_PROFILE CANON_MODEL_DIR_NAME \
@@ -87,6 +112,13 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
   req CANON_EXPECT_JAX_VERSION
   req CANON_EXPECT_PATHWAYS_RELEASE
   req CANON_TRAIN_DP_SHARDING
+  case "${CANON_REQUIRE_TRAIN_MESH_PIN:-0}" in
+    0|1) ;;
+    *)
+      echo "[env] CANON_REQUIRE_TRAIN_MESH_PIN must be 0 or 1" >&2
+      fail=1
+      ;;
+  esac
   [ "${CANON_TRAIN_DP_SHARDING:-}" = "replicated-params" ] || {
     echo "[env] P32 requires replicated-params, got ${CANON_TRAIN_DP_SHARDING:-unset}" >&2
     fail=1
@@ -132,6 +164,14 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
     echo "[env] P32 admission must keep the legacy trainer at TP4-only; 16,4 currently means FSDP" >&2
     fail=1
   }
+  if [ "${CANON_REQUIRE_TRAIN_MESH_PIN:-0}" = "1" ]; then
+    req CANON_EXPECT_TRAIN_MESH_IDS
+  fi
+  if [ -n "${CANON_EXPECT_TRAIN_MESH_IDS:-}" ]; then
+    validate_train_mesh_pin "$CANON_EXPECT_TRAIN_MESH_IDS"
+  else
+    echo "[env] P32 train mesh pin DISCOVERY: no release placement assertion"
+  fi
   echo "[env] P32 admission arithmetic OK: DP${CANON_DP_SIZE}xTP${CANON_TP_SIZE}, "\
 "${CANON_LOCAL_TRAJECTORIES} local / ${CANON_GLOBAL_TRAJECTORIES} global trajectories, "\
 "global M=${MIN_TOKEN_BUCKET}"

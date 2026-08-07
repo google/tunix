@@ -150,7 +150,9 @@ spec:
               - name: CANON_P32_EXPECT_MODEL_MESH_IDS
                 value: "144,160,176,192,148,164,180,196,152,168,184,200,156,172,188,204,145,161,177,193,149,165,181,197,153,169,185,201,157,173,189,205,146,162,178,194,150,166,182,198,154,170,186,202,158,174,190,206,147,163,179,195,151,167,183,199,155,171,187,203,159,175,191,207"
               - name: CANON_EXPECT_TRAIN_MESH_IDS
-                value: ""                  # fill from the first T2-DP MESH line
+                value: ""                  # discovery only: fill from this topology's first T2 MESH line
+              - name: CANON_REQUIRE_TRAIN_MESH_PIN
+                value: "0"                 # device ids 144..207 require an independent measurement
               - name: CANON_WORKER_WAIT_SECONDS
                 value: "600"
               - name: CANON_WAYCOUNT_WIDTHS

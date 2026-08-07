@@ -141,8 +141,19 @@ Use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env`. The expected terminal ma
 `auto_regroup_exact`: if false, the same samples assigned to different DP ranks are not bitwise
 invariant. Do not relabel that as a failed fixed-placement run or as arbitrary batch invariance.
 
-The first run leaves `CANON_EXPECT_TRAIN_MESH_IDS` empty to measure placement. Pin the printed ids
-and rerun. Only the pinned rerun is admission evidence.
+The first 64-chip run measured the train mesh as:
+
+```
+0,1,2,3,16,17,18,19,32,33,34,35,48,49,50,51,
+4,5,6,7,20,21,22,23,36,37,38,39,52,53,54,55,
+8,9,10,11,24,25,26,27,40,41,42,43,56,57,58,59,
+12,13,14,15,28,29,30,31,44,45,46,47,60,61,62,63
+```
+
+`jobset-64chip.yaml` pins that exact sequence and sets `CANON_REQUIRE_TRAIN_MESH_PIN=1`. The next
+fresh run is the admission attempt: a missing, malformed or changed pin fails before promotion.
+`jobset-256cluster-64chip.yaml` remains an explicit discovery manifest because its device ids are
+144..207; never reuse the 0..63 order on it.
 
 ### `run`
 
@@ -160,6 +171,7 @@ Ranked by how easily each is mistaken for success.
 |---|---|---|
 | **`JOBSET_ATTEMPT` is not 0, or is unknown** | The JobSet restarts on failure and a red gate is a failure, so this log may be from a later attempt while `kubectl logs` shows only the current pod. A verdict from a retried run is not evidence of determinism -- it is evidence that one attempt out of several passed. | Report the attempt number with the verdict. For a strict single-shot gate set `failurePolicy.maxRestarts: 0` for that run. |
 | **Missing successful `[T1.PATHWAYS]` marker** | The proxy backend was not proven initialized before JAX import. A local/direct-TPU fallback would test a different runtime. | **Void the topology run.** In proxy mode, import/initialization failure must exit nonzero. |
+| **`tracked_dirty` or `package_untracked` is nonzero** | The checked-out commit does not fully define the executable package. An untracked module may shadow reviewed code. | Stop before install. Unrelated image-owned files outside `canon-zero-tim/` are reported separately as `external_untracked` and do not bypass the package gate. |
 | **No `[PATHTRACE]` lines** | The intervention never executed. The chain is imported by path and by module name; a missing member does not raise — the engine silently uses its stock module while every switch still reads "on". | **Void the run.** Do not report its numbers. |
 | **A gate printed no measurement line** | It did not run. Absence is never a pass. | Investigate before rerunning. |
 | **`SKIP_TAINTED` appears** | The named earlier probe failed or raised; all later probes were intentionally suppressed because the Pathways session may be contaminated. | Fix the first failure and rerun from a fresh JobSet attempt. Never reuse earlier downstream rows from the failed session. |
