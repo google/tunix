@@ -22,20 +22,14 @@ import jax
 from jax import numpy as jnp
 import jaxtyping
 import numpy as np
+from tunix.common import configs
+
+CacheConfig = configs.CacheConfig
+RolloutConfig = configs.RolloutConfig
 from tunix.generate import mappings
 
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
-
-
-@dataclasses.dataclass(frozen=True)
-class CacheConfig:
-  """Configuration for the KV cache."""
-
-  cache_size: int
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
 
 
 @dataclasses.dataclass
@@ -62,193 +56,6 @@ class RolloutOutput:
 
   # The log probs from sampler generations.
   logprobs: list[np.ndarray] | None
-
-
-@dataclasses.dataclass
-class RolloutConfig:
-  """Configuration for the rollout worker.
-
-  Fields should be mapped to a subset of vLLM sampling knobs
-  https://docs.vllm.ai/en/v0.6.4/dev/sampling_params.html
-  """
-
-  # Maximum number of tokens to generate per output sequence
-  max_tokens_to_generate: int = 64
-
-  # Float that controls the randomness of the sampling.
-  # Lower values make the model more deterministic, while higher values make the
-  # model more random. Zero means greedy sampling.
-  temperature: float = 0.9
-
-  # Float that controls the cumulative probability of the top tokens to
-  # consider. Must be in (0, 1]. Set to 1 to consider all tokens.
-  top_p: float | None = 1.0
-
-  # Integer that controls the number of top tokens to consider. Set to -1 to
-  # consider all tokens.
-  top_k: int | None = None
-
-  # Random seed to use for the generation.
-  seed: jax.Array | None = None
-
-  # Maximum length of the prompt. The prompt will be padded/truncated to this
-  # length.
-  max_prompt_length: int = 64
-
-  # Only used for vanilla rollout engine.
-  kv_cache_size: int = 1024  # Only used for vanilla rollout engine.
-
-  # data type of the rollout model.
-  data_type: jnp.dtype | None = None
-
-  # EOS tokens to stop the generation. If not defined, eos_id from tokenizer
-  # will be used.
-  eos_tokens: list[int] | None = None
-
-  # Weights mapping config for the rollout model.
-  rollout_mapping_config: mappings.MappingConfig | None = None
-
-  # Parallelism configs.
-  tensor_parallel_size: int = -1
-  data_parallel_size: int = -1
-  expert_parallel_size: int = 1
-
-  # Whether to return logprobs from the sampler.
-  return_logprobs: bool = False
-
-  # vLLM specific rollout configs.
-
-  # Whether to run rollout in vLLM server mode or batch inference mode.
-  rollout_vllm_server_mode: bool = False
-
-  # Only drain the vLLM server-mode submission queue once at least this many
-  # requests have accumulated. 0 disables the threshold.
-  rollout_vllm_server_mode_submission_threshold: int = 0
-
-  # Flush the vLLM server-mode submission queue after this many seconds have
-  # elapsed since the first request of the current window arrived, even if the
-  # submission threshold has not been reached. This bounds latency when fewer
-  # than the threshold accumulate. 0 disables the timeout.
-  rollout_vllm_server_mode_submission_timeout_s: float = 0.0
-
-  # Model version for vLLM rollout engine.
-  rollout_vllm_model_version: str = ""
-
-  # LoRA config for vLLM rollout engine.
-  rollout_vllm_lora_config: dict[str, Any] | None = None
-
-  # Allocated HBM fraction for vLLM rollout engine.
-  rollout_vllm_hbm_utilization: float = 0.2
-
-  # Whether to initialize vLLM model with random weights or huggingface weights.
-  rollout_vllm_init_with_random_weights: bool = True
-
-  # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
-  rollout_vllm_tpu_backend_type: str | None = None
-
-  # Whether to enable asynchronous scheduling for vLLM rollout engine.
-  rollout_vllm_async_scheduling: bool = False
-
-  # Mode for processing logprobs from vLLM.
-  rollout_vllm_logprobs_mode: str = "processed_logprobs"
-
-  # Configs for MaxText/Custom Model support in vLLM rollout engine.
-  rollout_vllm_hf_config_path: str | None = None
-  rollout_vllm_additional_config: dict[str, Any] | None = None
-
-  # Whether to enable data parallel in attention for vLLM rollout engine.
-  # The "attn_dp" mesh axis is used when the degree of tensor parallelism
-  # specified is more than the number of KV heads in the model. Enabling this
-  # allows for non-attention tensors to be sharded across "attn_dp" and "model"
-  # axes, which can help reduce memory usage for large models with few KV heads.
-  rollout_vllm_enable_dp_attention: bool = False
-
-  # Whether to delete destination buffers when synchronizing weights between
-  # trainer and vLLM model. Default to True to ensure old weights are deleted
-  # to free up HBM memory.
-  rollout_vllm_delete_dst_buffers: bool = True
-
-  # Maximum number of batched tokens allowed in vLLM. This allows for pending prefill requests
-  # to be batched along with decode requests if enough tokens are available. Only used when
-  # chunked prefill is enabled.
-  rollout_vllm_max_num_batched_tokens: Optional[int] = None
-
-  # Maximum number of concurrent sequences allowed to be processed in vLLM.
-  rollout_vllm_max_num_seqs: Optional[int] = None
-
-  # Number of flat keys to reshard at a time when synchronizing weights between
-  # trainer and vLLM model. None (default) reshards the whole model in one call.
-  # Set to a smaller value to reduce peak HBM pressure on large models.
-  rollout_vllm_reshard_chunk_size: Optional[int] = None
-
-  # Additional keyword arguments forwarded directly to the vLLM engine constructor.
-  rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-  # Additional keyword arguments forwarded directly to the vLLM sampling params.
-  rollout_vllm_sampling_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-  # SG-Lang JAX specific rollout configs.
-
-  # Model version for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_model_version: str = ""
-
-  # Context length for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_context_length: Optional[int] = None
-
-  # Allocated HBM fraction for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_mem_fraction_static: float = 0.2
-
-  # Whether to initialize SG-Lang JAX model with random weights.
-  rollout_sglang_jax_init_with_random_weights: bool = True
-
-  # Radix cache disabling flag for SG-Lang JAX rollout engine. Default to True for RL.
-  rollout_sglang_jax_disable_radix_cache: bool = True
-
-  # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_enable_deterministic_sampling: bool = False
-
-  # Whether to use sort or mask implementation in sampler, sort has better evaluation result.
-  rollout_sglang_jax_use_sort_for_toppk_minp: bool = True
-
-  # Whether to use lora
-  rollout_sglang_jax_enable_static_lora: bool = False
-
-  # Whether to use single controller mode, single controller mode is required in pathways
-  rollout_sglang_jax_enable_single_process: bool = True
-
-  # Specify the modules which are required to use lora
-  rollout_sglang_jax_lora_target_modules: Optional[List[str]] = None
-
-  # Specify the lora RANK
-  rollout_sglang_jax_max_lora_rank: Optional[int] = None
-
-  rollout_sglang_jax_lora_scaling: Optional[float] = None
-
-  # Specify the paddings for batch_size
-  rollout_sglang_jax_precompile_bs_paddings: Optional[List[int]] = None
-
-  # Specify the paddings for tokens which is used in prefll
-  rollout_sglang_jax_precompile_token_paddings: Optional[List[int]] = None
-
-  # Specify the the maximum number of tokens in a chunk for the chunked prefill
-  rollout_sglang_jax_chunked_prefill_size: Optional[int] = -1
-
-  # The number of tokens in a page
-  rollout_sglang_jax_page_size: int = 128
-
-  # The format of the model weights to load.
-  rollout_sglang_jax_load_format: str = "auto"
-
-  # The maximum number of running requests to accumulate batch
-  rollout_sglang_jax_max_running_requests: Optional[int] = None
-
-  # The log level of sglang_jax
-  rollout_sglang_jax_log_level: Optional[str] = "info"
-
-  # Additional keyword arguments forwarded directly to the SG-Lang JAX sampler/engine.
-  rollout_sglang_jax_kwargs: dict[str, Any] = dataclasses.field(
-      default_factory=dict
-  )
 
 
 class BaseRollout(ABC):
