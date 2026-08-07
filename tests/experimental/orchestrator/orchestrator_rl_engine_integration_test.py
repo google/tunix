@@ -16,17 +16,11 @@
 
 The whole point of the cluster-swap approach is that an existing `GRPOLearner`
 built against the in-process cluster works verbatim when handed an
-`OrchestratorRLEngine` instead -- generation, training, scoring, and weight
-sync
-route through the orchestrator's primitives with no learner changes. These tests
-run the real agentic loop on a toy model both with a trainer worker handle and
-in
-pure-delegation mode.
+`OrchestratorRLEngine` instead. This test runs the real agentic loop on a toy
+model in pure-delegation mode.
 """
 
 import os
-from unittest import mock
-
 from absl.testing import absltest
 import chex
 from flax import nnx
@@ -34,7 +28,6 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import optax
-from tunix.experimental.orchestrator import inprocess_workers
 from tunix.experimental.orchestrator import orchestrator_rl_engine
 from tunix.generate import tokenizer_adapter
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -152,28 +145,6 @@ class OrchestratorRlEngineIntegrationTest(absltest.TestCase):
         {"prompts": [str(i)], "answer": [str(i)], "question": [str(i)]}
         for i in range(4)
     ]
-
-  def test_learner_trains_through_orchestrator_cluster_with_handle(self):
-    max_steps = 2
-    base, model = self._build_base_engine(max_steps)
-    original_params = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
-
-    handle = inprocess_workers.InProcessTrainerWorker(base)
-    cluster = orchestrator_rl_engine.OrchestratorRLEngine(
-        base, trainer_worker=handle
-    )
-    learner = self._make_learner(cluster)
-
-    with mock.patch.object(handle, "train", wraps=handle.train) as spy_train:
-      learner.train(self._train_ds())
-
-    # Training was driven through the trainer handle via the cluster primitive.
-    self.assertGreater(spy_train.call_count, 0)
-    self.assertEqual(base.global_steps, max_steps)
-    updated_params = nnx.state(model, nnx.Param)
-    jax.tree.map_with_path(
-        test_common.assert_not_equal, original_params, updated_params
-    )
 
   def test_learner_trains_through_orchestrator_cluster_pure_delegation(self):
     # With no handles, OrchestratorRLEngine is a drop-in for the base engine:

@@ -28,6 +28,7 @@ class _FakeBaseEngine:
     self.generate_calls = []
     self.update_actor_calls = []
     self.update_critic_calls = []
+    self.eval_actor_calls = []
     self.sync_calls = 0
     self.ref_calls = []
     self.actor_calls = []
@@ -46,6 +47,9 @@ class _FakeBaseEngine:
 
   def update_actor(self, *args):
     self.update_actor_calls.append(args)
+
+  def eval_actor(self, *args):
+    self.eval_actor_calls.append(args)
 
   def update_critic(self, *args):
     self.update_critic_calls.append(args)
@@ -86,6 +90,7 @@ class _FakeStepTrainerWorker:
   def __init__(self):
     self.fwd_bwd_calls = []
     self.update_calls = []
+    self.eval_calls = []
     self.configure_calls = []
 
   def configure_grpo_loss(self, **kwargs):
@@ -95,9 +100,12 @@ class _FakeStepTrainerWorker:
   def fwd_bwd(self, chunk):
     self.fwd_bwd_calls.append(chunk)
 
-  def update(self, eval_ds=None, skip_jit=False):
-    self.update_calls.append((eval_ds, skip_jit))
+  def update(self, skip_jit=False):
+    self.update_calls.append(skip_jit)
     return 7
+
+  def run_eval(self, eval_ds):
+    self.eval_calls.append(eval_ds)
 
 
 class _FakeRolloutWorker:
@@ -184,8 +192,23 @@ class OrchestratorRlEngineTest(absltest.TestCase):
     )
     self.assertEqual(routed.update_actor(["c0", "c1"], "eval", True), 7)
     self.assertEqual(worker.fwd_bwd_calls, ["c0", "c1"])
-    self.assertEqual(worker.update_calls, [("eval", True)])
+    self.assertEqual(worker.update_calls, [True])
+    self.assertEqual(worker.eval_calls, ["eval"])
     self.assertEmpty(base.update_actor_calls)
+
+  def test_eval_actor_routes_then_falls_back(self):
+    base = _FakeBaseEngine()
+    worker = _FakeStepTrainerWorker()
+    routed = orchestrator_rl_engine.OrchestratorRLEngine(
+        base, trainer_worker=worker
+    )
+    routed.eval_actor(["eval"])
+    self.assertEqual(worker.eval_calls, [["eval"]])
+    self.assertEmpty(base.eval_actor_calls)
+
+    fallback = orchestrator_rl_engine.OrchestratorRLEngine(base)
+    fallback.eval_actor(["eval"])
+    self.assertEqual(base.eval_actor_calls, [(["eval"],)])
 
   def test_sync_weights_routes_then_falls_back(self):
     base = _FakeBaseEngine()

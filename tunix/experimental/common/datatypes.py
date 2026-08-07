@@ -30,8 +30,21 @@ from tunix.rl.agentic.agents import agent_types
 
 ##### Worker-internal datatypes #####
 
+
+# TODO(noghabi): Consolidate Role with rl_cluster.Role.
+class Role(enum.Enum):
+  """Role of the model."""
+
+  ACTOR = "actor"  # policy model
+  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
+  REFERENCE = "reference"  # kept fixed during training
+  REWARD = "reward"
+  ROLLOUT = "rollout"
+
+
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
+TrajectoryItem = agent_types.TrajectoryItem
 Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
 
@@ -196,8 +209,8 @@ class RolloutRequest(Request):
     prompt: The prompt to generate from (e.g. formatted string, token array, or
       chat dictionary).
     prompt_id: Unique identifier for this prompt within a task or dataset.
-    group_id: Optional identifier for grouping related rollout requests (e.g.
-      for GRPO).
+    group_offset_id: Optional identifier for grouping related rollout requests
+      (e.g. for GRPO).
     generation_kwargs: Additional keyword arguments for generation (e.g.
       sampling parameters like max_tokens and temperature).
     max_turns: Maximum number of conversation turns for environment interaction.
@@ -207,17 +220,17 @@ class RolloutRequest(Request):
 
   prompt: Any = ""
   prompt_id: str = "default_prompt"
-  group_id: str = ""
+  group_offset_id: str = ""
   generation_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
   max_turns: int = 10
   target_policy_version: int = 0
 
   @property
   def traj_id(self) -> str:
-    """Standardized semantic trajectory identifier computed from prompt_id and group_id."""
+    """Standardized semantic trajectory identifier computed from prompt_id and group_offset_id."""
     return (
-        f"traj_{self.prompt_id}_{self.group_id}"
-        if self.group_id
+        f"traj_{self.prompt_id}_{self.group_offset_id}"
+        if self.group_offset_id
         else f"traj_{self.prompt_id}"
     )
 
@@ -265,6 +278,7 @@ class RolloutResponse(Response):
   response.
 
   Attributes:
+    prompt_id: Unique identifier for this prompt within a task or dataset.
     status: Terminal status name (e.g. a rollout trajectory status, or
       "CANCELLED").
     prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
@@ -276,6 +290,7 @@ class RolloutResponse(Response):
     error: Failure details when the request did not succeed, else None.
   """
 
+  prompt_id: str = ""
   status: str
   prompt_tokens: np.ndarray = dataclasses.field(
       default_factory=lambda: np.zeros(0, dtype=np.int32)
@@ -367,7 +382,6 @@ class TrainerPayload:
   token_ids: ArrayLike
   token_mask: ArrayLike
   segment_ids: ArrayLike | None = None
-
 
 ##### Weight Sync DTOs #####
 

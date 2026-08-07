@@ -53,7 +53,7 @@ def _rollout_request_dto() -> datatypes.RolloutRequest:
       request_id="req-123",
       prompt="Solve 2+2",
       prompt_id="req-rollout-42",
-      group_id="group-1",
+      group_offset_id="group-1",
       generation_kwargs={"max_tokens": 128, "temperature": 0.5},
       max_turns=5,
       target_policy_version=3,
@@ -71,7 +71,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.prompt, original.prompt)
     self.assertEqual(restored.prompt_id, original.prompt_id)
-    self.assertEqual(restored.group_id, original.group_id)
+    self.assertEqual(restored.group_offset_id, original.group_offset_id)
     self.assertEqual(restored.generation_kwargs, original.generation_kwargs)
     self.assertEqual(restored.max_turns, original.max_turns)
     self.assertEqual(

@@ -222,6 +222,10 @@ class OrchestratorRLEngine:
       return None
 
     base = self._require_base("eval_actor")
+    base_eval_actor = getattr(base, "eval_actor", None)
+    if callable(base_eval_actor):
+      return base_eval_actor(eval_ds)
+
     actor_trainer = getattr(base, "actor_trainer", None)
     run_eval = getattr(actor_trainer, "_run_eval", None)
     if callable(run_eval):
