@@ -204,6 +204,36 @@ if [ "${CANON_MODE:-}" = "model-init-only" ]; then
   }
   echo "[env] P32 model-init-only contract OK: structural state, zero commits"
 fi
+if [ "${CANON_MODE:-}" = "dp16-rc" ]; then
+  for k in CANON_P32_RC CANON_P32_RC_STAGE CANON_P32_CHECKPOINT_DIR \
+           CANON_P32_OPTIMIZER_MEMORY_KIND; do
+    req "$k"
+  done
+  [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] || {
+    echo "[env] dp16-rc requires the P32 DP admission contract" >&2
+    fail=1
+  }
+  [ "${CANON_P32_RC:-0}" = "1" ] || {
+    echo "[env] dp16-rc requires CANON_P32_RC=1" >&2
+    fail=1
+  }
+  [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "0" ] || {
+    echo "[env] dp16-rc must not admit production training" >&2
+    fail=1
+  }
+  case "${CANON_P32_RC_STAGE:-}" in
+    checkpoint-forward|backward|one-update|three-update) ;;
+    *)
+      echo "[env] invalid CANON_P32_RC_STAGE=${CANON_P32_RC_STAGE:-unset}" >&2
+      fail=1
+      ;;
+  esac
+  [ "${CANON_P32_OPTIMIZER_MEMORY_KIND:-}" = "pinned_host" ] || {
+    echo "[env] dp16-rc requires pinned-host optimizer state" >&2
+    fail=1
+  }
+  echo "[env] P32 dp16-rc contract OK: stage=${CANON_P32_RC_STAGE} production_training=refused"
+fi
 [ "$fail" = 0 ] || { echo "[env] REFUSING TO CONTINUE: canonical set incomplete" >&2; exit 1; }
 
 # Emit the resolved configuration.  Secrets are re-exported by later steps from the process

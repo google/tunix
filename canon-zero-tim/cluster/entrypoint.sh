@@ -19,6 +19,8 @@
 #                sensitivity and one small AdamW update.  Still no model or training.
 #   model-init-only 00..60 + P32 model/optimizer/accumulator materialization.  No
 #                checkpoint load, forward, backward, update or training.
+#   dp16-rc      00..60 + P32 real-checkpoint release-candidate stage. The stage is
+#                selected by CANON_P32_RC_STAGE and remains production-default-off.
 #   run          00..90 -- everything, then the command in CANON_RUN_CMD.
 #
 # Every step is fail-closed and ordered.  A step that produces no output did not run, and a
@@ -42,7 +44,7 @@ log() { echo "[entrypoint] $*"; }
 die() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
 case "$MODE" in
-  probe-only|install-only|gate-only|dp-gate-only|model-init-only|run) ;;
+  probe-only|install-only|gate-only|dp-gate-only|model-init-only|dp16-rc|run) ;;
   *) die "unknown CANON_MODE: $MODE" ;;
 esac
 
@@ -113,6 +115,13 @@ if [ "$MODE" = "model-init-only" ]; then
   step 60_wait_workers.sh
   step 80_model_init.sh
   log "mode=model-init-only -- structural state materialized; no checkpoint, forward, backward, update or training was run."
+  exit 0
+fi
+
+if [ "$MODE" = "dp16-rc" ]; then
+  step 60_wait_workers.sh
+  step 85_run_dp16_rc.sh
+  log "mode=dp16-rc -- bounded release-candidate stage complete; no production training was admitted."
   exit 0
 fi
 
