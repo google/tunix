@@ -922,6 +922,7 @@ if MODEL_SOURCE == "maxtext":
           "log_config": False,
           "weight_dtype": "bfloat16",
           "prefuse_moe_weights": True,
+          "attention": "vllm_rpa",
       }
   }
   # Force no-op mappings for weight sync if both trainer and sampler use MaxText
