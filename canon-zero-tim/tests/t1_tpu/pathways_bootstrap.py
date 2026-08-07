@@ -101,9 +101,12 @@ def initialize_pathways(
     try:
         from absl import flags as _absl_flags
         try:
-            _absl_flags.FLAGS([""])
+            _absl_flags.FLAGS(["prog", "--pathways_enforce_subset_devices_form_subslice=false", "--FLAGS_pathways_enforce_subset_devices_form_subslice=false"], known_only=True)
         except Exception:
-            pass
+            try:
+                _absl_flags.FLAGS(["prog"])
+            except Exception:
+                pass
         if hasattr(_absl_flags.FLAGS, "pathways_enforce_subset_devices_form_subslice"):
             _absl_flags.FLAGS.set_default("pathways_enforce_subset_devices_form_subslice", False)
             _absl_flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
