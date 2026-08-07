@@ -34,6 +34,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
       tokenizer: Any,
       mesh: jax.sharding.Mesh,
       rollout_config: base_rollout.RolloutConfig,
+      converter: Any = None,
   ):
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
@@ -42,6 +43,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
     )
     self._sampler = sglang_jax_sampler.SglangJaxSampler(
         tokenizer=tokenizer,
+        converter=converter,
         config=sglang_jax_sampler.SglangJaxConfig(
             mesh=mesh,
             mapping_config=mapping_config,
