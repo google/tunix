@@ -891,6 +891,10 @@ vllm_rollout_dict = {
         "enable_prefix_caching": True,
         "tokenizer": tokenizer_path,
     },
+    "rollout_vllm_sampling_kwargs": {
+        "stop": ["</function>"],
+        "detokenize": True,
+    },
 }
 
 if MODEL_SOURCE == "maxtext":
@@ -1043,7 +1047,11 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "reward_timeout": REWARD_TIMEOUT_SECS,
     },
     algo_config=grpo_config,
-    chat_parser=chat_parser,
+    # Disabling the custom chat parser is required to fallback to the tokenizer's
+    # native ChatML template. Qwen 3.5 depends on specific <think> and </think> tags
+    # to trigger its reasoning blocks; the default parser would strip these tags,
+    # causing the model to output unstructured gibberish.
+    chat_parser=None,
 )
 
 
