@@ -1,0 +1,270 @@
+XPK Start: 2026-08-07T22:26:11Z
+[entrypoint] start 2026-08-07T22:26:14Z  mode=model-init-only  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-zero-tim-v5p-64-pathways-head-0-0-4jn7s
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P32 train mesh pin DISCOVERY: no release placement assertion
+[env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
+[env] P32 model-init-only contract OK: structural state, zero commits
+[env] profile=qwen3-8b-dp16-tp4-model-init model_dir=qwen8b
+[env] resolved configuration written to /tmp/canon-state/env.sh (84 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=ce0511ee068be38431e005faccfc149694dccb5d
+[sync] describe=ce0511ee Use on-device JIT zero allocation in probe_qwen8b_init to eliminate host thread exhaustion
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] tpu_inference=/usr/local/lib/python3.12/site-packages/tpu_inference
+[probe] SAME      layers/common/attention_interface.py
+[probe] SAME      layers/jax/embed.py
+[probe] SAME      layers/jax/linear.py
+[probe] SAME      models/jax/qwen2.py
+[probe] SAME      models/jax/qwen3.py
+[probe] SAME      runner/tpu_runner.py
+[probe] SUMMARY same=6 drift=0 missing=0
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] new form already present (upstream) -- not patching
+[rope]   35:from tpu_inference.layers.jax.rope_interface import (apply_rope,
+[rope]   66:        self.rope_theta = get_rope_theta(config, default=1000000.0)
+[rope]   67:        self.rope_scaling = get_rope_scaling(config)
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 30_install_canon.sh
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b)
+[4/4] verifying against MANIFEST.sha256
+      all 29 files match (qwen8b)
+
+Installed to: /tmp/canon-state/canon   (model=qwen8b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/tmp/canon-state/canon:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/canon-state/canon          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+[install] installed to /tmp/canon-state/canon (29 files)
+[entrypoint] <-- 30_install_canon.sh ok
+[entrypoint] --> 40_overlay_engine.sh
+[overlay] attn_iface_patched.py        -> layers/common/attention_interface.py
+[overlay] linear_p22xk.py              -> layers/jax/linear.py
+[overlay] embed_patched.py             -> layers/jax/embed.py
+[overlay] tpu_runner_p21_l30.py        -> runner/tpu_runner.py
+[overlay] qwen3_p22xk.py               -> models/jax/qwen3.py
+[overlay] qwen2_p22xk.py               -> models/jax/qwen2.py
+[overlay] PYTHONPATH and CANON_SHIM_ROOT recorded; originals in /tmp/canon-state/stock_backup
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] A. byte identity of overlay targets
+[verify]   OK   attn_iface_patched.py        8f8cec35f296
+[verify]   OK   linear_p22xk.py              857859226b61
+[verify]   OK   embed_patched.py             4a0540323c75
+[verify]   OK   tpu_runner_p21_l30.py        b8b1e118ca3c
+[verify]   OK   qwen3_p22xk.py               c3602c7163a1
+[verify]   OK   qwen2_p22xk.py               79a88e88bd6c
+[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
+[verify] Section B promotion checks will run inside Step 70 single Pathways session.
+
+[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
+[verify] This does NOT yet prove it executes on the hot path; 90_run.sh checks the
+[verify] [PATHTRACE] tally for that.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 60_wait_workers.sh
+[wait] giving all 64 devices on 16 TPU worker nodes 180s quiet period to boot and register with Pathways RM...
+[wait] hardware quiet period completed. Single-session unified runner in Step 70 will perform device assertion and all admission probes.
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 80_model_init.sh
+[model-init] starting structural materialization; no checkpoint, forward, backward, update, or training
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[T1.PATHWAYS] required=1 initialized=1 status=ok
+I0807 22:29:18.810035     241 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0807 22:29:18.810084     241 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0807 22:29:18.810097     241 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 22:29:18.812266     241 grpc_client_session.cc:264]   Established channel.
+I0807 22:29:18.812285     241 grpc_client_session.cc:269]   Created stub.
+I0807 22:29:18.831132     241 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0807 22:29:18.898499     241 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0807 22:29:18.898569     241 grpc_client_session.cc:264]   Established channel.
+I0807 22:29:18.898579     241 grpc_client_session.cc:269]   Created stub.
+I0807 22:29:18.899382     241 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0807 22:29:18.926767     241 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0807 22:29:18.926790     241 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+[P32.INIT] START dp=16 tp=4 devices=64 checkpoint_loaded=0 forward=0 backward=0 update=0
+[P32.INIT] MESH shape=(16, 4) unique=64 full_slice=1
+[P32.INIT] JSON {"attempt": 0, "execution": {"backward": 0, "forward": 0, "optimizer_updates": 0, "training_steps": 0}, "inventory": {"accumulator": {"arrays": 399, "dp_partitioned_leaves": 0, "leaves": 399, "logical_bytes": 32762941440, "memory_kinds": ["device"], "tp_partitioned_leaves": 399}, "model": {"arrays": 399, "dp_partitioned_leaves": 0, "leaves": 399, "logical_bytes": 32762941440, "memory_kinds": ["device"], "tp_partitioned_leaves": 399}, "optimizer": {"arrays": 799, "dp_partitioned_leaves": 0, "leaves": 799, "logical_bytes": 65525882884, "memory_kinds": ["pinned_host"], "tp_partitioned_leaves": 798}}, "model": {"checkpoint_loaded": false, "compute_dtype": "<class 'jax.numpy.bfloat16'>", "embed": 4096, "head_dim": 128, "heads": 32, "hidden": 12288, "kv_heads": 8, "layers": 36, "name": "qwen3-8b", "param_dtype": "<class 'jax.numpy.float32'>", "state_kind": "zero-structural", "vocab": 151936}, "optimizer": {"b1": 0.9, "b2": 0.95, "commits": 0, "learning_rate": 1e-06, "memory_kind": "pinned_host", "name": "adamw", "weight_decay": 0.0}, "physical_bytes_per_device": {"accumulator": 8190735360, "model": 8190735360, "optimizer": 16381470724}, "topology": {"devices": 64, "dp": 16, "full_slice": true, "mesh_shape": [16, 4], "tp": 4, "unique_devices": 64}, "wandb": {"group": "qwen3-8b-dp16-tp4-model-init", "network_initialized": false, "project": "canon-zero-tim-p32", "run_name": "p32-model-init-attempt-0"}}
+[P32.INIT] VERDICT PASS
+I0807 22:30:50.182859     241 client.cc:221] Client::~Client() starting.
+I0807 22:30:50.183784     241 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 22:30:50.183791     241 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0807 22:30:50.183958     241 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0807 22:30:50.183981     241 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 22:30:50.183985     241 grpc_client_session.cc:202] GrpcClientSession: Finish(): calling context_->TryCancel();
+I0807 22:30:50.184128     325 grpc_client_session.cc:176] GrpcClientSession: reader loop is exiting.
+I0807 22:30:50.184175     325 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status OK
+I0807 22:30:50.184191     241 grpc_client_session.cc:205] GrpcClientSession: Waiting for reader thread to stop.
+I0807 22:30:50.184199     241 grpc_client_session.cc:209] GrpClientSession: Attempting to call stream->Finish()
+I0807 22:30:50.184201     241 grpc_client_session.cc:213] GrpClientSession: Attempting to call stream->Finish(), mutex acquired
+I0807 22:30:50.184244     241 grpc_client_session.cc:216] GrpClientSession: stream->Finish() returned server status CANCELLED: CANCELLED
+I0807 22:30:50.184248     241 grpc_client_session.cc:237] GrpClientSession::Finish(): calling terminated cb with CANCELLED: CANCELLED
+W0807 22:30:50.184253     241 grpc_client.cc:91] IFRT proxy server disconnected: CANCELLED: CANCELLED; Stack trace: *** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyGC_Collect
+	Py_FinalizeEx
+	Py_Exit
+	
+	
+	
+	_PyRun_AnyFileObject
+	Py_RunMain
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+I0807 22:30:50.184703     241 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 22:30:50.184706     241 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0807 22:30:50.184709     241 client.cc:223] Client::~Client(): rpc_helper_->Disconnect() is done.
+I0807 22:30:50.184727     325 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 22:30:50.185096     241 rpc_helper.cc:509] RpcHelper::~RpcHelper() starting.
+I0807 22:30:50.185170     241 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 22:30:50.185174     241 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0807 22:30:50.185175     241 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0807 22:30:50.185177     241 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0807 22:30:50.185180     241 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 22:30:50.185181     241 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0807 22:30:50.185183     241 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
+I0807 22:30:50.185187     241 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
+I0807 22:30:50.185191     241 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
+I0807 22:30:50.185226     241 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
+I0807 22:30:50.185234     241 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
+I0807 22:30:50.185236     241 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0807 22:30:50.185471     241 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0807 22:30:50.185753     241 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
+{
+  "reasons": [],
+  "record": {
+    "attempt": 0,
+    "execution": {
+      "backward": 0,
+      "forward": 0,
+      "optimizer_updates": 0,
+      "training_steps": 0
+    },
+    "inventory": {
+      "accumulator": {
+        "arrays": 399,
+        "dp_partitioned_leaves": 0,
+        "leaves": 399,
+        "logical_bytes": 32762941440,
+        "memory_kinds": [
+          "device"
+        ],
+        "tp_partitioned_leaves": 399
+      },
+      "model": {
+        "arrays": 399,
+        "dp_partitioned_leaves": 0,
+        "leaves": 399,
+        "logical_bytes": 32762941440,
+        "memory_kinds": [
+          "device"
+        ],
+        "tp_partitioned_leaves": 399
+      },
+      "optimizer": {
+        "arrays": 799,
+        "dp_partitioned_leaves": 0,
+        "leaves": 799,
+        "logical_bytes": 65525882884,
+        "memory_kinds": [
+          "pinned_host"
+        ],
+        "tp_partitioned_leaves": 798
+      }
+    },
+    "model": {
+      "checkpoint_loaded": false,
+      "compute_dtype": "<class 'jax.numpy.bfloat16'>",
+      "embed": 4096,
+      "head_dim": 128,
+      "heads": 32,
+      "hidden": 12288,
+      "kv_heads": 8,
+      "layers": 36,
+      "name": "qwen3-8b",
+      "param_dtype": "<class 'jax.numpy.float32'>",
+      "state_kind": "zero-structural",
+      "vocab": 151936
+    },
+    "optimizer": {
+      "b1": 0.9,
+      "b2": 0.95,
+      "commits": 0,
+      "learning_rate": 1e-06,
+      "memory_kind": "pinned_host",
+      "name": "adamw",
+      "weight_decay": 0.0
+    },
+    "physical_bytes_per_device": {
+      "accumulator": 8190735360,
+      "model": 8190735360,
+      "optimizer": 16381470724
+    },
+    "topology": {
+      "devices": 64,
+      "dp": 16,
+      "full_slice": true,
+      "mesh_shape": [
+        16,
+        4
+      ],
+      "tp": 4,
+      "unique_devices": 64
+    },
+    "wandb": {
+      "group": "qwen3-8b-dp16-tp4-model-init",
+      "network_initialized": false,
+      "project": "canon-zero-tim-p32",
+      "run_name": "p32-model-init-attempt-0"
+    }
+  },
+  "status": "PASS"
+}
+[model-init] artifact=/tmp/canon-state/model_init.log
+[model-init] classification=/tmp/canon-state/model_init.classification.json
+[entrypoint] <-- 80_model_init.sh ok
+[entrypoint] mode=model-init-only -- structural state materialized; no checkpoint, forward, backward, update or training was run.

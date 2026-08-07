@@ -83,6 +83,22 @@ python3 -m unittest -v tests/t0_cpu/test_64chip_admission_evidence.py
 
 ## 6. Phase 9 Qwen3-8B 36-Layer State Materialization Gate (64 Physical Chips)
 
+The P32.2c evidence is archived separately from the P32.1 admission log above:
+
+- `p32_2c_model_init_attempt0_pass.raw.log` is the successful target run from source
+  `ce0511ee`. Its SHA-256 is
+  `4a98384920de136da753114963d8edc216e0b564e535276091b4b2178d1fd140`.
+- `p32_2c_model_init_attempt0_pass.classification.json` is the regenerated PASS report. Its
+  SHA-256 is
+  `1097f0b67410a9eb5178121dccf0a7c9a84b0e36f5c9601a3b82330c6f84eb59`.
+- `p32_2c_model_init_attempt0_hostbuffer_fail.raw.log` preserves the preceding infrastructure
+  failure. Its SHA-256 is
+  `af4e8baaa9a325fac32b8187b0fbab84cd22b005a45ec2e77507127fc6ec6c5c`.
+
+The successful configuration changed both the allocation path and the pod resources. The
+artifact proves the combined configuration; it does not isolate either intervention as the sole
+cause of the earlier host-buffer thread failure.
+
 | Structure | Leaf Count | Logical Size | Sharding Mode | Memory Kind | DP-Sharded Leaves | Physical Bytes / Chip | Verdict |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Actor Model** | 399 | 32.76 GB | Pure Replicated DP16 x TP4 | `device` (HBM) | **0 (No FSDP)** | 8.19 GB | 🟢 **PASS** |
@@ -91,4 +107,14 @@ python3 -m unittest -v tests/t0_cpu/test_64chip_admission_evidence.py
 
 * **Total Physical Leaves Verified**: 1,597 leaves across 64 TPU v5p chips.
 * **FSDP Sharded Leaves**: **0 (Strict Pure Replicated Data Parallelism enforced)**.
-* **Deterministic Classification**: `debug_logs/model_init.classification.json` status: `PASS`.
+* **Deterministic Classification**:
+  `debug_logs/p32_2c_model_init_attempt0_pass.classification.json` status: `PASS`.
+
+Reproduce both evidence seals:
+
+```bash
+python3 -m unittest -v tests/t0_cpu/test_64chip_admission_evidence.py
+python3 -m unittest -v \
+  tests/p32_model_init/test_archived_model_init_evidence.py
+sha256sum -c evidence/package_artifacts.sha256
+```

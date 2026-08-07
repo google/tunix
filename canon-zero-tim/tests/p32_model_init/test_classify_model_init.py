@@ -148,6 +148,12 @@ class ModelInitClassifierTest(unittest.TestCase):
     text = _log(_record()) + "\nTraceback (most recent call last):\n"
     self.assertEqual(classify_model_init.classify_text(text)["status"], "INCONCLUSIVE")
 
+  def test_late_host_buffer_failure_is_rejected(self):
+    text = _log(_record()) + "\nCheck failed: pthread_create() failed\n"
+    self.assertEqual(
+        classify_model_init.classify_text(text)["status"], "INCONCLUSIVE"
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -134,6 +134,9 @@ def classify_text(text: str) -> dict[str, Any]:
   forbidden = (
       "Traceback (most recent call last):",
       "[entrypoint] FATAL:",
+      "Check failed:",
+      "pthread_create() failed",
+      "RESOURCE_EXHAUSTED",
       "SKIP_TAINTED",
       "TARGET NOT RUN",
   )
