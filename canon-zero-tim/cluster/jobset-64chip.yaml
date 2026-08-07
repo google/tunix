@@ -26,8 +26,6 @@ kind: JobSet
 metadata:
   name: canon-zero-tim-v5p-64
   namespace: default
-  annotations:
-    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
 spec:
@@ -88,8 +86,8 @@ spec:
                 - name: PATHWAYS_HEAD
                   value: localhost
               resources:
-                requests: {cpu: '16', memory: 100Gi}
-                limits:   {cpu: '32', memory: 350G}
+                requests: {cpu: '2', memory: 8Gi}
+                limits:   {cpu: '4', memory: 32Gi}
               restartPolicy: Always
             - name: pathways-rm
               # 20260730-jax_0.10.2, matched to the canonical client image.
@@ -106,8 +104,8 @@ spec:
                 - name: TPU_SKIP_MDS_QUERY
                   value: 'true'
               resources:
-                requests: {cpu: '8', memory: 32Gi}
-                limits:   {cpu: '16', memory: 150G}
+                requests: {cpu: '2', memory: 8Gi}
+                limits:   {cpu: '4', memory: 32Gi}
               restartPolicy: Always
             containers:
             - name: jax-tpu
@@ -115,7 +113,8 @@ spec:
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
               imagePullPolicy: Always
               resources:
-                limits: {cpu: '24', memory: 200G}
+                requests: {cpu: '4', memory: 16Gi}
+                limits:   {cpu: '8', memory: 64Gi}
               command:
               - bash
               - -c
@@ -144,9 +143,9 @@ spec:
                     fieldPath: metadata.name
               # --- what to run -------------------------------------------------------------
               - name: CANON_MODE
-                value: dp-gate-only          # probe-only | install-only | gate-only | dp-gate-only
+                value: model-init-only          # probe-only | install-only | gate-only | dp-gate-only
               - name: CANON_PROFILE_FILE
-                value: cluster/profiles/qwen3-8b-dp16-tp4-admission.env
+                value: cluster/profiles/qwen3-8b-dp16-tp4-model-init.env
               - name: CANON_STATE
                 value: /tmp/canon-state
               # --- topology-specific: MUST be set from probe output, not inherited ----------
@@ -206,6 +205,8 @@ spec:
         completionMode: Indexed
         template:
           metadata:
+            annotations:
+              alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
             labels:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:

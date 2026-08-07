@@ -26,8 +26,6 @@ kind: JobSet
 metadata:
   name: canon-zero-tim-v5p-64
   namespace: default
-  annotations:
-    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
 spec:
@@ -74,7 +72,7 @@ spec:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
             nodeSelector:
-              cloud.google.com/gke-nodepool: deepswe-cpu-pool
+              cloud.google.com/gke-nodepool: cpu-np
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             restartPolicy: Never
@@ -90,8 +88,8 @@ spec:
                 - name: PATHWAYS_HEAD
                   value: localhost
               resources:
-                requests: {cpu: '16', memory: 100Gi}
-                limits:   {cpu: '32', memory: 350G}
+                requests: {cpu: '2', memory: 8Gi}
+                limits:   {cpu: '4', memory: 32Gi}
             - name: pathways-rm
               # 20260730-jax_0.10.2, matched to the canonical client image.
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:3d9a6523f2262e6881c700542a9d89a4032103a79ee2851a72ca353d24ad5f95
@@ -107,14 +105,15 @@ spec:
                 - name: TPU_SKIP_MDS_QUERY
                   value: 'true'
               resources:
-                requests: {cpu: '8', memory: 32Gi}
-                limits:   {cpu: '16', memory: 150G}
+                requests: {cpu: '2', memory: 8Gi}
+                limits:   {cpu: '4', memory: 32Gi}
             - name: jax-tpu
               # PIN THIS BY DIGEST.  See the header note.
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
               imagePullPolicy: Always
               resources:
-                limits: {cpu: '24', memory: 200G}
+                requests: {cpu: '4', memory: 16Gi}
+                limits:   {cpu: '8', memory: 64Gi}
               command:
               - bash
               - -c
@@ -203,6 +202,8 @@ spec:
         completionMode: Indexed
         template:
           metadata:
+            annotations:
+              alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
             labels:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
