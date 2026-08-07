@@ -157,6 +157,9 @@ class MockBaseSamplerImpl(sampler_lib.VanillaSamplerAdapter):
     self.tokenizer = MockTokenizer()
     self.chat_parser = MockChatParser()
 
+  def initialize(self) -> None:
+    pass
+
   async def sample(
       self,
       sampling_requests: (

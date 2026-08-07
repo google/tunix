@@ -450,3 +450,19 @@ def is_running_in_colab() -> bool:
     return hasattr(sys.modules['IPython'].get_ipython(), 'kernel')
   except (NameError, KeyError, AttributeError):
     return False
+
+
+def safe_set_n_cpu_devices(n: int) -> None:
+  """Safely set the number of CPU devices for JAX."""
+  import chex  # pylint: disable=g-import-not-at-top
+  try:
+    chex.set_n_cpu_devices(n)
+  except RuntimeError as e:
+    # If JAX is already initialized, check if we have enough devices.
+    devices = jax.local_devices()
+    if len(devices) < n:
+      raise RuntimeError(
+          f"JAX already initialized with {len(devices)} CPU devices, "
+          f"but {n} are required."
+      ) from e
+

@@ -478,6 +478,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
+    self._last_lora_weights = None
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -1112,7 +1113,19 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def prepare_weight_sync(self, **kwargs) -> None:
-    pass
+    if kwargs:
+      raise ValueError(f"Unexpected prepare_weight_sync kwargs: {sorted(kwargs)}")
+    if not self._lora_enabled:
+      raise ValueError(
+          "LoRA weight sync was requested, but this trainer was created "
+          "without LoRA parameters."
+      )
+    self._last_lora_weights = nnx.state(self.model, nnx.LoRAParam)
+
+  def get_lora_weights(self) -> Any:
+    if self._last_lora_weights is None:
+      self.prepare_weight_sync()
+    return self._last_lora_weights
 
   @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:

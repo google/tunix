@@ -994,6 +994,25 @@ class RlEngineTest(parameterized.TestCase):
         )
 
     with self.subTest('satisfies_abstract_rl_engine_protocol'):
+      expected_members = [
+          'global_steps',
+          'tokenizer',
+          'buffer_metrics',
+          'buffer_metrics_async',
+          'close',
+          'generate',
+          'train',
+          'eval_actor',
+          'per_token_logps',
+          'sync_weights',
+          'cluster_config',
+          'r2m',
+          'get_rollout_config',
+          'rollout',
+          'actor_trainer',
+      ]
+      missing = [m for m in expected_members if not hasattr(rl_engine, m)]
+      self.assertEqual(missing, [], f"RLEngine is missing protocol members: {missing}")
       self.assertIsInstance(
           rl_engine, rl_engine_interface.AbstractRLEngine
       )
