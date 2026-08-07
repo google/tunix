@@ -752,7 +752,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           self.algo_config.advantage_estimator
       )
       advantages = advantage_estimator(
-          rewards=rewards, num_generations=self.algo_config.num_generations
+          rewards=rewards,
+          num_generations=self.algo_config.num_generations,
+          use_leave_one_out_baseline=getattr(
+              self.algo_config, "use_leave_one_out_baseline", False
+          ),
       )
 
     logging.debug("Advantages computed: %s", advantages)

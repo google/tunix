@@ -46,6 +46,24 @@ class AlgoCoreTest(absltest.TestCase):
     )
     np.testing.assert_allclose(advantages, expected_value, rtol=1e-3, atol=1e-3)
 
+  def test_grpo_compute_advantages_leave_one_out(self):
+    rewards = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    advantages_std = algo_core.compute_advantages(
+        rewards, num_generations=3, use_leave_one_out_baseline=False
+    )
+    expected_std = np.array([-1.0, 0.0, 1.0, -1.0, 0.0, 1.0])
+    np.testing.assert_allclose(advantages_std, expected_std, rtol=1e-4, atol=1e-4)
+
+    advantages_loo = algo_core.compute_advantages(
+        rewards,
+        num_generations=3,
+        use_leave_one_out_baseline=True,
+        extra_unused_kwarg="test",
+    )
+    expected_loo = np.array([-1.5, 0.0, 1.5, -1.5, 0.0, 1.5])
+    np.testing.assert_allclose(advantages_loo, expected_loo, rtol=1e-4, atol=1e-4)
+
+
   def test_grpo_loss_fn_packed_equals_unpacked(self):
     # P3.4 gate: grpo_loss_fn gives the SAME primary loss whether two sequences
     # are packed into one row (segment_ids set) or one-per-row (segment_ids
