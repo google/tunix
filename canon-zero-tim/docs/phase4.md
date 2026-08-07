@@ -1,7 +1,6 @@
 # Phase 4 — T1 层 + 新集群准入探针
 
-Status: **64-chip discovery process complete; P1a/P1b green; T2 discovery green;
-fresh pinned/provenance-clean rerun pending**
+Status: **64-chip bounded target gate PASS; full model and training remain NOT RUN**
 Date: 2026-08-07
 
 ---
@@ -37,7 +36,7 @@ Date: 2026-08-07
       persisted-marker validator so it cannot create a second IFRT proxy client
 - [x] **P4.9a** Add P1a: report client JAX/JAXLIB/PathwaysUtils versions and compile the exact
       promoted RMSNorm through Mosaic before P1b
-- [~] **P4.10** GATE: P1b and same-session T2 measured; pinned fresh-process repeat pending
+- [x] **P4.10** GATE: clean Attempt 0, P1b 4/4 bitwise and same-session toy T2 7/7
 
 ## GATE 状态
 
@@ -126,19 +125,19 @@ fail-closed 行为得到实证)。
   Python/Bash/diff/English-output checks PASS.
 - Hardware status: TP8 generic P1, P1a, P1b and T2 are NOT RUN after this extension.
 
-**2026-08-07 — first complete 64-chip discovery process**
+**2026-08-07 — first complete 64-chip bounded admission process**
 
 - Artifact: `debug_logs/head_jax_tpu.log`, SHA-256
-  `cfe47420b7b95f64ab45ce3fe1b631616ebfde96837c6f80301177895d3afd72`.
+  `da3f7ff78ef43d8a55026cd4d40224a608d4c663a5888b316b23605e27a2f333`.
 - Attempt 0 completed P1a, all 18 generic P1 rows, P1b at depths `1,2,4,8`, and same-session T2.
   P1b is bitwise with live gradients. Generic P1 is complete but all arms are dirty and remains
   advisory. H2 is an expected-red negative control.
-- T2 fixed-placement checks passed and measured the exact train mesh. Because the expected pin
-  was empty in that process, this is discovery evidence rather than release admission.
-- The old sync step printed `dirty_files=5` without classifying the entries. The next revision
-  fails on tracked drift or package-local untracked files and reports unrelated image files
-  separately.
-- The standard 64-chip manifest now pins the measured order and requires it. The 256-cluster
-  manifest remains discovery-only because its 144..207 device range requires an independent pin.
-- Next gate: a fresh Attempt 0 with exact train-mesh reproduction and clean package provenance.
-  No model initialization or training is admitted by this result.
+- T2 fixed-placement checks passed on the topology-aware full-slice `(16,4)` mesh. The train
+  mesh is discovered per allocation because autoscaling may change the global device-id range;
+  the hard contract is complete coverage, repeatability and replica equality in one process.
+- Provenance reports `tracked_dirty=0` and `package_untracked=0`; five unrelated image-owned
+  files are separately reported as `external_untracked` and do not enter the package.
+- Machine classification is in `debug_logs/head_jax_tpu.classification.json`; seven negative
+  tests reject wrong attempts, missing rows, false T2 checks, taint and hash drift.
+- No model initialization, segmented backward, optimizer commit or training is admitted by this
+  result. The next technical phase is the real replicated DP16×TP4 Qwen3-8B adapter.

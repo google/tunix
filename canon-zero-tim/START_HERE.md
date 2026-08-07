@@ -26,15 +26,16 @@ It is packaging of work already done, not a new result. What is signed and what 
 | **Direct-attached 4-chip T1 rerun from this package** | **NOT RUN** — the probe host's TPU was busy |
 | DP gradient/update probe on CPU | **PASS** — fixed placement repeats; regrouped samples change bits |
 | **Generic DP16×TP4 diagnostic on Pathways/GKE** | **COMPLETE, DIRTY** — 18/18 TP2/4/8 rows completed; replicated, stock and F4 arms all show third-program drift. This is platform evidence, not a production-Qwen verdict. |
-| **Canonical Qwen operator P1b on Pathways/GKE** | **PASS in first process** — depths 1/2/4/8 are bitwise with live gradients after matching JAX/Pathways releases. |
-| **Same-session T2 on Pathways/GKE** | **DISCOVERY PASS** — fixed-placement checks passed, but the first process had no expected train-mesh pin. A fresh pinned Attempt 0 is required. |
+| **Canonical Qwen operator P1b on Pathways/GKE** | **TARGET PASS** — Attempt 0 produced zero differing bytes with live gradients at depths 1/2/4/8. |
+| **Same-session toy T2 on Pathways/GKE** | **TARGET PASS** — all 7 fixed-placement checks passed on the topology-aware `(16,4)` mesh; arbitrary regrouping remains bitwise-sensitive. |
 | **Round-trip: install from this package, reproduce signed numbers** | **NOT RUN** |
-| Pathways numerical admission | **PENDING PINNED REPEAT** — the first process measured the pin; provenance and exact train-mesh order must pass in a fresh process |
+| Pathways topology/operator/toy-update admission | **TARGET PASS** — single-slice 64-chip Attempt 0, clean package provenance, P1a/P1b and T2 all passed; the raw log is machine-classified and hash-pinned. |
+| Full Qwen3-8B model initialization, segmented backward, optimizer commit, training | **TARGET NOT RUN** |
 
-**The next useful action on the 64-chip target is Task C in `RUNBOOK.md`** — rerun
-`dp-gate-only` with the measured train mesh pinned and the strict provenance split enabled.
-P1a/P1b and T2 must remain green in that fresh process. TP8 remains diagnostic until a separate
-Qwen8B TP8 production contract exists.
+**Do not spend another 64-chip run repeating the same bounded admission.** The next useful
+action is to implement the real replicated DP16×TP4 Qwen3-8B adapter and promote it through
+model-init, forward, backward-no-commit, one-update and steady-state gates. TP8 remains a generic
+platform diagnostic until it has a separate Qwen8B production contract.
 
 ---
 

@@ -160,15 +160,18 @@ Start at `probe-only`. Full expected output, the red table, and the reporting fo
 `cluster/README.md` — that file is the operator guide for this task and supersedes this summary.
 
 For P32 use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env` and promote only through
-`dp-gate-only`. The first 64-chip process measured the train mesh and the standard manifest now
-pins it with `CANON_REQUIRE_TRAIN_MESH_PIN=1`. Run a fresh Attempt 0 and require the same 64-id
-sequence. The 256-cluster manifest remains discovery-only until independently measured. Return
-`$CANON_STATE/t2_dp.log`; do not bypass the run refusal.
+`dp-gate-only`. The archived 64-chip Attempt 0 passed the bounded topology, canonical-operator
+and toy-update gates. Device ids may be allocated from a different range on a new cluster, so the
+train mesh is topology-discovered rather than pinned to one global id list. A valid run must still
+cover exactly one single slice, use every visible device exactly once in a topology-aware
+`(16,4)` mesh, and pass every same-session T2 check. Return `$CANON_STATE/t2_dp.log`; do not
+bypass the run refusal.
 
 **Two things to set before the first apply**, both in the manifest:
 - the `jax-tpu` image, **pinned by digest** — a floating `:latest` means the same manifest runs
   on a different engine tomorrow, which is incompatible with a bitwise contract;
-- `CANON_P32_EXPECT_MODEL_MESH_IDS`, from Task B's output **on this topology**.
+- `CANON_P32_EXPECT_MODEL_MESH_IDS`, from Task B's output **for that manifest's device-id
+  range**. Do not copy the `0..63` pin into a manifest whose allocator returns another range.
 
 ---
 

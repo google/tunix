@@ -6,16 +6,35 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${CANON_ARTIFACT_ROOT:-/mnt/disks/tunix-data/logp_probe_1host}"
 MAN="$HERE/evidence/artifacts.sha256"
+PACKAGE_MAN="$HERE/evidence/package_artifacts.sha256"
 [ -f "$MAN" ] || { echo "missing $MAN" >&2; exit 1; }
+[ -f "$PACKAGE_MAN" ] || { echo "missing $PACKAGE_MAN" >&2; exit 1; }
 ok=0; bad=0; gone=0
-while read -r want rel; do
-  f="$ROOT/$rel"
-  if [ ! -f "$f" ]; then printf '  GONE   %s\n' "$rel"; gone=$((gone+1)); continue; fi
-  got="$(sha256sum "$f" | cut -d' ' -f1)"
-  if [ "$got" = "$want" ]; then printf '  OK     %s\n' "$rel"; ok=$((ok+1))
-  else printf '  CHANGED %s  (recorded %s.. now %s..)\n' "$rel" \
-       "$(echo "$want"|cut -c1-12)" "$(echo "$got"|cut -c1-12)"; bad=$((bad+1)); fi
-done < "$MAN"
-echo "  --- ok=$ok changed=$bad gone=$gone (root=$ROOT)"
+
+verify_manifest() {
+  local manifest="$1" root="$2" label="$3"
+  while read -r want rel; do
+    [ -n "$want" ] || continue
+    f="$root/$rel"
+    if [ ! -f "$f" ]; then
+      printf '  GONE   %s:%s\n' "$label" "$rel"
+      gone=$((gone+1))
+      continue
+    fi
+    got="$(sha256sum "$f" | cut -d' ' -f1)"
+    if [ "$got" = "$want" ]; then
+      printf '  OK     %s:%s\n' "$label" "$rel"
+      ok=$((ok+1))
+    else
+      printf '  CHANGED %s:%s  (recorded %s.. now %s..)\n' "$label" "$rel" \
+        "$(echo "$want" | cut -c1-12)" "$(echo "$got" | cut -c1-12)"
+      bad=$((bad+1))
+    fi
+  done < "$manifest"
+}
+
+verify_manifest "$MAN" "$ROOT" external
+verify_manifest "$PACKAGE_MAN" "$HERE" package
+echo "  --- ok=$ok changed=$bad gone=$gone (external_root=$ROOT)"
 [ "$bad" = 0 ] && [ "$gone" = 0 ] || exit 1
 echo "  EVIDENCE VERIFIED"

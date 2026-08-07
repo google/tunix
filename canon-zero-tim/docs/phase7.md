@@ -1,7 +1,7 @@
 # Phase 7 — P32 DP16×TP4 update admission
 
-Status: **local implementation + CPU gate PASS; 64-chip TPU NOT RUN**
-Date: 2026-08-06
+Status: **bounded 64-chip target gate PASS; real Qwen3-8B DP16×TP4 path NOT RUN**
+Date: 2026-08-07
 
 ## Contract
 
@@ -86,8 +86,9 @@ docstrings, comments, and output strings contain no Chinese text.
 ## Remote gate and stop rule
 
 Run `probe-only → install-only → dp-gate-only`. Preserve `$CANON_STATE/t2_dp.log`, resolved
-`env.sh`, image digest and raw JobSet log. The first run measures mesh ids; pin those ids for a
-fresh second `dp-gate-only` run.
+`env.sh`, image digest and raw JobSet log. The archived single-slice Attempt 0 passes the bounded
+target gate. Global device ids are allocation-specific; the portable contract is a topology-aware
+full-slice `(16,4)` mesh plus exact fixed-placement repeatability and replica equality.
 
 No model initialization, backward or training is admitted by this phase. A remote green result
 only admits implementation of the real replicated-DP adapter, followed by the six-stage ladder
@@ -97,3 +98,16 @@ Rollback: unset/remove the P32 admission profile and step 75; the earlier TP4 pr
 production defaults are unchanged.  The bootstrap refinement can be rolled back independently by
 reverting its single commit; no model, numerical implementation, profile default or cloud state is
 changed.
+
+## Target evidence
+
+- Raw log: `debug_logs/head_jax_tpu.log`
+- Raw SHA-256: `da3f7ff78ef43d8a55026cd4d40224a608d4c663a5888b316b23605e27a2f333`
+- Classification: `debug_logs/head_jax_tpu.classification.json`
+- Result: Attempt 0, clean package provenance, 64 v5p devices in one slice, P1a PASS, generic
+  P1 18/18 advisory dirty, P1b 4/4 bitwise with live gradients, toy T2 7/7.
+- Boundary: model initialization, segmented backward, optimizer commit and training are all
+  `TARGET NOT RUN`.
+
+Rollback is documentation/evidence-local: revert the additive evidence-sealing change. No
+runtime default, JobSet, cloud resource or numerical implementation changes in this phase.

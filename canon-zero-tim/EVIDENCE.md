@@ -3,8 +3,10 @@
 Every claim below names the artifact that carries it. `./verify_evidence.sh` checks that each
 one still exists and still hashes to what was recorded — run it before citing anything.
 
-Artifacts live on the probe host under `/mnt/disks/tunix-data/logp_probe_1host` (override with
-`CANON_ARTIFACT_ROOT`). Machine-readable list: `evidence/artifacts.sha256`.
+Release artifacts live on the probe host under `/mnt/disks/tunix-data/logp_probe_1host`
+(override with `CANON_ARTIFACT_ROOT`). Package-local cluster evidence is under `debug_logs/`.
+Machine-readable lists: `evidence/artifacts.sha256` and
+`evidence/package_artifacts.sha256`.
 
 ## What is signed
 
@@ -16,6 +18,7 @@ Artifacts live on the probe host under `/mnt/disks/tunix-data/logp_probe_1host` 
 | Gradient correctness of the non-standard pullback, in-domain | 20/20 records; worst route rel-L2 `3.59e-5`; `g[1]` fault rejected | `std_p22_t2a_candidate_r1_0804.raw.log`, `p22_t2a_candidate_r1_0804.json` |
 | 200 optimizer steps of real GSM8K at zero TIM | 3200/3200 reports, `N_action = 2,745,204`, all boundaries 0 bytes, 200 finite nonzero gradients, 200 commit/sync | `p26_gsm8k_g3_0804_g3_r1_evidenceonly.{raw.log,alignment.jsonl,classification.json}` |
 | The exact command that produced it | — | `p26_runner_freezes/run_p26_gsm8k_train_g3_0804_r1_evidenceonly.sh` |
+| 64-chip single-slice Pathways bounded admission | Attempt 0; P1a PASS; P1 18/18 advisory dirty; P1b 4/4 bitwise with live gradients; toy T2 7/7 | `debug_logs/head_jax_tpu.{log,classification.json}` |
 
 The training branch tip (`3a00d951`) is byte-identical to the sources that run recorded: all
 25 files in its manifest match. See `docs/phase0.md` finding F4.
@@ -49,8 +52,9 @@ strongly-supported rather than proven.
   rather than fixing it, and pinning is not a production posture (decode pays for a 256-token
   bucket regardless of how few tokens it has).
 - **A full-model or training claim on another topology.** The signed release numbers above still
-  come from one directly-attached 4-chip v5p host. A separate 64-chip single-slice Pathways
-  discovery process passed bounded P1b/T2 probes, but its pinned-repeat gate, full model,
-  multi-slice behavior and training remain unverified — see `CLUSTER_ADMISSION.md`.
+  come from one directly-attached 4-chip v5p host. A 64-chip single-slice Pathways Attempt 0
+  passes bounded P1b/T2 target gates, but full-model initialization, segmented backward,
+  optimizer commit, multi-slice behavior and training remain unverified — see
+  `CLUSTER_ADMISSION.md`.
 - **The production `nnx` training forward.** The signed `C` is the engine-module differentiable
   forward. The production tunix `nnx` path still differs by `0.0267`.

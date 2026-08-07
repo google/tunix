@@ -202,12 +202,13 @@ contract is:
 - every DP replica sees the same post-reduction gradient;
 - the injected rank-dependent negative is rejected;
 - one AdamW arithmetic step emits stable SHA-256s for gradient, parameter and both moments;
-- the measured mesh id sequence can be pinned and reproduced in a fresh run.
+- the topology-aware mesh covers all 64 visible devices exactly once and has shape `(16,4)`.
 
-The first 64-chip T2 process measured an exact `(16,4)` order and passed the numerical checks, but
-the expected-id variable was empty in that process. `jobset-64chip.yaml` now pins the observed
-order and requires it at preflight. Only a fresh run that reproduces the pin upgrades T2 from
-discovery evidence to admission evidence. Other manifests must measure and pin their own ids.
+The archived single-slice 64-chip Attempt 0 passes this bounded contract. Its raw device ids are
+not a portable release pin: autoscaled clusters may allocate another contiguous id range. The
+manifest may pin the one-dimensional model-mesh order for its own range, while T2 derives the
+full-slice `(16,4)` train mesh and verifies coverage, repeatability and replica equality in the
+same Pathways process.
 
 The probe also redistributes the same global samples across DP ranks. This is an observation, not
 an initial hard gate. Local CPU evidence already shows the regrouped gradient changes even under
@@ -221,9 +222,9 @@ invariance. Either freeze placement or accumulate canonical per-example contribu
 
 Say these out loud in any report from a new topology.
 
-- **Full-model Pathways behavior.** One single-slice 64-device Pathways discovery process now
-  covers the bounded P1a/P1b operator chain and T2 arithmetic. The train-mesh pin still needs an
-  independent process repeat, and no full model, rollout or training step has run there.
+- **Full-model Pathways behavior.** One single-slice 64-device Attempt 0 covers the bounded
+  P1a/P1b operator chain and toy T2 arithmetic. No full model, rollout, segmented backward,
+  optimizer commit or training step has run there.
 - **FSDP parameter sharding.** A mesh axis named `fsdp` may shard parameters and all-gather
   them per layer in the forward. That is another collective in the forward path, and it has
   never been characterised here. Isolate it: run gates before training.

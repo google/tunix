@@ -141,7 +141,7 @@ Use `cluster/profiles/qwen3-8b-dp16-tp4-admission.env`. The expected terminal ma
 `auto_regroup_exact`: if false, the same samples assigned to different DP ranks are not bitwise
 invariant. Do not relabel that as a failed fixed-placement run or as arbitrary batch invariance.
 
-The first 64-chip run measured the train mesh as:
+The archived 64-chip run measured the train mesh as:
 
 ```
 0,1,2,3,16,17,18,19,32,33,34,35,48,49,50,51,
@@ -150,10 +150,11 @@ The first 64-chip run measured the train mesh as:
 12,13,14,15,28,29,30,31,44,45,46,47,60,61,62,63
 ```
 
-`jobset-64chip.yaml` pins that exact sequence and sets `CANON_REQUIRE_TRAIN_MESH_PIN=1`. The next
-fresh run is the admission attempt: a missing, malformed or changed pin fails before promotion.
-`jobset-256cluster-64chip.yaml` remains an explicit discovery manifest because its device ids are
-144..207; never reuse the 0..63 order on it.
+That sequence is evidence for the archived allocation, not a global-id contract. Autoscaling can
+allocate another range. The runtime must construct a topology-aware full-slice `(16,4)` mesh,
+cover all 64 visible ids exactly once and pass the seven T2 checks in the same process. Each
+manifest may pin its own one-dimensional model-mesh order; never reuse the `0..63` order on a
+manifest whose allocator returns another range.
 
 ### `run`
 

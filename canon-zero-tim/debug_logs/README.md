@@ -1,11 +1,21 @@
-# 64-Chip DP16xTP4 First-Run Admission Evidence
+# 64-Chip DP16xTP4 Bounded Admission Evidence
 
 This directory archives the live, untruncated log traces and structured admission matrix for the 64 TPU v5p multi-node cluster (`europe-west4_mlperf-v5p`, 16 hosts, 4x4x4 3D Torus).
 
 ---
 
 ## 1. Archived Log Evidence
-* **`head_jax_tpu.log`**: Complete raw log from `run_20260807_080555` on single-slice atomic allocation (`gke-tpu-0ffa8231-*`, 16 hosts x 4 = 64 TPU v5p chips) with `alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool`. Execution reached every registered probe without a retry or session taint. P0, P2, P3, P4, P1a, P1b (0 errors at all depths), and T2 (7/7 checks true) passed 100%.
+* **`head_jax_tpu.log`**: Complete raw log from `run_20260807_080555` on single-slice atomic allocation (`gke-tpu-0ffa8231-*`, 16 hosts x 4 = 64 TPU v5p chips) with `alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool`. Execution reached every registered probe without a retry or session taint. P0, P2, P3, P4, P1a, P1b (0 errors at all depths), and toy T2 (7/7 checks true) passed their registered bounded gates.
+* **`head_jax_tpu.classification.json`**: Deterministic classifier output. It explicitly keeps model initialization, segmented backward, optimizer commit and training at `TARGET NOT RUN`.
+
+Reproduce the classification:
+
+```bash
+python3 debug_logs/classify_64chip_admission.py \
+  debug_logs/head_jax_tpu.log \
+  --expected-sha256 da3f7ff78ef43d8a55026cd4d40224a608d4c663a5888b316b23605e27a2f333
+python3 -m unittest -v tests/t0_cpu/test_64chip_admission_evidence.py
+```
 
 ---
 
@@ -28,7 +38,7 @@ This directory archives the live, untruncated log traces and structured admissio
 
 ## 3. Release Boundary
 
-- The canonical P1b operator chain is 100% green (0 differing bytes) across all 4 stack depths on this 64-chip Pathways topology.
+- The canonical P1b operator chain is bitwise (0 differing bytes) across all 4 registered stack depths on this 64-chip Pathways topology.
 - T2 proves fixed-placement repeatability and 7/7 consistency checks in single-slice gang-scheduled execution (`gke-tpu-0ffa8231-*`).
 - Single-slice gang scheduling is enforced via `alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool`.
 - Provenance checks verified 0 tracked dirty files and 0 package-untracked files.
