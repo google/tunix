@@ -126,13 +126,10 @@ def materialize_zero_state(
     if not isinstance(sharding, NamedSharding):
       raise ValueError("every abstract state leaf must have NamedSharding")
     sharding = _with_memory_kind(sharding, memory_kind)
-    return jax.make_array_from_callback(
-        value.shape,
-        sharding,
-        lambda index, dtype=value.dtype, shape=value.shape: np.zeros(
-            _index_shape(index, shape), dtype=dtype
-        ),
-    )
+    return jax.jit(
+        lambda: jnp.zeros(value.shape, dtype=value.dtype),
+        out_shardings=sharding,
+    )()
 
   return jax.tree.map(allocate, abstract_state)
 
