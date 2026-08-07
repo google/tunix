@@ -17,7 +17,11 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 D, F, T = 512, 2048, 256
 devs = jax.devices(); N = len(devs)
-mesh = Mesh(mesh_utils.create_device_mesh((N,), devs), ("m",))
+try:
+    dmesh = mesh_utils.create_device_mesh((N,), devs, allow_split_physical_axes=True)
+except (TypeError, NotImplementedError):
+    dmesh = np.array(devs).reshape((N,))
+mesh = Mesh(dmesh, ("m",))
 rng = np.random.default_rng(0)
 put = lambda a, s: jax.device_put(jnp.asarray(a, jnp.bfloat16), NamedSharding(mesh, s))
 

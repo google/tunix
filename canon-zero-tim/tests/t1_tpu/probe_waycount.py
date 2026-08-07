@@ -132,7 +132,11 @@ def main():
         if n > nd:
             print(f"[waycount] SKIP width={n}: exceeds {nd} visible devices", flush=True)
             continue
-        mesh = Mesh(mesh_utils.create_device_mesh((n,), devs[:n]), (AXIS,))
+        try:
+            dmesh = mesh_utils.create_device_mesh((n,), devs[:n], allow_split_physical_axes=True)
+        except (TypeError, NotImplementedError):
+            dmesh = np.array(devs[:n]).reshape((n,))
+        mesh = Mesh(dmesh, (AXIS,))
         put = lambda a, s: jax.device_put(jnp.asarray(a, jnp.bfloat16), NamedSharding(mesh, s))
         for L in depths:
             w = [dict(g=put(rng.normal(size=(D,)) * 0.1 + 1.0, P(None)),

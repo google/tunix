@@ -37,9 +37,18 @@ def check(tag, mesh, sg, sd, L):
           f"{'SAME ***' if nb==0 else 'DIFFERS'}", flush=True)
 
 m1_plain = Mesh(np.array(devs[:4]).reshape(4), ("m",))
-m1_cdm   = Mesh(mesh_utils.create_device_mesh((4,), devs[:4]), ("m",))
-m22_plain= Mesh(np.array(devs[:4]).reshape(2,2), ("a","b"))
-m22_cdm  = Mesh(mesh_utils.create_device_mesh((2,2), devs[:4]), ("a","b"))
+try:
+    d1_cdm = mesh_utils.create_device_mesh((4,), devs[:4], allow_split_physical_axes=True)
+except (TypeError, NotImplementedError):
+    d1_cdm = np.array(devs[:4]).reshape(4)
+m1_cdm = Mesh(d1_cdm, ("m",))
+
+m22_plain = Mesh(np.array(devs[:4]).reshape(2, 2), ("a", "b"))
+try:
+    d22_cdm = mesh_utils.create_device_mesh((2, 2), devs[:4], allow_split_physical_axes=True)
+except (TypeError, NotImplementedError):
+    d22_cdm = np.array(devs[:4]).reshape(2, 2)
+m22_cdm = Mesh(d22_cdm, ("a", "b"))
 for L in (8, 15, 24, 32):
     check("1D-4dev(plain reshape) TP", m1_plain, P(None,"m"), P("m",None), L)
     check("1D-4dev(create_device_mesh) TP", m1_cdm, P(None,"m"), P("m",None), L)

@@ -18,7 +18,11 @@ D, F, T = 512, 2048, 256
 devs = jax.devices()
 N = int(_os.environ.get("CANON_MINREPRO_N") or min(4, len(devs)))
 assert N <= len(devs), f"CANON_MINREPRO_N={N} exceeds {len(devs)} visible devices"
-mesh = Mesh(mesh_utils.create_device_mesh((N,), devs[:N]), ("m",))
+try:
+    dmesh = mesh_utils.create_device_mesh((N,), devs[:N], allow_split_physical_axes=True)
+except (TypeError, NotImplementedError):
+    dmesh = np.array(devs[:N]).reshape((N,))
+mesh = Mesh(dmesh, ("m",))
 rng = np.random.default_rng(0)
 put = lambda a, s: jax.device_put(jnp.asarray(a, jnp.bfloat16), NamedSharding(mesh, s))
 def rms(x, g):
