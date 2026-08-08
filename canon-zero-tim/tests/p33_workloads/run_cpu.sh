@@ -20,6 +20,15 @@ grep -Fq "sentencepiece==0.2.2" \
   canon-zero-tim/cluster/steps/30_install_canon.sh
 grep -Fq "tiktoken==0.13.0" \
   canon-zero-tim/cluster/steps/30_install_canon.sh
+grep -Fq "gymnasium==1.3.0" \
+  canon-zero-tim/cluster/steps/30_install_canon.sh
+grep -Fq -- "--no-deps" canon-zero-tim/cluster/steps/30_install_canon.sh
+if grep -Fq -- "--target" canon-zero-tim/cluster/steps/30_install_canon.sh; then
+  echo "[P33.WORKLOAD] canonical overlay accepted runtime dependencies" >&2
+  exit 1
+fi
+grep -Fq "import gymnasium, numba, numpy, sentencepiece, tiktoken" \
+  canon-zero-tim/cluster/steps/30_install_canon.sh
 
 JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \

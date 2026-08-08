@@ -69,6 +69,8 @@ def _environment(name: str) -> dict[str, str]:
   }
   if name == "frozenlake":
     environ["CANON_P33_DISABLE_EVAL"] = "1"
+  if name == "gsm8k":
+    environ["CANON_GSM8K_GRAD_PROBE"] = "0"
   return environ
 
 
@@ -96,6 +98,15 @@ class DPWorkloadsTest(unittest.TestCase):
         (workload.max_prompt_length, workload.max_response_length),
         (1024, 1024),
     )
+
+  def test_gsm8k_requires_gradient_probe_explicitly_disabled(self):
+    workload = dp_workloads.get_workload("gsm8k")
+    environ = _environment("gsm8k")
+    del environ["CANON_GSM8K_GRAD_PROBE"]
+    with self.assertRaisesRegex(ValueError, "environment mismatch"):
+      dp_workloads.validate_environment(
+          workload, environ, require_reduction_admission=False
+      )
 
   def test_frozenlake_preserves_signed_convergence_lengths(self):
     workload = dp_workloads.get_workload("frozenlake")

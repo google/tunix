@@ -333,6 +333,8 @@ def validate_environment(
   )
   if workload.name == "frozenlake":
     expected["CANON_P33_DISABLE_EVAL"] = "1"
+  if workload.name == "gsm8k":
+    expected["CANON_GSM8K_GRAD_PROBE"] = "0"
   wrong = {
       key: values.get(key)
       for key, expected_value in expected.items()
