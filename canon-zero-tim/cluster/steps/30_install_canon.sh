@@ -11,4 +11,5 @@ OUT="${CANON_INSTALL_DIR:-$CANON_STATE/canon}"
 rm -rf "$OUT"
 PATHWAYS_HEAD="" JAX_BACKEND_TARGET="" JAX_PLATFORMS=cpu bash "$CANON_PKG/install.sh" "$OUT" --from-path "$SP" --model "$CANON_MODEL_DIR_NAME"
 echo "$OUT" > "$CANON_STATE/install_dir"
+python3 -c "import gymnasium" 2>/dev/null || pip install -q gymnasium
 echo "[install] installed to $OUT ($(find "$OUT" -name '*.py' | wc -l) files)"
