@@ -106,6 +106,14 @@ def _get_all_models_test_parameters():
       dict(testcase_name="qwen3-30b-a3b", model_name="qwen3-30b-a3b"),
       dict(testcase_name="qwen3-32b", model_name="qwen3-32b"),
       dict(testcase_name="Qwen3-32B", model_name="Qwen3-32B"),
+      dict(
+          testcase_name="qwen3.5-35b-a3b",
+          model_name="qwen3.5-35b-a3b",
+      ),
+      dict(
+          testcase_name="qwen3.5-397b-a17b",
+          model_name="qwen3.5-397b-a17b",
+      ),
   )
 
 
@@ -432,6 +440,7 @@ class AutoModelTest(parameterized.TestCase):
     self.assertTrue(called_config.use_flash_attention)
     self.assertEqual(called_config.flash_attention_block_size, 512)
     self.assertFalse(hasattr(called_config, "invalid_param"))
+
 
 if __name__ == "__main__":
   absltest.main()

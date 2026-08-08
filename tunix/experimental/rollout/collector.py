@@ -71,29 +71,23 @@ class TrajectoryCollectorEngine:
       if max_generation_steps is not None:
         generation_kwargs["max_tokens"] = max_generation_steps
 
-      if self.sampler:
-        sampling_params = sampler_lib.SamplingParams(
-            max_tokens=generation_kwargs.get("max_tokens", 64),
-            temperature=generation_kwargs.get("temperature", 0.0),
-            top_p=generation_kwargs.get("top_p", None),
-            top_k=generation_kwargs.get("top_k", None),
-            seed=generation_kwargs.get("seed", None),
-            return_logprobs=generation_kwargs.get("return_logprobs", False),
-        )
-        sampling_req = sampler_lib.SamplingRequest(
-            request_id=self.traj_id,
-            prompt=chat_completions,
-            sampling_params=sampling_params,
-        )
-        res = await self.sampler.sample(sampling_req, **generation_kwargs)
-        text = res if isinstance(res, str) else getattr(res, "text", str(res))
-        tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
-        logprobs = getattr(res, "logprobs", None)
-      else:
-        raise RuntimeError(
-            "TrajectoryCollectorEngine requires a valid sampler instance to"
-            " execute model_call."
-        )
+      sampling_params = sampler_lib.SamplingParams(
+          max_tokens=generation_kwargs.get("max_tokens", 64),
+          temperature=generation_kwargs.get("temperature", 0.0),
+          top_p=generation_kwargs.get("top_p", None),
+          top_k=generation_kwargs.get("top_k", None),
+          seed=generation_kwargs.get("seed", None),
+          return_logprobs=generation_kwargs.get("return_logprobs", False),
+      )
+      sampling_req = sampler_lib.SamplingRequest(
+          request_id=self.traj_id,
+          prompt=chat_completions,
+          sampling_params=sampling_params,
+      )
+      res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      text = res if isinstance(res, str) else getattr(res, "text", str(res))
+      tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
+      logprobs = getattr(res, "logprobs", None)
 
       return base_rollout.RolloutOutput(
           text=[text],
