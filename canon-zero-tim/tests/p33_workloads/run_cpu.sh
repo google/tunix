@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKTREE="$(cd "$ROOT/.." && pwd)"
 cd "$WORKTREE"
 
-python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
   canon-zero-tim/cluster/steps/00_env.sh \
@@ -18,6 +18,7 @@ bash -n \
 
 JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
+  canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py \
   canon-zero-tim/tests/p33_workloads/test_classify_run.py
 canon-zero-tim/tests/p33_workloads/negative_control.sh
 
@@ -129,4 +130,4 @@ EOF
 
 validate_stale_evidence_rejected
 
-echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=29 negative_controls=3 admitted_preflights=1"
+echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=35 negative_controls=3 admitted_preflights=1"

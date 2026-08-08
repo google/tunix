@@ -299,6 +299,8 @@ Do not paste tokens or `.git/config`. Do not summarise a red gate as "mostly wor
 cluster/
 ├── entrypoint.sh              the only thing the manifest calls
 ├── jobset-64chip.yaml         v5p 4x4x4, 16 worker pods x 4 chips
+├── render_p33_jobsets.py      render three isolated P33 Attempt-0 JobSets
+├── P33_QUEUE.md               pull, render, queue, monitor and evidence handoff
 ├── profiles/
 │   ├── _canonical_engine.env  the switch set; shared by every profile
 │   ├── qwen3-1p7b.env         model geometry (GSM8K release)
@@ -319,7 +321,7 @@ cluster/
     ├── 75_run_dp.sh           validate same-session DP markers; no new Pathways client
     ├── 80_model_init.sh       materialize exact state shapes; zero execution/commits
     ├── 85_run_dp16_rc.sh      run and classify one bounded real-checkpoint RC stage
-    └── 90_run.sh              the workload, then the PATHTRACE tally
+    └── 90_run.sh              workload, PATHTRACE tally and P33 result classifier
 ```
 
 Change behaviour by committing to `steps/`, not by editing YAML.

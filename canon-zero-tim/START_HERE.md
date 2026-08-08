@@ -31,13 +31,16 @@ It is packaging of work already done, not a new result. What is signed and what 
 | **Round-trip: install from this package, reproduce signed numbers** | **NOT RUN** |
 | Pathways topology/operator/toy-update admission | **TARGET PASS** — single-slice 64-chip Attempt 0, clean package provenance, P1a/P1b and T2 all passed; the raw log is machine-classified and hash-pinned. |
 | DP16×TP4 Qwen3 adapter and abstract state inventory | **LOCAL CPU PASS** — fixed placement, grouped segmented adapter, deterministic DP16 tree and exact Qwen3-8B state shapes; no target materialization claim. |
-| Full Qwen3-8B model initialization, segmented backward, optimizer commit, training | **TARGET NOT RUN** |
+| Bounded Qwen3-8B model initialization, backward and three optimizer commits | **TARGET SYSTEMS PASS** — dense-reference RC only; zero-TIM alignment was not measured. |
+| P33 DP16×TP4 rank-local reducer and workload contracts | **LOCAL PASS, PUBLISHED** — 256 reverse calls/update correctness vehicle; target workload not run. |
+| P33 FrozenLake backward-no-commit, GSM8K-200 and FrozenLake-450 | **TARGET NOT RUN** — strict three-JobSet queue is documented in `cluster/P33_QUEUE.md`. |
 
-**Do not spend another 64-chip run repeating the same bounded admission.** The next useful
-action is `model-init-only`: materialize the exact actor/AdamW/accumulator states without a
-checkpoint, forward, backward or update. Only after that target gate passes should the adapter
-advance through forward, backward-no-commit, one-update and steady-state gates. TP8 remains a
-generic platform diagnostic until it has a separate Qwen8B production contract.
+**Do not spend another 64-chip run repeating the bounded P32 admission.** Its model-init,
+backward and three-update systems gates have already passed, but they used a dense synthetic
+objective and did not measure A=B=C. The next target work is the P33 queue in
+`cluster/P33_QUEUE.md`: one FrozenLake backward-no-commit diagnostic plus the independently
+approved full GSM8K and FrozenLake campaigns. TP8 remains a generic platform diagnostic until it
+has a separate Qwen8B production contract.
 
 ---
 
