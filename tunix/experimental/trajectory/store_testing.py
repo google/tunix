@@ -51,9 +51,27 @@ STEP_2_2: Final[trajectory_lib.Step] = trajectory_lib.Step(
     message="Second step in traj 2",
     timestamp=TEST_TIMESTAMP,
 )
+STEP_2_3: Final[trajectory_lib.Step] = trajectory_lib.Step(
+    step_id=3,
+    source=trajectory_lib.Source.USER,
+    message="Third step in traj 2",
+    timestamp=TEST_TIMESTAMP,
+)
+STEP_2_4: Final[trajectory_lib.Step] = trajectory_lib.Step(
+    step_id=4,
+    source=trajectory_lib.Source.AGENT,
+    message="Fourth step in traj 2",
+    timestamp=TEST_TIMESTAMP,
+)
+STEP_2_5: Final[trajectory_lib.Step] = trajectory_lib.Step(
+    step_id=5,
+    source=trajectory_lib.Source.AGENT,
+    message="Fifth step in traj 2",
+    timestamp=TEST_TIMESTAMP,
+)
 TRAJECTORY_2: Final[trajectory_lib.Trajectory] = trajectory_lib.Trajectory(
     **METADATA_2.model_dump(),
-    steps=[STEP_2_1, STEP_2_2],
+    steps=[STEP_2_1, STEP_2_2, STEP_2_3, STEP_2_4, STEP_2_5],
 )
 
 
@@ -89,7 +107,10 @@ class TrajectoryReaderTestCase(
     self.reader = self._create_reader(
         initial_data=[
             (METADATA_1, [STEP_1_1]),
-            (METADATA_2, [STEP_2_1, STEP_2_2]),
+            (
+                METADATA_2,
+                [STEP_2_1, STEP_2_2, STEP_2_3, STEP_2_4, STEP_2_5],
+            ),
         ],
     )
 
@@ -143,6 +164,9 @@ class TrajectoryWriterTestCase(
     """Tests that sequential steps are correctly appended to a trajectory."""
     self.writer.add_step(STEP_2_1, METADATA_2)
     self.writer.add_step(STEP_2_2, METADATA_2)
+    self.writer.add_step(STEP_2_3, METADATA_2)
+    self.writer.add_step(STEP_2_4, METADATA_2)
+    self.writer.add_step(STEP_2_5, METADATA_2)
     self.writer.flush()
 
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_2])
@@ -177,6 +201,9 @@ class TrajectoryWriterTestCase(
     self.assertEqual(traj_2, expected_traj_2_partial)
 
     self.writer.add_step(STEP_2_2, METADATA_2)
+    self.writer.add_step(STEP_2_3, METADATA_2)
+    self.writer.add_step(STEP_2_4, METADATA_2)
+    self.writer.add_step(STEP_2_5, METADATA_2)
     self.writer.flush()
 
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_1, TRAJECTORY_ID_2])
