@@ -247,6 +247,20 @@ def requires_alignment_train_mode(
   )
 
 
+def configure_replicated_parameter_sharding(
+    config: Any, *, data_axis: str = "dp"
+) -> None:
+  """Uses TP-sharded parameters and DP-sharded activations on a DP/TP mesh."""
+  sharding_type = type(config.shd_config)
+  factory = getattr(sharding_type, "get_data_parallel_sharding", None)
+  if factory is None:
+    raise TypeError(
+        "model sharding config does not support replicated-parameter data "
+        "parallelism"
+    )
+  config.shd_config = factory(data_axis)
+
+
 def requested_max_steps(
     workload: DPWorkloadSpec,
     environ: Mapping[str, str] | None = None,

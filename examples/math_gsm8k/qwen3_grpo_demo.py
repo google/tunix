@@ -630,6 +630,8 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
     config.flash_attention_block_size = 256
   config.dtype = jnp.bfloat16
   config.param_dtype = jnp.float32
+  if CANON_P32_WORKLOAD:
+    dp_workloads.configure_replicated_parameter_sharding(config)
 
   reference = qwen3_params_lib.create_model_from_safe_tensors(
       MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE

@@ -647,8 +647,12 @@ def create_datasets(
     train_df = pd.read_parquet(train_f)
     test_df = pd.read_parquet(test_f)
 
-  train_ds = Dataset.from_pandas(train_df)
-  test_ds = Dataset.from_pandas(test_df)
+  train_ds = grain.MapDataset.source(
+      frozenlake_data.add_empty_prompt_column(Dataset.from_pandas(train_df))
+  )
+  test_ds = grain.MapDataset.source(
+      frozenlake_data.add_empty_prompt_column(Dataset.from_pandas(test_df))
+  )
   if args.shuffle_data:
     train_ds = train_ds.shuffle(SEED)
     test_ds = test_ds.shuffle(SEED)
@@ -728,6 +732,8 @@ if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
   oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
 
 config = model_lib.ModelConfig.qwen3_8b()
+if CANON_P32_WORKLOAD:
+  dp_workloads.configure_replicated_parameter_sharding(config)
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:

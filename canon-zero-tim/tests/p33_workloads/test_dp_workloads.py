@@ -7,6 +7,12 @@ import types
 import unittest
 from unittest import mock
 
+import datasets
+import grain
+import pandas as pd
+from examples.frozenlake import data as frozenlake_data
+from tunix.models.qwen3 import model as qwen3_model
+from tunix.cli.utils import data as data_lib
 from tunix.rl import dp_workloads
 
 
@@ -315,6 +321,32 @@ class DPWorkloadsTest(unittest.TestCase):
       dp_workloads.requires_alignment_train_mode(
           {"CANON_P32_WORKLOAD": "unknown"}
       )
+
+  def test_frozenlake_dataset_adds_required_prompt_column(self):
+    frame = pd.DataFrame({"seed": [1, 2], "size": [4, 5], "p": [0.7, 0.8]})
+    dataset = frozenlake_data.add_empty_prompt_column(
+        datasets.Dataset.from_pandas(frame)
+    )
+    self.assertIn("prompts", dataset.column_names)
+    self.assertEqual(dataset["prompts"], ["", ""])
+
+    tokenizer = types.SimpleNamespace(encode=lambda value: [value])
+    training, validation = data_lib.post_init_dataset(
+        grain.MapDataset.source(dataset),
+        tokenizer,
+        batch_size=1,
+        num_batches=2,
+        max_prompt_length=4,
+    )
+    self.assertIsNone(validation)
+    self.assertEqual(len(list(training)), 2)
+
+  def test_qwen3_replicated_parameter_sharding_drops_fsdp_axis(self):
+    config = qwen3_model.ModelConfig.qwen3_1p7b()
+    self.assertIn("fsdp", repr(config.shd_config))
+    dp_workloads.configure_replicated_parameter_sharding(config)
+    self.assertNotIn("fsdp", repr(config.shd_config))
+    self.assertIn("dp", repr(config.shd_config.act_btd))
 
   def test_unknown_workload_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "unknown canonical workload"):

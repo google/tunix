@@ -86,6 +86,15 @@ def save_dataset(data: list[dict], filepath: str) -> None:
   print(f"Saved {len(data)} entries to {filepath}")
 
 
+def add_empty_prompt_column(
+    dataset: datasets_lib.Dataset,
+) -> datasets_lib.Dataset:
+  """Adds the prompt field required by the shared dataset preprocessing path."""
+  if "prompts" in dataset.column_names:
+    dataset = dataset.remove_columns("prompts")
+  return dataset.add_column("prompts", [""] * len(dataset))
+
+
 def create_dataset(
     split: str = "train",
     data_dir: str = "/tmp/data/frozenlake",
@@ -114,13 +123,8 @@ def create_dataset(
     print(f"Loading existing dataset from {filepath}")
     
   df = pd.read_parquet(filepath)
-  hf_ds = datasets_lib.Dataset.from_pandas(df)
-  
-  def process_item(item):
-    item["prompts"] = ""
-    return item
-    
-  return grain.MapDataset.source(hf_ds).map(process_item)
+  hf_ds = add_empty_prompt_column(datasets_lib.Dataset.from_pandas(df))
+  return grain.MapDataset.source(hf_ds)
 
 
 def main():
