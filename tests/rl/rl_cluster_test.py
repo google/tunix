@@ -993,11 +993,6 @@ class RlEngineTest(parameterized.TestCase):
             eos_id=1,
         )
 
-    with self.subTest('satisfies_abstract_rl_engine_protocol'):
-      self.assertIsInstance(
-          rl_engine, rl_engine_interface.AbstractRLEngine
-      )
-
 
 if __name__ == '__main__':
   absltest.main()

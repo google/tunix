@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import collections
 from collections.abc import Hashable
-import dataclasses
 from typing import Callable, Deque, Dict, Generic, List, Optional, Tuple, TypeVar, Union
 
 _T = TypeVar("_T")

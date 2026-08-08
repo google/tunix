@@ -26,7 +26,7 @@ run surfaces every misconfiguration at once.
 from typing import Protocol
 from tunix.experimental.orchestrator import worker_registry
 from tunix.rl import algorithm_config
-from tunix.rl import rl_cluster
+from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 
 
@@ -46,7 +46,7 @@ class StartupValidator(Protocol):
       self,
       registry: worker_registry.WorkerRegistry,
       alg_config: algorithm_config.AlgorithmConfig,
-      training_config: rl_cluster.RLTrainingConfig,
+      training_config: rl_cluster_lib.RLTrainingConfig,
   ) -> list[str]:
     """Returns a list of error messages; empty list if all checks pass."""
     ...
@@ -59,7 +59,7 @@ class RunGeometryValidator:
       self,
       registry: worker_registry.WorkerRegistry,
       alg_config: algorithm_config.AlgorithmConfig,
-      training_config: rl_cluster.RLTrainingConfig,
+      training_config: rl_cluster_lib.RLTrainingConfig,
   ) -> list[str]:
     del registry
     errors: list[str] = []
@@ -138,7 +138,7 @@ DEFAULT_VALIDATORS: tuple[StartupValidator, ...] = (RunGeometryValidator(),)
 def validate_startup(
     registry: worker_registry.WorkerRegistry,
     alg_config: algorithm_config.AlgorithmConfig,
-    training_config: rl_cluster.RLTrainingConfig,
+    training_config: rl_cluster_lib.RLTrainingConfig,
     *,
     validators: tuple[StartupValidator, ...] = DEFAULT_VALIDATORS,
 ) -> None:
