@@ -230,3 +230,36 @@ sha256sum -c evidence/package_artifacts.sha256
     ValueError: canonical GSM8K environment mismatch: {'CANON_GSM8K_GRAD_PROBE': None}
     ```
   - **Diagnostic**: Canonical environment check in `qwen3_grpo_demo.py:809` requires `"CANON_GSM8K_GRAD_PROBE": expected_grad_probe` (evaluating to `"0"` in full train mode `CANON_GSM8K_TRAIN=1`), but `CANON_GSM8K_GRAD_PROBE` was not exported in `cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env`. All other 10 environment checks passed.
+
+---
+
+## 11. Phase 33 Attempt `r7` (Commit `ca6d78d0`) Execution & Diagnostics
+
+- `p33_r7_frozenlake_logsoftmax_row_error.raw.log` records the live execution of `canon-p33-fl-full-r7-ca6d78d0` (Qwen3-8B full 450 steps) on 64 physical TPU v5p chips.
+  - **Progress**: Environment isolation (`numpy<2.4`, `numba<0.62`) and profile checks 100% passed! Model weights loaded across 64 TPU chips with replicated parameters data parallelism (`49.5 GiB / device`). DPScheduler initialized 16 worker processes across DP=16. Pallas JIT compilation passed across all 36 layers up to $M=65536$.
+  - **Traceback**:
+    ```text
+    File "/app/tunix/rl/canonical_qwen3_adapter.py", line 209, in compute_and_gather
+      logprobs = mapped_log_softmax(logits)
+    File "/app/tunix/rl/canonical_qwen3_adapter.py", line 179, in local_log_softmax
+      raise FunctionalMappingError(
+          f"P32 log-softmax global row count changed: {logits.shape[0]} != {global_m}"
+      )
+    tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: P32 log-softmax global row count changed: 256 != 4096
+    ```
+  - **Diagnostic**: In `local_log_softmax`, the assertion expects `logits.shape[0] == global_m (4096)` and performs dynamic slicing by DP rank. During rollout sampling (`vllm_sampler.py` -> `tpu_runner.py:_sample_from_logits`), each TPU worker process passes its local shard `(local_m = 256)` directly to `compute_and_gather_logprobs`.
+
+- `p33_r7_gsm8k_logsoftmax_row_error.raw.log` records the live execution of `canon-p33-gsm8k-full-r7-ca6d78d0` (Qwen3-1.7B full 200 steps) on 64 physical TPU v5p chips.
+  - **Progress**: `CANON_GSM8K_GRAD_PROBE=0` environment verification passed! 28 layers compiled with Pallas custom kernels up to $M=65536$. W&B run connected online.
+  - **Traceback**:
+    ```text
+    File "/app/tunix/rl/canonical_qwen3_adapter.py", line 209, in compute_and_gather
+      logprobs = mapped_log_softmax(logits)
+    File "/app/tunix/rl/canonical_qwen3_adapter.py", line 179, in local_log_softmax
+      raise FunctionalMappingError(
+          f"P32 log-softmax global row count changed: {logits.shape[0]} != {global_m}"
+      )
+    tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: P32 log-softmax global row count changed: 256 != 4096
+    ```
+  - **Diagnostic**: Identical to FrozenLake: `local_log_softmax` in `canonical_qwen3_adapter.py` must accept both global ($M=4096$) and local ($M=256$) row counts.
+
