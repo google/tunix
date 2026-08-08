@@ -317,8 +317,10 @@ def apply_rope(
   
   # Handle missing b dim
   if positions.ndim == 1:
-    sinusoid_inp = positions[:, None] / timescale[None, :]
-    sinusoid_inp = sinusoid_inp[:, None, :]
+    # (i,j) = (p_i / t_j) 
+    sinusoid_inp = positions[:, jnp.newaxis] / timescale[jnp.newaxis, :] # (N, 1) / (N, D) -> (N, D)
+    # (i,0,k) = (p_i/t_k)
+    sinusoid_inp = sinusoid_inp[:, jnp.newaxis, :] # (N, D) -> (N, 1, D)
   else:
     sinusoid_inp = (
         positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
@@ -477,8 +479,8 @@ class Attention(nnx.Module):
           shd.PartitionSpec(),                       # kv_lens: (batch_size,)
           shd.PartitionSpec(),                 # page_indices: (batch_size, max_pages_per_seq)
           shd.PartitionSpec(),                       # q_lens
-          shd.PartitionSpec(),
-          shd.PartitionSpec(),
+          shd.PartitionSpec(),                      # Dist
+          shd.PartitionSpec(),                      # soft cap
       )
       out_specs = (
           shd.PartitionSpec(None, tp_axis, None),
@@ -497,13 +499,11 @@ class Attention(nnx.Module):
       ):
         if distribution_in is None:
           raise ValueError("distribution cannot be None when cache is provided.")
-        local_num_seqs = q_lens_in.shape[0]
-        is_decode = (q_in.shape[0] == local_num_seqs)
-        actual_q_lens = jax.lax.cond(
-            is_decode,
-            lambda: jnp.ones_like(q_lens_in),
-            lambda: q_lens_in,
-        )
+        batch_size = cache.batch_size
+        decode_end = distribution_in[0]
+        is_decode = jnp.arange(batch_size) < decode_end
+
+        actual_q_lens = jnp.where(is_decode, 1, q_lens_in)
         cu_q_lens_in = jnp.pad(jnp.cumsum(actual_q_lens), (1, 0))
 
         effective_soft_cap = soft_cap_in if soft_cap_in is not None else self.attn_logits_soft_cap
@@ -520,7 +520,7 @@ class Attention(nnx.Module):
             soft_cap=effective_soft_cap,
         )
 
-      attn_output, updated_pages = sharded_rpa(
+      attn_output, updated_layer_pages = sharded_rpa(
           q,
           k,
           v,
@@ -534,9 +534,14 @@ class Attention(nnx.Module):
 
       attn_output = self.attn_vec_einsum(attn_output)
       attn_output = shard(attn_output, self.shd_config.act_btd)
-
-      cache.pages[layer_name] = updated_pages
-      return cache, attn_output
+     
+      new_pages = {**cache.pages, layer_name: updated_layer_pages}
+      updated_cache = dataclasses.replace(
+          cache, 
+          pages=new_pages,
+      )
+      
+      return updated_cache, attn_output
 
     if self.use_gqa:
       # Reshape matrices to enable einsums over groups.

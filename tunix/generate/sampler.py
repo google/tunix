@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
-import jaxtyping
+
 import numpy as np
 from tunix.generate import base_sampler
 from tunix.generate import utils
@@ -40,7 +40,6 @@ import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.processors import audio_processor
 from tunix.processors import image_processor
-from jax.sharding import PartitionSpec as P
 
 
 def shard(x: jnp.ndarray, s: tuple[str | None, ...]):
@@ -100,13 +99,12 @@ class CacheConfig:
   num_kv_heads: int
   head_dim: int
 
-  max_seq_len: int = 1028
-  max_num_pages: int = 128 
+  max_seq_len: int = 1024
+  num_pages: int = 2048 
   page_size: int = 8
-  num_shards: int = 1
   window_size: int | None = None
 
-  kv_packing: int = 1
+  kv_packing: int = 2
   seq_partition: str | None = None
   head_partition: str | None = None
 
@@ -123,33 +121,36 @@ class CacheConfig:
     window_upper_bound = cdiv(self.window_size, self.page_size)
     return min(upper_bound, window_upper_bound + 1)
 
-  @property
-  def max_num_pages_per_seq_per_shard(self) -> int:
-    return cdiv(self.max_num_pages_per_seq, self.num_shards)
-
-
-
-
+@jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PageManager:
   """Page state and data blocks for a batch of sequences."""
   pages: dict[str, jax.Array]
-  page_indices: jax.Array  # i32[batch_size, max_num_pages_per_seq_per_shard]
-  available_page_indices: jax.Array  # i32[total_num_pages_per_shard]
+  page_indices: jax.Array  # i32[batch_size, max_num_pages_per_seq]
+  available_page_indices: jax.Array  # i32[total_num_pages]
   num_available_pages: jax.Array  # i32 scalar
   seq_lens: jax.Array # i32[batch_size]
-  page_size: int = 8
-  max_seq_len: int = 1028
-  num_shards: int = 1
-  window_size: int | None = None
-  max_num_pages_per_seq_per_shard: int = 2048
+  
+  page_size: int = dataclasses.field(
+      metadata={'static': True}
+  )
+  max_seq_len: int = dataclasses.field(
+      metadata={'static': True}
+  )
+  window_size: int | None = dataclasses.field(
+      metadata={'static': True}
+  )
 
   @property
   def batch_size(self) -> int:
     return self.seq_lens.shape[0]
 
   @property
-  def total_num_pages_per_shard(self) -> int:
+  def max_num_pages_per_seq(self) -> int:
+    return self.max_seq_len / self.page_size
+
+  @property
+  def total_num_pages(self) -> int:
     return self.available_page_indices.shape[0]
 
   @property
@@ -161,23 +162,22 @@ class PageManager:
     return self.seq_lens
 
   @functools.cached_property
-  def num_local_pages(self) -> jax.Array:
-    return cdiv(cdiv(self.seq_lens, self.page_size), self.num_shards)
+  def num_pages(self) -> jax.Array:
+    return cdiv(self.seq_lens, self.page_size)
 
   @jax.named_call
   def allocate(self, q_lens: jax.Array) -> "PageManager":
     """Allocates pages for new tokens."""
-    total_pages_required = cdiv(self.seq_lens + q_lens, self.page_size)
-    local_pages_required = cdiv(total_pages_required, self.num_shards)
+    pages_required = cdiv(self.seq_lens + q_lens, self.page_size)
 
-    num_pages_to_allocate = local_pages_required - self.num_local_pages
+    num_pages_to_allocate = pages_required - self.num_pages
 
     page_indices_to_allocate = RaggedArray(
         data=self.available_page_indices, lens=num_pages_to_allocate
     )
     page_indices_rows = page_indices_to_allocate.row_idxs
     page_indices_cols = (
-        self.num_local_pages[page_indices_rows]
+        self.num_pages[page_indices_rows]
         + page_indices_to_allocate.intra_offsets
     )
 
@@ -206,14 +206,14 @@ class PageManager:
     updated_lens = jnp.where(should_release, 0, self.seq_lens)
 
     page_indices_to_release = RaggedArray(
-        data=jax.lax.empty((self.total_num_pages_per_shard,), dtype=jnp.int32),
-        lens=jnp.where(should_release, self.num_local_pages, 0),
+        data=jax.lax.empty((self.total_num_pages,), dtype=jnp.int32),
+        lens=jnp.where(should_release, self.num_pages, 0),
     )
     page_indices_irows = page_indices_to_release.row_idxs
     page_indices_icols = page_indices_to_release.intra_offsets
 
     updated_available_page_indices = self.available_page_indices.at[
-        jnp.arange(self.total_num_pages_per_shard) + self.num_available_pages
+        jnp.arange(self.total_num_pages) + self.num_available_pages
     ].set(self.page_indices[page_indices_irows, page_indices_icols])
 
     updated_num_available_pages = (
@@ -232,30 +232,28 @@ class PageManager:
     if self.window_size is None:
       return self
 
-    num_pages_to_release_per_shard = (
+    num_pages_to_release = (
         jnp.maximum(self.seq_lens - self.window_size, 0)
         // self.page_size
-        // self.num_shards
     )
     page_indices_irows = jnp.arange(self.batch_size)[:, None]
     page_indices_icols = (
-        jnp.arange(self.max_num_pages_per_seq_per_shard)
-        + num_pages_to_release_per_shard[:, None]
+        jnp.arange(self.max_num_pages_per_seq)
+        + num_pages_to_release[:, None]
     )
     updated_page_indices = self.page_indices[
         page_indices_irows, page_indices_icols
     ]
     release_helper = RaggedArray(
-        data=jax.lax.empty((self.total_num_pages_per_shard,), dtype=jnp.int32),
-        lens=num_pages_to_release_per_shard,
+        data=jax.lax.empty((self.total_num_pages,), dtype=jnp.int32),
+        lens=num_pages_to_release,
     )
     released_page_indices = self.page_indices[
         release_helper.row_idxs, release_helper.intra_offsets
     ]
     updated_available_page_indices = self.available_page_indices.at[
-        jnp.arange(self.total_num_pages_per_shard) + self.num_available_pages
+        jnp.arange(self.total_num_pages) + self.num_available_pages
     ].set(released_page_indices, mode='drop')
-    num_pages_to_release = num_pages_to_release_per_shard * self.num_shards
     return dataclasses.replace(
         self,
         page_indices=updated_page_indices,
@@ -273,34 +271,50 @@ class PageManager:
     seq_idxs = token_ragged.row_idxs
     token_offsets = token_ragged.intra_offsets
 
-    local_page_cols = (token_offsets // self.page_size) // self.num_shards
+    local_page_cols = (token_offsets // self.page_size) 
     page_offsets = token_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
-
-    self.pages[key] = self.pages[key].at[phys_page_ids, page_offsets].set(
+    
+    updated_layer_pages = self.pages[key].at[phys_page_ids, page_offsets].set(
         prompt_tokens
     )
-    return self
+    new_pages = {**self.pages, key: updated_layer_pages}
+
+    return dataclasses.replace(
+          self, 
+          pages=new_pages,
+    )
+
 
   def append_tokens(
-      self, tokens: jax.Array, key: str = "token_buffer"
+      self, tokens: jax.Array, valid_mask: jax.Array | None = None, key: str = "token_buffer"
   ) -> "PageManager":
     """Appends 1 new token per sequence to paged memory."""
-    pm = self.allocate(jnp.ones(self.batch_size, dtype=jnp.int32))
+    if valid_mask is None:
+      valid_mask = jnp.ones(self.batch_size, dtype=jnp.int32)
+      
+    pm = self.allocate(valid_mask)
+
+    # pm = self.allocate(jnp.ones(self.batch_size, dtype=jnp.int32))
 
     token_offsets = pm.seq_lens - 1  # position of new token
-    local_page_cols = (token_offsets // pm.page_size) // pm.num_shards
+    local_page_cols = (token_offsets // pm.page_size)
     page_offsets = token_offsets % pm.page_size
     seq_idxs = jnp.arange(pm.batch_size)
     phys_page_ids = pm.page_indices[seq_idxs, local_page_cols]
+    
+    updated_layer_pages = pm.pages[key].at[phys_page_ids, page_offsets].set(tokens)
+    new_pages = {**pm.pages, key: updated_layer_pages}
 
-    pm.pages[key] = pm.pages[key].at[phys_page_ids, page_offsets].set(tokens)
-    return pm
+    return dataclasses.replace(
+          pm, 
+          pages=new_pages,
+    )
 
   def get_token_at(self, pos: int | jax.Array, key: str = "token_buffer") -> jax.Array:
-    """Directly looks up token IDs at sequence position `pos` using page_indices and modulo."""
+    """Directly looks up token IDs at sequence position `pos` using page_indices."""
     seq_idxs = jnp.arange(self.batch_size)
-    local_page_col = (pos // self.page_size) // self.num_shards
+    local_page_col = (pos // self.page_size) 
     page_offset = pos % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_col]
     return self.pages[key][phys_page_ids, page_offset]
@@ -310,29 +324,20 @@ class PageManager:
     seq_grid = jnp.arange(self.batch_size)[:, None]
     pos_grid = start + jnp.arange(length)[None, :]
 
-    local_page_cols = (pos_grid // self.page_size) // self.num_shards
+    local_page_cols = (pos_grid // self.page_size)
     page_offsets = pos_grid % self.page_size
     safe_cols = jnp.clip(
-        local_page_cols, 0, self.max_num_pages_per_seq_per_shard - 1
+        local_page_cols, 0, self.max_num_pages_per_seq - 1
     )
     phys_page_ids = self.page_indices[seq_grid, safe_cols]
     return self.pages[key][phys_page_ids, page_offsets]
 
   def to_array(
       self,
-      total_num_tokens: int | None = None,
+      total_num_tokens: int,
       block_id: str = "token_buffer",
-      is_2d: bool = False,
   ) -> jax.Array:
     """Extracts array of token IDs from paged memory."""
-    if is_2d:
-      max_len = total_num_tokens if total_num_tokens is not None else self.config.max_seq_len
-      gathered_pages = self.pages[block_id][self.page_indices]
-      flat_sequences = gathered_pages.reshape(self.batch_size, -1)
-      return flat_sequences[:, :max_len]
-
-    if total_num_tokens is None:
-      total_num_tokens = int(jnp.sum(self.seq_lens))
     token_ragged = RaggedArray(
         data=jnp.zeros((total_num_tokens,), dtype=jnp.int32),
         lens=self.seq_lens,
@@ -340,7 +345,7 @@ class PageManager:
     seq_idxs = token_ragged.row_idxs
     token_offsets = token_ragged.intra_offsets
 
-    local_page_cols = (token_offsets // self.page_size) // self.num_shards
+    local_page_cols = (token_offsets // self.page_size)
     page_offsets = token_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
@@ -348,27 +353,7 @@ class PageManager:
     packed_tokens = self.pages[block_id][phys_page_ids, page_offsets]
     return packed_tokens
 
-
-jax.tree_util.register_dataclass(
-    PageManager,
-    data_fields=[
-        'pages',
-        'page_indices',
-        'available_page_indices',
-        'num_available_pages',
-        'seq_lens',
-    ],
-    meta_fields=[
-        'page_size',
-        'max_seq_len',
-        'num_shards',
-        'window_size',
-        'max_num_pages_per_seq_per_shard',
-    ],
-)
-
 Cache = PageManager
-LayerCache = dict[str, jaxtyping.Array]
 
 
 @flax.struct.dataclass
@@ -494,24 +479,24 @@ def _init_page_manager(
     pad_id: int,
     dtype: jnp.dtype,
 ) -> PageManager:
-  num_pages_per_shard = cache_config.max_num_pages // cache_config.num_shards
+  num_pages = cache_config.num_pages
   page_indices = jnp.zeros(
-      (batch_size, cache_config.max_num_pages_per_seq_per_shard), dtype=jnp.int32
+      (batch_size, cache_config.max_num_pages_per_seq), dtype=jnp.int32
   )
-  available_page_indices = jnp.arange(num_pages_per_shard, dtype=jnp.int32)
-  num_available_pages = jnp.array(num_pages_per_shard, dtype=jnp.int32)
+  available_page_indices = jnp.arange(num_pages, dtype=jnp.int32)
+  num_available_pages = jnp.array(num_pages, dtype=jnp.int32)
   
   blocks = {}
 
   token_buffer_block = jnp.full(
-      (cache_config.max_num_pages, cache_config.page_size), pad_id, dtype=jnp.int32
+      (cache_config.num_pages, cache_config.page_size), pad_id, dtype=jnp.int32
   )
   blocks['token_buffer'] = token_buffer_block
   
   for i in range(cache_config.num_layers):
     layer_block = jax.lax.empty(
         (
-            cache_config.max_num_pages,
+            cache_config.num_pages,
             cache_config.page_size,
             2 * cache_config.num_kv_heads // cache_config.kv_packing,
             cache_config.kv_packing,
@@ -530,9 +515,7 @@ def _init_page_manager(
       seq_lens=jnp.zeros(batch_size, dtype=jnp.int32),
       page_size=cache_config.page_size,
       max_seq_len=cache_config.max_seq_len,
-      num_shards=cache_config.num_shards,
       window_size=cache_config.window_size,
-      max_num_pages_per_seq_per_shard=cache_config.max_num_pages_per_seq_per_shard,
   )
 
 
@@ -545,14 +528,18 @@ def _init_cache(
     dtype: jnp.dtype,
 ) -> Cache:
   """Create KV cache for the transformer."""
+  max_seq_len=1024
+  page_size=8
+  num_pages=0.6 * max_seq_len / page_size * batch_size
+
   config = CacheConfig(
       cache_size=cache_size,
       num_layers=n_layers,
       num_kv_heads=num_kv_heads,
       head_dim=head_dim,
-      num_shards=2,
-      page_size=8,
-      max_seq_len=max(cache_size, 1028),
+      num_pages=num_pages,
+      page_size=page_size,
+      max_seq_len=max_seq_len,
   )
   return _init_page_manager(config, batch_size, 0, dtype)
 
@@ -807,6 +794,7 @@ class Sampler(base_sampler.BaseSampler):
     beam_search_state = sampler_state.beam_search_sampling_state
     if sampler_state.forbidden_token_ids:
       logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
+    
 
     if sampler_state.sampling_mode == 'beam_search':
       beam_search_state, updated_args = beam_search_lib.beam_search_step(
@@ -830,6 +818,7 @@ class Sampler(base_sampler.BaseSampler):
             logits, return_logprobs=(logprobs_buffer is not None)
         )
       elif sampler_state.sampling_mode == 'top_p':
+        # key = jax.random.fold_in(sampler_state.seed, decoding_step)
         key = jax.random.fold_in(sampler_state.seed, jnp.max(decoding_step))
         next_token_candidate, logp = sample_top_p(
             logits,
@@ -850,6 +839,7 @@ class Sampler(base_sampler.BaseSampler):
         ].set(logp)
 
     latest_tokens = cache.get_token_at(decoding_step + 1)
+
     done = done | jnp.isin(latest_tokens, eos)
     return _SamplingState(
         decoding_step=sampler_state.decoding_step + 1,
@@ -880,6 +870,7 @@ class Sampler(base_sampler.BaseSampler):
     """Performs prefill."""
     batch_size = sampler_state.cache.batch_size
 
+     
     if sampler_state.positions is not None:
       step_positions = sampler_state.positions[
           :, : sampler_state.num_input_tokens
@@ -903,12 +894,16 @@ class Sampler(base_sampler.BaseSampler):
         lens=sampler_state.cache.seq_lens,
     )
     step_positions = position_ragged.intra_offsets
+    
+    batch_size = sampler_state.cache.batch_size
+    distribution = jnp.array([0, 0, batch_size], dtype=jnp.int32)
 
     logits, cache = transformer(
         tokens,
         step_positions,
         sampler_state.cache,
         seq_lens=sampler_state.cache.seq_lens,
+        distribution=distribution,
         **kwargs,
     )
 
@@ -916,23 +911,13 @@ class Sampler(base_sampler.BaseSampler):
     positions = sampler_state.positions
     beam_search_sampling_state = None
     if sampler_state.logits_buffer is not None:
-      start_indices = jnp.pad(
-          jnp.cumsum(sampler_state.cache.seq_lens)[:-1], (1, 0)
+      start_idx = (
+          sampler_state.num_input_tokens if decode_only_last_token else 1
       )
-      max_len = sampler_state.logits_buffer.shape[1]
-      vocab_size = logits.shape[1]
-
-      def unpack_logits(start_idx, length):
-        slice_val = jax.lax.dynamic_slice(
-            logits.astype(sampler_state.logits_buffer.dtype),
-            (start_idx, 0),
-            (max_len, vocab_size),
-        )
-        mask = (jnp.arange(max_len) < length)[:, None]
-        return jnp.where(mask, slice_val, 0)
-
-      logits_buffer = jax.vmap(unpack_logits)(
-          start_indices, sampler_state.cache.seq_lens
+      logits_buffer = jax.lax.dynamic_update_slice(
+          sampler_state.logits_buffer,
+          logits.astype(sampler_state.logits_buffer.dtype),
+          (0, start_idx, 0),
       )
     else:
       logits_buffer = sampler_state.logits_buffer
@@ -971,9 +956,11 @@ class Sampler(base_sampler.BaseSampler):
         sampling_mode=sampler_state.sampling_mode,
         beam_search_sampling_state=beam_search_sampling_state,
     )
+
     last_token_indices = jnp.cumsum(sampler_state.cache.seq_lens) - 1
     last_token_logits = logits[last_token_indices]
-    last_token_logits = jnp.expand_dims(last_token_logits, axis=1)
+    last_token_logits = jnp.expand_dims(last_token_logits, axis=1)  
+
     updated_sampler_state = self._sample(
         logits=last_token_logits,
         cache=cache,
@@ -994,9 +981,14 @@ class Sampler(base_sampler.BaseSampler):
 
     def cond_fn(sampler_state: _SamplingState):
       return jnp.any(
-          (sampler_state.decoding_step < sampler_state.total_sampling_steps - 1)
-          & jnp.logical_not(sampler_state.done)
+        (sampler_state.decoding_step < sampler_state.total_sampling_steps - 1)
+        & jnp.logical_not(sampler_state.done)
       )
+      """
+      return (
+          sampler_state.decoding_step < sampler_state.total_sampling_steps - 1
+      ) & jnp.any(jnp.logical_not(sampler_state.done))
+      """
 
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
 
@@ -1016,14 +1008,19 @@ class Sampler(base_sampler.BaseSampler):
       step_positions = decoding_step[:, None].astype(jnp.int32)
 
     transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
+    batch_size = sampler_state.cache.batch_size
+    distribution = jnp.array([batch_size, batch_size, batch_size], dtype=jnp.int32)
+
     logits, cache = transformer(
         last_token,
         positions=step_positions,
         cache=sampler_state.cache,
         seq_lens=sampler_state.cache.seq_lens,
+        distribution=distribution
     )
     logits = jnp.expand_dims(logits, axis=1)
-
+    
+    
     updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
@@ -1074,7 +1071,52 @@ class Sampler(base_sampler.BaseSampler):
       max_audio_length: int | None = None,
       max_audio_clips: int | None = None,
   ) -> base_sampler.SamplerOutput:
-    """Samples a completion of the input string(s)."""
+    """Samples a completion of the input string.
+
+    If top_p is provided, the sampling mode will be top_p.
+    If beam_size is provided, the sampling mode will be beam_search.
+    If None of them are provided, the sampling mode will be greedy.
+
+    Args:
+      input_strings: input prompts to feed to the model for sampling.
+      max_generation_steps: number of generation steps. will correspond to the
+        longest prompt in the batch.
+      max_prompt_length: maximum length of the prompt. Specify to avoid
+        recompilation on different prompt lengths.
+      echo: whgether to return the prompt as part of the output sample.
+      return_logits: whether to return per-step logits used during generation.
+      eos_tokens: end of sequence tokens to stop generation. If None, the
+        tokenizer's eos_id will be used.
+      forbidden_tokens: Optional Iterable of token IDs that are disallowed.
+      temperature: temperature for sampling.
+      top_p: top-p sampling threshold.
+      top_k: top-k sampling threshold.
+      beam_size: beam size for beam search.
+      seed: random seed for sampling.
+      pad_output: whether to pad the output to maximum length. If this set as
+        True, the output len will be max_generation_steps if echo is False,
+        otherwise it will be max_generation_steps + max_prompt_length. The
+        padding now only supports right padding. Can modify to support left
+        padding if needed.
+      images: input images to process. Can be a string/array, list of
+        strings/arrays, or list of list of strings/arrays depending on whether
+        there is one, multiple, or varying number of images per batch.
+      audios: Raw audio waveforms. Can be a single array (batch_size=1), list of
+        arrays (multiple samples in a batch, each sample with one clip), or a
+        list of list of arrays (multiple clips for multiple samples in a batch).
+        A mix of these is also allowed. E.g. `[a1, [a2, a3], []]` would mean the
+        first sample has 1 audio clip (a1), the second sample has 2 audio clips
+        (a2 and a3), and the third sample has 0 audio clips.
+      max_audio_length: Maximum length of audio waveforms. If specified, audio
+        input to the model will be padded upto this length. Specify to avoid
+        recompilation on different audio lengths across calls.
+      max_audio_clips: Maximum number of audio clips in a sample. If specified,
+        audio input to the model will be padded upto this count. Specify to
+        avoid recompilation on different number of clips across calls.
+
+    Returns:
+      sampler_output: A SamplerOutput object containing the generated samples.
+    """
     self.eos_ids = jnp.array(eos_tokens or [self.tokenizer.eos_id()])
     input_strings = (
         [input_strings] if isinstance(input_strings, str) else input_strings
@@ -1160,10 +1202,7 @@ class Sampler(base_sampler.BaseSampler):
     sampling_state = self._compiled_decode_fn(
         self._flattened_transformer_state, sampling_state
     )
-    batch_size = len(tokens)
-    ragged_token_buffer = sampling_state.cache.to_array(
-        total_sampling_steps * batch_size
-    )
+    ragged_token_buffer = sampling_state.cache.to_array(len(tokens) * total_sampling_steps)
     ragged_token_buffer = jax.device_get(ragged_token_buffer)
     seq_lens = jax.device_get(sampling_state.cache.seq_lens)
     logits_buffers = sampling_state.logits_buffer
@@ -1171,16 +1210,19 @@ class Sampler(base_sampler.BaseSampler):
     batch_size = len(tokens)
     start_indices = jnp.pad(jnp.cumsum(seq_lens)[:-1], (1, 0))
 
-    def unpack_left_padded_seq(start_idx, length, prompt_len):
+    def unpack_left_padded_seq(start_idx, length, prompt_length):
       raw_slice = jax.lax.dynamic_slice(ragged_token_buffer, (start_idx,), (total_sampling_steps,))
       valid_mask = jnp.arange(total_sampling_steps) < length
       right_padded = jnp.where(valid_mask, raw_slice, self.tokenizer.pad_id())
-      shift_amount = max_prompt_length - prompt_len
+      # shift_amount = total_sampling_steps - length
+      shift_amount = max_prompt_length - prompt_length
       left_padded = jnp.roll(right_padded, shift_amount)
       return left_padded
 
     token_buffers = jax.vmap(unpack_left_padded_seq)(
-        start_indices, seq_lens, jnp.array(lens)
+        start_indices, 
+        seq_lens,
+        jnp.array(lens)
     )
     
     all_input_ids = np.array([
@@ -1280,6 +1322,7 @@ class Sampler(base_sampler.BaseSampler):
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
         if return_logprobs:
+          # Extract logprobs for the generated tokens
           out_logprobs.append(
               final_logprobs_buffer[i][start_idx:end_idx].tolist()
           )

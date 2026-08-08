@@ -22,6 +22,7 @@ from typing import Any, Optional, Tuple
 from flax import nnx
 import jax
 import jaxtyping
+import numpy as np
 from tunix.generate import continuous_async_driver
 from tunix.generate import continuous_sampler
 from tunix.generate import sampler
@@ -60,7 +61,8 @@ class VanillaRollout(base_rollout.BaseRollout):
             sampler=self._continuous_sampler,
             sampling_config=continuous_sampler.SamplingConfig(
                 max_num_sequences=32,
-                max_generation_steps=824,
+                max_generation_steps=800,
+                max_prompt_length=256
             ),
         )
         self._driver.start()
@@ -68,7 +70,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       self._sampler = sampler.Sampler(
           model,
           tokenizer,
-          base_rollout.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+          sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
       )
 
   def generate(
@@ -111,7 +113,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     sampling_config = continuous_sampler.SamplingConfig(
-        max_num_sequences=self.cache_config.cache_size,
+        max_num_sequences=32,
         max_generation_steps=rollout_config.max_tokens_to_generate,
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
@@ -134,19 +136,21 @@ class VanillaRollout(base_rollout.BaseRollout):
     completed: dict[str, continuous_sampler.RequestOutput] = {}
     step_reqs = req_dicts
     while len(completed) < len(prompts):
-      outputs = self._continuous_sampler._sample_step(sampling_state, step_reqs)
+      sampling_state, outputs = self._continuous_sampler._sample_step(sampling_state, step_reqs)
       step_reqs = []
       completed.update(outputs)
-
+      print(f"Completions: {len(completed)} / {len(prompts)}")
+    
+    print("DONE :)")
     del sampling_state
 
     results = [completed[f"sync_{i}"] for i in range(len(prompts))]
     return base_rollout.RolloutOutput(
         text=[r.text for r in results],
-        logits=None,
+        logits=np.array([r.logits for r in results]),
         tokens=[r.tokens for r in results],
-        left_padded_prompt_tokens=[],
-        logprobs=None,
+        left_padded_prompt_tokens=np.array([r.padded_tokens for r in results]),
+        logprobs=np.array([r.logprobs for r in results]),
     )
 
   def _generate_server_mode(
@@ -203,9 +207,11 @@ class VanillaRollout(base_rollout.BaseRollout):
       params: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
   ) -> None:
+    """
     if self.use_continuous_sampling:
       self._continuous_sampler.update_params(params)
       return
+    """
 
     if filter_types is not None:
       dst_params = nnx.state(self.model(), filter_types)

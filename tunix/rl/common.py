@@ -280,9 +280,6 @@ def process_ids(
 
   return prompt_completion_ids, positions, attn_mask, input_seg_ids
 
-@functools.cache
-def _call_contains_by_type(target_cls: type, target_arg: str) -> bool:
-  """Determines if a class' call function contains a target argument and caches the result"""
 
 @functools.cache
 def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
@@ -295,6 +292,15 @@ def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
     )
   except Exception:
     return False
+
+
+def model_call_contains(model, target_arg: str) -> bool:
+  """Determines if a model's call function contains a target argument"""
+
+  target_obj = model.transformer if hasattr(model, "transformer") else model
+
+  return _call_contains_by_type(type(target_obj), target_arg)
+
 
 @functools.partial(
     jax.jit,

@@ -22,6 +22,7 @@ import threading
 import inspect
 import time
 from typing import Any, Dict, List, Sequence, Tuple, Union
+import sys
 
 import flax
 from flax import nnx
@@ -34,6 +35,7 @@ from tunix.generate import beam_search as beam_search_lib
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import utils
 
+
 class RequestStatus(enum.IntEnum):
   """Status of KV values stored for each sequence slot."""
   PREFILL = 0    # Prompt tokens only; no KV layers written
@@ -43,7 +45,9 @@ class RequestStatus(enum.IntEnum):
 class SamplingConfig:
   max_num_sequences: int
   max_generation_steps: int
-  max_prompt_length: int = 128 
+  max_prompt_length: int = 200 
+  num_cpu_pages: int = 4096 * 32
+  num_hbm_pages: int = 256 * 32
   page_size: int = 8 
   dtype: jnp.dtype = jnp.bfloat16
   temperature: float = 0.0
@@ -54,7 +58,7 @@ class SamplingConfig:
   forbidden_tokens: Tuple[int, ...] | None = None
   eos_tokens: Sequence[int] | None = None
   include_logits: bool = False
-  include_logprobs: bool = False
+  include_logprobs: bool = True 
   pad_output: bool = False
   max_audio_length: int | None = None
   max_audio_clips: int | None = None
@@ -66,9 +70,9 @@ class RequestOutput:
   request_id: str
   text: str
   tokens: List[int]
-  logits: np.ndarray | None = None
+  padded_tokens: np.ndarray
   logprobs: np.ndarray | None = None
-
+  logits: np.ndarray | None = None
 
 class RequestFuture:
   """Future handle returned to callers submitting async requests."""
@@ -96,7 +100,8 @@ class RequestFuture:
     return self._output
 
 
-@flax.struct.dataclass
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(kw_only=True)
 class _SamplingState:
   """Internal sampling state for Continuous Batching."""
   # Decoding steps: ith entry contains the decoding step of the ith HBM sequence
@@ -105,8 +110,6 @@ class _SamplingState:
   # (i, j, k) represents that sequences[0:i] are decode-only,
   # sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed.
   distribution: jnp.ndarray  # i32[3]
-  # Sequence Lengths on TPU HBM
-  sequence_lengths: jnp.ndarray  # i32[max_num_sequences]
   # Sharded TPU HBM cache storing tokens and KV values for active sequences on TPU
   hbm_cache: sampler_lib.PageManager
   # CPU cache storing tokens and offloaded KV values for pending/preempted sequences
@@ -134,9 +137,14 @@ class _SamplingState:
       default_factory=list, pytree_node=False
   )
 
-
   sampling_mode: str = flax.struct.field(
       default="greedy", pytree_node=False
+  )
+  max_prompt_length: int = flax.struct.field(
+      default=128, pytree_node=False
+  )
+  max_generation_steps: int = flax.struct.field(
+      default=128, pytree_node=False
   )
   temperature: float = flax.struct.field(
       default=0.0, pytree_node=False
@@ -171,7 +179,7 @@ class VanillaSampler:
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
     
-    self._compiled_step_fn = jax.jit(self._model_step_fn, donate_argnums=(1,))
+    self._compiled_step_fn = jax.jit(self._model_step_fn, static_argnames=("echo", "max_prompt_length"))
     self._supports_decode_only_last_token = (
         'decode_only_last_token'
         in inspect.signature(transformer.__call__).parameters
@@ -182,6 +190,7 @@ class VanillaSampler:
       updated_weights: jaxtyping.PyTree,
   ) -> None:
     """Update underlying NNX model weights in-place with synchronization barrier."""
+    print("BAD BAD BAD BAD BAD")
     return
     jax.effects_barrier()
     nnx.update(self.model_module, updated_weights)
@@ -190,18 +199,19 @@ class VanillaSampler:
   def _init_page_manager(
       self,
       max_seqs: int,
-      max_num_pages_per_seq: int,
       page_size: int,
       max_seq_len: int,
+      num_pages: int,
       dp_axis: str | None = None,
       tp_axis: str | None = None,
       device: Any = None,
   ) -> sampler_lib.PageManager:
     """Explicitly initializes physical page tensors for a PageManager pool, placing CPU caches on host memory."""
     blocks: dict[str, jax.Array] = {}
+    max_num_pages_per_seq = int(max_seq_len / page_size)
 
     token_block = jax.lax.empty(
-        (self.cache_config.cache_size, page_size), dtype=jnp.int32
+        (num_pages, page_size), dtype=jnp.int32
     )
     if dp_axis is not None:
       token_block = sampler_lib.shard(token_block, (dp_axis, None))
@@ -209,11 +219,11 @@ class VanillaSampler:
       token_block = jax.device_put(token_block, device)
     blocks["token_buffer"] = token_block
 
-    layer_dtype = getattr(self.cache_config, "dtype", jnp.bfloat16)
+    # layer_dtype = getattr(self.cache_config, "dtype", jnp.bfloat16)
     for i in range(self.cache_config.num_layers):
       layer_block = jax.lax.empty(
           (
-              self.cache_config.cache_size,
+              num_pages,
               page_size,
               2 * self.cache_config.num_kv_heads // self.cache_config.kv_packing,
               self.cache_config.kv_packing,
@@ -228,8 +238,8 @@ class VanillaSampler:
       blocks[f"layer_{i}"] = layer_block
 
     page_indices = jnp.zeros((max_seqs, max_num_pages_per_seq), dtype=jnp.int32)
-    available_page_indices = jnp.arange(self.cache_config.cache_size, dtype=jnp.int32)
-    num_available_pages = jnp.array(self.cache_config.cache_size, dtype=jnp.int32)
+    available_page_indices = jnp.arange(num_pages, dtype=jnp.int32)
+    num_available_pages = jnp.array(num_pages, dtype=jnp.int32)
     seq_lens = jnp.zeros((max_seqs,), dtype=jnp.int32)
 
     if device is not None:
@@ -237,6 +247,7 @@ class VanillaSampler:
       available_page_indices = jax.device_put(available_page_indices, device)
       num_available_pages = jax.device_put(num_available_pages, device)
       seq_lens = jax.device_put(seq_lens, device)
+    
 
     return sampler_lib.PageManager(
         pages=blocks,
@@ -246,6 +257,7 @@ class VanillaSampler:
         seq_lens=seq_lens,
         page_size=page_size,
         max_seq_len=max_seq_len,
+        window_size=None,
     )
   
   def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
@@ -266,12 +278,6 @@ class VanillaSampler:
   def transformer_state(self, state: statelib.State) -> None:
 
     def get_all_param_types(tree):
-      param_types = set()
-      jax.tree_util.tree_map(
-          lambda x: param_types.add(type(x)),
-          tree,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
       return param_types
 
     def check_tree_structure(tree1, tree2):
@@ -287,6 +293,10 @@ class VanillaSampler:
       def check_shape_dtype_sharding(x, y):
 
         def equivalent_sharding(x, y):
+          # Lift the condition on memory_kind due to offloading.
+          # Besides it seems jax.jit might change some shardings of the params
+          # to equivalent representation so here we check if the specs are
+          # equivalent instead of checking the identity.
           if isinstance(
               x.sharding, jax.sharding.SingleDeviceSharding
           ) and isinstance(y.sharding, jax.sharding.SingleDeviceSharding):
@@ -298,6 +308,56 @@ class VanillaSampler:
             return False
           if x.sharding.mesh != y.sharding.mesh:
             return False
+          mesh = x.sharding.mesh
+          diff_spec = list(set(x.sharding.spec) - set(y.sharding.spec))
+          for spec in diff_spec:
+            if spec and mesh.shape[spec] != 1:
+              return False
+          return True
+
+        return (
+            jnp.shape(x) == jnp.shape(y)
+            and x.dtype == y.dtype
+            and equivalent_sharding(x, y)
+        )
+
+      if not all(
+          jax.tree_util.tree_leaves(
+              jax.tree_util.tree_map(check_shape_dtype_sharding, tree1, tree2)
+          )
+      ):
+        raise ValueError(
+            'New state must have the same shape, dtype and sharding as the old'
+            f' state. {tree1} vs {tree2}'
+        )
+
+    param_types = get_all_param_types(state)
+
+    if nnx.Param in param_types:
+      # Full state replacement.
+      check_tree_structure(self._transformer_state, state)
+      self._transformer_state = state
+    else:
+      # LoRA state replacement.
+      if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+        raise ValueError(
+            'Only LoRAParam is supported. Received invalid `param_types`: '
+            f'{param_types}'
+        )
+      original_lora_params = statelib.filter_state(
+          self._transformer_state, nnx.LoRAParam
+      )
+      check_tree_structure(original_lora_params, state)
+      base_state = statelib.filter_state(
+          self._transformer_state, filterlib.Not(nnx.LoRAParam)
+      )
+      self._transformer_state = statelib.merge_state(base_state, state)
+
+    self._flattened_transformer_state = jax.tree.leaves(
+        self._transformer_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
 
   @property
   def dtype(self) -> jnp.dtype:
@@ -310,12 +370,16 @@ class VanillaSampler:
   def init_sample_state(
       self,
       sampling_config: SamplingConfig,
+      beam_size: Optional[int] = None,
   ) -> _SamplingState:
     """Initialize sampling state with HBM, Offloaded, and Prefix cache pools."""
     max_seqs = sampling_config.max_num_sequences
     page_size = sampling_config.page_size
     max_seq_len = sampling_config.max_generation_steps + sampling_config.max_prompt_length
-    max_num_pages_per_seq = sampler_lib.cdiv(max_seq_len, page_size)
+
+    hbm_num_pages = sampling_config.num_hbm_pages
+    cpu_num_pages = sampling_config.num_cpu_pages
+
 
     shd_config = getattr(getattr(self.transformer, "config", None), "shd_config", None)
     if shd_config is not None:
@@ -328,8 +392,8 @@ class VanillaSampler:
     cpu_device = jax.devices("cpu")[0] if jax.devices("cpu") else None
 
     hbm_cache = self._init_page_manager(
+        num_pages=hbm_num_pages,
         max_seqs=max_seqs,
-        max_num_pages_per_seq=max_num_pages_per_seq,
         page_size=page_size,
         max_seq_len=max_seq_len,
         dp_axis=dp_axis,
@@ -337,8 +401,8 @@ class VanillaSampler:
         device=None,
     )
     offloaded_cache = self._init_page_manager(
+        num_pages=cpu_num_pages, 
         max_seqs=max_seqs,
-        max_num_pages_per_seq=max_num_pages_per_seq,
         page_size=page_size,
         max_seq_len=max_seq_len,
         dp_axis=None,
@@ -347,18 +411,42 @@ class VanillaSampler:
     )
 
     eos_ids = tuple(sampling_config.eos_tokens) if sampling_config.eos_tokens is not None else None
+    
+    if sampling_config.include_logprobs:
+      logprobs_buffer=jnp.zeros((max_seqs, max_seq_len))
+    else:
+      logprobs_buffer = None
+
+    if sampling_config.include_logits:
+      vocab_size = self.transformer.config.vocab_size
+      logits_buffer=jnp.zeros((max_seqs, max_seq_len, vocab_size))
+    else:
+      logits_buffer = None
+
+    sampling_parameters = {}
+    sampling_mode = [None]
+
+    if beam_size is not None:
+      utils.check_sampling_mode_conflict(sampling_mode, 'beam_search')  # pyrefly: ignore[bad-argument-type]
+      sampling_parameters['beam_size'] = beam_size
+
+    if sampling_config.top_p is not None:
+      utils.check_sampling_mode_conflict(sampling_mode, 'top_p')  # pyrefly: ignore[bad-argument-type]
+      sampling_parameters['top_p'] = sampling_config.top_p
+      sampling_parameters['top_k'] = sampling_config.top_k
 
     return _SamplingState(
+        max_prompt_length=sampling_config.max_prompt_length,
+        max_generation_steps=sampling_config.max_generation_steps,
         decoding_steps=jnp.zeros((max_seqs,), dtype=jnp.int32),
         offloaded_decoding_steps=jnp.zeros((max_seqs,), dtype=jnp.int32),
         distribution=jnp.array([0, 0, 0], dtype=jnp.int32),
-        sequence_lengths=jnp.zeros((max_seqs,), dtype=jnp.int32),
         hbm_cache=hbm_cache,
         offloaded_cache=offloaded_cache,
         done=jnp.zeros((max_seqs,), dtype=jnp.bool_),
-        insertion_timestamps=jnp.zeros((max_seqs,), dtype=jnp.float64),
-        logits_buffer=None,
-        logprobs_buffer=None,
+        insertion_timestamps=jnp.zeros((max_seqs,), dtype=jnp.float32),
+        logits_buffer=logits_buffer,
+        logprobs_buffer=logprobs_buffer,
         forbidden_token_ids=sampling_config.forbidden_tokens,
         eos_token_ids=eos_ids,
         seed=jax.random.PRNGKey(sampling_config.seed or 0),
@@ -366,7 +454,7 @@ class VanillaSampler:
         cpu_request_ids=[],
         sampling_mode="top_p" if sampling_config.top_p else "greedy",
         temperature=sampling_config.temperature,
-        sampling_parameters={"top_p": sampling_config.top_p or 1.0},
+        sampling_parameters=sampling_parameters,
         attn_logits_soft_cap=sampling_config.attn_logits_soft_cap,
     )
 
@@ -425,6 +513,29 @@ class VanillaSampler:
 
     return sampling_state
 
+  def _put_on_target_device(self, tensor: jax.Array, target_tensor: jax.Array) -> jax.Array:
+    """Safely places tensor on the same device/mesh as target_tensor."""
+    if hasattr(target_tensor, "sharding") and target_tensor.sharding is not None:
+      sharding = target_tensor.sharding
+      if isinstance(sharding, jax.sharding.NamedSharding):
+        orig_spec = sharding.spec
+        
+        # Replicate the tensor in the case of DP
+        if len(orig_spec) > 0:
+          safe_spec = jax.sharding.PartitionSpec(None, *orig_spec[1:])
+        else:
+          safe_spec = jax.sharding.PartitionSpec()
+        
+        target_sharding = jax.sharding.NamedSharding(sharding.mesh, safe_spec)
+        return jax.device_put(tensor, target_sharding)
+      elif isinstance(sharding, jax.sharding.SingleDeviceSharding):
+        return jax.device_put(tensor, sharding)
+    
+    if hasattr(target_tensor, "devices") and len(target_tensor.devices()) > 0:
+      return jax.device_put(tensor, list(target_tensor.devices())[0])
+    
+    return tensor
+
   def _batch_transfer_pages(
       self,
       src_cache: sampler_lib.PageManager,
@@ -434,22 +545,35 @@ class VanillaSampler:
       transfer_kv: bool = True,
   ) -> sampler_lib.PageManager:
     """Transfers pages across specified slots, optionally copying only token_buffer when transfer_kv is False."""
-    if not src_slots:
+    if len(src_slots) == 0:
+      return dst_cache
+    
+    src_idxs_list = []
+    dst_idxs_list = []
+    for s_slot, d_slot in zip(src_slots, dst_slots):
+      seq_len = int(src_cache.seq_lens[s_slot])
+      if seq_len == 0:
+        continue
+      num_pages = (seq_len + src_cache.page_size - 1) // src_cache.page_size
+      src_idxs_list.append(src_cache.page_indices[s_slot, :num_pages])
+      dst_idxs_list.append(dst_cache.page_indices[d_slot, :num_pages])
+
+    if not src_idxs_list:
       return dst_cache
 
-    src_idxs = src_cache.page_indices[jnp.array(src_slots)].reshape(-1)
-    dst_idxs = dst_cache.page_indices[jnp.array(dst_slots)].reshape(-1)
+    src_idxs = jnp.concatenate(src_idxs_list)
+    dst_idxs = jnp.concatenate(dst_idxs_list)
+
+    # src_idxs = src_cache.page_indices[jnp.array(src_slots)].reshape(-1)
+    # dst_idxs = dst_cache.page_indices[jnp.array(dst_slots)].reshape(-1)
 
     if not transfer_kv:
       src_tensor = src_cache.pages["token_buffer"]
       dst_tensor = dst_cache.pages.get("token_buffer", jnp.zeros_like(src_tensor))
 
       src_slice = src_tensor[src_idxs]
-      if hasattr(dst_tensor, "sharding") and dst_tensor.sharding is not None:
-        src_slice = jax.device_put(src_slice, dst_tensor.sharding)
-      elif len(jax.devices("cpu")) > 0:
-        src_slice = jax.device_put(src_slice, jax.devices("cpu")[0])
-
+      src_slice = self._put_on_target_device(src_slice, dst_tensor)
+      
       dst_cache.pages["token_buffer"] = dst_tensor.at[dst_idxs].set(src_slice)
       return dst_cache
 
@@ -457,14 +581,20 @@ class VanillaSampler:
       dst_tensor = dst_cache.pages.get(key, jnp.zeros_like(src_tensor))
 
       src_slice = src_tensor[src_idxs]
-      if hasattr(dst_tensor, "sharding") and dst_tensor.sharding is not None:
-        src_slice = jax.device_put(src_slice, dst_tensor.sharding)
-      elif len(jax.devices("cpu")) > 0:
-        src_slice = jax.device_put(src_slice, jax.devices("cpu")[0])
+      src_slice = self._put_on_target_device(src_slice, dst_tensor)
 
       dst_cache.pages[key] = dst_tensor.at[dst_idxs].set(src_slice)
 
     return dst_cache
+
+  def _tokenize(self, input_string: str) -> np.ndarray | list[int]:
+    """Tokenizes the input string."""
+    input_ids = self.tokenizer.encode(input_string)
+    bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
+    input_ids = np.array(
+        self.tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=np.int32
+    )
+    return input_ids
 
   def _queue_new_requests(
       self,
@@ -493,7 +623,7 @@ class VanillaSampler:
     for req_dict in new_requests:
       req_id = req_dict["id"]
       prompt_str = req_dict["prompt"]
-      prompt_tokens = self.tokenizer.encode(prompt_str)
+      prompt_tokens = self._tokenize(prompt_str)
       prompt_len = len(prompt_tokens)
 
       slot_idx = len(cpu_req_ids)
@@ -504,10 +634,9 @@ class VanillaSampler:
       q_lens = jnp.zeros((max_seqs,), dtype=jnp.int32).at[slot_idx].set(prompt_len)
       offloaded_cache = offloaded_cache.allocate(q_lens=q_lens)
 
-      tokens_arr = jnp.array(prompt_tokens, dtype=jnp.int32)
+      # tokens_arr = jnp.array(prompt_tokens, dtype=jnp.int32)
       lens_arr = jnp.zeros((max_seqs,), dtype=jnp.int32).at[slot_idx].set(prompt_len)
-      offloaded_cache = offloaded_cache.load_prompt_tokens(tokens_arr, lens=lens_arr, key="token_buffer")
-      
+      offloaded_cache = offloaded_cache.load_prompt_tokens(prompt_tokens, lens=lens_arr, key="token_buffer")
 
     return dataclasses.replace(
         sampling_state,
@@ -521,8 +650,6 @@ class VanillaSampler:
     """Evicts newest active HBM sequence to offloaded_cache when HBM is constrained.
     """
     hbm_available = int(sampling_state.hbm_cache.num_available_pages)
-    num_tpu = len(sampling_state.hbm_request_ids)
-    num_cpu = len(sampling_state.cpu_request_ids)
 
     evict_hbm_slots: list[int] = []
     evict_cpu_slots: list[int] = []
@@ -530,9 +657,13 @@ class VanillaSampler:
     hbm_request_ids = list(sampling_state.hbm_request_ids)
     cpu_request_ids = list(sampling_state.cpu_request_ids)
     offloaded_cache = sampling_state.offloaded_cache
-
+    
+    num_tpu = len(hbm_request_ids)    
+    num_cpu = len(cpu_request_ids) 
     while hbm_available < num_tpu:
-      evict_idx = num_tpu - 1 - len(evict_hbm_slots)
+      evict_idx = num_tpu - 1
+      print("EVICT IDX: ", evict_idx)
+
       req_id = hbm_request_ids[evict_idx]
       seq_len = int(sampling_state.hbm_cache.seq_lens[evict_idx])
       pages_needed = sampler_lib.cdiv(seq_len, offloaded_cache.page_size)
@@ -542,17 +673,22 @@ class VanillaSampler:
 
       cpu_slot = num_cpu + len(evict_cpu_slots)
       cpu_request_ids.append(req_id)
+      hbm_request_ids.pop()
 
       q_lens = jnp.zeros((int(offloaded_cache.batch_size),), dtype=jnp.int32).at[cpu_slot].set(seq_len)
       offloaded_cache = offloaded_cache.allocate(q_lens=q_lens)
 
       evict_hbm_slots.append(evict_idx)
       evict_cpu_slots.append(cpu_slot)
-      hbm_available += int(pages_needed)
+      
+      num_tpu -= 1
+      num_cpu += 1
 
     if evict_hbm_slots:
-      offloaded_decoding_steps[evict_cpu_slots] = sampling_state.decoding_steps[evict_hbm_slots]
-
+      evict_hbm_slots = jnp.array(evict_hbm_slots, dtype=jnp.int32)
+      evict_cpu_slots = jnp.array(evict_cpu_slots, dtype=jnp.int32)
+      
+      offloaded_decoding_steps = sampling_state.offloaded_decoding_steps.at[evict_cpu_slots].set(sampling_state.decoding_steps[evict_hbm_slots])
       offloaded_cache = self._batch_transfer_pages(
           sampling_state.hbm_cache,
           offloaded_cache,
@@ -564,21 +700,23 @@ class VanillaSampler:
       for slot in evict_hbm_slots:
         should_release = should_release.at[slot].set(True)
       updated_hbm_cache = self._release_slots(sampling_state.hbm_cache, should_release)
+    
+      # hbm_request_ids=hbm_request_ids[:-len(evict_hbm_slots)]
+      # for _ in evict_hbm_slots:
+      #  hbm_request_ids.pop()
 
-      for _ in evict_hbm_slots:
-        hbm_request_ids.pop()
-
-      return dataclasses.replace(
+      return hbm_available, dataclasses.replace(
           sampling_state,
+          offloaded_decoding_steps=offloaded_decoding_steps,
           hbm_cache=updated_hbm_cache,
           offloaded_cache=offloaded_cache,
           hbm_request_ids=hbm_request_ids,
           cpu_request_ids=cpu_request_ids,
       )
 
-    return sampling_state
+    return hbm_available, sampling_state
 
-  def _drain_pending_queue(self, sampling_state: _SamplingState) -> _SamplingState:
+  def _drain_pending_queue(self, hbm_available: int, sampling_state: _SamplingState) -> _SamplingState:
     """Admit sequences from offloaded_cache to HBM cache."""
     hbm_req_ids = list(sampling_state.hbm_request_ids)
     cpu_req_ids = list(sampling_state.cpu_request_ids)
@@ -590,9 +728,16 @@ class VanillaSampler:
 
     decode_src_slots: list[int] = []
     prefill_src_slots: list[int] = []
-
+    
     is_decode = sampling_state.offloaded_decoding_steps > 0
     for cpu_slot in sorted_cpu_slots:
+      seq_len = int(sampling_state.offloaded_cache.seq_lens[cpu_slot])
+      pages_needed = sampler_lib.cdiv(seq_len + 1, sampling_state.hbm_cache.page_size)
+      
+      if pages_needed > hbm_available:
+        break
+      
+      hbm_available -= pages_needed
       if is_decode[cpu_slot]: 
         decode_src_slots.append(cpu_slot)
       else:
@@ -605,22 +750,22 @@ class VanillaSampler:
         
     i_val = num_existing_decode + len(decode_src_slots)
     j_val = i_val + len(prefill_src_slots)
-    k_val = j_val 
+    k_val = j_val
   
     src_slots = decode_src_slots + prefill_src_slots
     dst_slots = list(range(num_existing_decode, k_val))
 
     q_lens = jnp.zeros((max_seqs,), dtype=jnp.int32)
-    for idx in range(num_existing_decode):
-      q_lens = q_lens.at[idx].set(1)
+    # for idx in range(num_existing_decode):
+    #  q_lens = q_lens.at[idx].set(1)
 
-    sequence_lengths = sampling_state.sequence_lengths
+    # sequence_lengths = sampling_state.hbm_cache.seq_lens 
     for src_slot, dst_slot in zip(src_slots, dst_slots):
       req_id = cpu_req_ids[src_slot]
       seq_len = int(offloaded_cache.seq_lens[src_slot])
       hbm_req_ids.append(req_id)
       q_lens = q_lens.at[dst_slot].set(seq_len)
-      sequence_lengths = sequence_lengths.at[dst_slot].set(seq_len)
+      # sequence_lengths = sequence_lengths.at[dst_slot].set(seq_len)
 
     updated_hbm_cache = sampling_state.hbm_cache.allocate(q_lens=q_lens)
     
@@ -633,6 +778,15 @@ class VanillaSampler:
         decode_dst_slots,
         transfer_kv=True,
     )
+
+    prefill_dst_slots = list(range(i_val, j_val))
+    updated_hbm_cache = self._batch_transfer_pages(
+        offloaded_cache,
+        updated_hbm_cache,
+        prefill_src_slots,
+        prefill_dst_slots,
+        transfer_kv=False,
+    )
     
     should_release_cpu = jnp.zeros((max_seqs,), dtype=jnp.bool_)
     for slot in src_slots:
@@ -641,18 +795,18 @@ class VanillaSampler:
     admitted_set = set(src_slots)
     cpu_req_ids = [rid for i, rid in enumerate(cpu_req_ids) if i not in admitted_set]
 
-    dist = jnp.array([i_val, j_val, k_val], dtype=jnp.int32)
-    src_slots = jnp.array(src_slots)
-    dst_slots = jnp.array(dst_slots)
+    dist = jnp.array([i_val, i_val, k_val], dtype=jnp.int32)
+    src_slots = jnp.array(src_slots, dtype=jnp.int32)
+    dst_slots = jnp.array(dst_slots, dtype=jnp.int32)
 
-    src_decoding_steps = sampling_state.offloaded_decoding_steps[src_slots] 
+    src_decoding_steps = sampling_state.offloaded_decoding_steps[src_slots]
+    # src_decoding_steps = jax.device_put(src_decoding_steps, sampling_state.decoding_steps.devices())
     updated_decoding_steps = sampling_state.decoding_steps.at[dst_slots].set(src_decoding_steps)
 
     return dataclasses.replace(
         sampling_state,
         decoding_steps=updated_decoding_steps,
         distribution=dist,
-        sequence_lengths=sequence_lengths,
         hbm_cache=updated_hbm_cache,
         offloaded_cache=self._release_slots(offloaded_cache, should_release_cpu),
         hbm_request_ids=hbm_req_ids,
@@ -661,6 +815,7 @@ class VanillaSampler:
 
   def _compact_batch(self, sampling_state: _SamplingState) -> _SamplingState:
     """Compact continuing sequences into contiguous HBM slots and permute static metadata arrays."""
+    # jax.debug.print("Old ids: {old_ids}", old_ids=sampling_state.hbm_request_ids)
     num_tpu = len(sampling_state.hbm_request_ids)
     active_mask = ~sampling_state.done & (
         jnp.arange(sampling_state.hbm_cache.batch_size) < num_tpu
@@ -673,12 +828,15 @@ class VanillaSampler:
         page_indices=sampling_state.hbm_cache.page_indices[slot_perm],
         seq_lens=sampling_state.hbm_cache.seq_lens[slot_perm],
     )
+
+    # reordered_ids = sampling_state.hbm_request_ids[slot_perm]
     reordered_ids = [sampling_state.hbm_request_ids[int(i)] for i in jax.device_get(slot_perm)[:num_remaining]]
+    # jax.debug.print("New ids: {new_ids}", new_ids=reordered_ids)
+
 
     return dataclasses.replace(
         sampling_state,
         decoding_steps=sampling_state.decoding_steps[slot_perm],
-        sequence_lengths=sampling_state.sequence_lengths[slot_perm],
         insertion_timestamps=sampling_state.insertion_timestamps[slot_perm],
         done=jnp.zeros_like(sampling_state.done),
         hbm_cache=compacted_hbm_cache,
@@ -687,10 +845,10 @@ class VanillaSampler:
 
   def _model_step_fn(
       self,
+      max_prompt_length: int,
       params: statelib.State,
-      hbm_cache: sampler_lib.PageManager,
+      cache: sampler_lib.PageManager,
       decoding_steps: jax.Array,
-      sequence_lengths: jax.Array,
       distribution: jnp.ndarray,
       images: jnp.ndarray | None = None,
       audios: Any = None,
@@ -700,6 +858,7 @@ class VanillaSampler:
   ) -> Tuple[jnp.ndarray, sampler_lib.PageManager]:
     """JIT-compiled forward pass invoking Gemma with ragged paged attention and explicit soft_cap."""
     transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
+
     kwargs = {}
     if images is not None:
       kwargs['images'] = images
@@ -710,61 +869,60 @@ class VanillaSampler:
       kwargs['decode_only_last_token'] = True
 
     transformer = nnx.merge(self._transformer_graphdef, params)
-    max_seqs = int(hbm_cache.batch_size)
+    max_seqs = int(cache.batch_size)
 
-    is_decode = decoding_steps > 0
+    is_decode = (decoding_steps > 0) & (cache.seq_lens > 0)
     active_seq_lens = jnp.where(
         is_decode,
         1,
-        sequence_lengths, # Prefill
-    )
-    token_start_idxs = jnp.where(
-        is_decode,
-        decoding_steps,
-        sequence_lengths,
+        cache.seq_lens, # Prefill
     )
 
-    max_seqs = int(hbm_cache.batch_size)
-    static_token_capacity = (
-         hbm_cache.max_seq_len * max_seqs
+    token_start_idxs = jnp.where(
+        is_decode,
+        cache.seq_lens - 1,
+        0,
+    )
+
+    max_seqs = int(cache.batch_size)
+    static_token_capacity = int(
+         max_prompt_length * max_seqs
     )
     ragged = sampler_lib.RaggedArray(
         data=jnp.zeros((static_token_capacity,), dtype=jnp.int32),
         lens=active_seq_lens,
     )
+
     seq_idxs = ragged.row_idxs
     intra_offsets = ragged.intra_offsets
 
     # 2) Absolute token positions and physical page indirection:
     abs_positions = token_start_idxs[seq_idxs] + intra_offsets
-    page_cols = abs_positions // hbm_cache.page_size
-    page_offsets = abs_positions % hbm_cache.page_size
-    phys_page_ids = hbm_cache.page_indices[seq_idxs, page_cols]
+    page_cols = abs_positions // cache.page_size
+    page_offsets = abs_positions % cache.page_size
+    phys_page_ids = cache.page_indices[seq_idxs, page_cols]
 
-    tokens = hbm_cache.pages["token_buffer"][
+    tokens = cache.pages["token_buffer"][
         phys_page_ids, page_offsets
     ]
 
-    logits, new_hbm_cache = transformer(
+    logits, new_cache = transformer(
         tokens,
-        abs_positions,
-        cache=hbm_cache,
-        seq_lens=sequence_lengths,
+        abs_positions, # Segment positions
+        cache=cache,
         distribution=distribution,
+        seq_lens=cache.seq_lens,
         soft_cap=soft_cap,
         **kwargs,
     )
-
-    last_token_logits = logits[:, hbm_cache.seq_lens - 1]
     
-    """
-    updated_state = dataclasses.replace(
-        sampler_state,
-        hbm_cache=new_hbm_cache,
-    )
-    """
+    # last_token_logits = jnp.expand_dims(logits[last_token_idxs, :], axis=1)
 
-    return last_token_logits, new_hbm_cache 
+    last_token_idxs = jnp.cumsum(active_seq_lens) - 1
+    last_token_logits = logits[last_token_idxs]
+    last_token_logits = jnp.expand_dims(last_token_logits, axis=1)
+    
+    return last_token_logits, new_cache
 
   def _release_completed(
       self,
@@ -773,26 +931,63 @@ class VanillaSampler:
   ) -> tuple[_SamplingState, dict[str, RequestOutput]]:
     """Inspects generated tokens, appends EOS at max_seq_len - 1, formats outputs, and releases completed slots."""
     completed_outputs: dict[str, RequestOutput] = {}
-    should_release_hbm = jnp.zeros((int(sampling_state.hbm_cache.batch_size),), dtype=jnp.bool_)
+    cache = sampling_state.hbm_cache
+
+    batch_size = cache.batch_size
+    max_seq_len = cache.max_seq_len
+
+    should_release_hbm = jnp.zeros((batch_size,), dtype=jnp.bool)
+    logp_buffer = sampling_state.logprobs_buffer
+    logits_buffer = sampling_state.logits_buffer
+    
+    total_len = jnp.sum(cache.seq_lens)
+    ragged_token_buffer = cache.to_array(total_len)
+    # print("FULL TOKENS: ", self.tokenizer.decode(ragged_token_buffer.tolist()))
     
     # TODO: We should find and write the completed outputs in batched operations.
+    total_len = 0
     for idx, req_id in enumerate(sampling_state.hbm_request_ids):
       sampled_token = int(next_tokens[idx])
       eos_ids = sampling_state.eos_token_ids or (1,)
-      
+      n_decoding_steps = int(sampling_state.decoding_steps[idx])
       is_done = (
           (sampled_token in eos_ids)
-          or (int(sampling_state.hbm_cache.seq_lens[idx]) >= sampling_state.hbm_cache.max_seq_len - 1)
+          or (n_decoding_steps >= sampling_state.max_generation_steps)
       )
+      seq_len = int(sampling_state.hbm_cache.seq_lens[idx])
+
       if is_done:
         if sampled_token not in eos_ids:
           sampled_token = eos_ids[0]
+      
+        logps = None
+        logits = None
+        tokens = jax.device_get(ragged_token_buffer[total_len: total_len + cache.seq_lens[idx]])
+        
+        prompt_len = seq_len - n_decoding_steps 
+        padded_prompt = utils.pad_to_length(
+          tokens[:prompt_len],
+          target_length=sampling_state.max_prompt_length,
+          pad_value=self.tokenizer.pad_id(),
+          left=True,
+        )
+
+        if logp_buffer is not None:
+          logps = logp_buffer[idx]
+        if logits_buffer is not None:
+          logits = logits_buffer[idx, :n_decoding_steps]
+         
+        gen_tokens = tokens[prompt_len:]
         completed_outputs[req_id] = RequestOutput(
             request_id=req_id,
-            text=self.tokenizer.decode([sampled_token]),
-            tokens=[sampled_token],
+            text=self.tokenizer.decode(gen_tokens.tolist()),
+            tokens=gen_tokens,
+            logprobs=jax.device_get(logps),
+            logits=jax.device_get(logits),
+            padded_tokens=padded_prompt,
         )
         should_release_hbm = should_release_hbm.at[idx].set(True)
+      total_len += cache.seq_lens[idx]
 
     updated_hbm_cache = self._release_slots(sampling_state.hbm_cache, should_release_hbm)
 
@@ -810,45 +1005,135 @@ class VanillaSampler:
   ) -> dict[str, RequestOutput]:
     """Complete a single sampling step, and return completions."""
     sampling_state = self._queue_new_requests(sampling_state, requests)
-    sampling_state = self._make_room_for_allocation(sampling_state)
-    sampling_state = self._drain_pending_queue(sampling_state)
+    hbm_available, sampling_state = self._make_room_for_allocation(sampling_state)
+    sampling_state = self._drain_pending_queue(hbm_available, sampling_state)
 
     num_tpu = len(sampling_state.hbm_request_ids)
     if num_tpu == 0:
       return {}
+    
+    hbm_cache = sampling_state.hbm_cache
 
+    max_prompt_length = sampling_state.max_prompt_length
+    """
+    decoding_steps = sampling_state.decoding_steps
+    is_decode = (decoding_steps > 0) & (hbm_cache.seq_lens > 0)
+    # print("IS DECODE: ", jax.device_get(is_decode).tolist()[:num_tpu])
+    # print("\n")
+
+    active_seq_lens = jnp.where(
+        is_decode,
+        1,
+        hbm_cache.seq_lens, # Prefill
+    )
+    # print("Active seq lens: ", jax.device_get(active_seq_lens).tolist()[:num_tpu])
+    # print("\n")
+
+
+    token_start_idxs = jnp.where(
+        is_decode,
+        hbm_cache.seq_lens - 1,
+        0,
+    )
+
+    max_seqs = int(hbm_cache.batch_size)
+    static_token_capacity = int(
+         max_prompt_length * max_seqs
+    )
+    ragged = sampler_lib.RaggedArray(
+        data=jnp.zeros((static_token_capacity,), dtype=jnp.int32),
+        lens=active_seq_lens,
+    )
+
+    seq_idxs = ragged.row_idxs
+    intra_offsets = ragged.intra_offsets
+
+    # 2) Absolute token positions and physical page indirection:
+    abs_positions = token_start_idxs[seq_idxs] + intra_offsets
+    # print("Abs Positions: ", jax.device_get(abs_positions).tolist()[:jnp.sum(active_seq_lens)])
+    # print("\n")
+
+
+    page_cols = abs_positions // hbm_cache.page_size
+    # page_cols = intra_offsets // hbm_cache.page_size
+    page_offsets = abs_positions % hbm_cache.page_size
+    phys_page_ids = hbm_cache.page_indices[seq_idxs, page_cols]
+
+    tokens = hbm_cache.pages["token_buffer"][
+        phys_page_ids, page_offsets
+    ]
+    
+    total_len = 0
+# jnp.sum(active_seq_lens)   
+    # np.set_printoptions(threshold=sys.maxsize)
+    
+    print("FULL TOKENS: ")
+    for i in range(num_tpu):
+      print(f"SEQ {i} STARTING\n", self.tokenizer.decode(jax.device_get(tokens).tolist()[total_len: total_len + active_seq_lens[i]]), f"\nSEQ {i} ENDING\n\n")
+      total_len += active_seq_lens[i]
+    print("\n\n")
+    print("DECODING STEPS: ", jax.device_get(decoding_steps).tolist()[:total_len])
+    print("\n")
+    print("DIST: ", jax.device_get(sampling_state.distribution)[:total_len])
+    print("\n")
+    print("Seq lens: ", jax.device_get(sampling_state.hbm_cache.seq_lens)[:total_len])
+    """
     logits, updated_hbm_cache = self._compiled_step_fn(
+        sampling_state.max_prompt_length,
         params=self._flattened_transformer_state,
-        hbm_cache=sampling_state.hbm_cache,
+        cache=sampling_state.hbm_cache,
         decoding_steps=sampling_state.decoding_steps,
-        sequence_lengths=sampling_state.sequence_lengths,
         distribution=sampling_state.distribution,
         soft_cap=sampling_state.attn_logits_soft_cap,
     )
-
-    sampling_state = dataclasses.replace(
-        sampling_state,
-        hbm_cache=new_hbm_cache,
-    )
-
+    
     key, subkey = jax.random.split(sampling_state.seed)
-    next_tokens, _ = sampler_lib.sample_top_p(
+    
+    """
+    print("Next logits shape: ", jax.device_get(logits).shape)
+    
+    print("TEMP: ", sampling_state.temperature)
+    print("Top p: ", sampling_state.sampling_parameters['top_p'])
+    print("Top k: ", sampling_state.sampling_parameters['top_k'])
+    """
+    next_tokens, log_probs = sampler_lib.sample_top_p(
         logits=logits,
         key=subkey,
         temperature=sampling_state.temperature,
-        top_p=float(sampling_state.sampling_parameters.get("top_p", 1.0)),
-        top_k=None,
+        top_p=sampling_state.sampling_parameters['top_p'],
+        top_k=sampling_state.sampling_parameters['top_k'],  # pyrefly: ignore[bad-argument-type]
+        return_logprobs=True,
     )
+    """
+    print("Next tokens shape: ", jax.device_get(next_tokens).shape)
+    print("Next Tokens: ", self.tokenizer.decode(jax.device_get(next_tokens).tolist()), flush=True)
+    
+    # print("Next Tokens: ", self.tokenizer.decode(jax.device_get(next_tokens).tolist()[:num_tpu]))
+    """
+    seq_idxs = jnp.arange(updated_hbm_cache.batch_size)
+    valid_mask = seq_idxs  < num_tpu
+    updated_hbm_cache = updated_hbm_cache.append_tokens(next_tokens, valid_mask)
+
+    updated_logits = None
+    updated_logprobs = None
+    
+    decoding_steps = sampling_state.decoding_steps 
+    if sampling_state.logits_buffer is not None:
+      updated_logits = sampling_state.logits_buffer.at[seq_idxs, decoding_steps, :].set(logits)
+    if sampling_state.logprobs_buffer is not None:
+      updated_logprobs = sampling_state.logprobs_buffer.at[seq_idxs, decoding_steps].set(log_probs)
 
     sampling_state = dataclasses.replace(
         sampling_state,
         hbm_cache=updated_hbm_cache,
+        logits_buffer=updated_logits,
+        logprobs_buffer=updated_logprobs,
         seed=key,
-        decoding_steps=sampling_state.decoding_steps + 1,
+        decoding_steps=decoding_steps + 1,
     )
 
     sampling_state, completed_outputs = self._release_completed(sampling_state, next_tokens)
-    return completed_outputs
+    return sampling_state, completed_outputs
 
   def __call__(
       self,
