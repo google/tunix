@@ -1,0 +1,17 @@
+XPK Start: 2026-08-08T20:28:45Z
+[entrypoint] start 2026-08-08T20:28:47Z  mode=run  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-p33-fl-full-r11-33bf1f03-pathways-head-0-0-wz7xq
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P32 train mesh pin DISCOVERY: no release placement assertion
+[env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
+[env] profile=qwen3-8b-dp16-tp4-frozenlake model_dir=qwen8b
+[env] resolved configuration written to /tmp/canon-state/canon-p33-fl-full-r11-33bf1f03/env.sh (120 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=4b815fac59cd0c1c8b69d3a7f234fabafc729a57
+[sync] describe=4b815fac Add raw debug log for P33 r10 linear_p22xi traced_padded_matmul keyword argument error
+[sync] REFUSING: expected commit 33bf1f0351d34a173bb068332e32660fb3de55d6, got 4b815fac59cd0c1c8b69d3a7f234fabafc729a57
+[entrypoint] FATAL: 10_sync_repo.sh exited 1
