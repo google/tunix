@@ -29,6 +29,7 @@ def traced_canonical_vjp_rmsnorm(
     epsilon: float,
     interpret: bool = False,
     shape_invariant_numerics: bool = True,
+    **kwargs,
 ):
     def forward(a, w):
         return _forward(
@@ -37,6 +38,7 @@ def traced_canonical_vjp_rmsnorm(
             epsilon=epsilon,
             interpret=interpret,
             shape_invariant_numerics=shape_invariant_numerics,
+            **kwargs,
         )
 
     print(

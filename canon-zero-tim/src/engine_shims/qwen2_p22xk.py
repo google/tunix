@@ -32,6 +32,7 @@ def traced_canonical_vjp_swiglu(
     *,
     interpret: bool = False,
     shape_invariant_numerics: bool = True,
+    **kwargs,
 ):
     def forward(g, u):
         layer_override = os.environ.pop("P16_NUM_LAYERS", None)
@@ -41,6 +42,7 @@ def traced_canonical_vjp_swiglu(
                 u,
                 interpret=interpret,
                 shape_invariant_numerics=shape_invariant_numerics,
+                **kwargs,
             )
         finally:
             if layer_override is not None:

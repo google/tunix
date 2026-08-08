@@ -37,6 +37,7 @@ def traced_canonical_vjp_matmul(
     *,
     interpret: bool = False,
     shape_invariant_numerics: bool = True,
+    **kwargs,
 ):
     def forward(a, b):
         layer_override = os.environ.pop("P16_NUM_LAYERS", None)
@@ -46,6 +47,7 @@ def traced_canonical_vjp_matmul(
                 b,
                 interpret=interpret,
                 shape_invariant_numerics=shape_invariant_numerics,
+                **kwargs,
             )
         finally:
             if layer_override is not None:
