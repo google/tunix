@@ -71,7 +71,14 @@ sudo docker run --rm \
   -v "$PWD:/workspace" -w /workspace -e JAX_PLATFORMS=cpu \
   tunix_frozenlake_image:vllm-tpu0.25.0 \
   bash canon-zero-tim/tests/p33_workloads/run_cpu.sh
+
+bash canon-zero-tim/tests/p33_workloads/run_exact_image.sh
 ```
+
+The exact-image gate must end with
+`P33_EXACT_IMAGE_PASS decode_chunk_cases=5 overlays=2`. For a workload that schedules 512 decode
+rows, the live log must additionally show `canonical_rows=256 chunks=2`; changing
+`CANON_LOGPROB_M` to 512 is not an accepted workaround.
 
 If access to the target cluster is already configured, perform an API-schema dry run before the
 real apply. This contacts the API server but creates no JobSet:

@@ -294,3 +294,33 @@ user-owned W&B secret-persistence check; that unrelated credential path was not 
 **Target status:** PENDING. A fresh source-pinned Attempt 0 must show the three prompt PATHTRACE
 markers, then reach the workload alignment/update classifier. No GKE or backward/update PASS is
 claimed from the local repair.
+
+---
+
+## 13. Phase 33 Attempt `r12`: FrozenLake Inconclusive and Decode M=512
+
+- `p33_r12_frozenlake_canary_backward_pass.raw.log` and
+  `p33_r12_frozenlake_full.raw.log` both enter the promoted Qwen3-8B Pallas path, but neither log
+  contains the workload classifier or its terminal `[P33.RUN] VERDICT`. They remain
+  **INCONCLUSIVE** regardless of their filenames.
+- `p33_r12_gsm8k_decode_logprob_m_512_error.raw.log` gets past the r11 prompt-row assertion and
+  reaches live decode with 512 scheduled rows. The old decode helper accepted at most one
+  canonical block and failed closed at `512 > CANON_LOGPROB_M=256`.
+
+The r13 candidate keeps `CANON_LOGPROB_M=256`. It divides the decode row axis into consecutive
+blocks, pads only the final partial block, invokes the separately jitted
+`compute_and_gather_logprobs` once per M=256 block, removes tail padding, and concatenates outputs
+in the original row order. A 512-row decode therefore reuses the same M=256 executable twice; it
+does not introduce an M=512 numerical program. Model forward, sampling transforms, precision,
+loss, gradient reduction, and optimizer behavior are unchanged.
+
+Local evidence:
+
+- exact-image overlays: 29/29 manifest entries for both `qwen1p7b` and `qwen8b`;
+- decode contract: 5/5 cases, including 512 rows, a 513-row partial tail, order preservation, and
+  two fail-closed shape controls;
+- expected terminal marker: `P33_EXACT_IMAGE_PASS decode_chunk_cases=5 overlays=2`.
+
+**Target status:** PENDING. A fresh source-pinned GKE run must print
+`CANON_LOGPROB_M on ... canonical_rows=256 chunks=2` for the 512-row decode and then reach the
+workload classifier. No GKE training PASS is claimed from the local repair.

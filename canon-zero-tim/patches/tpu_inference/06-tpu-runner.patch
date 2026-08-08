@@ -16,11 +16,12 @@
      _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
      compute_prompt_logprobs, sample)
  from tpu_inference.layers.jax.sample.sampling_metadata import \
-@@ -122,6 +124,234 @@
+@@ -122,6 +124,277 @@
  
  logger = init_logger(__name__)
  
 +_CANON_LOGPROB_M_ANNOUNCED = False
++_CANON_LOGPROB_MULTI_CHUNK_ANNOUNCED = False
 +
 +
 +def _canon_logprob_m() -> Optional[int]:
@@ -69,6 +70,48 @@
 +        logprobs=tensors.logprobs[:rows],
 +        selected_token_ranks=tensors.selected_token_ranks[:rows],
 +    )
++
++
++def _canon_concat_logprobs(
++    chunks: List[LogprobsTensors],
++) -> LogprobsTensors:
++    """Concatenate canonical decode chunks without changing their row order."""
++    if not chunks:
++        raise ValueError("canonical decode logprobs require at least one chunk")
++    if len(chunks) == 1:
++        return chunks[0]
++    return LogprobsTensors(
++        logprob_token_ids=jnp.concatenate(
++            [chunk.logprob_token_ids for chunk in chunks], axis=0),
++        logprobs=jnp.concatenate(
++            [chunk.logprobs for chunk in chunks], axis=0),
++        selected_token_ranks=jnp.concatenate(
++            [chunk.selected_token_ranks for chunk in chunks], axis=0),
++    )
++
++
++def _canon_compute_decode_logprobs(
++    logits: jax.Array,
++    token_ids: jax.Array,
++    max_logprobs: int,
++    target_rows: int,
++) -> tuple[LogprobsTensors, int, int]:
++    """Run every decode chunk through the same canonical-M jitted program."""
++    rows = int(logits.shape[0])
++    if rows <= 0:
++        raise ValueError("decode logprob rows must be positive")
++    if int(token_ids.shape[0]) != rows:
++        raise ValueError(
++            f"logprob logits/token row mismatch: {rows} vs {token_ids.shape[0]}")
++    chunks = []
++    for start in range(0, rows, target_rows):
++        stop = min(start + target_rows, rows)
++        chunk_logits, chunk_token_ids, chunk_rows = _canon_pad_logprob_inputs(
++            logits[start:stop], token_ids[start:stop], target_rows)
++        chunk = compute_and_gather_logprobs(
++            chunk_logits, chunk_token_ids, max_logprobs)
++        chunks.append(_canon_slice_logprobs(chunk, chunk_rows))
++    return _canon_concat_logprobs(chunks), rows, len(chunks)
 +
 +
 +def _canon_snapshot_prompt_logprobs(
@@ -251,7 +294,7 @@
  logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
  
  INVALID_TOKEN_ID = -1
-@@ -523,6 +753,126 @@
+@@ -523,6 +796,126 @@
      return routed_experts
  
  
@@ -378,7 +421,7 @@
  class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
  
      def __init__(
-@@ -614,6 +964,36 @@
+@@ -614,6 +1007,36 @@
              # in the future.
              self.mesh = self._create_2d_mesh()
  
@@ -415,7 +458,7 @@
          logger.info(f"Init mesh | mesh={self.mesh}")
  
      def _create_new_model_mesh(self) -> jax.sharding.Mesh:
-@@ -1317,6 +1697,37 @@
+@@ -1317,6 +1740,37 @@
                      scheduler_output) as kv_connector_output:
                  # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                  # but one of them would be `None`
@@ -453,7 +496,7 @@
                  (self.kv_caches, hidden_states, aux_hidden_states,
                   expert_indices) = self.model_fn(
                       self.state_leaves,
-@@ -1380,6 +1791,57 @@
+@@ -1380,6 +1834,57 @@
                  full_hidden_states,
                  lora_metadata,
              )
@@ -511,7 +554,7 @@
              logits = self._select_from_array_fn(full_logits, logits_indices,
                                                  self.mesh)
          else:
-@@ -1795,23 +2257,134 @@
+@@ -1795,23 +2300,144 @@
                      logprobs_logits = (processed_logits
                                         if self.model_config.logprobs_mode
                                         == "processed_logprobs" else logits)
@@ -524,23 +567,36 @@
 +                    if spec_decode_metadata is not None:
 +                        raise ValueError(
 +                            "CANON_LOGPROB_M does not yet support speculative decoding")
-+                    logprobs_logits, next_tokens, original_logprob_rows = (
-+                        _canon_pad_logprob_inputs(
-+                            logprobs_logits, next_tokens, canon_logprob_m))
++                    logprobs, original_logprob_rows, canon_logprob_chunks = (
++                        _canon_compute_decode_logprobs(
++                            logprobs_logits,
++                            next_tokens,
++                            self.model_config.max_logprobs,
++                            canon_logprob_m,
++                        ))
 +                    global _CANON_LOGPROB_M_ANNOUNCED
-+                    if not _CANON_LOGPROB_M_ANNOUNCED:
++                    global _CANON_LOGPROB_MULTI_CHUNK_ANNOUNCED
++                    should_announce = (not _CANON_LOGPROB_M_ANNOUNCED or
++                                       (canon_logprob_chunks > 1 and
++                                        not _CANON_LOGPROB_MULTI_CHUNK_ANNOUNCED))
++                    if should_announce:
 +                        _CANON_LOGPROB_M_ANNOUNCED = True
++                        if canon_logprob_chunks > 1:
++                            _CANON_LOGPROB_MULTI_CHUNK_ANNOUNCED = True
 +                        print(
 +                            "[PATHTRACE] CANON_LOGPROB_M on "
-+                            f"decode_rows={original_logprob_rows} canonical_rows={canon_logprob_m}",
++                            f"decode_rows={original_logprob_rows} "
++                            f"canonical_rows={canon_logprob_m} "
++                            f"chunks={canon_logprob_chunks}",
 +                            flush=True,
 +                        )
-                 logprobs = compute_and_gather_logprobs(
-                     logprobs_logits, next_tokens,
-                     self.model_config.max_logprobs)
-+                if canon_logprob_m is not None:
-+                    logprobs = _canon_slice_logprobs(
-+                        logprobs, original_logprob_rows)
+-                logprobs = compute_and_gather_logprobs(
+-                    logprobs_logits, next_tokens,
+-                    self.model_config.max_logprobs)
++                else:
++                    logprobs = compute_and_gather_logprobs(
++                        logprobs_logits, next_tokens,
++                        self.model_config.max_logprobs)
                  logprobs = _jax_logprobs_copy_to_host_async(logprobs)
              else:
                  logprobs = None

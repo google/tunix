@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKTREE="$(cd "$ROOT/.." && pwd)"
 cd "$WORKTREE"
 
-python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
   canon-zero-tim/cluster/steps/00_env.sh \
@@ -14,6 +14,7 @@ bash -n \
   canon-zero-tim/cluster/steps/90_run.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env \
   canon-zero-tim/cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env \
+  canon-zero-tim/tests/p33_workloads/run_exact_image.sh \
   canon-zero-tim/tests/p33_workloads/negative_control.sh
 
 grep -Fq "sentencepiece==0.2.2" \

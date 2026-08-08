@@ -97,6 +97,21 @@ class DPWorkloadsTest(unittest.TestCase):
         patch,
     )
 
+  def test_decode_logprobs_chunk_rows_above_canonical_m(self):
+    patch = (
+        Path(__file__).parents[2]
+        / "patches"
+        / "tpu_inference"
+        / "06-tpu-runner.patch"
+    ).read_text(encoding="utf-8")
+    self.assertIn("def _canon_compute_decode_logprobs(", patch)
+    self.assertIn("for start in range(0, rows, target_rows):", patch)
+    self.assertIn("chunks={canon_logprob_chunks}", patch)
+    self.assertIn(
+        "_canon_compute_decode_logprobs(\n+                            logprobs_logits,",
+        patch,
+    )
+
   def test_registered_workloads_share_production_topology(self):
     gsm8k = dp_workloads.get_workload("gsm8k")
     frozenlake = dp_workloads.get_workload("frozenlake")
