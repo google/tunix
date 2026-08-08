@@ -45,7 +45,7 @@ spec:
     # [entrypoint] JOBSET_ATTEMPT, and an admission report must state it.  A verdict from any
     # attempt after the first is a retry, not a result.  If you want a strict single-shot gate,
     # set maxRestarts to 0 for that run.
-    maxRestarts: 10
+    maxRestarts: 0
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
