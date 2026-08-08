@@ -231,6 +231,12 @@ jobs:
 
           export JAX_PLATFORMS=tpu,cpu
           ./tests/sft/sft_tpu_smoke_test.sh
+      - name: Run tunix RL smoke tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          export JAX_PLATFORMS=tpu,cpu
+          ./tests/rl/rl_tpu_smoke_test.sh
       - name: Run Smoke tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
