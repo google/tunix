@@ -23,7 +23,6 @@ import dataclasses
 import enum
 import time
 from typing import Any, Dict
-
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl.agentic.agents import agent_types
@@ -44,9 +43,28 @@ class Role(enum.Enum):
 
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
-TrajectoryItem = agent_types.TrajectoryItem
 Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
+
+
+# TODO: Unify this extended TrajectoryItem back into agent_types.TrajectoryItem
+# so that all agentic workflows share the same strict token array fields.
+@dataclasses.dataclass(kw_only=True)
+class TrajectoryItem(agent_types.TrajectoryItem):
+  """Extended TrajectoryItem for Orchestrator with token arrays."""
+  prompt_tokens: np.ndarray | None = None
+  completion_tokens: np.ndarray | None = None
+  action_mask: np.ndarray | None = None
+  policy_version: int = 0
+  # TODO: trajectory item having the completion tokens, masks, etc is quite redundant since those are in the trainer payload already.
+
+class Role(str, enum.Enum):
+  """Orchestrator worker roles."""
+  ACTOR = "actor"
+  CRITIC = "critic"
+  ROLLOUT = "rollout"
+  REFERENCE = "reference"
+  REWARD = "reward"
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -367,22 +385,6 @@ class RolloutResponse(Response):
     )
 
 
-@dataclasses.dataclass(kw_only=True)
-class TrainerPayload:
-  """Generic trainer payload.
-
-  Attributes:
-    token_ids: [B, T] token IDs. By default, structured as left-padded prompt
-      tokens concatenated with right-padded completion tokens.
-    token_mask: [B, T] token mask to differentiate padding tokens from valid
-      tokens.
-    segment_ids: Optional [B, T] packing segment ids.
-  """
-
-  token_ids: ArrayLike
-  token_mask: ArrayLike
-  segment_ids: ArrayLike | None = None
-
 ##### Weight Sync DTOs #####
 
 
@@ -462,22 +464,51 @@ class WeightSyncMetadata:
 
 
 @dataclasses.dataclass(kw_only=True)
+class TrainerPayload:
+  """Generic trainer payload.
+
+  Attributes:
+    token_ids: [B, T] token IDs. By default, structured as left-padded prompt
+      tokens concatenated with right-padded completion tokens.
+    token_mask: [B, T] token mask to differentiate padding tokens from valid
+      tokens.
+    segment_ids: Optional [B, T] packing segment ids.
+    segment_positions: Optional [B, T] position indices within each segment.
+  """
+
+  token_ids: ArrayLike
+  token_mask: ArrayLike
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
+
+
+# TODO: Introduce PPOTrainerPayload to replace generic RLTrainerPayload when PPO specific fields are needed.
+@dataclasses.dataclass(kw_only=True)
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
 
   Attributes:
     advantages: [B] or [B, C] advantages.
     loss_mask: [B, T], 1 where the position contributes to the loss.
+    action_mask: Optional [B, T] or [B, C] mask of policy actions.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
+    returns: Optional [B, C] value baseline returns (for PPO / Critic).
+    old_values: Optional [B, C] critic value estimates (for PPO / Critic).
+    metadata: Extra payload metadata dictionary.
   """
 
   advantages: ArrayLike
   loss_mask: ArrayLike
+  action_mask: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
+  returns: ArrayLike | None = None
+  old_values: ArrayLike | None = None
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+  # TODO: add ppo sepcific fields in a PPO specific fields in  PPORLTrainerPayload
 
 
 @dataclasses.dataclass(kw_only=True)
