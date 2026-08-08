@@ -92,4 +92,14 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       --alignment-report "$CANON_ALIGN_REPORT" \
       --output "$classification" || exit 1
 fi
+if [ -n "${CANON_GCS_CACHE_BUCKET:-}" ] && [ -d "${JAX_COMPILATION_CACHE_DIR:-}" ]; then
+  PROFILE_NAME="$(basename "${CANON_PROFILE_FILE:-default}" .env)"
+  GCS_PATH="${CANON_GCS_CACHE_BUCKET}/${PROFILE_NAME}"
+  echo "[cache] Syncing persistent compilation cache back to $GCS_PATH..."
+  if command -v gcloud >/dev/null 2>&1; then
+    gcloud storage rsync -r "$JAX_COMPILATION_CACHE_DIR" "$GCS_PATH" 2>/dev/null || true
+  elif command -v gsutil >/dev/null 2>&1; then
+    gsutil -m rsync -r "$JAX_COMPILATION_CACHE_DIR" "$GCS_PATH" 2>/dev/null || true
+  fi
+fi
 exit "$rc"

@@ -81,6 +81,7 @@ step 00_env.sh
 step 10_sync_repo.sh
 step 20_probe_image.sh
 step 25_rope_fix.sh
+step 28_sync_cache.sh
 
 if [ "$MODE" = "probe-only" ]; then
   log "mode=probe-only -- stopping before install.  No TPU program was started."
