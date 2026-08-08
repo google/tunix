@@ -47,6 +47,25 @@ _LOCAL_TRAJECTORIES = 16
 _DP_SIZE = 16
 _TP_SIZE = 4
 _SEQ_LEN = 16
+_ATTENTION_BACKEND = "dense-reference"
+
+
+def _release_candidate_model_config() -> model_lib.ModelConfig:
+  """Builds the bounded RC model contract used by all four stages.
+
+  The RC deliberately uses a 16-token sequence to keep the real-checkpoint
+  systems probe bounded. Splash Attention with the production block size of
+  256 cannot represent that shape because the query block must divide the
+  query sequence length. The production Splash path is therefore outside this
+  RC's claim and must be admitted by a workload-scale gate.
+  """
+  config = model_lib.ModelConfig.qwen3_8b()
+  config.dtype = jnp.bfloat16
+  config.param_dtype = jnp.float32
+  config.remat_config = model_lib.RematConfig.DECODER
+  config.use_flash_attention = False
+  config.shd_config = model_lib.ShardingConfig.get_data_parallel_sharding()
+  return config
 
 
 def _required_int(environ: Mapping[str, str], name: str) -> int:
@@ -547,13 +566,7 @@ def main(argv: list[str] | None = None) -> int:
   checkpoint_before = _ensure_checkpoint(checkpoint_dir)
   devices = list(jax.devices())
   mesh = _topology_mesh(devices, dp, tp)
-  config = model_lib.ModelConfig.qwen3_8b()
-  config.dtype = jnp.bfloat16
-  config.param_dtype = jnp.float32
-  config.remat_config = model_lib.RematConfig.DECODER
-  config.use_flash_attention = True
-  config.flash_attention_block_size = 256
-  config.shd_config = model_lib.ShardingConfig.get_data_parallel_sharding()
+  config = _release_candidate_model_config()
   with jax.set_mesh(mesh):
     model = params_lib.create_model_from_safe_tensors(
         str(checkpoint_dir), config, mesh, dtype=jnp.float32
@@ -593,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
           "name": "qwen3-8b",
           "checkpoint_loaded": True,
           "checkpoint": checkpoint_before,
+          "attention_backend": _ATTENTION_BACKEND,
           "compute_dtype": str(config.dtype),
           "param_dtype": str(config.param_dtype),
           "inventory": inventory,

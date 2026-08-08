@@ -18,6 +18,7 @@ from probe_qwen8b_rc import _build_optimizer_state
 from probe_qwen8b_rc import _commit_program
 from probe_qwen8b_rc import _make_inputs
 from probe_qwen8b_rc import _put_memory_kind
+from probe_qwen8b_rc import _release_candidate_model_config
 from probe_qwen8b_rc import _replica_samples_exact
 from probe_qwen8b_rc import _sample_tree_sha256
 from probe_qwen8b_rc import _state_memory_kinds
@@ -25,6 +26,17 @@ from probe_qwen8b_rc import _stream_fixed_rank_gradient
 from probe_qwen8b_rc import _tree_exact
 from probe_qwen8b_rc import _tree_health
 from probe_qwen8b_rc import build_dp_programs
+
+
+class ReleaseCandidateConfigTest(unittest.TestCase):
+
+  def test_bounded_contract_uses_dense_reference_attention(self):
+    config = _release_candidate_model_config()
+    self.assertFalse(config.use_flash_attention)
+    self.assertEqual(
+        config.shd_config,
+        model_lib.ShardingConfig.get_data_parallel_sharding(),
+    )
 
 
 class ProbeRCTest(unittest.TestCase):

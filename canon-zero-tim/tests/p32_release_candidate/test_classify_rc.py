@@ -68,6 +68,7 @@ def _record(stage: str) -> dict:
       "model": {
           "name": "qwen3-8b",
           "checkpoint_loaded": True,
+          "attention_backend": "dense-reference",
           "checkpoint": {
               "files": 5,
               "bytes": 16_000_000_000,
@@ -198,6 +199,11 @@ class ClassifyRCTest(unittest.TestCase):
   def test_wrong_execution_count_rejected(self):
     record = copy.deepcopy(_record("one-update"))
     record["execution"]["optimizer_updates"] = 2
+    self.assertEqual(classify_text(_log(record))["status"], "INCONCLUSIVE")
+
+  def test_missing_attention_backend_scope_rejected(self):
+    record = _record("checkpoint-forward")
+    del record["model"]["attention_backend"]
     self.assertEqual(classify_text(_log(record))["status"], "INCONCLUSIVE")
 
 

@@ -120,6 +120,10 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
     model = record.get("model", {})
     if model.get("name") != "qwen3-8b" or model.get("checkpoint_loaded") is not True:
       reasons.append("model: real Qwen3-8B checkpoint was not loaded")
+    if model.get("attention_backend") != "dense-reference":
+      reasons.append(
+          "model: bounded RC must declare the dense-reference attention backend"
+      )
     checkpoint = model.get("checkpoint", {})
     if (
         checkpoint.get("files", 0) <= 0
