@@ -148,6 +148,16 @@ class DPWorkloadsTest(unittest.TestCase):
         (4096, 2048),
     )
 
+  def test_frozenlake_rollout_limits_are_per_dp_rank(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    command = workload.command()
+    self.assertIn("--vllm_max_num_seqs=16", command)
+    self.assertIn("--vllm_max_num_batched_tokens=256", command)
+    self.assertEqual(workload.dp_size * 16, workload.global_trajectories)
+    self.assertEqual(workload.dp_size * 256, workload.global_m)
+    self.assertNotIn("--vllm_max_num_seqs=256", command)
+    self.assertNotIn("--vllm_max_num_batched_tokens=4096", command)
+
   def test_frozenlake_command_disables_periodic_evaluation(self):
     command = dp_workloads.get_workload("frozenlake").command()
     self.assertFalse(

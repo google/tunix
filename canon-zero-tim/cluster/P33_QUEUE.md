@@ -26,6 +26,13 @@ writes output. Each JobSet has:
 - Kubernetes Secret references for Hugging Face and W&B, with no literal credential;
 - FrozenLake periodic evaluation disabled in both the profile and manifest.
 
+For FrozenLake, vLLM scheduler limits are per DP rank. The frozen command therefore sets
+`vllm_max_num_batched_tokens=256` and `vllm_max_num_seqs=16`. Under DP16 this is global token
+capacity 4096 and global sequence capacity 256. With `MIN_TOKEN_BUCKET=4096`, TPU inference must
+prepare exactly one global token bucket, `[4096]`, whose local executable row count is 256.
+Long prompts remain supported through chunked prefill; these limits bound one scheduler step,
+not the model context length.
+
 Step 90 refuses a pre-existing evidence path before executing the command. A successful child
 process is then classified from the immutable update and alignment reports. The final log must
 contain one `[P33.RUN] VERDICT PASS` and one `[P33.RUN] JSON ...` line. The JSON includes SHA-256
@@ -81,6 +88,17 @@ schedules 512 decode rows, the live log must additionally show
 `canonical_rows=256 chunks=2`. A packed prompt with 2,048 physical rows per DP rank must show
 `rows_per_dp=2048 canonical_rows=256 chunks=8`. Both paths reuse the same local-M256 executable;
 changing `CANON_LOGPROB_M` to 512 or 2,048 is not an accepted workaround.
+
+The first target startup after this change must also contain:
+
+```text
+Prepared token paddings: [4096]
+Precompile worker0 backbone --> {'num_tokens': 4096, 'num_reqs': 256}
+```
+
+Any prepared token bucket above 4096 or a request capacity above 256 is a contract failure. A
+runtime JAX cache miss for a larger backbone shape is also a failure; do not hide it by enabling
+`SKIP_JAX_PRECOMPILE`.
 
 If access to the target cluster is already configured, perform an API-schema dry run before the
 real apply. This contacts the API server but creates no JobSet:

@@ -136,15 +136,13 @@ arg_parser.add_argument("--temperature", type=float, default=0.7)
 # comparable; exploration can be controlled via temperature.
 arg_parser.add_argument("--top_p", type=float, default=1.0)
 arg_parser.add_argument("--top_k", type=int, default=0)
-# Concurrent rollout threads. Should stay at or below the vLLM engine's
-# `max_num_seqs` (default 64) plus a small backlog; pushing it much higher
-# pegs the KV cache at 100% and forces chunked-prefill to interleave with
-# decode, which makes the sampler's logits diverge from the trainer's
-# recomputation (visible as a large `sampler_trainer/train/logp_diff_mean`)
-# and noticeably degrades steady-state reward. Keep ~4x `max_num_seqs` so the
-# engine has work queued without saturating the cache.
+# Concurrent rollout threads are global. The vLLM limits below are per data
+# parallel rank, so their global capacity is multiplied by mesh DP. Keep this
+# distinction explicit: passing a global limit as a per-rank limit silently
+# expands the TPU precompile shapes by the DP width.
 arg_parser.add_argument("--max_concurrency", type=int, default=256)
 arg_parser.add_argument("--vllm_max_num_seqs", type=int, default=64)
+arg_parser.add_argument("--vllm_max_num_batched_tokens", type=int, default=None)
 arg_parser.add_argument("--env_max_steps", type=int, default=8)
 arg_parser.add_argument("--num_test_batches", type=int, default=2)
 arg_parser.add_argument("--eval_every_n_steps", type=int, default=10)
@@ -305,13 +303,12 @@ NUM_GENERATIONS = args.num_generations
 # shared trainer+rollout mesh that KV-cache pool consumes HBM that the
 # trainer needs at peak (logits + activations + optimizer state).
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
-VLLM_MAX_BATCHED_TOKENS = (
-    4096
-    if CANON_P32_WORKLOAD
-    else 256
-    if CANON_L3
-    else VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
-)
+if args.vllm_max_num_batched_tokens is not None:
+  VLLM_MAX_BATCHED_TOKENS = args.vllm_max_num_batched_tokens
+elif CANON_P32_WORKLOAD or CANON_L3:
+  VLLM_MAX_BATCHED_TOKENS = 256
+else:
+  VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
 
 NUM_ITERATIONS = 1
 BETA = args.beta
@@ -343,7 +340,8 @@ if CANON_P32_WORKLOAD:
       "max_prompt_length": (MAX_PROMPT_LENGTH, 4096),
       "max_response_length": (MAX_RESPONSE_LENGTH, 2048),
       "max_concurrency": (args.max_concurrency, 256),
-      "vllm_max_num_seqs": (VLLM_MAX_NUM_SEQS, 256),
+      "vllm_max_num_seqs": (VLLM_MAX_NUM_SEQS, 16),
+      "vllm_max_num_batched_tokens": (VLLM_MAX_BATCHED_TOKENS, 256),
       "env_max_steps": (args.env_max_steps, 5),
       "learning_rate": (args.learning_rate, 1e-6),
       "b1": (args.b1, 0.9),

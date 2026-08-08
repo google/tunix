@@ -120,6 +120,12 @@ class RenderP33JobSetsTest(unittest.TestCase):
         )
         self.assertEqual(by_stage[(workload_name, stage)]["CANON_RUN_CMD"], expected)
 
+      frozenlake_command = by_stage[("frozenlake", "full")]["CANON_RUN_CMD"]
+      self.assertIn("--vllm_max_num_seqs=16", frozenlake_command)
+      self.assertIn("--vllm_max_num_batched_tokens=256", frozenlake_command)
+      self.assertNotIn("--vllm_max_num_seqs=256", frozenlake_command)
+      self.assertNotIn("--vllm_max_num_batched_tokens=4096", frozenlake_command)
+
   def test_frozenlake_jobs_disable_periodic_evaluation(self):
     with tempfile.TemporaryDirectory() as tmp:
       for path in self._render(Path(tmp)):
