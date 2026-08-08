@@ -6,7 +6,14 @@ from p22_pallas_matmul import BM, matmul as base_matmul
 from p22xi_contract import preflight
 
 
-def matmul(x, y, *, interpret: bool = False, shape_invariant_numerics: bool = True):
+def matmul(
+    x,
+    y,
+    *,
+    interpret: bool = False,
+    shape_invariant_numerics: bool = True,
+    **kwargs,
+):
     import jax.numpy as jnp
 
     preflight(require_enabled=True)
@@ -18,12 +25,18 @@ def matmul(x, y, *, interpret: bool = False, shape_invariant_numerics: bool = Tr
     mp = ((m + BM - 1) // BM) * BM
     if mp == m:
         return base_matmul(
-            x, y, interpret=interpret,
+            x,
+            y,
+            interpret=interpret,
             shape_invariant_numerics=shape_invariant_numerics,
+            **kwargs,
         )
     padded = jnp.pad(x, ((0, mp - m), (0, 0)), constant_values=0)
     out = base_matmul(
-        padded, y, interpret=interpret,
+        padded,
+        y,
+        interpret=interpret,
         shape_invariant_numerics=shape_invariant_numerics,
+        **kwargs,
     )
     return out[:m]

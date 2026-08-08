@@ -17,7 +17,14 @@ spec.loader.exec_module(base)
 preflight(require_enabled=True)
 
 
-def traced_padded_matmul(x, y, *, interpret=False, shape_invariant_numerics=True):
+def traced_padded_matmul(
+    x,
+    y,
+    *,
+    interpret=False,
+    shape_invariant_numerics=True,
+    **kwargs,
+):
     m = int(x.shape[0])
     mp = ((m + 127) // 128) * 128
     print(
@@ -25,8 +32,11 @@ def traced_padded_matmul(x, y, *, interpret=False, shape_invariant_numerics=True
         flush=True,
     )
     return padded_matmul(
-        x, y, interpret=interpret,
+        x,
+        y,
+        interpret=interpret,
         shape_invariant_numerics=shape_invariant_numerics,
+        **kwargs,
     )
 
 
