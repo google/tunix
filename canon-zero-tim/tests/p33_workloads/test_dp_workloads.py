@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import types
 import unittest
 from unittest import mock
@@ -75,6 +76,26 @@ def _environment(name: str) -> dict[str, str]:
 
 
 class DPWorkloadsTest(unittest.TestCase):
+
+  def test_prompt_logprob_contract_compares_global_rows_to_dp_local_rows(self):
+    patch = (
+        Path(__file__).parents[2]
+        / "patches"
+        / "tpu_inference"
+        / "06-tpu-runner.patch"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        "int(full_logits.shape[0]) != canon_logprob_m * self.dp_size",
+        patch,
+    )
+    self.assertIn(
+        "f\"{canon_logprob_m * self.dp_size}\"",
+        patch,
+    )
+    self.assertNotIn(
+        "int(full_logits.shape[0]) != canon_logprob_m):",
+        patch,
+    )
 
   def test_registered_workloads_share_production_topology(self):
     gsm8k = dp_workloads.get_workload("gsm8k")

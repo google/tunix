@@ -263,3 +263,34 @@ sha256sum -c evidence/package_artifacts.sha256
     ```
   - **Diagnostic**: Identical to FrozenLake: `local_log_softmax` in `canonical_qwen3_adapter.py` must accept both global ($M=4096$) and local ($M=256$) row counts.
 
+---
+
+## 12. Phase 33 Attempts `r10`/`r11`: Wrapper Repair and Prompt-Row Contract
+
+- `p33_r10_frozenlake_linear_p22xi_traced_padded_matmul_error.raw.log` proves that
+  forwarding `block_n` and `block_k` through only the outer canonical-VJP wrapper was
+  insufficient. The nested P22.XI padding wrapper still rejected `block_n`. Commits
+  `947a20ae` and `33bf1f03` forward keyword arguments through both wrapper layers and the
+  padded/unpadded branches to the unchanged Pallas matmul.
+- `p33_r11_frozenlake_backward_pass_success.raw.log` advances beyond that Python exception and
+  exercises the promoted Pallas chain. Despite its historical filename, it contains neither
+  `[CANON_P33_DP16] backward_no_commit verdict=PASS` nor `[P33.RUN] VERDICT`; it ends during
+  path tracing. Its evidence status is therefore **INCONCLUSIVE**, not PASS.
+- `p33_r11_frozenlake_full_provenance_drift.raw.log` is a fail-closed source-pin rejection:
+  the pod expected `33bf1f03` but fetched `4b815fac`. It executed no model computation and is
+  not a numerical failure.
+- `p33_r11_gsm8k_prompt_logprob_m_error.raw.log` reaches rollout prompt-logprob processing and
+  fails because the runner compared global `full_logits` rows (`4096`) directly with the local
+  canonical row count (`CANON_LOGPROB_M=256`). Under DP16 the signed contract is
+  `global_rows == dp_size * CANON_LOGPROB_M`, or `4096 == 16 * 256`.
+
+The local candidate repair changes only that prompt-path assertion. Decode padding, sampling
+transforms, precision, model/loss math, gradient reduction, and optimizer behavior are unchanged.
+The pinned-image package gate passes all 29 manifest entries for both `qwen1p7b` and `qwen8b`,
+and the P33 workload unit/negative subset passes 41/41 plus its unadmitted-launch negative
+control. The complete `tests/p33_workloads/run_cpu.sh` remains red at the pre-existing
+user-owned W&B secret-persistence check; that unrelated credential path was not modified.
+
+**Target status:** PENDING. A fresh source-pinned Attempt 0 must show the three prompt PATHTRACE
+markers, then reach the workload alignment/update classifier. No GKE or backward/update PASS is
+claimed from the local repair.

@@ -511,7 +511,7 @@
              logits = self._select_from_array_fn(full_logits, logits_indices,
                                                  self.mesh)
          else:
-@@ -1795,23 +2257,132 @@
+@@ -1795,23 +2257,134 @@
                      logprobs_logits = (processed_logits
                                         if self.model_config.logprobs_mode
                                         == "processed_logprobs" else logits)
@@ -562,10 +562,12 @@
 +                    and self.input_batch.num_prompt_logprobs):
 +                canon_logprob_m = _canon_logprob_m()
 +                if (canon_logprob_m is not None
-+                        and int(full_logits.shape[0]) != canon_logprob_m):
++                        and int(full_logits.shape[0]) != canon_logprob_m * self.dp_size):
 +                    raise ValueError(
-+                        "processed prompt rows must equal CANON_LOGPROB_M: "
-+                        f"{full_logits.shape[0]} vs {canon_logprob_m}")
++                        "processed prompt global rows must equal "
++                        "dp_size * CANON_LOGPROB_M: "
++                        f"{full_logits.shape[0]} vs "
++                        f"{canon_logprob_m * self.dp_size}")
 +                temperatures, top_ks, top_ps, populated = (
 +                    _canon_expand_prompt_sampling_params(
 +                        self.input_batch,

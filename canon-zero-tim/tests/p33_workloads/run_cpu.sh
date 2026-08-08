@@ -144,4 +144,4 @@ EOF
 
 validate_stale_evidence_rejected
 
-echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=35 negative_controls=3 admitted_preflights=1"
+echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=41 negative_controls=3 admitted_preflights=1"
