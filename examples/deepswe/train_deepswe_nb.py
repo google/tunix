@@ -1105,7 +1105,7 @@ grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine=rl_engine,
-    reward_fns=[deepswe_format_reward_fn],
+    reward_fns=None,
     agent_class=swe_agent.SWEAgent,
     agent_kwargs={},
     env_class=swe_env.SWEEnv,
