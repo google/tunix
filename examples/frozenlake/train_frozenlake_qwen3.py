@@ -63,6 +63,7 @@ _CANON_PRELEARNER_ONLY = (
 if not _CANON_PRELEARNER_ONLY:
   from examples.frozenlake.agent import FrozenLakeAgent
   from examples.frozenlake.env import FrozenLakeEnv
+  from examples.frozenlake import data as frozenlake_data
 else:
   FrozenLakeAgent = None
   FrozenLakeEnv = None
@@ -620,24 +621,17 @@ def create_datasets(
     train_ds_path: str = TRAIN_DATA_PATH,
     test_ds_path: str = TEST_DATA_PATH,
 ):
-  with fsspec.open(train_ds_path, "rb") as train_f, fsspec.open(
-      test_ds_path, "rb"
-  ) as test_f:
-    train_df = pd.read_parquet(train_f)
-    test_df = pd.read_parquet(test_f)
-
-  train_ds = Dataset.from_pandas(train_df)
-  test_ds = Dataset.from_pandas(test_df)
+  data_dir = os.path.dirname(train_ds_path)
+  os.makedirs(data_dir, exist_ok=True)
+  train_ds = frozenlake_data.get_dataset(
+      "train", data_dir=data_dir, train_size=10000, seed=SEED
+  )
+  test_ds = frozenlake_data.get_dataset(
+      "test", data_dir=data_dir, test_size=100, seed=SEED + 1
+  )
   if args.shuffle_data:
     train_ds = train_ds.shuffle(SEED)
     test_ds = test_ds.shuffle(SEED)
-
-  def process_item(item):
-    item["prompts"] = ""
-    return item
-
-  train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
   return train_ds, test_ds
 
 
