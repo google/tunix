@@ -25,6 +25,7 @@ import optax
 from orbax import checkpoint as ocp
 import qwix
 from transformers import AutoTokenizer
+from pydantic import ValidationError
 from tunix.cli.utils import data as data_lib
 from tunix.rl.agentic.agents import agent_types
 from tunix.utils import compat
@@ -45,16 +46,16 @@ parser.add_argument("--models_base_dir", type=str, default="models")
 parser.add_argument(
     "--model_source",
     type=str,
-    default="huggingface",
+    default="maxtext",
     choices=["huggingface", "maxtext"],
 )
 parser.add_argument(
     "--model_absolute_path",
     type=str,
-    default=None,
+    default="gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/scanned/0/items",
 )
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--model_version", type=str, default="Qwen/Qwen3-32B")
+parser.add_argument("--model_version", type=str, default="Qwen3.5-35B-A3B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--dataset_path", type=str, default=None)
 
@@ -565,7 +566,10 @@ USE_ROLLOUT_LOGPS = args.use_rollout_logps
 tokenizer_path = MODEL_PATH
 local_files_only = True
 if MODEL_SOURCE == "maxtext" and MODEL_PATH.startswith("gs://"):
-  tokenizer_path = MODEL_VERSION
+  if MODEL_VERSION.startswith("Qwen/"):
+    tokenizer_path = MODEL_VERSION
+  else:
+    tokenizer_path = f"Qwen/{MODEL_VERSION}"
   local_files_only = False
   print(f"Loading tokenizer from HF Hub: {tokenizer_path}")
 
@@ -1003,12 +1007,18 @@ cluster_config = rl_engine_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
-rl_engine = rl_engine_lib.RLEngine(
-    actor=qwen_actor,
-    reference=qwen_reference,
-    tokenizer=tokenizer,
-    cluster_config=cluster_config,
-)
+try:
+  rl_engine = rl_engine_lib.RLEngine(
+      actor=qwen_actor,
+      reference=qwen_reference,
+      tokenizer=tokenizer,
+      cluster_config=cluster_config,
+  )
+except ValidationError as e:
+  print("Failed to initialize RLEngine due to ValidationError:", flush=True)
+  import pprint
+  pprint.pprint(e.errors())
+  raise
 
 # %%
 # ==========================================
@@ -1046,6 +1056,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
+        "verbose": True,
     },
     algo_config=grpo_config,
     # Disabling the custom chat parser is required to fallback to the tokenizer's

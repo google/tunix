@@ -920,7 +920,7 @@ class RLEngine:
               prompt,  # pytype: disable=wrong-arg-types
               add_generation_prompt=True,
               tokenize=False,
-              enable_thinking=False,
+              enable_thinking=True,
           )
           for prompt in prompts
       ]
