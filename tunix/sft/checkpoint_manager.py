@@ -102,6 +102,9 @@ class CheckpointManager:
   def _context(self) -> ocp.Context:
     """The orbax context applied to every checkpointer operation."""
     ctx = ocp.Context()
+    # Disable descriptor proto metadata files, which crash with 'no parent directory'
+    # on CNS when temporary directory atomicity is enabled.
+    ctx.file_options.enable_descriptor = False
     if (
         self._options.async_options is not None
         and self._options.async_options.timeout_secs is not None
