@@ -148,3 +148,29 @@ sha256sum -c evidence/package_artifacts.sha256
 * **Full-Array Device Ring Replica Equality**: All 399 gradient leaves across all 16 DP ranks verified bitwise identical via device-side `ppermute` ring comparison (`exact: true`) on every step.
 * **Deterministic Classification**: All four RC stages (`checkpoint-forward`, `backward`, `one-update`, and `three-update`) report status `PASS` with 0 reasons.
 
+---
+
+## 8. Phase 33 Workload Cluster Execution & Diagnostics (64 Physical Chips)
+
+- `p33_gsm8k_tokenizer_dep_error.raw.log` records the live execution of `canon-p33-gsm8k-full-r2-0bab1a4d` on Attempt 0 (`42cmh`) on 64 physical TPU v5p chips (16/16 worker nodes registered with Pathways RM).
+  - **Traceback**:
+    ```text
+    File "/usr/local/lib/python3.12/site-packages/transformers/tokenization_utils_tokenizers.py", line 376, in __init__
+      raise ValueError(
+    ValueError: Couldn't instantiate the backend tokenizer from one of: 
+    (1) a `tokenizers` library serialization file, 
+    (2) a slow tokenizer instance to convert or 
+    (3) an equivalent slow tokenizer class to instantiate and convert. 
+    You need to have sentencepiece or tiktoken installed to convert a slow tokenizer to a fast one.
+    ```
+  - **Root Cause & Fix**: `sentencepiece` and `tiktoken` are missing in the base python environment. In `canon-zero-tim/cluster/steps/30_install_canon.sh`, add `pip install -q tiktoken sentencepiece`.
+
+- `p33_frozenlake_p31_convergence_error.raw.log` records the live execution of `canon-p33-fl-bwd-r2-0bab1a4d` on Attempt 0 (`k72f9`) on 64 physical TPU v5p chips.
+  - **Traceback**:
+    ```text
+    File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 234, in <module>
+      raise ValueError("P28 G6 requires update-canary mode")
+    ValueError: P28 G6 requires update-canary mode
+    ```
+  - **Root Cause & Fix**: `train_frozenlake_qwen3.py` requires `CANON_P31_CONVERGENCE=1` when running training mode with `CANON_ALIGNMENT_UPDATE_CANARY=0`. In `canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env`, add `export CANON_P31_CONVERGENCE=1`.
+

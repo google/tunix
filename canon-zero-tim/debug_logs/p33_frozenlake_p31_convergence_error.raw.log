@@ -1,0 +1,178 @@
+XPK Start: 2026-08-08T09:27:04Z
+[entrypoint] start 2026-08-08T09:27:06Z  mode=run  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-p33-fl-bwd-r2-0bab1a4d-pathways-head-0-0-k72f9
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P32 train mesh pin DISCOVERY: no release placement assertion
+[env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
+[env] profile=qwen3-8b-dp16-tp4-frozenlake model_dir=qwen8b
+[env] resolved configuration written to /tmp/canon-state/canon-p33-fl-bwd-r2-0bab1a4d/env.sh (120 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=0bab1a4de782e572f6216cba3ec2a3256dad52a3
+[sync] describe=0bab1a4d Fix P33 runtime environment: export WANDB_/HF_ variables and ensure gymnasium dependency
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] tpu_inference=/usr/local/lib/python3.12/site-packages/tpu_inference
+[probe] SAME      layers/common/attention_interface.py
+[probe] SAME      layers/jax/embed.py
+[probe] SAME      layers/jax/linear.py
+[probe] SAME      models/jax/qwen2.py
+[probe] SAME      models/jax/qwen3.py
+[probe] SAME      runner/tpu_runner.py
+[probe] SUMMARY same=6 drift=0 missing=0
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] new form already present (upstream) -- not patching
+[rope]   35:from tpu_inference.layers.jax.rope_interface import (apply_rope,
+[rope]   66:        self.rope_theta = get_rope_theta(config, default=1000000.0)
+[rope]   67:        self.rope_scaling = get_rope_scaling(config)
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 30_install_canon.sh
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b)
+[4/4] verifying against MANIFEST.sha256
+      all 29 files match (qwen8b)
+
+Installed to: /tmp/canon-state/canon-p33-fl-bwd-r2-0bab1a4d/canon   (model=qwen8b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/tmp/canon-state/canon-p33-fl-bwd-r2-0bab1a4d/canon:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/canon-state/canon-p33-fl-bwd-r2-0bab1a4d/canon          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+[install] installed to /tmp/canon-state/canon-p33-fl-bwd-r2-0bab1a4d/canon (29 files)
+[entrypoint] <-- 30_install_canon.sh ok
+[entrypoint] --> 40_overlay_engine.sh
+[overlay] attn_iface_patched.py        -> layers/common/attention_interface.py
+[overlay] linear_p22xk.py              -> layers/jax/linear.py
+[overlay] embed_patched.py             -> layers/jax/embed.py
+[overlay] tpu_runner_p21_l30.py        -> runner/tpu_runner.py
+[overlay] qwen3_p22xk.py               -> models/jax/qwen3.py
+[overlay] qwen2_p22xk.py               -> models/jax/qwen2.py
+[overlay] PYTHONPATH and CANON_SHIM_ROOT recorded; originals in /tmp/canon-state/canon-p33-fl-bwd-r2-0bab1a4d/stock_backup
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] A. byte identity of overlay targets
+[verify]   OK   attn_iface_patched.py        8f8cec35f296
+[verify]   OK   linear_p22xk.py              857859226b61
+[verify]   OK   embed_patched.py             4a0540323c75
+[verify]   OK   tpu_runner_p21_l30.py        b8b1e118ca3c
+[verify]   OK   qwen3_p22xk.py               c3602c7163a1
+[verify]   OK   qwen2_p22xk.py               79a88e88bd6c
+[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
+[verify] Section B promotion checks will run inside Step 70 single Pathways session.
+
+[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
+[verify] This does NOT yet prove it executes on the hot path; 90_run.sh checks the
+[verify] [PATHTRACE] tally for that.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 60_wait_workers.sh
+[wait] giving all 64 devices on 16 TPU worker nodes 180s quiet period to boot and register with Pathways RM...
+[wait] hardware quiet period completed. Single-session unified runner in Step 70 will perform device assertion and all admission probes.
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 90_run.sh
+[run] cmd: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=16 --mesh_tp=4 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=16 --max_steps=1 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0
+[run] log: /tmp/canon-state/canon-p33-fl-bwd-r2-0bab1a4d/run.log
+Logging configured at INFO level.
+2026-08-08 09:30:12 - WARNING - [absl] Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+I0808 09:30:12.821053     257 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0808 09:30:12.821111     257 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0808 09:30:12.821123     257 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0808 09:30:12.823033     257 grpc_client_session.cc:264]   Established channel.
+I0808 09:30:12.823059     257 grpc_client_session.cc:269]   Created stub.
+I0808 09:30:12.849883     257 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0808 09:30:12.920755     257 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0808 09:30:12.920911     257 grpc_client_session.cc:264]   Established channel.
+I0808 09:30:12.920925     257 grpc_client_session.cc:269]   Created stub.
+I0808 09:30:12.922145     257 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0808 09:30:12.952509     257 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0808 09:30:12.952542     257 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+jax devices:  [device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)]
+Traceback (most recent call last):
+  File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 234, in <module>
+    raise ValueError("P28 G6 requires update-canary mode")
+ValueError: P28 G6 requires update-canary mode
+I0808 09:30:13.175403     257 client.cc:221] Client::~Client() starting.
+I0808 09:30:13.176323     257 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 09:30:13.176329     257 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0808 09:30:13.176445     257 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0808 09:30:13.176455     257 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 09:30:13.176457     257 grpc_client_session.cc:202] GrpcClientSession: Finish(): calling context_->TryCancel();
+I0808 09:30:13.176642     257 grpc_client_session.cc:205] GrpcClientSession: Waiting for reader thread to stop.
+I0808 09:30:13.176607     341 grpc_client_session.cc:176] GrpcClientSession: reader loop is exiting.
+I0808 09:30:13.176814     341 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status OK
+I0808 09:30:13.176869     257 grpc_client_session.cc:209] GrpClientSession: Attempting to call stream->Finish()
+I0808 09:30:13.176898     257 grpc_client_session.cc:213] GrpClientSession: Attempting to call stream->Finish(), mutex acquired
+I0808 09:30:13.176966     257 grpc_client_session.cc:216] GrpClientSession: stream->Finish() returned server status CANCELLED: CANCELLED
+I0808 09:30:13.176979     257 grpc_client_session.cc:237] GrpClientSession::Finish(): calling terminated cb with CANCELLED: CANCELLED
+W0808 09:30:13.176982     257 grpc_client.cc:91] IFRT proxy server disconnected: CANCELLED: CANCELLED; Stack trace: *** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyGC_Collect
+	Py_FinalizeEx
+	
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+I0808 09:30:13.177517     257 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 09:30:13.177521     257 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0808 09:30:13.177526     257 client.cc:223] Client::~Client(): rpc_helper_->Disconnect() is done.
+I0808 09:30:13.177540     341 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 09:30:13.177780     257 rpc_helper.cc:509] RpcHelper::~RpcHelper() starting.
+I0808 09:30:13.177839     257 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 09:30:13.177842     257 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0808 09:30:13.177844     257 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0808 09:30:13.177847     257 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 09:30:13.177850     257 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 09:30:13.177851     257 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0808 09:30:13.177854     257 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
+I0808 09:30:13.177858     257 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
+I0808 09:30:13.177862     257 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
+I0808 09:30:13.177895     257 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
+I0808 09:30:13.177902     257 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
+I0808 09:30:13.177905     257 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 09:30:13.177998     257 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0808 09:30:13.178134     257 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
+[run] exit=1
+[run] FATAL: no PATHTRACE for the fixed-order reductions -- the intervention did not
+[run]        execute.  Any result from this run is void regardless of its exit code.
+[run] PATHTRACE fixed_ar=0 embed=0 logprob_m=0 wandb_online=0 eval_off=0
+[entrypoint] FATAL: 90_run.sh exited 1
