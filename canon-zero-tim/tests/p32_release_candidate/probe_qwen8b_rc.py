@@ -160,15 +160,23 @@ def _sample_tree_sha256(tree: Any, *, samples_per_leaf: int = 8) -> str:
   digest = hashlib.sha256()
   leaves = jax.tree.leaves(tree)
   for index, leaf in enumerate(leaves):
-    flat = leaf.reshape(-1)
-    count = min(samples_per_leaf, int(flat.size))
-    if not count:
-      continue
-    sample = np.ascontiguousarray(jax.device_get(flat[:count]))
     digest.update(index.to_bytes(4, "little"))
     digest.update(str(tuple(leaf.shape)).encode("ascii"))
     digest.update(str(leaf.dtype).encode("ascii"))
-    digest.update(sample.view(np.uint8))
+    shards = getattr(leaf, "addressable_shards", None)
+    if shards:
+      for shard in shards:
+        sample = np.ascontiguousarray(
+            jax.device_get(shard.data.reshape(-1)[:samples_per_leaf])
+        )
+        digest.update(sample.view(np.uint8))
+    else:
+      count = min(samples_per_leaf, int(leaf.size))
+      if count:
+        sample = np.ascontiguousarray(
+            jax.device_get(leaf).reshape(-1)[:count]
+        )
+        digest.update(sample.view(np.uint8))
   return digest.hexdigest()
 
 
