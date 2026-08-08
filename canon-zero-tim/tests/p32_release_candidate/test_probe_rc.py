@@ -9,6 +9,8 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 import numpy as np
 import optax
 
@@ -19,6 +21,8 @@ from probe_qwen8b_rc import _commit_program
 from probe_qwen8b_rc import _make_inputs
 from probe_qwen8b_rc import _put_memory_kind
 from probe_qwen8b_rc import _release_candidate_model_config
+from probe_qwen8b_rc import _replica_full_report
+from probe_qwen8b_rc import _replica_sample_report
 from probe_qwen8b_rc import _replica_samples_exact
 from probe_qwen8b_rc import _sample_tree_sha256
 from probe_qwen8b_rc import _state_memory_kinds
@@ -95,6 +99,7 @@ class ProbeRCTest(unittest.TestCase):
     self.assertEqual(len(fingerprints), 2)
     self.assertNotEqual(fingerprints[0], fingerprints[1])
     self.assertTrue(_replica_samples_exact(gradients))
+    self.assertTrue(_replica_full_report(gradients, mesh=self.mesh)["exact"])
 
     def global_objective(candidate):
       model = nnx.merge(self.graphdef, candidate)
@@ -112,6 +117,29 @@ class ProbeRCTest(unittest.TestCase):
       np.testing.assert_allclose(
           np.asarray(fixed_leaf), np.asarray(stock_leaf), rtol=2.0e-5, atol=2.0e-6
       )
+
+  def test_full_replica_check_rejects_an_unsampled_difference(self):
+    shape = (4, 20)
+    sharding = NamedSharding(self.mesh, P(None, "tp"))
+    base = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    target_device = self.mesh.devices[1, 0]
+    indices = sharding.addressable_devices_indices_map(shape)
+    device_arrays = []
+    for device in sharding.addressable_devices:
+      local = np.ascontiguousarray(base[indices[device]])
+      if device == target_device:
+        local = local.copy()
+        local.reshape(-1)[9] += np.float32(1.0)
+      device_arrays.append(jax.device_put(local, device))
+    inconsistent = jax.make_array_from_single_device_arrays(
+        shape, sharding, device_arrays
+    )
+
+    sample = _replica_sample_report(inconsistent)
+    full = _replica_full_report(inconsistent, mesh=self.mesh)
+    self.assertTrue(sample["exact"])
+    self.assertEqual(sample["samples_per_shard"], 8)
+    self.assertFalse(full["exact"])
 
   def test_three_updates_move_optimizer_state_and_parameters(self):
     _, rank_value_and_grad = build_dp_programs(

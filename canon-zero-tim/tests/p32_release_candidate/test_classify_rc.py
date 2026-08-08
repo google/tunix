@@ -21,6 +21,27 @@ def _record(stage: str) -> dict:
   sha_a = "a" * 64
   sha_b = "b" * 64
   records = 2 if stage == "backward" else updates
+  replica_check = {
+      "schema_version": 2,
+      "sample": {
+          "algorithm": "host-prefix-sample",
+          "checked_leaves": 8,
+          "total_leaves": 399,
+          "samples_per_shard": 8,
+          "checked_physical_values": 4096,
+          "replica_groups": 32,
+          "replica_comparisons": 480,
+          "exact": True,
+      },
+      "full": {
+          "algorithm": "device-ring-all-elements",
+          "checked_leaves": 399,
+          "dp_size": 16,
+          "tp_size": 4,
+          "physical_flags": 64,
+          "exact": True,
+      },
+  }
   steps = [
       {
           "step": index,
@@ -29,7 +50,7 @@ def _record(stage: str) -> dict:
           "gradient_sample_sha256": "c" * 64,
           "gradient_health": {"finite": True, "nonzero": 12, "norm": 2.0},
           "rank_local_stats_distinct": True,
-          "post_reduction_replicas_exact": True,
+          "post_reduction_replica_check": copy.deepcopy(replica_check),
           "rank_contribution_signature_sha256": [
               f"{rank:064x}" for rank in range(16)
           ],
@@ -100,7 +121,10 @@ def _record(stage: str) -> dict:
           None if stage == "checkpoint-forward" else True
       ),
       "post_reduction_replicas_exact": (
-          None if stage == "checkpoint-forward" else True
+          None
+      ),
+      "post_reduction_replica_check": (
+          None if stage == "checkpoint-forward" else copy.deepcopy(replica_check)
       ),
       "dp_reduction_transactions": (
           0 if not backward else 2 if stage == "backward" else updates
@@ -178,8 +202,33 @@ class ClassifyRCTest(unittest.TestCase):
 
   def test_unequal_replicas_rejected(self):
     record = _record("backward")
-    record["post_reduction_replicas_exact"] = False
+    record["post_reduction_replica_check"]["full"]["exact"] = False
     self.assertEqual(classify_text(_log(record))["status"], "INCONCLUSIVE")
+
+  def test_forged_full_replica_aggregate_is_rejected(self):
+    record = _record("backward")
+    record["step_records"][0]["post_reduction_replica_check"]["full"][
+        "exact"
+    ] = False
+    self.assertEqual(classify_text(_log(record))["status"], "INCONCLUSIVE")
+
+  def test_update_without_full_replica_evidence_is_rejected(self):
+    record = _record("one-update")
+    record["post_reduction_replica_check"] = None
+    self.assertEqual(classify_text(_log(record))["status"], "INCONCLUSIVE")
+
+  def test_archived_backward_sample_is_labeled_not_upgraded(self):
+    record = _record("backward")
+    record["post_reduction_replica_check"] = None
+    record["post_reduction_replicas_exact"] = True
+    for step in record["step_records"]:
+      step["post_reduction_replica_check"] = None
+      step["post_reduction_replicas_exact"] = True
+    result = classify_text(_log(record))
+    self.assertEqual(result["status"], "PASS")
+    self.assertEqual(
+        result["replica_evidence_scope"], "sampled-prefix-legacy"
+    )
 
   def test_update_without_pinned_host_rejected(self):
     record = _record("one-update")

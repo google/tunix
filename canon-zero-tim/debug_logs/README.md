@@ -132,6 +132,11 @@ sha256sum -c evidence/package_artifacts.sha256
 | **`backward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 498.43 / 7.585B Nonzero** | 🟢 **Bitwise Exact Gradients** | 🟢 **PASS** |
 
 * **16 Unique DP Rank Gradient Signatures**: All 16 DP ranks produced distinct local gradient signatures across 16 trajectories.
-* **100% Post-Reduction Bit-Identical Replicas**: Across all 16 DP ranks, gradient arrays after reduction are 100% bitwise exact (`post_reduction_replicas_exact: true`).
+* **Sampled Post-Reduction Replica Equality**: The archived Stage 2 probe compared the first 8 leaves and the first 8 values of each physical shard. Those sampled prefixes are exact across all 16 DP ranks (`post_reduction_replicas_exact: true`). It did not compare every gradient element, so full-array cross-replica equality remains unmeasured in this artifact.
 * **Deterministic Classification**: Both `checkpoint-forward` and `backward` report status `PASS` with 0 reasons.
 
+The follow-up RC schema records the sampled budget explicitly and adds a
+device-side ring comparison over every element of every gradient leaf. Fresh
+`one-update` and `three-update` evidence must carry that full verdict; the
+archived Stage 2 record is retained as sampled legacy evidence and is never
+upgraded retroactively.

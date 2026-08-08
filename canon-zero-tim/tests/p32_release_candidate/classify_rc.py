@@ -37,6 +37,10 @@ _STAGE_COUNTS = {
         "training_steps": 3,
     },
 }
+_REPLICA_CHECK_SCHEMA = 2
+_REPLICA_SAMPLE_LEAVES = 8
+_REPLICA_SAMPLES_PER_SHARD = 8
+_MODEL_GRADIENT_LEAVES = 399
 
 
 def _exactly_one(text: str, pattern: str, label: str, reasons: list[str]):
@@ -45,8 +49,52 @@ def _exactly_one(text: str, pattern: str, label: str, reasons: list[str]):
     reasons.append(f"{label}: expected exactly one marker, found {count}")
 
 
+def _validate_replica_check(
+    check: Any,
+    *,
+    legacy_exact: Any,
+    label: str,
+    allow_legacy_sample: bool,
+    reasons: list[str],
+) -> str:
+  """Validates explicit full evidence or labels one archived sample verdict."""
+  if check is None:
+    if allow_legacy_sample and legacy_exact is True:
+      return "sampled-prefix-legacy"
+    reasons.append(f"{label}: full replica check is missing")
+    return "missing"
+  if legacy_exact is not None:
+    reasons.append(f"{label}: ambiguous legacy and v2 replica fields coexist")
+  if not isinstance(check, dict):
+    reasons.append(f"{label}: replica check must be an object")
+    return "invalid"
+  if check.get("schema_version") != _REPLICA_CHECK_SCHEMA:
+    reasons.append(f"{label}: replica check schema changed")
+  sample = check.get("sample") or {}
+  if (
+      sample.get("algorithm") != "host-prefix-sample"
+      or sample.get("checked_leaves") != _REPLICA_SAMPLE_LEAVES
+      or sample.get("total_leaves") != _MODEL_GRADIENT_LEAVES
+      or sample.get("samples_per_shard") != _REPLICA_SAMPLES_PER_SHARD
+      or sample.get("exact") is not True
+  ):
+    reasons.append(f"{label}: sampled replica evidence is incomplete")
+  full = check.get("full") or {}
+  if (
+      full.get("algorithm") != "device-ring-all-elements"
+      or full.get("checked_leaves") != _MODEL_GRADIENT_LEAVES
+      or full.get("dp_size") != 16
+      or full.get("tp_size") != 4
+      or full.get("physical_flags") != 64
+      or full.get("exact") is not True
+  ):
+    reasons.append(f"{label}: full replica evidence is incomplete")
+  return "device-ring-all-elements"
+
+
 def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any]:
   reasons: list[str] = []
+  replica_evidence_scope = "not-applicable"
   for marker in (
       "Traceback (most recent call last):",
       "[entrypoint] FATAL:",
@@ -161,8 +209,9 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
           record.get("third_program_exact"),
           record.get("gradient_health"),
           record.get("post_reduction_replicas_exact"),
+          record.get("post_reduction_replica_check"),
       )
-      if forbidden_work != (None, None, None):
+      if forbidden_work != (None, None, None, None):
         reasons.append("forward: backward-only fields were populated")
     else:
       if not isinstance(record.get("third_program_exact"), bool):
@@ -177,8 +226,13 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
         reasons.append("gradient: health contract failed")
       if record.get("rank_local_stats_distinct") is not True:
         reasons.append("gradient: rank-local contribution was not observed")
-      if record.get("post_reduction_replicas_exact") is not True:
-        reasons.append("gradient: reduced replicas were not exact")
+      replica_evidence_scope = _validate_replica_check(
+          record.get("post_reduction_replica_check"),
+          legacy_exact=record.get("post_reduction_replicas_exact"),
+          label="gradient",
+          allow_legacy_sample=stage == "backward",
+          reasons=reasons,
+      )
       expected_transactions = {
           "backward": 2,
           "one-update": 1,
@@ -211,6 +265,13 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
       ):
         reasons.append("THIRDPROG: aggregate does not match transaction records")
       for index, entry in enumerate(steps):
+        _validate_replica_check(
+            entry.get("post_reduction_replica_check"),
+            legacy_exact=entry.get("post_reduction_replicas_exact"),
+            label=f"gradient: step {index}",
+            allow_legacy_sample=stage == "backward",
+            reasons=reasons,
+        )
         contributions = entry.get("rank_contribution_signature_sha256", [])
         if (
             len(contributions) != 16
@@ -238,6 +299,7 @@ def classify_text(text: str, expected_stage: str | None = None) -> dict[str, Any
   return {
       "status": "PASS" if not reasons else "INCONCLUSIVE",
       "reasons": reasons,
+      "replica_evidence_scope": replica_evidence_scope,
       "record": record,
   }
 

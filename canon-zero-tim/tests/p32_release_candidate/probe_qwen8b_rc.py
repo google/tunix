@@ -48,6 +48,9 @@ _DP_SIZE = 16
 _TP_SIZE = 4
 _SEQ_LEN = 16
 _ATTENTION_BACKEND = "dense-reference"
+_REPLICA_CHECK_SCHEMA = 2
+_REPLICA_SAMPLE_LEAVES = 8
+_REPLICA_SAMPLES_PER_SHARD = 8
 
 
 def _release_candidate_model_config() -> model_lib.ModelConfig:
@@ -334,20 +337,117 @@ def _stream_fixed_rank_gradient(
   return total_loss, rows, accumulator, tuple(fingerprints)
 
 
-def _replica_samples_exact(tree: Any, *, samples_per_shard: int = 8) -> bool:
-  """Checks small physical samples for every replicated DP copy."""
-  for leaf in jax.tree.leaves(tree)[:8]:
+def _replica_sample_report(
+    tree: Any,
+    *,
+    max_leaves: int = _REPLICA_SAMPLE_LEAVES,
+    samples_per_shard: int = _REPLICA_SAMPLES_PER_SHARD,
+) -> dict[str, Any]:
+  """Reports the bounded physical-shard prefix comparison."""
+  leaves = jax.tree.leaves(tree)
+  exact = True
+  physical_values = 0
+  replica_groups = 0
+  replica_comparisons = 0
+  for leaf in leaves[:max_leaves]:
     groups: dict[str, list[np.ndarray]] = {}
     for shard in leaf.addressable_shards:
       key = repr(shard.index)
       sample = np.ascontiguousarray(
           jax.device_get(shard.data.reshape(-1)[:samples_per_shard])
       )
+      physical_values += int(sample.size)
       groups.setdefault(key, []).append(sample)
     for values in groups.values():
-      if not all(np.array_equal(values[0], value) for value in values[1:]):
-        return False
-  return True
+      if len(values) > 1:
+        replica_groups += 1
+        replica_comparisons += len(values) - 1
+      exact = exact and all(
+          np.array_equal(values[0], value) for value in values[1:]
+      )
+  return {
+      "algorithm": "host-prefix-sample",
+      "checked_leaves": min(max_leaves, len(leaves)),
+      "total_leaves": len(leaves),
+      "samples_per_shard": samples_per_shard,
+      "checked_physical_values": physical_values,
+      "replica_groups": replica_groups,
+      "replica_comparisons": replica_comparisons,
+      "exact": exact,
+  }
+
+
+def _replica_samples_exact(tree: Any, *, samples_per_shard: int = 8) -> bool:
+  """Returns the legacy bounded physical-shard prefix verdict."""
+  return bool(
+      _replica_sample_report(
+          tree, samples_per_shard=samples_per_shard
+      )["exact"]
+  )
+
+
+def _replica_full_report(
+    tree: Any,
+    *,
+    mesh: jax.sharding.Mesh,
+    dp_axis: str = "dp",
+    tp_axis: str = "tp",
+) -> dict[str, Any]:
+  """Compares every physical DP replica element on device."""
+  leaves = jax.tree.leaves(tree)
+  if not leaves:
+    raise ValueError("replica full check requires at least one array leaf")
+  dp_size = int(mesh.shape[dp_axis])
+  tp_size = int(mesh.shape[tp_axis])
+  permutation = tuple(
+      (rank, (rank + 1) % dp_size) for rank in range(dp_size)
+  )
+  specs = jax.tree.map(lambda leaf: leaf.sharding.spec, tree)
+
+  def compare_local(local_tree):
+    peer_tree = jax.lax.ppermute(
+        local_tree, axis_name=dp_axis, perm=permutation
+    )
+    exact = jnp.asarray(True)
+    for local_leaf, peer_leaf in zip(
+        jax.tree.leaves(local_tree),
+        jax.tree.leaves(peer_tree),
+        strict=True,
+    ):
+      exact = jnp.logical_and(
+          exact, jnp.array_equal(local_leaf, peer_leaf)
+      )
+    return jnp.reshape(exact, (1, 1))
+
+  kwargs = {
+      "mesh": mesh,
+      "in_specs": (specs,),
+      "out_specs": P(dp_axis, tp_axis),
+  }
+  try:
+    compare = jax.shard_map(compare_local, check_vma=False, **kwargs)
+  except TypeError:
+    compare = jax.shard_map(compare_local, check_rep=False, **kwargs)
+  physical_flags = np.asarray(jax.device_get(compare(tree)))
+  return {
+      "algorithm": "device-ring-all-elements",
+      "checked_leaves": len(leaves),
+      "dp_size": dp_size,
+      "tp_size": tp_size,
+      "physical_flags": int(physical_flags.size),
+      "exact": bool(np.all(physical_flags)),
+  }
+
+
+def _replica_check_report(
+    tree: Any, *, mesh: jax.sharding.Mesh
+) -> dict[str, Any]:
+  """Returns sampled compatibility evidence and a full device-side verdict."""
+  return {
+      "schema_version": _REPLICA_CHECK_SCHEMA,
+      "sample": _replica_sample_report(tree),
+      "full": _replica_full_report(tree, mesh=mesh),
+  }
 
 
 def _build_optimizer_state(params: Any, mesh: jax.sharding.Mesh, tx: optax.GradientTransformation):
@@ -415,6 +515,7 @@ def _run_stage(
       "gradient_health": None,
       "rank_local_stats_distinct": None,
       "post_reduction_replicas_exact": None,
+      "post_reduction_replica_check": None,
       "dp_reduction_transactions": 0,
       "dp_reduction_rounds_per_transaction": 0,
       "dp_rank_pullbacks_per_transaction": 0,
@@ -466,7 +567,8 @@ def _run_stage(
     if not health["finite"] or health["nonzero"] <= 0 or health["norm"] <= 0:
       raise RuntimeError(f"gradient health failed: {health}")
     local_distinct = len(set(rank_fingerprints)) == _DP_SIZE
-    reduced_exact = _replica_samples_exact(gradients)
+    replica_check = _replica_check_report(gradients, mesh=mesh)
+    reduced_exact = bool(replica_check["full"]["exact"])
     if not local_distinct:
       raise RuntimeError("rank-local gradient signatures are not all distinct")
     if not reduced_exact:
@@ -487,7 +589,7 @@ def _run_stage(
         "gradient_sample_sha256": gradient_sha,
         "gradient_health": health,
         "rank_local_stats_distinct": local_distinct,
-        "post_reduction_replicas_exact": reduced_exact,
+        "post_reduction_replica_check": replica_check,
         "rank_contribution_signature_sha256": list(rank_fingerprints),
     }
     if updates:
@@ -518,7 +620,9 @@ def _run_stage(
       "gradient_repeat_exact": gradient_repeat_exact if stage == "backward" else None,
       "gradient_health": result["step_records"][-1]["gradient_health"],
       "rank_local_stats_distinct": True,
-      "post_reduction_replicas_exact": True,
+      "post_reduction_replica_check": result["step_records"][-1][
+          "post_reduction_replica_check"
+      ],
       "dp_reduction_transactions": iterations,
       "dp_reduction_rounds_per_transaction": _DP_SIZE - 1,
       "dp_rank_pullbacks_per_transaction": _DP_SIZE,
