@@ -123,23 +123,24 @@ sha256sum -c evidence/package_artifacts.sha256
   Its SHA-256 is `158ca81c1bc82f62053eb0eff46f109edd8bf10181cc7f9ff319c0d594f12647`.
 - `p32_3_rc_backward_pass.classification.json` is the deterministic Stage 2 PASS report.
   Its SHA-256 is `be0a8cf168c24601b51cb557473d14c0d4a0acbb0868b6cbf22a13faed7307dc`.
-- `p32_3_rc_checkpoint_forward_splash_fail.raw.log` preserves the preceding diagnostic run (`r8s2p`).
-  Its SHA-256 is `4e10d400c7f5330e66ea6a96b5dbb0d0163560b35753081a18f2cca8c3750e62`.
+- `p32_3_rc_one_update_pass.raw.log` is the Stage 3 run from source `7ec0c379` on Attempt 0 (`qv5hp`).
+  Its SHA-256 is `8aa277a895904dd9222b7a6b937b7f5bb43765cff81a603f4801bff8af0463ea`.
+- `p32_3_rc_one_update_pass.classification.json` is the deterministic Stage 3 PASS report.
+  Its SHA-256 is `40f6c9b06c3b0a16882d6f2322b84e4c0c3e7052d666d0d9e0f0e10f9c5016df`.
 - `p32_3_rc_one_update_xla1200_fail.raw.log` preserves the Stage 3 diagnostic run (`hpdfs`).
   Its SHA-256 is `1c1f69ae07f6659181dfc10a32b8593560603b60ca7c9a028accf37a41e459cb`.
-  The run reached the post-commit diagnostic fingerprint and then failed with
-  XLA E1200 because a JAX reshape was applied after the optimizer state moved
-  to `pinned_host`. It contains no final JSON or Stage 3 numerical verdict.
 
+| Stage | Attempt | Devices | DP x TP | Trajectories (Global/Local) | Checkpoint Loaded | Gradient Health (Norm / Nonzero) | Parameter Mutation (Before != After) | Replica Check Scope | Status |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`checkpoint-forward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | N/A (Forward Only) | 🟢 **Bitwise Exact Checkpoint (`[256, 151936]`)** | N/A | 🟢 **PASS** |
+| **`backward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 498.43 / 7.585B Nonzero** | 🟢 **0 Mutations (Pure Backward)** | Sampled Prefix | 🟢 **PASS** |
+| **`one-update`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 498.43 / 7.585B Nonzero** | 🟢 **Mutated (`c33ae361` ➜ `ccbec74d`)** | 🟢 **`device-ring-all-elements` (399 Leaves)** | 🟢 **PASS** |
 
-| Stage | Attempt | Devices | DP x TP | Trajectories (Global/Local) | Checkpoint Loaded | Gradient Health (Norm / Nonzero) | Repeat Exactness | Status |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`checkpoint-forward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | N/A (Forward Only) | 🟢 **Bitwise Exact (`[256, 151936]`)** | 🟢 **PASS** |
-| **`backward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 498.43 / 7.585B Nonzero** | 🟢 **Bitwise Exact Gradients** | 🟢 **PASS** |
-
+* **Pinned Host Round-trip Verified**: `optimizer_state_memory_during_commit` is `["device"]` and `optimizer_state_memory_between_commits` is `["pinned_host"]`.
 * **16 Unique DP Rank Gradient Signatures**: All 16 DP ranks produced distinct local gradient signatures across 16 trajectories.
-* **Sampled Post-Reduction Replica Equality**: The archived Stage 2 probe compared the first 8 leaves and the first 8 values of each physical shard. Those sampled prefixes are exact across all 16 DP ranks (`post_reduction_replicas_exact: true`). It did not compare every gradient element, so full-array cross-replica equality remains unmeasured in this artifact.
-* **Deterministic Classification**: Both `checkpoint-forward` and `backward` report status `PASS` with 0 reasons.
+* **Full-Array Device Ring Replica Equality**: All 399 gradient leaves across all 16 DP ranks verified bitwise identical via device-side `ppermute` ring comparison (`exact: true`).
+* **Deterministic Classification**: `checkpoint-forward`, `backward`, and `one-update` all report status `PASS` with 0 reasons.
+
 
 The follow-up RC schema records the sampled budget explicitly and adds a
 device-side ring comparison over every element of every gradient leaf. Fresh
