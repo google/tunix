@@ -23,5 +23,7 @@ $DOCKER run --rm \
     bash canon-zero-tim/install.sh "$qwen8b_overlay" \
       --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
       --model qwen8b
-    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 overlays=2"
+    python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
+      --overlay "$qwen8b_overlay"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 overlays=2"
   '

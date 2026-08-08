@@ -76,9 +76,11 @@ bash canon-zero-tim/tests/p33_workloads/run_exact_image.sh
 ```
 
 The exact-image gate must end with
-`P33_EXACT_IMAGE_PASS decode_chunk_cases=5 overlays=2`. For a workload that schedules 512 decode
-rows, the live log must additionally show `canonical_rows=256 chunks=2`; changing
-`CANON_LOGPROB_M` to 512 is not an accepted workaround.
+`P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 overlays=2`. For a workload that
+schedules 512 decode rows, the live log must additionally show
+`canonical_rows=256 chunks=2`. A packed prompt with 2,048 physical rows per DP rank must show
+`rows_per_dp=2048 canonical_rows=256 chunks=8`. Both paths reuse the same local-M256 executable;
+changing `CANON_LOGPROB_M` to 512 or 2,048 is not an accepted workaround.
 
 If access to the target cluster is already configured, perform an API-schema dry run before the
 real apply. This contacts the API server but creates no JobSet:

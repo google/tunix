@@ -16,7 +16,7 @@
      _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
      compute_prompt_logprobs, sample)
  from tpu_inference.layers.jax.sample.sampling_metadata import \
-@@ -122,6 +124,277 @@
+@@ -122,6 +124,391 @@
  
  logger = init_logger(__name__)
  
@@ -112,6 +112,120 @@
 +            chunk_logits, chunk_token_ids, max_logprobs)
 +        chunks.append(_canon_slice_logprobs(chunk, chunk_rows))
 +    return _canon_concat_logprobs(chunks), rows, len(chunks)
++
++
++def _canon_prompt_dp_chunk(
++    values: jax.Array,
++    dp_size: int,
++    rows_per_dp: int,
++    start: int,
++    stop: int,
++    target_rows: int,
++    pad_value: float | int,
++) -> jax.Array:
++    """Select one local-row window from every DP rank and pad its tail."""
++    trailing_shape = tuple(values.shape[1:])
++    per_dp = values.reshape((dp_size, rows_per_dp) + trailing_shape)
++    chunk = per_dp[:, start:stop]
++    pad = target_rows - (stop - start)
++    if pad:
++        padding = [(0, 0), (0, pad)] + [(0, 0)] * len(trailing_shape)
++        chunk = jnp.pad(chunk, padding, constant_values=pad_value)
++    return chunk.reshape((dp_size * target_rows,) + trailing_shape)
++
++
++def _canon_restore_prompt_logprobs(
++    chunks: List[LogprobsTensors],
++    dp_size: int,
++    target_rows: int,
++    chunk_rows: List[int],
++) -> LogprobsTensors:
++    """Restore canonical chunks to the original DP-major packed-row order."""
++    if not chunks or len(chunks) != len(chunk_rows):
++        raise ValueError("canonical prompt chunks and row counts must be non-empty and match")
++
++    def restore_field(field_name: str) -> jax.Array:
++        per_dp_chunks = []
++        for chunk, rows in zip(chunks, chunk_rows):
++            field = getattr(chunk, field_name)
++            trailing_shape = tuple(field.shape[1:])
++            per_dp = field.reshape((dp_size, target_rows) + trailing_shape)
++            per_dp_chunks.append(per_dp[:, :rows])
++        restored = jnp.concatenate(per_dp_chunks, axis=1)
++        return restored.reshape((-1,) + tuple(restored.shape[2:]))
++
++    return LogprobsTensors(
++        logprob_token_ids=restore_field("logprob_token_ids"),
++        logprobs=restore_field("logprobs"),
++        selected_token_ranks=restore_field("selected_token_ranks"),
++    )
++
++
++def _canon_compute_prompt_logprobs(
++    step_rng: jax.Array,
++    mesh: Any,
++    logits: jax.Array,
++    temperatures: jax.Array,
++    top_ks: jax.Array,
++    top_ps: jax.Array,
++    target_ids: jax.Array,
++    max_logprobs: int,
++    dp_size: int,
++    target_rows: int,
++) -> tuple[LogprobsTensors, int, int]:
++    """Run packed prompt rows as repeated DP-wide canonical-local-M programs."""
++    rows = int(logits.shape[0])
++    if dp_size <= 0 or target_rows <= 0 or rows <= 0:
++        raise ValueError(
++            f"invalid canonical prompt dimensions: rows={rows}, dp={dp_size}, "
++            f"target_rows={target_rows}")
++    if rows % dp_size:
++        raise ValueError(f"prompt rows {rows} not divisible by dp_size {dp_size}")
++    for name, values in (
++        ("temperature", temperatures),
++        ("top_k", top_ks),
++        ("top_p", top_ps),
++        ("target_ids", target_ids),
++    ):
++        if int(values.shape[0]) != rows:
++            raise ValueError(
++                f"prompt {name} rows {values.shape[0]} do not match logits rows {rows}")
++
++    rows_per_dp = rows // dp_size
++    chunks = []
++    chunk_rows = []
++    for start in range(0, rows_per_dp, target_rows):
++        stop = min(start + target_rows, rows_per_dp)
++        rows_in_chunk = stop - start
++        chunk_logits = _canon_prompt_dp_chunk(
++            logits, dp_size, rows_per_dp, start, stop, target_rows, 0.0)
++        chunk_temperatures = _canon_prompt_dp_chunk(
++            temperatures, dp_size, rows_per_dp, start, stop, target_rows, 1.0)
++        chunk_top_ks = _canon_prompt_dp_chunk(
++            top_ks, dp_size, rows_per_dp, start, stop, target_rows, -1)
++        chunk_top_ps = _canon_prompt_dp_chunk(
++            top_ps, dp_size, rows_per_dp, start, stop, target_rows, 1.0)
++        chunk_target_ids = _canon_prompt_dp_chunk(
++            target_ids, dp_size, rows_per_dp, start, stop, target_rows, 0)
++        chunk_metadata = TPUSupportedSamplingMetadata(
++            temperature=chunk_temperatures,
++            top_k=chunk_top_ks,
++            top_p=chunk_top_ps,
++            do_sampling=True,
++            logprobs=True,
++        )
++        _, processed_logits = sample(
++            step_rng, mesh, chunk_logits, chunk_metadata)
++        chunks.append(compute_and_gather_logprobs(
++            processed_logits, chunk_target_ids, max_logprobs))
++        chunk_rows.append(rows_in_chunk)
++
++    return (
++        _canon_restore_prompt_logprobs(
++            chunks, dp_size, target_rows, chunk_rows),
++        rows_per_dp,
++        len(chunks),
++    )
 +
 +
 +def _canon_snapshot_prompt_logprobs(
@@ -294,7 +408,7 @@
  logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
  
  INVALID_TOKEN_ID = -1
-@@ -523,6 +796,126 @@
+@@ -523,6 +910,126 @@
      return routed_experts
  
  
@@ -421,7 +535,7 @@
  class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
  
      def __init__(
-@@ -614,6 +1007,36 @@
+@@ -614,6 +1121,36 @@
              # in the future.
              self.mesh = self._create_2d_mesh()
  
@@ -458,7 +572,7 @@
          logger.info(f"Init mesh | mesh={self.mesh}")
  
      def _create_new_model_mesh(self) -> jax.sharding.Mesh:
-@@ -1317,6 +1740,37 @@
+@@ -1317,6 +1854,37 @@
                      scheduler_output) as kv_connector_output:
                  # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                  # but one of them would be `None`
@@ -496,7 +610,7 @@
                  (self.kv_caches, hidden_states, aux_hidden_states,
                   expert_indices) = self.model_fn(
                       self.state_leaves,
-@@ -1380,6 +1834,57 @@
+@@ -1380,6 +1948,57 @@
                  full_hidden_states,
                  lora_metadata,
              )
@@ -554,7 +668,7 @@
              logits = self._select_from_array_fn(full_logits, logits_indices,
                                                  self.mesh)
          else:
-@@ -1795,23 +2300,144 @@
+@@ -1795,23 +2414,142 @@
                      logprobs_logits = (processed_logits
                                         if self.model_config.logprobs_mode
                                         == "processed_logprobs" else logits)
@@ -617,13 +731,6 @@
 +                    and full_logits is not None
 +                    and self.input_batch.num_prompt_logprobs):
 +                canon_logprob_m = _canon_logprob_m()
-+                if (canon_logprob_m is not None
-+                        and int(full_logits.shape[0]) != canon_logprob_m * self.dp_size):
-+                    raise ValueError(
-+                        "processed prompt global rows must equal "
-+                        "dp_size * CANON_LOGPROB_M: "
-+                        f"{full_logits.shape[0]} vs "
-+                        f"{canon_logprob_m * self.dp_size}")
 +                temperatures, top_ks, top_ps, populated = (
 +                    _canon_expand_prompt_sampling_params(
 +                        self.input_batch,
@@ -648,12 +755,6 @@
 +                    if input_ids is None:
 +                        raise ValueError(
 +                            "CANON_LOGPROB_M direct prompt path requires input_ids")
-+                    _, prompt_logprobs_logits = sample(
-+                        step_rng,
-+                        self.mesh,
-+                        full_logits,
-+                        prompt_sampling_metadata,
-+                    )
 +                    prompt_target_ids = device_array(
 +                        self.mesh,
 +                        _canon_expand_prompt_target_ids(
@@ -665,11 +766,19 @@
 +                        ),
 +                        sharding=token_sharding,
 +                    )
-+                    prompt_lp_tensors = compute_and_gather_logprobs(
-+                        prompt_logprobs_logits,
-+                        prompt_target_ids,
-+                        self.model_config.max_logprobs,
-+                    )
++                    (prompt_lp_tensors, prompt_rows_per_dp,
++                     prompt_logprob_chunks) = _canon_compute_prompt_logprobs(
++                         step_rng,
++                         self.mesh,
++                         full_logits,
++                         prompt_sampling_metadata.temperature,
++                         prompt_sampling_metadata.top_k,
++                         prompt_sampling_metadata.top_p,
++                         prompt_target_ids,
++                         self.model_config.max_logprobs,
++                         self.dp_size,
++                         canon_logprob_m,
++                     )
 +                    prompt_logprobs_async = _canon_snapshot_prompt_logprobs(
 +                        prompt_lp_tensors,
 +                        int(full_logits.shape[0]),
@@ -681,7 +790,10 @@
 +                    )
 +                    print(
 +                        "[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on "
-+                        f"rows={full_logits.shape[0]}",
++                        f"rows={full_logits.shape[0]} "
++                        f"rows_per_dp={prompt_rows_per_dp} "
++                        f"canonical_rows={canon_logprob_m} "
++                        f"chunks={prompt_logprob_chunks}",
 +                        flush=True,
 +                    )
 +                    print(

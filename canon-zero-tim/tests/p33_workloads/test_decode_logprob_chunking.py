@@ -95,6 +95,126 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
           target_rows=256,
       )
 
+  def _run_prompt(
+      self, *, rows_per_dp: int, target_rows: int, dp_size: int = 2
+  ):
+    rows = dp_size * rows_per_dp
+    calls = []
+
+    def fake_sample(rng, mesh, logits, metadata):
+      del rng, mesh
+      calls.append({
+          "logits": np.asarray(logits),
+          "temperature": np.asarray(metadata.temperature),
+          "top_k": np.asarray(metadata.top_k),
+          "top_p": np.asarray(metadata.top_p),
+      })
+      return jnp.zeros((logits.shape[0],), dtype=jnp.int32), logits
+
+    def fake_compute(logits, token_ids, max_logprobs):
+      del logits, max_logprobs
+      ids = jnp.asarray(token_ids, dtype=jnp.int32)
+      return self.runner.LogprobsTensors(
+          logprob_token_ids=ids[:, None],
+          logprobs=ids.astype(jnp.float32)[:, None],
+          selected_token_ranks=ids,
+      )
+
+    logits = jnp.arange(rows, dtype=jnp.float32)[:, None]
+    temperatures = jnp.arange(rows, dtype=jnp.float32) + 100.0
+    top_ks = jnp.arange(rows, dtype=jnp.int32)
+    top_ps = jnp.arange(rows, dtype=jnp.float32) + 200.0
+    target_ids = jnp.arange(rows, dtype=jnp.int32)
+    with (
+        mock.patch.object(self.runner, "sample", side_effect=fake_sample),
+        mock.patch.object(
+            self.runner,
+            "compute_and_gather_logprobs",
+            side_effect=fake_compute,
+        ),
+    ):
+      tensors, observed_rows_per_dp, chunks = (
+          self.runner._canon_compute_prompt_logprobs(
+              None,
+              None,
+              logits,
+              temperatures,
+              top_ks,
+              top_ps,
+              target_ids,
+              max_logprobs=1,
+              dp_size=dp_size,
+              target_rows=target_rows,
+          )
+      )
+    return tensors, observed_rows_per_dp, chunks, calls
+
+  def test_prompt_chunks_each_dp_rank_at_canonical_local_m(self):
+    tensors, rows_per_dp, chunks, calls = self._run_prompt(
+        rows_per_dp=6, target_rows=3
+    )
+    self.assertEqual((rows_per_dp, chunks), (6, 2))
+    self.assertEqual([call["logits"].shape for call in calls], [(6, 1)] * 2)
+    np.testing.assert_array_equal(
+        calls[0]["logits"][:, 0], np.array([0, 1, 2, 6, 7, 8])
+    )
+    np.testing.assert_array_equal(
+        calls[1]["logits"][:, 0], np.array([3, 4, 5, 9, 10, 11])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(tensors.selected_token_ranks), np.arange(12)
+    )
+
+  def test_prompt_single_chunk_preserves_dp_major_order(self):
+    tensors, rows_per_dp, chunks, calls = self._run_prompt(
+        rows_per_dp=3, target_rows=3
+    )
+    self.assertEqual((rows_per_dp, chunks), (3, 1))
+    np.testing.assert_array_equal(calls[0]["logits"][:, 0], np.arange(6))
+    np.testing.assert_array_equal(
+        np.asarray(tensors.selected_token_ranks), np.arange(6)
+    )
+
+  def test_prompt_partial_tail_is_padded_per_dp_then_removed(self):
+    tensors, rows_per_dp, chunks, calls = self._run_prompt(
+        rows_per_dp=5, target_rows=3
+    )
+    self.assertEqual((rows_per_dp, chunks), (5, 2))
+    np.testing.assert_array_equal(
+        calls[1]["logits"][:, 0], np.array([3, 4, 0, 8, 9, 0])
+    )
+    np.testing.assert_array_equal(
+        calls[1]["temperature"], np.array([103, 104, 1, 108, 109, 1])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(tensors.selected_token_ranks), np.arange(10)
+    )
+
+  def test_prompt_r13_shape_reuses_eight_local_m256_chunks(self):
+    tensors, rows_per_dp, chunks, calls = self._run_prompt(
+        rows_per_dp=2048, target_rows=256, dp_size=16
+    )
+    self.assertEqual((rows_per_dp, chunks), (2048, 8))
+    self.assertEqual([call["logits"].shape for call in calls], [(4096, 1)] * 8)
+    np.testing.assert_array_equal(
+        np.asarray(tensors.selected_token_ranks), np.arange(32768)
+    )
+
+  def test_prompt_metadata_row_mismatch_fails_closed(self):
+    with self.assertRaisesRegex(ValueError, "temperature rows"):
+      self.runner._canon_compute_prompt_logprobs(
+          None,
+          None,
+          jnp.zeros((8, 3)),
+          jnp.ones((7,)),
+          jnp.ones((8,), dtype=jnp.int32),
+          jnp.ones((8,)),
+          jnp.zeros((8,), dtype=jnp.int32),
+          max_logprobs=1,
+          dp_size=2,
+          target_rows=2,
+      )
+
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()

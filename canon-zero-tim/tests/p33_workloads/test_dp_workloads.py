@@ -77,25 +77,20 @@ def _environment(name: str) -> dict[str, str]:
 
 class DPWorkloadsTest(unittest.TestCase):
 
-  def test_prompt_logprob_contract_compares_global_rows_to_dp_local_rows(self):
+  def test_prompt_logprobs_chunk_each_dp_rank_at_canonical_local_m(self):
     patch = (
         Path(__file__).parents[2]
         / "patches"
         / "tpu_inference"
         / "06-tpu-runner.patch"
     ).read_text(encoding="utf-8")
-    self.assertIn(
-        "int(full_logits.shape[0]) != canon_logprob_m * self.dp_size",
-        patch,
-    )
-    self.assertIn(
-        "f\"{canon_logprob_m * self.dp_size}\"",
-        patch,
-    )
+    self.assertIn("def _canon_compute_prompt_logprobs(", patch)
+    self.assertIn("for start in range(0, rows_per_dp, target_rows):", patch)
     self.assertNotIn(
-        "int(full_logits.shape[0]) != canon_logprob_m):",
+        "processed prompt global rows must equal",
         patch,
     )
+    self.assertIn("f\"chunks={prompt_logprob_chunks}\"", patch)
 
   def test_decode_logprobs_chunk_rows_above_canonical_m(self):
     patch = (

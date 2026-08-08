@@ -324,3 +324,44 @@ Local evidence:
 **Target status:** PENDING. A fresh source-pinned GKE run must print
 `CANON_LOGPROB_M on ... canonical_rows=256 chunks=2` for the 512-row decode and then reach the
 workload classifier. No GKE training PASS is claimed from the local repair.
+
+---
+
+## 14. Phase 33 Attempt `r13`: Packed Prompt Rows Exceed One Canonical Block
+
+- `p33_r13_gsm8k_prompt_logprob_32768_assertion.raw.log` proves the r12 decode repair executes:
+  the live run prints `decode_rows=512 canonical_rows=256 chunks=2`. The first prompt-logprob call
+  also succeeds at 4,096 global rows. A later scheduler wave has 2,048 physical rows per DP rank,
+  or 32,768 global rows, and the old assertion incorrectly requires the entire physical prompt
+  tensor to fit one `DP16 x M256` call. It fails at `32768 != 4096` before any update classifier.
+- `p33_r13_frozenlake_canary_backward_pass.raw.log` ends during full-depth Pallas tracing without a
+  traceback, update report, or terminal classifier. It is **INCONCLUSIVE**, not a backward pass.
+- `p33_r13_frozenlake_full.raw.log` terminates when the IFRT proxy socket closes. This is an
+  infrastructure failure, not numerical, optimizer, or OOM evidence.
+
+The local r14 candidate preserves local canonical M256. It reshapes packed prompt rows into
+`[DP, rows_per_dp, ...]`, selects the same 256-row window from every rank, executes each global
+`DP x 256` chunk, removes only tail padding, and restores the original DP-major row order. The r13
+shape therefore runs as eight calls with global shape 4,096 instead of one call with global shape
+32,768. Decode chunking, model forward, sampling transforms, precision, loss, gradient reduction,
+and optimizer behavior are unchanged.
+
+Archived SHA-256 values:
+
+- canary: `3571f2660306be2a145f6f30051217b421ccd402d7aeb0e9d27d113b10f3c0f9`;
+- FrozenLake full: `e09df4080dfe3d7cc1eb8c3377a48c29b4141c24497411c482a0e49c0bed01d8`;
+- GSM8K full: `af10d362888bd97f011b4c263d677de1dc8448f3bb2fa2eba3f0b811bf934a75`.
+
+Local evidence:
+
+- exact-image overlays: 29/29 manifest entries for both `qwen1p7b` and `qwen8b`;
+- per overlay: 5 decode cases and 5 prompt cases pass, including one-chunk identity, the exact
+  `DP16 x 2,048 -> 8 x (DP16 x M256)` r13 shape and a per-DP partial-tail control;
+- P33 workload/classifier suite: 42/42 plus its unadmitted-launch negative control;
+- expected terminal marker:
+  `P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 overlays=2`.
+
+**Target status:** PENDING. A fresh source-pinned Attempt 0 must print
+`CANON_PROMPT_DIRECT_LOGPROBS on rows=32768 rows_per_dp=2048 canonical_rows=256 chunks=8` and then
+reach the workload classifier. Rollback is to leave canonical admission disabled or revert only
+the prompt-chunking candidate; no production default changed.
