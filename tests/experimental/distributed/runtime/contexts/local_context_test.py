@@ -32,9 +32,7 @@ class LocalContextTest(absltest.TestCase):
   @mock.patch(
       "tunix.experimental.distributed.runtime.discovery.discovery.grpc.server"
   )
-  def test_local_discovery_context_lifecycle_and_registration(
-      self, mock_grpc_server
-  ):
+  def test_discovery_context_register(self, mock_grpc_server):
     port = portpicker.pick_unused_port()
     args = argparse.Namespace(
         discovery_port=port,
@@ -56,7 +54,61 @@ class LocalContextTest(absltest.TestCase):
 
     self.assertFalse(disc_ctx._server.is_started())
 
-  def test_local_process_context(self):
+  @mock.patch(
+      "tunix.experimental.distributed.runtime.contexts.local_context.discovery.connect"
+  )
+  @mock.patch(
+      "tunix.experimental.distributed.runtime.contexts.local_context.discovery.DiscoveryServer"
+  )
+  def test_discovery_context_connect(self, mock_server_cls, mock_connect):
+    port = 8888
+    args = argparse.Namespace(
+        discovery_port=port,
+        discovery_addrs=f"leader:{port}",
+        discovery_id="worker-0",
+    )
+
+    mock_server = mock_server_cls.return_value
+
+    with local_context.LocalDiscoveryContext(args) as disc_ctx:
+      on_client_connected = lambda cid, h, p, m, rec: None
+      on_client_disconnected = lambda cid, h, p, r: None
+
+      disc_ctx.on_connect(
+          on_client_connected=on_client_connected,
+          on_client_disconnected=on_client_disconnected,
+      )
+      mock_server.on_connect.assert_called_once_with(
+          on_client_connected=on_client_connected,
+          on_client_disconnected=on_client_disconnected,
+      )
+      mock_server.start.assert_called_once_with(port)
+
+      on_connected = lambda epoch, rec: None
+      on_disconnected = lambda epoch, r: None
+
+      client = disc_ctx.connect(
+          b"my-metadata",
+          client_id="worker-0",
+          on_connected=on_connected,
+          on_disconnected=on_disconnected,
+      )
+      mock_connect.assert_called_once_with(
+          "localhost:8888",
+          "localhost",
+          port,
+          b"my-metadata",
+          client_id="worker-0",
+          on_connected=on_connected,
+          on_disconnected=on_disconnected,
+      )
+      self.assertEqual(disc_ctx._client, mock_connect.return_value)
+
+    mock_connect.return_value.stop.assert_called_once()
+    mock_server.stop.assert_called_once()
+    self.assertIsNone(disc_ctx._client)
+
+  def test_process_context(self):
     args = argparse.Namespace(
         discovery_port=portpicker.pick_unused_port(),
         discovery_addrs="leader:9999",
