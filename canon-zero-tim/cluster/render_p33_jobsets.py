@@ -236,7 +236,7 @@ def render_jobset(
           "CANON_WAYCOUNT_WIDTHS": "2,4,8",
           "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
           "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
-          "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHING": "true",
+          "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "all",
           "CANON_GCS_CACHE_BUCKET": "gs://yuxzhang-tunix-models/cache/p33_compilation_cache",
       },
       remove=("CANON_P32_RC_STAGE",),
