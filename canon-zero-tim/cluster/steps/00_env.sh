@@ -160,10 +160,93 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
     echo "[env] P32 Pathways release must remain 20260730-jax_0.10.2" >&2
     fail=1
   }
-  [ "${FL_SHARED_MESH:-}" = "1,4" ] || {
-    echo "[env] P32 admission must keep the legacy trainer at TP4-only; 16,4 currently means FSDP" >&2
-    fail=1
-  }
+  if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ]; then
+    req CANON_P32_WORKLOAD
+    for k in CANON_P32_DP_REDUCTION_ADMITTED CANON_P33_WORKLOAD_LAUNCH_ADMITTED \
+             CANON_P32_DP16_SEGMENTED \
+             CANON_P28_SEGMENTED_FORWARD CANON_P28_SEGMENTED_TRAIN \
+             CANON_P28_G6_UPDATE CANON_P29_FULL_TRAIN \
+             CANON_ALIGNMENT_GATE CANON_ALIGNMENT_TRAIN \
+             CANON_P30_OPT_STATE_OFFLOAD CANON_P30_SPARSE_GRAD_ASSEMBLY \
+             CANON_P30_REUSE_SEGMENTED_ENGINE \
+             CANON_P30_RELEASE_CAPTURED_STATE \
+             CANON_P30_RESHARD_ACCUMULATOR; do
+      req "$k"
+      [ "${!k:-}" = "1" ] || {
+        echo "[env] admitted P33 training requires $k=1" >&2
+        fail=1
+      }
+    done
+    case "${CANON_P32_WORKLOAD:-}" in
+      gsm8k|frozenlake) ;;
+      *) echo "[env] admitted P33 training has invalid workload" >&2; fail=1 ;;
+    esac
+    if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; then
+      req CANON_P33_DISABLE_EVAL
+      [ "${CANON_P33_DISABLE_EVAL:-0}" = "1" ] || {
+        echo "[env] admitted P33 FrozenLake requires periodic evaluation disabled" >&2
+        fail=1
+      }
+    fi
+    [ "${CANON_P30_FUSED_PAIR_ACCUMULATION:-}" = "0" ] || {
+      echo "[env] P33 rank-reduced groups require fused pair accumulation off" >&2
+      fail=1
+    }
+    [ "${FL_SHARED_MESH:-}" = "16,4" ] || {
+      echo "[env] admitted P33 training requires FL_SHARED_MESH=16,4" >&2
+      fail=1
+    }
+    [ "${CANON_P32_DP_REDUCTION_ADMITTED:-0}" = "1" ] || {
+      echo "[env] admitted P33 training requires the DP reduction gate" >&2
+      fail=1
+    }
+    [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ] || {
+      echo "[env] admitted P33 training requires the workload launch gate" >&2
+      fail=1
+    }
+    req CANON_P33_RUN_STAGE
+    case "${CANON_P33_NO_COMMIT:-0}" in
+      0|1) ;;
+      *) echo "[env] CANON_P33_NO_COMMIT must be 0 or 1" >&2; fail=1 ;;
+    esac
+    case "${CANON_P33_RUN_STAGE:-}" in
+      backward-no-commit)
+        [ "${CANON_P33_NO_COMMIT:-0}" = "1" ] || {
+          echo "[env] backward-no-commit stage requires CANON_P33_NO_COMMIT=1" >&2
+          fail=1
+        }
+        ;;
+      one-update|three-update|full)
+        [ "${CANON_P33_NO_COMMIT:-0}" = "0" ] || {
+          echo "[env] update/full stages require CANON_P33_NO_COMMIT=0" >&2
+          fail=1
+        }
+        ;;
+      *) echo "[env] invalid CANON_P33_RUN_STAGE" >&2; fail=1 ;;
+    esac
+    for k in CANON_WANDB_ONLINE_REQUIRED CANON_P31_MONOTONIC_METRICS \
+             CANON_WANDB_PROJECT CANON_WANDB_GROUP CANON_WANDB_RUN_NAME \
+             WANDB_MODE WANDB_API_KEY; do
+      req "$k"
+    done
+    [ "${CANON_WANDB_ONLINE_REQUIRED:-0}" = "1" ] || {
+      echo "[env] admitted P33 training requires online W&B" >&2
+      fail=1
+    }
+    [ "${CANON_P31_MONOTONIC_METRICS:-0}" = "1" ] || {
+      echo "[env] admitted P33 training requires monotonic W&B metrics" >&2
+      fail=1
+    }
+    [ "${WANDB_MODE:-}" = "online" ] || {
+      echo "[env] admitted P33 training requires WANDB_MODE=online" >&2
+      fail=1
+    }
+  else
+    [ "${FL_SHARED_MESH:-}" = "1,4" ] || {
+      echo "[env] unadmitted P32 modes must keep the legacy trainer at TP4-only" >&2
+      fail=1
+    }
+  fi
   if [ "${CANON_REQUIRE_TRAIN_MESH_PIN:-0}" = "1" ]; then
     req CANON_EXPECT_TRAIN_MESH_IDS
   fi
@@ -233,6 +316,41 @@ if [ "${CANON_MODE:-}" = "dp16-rc" ]; then
     fail=1
   }
   echo "[env] P32 dp16-rc contract OK: stage=${CANON_P32_RC_STAGE} production_training=refused"
+fi
+if [ "${CANON_MODE:-}" = "workload-contract-only" ]; then
+  for k in CANON_P32_WORKLOAD CANON_P32_DP_REDUCTION_ADMITTED \
+           CANON_P33_WORKLOAD_LAUNCH_ADMITTED \
+           CANON_WANDB_PROJECT CANON_WANDB_GROUP CANON_WANDB_RUN_NAME; do
+    req "$k"
+  done
+  [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] || {
+    echo "[env] workload contract requires the P32 DP admission contract" >&2
+    fail=1
+  }
+  [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "0" ] || {
+    echo "[env] workload contract must keep production training refused" >&2
+    fail=1
+  }
+  case "${CANON_P32_WORKLOAD:-}" in
+    gsm8k|frozenlake) ;;
+    *) echo "[env] invalid CANON_P32_WORKLOAD=${CANON_P32_WORKLOAD:-unset}" >&2; fail=1 ;;
+  esac
+  if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; then
+    req CANON_P33_DISABLE_EVAL
+    [ "${CANON_P33_DISABLE_EVAL:-0}" = "1" ] || {
+      echo "[env] P33 FrozenLake contract requires periodic evaluation disabled" >&2
+      fail=1
+    }
+  fi
+  [ "${CANON_P32_DP_REDUCTION_ADMITTED:-}" = "0" ] || {
+    echo "[env] contract-only mode must keep DP reduction unadmitted" >&2
+    fail=1
+  }
+  [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-}" = "0" ] || {
+    echo "[env] contract-only mode must keep workload launch unadmitted" >&2
+    fail=1
+  }
+  echo "[env] P33 workload contract OK: workload=${CANON_P32_WORKLOAD} launch=refused"
 fi
 [ "$fail" = 0 ] || { echo "[env] REFUSING TO CONTINUE: canonical set incomplete" >&2; exit 1; }
 

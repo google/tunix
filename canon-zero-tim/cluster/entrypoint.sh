@@ -21,6 +21,9 @@
 #                checkpoint load, forward, backward, update or training.
 #   dp16-rc      00..60 + P32 real-checkpoint release-candidate stage. The stage is
 #                selected by CANON_P32_RC_STAGE and remains production-default-off.
+#   workload-contract-only
+#                00..50 + P33 workload serialization. No Pathways connection, model,
+#                rollout, backward, optimizer update, W&B initialization or training.
 #   run          00..90 -- everything, then the command in CANON_RUN_CMD.
 #
 # Every step is fail-closed and ordered.  A step that produces no output did not run, and a
@@ -44,7 +47,7 @@ log() { echo "[entrypoint] $*"; }
 die() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
 case "$MODE" in
-  probe-only|install-only|gate-only|dp-gate-only|model-init-only|dp16-rc|run) ;;
+  probe-only|install-only|gate-only|dp-gate-only|model-init-only|dp16-rc|workload-contract-only|run) ;;
   *) die "unknown CANON_MODE: $MODE" ;;
 esac
 
@@ -90,6 +93,12 @@ step 50_verify_overlay.sh
 
 if [ "$MODE" = "install-only" ]; then
   log "mode=install-only -- chain installed and verified.  No TPU program was started."
+  exit 0
+fi
+
+if [ "$MODE" = "workload-contract-only" ]; then
+  step 86_validate_workload.sh
+  log "mode=workload-contract-only -- contract serialized; no TPU program or training was started."
   exit 0
 fi
 

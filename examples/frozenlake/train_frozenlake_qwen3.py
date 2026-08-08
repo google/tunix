@@ -45,6 +45,7 @@ from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import dp_workloads
 from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
@@ -97,6 +98,12 @@ arg_parser = argparse.ArgumentParser(
 # the GRPO group-mean baseline.
 arg_parser.add_argument("--batch_size", type=int, default=64)
 arg_parser.add_argument("--mini_batch_size", type=int, default=64)
+arg_parser.add_argument(
+    "--train_trajectory_micro_batch_size", type=int, default=None
+)
+arg_parser.add_argument("--mesh_dp", type=int, default=None)
+arg_parser.add_argument("--mesh_tp", type=int, default=None)
+arg_parser.add_argument("--max_steps", type=int, default=None)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 # AdamW second-moment decay (β2). Lower than the AdamW default (0.999) so the
@@ -168,6 +175,27 @@ CANON_P28_G5C_ONLY = os.getenv("CANON_P28_G5C_ONLY", "") == "1"
 CANON_P28_G6_UPDATE = os.getenv("CANON_P28_G6_UPDATE", "") == "1"
 CANON_P29_FULL_TRAIN = os.getenv("CANON_P29_FULL_TRAIN", "") == "1"
 CANON_P31_CONVERGENCE = os.getenv("CANON_P31_CONVERGENCE", "") == "1"
+_P32_WORKLOAD_NAME = os.getenv("CANON_P32_WORKLOAD", "")
+if _P32_WORKLOAD_NAME and _P32_WORKLOAD_NAME != "frozenlake":
+  raise ValueError(
+      "FrozenLake recipe cannot run a different P32 workload: "
+      f"{_P32_WORKLOAD_NAME!r}"
+  )
+CANON_P32_WORKLOAD = _P32_WORKLOAD_NAME == "frozenlake"
+CANON_P33_DISABLE_EVAL = os.getenv("CANON_P33_DISABLE_EVAL", "") == "1"
+P32_WORKLOAD = (
+    dp_workloads.get_workload("frozenlake") if CANON_P32_WORKLOAD else None
+)
+if CANON_P32_WORKLOAD:
+  dp_workloads.validate_environment(
+      P32_WORKLOAD, require_reduction_admission=True
+  )
+  if not CANON_L3:
+    raise ValueError("canonical DP16 FrozenLake requires CANON_FROZENLAKE_L3=1")
+  if not CANON_P33_DISABLE_EVAL:
+    raise ValueError(
+        "canonical DP16 FrozenLake requires CANON_P33_DISABLE_EVAL=1"
+    )
 CANON_P30_OPT_STATE_OFFLOAD = (
     os.getenv("CANON_P30_OPT_STATE_OFFLOAD", "") == "1"
 )
@@ -248,11 +276,16 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-# Single shared mesh across actor / reference / rollout. Pure tensor-parallel
-# (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
-# fsdp axis.
-SHARED_MESH_SHAPE = (1, jax.device_count())
-SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
+# Single shared mesh across actor / reference / rollout. The signed local path
+# remains pure TP. The default-off P32 path uses a distinct DP axis so model
+# and optimizer leaves remain replicated over data parallel ranks.
+if args.mesh_dp is not None:
+  mesh_tp = args.mesh_tp or (jax.device_count() // args.mesh_dp)
+  SHARED_MESH_SHAPE = (args.mesh_dp, mesh_tp)
+  SHARED_MESH_AXIS_NAMES = ("dp", "tp")
+else:
+  SHARED_MESH_SHAPE = (1, jax.device_count())
+  SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
@@ -269,7 +302,11 @@ NUM_GENERATIONS = args.num_generations
 # trainer needs at peak (logits + activations + optimizer state).
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = (
-    256 if CANON_L3 else VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
+    4096
+    if CANON_P32_WORKLOAD
+    else 256
+    if CANON_L3
+    else VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
 )
 
 NUM_ITERATIONS = 1
@@ -293,7 +330,40 @@ ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
-if CANON_P31_CONVERGENCE:
+if CANON_P32_WORKLOAD:
+  expected_geometry = {
+      "batch_size": (BATCH_SIZE, 32),
+      "mini_batch_size": (MINI_BATCH_SIZE, 32),
+      "num_batches": (NUM_BATCHES, 150),
+      "num_generations": (NUM_GENERATIONS, 8),
+      "max_prompt_length": (MAX_PROMPT_LENGTH, 4096),
+      "max_response_length": (MAX_RESPONSE_LENGTH, 2048),
+      "max_concurrency": (args.max_concurrency, 256),
+      "vllm_max_num_seqs": (VLLM_MAX_NUM_SEQS, 256),
+      "env_max_steps": (args.env_max_steps, 5),
+      "learning_rate": (args.learning_rate, 1e-6),
+      "b1": (args.b1, 0.9),
+      "b2": (args.b2, 0.95),
+      "weight_decay": (args.weight_decay, 0.0),
+      "beta": (args.beta, 0.0),
+      "epsilon": (args.epsilon, 0.003),
+      "epsilon_high": (args.epsilon_high, 0.005),
+      "temperature": (args.temperature, 0.7),
+      "top_p": (args.top_p, 1.0),
+      "top_k": (args.top_k, 0),
+      "loss_algo": (args.loss_algo, "gspo-token"),
+      "advantage_estimator": (args.advantage_estimator, "rloo"),
+      "mesh": (SHARED_MESH_SHAPE, (16, 4)),
+      "trajectory_micro": (args.train_trajectory_micro_batch_size, 16),
+  }
+  wrong_geometry = {
+      name: got
+      for name, (got, expected) in expected_geometry.items()
+      if got != expected
+  }
+  if wrong_geometry:
+    raise ValueError(f"P32 FrozenLake geometry mismatch: {wrong_geometry}")
+elif CANON_P31_CONVERGENCE:
   expected_geometry = {
       "batch_size": (BATCH_SIZE, 4),
       "mini_batch_size": (MINI_BATCH_SIZE, 4),
@@ -345,12 +415,18 @@ elif CANON_P27:
   if wrong_geometry:
     raise ValueError(f"P27 frozen geometry mismatch: {wrong_geometry}")
 TRAJECTORY_MINI_BATCH_SIZE = (
-    MINI_BATCH_SIZE * NUM_GENERATIONS if CANON_P27 else None
+    256
+    if CANON_P32_WORKLOAD
+    else MINI_BATCH_SIZE * NUM_GENERATIONS
+    if CANON_P27
+    else None
 )
 _P27_TRAJECTORY_MICRO_RAW = os.getenv("CANON_P27_TRAJECTORY_MICRO", "")
 if _P27_TRAJECTORY_MICRO_RAW and not CANON_P27:
   raise ValueError("CANON_P27_TRAJECTORY_MICRO requires CANON_FROZENLAKE_P27=1")
-if CANON_P27:
+if CANON_P32_WORKLOAD:
+  TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = args.train_trajectory_micro_batch_size
+elif CANON_P27:
   try:
     TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = int(
         _P27_TRAJECTORY_MICRO_RAW or "2"
@@ -373,7 +449,14 @@ NUM_EPOCHS = 3
 # P21.3 L3 is a one-batch, no-update release gate, not a convergence run.
 # Keeping this decision inside the default-off L3 branch prevents the three
 # dataset epochs from silently producing three alignment records.
-if CANON_P31_CONVERGENCE:
+if CANON_P32_WORKLOAD:
+  MAX_STEPS = dp_workloads.requested_max_steps(P32_WORKLOAD)
+  if args.max_steps != MAX_STEPS:
+    raise ValueError(
+        "P33 FrozenLake --max_steps does not match CANON_P33_RUN_STAGE: "
+        f"expected {MAX_STEPS}, found {args.max_steps}"
+    )
+elif CANON_P31_CONVERGENCE:
   try:
     MAX_STEPS = int(os.getenv("CANON_P31_MAX_STEPS", "450"))
   except ValueError as exc:
@@ -494,14 +577,21 @@ if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
       f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
   )
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
-)
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
-)
+if CANON_P32_WORKLOAD:
+  if args.mesh_dp != 16 or args.mesh_tp != 4:
+    raise ValueError(
+        "canonical FrozenLake DP workload requires --mesh_dp=16 --mesh_tp=4"
+    )
+  shared_mesh = dp_workloads.create_mesh(jax.devices(), P32_WORKLOAD)
+else:
+  shared_device_list = jax._src.mesh_utils.create_device_mesh(
+      SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+  )
+  shared_mesh = jax.sharding.Mesh(
+      shared_device_list,
+      axis_names=SHARED_MESH_AXIS_NAMES,
+      axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+  )
 print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 
 # ====== Data ======
@@ -561,7 +651,7 @@ if CANON_CONTRACT_ONLY or CANON_A3_ONLY:
   print("[CANON_L3] contract-only: dataset I/O skipped", flush=True)
 else:
   train_dataset, test_dataset = create_datasets()
-  if CANON_P31_CONVERGENCE:
+  if CANON_P31_CONVERGENCE or CANON_P32_WORKLOAD:
     train_rows = len(train_dataset)
     test_rows = len(test_dataset)
     selected_train_rows = min(NUM_BATCHES * BATCH_SIZE, train_rows)
@@ -594,13 +684,19 @@ else:
       fraction=TRAIN_FRACTION,
       num_epochs=NUM_EPOCHS,
   )
-  test_dataset, _ = data_lib.post_init_dataset(
-      test_dataset,
-      tokenizer,
-      batch_size=BATCH_SIZE,
-      num_batches=NUM_TEST_BATCHES,
-      max_prompt_length=MAX_PROMPT_LENGTH,
-  )
+  if CANON_P32_WORKLOAD:
+    # Periodic held-out rollouts are intentionally excluded from the P33 full
+    # campaign. The raw test split was checked above, but it is not tokenized
+    # or passed to the learner.
+    test_dataset = None
+  else:
+    test_dataset, _ = data_lib.post_init_dataset(
+        test_dataset,
+        tokenizer,
+        batch_size=BATCH_SIZE,
+        num_batches=NUM_TEST_BATCHES,
+        max_prompt_length=MAX_PROMPT_LENGTH,
+    )
 
 show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
@@ -660,11 +756,28 @@ if CANON_P29_FULL_TRAIN or not (
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=os.getenv("CANON_P29_LOG_DIR", TB_LOG_DIR),
       project_name=os.getenv(
-          "CANON_P29_WANDB_PROJECT", "tunix-frozenlake"
+          "CANON_WANDB_PROJECT"
+          if CANON_P32_WORKLOAD
+          else "CANON_P29_WANDB_PROJECT",
+          "tunix-frozenlake",
       ),
-      run_name=os.getenv("CANON_P29_WANDB_RUN_NAME", ""),
+      run_name=os.getenv(
+          "CANON_WANDB_RUN_NAME"
+          if CANON_P32_WORKLOAD
+          else "CANON_P29_WANDB_RUN_NAME",
+          "",
+      ),
       flush_every_n_steps=1,
-      backend_kwargs={"wandb": {"config": wandb_config}},
+      backend_kwargs={
+          "wandb": {
+              "config": wandb_config,
+              **(
+                  {"group": os.environ["CANON_WANDB_GROUP"]}
+                  if CANON_P32_WORKLOAD
+                  else {}
+              ),
+          }
+      },
   )
 
 optimizer = optax.adamw(
@@ -769,7 +882,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
             TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
         ),
         compute_logps_micro_batch_size=MINI_BATCH_SIZE,
-        optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
+        optimizer_offload=(CANON_P30_OPT_STATE_OFFLOAD or CANON_P32_WORKLOAD),
+        data_sharding_axis=("dp",) if CANON_P32_WORKLOAD else ("fsdp",),
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -797,7 +911,9 @@ grpo_config = GRPOConfig(
     # Recommended for multi-turn agentic rollouts where residual numerical
     # drift between sampler and trainer can produce occasional outlier
     # importance ratios.
-    sampler_is="token",
+    # P32 treats any sampler/trainer discrepancy as a hard alignment failure.
+    # TIS remains available to the legacy recipe but cannot mask P32 drift.
+    sampler_is=None if CANON_P32_WORKLOAD else "token",
     sampler_is_threshold=2.0,
     use_rollout_logps=True,
     advantage_estimator=args.advantage_estimator,
@@ -810,6 +926,12 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 show_hbm_usage("after RLCluster creation")
+if CANON_P32_WORKLOAD:
+  wandb_attestation = dp_workloads.require_online_wandb_run(P32_WORKLOAD)
+  print(
+      f"[CANON_P33_WANDB] ONLINE_RUN_PASS {wandb_attestation}",
+      flush=True,
+  )
 if CANON_L3:
   contract = rl_cluster.rollout.canonical_engine_contract_attestation()
   print(f"[CANON_L3] engine contract admitted: {contract}", flush=True)
@@ -883,21 +1005,27 @@ grpo_trainer = GRPOLearner(
 )
 show_hbm_usage("after GRPOLearner creation")
 
-# Pass test_dataset as the eval set so the learner runs held-out rollouts
-# every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
-# trajectory_reward → solve rate) separately from train metrics.
+if CANON_P32_WORKLOAD:
+  if P32_WORKLOAD.periodic_evaluation:
+    raise ValueError("canonical DP16 FrozenLake workload must disable evaluation")
+  training_eval_dataset = None
+  print(
+      "[CANON_P33_EVAL] DISABLED workload=frozenlake",
+      flush=True,
+  )
+elif (
+    CANON_P31_CONVERGENCE
+    and os.getenv("CANON_P31_ENABLE_EVAL", "") == "1"
+):
+  training_eval_dataset = test_dataset
+elif CANON_L3:
+  training_eval_dataset = None
+else:
+  training_eval_dataset = test_dataset
+
 grpo_trainer.train(
     train_dataset,
-    # P21.3's gate-only trainer rejects evaluation so a second batch cannot
-    # consume or reorder the pending host sidecar.
-    eval_dataset=(
-        test_dataset
-        if CANON_P31_CONVERGENCE
-        and os.getenv("CANON_P31_ENABLE_EVAL", "") == "1"
-        else None
-        if CANON_L3
-        else test_dataset
-    ),
+    eval_dataset=training_eval_dataset,
 )
 if CANON_P31_CONVERGENCE:
   print(

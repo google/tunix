@@ -130,6 +130,7 @@ from tunix.models.qwen3 import params as qwen3_params_lib
 from tunix.oss import utils as oss_utils
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import alignment as alignment_lib
+from tunix.rl import dp_workloads
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
@@ -154,6 +155,7 @@ arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=1024)
 arg_parser.add_argument("--max_concurrency", type=int, default=None)
 arg_parser.add_argument("--mesh_fsdp", type=int, default=None)
+arg_parser.add_argument("--mesh_dp", type=int, default=None)
 arg_parser.add_argument("--mesh_tp", type=int, default=None)
 arg_parser.add_argument(
     "--rollout_vllm_hbm_utilization", type=float, default=0.6
@@ -174,10 +176,26 @@ CANON_GSM8K_UPDATE_CANARY = (
     os.getenv("CANON_GSM8K_UPDATE_CANARY", "") == "1"
 )
 if CANON_GSM8K_L3 and CANON_GSM8K_TRAIN:
-  raise ValueError("CANON_GSM8K_L3 and CANON_GSM8K_TRAIN are mutually exclusive")
+  raise ValueError(
+      "CANON_GSM8K_L3 and CANON_GSM8K_TRAIN are mutually exclusive"
+  )
 if CANON_GSM8K_UPDATE_CANARY and not CANON_GSM8K_L3:
   raise ValueError("CANON_GSM8K_UPDATE_CANARY requires CANON_GSM8K_L3")
 CANON_GSM8K_ACTIVE = CANON_GSM8K_L3 or CANON_GSM8K_TRAIN
+_P32_WORKLOAD_NAME = os.getenv("CANON_P32_WORKLOAD", "")
+if _P32_WORKLOAD_NAME and _P32_WORKLOAD_NAME != "gsm8k":
+  raise ValueError(
+      "GSM8K recipe cannot run a different P32 workload: "
+      f"{_P32_WORKLOAD_NAME!r}"
+  )
+CANON_P32_WORKLOAD = _P32_WORKLOAD_NAME == "gsm8k"
+P32_WORKLOAD = (
+    dp_workloads.get_workload("gsm8k") if CANON_P32_WORKLOAD else None
+)
+if CANON_P32_WORKLOAD:
+  dp_workloads.validate_environment(
+      P32_WORKLOAD, require_reduction_admission=True
+  )
 
 
 # ====== Recipe Defaults ======
@@ -197,7 +215,18 @@ TRAJECTORY_MINI_BATCH_SIZE = (
 )
 COMPUTE_LOGPS_MICRO_BATCH_SIZE = args.compute_logps_micro_batch_size
 
-MAX_STEPS = 1 if CANON_GSM8K_L3 else args.max_steps
+MAX_STEPS = (
+    dp_workloads.requested_max_steps(P32_WORKLOAD)
+    if CANON_P32_WORKLOAD
+    else 1
+    if CANON_GSM8K_L3
+    else args.max_steps
+)
+if CANON_P32_WORKLOAD and args.max_steps != MAX_STEPS:
+  raise ValueError(
+      "P33 GSM8K --max_steps does not match CANON_P33_RUN_STAGE: "
+      f"expected {MAX_STEPS}, found {args.max_steps}"
+  )
 NUM_EPOCHS = 1000
 EVAL_EVERY_N_STEPS = 50
 EVAL_BATCH_SIZE = 128
@@ -280,10 +309,21 @@ _metric_call_idx = 0
 
 
 # ====== Shared Mesh ======
+if args.mesh_dp is not None and args.mesh_fsdp not in (None, 1):
+  raise ValueError("mesh_dp and a sharding mesh_fsdp cannot be combined")
+MESH_DP = args.mesh_dp or 1
 MESH_FSDP = args.mesh_fsdp or 1
-MESH_TP = args.mesh_tp or (jax.device_count() // MESH_FSDP)
-SHARED_MESH_SHAPE = (MESH_FSDP, MESH_TP)
-SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
+MESH_TP = args.mesh_tp or (
+    jax.device_count() // (MESH_DP if args.mesh_dp is not None else MESH_FSDP)
+)
+SHARED_MESH_SHAPE = (
+    (MESH_DP, MESH_TP)
+    if args.mesh_dp is not None
+    else (MESH_FSDP, MESH_TP)
+)
+SHARED_MESH_AXIS_NAMES = (
+    ("dp", "tp") if args.mesh_dp is not None else ("fsdp", "tp")
+)
 
 if math.prod(SHARED_MESH_SHAPE) != jax.device_count():
   raise ValueError(
@@ -291,14 +331,21 @@ if math.prod(SHARED_MESH_SHAPE) != jax.device_count():
       f"Got mesh={SHARED_MESH_SHAPE}, devices={jax.device_count()}."
   )
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
-)
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
-)
+if CANON_P32_WORKLOAD:
+  if args.mesh_dp != 16 or MESH_TP != 4:
+    raise ValueError(
+        "canonical GSM8K DP workload requires --mesh_dp=16 --mesh_tp=4"
+    )
+  shared_mesh = dp_workloads.create_mesh(jax.devices(), P32_WORKLOAD)
+else:
+  shared_device_list = jax._src.mesh_utils.create_device_mesh(
+      SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+  )
+  shared_mesh = jax.sharding.Mesh(
+      shared_device_list,
+      axis_names=SHARED_MESH_AXIS_NAMES,
+      axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+  )
 print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 
 
@@ -622,10 +669,27 @@ metrics_logging_options = None
 if not CANON_GSM8K_L3:
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=TB_LOG_DIR,
-      project_name=args.wandb_project,
-      run_name=args.wandb_run_name,
+      project_name=(
+          os.environ["CANON_WANDB_PROJECT"]
+          if CANON_P32_WORKLOAD
+          else args.wandb_project
+      ),
+      run_name=(
+          os.environ["CANON_WANDB_RUN_NAME"]
+          if CANON_P32_WORKLOAD
+          else args.wandb_run_name
+      ),
       flush_every_n_steps=1,
-      backend_kwargs={"wandb": {"config": wandb_config}},
+      backend_kwargs={
+          "wandb": {
+              "config": wandb_config,
+              **(
+                  {"group": os.environ["CANON_WANDB_GROUP"]}
+                  if CANON_P32_WORKLOAD
+                  else {}
+              ),
+          }
+      },
   )
 
 
@@ -728,6 +792,7 @@ def main() -> None:
     expected_update_canary = "1" if CANON_GSM8K_UPDATE_CANARY else "0"
     expected_train = "1" if CANON_GSM8K_TRAIN else "0"
     expected_grad_probe = "1" if CANON_GSM8K_L3 else "0"
+    expected_min_token_bucket = "4096" if CANON_P32_WORKLOAD else "256"
     required = {
         "CANON_ALIGNMENT_GATE": "1",
         "CANON_ALIGNMENT_GATE_ONLY": expected_gate_only,
@@ -738,7 +803,7 @@ def main() -> None:
         "CANON_VJP2_MAX_SEQS": "1",
         "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
         "CANON_LOGPROB_M": "256",
-        "MIN_TOKEN_BUCKET": "256",
+        "MIN_TOKEN_BUCKET": expected_min_token_bucket,
         "CANON_GSM8K_GRAD_PROBE": expected_grad_probe,
     }
     wrong = {
@@ -771,9 +836,14 @@ def main() -> None:
       if os.getenv("CANON_GSM8K_GRAD_PROBE", "") == "1":
         raise ValueError("real GSM8K training forbids diagnostic advantages")
       if MAX_PROMPT_LENGTH != 1024 or MAX_RESPONSE_LENGTH != 1024:
-        raise ValueError("real GSM8K training requires prompt/response 1024/1024")
-      if SHARED_MESH_SHAPE != (1, 4):
-        raise ValueError("real GSM8K training requires fsdp=1,tp=4")
+        raise ValueError(
+            "real GSM8K training requires prompt/response 1024/1024"
+        )
+      expected_mesh = (16, 4) if CANON_P32_WORKLOAD else (1, 4)
+      if SHARED_MESH_SHAPE != expected_mesh:
+        raise ValueError(
+            f"real GSM8K training requires mesh={expected_mesh}"
+        )
       if BETA != 0.04:
         raise ValueError("real GSM8K training requires reference beta=0.04")
       if os.getenv("CANON_PALLAS_LOGSOFTMAX") != "1":
@@ -784,9 +854,13 @@ def main() -> None:
             "real GSM8K training requires max_num_seqs == batch*generations; "
             f"got {vllm_max_num_seqs} vs {expected_num_seqs}"
         )
-      if vllm_max_batched_tokens != 256:
-        raise ValueError("real GSM8K training requires all-M max batched tokens 256")
-    vllm_max_batched_tokens = 256
+      expected_batched_tokens = 4096 if CANON_P32_WORKLOAD else 256
+      if vllm_max_batched_tokens != expected_batched_tokens:
+        raise ValueError(
+            "real GSM8K training requires the topology-specific all-M "
+            f"token budget {expected_batched_tokens}"
+        )
+    vllm_max_batched_tokens = 4096 if CANON_P32_WORKLOAD else 256
   vllm_rollout_dict = {
       "rollout_vllm_model_version": (
           MODEL_DOWNLOAD_DIR if CANON_GSM8K_ACTIVE else MODEL_ID
@@ -845,6 +919,8 @@ def main() -> None:
               TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
           ),
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
+          data_sharding_axis=("dp",) if CANON_P32_WORKLOAD else ("fsdp",),
+          optimizer_offload=CANON_P32_WORKLOAD,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
               CHECKPOINT_ROOT if ENABLE_CHECKPOINTING else None
@@ -859,7 +935,10 @@ def main() -> None:
 
   canonical_grpo = (
       {
-          "sampler_is": "token",
+          # P32 consumes rollout logprobs directly. TIS would mask an
+          # alignment failure instead of rejecting it at the four-boundary
+          # gate, so it is deliberately absent from the promoted workload.
+          "sampler_is": None if CANON_P32_WORKLOAD else "token",
           "sampler_is_threshold": 2.0,
           "force_compute_kl": False,
       }
@@ -898,6 +977,12 @@ def main() -> None:
       cluster_config=cluster_config,
   )
   show_hbm_usage("after RLCluster creation")
+  if CANON_P32_WORKLOAD:
+    wandb_attestation = dp_workloads.require_online_wandb_run(P32_WORKLOAD)
+    print(
+        f"[CANON_P33_WANDB] ONLINE_RUN_PASS {wandb_attestation}",
+        flush=True,
+    )
   if CANON_GSM8K_ACTIVE:
     contract = rl_cluster.rollout.canonical_engine_contract_attestation()
     marker = "CANON_GSM8K_TRAIN" if CANON_GSM8K_TRAIN else "CANON_GSM8K_L3"
