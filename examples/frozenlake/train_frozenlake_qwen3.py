@@ -623,12 +623,32 @@ def create_datasets(
 ):
   data_dir = os.path.dirname(train_ds_path)
   os.makedirs(data_dir, exist_ok=True)
-  train_ds = frozenlake_data.get_dataset(
-      "train", data_dir=data_dir, train_size=10000, seed=SEED
-  )
-  test_ds = frozenlake_data.get_dataset(
-      "test", data_dir=data_dir, test_size=100, seed=SEED + 1
-  )
+  if not os.path.exists(train_ds_path) or not os.path.exists(test_ds_path):
+    train_seeds, train_sizes, train_ps = frozenlake_data.generate_dataset_parameters(
+        10000, random_seed=42
+    )
+    train_data = [
+        frozenlake_data.get_frozenlake_dict(s, sz, p)
+        for s, sz, p in zip(train_seeds, train_sizes, train_ps)
+    ]
+    test_seeds, test_sizes, test_ps = frozenlake_data.generate_dataset_parameters(
+        100, random_seed=123
+    )
+    test_data = [
+        frozenlake_data.get_frozenlake_dict(s, sz, p)
+        for s, sz, p in zip(test_seeds, test_sizes, test_ps)
+    ]
+    frozenlake_data.save_dataset(train_data, train_ds_path)
+    frozenlake_data.save_dataset(test_data, test_ds_path)
+
+  with fsspec.open(train_ds_path, "rb") as train_f, fsspec.open(
+      test_ds_path, "rb"
+  ) as test_f:
+    train_df = pd.read_parquet(train_f)
+    test_df = pd.read_parquet(test_f)
+
+  train_ds = Dataset.from_pandas(train_df)
+  test_ds = Dataset.from_pandas(test_df)
   if args.shuffle_data:
     train_ds = train_ds.shuffle(SEED)
     test_ds = test_ds.shuffle(SEED)

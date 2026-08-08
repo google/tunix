@@ -746,7 +746,7 @@ def main() -> None:
 
   # ====== Tokenizer / Model ======
   tokenizer = AutoTokenizer.from_pretrained(
-      MODEL_DOWNLOAD_DIR if CANON_GSM8K_ACTIVE else MODEL_ID,
+      MODEL_ID,
       token=os.getenv("HF_TOKEN"),
       trust_remote_code=True,
   )
