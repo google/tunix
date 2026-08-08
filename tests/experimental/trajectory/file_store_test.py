@@ -1,4 +1,5 @@
 import tempfile
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -131,6 +132,141 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     with self.assertRaises(ValueError):
       self.file_s.add_step(store_testing.STEP_1_1, meta)
+
+  def test_mkdir_called_only_once_per_trajectory_across_multiple_steps(
+      self,
+  ) -> None:
+    """Verifies mkdir is called only once per trajectory across multiple steps."""
+    traj_1_dir = self.file_s.get_trajectory_dir(store_testing.TRAJECTORY_ID_1)
+    traj_2_dir = self.file_s.get_trajectory_dir(store_testing.TRAJECTORY_ID_2)
+
+    with mock.patch.object(
+        self.tmp_dir.__class__,
+        "mkdir",
+        autospec=True,
+        side_effect=self.tmp_dir.__class__.mkdir,
+    ) as mock_mkdir:
+      # Trajectory 1, Step 1: mkdir should be called.
+      self.file_s.add_step(store_testing.STEP_1_1, store_testing.METADATA_1)
+      traj_1_calls = [
+          c
+          for c in mock_mkdir.call_args_list
+          if c.args and c.args[0] == traj_1_dir
+      ]
+      self.assertLen(traj_1_calls, 1)
+
+      # Trajectory 2, Step 1: mkdir should be called for new trajectory.
+      self.file_s.add_step(store_testing.STEP_2_1, store_testing.METADATA_2)
+      traj_2_calls = [
+          c
+          for c in mock_mkdir.call_args_list
+          if c.args and c.args[0] == traj_2_dir
+      ]
+      self.assertLen(traj_2_calls, 1)
+
+      # Trajectory 2, Step 2: mkdir should be skipped.
+      self.file_s.add_step(store_testing.STEP_2_2, store_testing.METADATA_2)
+      traj_2_calls = [
+          c
+          for c in mock_mkdir.call_args_list
+          if c.args and c.args[0] == traj_2_dir
+      ]
+      self.assertLen(traj_2_calls, 1)
+
+      # Trajectory 2, Step 3: mkdir still skipped for initialized trajectory 2.
+      self.file_s.add_step(store_testing.STEP_2_3, store_testing.METADATA_2)
+      traj_2_calls = [
+          c
+          for c in mock_mkdir.call_args_list
+          if c.args and c.args[0] == traj_2_dir
+      ]
+      self.assertLen(traj_2_calls, 1)
+
+    self.assertIn(
+        store_testing.TRAJECTORY_ID_1,
+        self.file_s._metadata_hash_by_trajectory_id,
+    )
+    self.assertIn(
+        store_testing.TRAJECTORY_ID_2,
+        self.file_s._metadata_hash_by_trajectory_id,
+    )
+
+  def test_metadata_written_on_first_step_and_skipped_when_unchanged(
+      self,
+  ) -> None:
+    """Verifies metadata.json is written on step 1 and skipped for unchanged steps."""
+    step_1 = store_testing.STEP_1_1
+    step_2 = store_testing.STEP_2_1
+
+    path_cls = type(self.tmp_dir)
+    meta_path = self.file_s.get_trajectory_metadata_path(
+        store_testing.TRAJECTORY_ID_1
+    )
+    with mock.patch.object(
+        path_cls, "write_text", autospec=True, side_effect=path_cls.write_text
+    ) as mock_write:
+      self.file_s.add_step(step_1, store_testing.METADATA_1)
+      self.file_s.add_step(step_2, store_testing.METADATA_1)
+
+      meta_write_calls = [
+          c
+          for c in mock_write.call_args_list
+          if c.args and c.args[0] == meta_path
+      ]
+      self.assertLen(meta_write_calls, 1)
+
+    self.assertTrue(meta_path.exists())
+    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
+        meta_path.read_text()
+    )
+    self.assertEqual(saved_meta, store_testing.METADATA_1)
+
+  def test_metadata_updated_when_metadata_changes(self) -> None:
+    """Verifies metadata.json is updated when metadata content changes."""
+    step_1 = store_testing.STEP_2_1
+    step_2 = store_testing.STEP_2_2
+    step_3 = store_testing.STEP_2_3
+    step_4 = store_testing.STEP_2_4
+    step_5 = store_testing.STEP_2_5
+
+    meta_initial = store_testing.METADATA_1
+    meta_completed = store_testing.METADATA_1.model_copy(
+        update={"extra": {"status": "COMPLETED"}}
+    )
+    meta_failed = store_testing.METADATA_1.model_copy(
+        update={"extra": {"status": "FAILED"}}
+    )
+
+    path_cls = type(self.tmp_dir)
+    meta_path = self.file_s.get_trajectory_metadata_path(
+        store_testing.TRAJECTORY_ID_1
+    )
+    with mock.patch.object(
+        path_cls, "write_text", autospec=True, side_effect=path_cls.write_text
+    ) as mock_write:
+      # Step 1: Initial metadata written.
+      self.file_s.add_step(step_1, meta_initial)
+      # Step 2: Unchanged metadata skipped.
+      self.file_s.add_step(step_2, meta_initial)
+      # Step 3: Metadata updated to COMPLETED -> written.
+      self.file_s.add_step(step_3, meta_completed)
+      # Step 4: Metadata unchanged with COMPLETED -> skipped.
+      self.file_s.add_step(step_4, meta_completed)
+      # Step 5: Metadata updated to FAILED -> written.
+      self.file_s.add_step(step_5, meta_failed)
+
+      meta_write_calls = [
+          c
+          for c in mock_write.call_args_list
+          if c.args and c.args[0] == meta_path
+      ]
+      self.assertLen(meta_write_calls, 3)
+
+    # Verify latest metadata is reflected on disk.
+    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
+        meta_path.read_text()
+    )
+    self.assertEqual(saved_meta, meta_failed)
 
 
 if __name__ == "__main__":
