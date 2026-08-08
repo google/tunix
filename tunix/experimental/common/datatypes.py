@@ -26,20 +26,12 @@ from typing import Any, Dict
 
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
 ##### Worker-internal datatypes #####
 
-
-# TODO(noghabi): Consolidate Role with rl_cluster.Role.
-class Role(enum.Enum):
-  """Role of the model."""
-
-  ACTOR = "actor"  # policy model
-  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
-  REFERENCE = "reference"  # kept fixed during training
-  REWARD = "reward"
-  ROLLOUT = "rollout"
+Role = common_datatypes.Role
 
 
 # Worker-internal episode representation produced during rollout.
@@ -322,6 +314,7 @@ class RolloutResponse(Response):
     Returns:
       A wire-safe RolloutResponse.
     """
+
     def _get_step_attr(step, attr):
       val = getattr(step, attr, None)
       if val is not None:
@@ -382,6 +375,7 @@ class TrainerPayload:
   token_ids: ArrayLike
   token_mask: ArrayLike
   segment_ids: ArrayLike | None = None
+
 
 ##### Weight Sync DTOs #####
 
