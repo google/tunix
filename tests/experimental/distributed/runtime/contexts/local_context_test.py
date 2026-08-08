@@ -32,9 +32,7 @@ class LocalContextTest(absltest.TestCase):
   @mock.patch(
       "tunix.experimental.distributed.runtime.discovery.discovery.grpc.server"
   )
-  def test_local_discovery_context_lifecycle_and_registration(
-      self, mock_grpc_server
-  ):
+  def test_discovery_context_register(self, mock_grpc_server):
     port = portpicker.pick_unused_port()
     args = argparse.Namespace(
         discovery_port=port,
@@ -56,7 +54,37 @@ class LocalContextTest(absltest.TestCase):
 
     self.assertFalse(disc_ctx._server.is_started())
 
-  def test_local_process_context(self):
+  def test_discovery_context_connect(self):
+    port = portpicker.pick_unused_port()
+    args = argparse.Namespace(
+        discovery_port=port,
+        discovery_addrs=f"leader:{port}",
+        discovery_id="worker-0",
+    )
+
+    with local_context.LocalDiscoveryContext(args) as disc_ctx:
+      server_connected = []
+      client_connected = []
+
+      disc_ctx.on_connect(
+          on_client_connected=lambda cid, h, p, m, rec: server_connected.append(
+              cid
+          ),
+      )
+      client = disc_ctx.connect(
+          b"my-metadata",
+          client_id="worker-0",
+          on_connected=lambda epoch, rec: client_connected.append(epoch),
+      )
+      self.assertEqual(len(server_connected), 1)
+      self.assertEqual(server_connected[0], "worker-0")
+      self.assertEqual(len(client_connected), 1)
+      self.assertIsNotNone(disc_ctx._client)
+
+    self.assertIsNone(disc_ctx._client)
+    self.assertFalse(disc_ctx._server.is_started())
+
+  def test_process_context(self):
     args = argparse.Namespace(
         discovery_port=portpicker.pick_unused_port(),
         discovery_addrs="leader:9999",

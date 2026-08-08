@@ -50,7 +50,7 @@ class K8sContextTest(absltest.TestCase):
       with self.assertRaises(ValueError):
         k8s_context.resolve_self_hostname()
 
-  def test_k8s_jax_context_pathways(self):
+  def test_jax_context_pathways(self):
     envs = {
         "JAX_PLATFORMS": "proxy",
         "JAX_BACKEND_TARGET": "0.0.0.0:8000",
@@ -61,7 +61,7 @@ class K8sContextTest(absltest.TestCase):
         k8s_context.K8sJaxContext().initialize()
         mock_pw.initialize.assert_called_once()
 
-  def test_k8s_jax_context_mcjax(self):
+  def test_jax_context_mcjax(self):
     envs = {}
     mock_jax = mock.MagicMock()
     with mock.patch.dict(os.environ, envs, clear=True):
@@ -69,7 +69,7 @@ class K8sContextTest(absltest.TestCase):
         k8s_context.K8sJaxContext().initialize()
         mock_jax.distributed.initialize.assert_called_once()
 
-  def test_k8s_discovery_context_register(self):
+  def test_discovery_context_register(self):
     envs = {
         "JOBSET_NAME": "myjobset",
         "REPLICATED_JOB_NAME": "worker",
@@ -95,7 +95,44 @@ class K8sContextTest(absltest.TestCase):
               b"pod-meta",
           )
 
-  def test_k8s_process_context(self):
+  def test_discovery_context_connect(self):
+    envs = {
+        "JOBSET_NAME": "myjobset",
+        "REPLICATED_JOB_NAME": "worker",
+        "JOB_INDEX": "0",
+        "POD_INDEX": "1",
+    }
+    port = portpicker.pick_unused_port()
+    args = argparse.Namespace(
+        discovery_port=port,
+        discovery_addrs=f"door:{port}",
+        discovery_id="door",
+    )
+
+    with mock.patch.dict(os.environ, envs):
+      with k8s_context.K8sDiscoveryContext(args) as disc_ctx:
+        server_connected = []
+        client_connected = []
+
+        disc_ctx.on_connect(
+            on_client_connected=lambda cid, h, p, m, rec: server_connected.append(
+                cid
+            ),
+        )
+        client = disc_ctx.connect(
+            b"pod-meta",
+            client_id="door",
+            on_connected=lambda epoch, rec: client_connected.append(epoch),
+        )
+        self.assertEqual(len(server_connected), 1)
+        self.assertEqual(server_connected[0], "door")
+        self.assertEqual(len(client_connected), 1)
+        self.assertIsNotNone(disc_ctx._client)
+
+      self.assertIsNone(disc_ctx._client)
+      self.assertFalse(disc_ctx._server.is_started())
+
+  def test_process_context(self):
     args = argparse.Namespace(
         discovery_port=portpicker.pick_unused_port(),
         discovery_addrs="door:8888",
