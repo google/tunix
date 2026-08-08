@@ -12,9 +12,10 @@ The Tunix distributed process runtime provides a **platform-agnostic execution f
 - [Example 2: Process with CLI Flags](#example-2-process-with-cli-flags)
 - [Example 3: Process with TPUs](#example-3-process-with-tpus)
 - [Example 4: Peer Discovery and Inter-Process Communication](#example-4-peer-discovery-and-inter-process-communication)
-- [Example 5: Simulated Distributed RL Workload (Local)](#example-5-simulated-distributed-rl-workload-local)
-- [Example 6: Simulated Distributed RL Workload on Kubernetes](#example-6-simulated-distributed-rl-workload-on-kubernetes)
-- [Example 7: Distributed RL Generation with vLLM Workers](#example-7-distributed-rl-generation-with-vllm-workers)
+- [Example 5: Persistent Reconnecting Discovery with Heartbeats](#example-5-persistent-reconnecting-discovery-with-heartbeats)
+- [Example 6: Simulated Distributed RL Workload (Local)](#example-6-simulated-distributed-rl-workload-local)
+- [Example 7: Simulated Distributed RL Workload on Kubernetes](#example-7-simulated-distributed-rl-workload-on-kubernetes)
+- [Example 8: Distributed RL Generation with vLLM Workers](#example-8-distributed-rl-generation-with-vllm-workers)
 
 
 ---
@@ -28,7 +29,7 @@ Before running any examples, generate the required protobuf Python stubs from th
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
     tunix/experimental/distributed/runtime/discovery/discovery_service.proto
 
-# Compile the RL simulation service proto (required for Examples 5 & 6)
+# Compile the RL simulation service proto (required for Examples 6 & 7)
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
     tunix/experimental/distributed/examples/rl/service.proto
 ```
@@ -222,25 +223,86 @@ python -m tunix.experimental.distributed.runtime.main \
     --say="open the door"
 ```
 
+---
+
+## Example 5: Persistent Reconnecting Discovery with Heartbeats
+
+Building on the basic peer discovery concept introduced in [Example 4](#example-4-peer-discovery-and-inter-process-communication), this example demonstrates how to establish a persistent reconnecting session with automatic server restart recovery and heartbeat leases (using a WiFi hotspot and connecting phone metaphor).
+
+### 1. WiFi Hotspot Server (`wifi.py`)
+The `wifi` process starts a persistent discovery server on port `12345` (`--discovery_port=12345`) and registers callbacks for client connection and disconnection events:
+
+```python
+def main(argv: list[str], context: ProcessContext | None) -> None:
+  context.ipc.discovery.on_connect(
+      on_client_connected=lambda client_id, h, p, m, is_rec: logging.info(
+          f"Phone {client_id} connected (reconnect={is_rec})"
+      ),
+      on_client_disconnected=lambda client_id, h, p, reason: logging.warning(
+          f"Phone {client_id} disconnected ({reason})"
+      ),
+  )
+```
+
+### 2. WiFi Phone Client (`phone.py`)
+The `phone` process establishes a persistent reconnecting session with the WiFi hotspot. If the hotspot restarts or its network signal is briefly lost, the phone automatically re-registers:
+
+```python
+def main(argv: list[str], context: ProcessContext | None) -> None:
+  client = context.ipc.discovery.connect(
+      metadata=None,
+      client_id="Pixel 9 Pro",
+      on_connected=lambda epoch, is_rec: logging.info(f"Connected (epoch: {epoch})"),
+      on_disconnected=lambda epoch, reason: logging.warning(f"Disconnected ({reason})"),
+  )
+```
+
+### Run Locally
+
+```shell
+# Terminal 1: Start the persistent WiFi hotspot discovery server
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.wifi.main \
+    --discovery_id=wifi \
+    --discovery_port=12345
+# Press Ctrl+C to stop the server.
+# Rerun the command to restart the server.
+
+# Terminal 2: Start the persistent phone WiFi client
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.phone.main \
+    --discovery_addrs=wifi:12345 \
+    --model="Pixel 9 Pro"
+```
+
 ### Expected Output
 
-#### Door Terminal
+#### WiFi Hotspot Terminal (Terminal 1)
 ```
-this is door!
+this is wifi!
 discovery server started on port 12345
-localhost knocked and said: open the door
-discovery server stopped
+Phone Pixel 9 Pro connected (reconnect=False)
+^Cdiscovery server stopped
+
+<Relaunched>
+this is wifi!
+discovery server started on port 12345
+Phone Pixel 9 Pro connected (reconnect=False)
 ```
 
-#### Knocker Terminal
+#### Phone Terminal (Terminal 2)
 ```
-this is knocker!
-registered to discovery server at localhost:12345
+this is phone!
+connecting to discovery server at localhost:12345
+Connected (epoch: uuid-1)
+connected to discovery server at localhost:12345
+Disconnected (rpc_error)
+Connected (epoch: uuid-2)
 ```
 
 ---
 
-## Example 5: Simulated Distributed RL Workload (Local)
+## Example 6: Simulated Distributed RL Workload (Local)
 
 This example simulates a distributed reinforcement learning (RL) training workflow across **4 collaborating processes**:
 
@@ -293,7 +355,7 @@ python -m tunix.experimental.distributed.runtime.main \
 
 ---
 
-## Example 6: Simulated Distributed RL Workload on Kubernetes
+## Example 7: Simulated Distributed RL Workload on Kubernetes
 
 You can execute the exact same distributed RL simulation on a Kubernetes cluster using the `K8sExecutor` and JobSet deployment templates.
 
@@ -314,7 +376,7 @@ bash tunix/experimental/distributed/examples/rl/launcher.sh --role=trainer
 
 ---
 
-## Example 7: Distributed RL Generation with vLLM Workers
+## Example 8: Distributed RL Generation with vLLM Workers
 
 This example demonstrates a distributed reinforcement learning generation pipeline using **vLLM** and the Tunix remote execution framework (`remote_execution.GrpcRemoteExecutionServer` / `ActorHandle`).
 
@@ -367,6 +429,3 @@ Sample Response: To solve the problem, we need to add the two numbers 123 and 45
 ------------------------
 
 ```
-
-
-
