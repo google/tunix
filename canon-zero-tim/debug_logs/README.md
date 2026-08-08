@@ -127,6 +127,10 @@ sha256sum -c evidence/package_artifacts.sha256
   Its SHA-256 is `8aa277a895904dd9222b7a6b937b7f5bb43765cff81a603f4801bff8af0463ea`.
 - `p32_3_rc_one_update_pass.classification.json` is the deterministic Stage 3 PASS report.
   Its SHA-256 is `40f6c9b06c3b0a16882d6f2322b84e4c0c3e7052d666d0d9e0f0e10f9c5016df`.
+- `p32_3_rc_three_update_pass.raw.log` is the Stage 4 run from source `f69a14fd` on Attempt 0 (`nqcc4`).
+  Its SHA-256 is `14b3c320c7fea9097bcfd8c15a2c9436ac4a24dacb29d7a2868ed5a13ec8450a`.
+- `p32_3_rc_three_update_pass.classification.json` is the deterministic Stage 4 PASS report.
+  Its SHA-256 is `4dce912832fd717328857a5934a624dcdaf5dd31c2ec31d0a56b75b47a0d8ae3`.
 - `p32_3_rc_one_update_xla1200_fail.raw.log` preserves the Stage 3 diagnostic run (`hpdfs`).
   Its SHA-256 is `1c1f69ae07f6659181dfc10a32b8593560603b60ca7c9a028accf37a41e459cb`.
 
@@ -135,15 +139,12 @@ sha256sum -c evidence/package_artifacts.sha256
 | **`checkpoint-forward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | N/A (Forward Only) | 🟢 **Bitwise Exact Checkpoint (`[256, 151936]`)** | N/A | 🟢 **PASS** |
 | **`backward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 498.43 / 7.585B Nonzero** | 🟢 **0 Mutations (Pure Backward)** | Sampled Prefix | 🟢 **PASS** |
 | **`one-update`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 498.43 / 7.585B Nonzero** | 🟢 **Mutated (`c33ae361` ➜ `ccbec74d`)** | 🟢 **`device-ring-all-elements` (399 Leaves)** | 🟢 **PASS** |
+| **`three-update`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 489.09 / 7.585B Nonzero** | 🟢 **3-Step Mutated (`c33ae361` ➜ `8b2119ae`)** | 🟢 **`device-ring-all-elements` (399 Leaves)** | 🟢 **PASS** |
 
-* **Pinned Host Round-trip Verified**: `optimizer_state_memory_during_commit` is `["device"]` and `optimizer_state_memory_between_commits` is `["pinned_host"]`.
-* **16 Unique DP Rank Gradient Signatures**: All 16 DP ranks produced distinct local gradient signatures across 16 trajectories.
-* **Full-Array Device Ring Replica Equality**: All 399 gradient leaves across all 16 DP ranks verified bitwise identical via device-side `ppermute` ring comparison (`exact: true`).
-* **Deterministic Classification**: `checkpoint-forward`, `backward`, and `one-update` all report status `PASS` with 0 reasons.
+* **Monotonic Loss Descent Verified**: Step 0 (`15.485172`) ➜ Step 1 (`15.360338`) ➜ Step 2 (`15.018980`).
+* **Sequential Parameter Evolution**: 3 consecutive AdamW mutations ($W_0 \to W_1 \to W_2 \to W_3$) verified distinct and bit-exact across replicas.
+* **Pinned Host Round-trip Verified**: `optimizer_state_memory_during_commit` is `["device"]` and `optimizer_state_memory_between_commits` is `["pinned_host"]` across all 3 steps.
+* **16 Unique DP Rank Gradient Signatures**: All 16 DP ranks produced distinct local gradient signatures across all 3 update steps.
+* **Full-Array Device Ring Replica Equality**: All 399 gradient leaves across all 16 DP ranks verified bitwise identical via device-side `ppermute` ring comparison (`exact: true`) on every step.
+* **Deterministic Classification**: All four RC stages (`checkpoint-forward`, `backward`, `one-update`, and `three-update`) report status `PASS` with 0 reasons.
 
-
-The follow-up RC schema records the sampled budget explicitly and adds a
-device-side ring comparison over every element of every gradient leaf. Fresh
-`one-update` and `three-update` evidence must carry that full verdict; the
-archived Stage 2 record is retained as sampled legacy evidence and is never
-upgraded retroactively.

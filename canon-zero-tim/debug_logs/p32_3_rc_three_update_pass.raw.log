@@ -1,0 +1,448 @@
+========================================================
+XPK Start: 2026-08-08T05:45:30Z
+[entrypoint] start 2026-08-08T05:45:32Z  mode=dp16-rc  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-zero-tim-v5p-64-pathways-head-0-0-nqcc4
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P32 train mesh pin DISCOVERY: no release placement assertion
+[env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
+[env] P32 dp16-rc contract OK: stage=three-update production_training=refused
+[env] profile=qwen3-8b-dp16-tp4-rc model_dir=qwen8b
+[env] resolved configuration written to /tmp/canon-state/env.sh (85 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=f69a14fd9dd4fced3b73b2d4c4f26717333aaff4
+[sync] describe=f69a14fd Set JobSet maxRestarts to 0 for strict single-shot Attempt 0 RC execution
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] tpu_inference=/usr/local/lib/python3.12/site-packages/tpu_inference
+[probe] SAME      layers/common/attention_interface.py
+[probe] SAME      layers/jax/embed.py
+[probe] SAME      layers/jax/linear.py
+[probe] SAME      models/jax/qwen2.py
+[probe] SAME      models/jax/qwen3.py
+[probe] SAME      runner/tpu_runner.py
+[probe] SUMMARY same=6 drift=0 missing=0
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] new form already present (upstream) -- not patching
+[rope]   35:from tpu_inference.layers.jax.rope_interface import (apply_rope,
+[rope]   66:        self.rope_theta = get_rope_theta(config, default=1000000.0)
+[rope]   67:        self.rope_scaling = get_rope_scaling(config)
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 30_install_canon.sh
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b)
+[4/4] verifying against MANIFEST.sha256
+      all 29 files match (qwen8b)
+
+Installed to: /tmp/canon-state/canon   (model=qwen8b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/tmp/canon-state/canon:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/canon-state/canon          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+[install] installed to /tmp/canon-state/canon (29 files)
+[entrypoint] <-- 30_install_canon.sh ok
+[entrypoint] --> 40_overlay_engine.sh
+[overlay] attn_iface_patched.py        -> layers/common/attention_interface.py
+[overlay] linear_p22xk.py              -> layers/jax/linear.py
+[overlay] embed_patched.py             -> layers/jax/embed.py
+[overlay] tpu_runner_p21_l30.py        -> runner/tpu_runner.py
+[overlay] qwen3_p22xk.py               -> models/jax/qwen3.py
+[overlay] qwen2_p22xk.py               -> models/jax/qwen2.py
+[overlay] PYTHONPATH and CANON_SHIM_ROOT recorded; originals in /tmp/canon-state/stock_backup
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] A. byte identity of overlay targets
+[verify]   OK   attn_iface_patched.py        8f8cec35f296
+[verify]   OK   linear_p22xk.py              857859226b61
+[verify]   OK   embed_patched.py             4a0540323c75
+[verify]   OK   tpu_runner_p21_l30.py        b8b1e118ca3c
+[verify]   OK   qwen3_p22xk.py               c3602c7163a1
+[verify]   OK   qwen2_p22xk.py               79a88e88bd6c
+[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
+[verify] Section B promotion checks will run inside Step 70 single Pathways session.
+
+[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
+[verify] This does NOT yet prove it executes on the hot path; 90_run.sh checks the
+[verify] [PATHTRACE] tally for that.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 60_wait_workers.sh
+[wait] giving all 64 devices on 16 TPU worker nodes 180s quiet period to boot and register with Pathways RM...
+[wait] hardware quiet period completed. Single-session unified runner in Step 70 will perform device assertion and all admission probes.
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 85_run_dp16_rc.sh
+[dp16-rc] starting stage=three-update; production training remains refused
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[T1.PATHWAYS] required=1 initialized=1 status=ok
+[P32.RC] START stage=three-update attempt=0 dp=16 tp=4 global_trajectories=256 local_trajectories=16 sequence_length=16
+[P32.RC] checkpoint_download model=Qwen/Qwen3-8B directory=/tmp/models/Qwen3-8B
+I0808 05:48:59.698119     244 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0808 05:48:59.698174     244 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0808 05:48:59.698188     244 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0808 05:48:59.700057     244 grpc_client_session.cc:264]   Established channel.
+I0808 05:48:59.700079     244 grpc_client_session.cc:269]   Created stub.
+I0808 05:48:59.715098     244 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0808 05:48:59.792407     244 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0808 05:48:59.792551     244 grpc_client_session.cc:264]   Established channel.
+I0808 05:48:59.792564     244 grpc_client_session.cc:269]   Created stub.
+I0808 05:48:59.793314     244 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0808 05:48:59.819074     244 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0808 05:48:59.819101     244 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+[P32.RC] JSON {"attempt": 0, "batch": {"global_trajectories": 256, "local_trajectories": 16, "sample_to_rank_mapping": "frozen-contiguous-16", "sequence_length": 16}, "dp_rank_ordered_additions_per_transaction": 15, "dp_rank_pullbacks_per_transaction": 16, "dp_reduction_rounds_per_transaction": 15, "dp_reduction_transactions": 3, "execution": {"backward": 48, "forward": 53, "optimizer_updates": 3, "training_steps": 3}, "forward_repeat_exact": true, "forward_shape": [256, 151936], "gradient_health": {"finite": true, "nonzero": 7585062912, "norm": 489.0858459472656}, "gradient_repeat_exact": null, "gradient_sample_sha256": "7c5c89fa0b0c524ecbeeb1d1c6443f7046bc7c6852abd6eee5a4f1d3f5d6f612", "model": {"attention_backend": "dense-reference", "checkpoint": {"bytes": 16381516776, "files": 5, "manifest_sha256": "396817b2d77176a8106b61fdd95dae5cbb123dff525283af851b056390ee35ac"}, "checkpoint_loaded": true, "compute_dtype": "<class 'jax.numpy.bfloat16'>", "inventory": {"arrays": 399, "dp_partitioned_leaves": 0, "leaves": 399, "logical_bytes": 32762941440, "memory_kinds": ["device"], "tp_partitioned_leaves": 399}, "name": "qwen3-8b", "param_dtype": "<class 'jax.numpy.float32'>"}, "optimizer_state_memory_between_commits": ["pinned_host"], "optimizer_state_memory_during_commit": ["device"], "parameter_sample_sha256_after": "8b2119ae24d9d5c711ef5fea117de06b0611bff15f6691b6ef3ab05d94039151", "parameter_sample_sha256_before": "c33ae361413e6dff363af80750c50bd07ba4488baf1a3046cdb2df08e1fb67e1", "post_reduction_replica_check": {"full": {"algorithm": "device-ring-all-elements", "checked_leaves": 399, "dp_size": 16, "exact": true, "physical_flags": 64, "tp_size": 4}, "sample": {"algorithm": "host-prefix-sample", "checked_leaves": 8, "checked_physical_values": 4096, "exact": true, "replica_comparisons": 486, "replica_groups": 26, "samples_per_shard": 8, "total_leaves": 399}, "schema_version": 2}, "post_reduction_replicas_exact": null, "rank_local_stats_distinct": true, "scope": {"production_training_admitted": false, "rollout_engine_initialized": false, "zero_tim_alignment": "NOT_MEASURED"}, "stage": "three-update", "step_records": [{"gradient_health": {"finite": true, "nonzero": 7585063936, "norm": 498.4319763183594}, "gradient_sample_sha256": "b07d7bc95072873381d89422a7f2902e9b0879f5255b47d0bb30978a9fd29940", "loss": 15.485172271728516, "optimizer_sample_sha256": "362c6398b57ace0f9dffbd9eb67901e14e8ec9ef16eedec5559ffd58dec8e327", "parameter_sample_sha256": "ccbec74d53abd271ace91201022e245412e9c5d4739d68fc2aae7050921d6387", "post_reduction_replica_check": {"full": {"algorithm": "device-ring-all-elements", "checked_leaves": 399, "dp_size": 16, "exact": true, "physical_flags": 64, "tp_size": 4}, "sample": {"algorithm": "host-prefix-sample", "checked_leaves": 8, "checked_physical_values": 4096, "exact": true, "replica_comparisons": 486, "replica_groups": 26, "samples_per_shard": 8, "total_leaves": 399}, "schema_version": 2}, "rank_contribution_signature_sha256": ["ff94d68fed0e5e4e75ba4d7ba0e4046687abaddbe495536a84c87dffbdfdafd9", "03289a533d3a2b270aa4530f018efe7de6d2cedd310cd149fbb9be45ce07c64b", "953c68110d36749437addf73f48954f07bddab69f02230e6855095213bd10415", "f9fe807c2793b953eeab056244fc1304db9f8ed81ec8cf363799b80285478743", "e7cc03ea0607b653b481441e7172e355d614bab79862ae0dd2aea819ca57fe7e", "ae25d3182d59463caf68df1131a5e1065849e1c1281e75bc9ef9479018a76b21", "09a9fa51e2cc741ec242fcc1fad2461291ad1c66707e38ae5a077c0de1c464f9", "0a5bc042b91534c9b27c8d7be7d2e3311bf561dc738083fecbe0b9566bb771b6", "b5cfa0f7b05c0130c028113a451fb533b6ae2817198de13217850139cbf0536b", "4552e1c32fc75dad96a2ad5fdd655f8c54257a3541fab15bddcd0d818175df9d", "2b8e6474a10489312cb7cec701caafe0971117fe12d1b644825985fb9b9d58c6", "2cf3e69796b86ed61349959873d59403ededac0efab744a2f5460f6dc4519c9d", "03bae7706a17828c3e419edbc5ad3727153eb09c172b138e181dfaffe5291100", "49bdd4c273ac0ef898f41e7b8f3664f6c3ff98c1a1176d0d02434b562e50fc92", "0e8a209d408007bd7527aa7d281dcef93f3e0778cda89ff6fd5757c32eb4034e", "dbe520a5d8c69c70d78fbce6f160d8ef2c6f06c29e71efe92b422e4a3243560f"], "rank_local_stats_distinct": true, "step": 0, "third_program_exact": false}, {"gradient_health": {"finite": true, "nonzero": 7585062400, "norm": 495.9019775390625}, "gradient_sample_sha256": "e461242f7d273f6356ed92bdaa721b5e4f89dd59b1959c02dea32daa4ee41859", "loss": 15.36033821105957, "optimizer_sample_sha256": "bbe5d59c2676cde8711fe4356354381f1541b85edd78eff1c9b26312353c2a16", "parameter_sample_sha256": "0820e9b28131d09f4b20377f62d3f590175b625bc943a339574edb1c727c1c81", "post_reduction_replica_check": {"full": {"algorithm": "device-ring-all-elements", "checked_leaves": 399, "dp_size": 16, "exact": true, "physical_flags": 64, "tp_size": 4}, "sample": {"algorithm": "host-prefix-sample", "checked_leaves": 8, "checked_physical_values": 4096, "exact": true, "replica_comparisons": 486, "replica_groups": 26, "samples_per_shard": 8, "total_leaves": 399}, "schema_version": 2}, "rank_contribution_signature_sha256": ["ad1b279fc416af0f99161cb452f798d0c2e8ac51d32086dfabd703af7276b340", "69acda5ac8eafaaf9062fb2573c74da34e181a4e40bded6ddc3c56952997e151", "7787b6ad59c89b24e96edbc6d64a3e2dc2766df52d9e62c9cf3c4575d3b57abe", "37d05efdd223324d10fda1300b0ab8374f957f4fa318b0018f4c0b8d604a048a", "b8f39513b3754658c84ce97e47f7771f57c82dfb890ff6fb56a22cbd2526f539", "0a5e4c3ed92a6b731c419e6035ee6864b58d87bb9a2515fc134fa0d56fa79461", "9715c151c581c6dc2c890a0a984a35c899cd539f2003cf53ee8f0e458a574fb5", "532a04ec5a38d6d0e11f601e4c85768d34f5b67f0140ca162e031b26eab9812e", "3491f7315ca742430f26d79de037adec5c8f6d47510c8503ecfd355c05b407c0", "d6b3b6a3587ba04e0ef6980baff5d775da9639b6787c4291706d4088ae140260", "6eb0f3ae761778e4cac520152deef3e8a351b2580aac3a2343f2b4b5f3f4e0c4", "0aa16a705036a8f8d6b0b10e55d055157874bc4cb2cfc144f8dd3b718dfb0b04", "09a897e304be85d0282e262f2da7570dc60c2ae2ab159b9aa93912830e844e88", "0a1111e3a1386fa110e5433739bf120bf47db2bcf6f830f70c79166c1da09baa", "8a62a91eca72ad4cab016cd45bc25a652020b345abd6c393d7beae1f25a03bcf", "34224f9d1c11130889cd04fcfaf387967932c9a6a72e51b544d0ac07fae22945"], "rank_local_stats_distinct": true, "step": 1, "third_program_exact": false}, {"gradient_health": {"finite": true, "nonzero": 7585062912, "norm": 489.0858459472656}, "gradient_sample_sha256": "7c5c89fa0b0c524ecbeeb1d1c6443f7046bc7c6852abd6eee5a4f1d3f5d6f612", "loss": 15.018980026245117, "optimizer_sample_sha256": "6684d0cacb96aa3795879bbc5443a6e024bd55134271a1cce4013983c056ac0e", "parameter_sample_sha256": "8b2119ae24d9d5c711ef5fea117de06b0611bff15f6691b6ef3ab05d94039151", "post_reduction_replica_check": {"full": {"algorithm": "device-ring-all-elements", "checked_leaves": 399, "dp_size": 16, "exact": true, "physical_flags": 64, "tp_size": 4}, "sample": {"algorithm": "host-prefix-sample", "checked_leaves": 8, "checked_physical_values": 4096, "exact": true, "replica_comparisons": 486, "replica_groups": 26, "samples_per_shard": 8, "total_leaves": 399}, "schema_version": 2}, "rank_contribution_signature_sha256": ["a53b81fb4f36a9089b160d680a39c5077b11f2e8332428a5b77bf6c5180cb532", "5497490db0f8bbc2db7cb6e7cd738a495c6bf5c9436d33f794cf64a312f7efe9", "4b35be6167ac79fa825f7c4ed94a596293eb7029b86d96abf9ee06af3fa23ed3", "e68d2c41a2d5ff73d411cfe03a632984eaa8cbc003065dd95ef11ceb9d0a4422", "f00d2950e5a8c0116cd21f96ac3f2684ec103ef4c993185dd991a7ef624c3f35", "00aec0629163ee71eeae88cd9ddc20b0d4ba2b42a06cdc11f9aa6633449ca2c1", "2936b5d2341626c5409a646421ee054827ca7cd46bf2af07f6a22f27568a0b93", "10f8c3b92a7104555d6b7cb00ae519dd12845ff50d60b146d3e1c2e80e215c53", "fee74440bd180a59c5cb3e3a49738326f1bc96fbb630aedb43a8668974308986", "daef8caa62c908cc79eaa341e2f0120ac58211163a91fca5a85bf092d68c9ad3", "1c2c2c68c741e12cddfd9e81e415cb181260e4cbb811b90b10c4ded33329cbe8", "8e2a3bb7757ddc70c074201bda1d5dd77a09ff5a4b2ac40a51ec51a669ff7d34", "21e460783f9ab61cafaf64033c69811ca976d6bbf59ee46cb7c0e5e387ac6238", "7f5430a2a86ecacff0f0fda49acb50621fee82f501643e36b40ca25fa83c061a", "465fde9b7bf0e72d09898ce9fd217185c507c7f313dde97ac7b8eae5a08db0e7", "21ad6137ac8ca797175269db4c5381b71b82b76fa6c1457f0d0ed19206b312ba"], "rank_local_stats_distinct": true, "step": 2, "third_program_exact": false}], "third_program_exact": false, "topology": {"devices": 64, "dp": 16, "mesh_shape": [16, 4], "tp": 4, "unique_devices": 64}}
+[P32.RC] VERDICT PASS stage=three-update
+I0808 06:22:18.218897     244 client.cc:221] Client::~Client() starting.
+I0808 06:22:18.220043     244 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 06:22:18.220071     244 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0808 06:22:18.220320     244 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0808 06:22:18.220338     244 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 06:22:18.220344     244 grpc_client_session.cc:202] GrpcClientSession: Finish(): calling context_->TryCancel();
+I0808 06:22:18.220584     244 grpc_client_session.cc:205] GrpcClientSession: Waiting for reader thread to stop.
+I0808 06:22:18.220555     492 grpc_client_session.cc:176] GrpcClientSession: reader loop is exiting.
+I0808 06:22:18.221034     492 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status OK
+I0808 06:22:18.221064     244 grpc_client_session.cc:209] GrpClientSession: Attempting to call stream->Finish()
+I0808 06:22:18.221080     244 grpc_client_session.cc:213] GrpClientSession: Attempting to call stream->Finish(), mutex acquired
+I0808 06:22:18.221141     244 grpc_client_session.cc:216] GrpClientSession: stream->Finish() returned server status CANCELLED: CANCELLED
+I0808 06:22:18.221160     244 grpc_client_session.cc:237] GrpClientSession::Finish(): calling terminated cb with CANCELLED: CANCELLED
+W0808 06:22:18.221165     244 grpc_client.cc:91] IFRT proxy server disconnected: CANCELLED: CANCELLED; Stack trace: *** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyGC_Collect
+	Py_FinalizeEx
+	Py_Exit
+	
+	
+	
+	_PyRun_AnyFileObject
+	Py_RunMain
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+I0808 06:22:18.221778     244 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 06:22:18.221789     244 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0808 06:22:18.221790     492 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 06:22:18.221794     244 client.cc:223] Client::~Client(): rpc_helper_->Disconnect() is done.
+I0808 06:22:18.222205     244 rpc_helper.cc:509] RpcHelper::~RpcHelper() starting.
+I0808 06:22:18.222483     244 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 06:22:18.222488     244 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0808 06:22:18.222491     244 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0808 06:22:18.222494     244 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0808 06:22:18.222497     244 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 06:22:18.222499     244 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0808 06:22:18.222502     244 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
+I0808 06:22:18.222507     244 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
+I0808 06:22:18.704751     244 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
+I0808 06:22:18.705694     244 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
+I0808 06:22:18.705710     244 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
+I0808 06:22:18.705716     244 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0808 06:22:18.706164     244 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0808 06:22:18.766569     244 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
+{
+  "reasons": [],
+  "record": {
+    "attempt": 0,
+    "batch": {
+      "global_trajectories": 256,
+      "local_trajectories": 16,
+      "sample_to_rank_mapping": "frozen-contiguous-16",
+      "sequence_length": 16
+    },
+    "dp_rank_ordered_additions_per_transaction": 15,
+    "dp_rank_pullbacks_per_transaction": 16,
+    "dp_reduction_rounds_per_transaction": 15,
+    "dp_reduction_transactions": 3,
+    "execution": {
+      "backward": 48,
+      "forward": 53,
+      "optimizer_updates": 3,
+      "training_steps": 3
+    },
+    "forward_repeat_exact": true,
+    "forward_shape": [
+      256,
+      151936
+    ],
+    "gradient_health": {
+      "finite": true,
+      "nonzero": 7585062912,
+      "norm": 489.0858459472656
+    },
+    "gradient_repeat_exact": null,
+    "gradient_sample_sha256": "7c5c89fa0b0c524ecbeeb1d1c6443f7046bc7c6852abd6eee5a4f1d3f5d6f612",
+    "model": {
+      "attention_backend": "dense-reference",
+      "checkpoint": {
+        "bytes": 16381516776,
+        "files": 5,
+        "manifest_sha256": "396817b2d77176a8106b61fdd95dae5cbb123dff525283af851b056390ee35ac"
+      },
+      "checkpoint_loaded": true,
+      "compute_dtype": "<class 'jax.numpy.bfloat16'>",
+      "inventory": {
+        "arrays": 399,
+        "dp_partitioned_leaves": 0,
+        "leaves": 399,
+        "logical_bytes": 32762941440,
+        "memory_kinds": [
+          "device"
+        ],
+        "tp_partitioned_leaves": 399
+      },
+      "name": "qwen3-8b",
+      "param_dtype": "<class 'jax.numpy.float32'>"
+    },
+    "optimizer_state_memory_between_commits": [
+      "pinned_host"
+    ],
+    "optimizer_state_memory_during_commit": [
+      "device"
+    ],
+    "parameter_sample_sha256_after": "8b2119ae24d9d5c711ef5fea117de06b0611bff15f6691b6ef3ab05d94039151",
+    "parameter_sample_sha256_before": "c33ae361413e6dff363af80750c50bd07ba4488baf1a3046cdb2df08e1fb67e1",
+    "post_reduction_replica_check": {
+      "full": {
+        "algorithm": "device-ring-all-elements",
+        "checked_leaves": 399,
+        "dp_size": 16,
+        "exact": true,
+        "physical_flags": 64,
+        "tp_size": 4
+      },
+      "sample": {
+        "algorithm": "host-prefix-sample",
+        "checked_leaves": 8,
+        "checked_physical_values": 4096,
+        "exact": true,
+        "replica_comparisons": 486,
+        "replica_groups": 26,
+        "samples_per_shard": 8,
+        "total_leaves": 399
+      },
+      "schema_version": 2
+    },
+    "post_reduction_replicas_exact": null,
+    "rank_local_stats_distinct": true,
+    "scope": {
+      "production_training_admitted": false,
+      "rollout_engine_initialized": false,
+      "zero_tim_alignment": "NOT_MEASURED"
+    },
+    "stage": "three-update",
+    "step_records": [
+      {
+        "gradient_health": {
+          "finite": true,
+          "nonzero": 7585063936,
+          "norm": 498.4319763183594
+        },
+        "gradient_sample_sha256": "b07d7bc95072873381d89422a7f2902e9b0879f5255b47d0bb30978a9fd29940",
+        "loss": 15.485172271728516,
+        "optimizer_sample_sha256": "362c6398b57ace0f9dffbd9eb67901e14e8ec9ef16eedec5559ffd58dec8e327",
+        "parameter_sample_sha256": "ccbec74d53abd271ace91201022e245412e9c5d4739d68fc2aae7050921d6387",
+        "post_reduction_replica_check": {
+          "full": {
+            "algorithm": "device-ring-all-elements",
+            "checked_leaves": 399,
+            "dp_size": 16,
+            "exact": true,
+            "physical_flags": 64,
+            "tp_size": 4
+          },
+          "sample": {
+            "algorithm": "host-prefix-sample",
+            "checked_leaves": 8,
+            "checked_physical_values": 4096,
+            "exact": true,
+            "replica_comparisons": 486,
+            "replica_groups": 26,
+            "samples_per_shard": 8,
+            "total_leaves": 399
+          },
+          "schema_version": 2
+        },
+        "rank_contribution_signature_sha256": [
+          "ff94d68fed0e5e4e75ba4d7ba0e4046687abaddbe495536a84c87dffbdfdafd9",
+          "03289a533d3a2b270aa4530f018efe7de6d2cedd310cd149fbb9be45ce07c64b",
+          "953c68110d36749437addf73f48954f07bddab69f02230e6855095213bd10415",
+          "f9fe807c2793b953eeab056244fc1304db9f8ed81ec8cf363799b80285478743",
+          "e7cc03ea0607b653b481441e7172e355d614bab79862ae0dd2aea819ca57fe7e",
+          "ae25d3182d59463caf68df1131a5e1065849e1c1281e75bc9ef9479018a76b21",
+          "09a9fa51e2cc741ec242fcc1fad2461291ad1c66707e38ae5a077c0de1c464f9",
+          "0a5bc042b91534c9b27c8d7be7d2e3311bf561dc738083fecbe0b9566bb771b6",
+          "b5cfa0f7b05c0130c028113a451fb533b6ae2817198de13217850139cbf0536b",
+          "4552e1c32fc75dad96a2ad5fdd655f8c54257a3541fab15bddcd0d818175df9d",
+          "2b8e6474a10489312cb7cec701caafe0971117fe12d1b644825985fb9b9d58c6",
+          "2cf3e69796b86ed61349959873d59403ededac0efab744a2f5460f6dc4519c9d",
+          "03bae7706a17828c3e419edbc5ad3727153eb09c172b138e181dfaffe5291100",
+          "49bdd4c273ac0ef898f41e7b8f3664f6c3ff98c1a1176d0d02434b562e50fc92",
+          "0e8a209d408007bd7527aa7d281dcef93f3e0778cda89ff6fd5757c32eb4034e",
+          "dbe520a5d8c69c70d78fbce6f160d8ef2c6f06c29e71efe92b422e4a3243560f"
+        ],
+        "rank_local_stats_distinct": true,
+        "step": 0,
+        "third_program_exact": false
+      },
+      {
+        "gradient_health": {
+          "finite": true,
+          "nonzero": 7585062400,
+          "norm": 495.9019775390625
+        },
+        "gradient_sample_sha256": "e461242f7d273f6356ed92bdaa721b5e4f89dd59b1959c02dea32daa4ee41859",
+        "loss": 15.36033821105957,
+        "optimizer_sample_sha256": "bbe5d59c2676cde8711fe4356354381f1541b85edd78eff1c9b26312353c2a16",
+        "parameter_sample_sha256": "0820e9b28131d09f4b20377f62d3f590175b625bc943a339574edb1c727c1c81",
+        "post_reduction_replica_check": {
+          "full": {
+            "algorithm": "device-ring-all-elements",
+            "checked_leaves": 399,
+            "dp_size": 16,
+            "exact": true,
+            "physical_flags": 64,
+            "tp_size": 4
+          },
+          "sample": {
+            "algorithm": "host-prefix-sample",
+            "checked_leaves": 8,
+            "checked_physical_values": 4096,
+            "exact": true,
+            "replica_comparisons": 486,
+            "replica_groups": 26,
+            "samples_per_shard": 8,
+            "total_leaves": 399
+          },
+          "schema_version": 2
+        },
+        "rank_contribution_signature_sha256": [
+          "ad1b279fc416af0f99161cb452f798d0c2e8ac51d32086dfabd703af7276b340",
+          "69acda5ac8eafaaf9062fb2573c74da34e181a4e40bded6ddc3c56952997e151",
+          "7787b6ad59c89b24e96edbc6d64a3e2dc2766df52d9e62c9cf3c4575d3b57abe",
+          "37d05efdd223324d10fda1300b0ab8374f957f4fa318b0018f4c0b8d604a048a",
+          "b8f39513b3754658c84ce97e47f7771f57c82dfb890ff6fb56a22cbd2526f539",
+          "0a5e4c3ed92a6b731c419e6035ee6864b58d87bb9a2515fc134fa0d56fa79461",
+          "9715c151c581c6dc2c890a0a984a35c899cd539f2003cf53ee8f0e458a574fb5",
+          "532a04ec5a38d6d0e11f601e4c85768d34f5b67f0140ca162e031b26eab9812e",
+          "3491f7315ca742430f26d79de037adec5c8f6d47510c8503ecfd355c05b407c0",
+          "d6b3b6a3587ba04e0ef6980baff5d775da9639b6787c4291706d4088ae140260",
+          "6eb0f3ae761778e4cac520152deef3e8a351b2580aac3a2343f2b4b5f3f4e0c4",
+          "0aa16a705036a8f8d6b0b10e55d055157874bc4cb2cfc144f8dd3b718dfb0b04",
+          "09a897e304be85d0282e262f2da7570dc60c2ae2ab159b9aa93912830e844e88",
+          "0a1111e3a1386fa110e5433739bf120bf47db2bcf6f830f70c79166c1da09baa",
+          "8a62a91eca72ad4cab016cd45bc25a652020b345abd6c393d7beae1f25a03bcf",
+          "34224f9d1c11130889cd04fcfaf387967932c9a6a72e51b544d0ac07fae22945"
+        ],
+        "rank_local_stats_distinct": true,
+        "step": 1,
+        "third_program_exact": false
+      },
+      {
+        "gradient_health": {
+          "finite": true,
+          "nonzero": 7585062912,
+          "norm": 489.0858459472656
+        },
+        "gradient_sample_sha256": "7c5c89fa0b0c524ecbeeb1d1c6443f7046bc7c6852abd6eee5a4f1d3f5d6f612",
+        "loss": 15.018980026245117,
+        "optimizer_sample_sha256": "6684d0cacb96aa3795879bbc5443a6e024bd55134271a1cce4013983c056ac0e",
+        "parameter_sample_sha256": "8b2119ae24d9d5c711ef5fea117de06b0611bff15f6691b6ef3ab05d94039151",
+        "post_reduction_replica_check": {
+          "full": {
+            "algorithm": "device-ring-all-elements",
+            "checked_leaves": 399,
+            "dp_size": 16,
+            "exact": true,
+            "physical_flags": 64,
+            "tp_size": 4
+          },
+          "sample": {
+            "algorithm": "host-prefix-sample",
+            "checked_leaves": 8,
+            "checked_physical_values": 4096,
+            "exact": true,
+            "replica_comparisons": 486,
+            "replica_groups": 26,
+            "samples_per_shard": 8,
+            "total_leaves": 399
+          },
+          "schema_version": 2
+        },
+        "rank_contribution_signature_sha256": [
+          "a53b81fb4f36a9089b160d680a39c5077b11f2e8332428a5b77bf6c5180cb532",
+          "5497490db0f8bbc2db7cb6e7cd738a495c6bf5c9436d33f794cf64a312f7efe9",
+          "4b35be6167ac79fa825f7c4ed94a596293eb7029b86d96abf9ee06af3fa23ed3",
+          "e68d2c41a2d5ff73d411cfe03a632984eaa8cbc003065dd95ef11ceb9d0a4422",
+          "f00d2950e5a8c0116cd21f96ac3f2684ec103ef4c993185dd991a7ef624c3f35",
+          "00aec0629163ee71eeae88cd9ddc20b0d4ba2b42a06cdc11f9aa6633449ca2c1",
+          "2936b5d2341626c5409a646421ee054827ca7cd46bf2af07f6a22f27568a0b93",
+          "10f8c3b92a7104555d6b7cb00ae519dd12845ff50d60b146d3e1c2e80e215c53",
+          "fee74440bd180a59c5cb3e3a49738326f1bc96fbb630aedb43a8668974308986",
+          "daef8caa62c908cc79eaa341e2f0120ac58211163a91fca5a85bf092d68c9ad3",
+          "1c2c2c68c741e12cddfd9e81e415cb181260e4cbb811b90b10c4ded33329cbe8",
+          "8e2a3bb7757ddc70c074201bda1d5dd77a09ff5a4b2ac40a51ec51a669ff7d34",
+          "21e460783f9ab61cafaf64033c69811ca976d6bbf59ee46cb7c0e5e387ac6238",
+          "7f5430a2a86ecacff0f0fda49acb50621fee82f501643e36b40ca25fa83c061a",
+          "465fde9b7bf0e72d09898ce9fd217185c507c7f313dde97ac7b8eae5a08db0e7",
+          "21ad6137ac8ca797175269db4c5381b71b82b76fa6c1457f0d0ed19206b312ba"
+        ],
+        "rank_local_stats_distinct": true,
+        "step": 2,
+        "third_program_exact": false
+      }
+    ],
+    "third_program_exact": false,
+    "topology": {
+      "devices": 64,
+      "dp": 16,
+      "mesh_shape": [
+        16,
+        4
+      ],
+      "tp": 4,
+      "unique_devices": 64
+    }
+  },
+  "replica_evidence_scope": "device-ring-all-elements",
+  "status": "PASS"
+}
+[dp16-rc] artifact=/tmp/canon-state/p32_rc_three-update.log
+[dp16-rc] classification=/tmp/canon-state/p32_rc_three-update.classification.json
+[entrypoint] <-- 85_run_dp16_rc.sh ok
+[entrypoint] mode=dp16-rc -- bounded release-candidate stage complete; no production training was admitted.
