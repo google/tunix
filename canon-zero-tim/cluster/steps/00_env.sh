@@ -99,6 +99,124 @@ if [ -n "${CANON_RPA_VJP:-}" ] && [ "${CANON_RPA_VJP:-}" = "1" ]; then
   echo "[env]       whose kv gradients are identically zero.  See KNOWN_FOOTGUNS.md."
 fi
 
+if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
+  for k in CANON_P34_TOPOLOGY_ADMITTED CANON_P34_TP8_ADMITTED \
+           CANON_P34_TRAJECTORY_ADMITTED CANON_P34_UPDATE_ADMITTED \
+           CANON_P34_RUN_STAGE CANON_P34_NO_COMMIT \
+           CANON_DP_SIZE CANON_TP_SIZE CANON_TOTAL_DEVICES \
+           CANON_ENGINE_DP_SIZE CANON_GLOBAL_PROMPTS \
+           CANON_NUM_GENERATIONS CANON_LOCAL_TRAJECTORIES \
+           CANON_GLOBAL_TRAJECTORIES CANON_TARGET_M ABCPROD \
+           CANON_P34_PREFIX_CACHE CANON_P34_MAX_NUM_SEQS \
+           CANON_P34_MAX_BATCHED_TOKENS CANON_P34_STRICT_CLI \
+           CANON_P34_DISABLE_SAMPLER_IS CANON_P34_DISABLE_TIS \
+           CANON_TRAIN_DP_SHARDING FL_SHARED_MESH \
+           CANON_P34_WHITELIST CANON_P34_WHITELIST_SHA256; do
+    req "$k"
+  done
+  for k in CANON_DP_SIZE CANON_TP_SIZE CANON_TOTAL_DEVICES \
+           CANON_ENGINE_DP_SIZE CANON_GLOBAL_PROMPTS \
+           CANON_NUM_GENERATIONS CANON_LOCAL_TRAJECTORIES \
+           CANON_GLOBAL_TRAJECTORIES CANON_TARGET_M ABCPROD \
+           CANON_P34_MAX_NUM_SEQS CANON_P34_MAX_BATCHED_TOKENS; do
+    positive_int "$k"
+  done
+  [ "${CANON_DP_SIZE:-}" = "16" ] && [ "${CANON_TP_SIZE:-}" = "8" ] && \
+  [ "${CANON_TOTAL_DEVICES:-}" = "128" ] || {
+    echo "[env] P34 requires DP16xTP8 on each 128-device role" >&2; fail=1;
+  }
+  [ "$((CANON_DP_SIZE * CANON_TP_SIZE))" -eq "$CANON_TOTAL_DEVICES" ] || {
+    echo "[env] P34 arithmetic FAIL: dp*tp != role devices" >&2; fail=1;
+  }
+  [ "${CANON_GLOBAL_PROMPTS:-}" = "8" ] && \
+  [ "${CANON_NUM_GENERATIONS:-}" = "8" ] && \
+  [ "${CANON_GLOBAL_TRAJECTORIES:-}" = "64" ] && \
+  [ "${CANON_LOCAL_TRAJECTORIES:-}" = "4" ] || {
+    echo "[env] P34 requires 8x8=64 trajectories and four per DP rank" >&2; fail=1;
+  }
+  [ "$((CANON_DP_SIZE * CANON_LOCAL_TRAJECTORIES))" -eq \
+      "$CANON_GLOBAL_TRAJECTORIES" ] || {
+    echo "[env] P34 trajectory arithmetic does not close" >&2; fail=1;
+  }
+  [ "${CANON_LOGPROB_M:-}" = "256" ] && \
+  [ "${CANON_TARGET_M:-}" = "256" ] && \
+  [ "${ABCPROD:-}" = "256" ] && \
+  [ "${MIN_TOKEN_BUCKET:-}" = "4096" ] || {
+    echo "[env] P34 requires local M256 and global M4096" >&2; fail=1;
+  }
+  [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
+    echo "[env] P34 bucket FAIL: global M != dp*local M" >&2; fail=1;
+  }
+  [ "${CANON_VJP2_MAX_SEQS:-}" = "1" ] || {
+    echo "[env] P34 grouped model_fn requires CANON_VJP2_MAX_SEQS=1" >&2; fail=1;
+  }
+  [ "${CANON_P34_PREFIX_CACHE:-}" = "0" ] && \
+  [ "${CANON_P34_MAX_NUM_SEQS:-}" = "64" ] && \
+  [ "${CANON_P34_MAX_BATCHED_TOKENS:-}" = "8192" ] || {
+    echo "[env] P34 rollout scheduler contract changed" >&2; fail=1;
+  }
+  [ "${CANON_TRAIN_DP_SHARDING:-}" = "replicated-params" ] && \
+  [ "${FL_SHARED_MESH:-}" = "16,8" ] || {
+    echo "[env] P34 requires DP-replicated parameters on a 16,8 mesh" >&2; fail=1;
+  }
+  [ "${CANON_P34_STRICT_CLI:-}" = "1" ] && \
+  [ "${CANON_P34_DISABLE_SAMPLER_IS:-}" = "1" ] && \
+  [ "${CANON_P34_DISABLE_TIS:-}" = "1" ] || {
+    echo "[env] P34 strict CLI and neutral importance paths are mandatory" >&2; fail=1;
+  }
+  if [[ ! "${CANON_P34_WHITELIST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "[env] P34 whitelist SHA-256 is malformed" >&2
+    fail=1
+  elif [ ! -f "${CANON_P34_WHITELIST:-}" ]; then
+    echo "[env] P34 whitelist file is missing: ${CANON_P34_WHITELIST:-unset}" >&2
+    fail=1
+  elif ! printf '%s  %s\n' "$CANON_P34_WHITELIST_SHA256" \
+      "$CANON_P34_WHITELIST" | sha256sum -c - --quiet; then
+    echo "[env] P34 whitelist SHA-256 mismatch" >&2
+    fail=1
+  else
+    echo "[env] P34 whitelist SHA256 OK: $CANON_P34_WHITELIST_SHA256"
+  fi
+  case "${CANON_P34_RUN_STAGE:-}" in
+    backward-no-commit)
+      [ "${CANON_P34_NO_COMMIT:-}" = "1" ] || {
+        echo "[env] P34 backward-no-commit requires no-commit=1" >&2; fail=1;
+      } ;;
+    one-update|three-update|full)
+      [ "${CANON_P34_NO_COMMIT:-}" = "0" ] || {
+        echo "[env] P34 update stages require no-commit=0" >&2; fail=1;
+      } ;;
+    *) echo "[env] invalid CANON_P34_RUN_STAGE" >&2; fail=1 ;;
+  esac
+  p34_admitted=0
+  [ "${CANON_MODE:-}" = "run" ] && p34_admitted=1
+  for k in CANON_P34_TOPOLOGY_ADMITTED CANON_P34_TP8_ADMITTED \
+           CANON_P34_TRAJECTORY_ADMITTED CANON_P34_UPDATE_ADMITTED; do
+    [ "${!k:-}" = "$p34_admitted" ] || {
+      echo "[env] P34 admission mismatch: $k must equal $p34_admitted" >&2
+      fail=1
+    }
+  done
+  for k in CANON_P32_TRAIN_ADMITTED CANON_P32_DP_REDUCTION_ADMITTED \
+           CANON_P33_WORKLOAD_LAUNCH_ADMITTED; do
+    [ "${!k:-}" = "$p34_admitted" ] || {
+      echo "[env] P34 inherited admission mismatch: $k must equal $p34_admitted" >&2
+      fail=1
+    }
+  done
+  if [ "$p34_admitted" = "1" ]; then
+    for k in CANON_RUN_ID CANON_RUN_CMD CANON_RUN_LOG CANON_ALIGN_REPORT \
+             CANON_UPDATE_REPORT CANON_WANDB_PROJECT CANON_WANDB_GROUP \
+             CANON_WANDB_RUN_NAME WANDB_API_KEY; do
+      req "$k"
+    done
+    [ "${WANDB_MODE:-}" = "online" ] || {
+      echo "[env] P34 requires WANDB_MODE=online" >&2; fail=1;
+    }
+  fi
+  echo "[env] P34 contract OK: DP16xTP8 per role, local M256, global M4096"
+fi
+
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
   for k in CANON_DP_SIZE CANON_TP_SIZE CANON_TOTAL_DEVICES CANON_ENGINE_DP_SIZE \
            CANON_GLOBAL_PROMPTS CANON_LOCAL_PROMPTS CANON_NUM_GENERATIONS \
@@ -360,6 +478,9 @@ fi
 {
   echo "# generated by cluster/steps/00_env.sh -- do not edit"
   for k in $(compgen -e | grep -E '^(CANON_|WANDB_|HF_|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_|ROLLOUT_ENGINE|XLA_FLAGS|JAX_|FL_SHARED_MESH|TPU_|TF_CPP|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE)' | sort); do
+    case "$k" in
+      WANDB_API_KEY|HF_TOKEN|INJECTED_*) continue ;;
+    esac
     printf 'export %s=%q\n' "$k" "${!k}"
   done
 } > "$CANON_STATE/env.sh"

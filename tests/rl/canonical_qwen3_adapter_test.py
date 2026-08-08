@@ -637,6 +637,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           pad_id=0,
           eos_id=2,
           gradient_microbatch_sink=consume,
+          deterministic_repeat=True,
       )
 
     self.assertIsNone(result["gradients"])
@@ -660,6 +661,12 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     self.assertEqual(result["dp_reduction_transactions"], 16)
     self.assertEqual(result["dp_reduction_rounds_per_transaction"], 8)
     self.assertEqual(result["dp_rank_pullbacks_per_transaction"], 16)
+    self.assertTrue(result["gradient_deterministic_repeat"])
+    self.assertTrue(all(
+        report["deterministic_repeat_exact"]
+        and report["deterministic_repeat_leaf_checks"] > 0
+        for report in result["reports"]
+    ))
     self.assertTrue(all(
         len(set(fingerprints)) == 16
         for fingerprints in result["rank_local_gradient_fingerprints"]
@@ -1001,6 +1008,57 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         actual.sharding.spec, jax.sharding.PartitionSpec("data")
     )
     np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+  def test_dp16_logprob_pipeline_pads_compact_rollout_per_rank_to_m256(self):
+    if len(jax.devices()) != 64:
+      self.skipTest("requires exactly 64 forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()).reshape(16, 4), ("data", "model")
+    )
+    env = {
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_DP_SIZE": "16",
+        "CANON_TP_SIZE": "4",
+        "CANON_LOGPROB_M": "256",
+        "CANON_TARGET_M": "256",
+        "MIN_TOKEN_BUCKET": "4096",
+    }
+    observed_shapes = []
+
+    def return_logprobs(logprobs, next_tokens, max_logprobs):
+      del next_tokens, max_logprobs
+      return logprobs
+
+    def require_local_m256(value):
+      observed_shapes.append(value.shape)
+      self.assertEqual(value.shape, (256, 8))
+      return value + jnp.float32(1.0)
+
+    logits = jnp.arange(256 * 8, dtype=jnp.float32).reshape(256, 8)
+    logits = jnp.mod(logits, 17.0) / 7.0
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+        canonical_qwen3_adapter.canonical_logsoftmax,
+        "log_softmax",
+        require_local_m256,
+    ):
+      scorer = canonical_qwen3_adapter._make_canonical_compute_and_gather(
+          return_logprobs, mesh
+      )
+      actual = scorer(logits, jnp.zeros((256,), jnp.int32), 1)
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "global row count changed",
+      ):
+        scorer(jnp.zeros((512, 8), jnp.float32), jnp.zeros((512,), jnp.int32), 1)
+    self.assertTrue(observed_shapes)
+    self.assertTrue(all(shape == (256, 8) for shape in observed_shapes))
+    self.assertEqual(actual.shape, (256, 8))
+    self.assertEqual(
+        actual.sharding.spec, jax.sharding.PartitionSpec("data")
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual), np.asarray(logits + jnp.float32(1.0))
+    )
 
   def setUp(self):
     super().setUp()

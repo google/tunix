@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 
-from p22xf_contract import match_site, preflight
+from p22xf_contract import BK, BN, match_site, preflight
 
 
 BASE_PATH = __import__("canon_shim_root").resolve('linear_patched.py')
@@ -38,7 +38,7 @@ def _column_parallel(site, equation, inputs, weight, prefix):
         out_specs = P(None, base._CANON_TP_AXIS)
 
         def local(a_local, w_local):
-            out = pallas_matmul(a_local, w_local)
+            out = pallas_matmul(a_local, w_local, block_n=BN, block_k=BK)
             print(
                 f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
                 f"M={a_local.shape[0]} Klocal={a_local.shape[1]} Nlocal={w_local.shape[1]}",
@@ -60,7 +60,7 @@ def _column_parallel(site, equation, inputs, weight, prefix):
                 w_local = w_local.transpose(1, 0, 2)
             k_local, n_heads, head_dim = w_local.shape
             w2 = w_local.reshape(k_local, n_heads * head_dim)
-            out2 = pallas_matmul(a_local, w2)
+            out2 = pallas_matmul(a_local, w2, block_n=BN, block_k=BK)
             out = out2.reshape(a_local.shape[0], n_heads, head_dim)
             print(
                 f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
@@ -89,7 +89,7 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
     def local(a_local, w_local):
         a2 = a_local.reshape(a_local.shape[0], -1)
         w2 = w_local.reshape(a2.shape[1], -1)
-        partial = pallas_matmul(a2, w2)[None]
+        partial = pallas_matmul(a2, w2, block_n=BN, block_k=BK)[None]
         print(
             f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
             f"M={a2.shape[0]} Klocal={a2.shape[1]} Nlocal={w2.shape[1]}",

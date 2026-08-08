@@ -123,6 +123,12 @@ parser.add_argument(
 parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
 parser.add_argument("--max_to_keep", type=int, default=4)
 parser.add_argument("--save_interval_steps", type=int, default=500)
+parser.add_argument(
+    "--gold_whitelist",
+    type=str,
+    default="",
+    help="Optional JSONL whitelist joined to the dataset by docker_image.",
+)
 
 # Microbatch Sizes
 parser.add_argument("--train_micro_batch_size", type=int, default=1)
@@ -152,6 +158,12 @@ parser.add_argument(
     help="Optional override for rollout mesh FSDP dimension.",
 )
 parser.add_argument(
+    "--rollout_mesh_dp",
+    type=int,
+    default=None,
+    help="Optional replicated-data dimension for canonical DeepSWE.",
+)
+parser.add_argument(
     "--rollout_mesh_tp",
     type=int,
     default=None,
@@ -162,6 +174,12 @@ parser.add_argument(
     type=int,
     default=None,
     help="Optional override for train mesh FSDP dimension.",
+)
+parser.add_argument(
+    "--train_mesh_dp",
+    type=int,
+    default=None,
+    help="Optional replicated-data dimension for canonical DeepSWE.",
 )
 parser.add_argument(
     "--train_mesh_tp",
@@ -207,7 +225,7 @@ parser.add_argument(
 parser.add_argument("--advantage_estimator", type=str, default="rloo")
 parser.add_argument(
     "--use_rollout_logps",
-    type=bool,
+    action=argparse.BooleanOptionalAction,
     default=False,
     help=(
         "Whether to use rollout-cached logprobs as old policy logps. "
@@ -218,6 +236,8 @@ parser.add_argument(
 
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
+parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
+parser.add_argument("--max_num_batched_tokens", type=int, default=None)
 
 parser.add_argument(
     "--dtype",
@@ -246,7 +266,10 @@ parser.add_argument(
     help="Logging level for the script and relevant libraries.",
 )
 
-args, _ = parser.parse_known_args()
+if os.environ.get("CANON_P34_STRICT_CLI", "") == "1":
+  args = parser.parse_args()
+else:
+  args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
@@ -291,7 +314,8 @@ def patch_kubernetes_runtime():
     print(f"[Monkeypatch] Failed to patch DockerRuntime: {e}")
 
 
-patch_kubernetes_runtime()
+if os.environ.get("CANON_P34_DEEPSWE", "") != "1":
+  patch_kubernetes_runtime()
 
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
@@ -340,8 +364,13 @@ try:
 except ImportError as e:
   print(f"❌ Still missing a module: {e}")
 
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":  # pyrefly: ignore[unbound-name]
+if (
+    pathwaysutils is not None
+    and os.getenv("JAX_PLATFORMS", None) == "proxy"
+    and os.environ.get("CANON_PATHWAYS_INITIALIZED", "") != "1"
+):  # pyrefly: ignore[unbound-name]
   pathwaysutils.initialize()
+  os.environ["CANON_PATHWAYS_INITIALIZED"] = "1"
 
 
 # %%
@@ -353,6 +382,8 @@ from tunix.models.qwen3 import model as model_lib
 from tunix.sft import utils as sft_utils
 from tunix.sft import metrics_logger
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import deepswe_contract
+from tunix.rl import dp_workloads
 from tunix.rl.rollout import base_rollout
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
@@ -371,6 +402,9 @@ from examples.deepswe.swe_agent import (
 # Assumed custom imports based on usage
 from examples.deepswe.swe_agent import SWEAgent
 from examples.deepswe.swe_env import SWEEnv
+from examples.deepswe.r2egym_runtime_patch import (
+    apply_repoenv_kubernetes_poll_patch,
+)
 
 # %%
 # ==========================================
@@ -399,6 +433,9 @@ try:
   # k8s_client.list_namespace(timeout_seconds=5)
 except Exception as e:
   print(f"Warning: Kubernetes config loading failed: {e}")
+
+if os.environ.get("CANON_P34_DEEPSWE", "") == "1":
+  apply_repoenv_kubernetes_poll_patch()
 
 
 # %%
@@ -525,13 +562,21 @@ CKPT_DIR = (
 
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
+VLLM_MAX_NUM_SEQS = (
+    args.rollout_vllm_max_num_seqs
+    if args.rollout_vllm_max_num_seqs is not None
+    else ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
+)
 
 VLLM_UTILIZATION = args.vllm_utilization
 VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
 # Max number of tokens to be processed in parallel by vllm.
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE
+VLLM_MAX_BATCHED_TOKENS = (
+    args.max_num_batched_tokens
+    if args.max_num_batched_tokens is not None
+    else VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE
+)
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
@@ -543,6 +588,42 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 USE_ROLLOUT_LOGPS = args.use_rollout_logps
+
+P34_DEEPSWE = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+if P34_DEEPSWE:
+  deepswe_contract.validate_environment(os.environ)
+  p34 = deepswe_contract.P34_WORKLOAD
+  exact = {
+      "model_version": MODEL_VERSION in ("Qwen3-32B", p34.model_id),
+      "batch_size": BATCH_SIZE == p34.global_prompts,
+      "mini_batch_size": MINI_BATCH_SIZE == p34.global_prompts,
+      "train_micro_batch_size": TRAIN_MICRO_BATCH_SIZE == p34.global_prompts,
+      "compute_logps_micro_batch_size": (
+          COMPUTE_LOGPS_MICRO_BATCH_SIZE == p34.global_prompts
+      ),
+      "num_generations": NUM_GENERATIONS == p34.generations,
+      "max_prompt_length": MAX_PROMPT_LENGTH == p34.max_prompt_length,
+      "max_response_length": MAX_RESPONSE_LENGTH == p34.max_response_length,
+      "max_turns": MAX_TURNS == p34.max_turns,
+      "max_steps": MAX_STEPS
+      == deepswe_contract.requested_max_steps(os.environ),
+      "temperature": TEMPERATURE == p34.temperature,
+      "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
+      "top_k": TOP_K in (None, 0, -1),
+      "top_p": TOP_P in (None, 1.0),
+      "rollout_max_num_seqs": VLLM_MAX_NUM_SEQS == p34.max_num_seqs,
+      "rollout_max_batched_tokens": (
+          VLLM_MAX_BATCHED_TOKENS == p34.max_num_batched_tokens
+      ),
+  }
+  failures = [name for name, passed in exact.items() if not passed]
+  if failures:
+    raise ValueError(f"P34 signed DeepSWE CLI mismatch: {failures}")
+  print(
+      "[P34.CLI] PASS model=Qwen3-32B prompts=8 generations=8 "
+      "prompt=4096 response=32768 turns=50 scheduler=64/8192",
+      flush=True,
+  )
 
 
 # %%
@@ -588,6 +669,39 @@ dataset = dataset.map(
     transform,
     keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
 )
+
+if P34_DEEPSWE and not args.gold_whitelist:
+  raise ValueError("P34 requires an explicit DeepSWE gold whitelist")
+if args.gold_whitelist:
+  whitelist_path = os.path.abspath(args.gold_whitelist)
+  if not os.path.isfile(whitelist_path):
+    raise FileNotFoundError(f"gold whitelist not found: {whitelist_path}")
+  gold_images = set()
+  with open(whitelist_path, "r", encoding="utf-8") as whitelist_file:
+    for line_number, line in enumerate(whitelist_file, start=1):
+      if not line.strip():
+        continue
+      record = json.loads(line)
+      image = record.get("docker_image")
+      if not isinstance(image, str) or not image:
+        raise ValueError(
+            f"gold whitelist row {line_number} lacks docker_image"
+        )
+      gold_images.add(image)
+  before = len(dataset)
+  dataset = dataset.filter(
+      lambda entry: entry.get("docker_image") in gold_images,
+      keep_in_memory=True,
+  )
+  if len(dataset) == 0:
+    raise ValueError(
+        "gold whitelist retained zero rows; dataset and whitelist differ"
+    )
+  print(
+      f"[P34.DATASET] GOLD_FILTER_PASS rows={before}->{len(dataset)} "
+      f"images={len(gold_images)}",
+      flush=True,
+  )
 
 dataset = dataset.shuffle(seed=SEED)
 grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
@@ -677,8 +791,22 @@ total_devices = len(devices)
 # dropped (not defaulted to 1), so passing only --rollout_mesh_fsdp yields a 1D mesh.
 # If nothing is provided, fall back to the split-fraction heuristic (2D: fsdp+tp).
 rollout_fsdp = args.rollout_mesh_fsdp
+rollout_dp = args.rollout_mesh_dp
 rollout_tp = args.rollout_mesh_tp
-if rollout_fsdp is not None or rollout_tp is not None:
+if P34_DEEPSWE:
+  if rollout_fsdp is not None or args.train_mesh_fsdp is not None:
+    raise ValueError("P34 forbids FSDP; parameters must be replicated over dp")
+  if args.train_mesh_sp is not None:
+    raise ValueError("P34 does not admit sequence-parallel trainer state")
+  if (rollout_dp, rollout_tp, args.train_mesh_dp, args.train_mesh_tp) != (
+      16,
+      8,
+      16,
+      8,
+  ):
+    raise ValueError("P34 requires rollout and trainer DP16xTP8")
+  rollout_dims = [("dp", 16), ("tp", 8)]
+elif rollout_fsdp is not None or rollout_tp is not None:
   rollout_dims = []
   if rollout_fsdp is not None:
     rollout_dims.append(("fsdp", rollout_fsdp))
@@ -696,9 +824,12 @@ num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 # Supports fsdp-only, fsdp+sp, fsdp+tp, fsdp+sp+tp, etc. If nothing is provided,
 # fall back to leftover devices (2D: fsdp+tp).
 train_fsdp = args.train_mesh_fsdp
+train_dp = args.train_mesh_dp
 train_sp = args.train_mesh_sp
 train_tp = args.train_mesh_tp
-if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
+if P34_DEEPSWE:
+  train_dims = [("dp", 16), ("tp", 8)]
+elif any(v is not None for v in (train_fsdp, train_sp, train_tp)):
   train_dims = []
   train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
   if train_sp is not None:
@@ -726,10 +857,29 @@ rollout_shape = tuple(d for _, d in rollout_dims)
 train_axis_names = tuple(name for name, _ in train_dims)
 train_shape = tuple(d for _, d in train_dims)
 
-rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
-train_devices = np.array(
-    devices[num_rollout_devices : num_rollout_devices + num_train_devices]
-).reshape(train_shape)
+if P34_DEEPSWE:
+  rollout_role, trainer_role, placement_report = (
+      deepswe_contract.split_4x8x8_role_devices(devices)
+  )
+  rollout_devices = np.asarray(rollout_role, dtype=object).reshape(
+      rollout_shape
+  )
+  train_devices = np.asarray(trainer_role, dtype=object).reshape(train_shape)
+  print(
+      "[P34.TOPOLOGY] PASS "
+      f"rollout_devices={placement_report['rollout_devices']} "
+      f"trainer_devices={placement_report['trainer_devices']} "
+      f"rollout_processes={placement_report['rollout_processes']} "
+      f"trainer_processes={placement_report['trainer_processes']}",
+      flush=True,
+  )
+else:
+  rollout_devices = np.array(devices[:num_rollout_devices]).reshape(
+      rollout_shape
+  )
+  train_devices = np.array(
+      devices[num_rollout_devices : num_rollout_devices + num_train_devices]
+  ).reshape(train_shape)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
 train_mesh = Mesh(train_devices, axis_names=train_axis_names)
@@ -740,7 +890,11 @@ print(
 )
 print(f"*** Train Mesh *** | dims: {train_dims} | Shape: {train_mesh.shape}")
 
-if train_sp is not None:
+if P34_DEEPSWE:
+  dp_workloads.configure_replicated_parameter_sharding(
+      config, data_axis="dp"
+  )
+elif train_sp is not None:
   config.shd_config = model_lib.ShardingConfig.get_default_sharding(
       enable_sp=True
   )
@@ -862,13 +1016,15 @@ vllm_rollout_dict = {
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
     "tensor_parallel_size": rollout_mesh.shape.get("tp", 1),
-    "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
+    "data_parallel_size": rollout_mesh.shape.get(
+        "dp", rollout_mesh.shape.get("fsdp", 1)
+    ),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": True,
+        "enable_prefix_caching": not P34_DEEPSWE,
     },
 }
 
@@ -908,10 +1064,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
+        trajectory_mini_batch_size=(64 if P34_DEEPSWE else None),
+        train_trajectory_micro_batch_size=(4 if P34_DEEPSWE else None),
+        optimizer_offload=(True if P34_DEEPSWE else OPTIMIZER_OFFLOAD),
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
-        # optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -969,12 +1127,17 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 
 
 
-try:
+def initialize_wandb():
+  """Initializes the exact P34 online run or the legacy best-effort run."""
   import datetime
-  import wandb # pytype: disable=import-error
+  import wandb  # pytype: disable=import-error
 
   settings = wandb.Settings(console="off")
-  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  run_name = (
+      os.environ["CANON_WANDB_RUN_NAME"]
+      if P34_DEEPSWE
+      else datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  )
   wandb_config = {
       **vars(args),
       # Derived values not present in args
@@ -996,11 +1159,33 @@ try:
       "save_interval_steps": SAVE_INTERVAL_STEPS,
       "max_to_keep": MAX_TO_KEEP,
   }
-  wandb.init(
-      project="tunix", name=run_name, config=wandb_config, settings=settings
+  run = wandb.init(
+      project=(
+          os.environ["CANON_WANDB_PROJECT"] if P34_DEEPSWE else "tunix"
+      ),
+      group=(os.environ["CANON_WANDB_GROUP"] if P34_DEEPSWE else None),
+      name=run_name,
+      config=wandb_config,
+      settings=settings,
   )
-except Exception as e:
-  print(f"W&B initialization failed with error: {e}")
+  if P34_DEEPSWE:
+    if run is None or getattr(run, "mode", None) == "offline":
+      raise RuntimeError("P34 requires a live online W&B run")
+    print(
+        "[CANON_P34_WANDB] ONLINE_RUN_PASS "
+        f"project={os.environ['CANON_WANDB_PROJECT']} "
+        f"group={os.environ['CANON_WANDB_GROUP']} name={run_name}",
+        flush=True,
+    )
+
+
+if P34_DEEPSWE:
+  initialize_wandb()
+else:
+  try:
+    initialize_wandb()
+  except Exception as e:
+    print(f"W&B initialization failed with error: {e}")
 
 
 print("Starting training...", flush=True)

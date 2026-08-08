@@ -446,17 +446,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     from tunix.rl import alignment  # pylint: disable=g-import-not-at-top
     from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
     from tunix.rl import dp_workloads  # pylint: disable=g-import-not-at-top
+    from tunix.rl import deepswe_contract  # pylint: disable=g-import-not-at-top
 
     p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
     p33_workload = (
         os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
     )
+    p34_workload = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+    canonical_workload = p33_workload or p34_workload
     p33_no_commit = (
-        p33_workload
-        and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+        canonical_workload
+        and (
+            os.environ.get("CANON_P34_NO_COMMIT", "") == "1"
+            if p34_workload
+            else os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+        )
     )
     expected_mode = (
-        "train" if p31_convergence or p33_workload else "update-canary"
+        "train" if p31_convergence or canonical_workload else "update-canary"
     )
     if alignment.execution_mode() != expected_mode:
       raise alignment.AlignmentGateError(
@@ -472,7 +479,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     actor_trainer = self.rl_cluster.actor_trainer
     full_train = os.environ.get("CANON_P29_FULL_TRAIN", "") == "1"
     num_trajectories = int(train_example.completion_ids.shape[0])
-    if p33_workload:
+    if p34_workload:
+      deepswe_contract.validate_environment(os.environ)
+      workload = deepswe_contract.P34_WORKLOAD
+      trajectory_micro = workload.local_trajectories
+    elif p33_workload:
       workload = dp_workloads.active_workload()
       if workload is None:
         raise alignment.AlignmentGateError(
@@ -494,7 +505,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     expected_microbatches = num_trajectories // trajectory_micro
     expected_trajectories = (
         workload.global_trajectories
-        if p33_workload
+        if canonical_workload
         else 32 if p31_convergence else 8
     )
     if num_trajectories != expected_trajectories:
@@ -503,7 +514,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           f"{num_trajectories} != {expected_trajectories}"
       )
     marker_prefix = (
-        "[CANON_P33_DP16]"
+        "[CANON_P34_DP16]"
+        if p34_workload
+        else "[CANON_P33_DP16]"
         if p33_workload
         else "[CANON_FROZENLAKE_P31]"
         if p31_convergence
@@ -584,7 +597,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     fused_pair_accumulation = (
         os.environ.get("CANON_P30_FUSED_PAIR_ACCUMULATION", "") == "1"
     )
-    if p33_workload and fused_pair_accumulation:
+    if canonical_workload and fused_pair_accumulation:
       raise alignment.AlignmentGateError(
           "P33 uses rank-reduced scaled groups, not pair accumulation"
       )
@@ -660,9 +673,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "pad_id": self.rl_cluster.rollout.pad_id(),
           "eos_id": self.rl_cluster.rollout.eos_id(),
       }
-      if p33_workload:
+      if canonical_workload:
         result = adapter.segmented_dp_grpo_value_and_grad(
-            **common, gradient_microbatch_sink=consume_scaled
+            **common,
+            gradient_microbatch_sink=consume_scaled,
+            deterministic_repeat=(p34_workload and p33_no_commit),
         )
       else:
         result = adapter.segmented_grpo_value_and_grad(
@@ -684,6 +699,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           f"result={result['gradient_microbatches']} "
           f"norms={len(micro_norms)} expected={expected_microbatches}"
       )
+    gradient_deterministic = result.get("gradient_deterministic_repeat")
+    if p34_workload and p33_no_commit:
+      if gradient_deterministic is not True:
+        raise alignment.AlignmentGateError(
+            "P34 repeated backward-no-commit gradients are not array-exact"
+        )
+      print(
+          "[CANON_P34_DP16] deterministic_repeat array_exact=1 repeats=2",
+          flush=True,
+      )
     hbm_after_accumulation = memory_snapshot()
     emit_sharding_inventory("after_accumulation")
 
@@ -692,7 +717,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     for index in range(expected_microbatches):
       rows = (
           tuple(result["reports"][index]["trajectory_rows"])
-          if p33_workload
+          if canonical_workload
           else tuple(range(
               index * trajectory_micro,
               (index + 1) * trajectory_micro,
@@ -710,7 +735,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       active = (
           result["reports"][index]["gradient_nonzero"] > 0
-          if p33_workload
+          if canonical_workload
           else any(
               report["loss_cotangent"]["nonzero"] > 0
               for report in result["reports"][rows[0] : rows[-1] + 1]
@@ -784,6 +809,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "train_steps_before": before["train_steps"],
           "train_steps_after": actor_trainer.train_steps,
           "gradient_activity": activity,
+          "gradient_finite": all(
+              np.isfinite(float(np.asarray(value))) for value in micro_norms
+          ),
+          "gradient_deterministic": gradient_deterministic,
+          "dp_replicas_exact": result["replica_equality"],
+          "dp_reduction_transactions": result["dp_reduction_transactions"],
+          "dp_reduction_rounds_per_transaction": result[
+              "dp_reduction_rounds_per_transaction"
+          ],
+          "dp_rank_pullbacks_per_transaction": result[
+              "dp_rank_pullbacks_per_transaction"
+          ],
           "micro_gradient_norms": [
               float(np.asarray(value)) for value in micro_norms
           ],
@@ -928,6 +965,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "train_steps_before": before["train_steps"],
         "train_steps_after": actor_trainer.train_steps,
         "gradient_activity": activity,
+        "gradient_finite": all(
+            np.isfinite(float(np.asarray(value))) for value in micro_norms
+        ),
+        "dp_replicas_exact": result["replica_equality"],
+        "dp_reduction_transactions": result["dp_reduction_transactions"],
+        "dp_reduction_rounds_per_transaction": result[
+            "dp_reduction_rounds_per_transaction"
+        ],
+        "dp_rank_pullbacks_per_transaction": result[
+            "dp_rank_pullbacks_per_transaction"
+        ],
         "has_learning_signal": has_learning_signal,
         "micro_gradient_norms": [float(np.asarray(x)) for x in micro_norms],
         "commit_gradient_norm": float(np.asarray(commit_norm)),
@@ -1805,11 +1853,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         p33_workload = (
             os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
         )
+        p34_workload = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+        canonical_workload = p33_workload or p34_workload
         p31_convergence = (
             os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
         )
-        expected_total = 256 if p33_workload else 32 if p31_convergence else 8
-        expected_trajectory_micro = 16 if p33_workload else 2
+        expected_total = (
+            64
+            if p34_workload
+            else 256
+            if p33_workload
+            else 32
+            if p31_convergence
+            else 8
+        )
+        expected_trajectory_micro = (
+            4 if p34_workload else 16 if p33_workload else 2
+        )
         expected_grad_acc = expected_total // expected_trajectory_micro
         if (
             is_packed
@@ -1823,7 +1883,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               f"grad_acc={expected_grad_acc}"
           )
         marker_prefix = (
-            "[CANON_P33_DP16]"
+            "[CANON_P34_DP16]"
+            if p34_workload
+            else "[CANON_P33_DP16]"
             if p33_workload
             else "[CANON_FROZENLAKE_P31]"
             if p31_convergence
@@ -1840,15 +1902,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             merged_train_micro_batch
         )
         if (
-            p33_workload
-            and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+            canonical_workload
+            and (
+                os.environ.get("CANON_P34_NO_COMMIT", "") == "1"
+                if p34_workload
+                else os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+            )
         ):
           if (
               segmented_result.get("verdict") != "PASS"
               or segmented_result.get("commits") != 0
           ):
             raise RuntimeError(
-                "P33 backward no-commit did not produce its signed verdict"
+                "canonical backward no-commit did not produce its signed verdict"
             )
           prompt_queue.put(None)
           _ = producer_future.result()

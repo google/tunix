@@ -41,6 +41,7 @@ from tunix.generate import utils as generate_utils
 from tunix.rl import canonical_logsoftmax
 from tunix.rl import dp_training
 from tunix.rl import dp_workloads
+from tunix.rl import deepswe_contract
 
 
 class FunctionalMappingError(ValueError):
@@ -67,9 +68,10 @@ def _canonical_topology_contract() -> tuple[int, int, int, int]:
       raise FunctionalMappingError(
           "P32 topology values must be integers"
       ) from exc
-    if (data_size, tp_size) != (16, 4):
+    expected_tp = 8 if os.environ.get("CANON_P34_DEEPSWE", "") == "1" else 4
+    if (data_size, tp_size) != (16, expected_tp):
       raise FunctionalMappingError(
-          "P32 training admits exactly DP16xTP4; got "
+          f"canonical training admits exactly DP16xTP{expected_tp}; got "
           f"DP{data_size}xTP{tp_size}"
       )
     if local_m != 256 or target_m != local_m:
@@ -172,18 +174,23 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
   """Builds the one shared rollout/trainer logprob function object."""
 
   data_size, _, local_m, global_m = _canonical_topology_contract()
+  compact_rows_per_rank = local_m // data_size
 
   def local_log_softmax(logits):
     if data_size > 1:
-      if logits.shape[0] != global_m:
-        raise FunctionalMappingError(
-            "P32 log-softmax global row count changed: "
-            f"{logits.shape[0]} != {global_m}"
+      rows = int(logits.shape[0])
+      if rows == compact_rows_per_rank:
+        logits = jnp.pad(
+            logits,
+            ((0, local_m - rows), (0, 0)),
+            constant_values=jnp.float32(0),
         )
-      data_rank = jax.lax.axis_index("data")
-      logits = jax.lax.dynamic_slice_in_dim(
-          logits, data_rank * local_m, local_m, axis=0
-      )
+        return canonical_logsoftmax.log_softmax(logits)[:rows]
+      if rows != local_m:
+        raise FunctionalMappingError(
+            "canonical log-softmax per-rank row count changed: "
+            f"{rows} not in ({compact_rows_per_rank}, {local_m})"
+        )
     return canonical_logsoftmax.log_softmax(logits)
 
   row_spec = _canonical_logprob_row_spec(mesh)
@@ -192,7 +199,7 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
     mapped_log_softmax = jax.shard_map(
         local_log_softmax,
         mesh=mesh,
-        in_specs=jax.sharding.PartitionSpec(None, None),
+        in_specs=row_spec,
         out_specs=row_spec,
         check_vma=False,
     )
@@ -200,12 +207,18 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
     mapped_log_softmax = jax.shard_map(
         local_log_softmax,
         mesh=mesh,
-        in_specs=jax.sharding.PartitionSpec(None, None),
+        in_specs=row_spec,
         out_specs=row_spec,
         check_rep=False,
     )
 
   def compute_and_gather(logits, next_tokens, max_logprobs):
+    rows = int(logits.shape[0])
+    if data_size > 1 and rows not in (local_m, global_m):
+      raise FunctionalMappingError(
+          "canonical log-softmax global row count changed: "
+          f"{rows} not in ({local_m}, {global_m})"
+      )
     logprobs = mapped_log_softmax(logits)
     return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
@@ -2106,6 +2119,7 @@ class Qwen3EngineForwardAdapter:
       pad_id,
       eos_id,
       gradient_microbatch_sink=None,
+      deterministic_repeat=False,
   ):
     """Runs rank-local DP16 reverse and one fixed reduction per group.
 
@@ -2124,13 +2138,15 @@ class Qwen3EngineForwardAdapter:
       raise FunctionalMappingError(
           "P32 DP16 reverse requires CANON_P32_DP16_SEGMENTED=1"
       )
+    p34 = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+    expected_tp = 8 if p34 else 4
     if (
         os.environ.get("CANON_P32_TRAIN_ADMITTED", "") != "1"
         or self._data_size != 16
-        or self._tp_size != 4
+        or self._tp_size != expected_tp
     ):
       raise FunctionalMappingError(
-          "P32 grouped reverse requires the admitted DP16xTP4 contract"
+          f"grouped reverse requires the admitted DP16xTP{expected_tp} contract"
       )
     if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") != "1":
       raise FunctionalMappingError(
@@ -2144,16 +2160,22 @@ class Qwen3EngineForwardAdapter:
           "P33 rank-local reverse requires admitted reduction and workload "
           "launch gates"
       )
-    workload = dp_workloads.active_workload()
-    if workload is None:
-      raise FunctionalMappingError(
-          "P33 rank-local reverse requires CANON_P32_WORKLOAD"
+    if p34:
+      deepswe_contract.validate_environment(os.environ)
+      workload = deepswe_contract.P34_WORKLOAD
+      contract = workload
+      reverse_groups = contract.rank_major_rows()
+    else:
+      workload = dp_workloads.active_workload()
+      if workload is None:
+        raise FunctionalMappingError(
+            "P33 rank-local reverse requires CANON_P32_WORKLOAD"
+        )
+      dp_workloads.validate_environment(
+          workload, require_reduction_admission=True
       )
-    dp_workloads.validate_environment(
-        workload, require_reduction_admission=True
-    )
-    contract = workload.training_contract()
-    reverse_groups = contract.rank_major_reverse_groups()
+      contract = workload.training_contract()
+      reverse_groups = contract.rank_major_reverse_groups()
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
 
@@ -2198,7 +2220,7 @@ class Qwen3EngineForwardAdapter:
     )
     if (int(prompts.shape[1]), int(completions.shape[1])) != expected_widths:
       raise FunctionalMappingError(
-          f"P33 {workload.name} token contract changed: "
+          f"canonical {getattr(workload, 'name', 'deepswe')} token contract changed: "
           f"{prompts.shape[1]}/{completions.shape[1]} != "
           f"{expected_widths[0]}/{expected_widths[1]}"
       )
@@ -2239,8 +2261,9 @@ class Qwen3EngineForwardAdapter:
       segmented = build_p28_segmented_engine_forward(self._runner)
       self._p32_d3b_segmented_engine = segmented
       print(
-          "[P32.DP16] segmented_engine_ready data=16 groups=16 "
-          "local_batch=16 local_M=256 global_M=4096",
+          "[P34.DP16] segmented_engine_ready "
+          f"data=16 tp={self._tp_size} groups={contract.local_trajectories} "
+          "local_M=256 global_M=4096",
           flush=True,
       )
 
@@ -2296,10 +2319,10 @@ class Qwen3EngineForwardAdapter:
     )
     scale = loss_output.primary_loss.compute_scale()
 
-    trainer_gradients = None
     reducer = None
-    reports = []
-    for index, spec in enumerate(specs):
+
+    def reverse_reduce_group(index, spec):
+      nonlocal reducer
       rank_counts = []
       cache_nonzero = 0
       for rank in range(contract.dp_size):
@@ -2353,7 +2376,7 @@ class Qwen3EngineForwardAdapter:
               value.delete()
       one_gradient, reduction_report = reducer.finalize()
       leaves = jax.tree.leaves(one_gradient)
-      reports.append({
+      report = {
           "group": index,
           "trajectory_rows": reverse_groups[index],
           "n_real": spec["host_n_real"],
@@ -2367,15 +2390,51 @@ class Qwen3EngineForwardAdapter:
           ),
           "initial_cache_cotangent_nonzero": cache_nonzero,
           "dp_reduction": reduction_report,
-      })
+      }
+      return one_gradient, report
+
+    trainer_gradients = None
+    reports = []
+    for index, spec in enumerate(specs):
+      one_gradient, report = reverse_reduce_group(index, spec)
+      if deterministic_repeat:
+        repeated_gradient, repeated_report = reverse_reduce_group(index, spec)
+        exact_flags = tuple(
+            bool(np.asarray(jnp.array_equal(first, second)))
+            for first, second in zip(
+                jax.tree.leaves(one_gradient),
+                jax.tree.leaves(repeated_gradient),
+                strict=True,
+            )
+        )
+        report["deterministic_repeat_exact"] = (
+            bool(exact_flags)
+            and all(exact_flags)
+            and report["dp_reduction"]["rank_local_fingerprints"]
+            == repeated_report["dp_reduction"]["rank_local_fingerprints"]
+        )
+        report["deterministic_repeat_leaf_checks"] = len(exact_flags)
+        seen = set()
+        for value in jax.tree.leaves(repeated_gradient):
+          if isinstance(value, jax.Array) and id(value) not in seen:
+            seen.add(id(value))
+            if not value.is_deleted():
+              value.delete()
+        if not report["deterministic_repeat_exact"]:
+          raise FunctionalMappingError(
+              f"P34 group {index} repeated gradient is not array-exact"
+          )
+      reports.append(report)
       print(
-          "[P33.DP16] reverse_group_done "
+          f"[{'P34' if p34 else 'P33'}.DP16] reverse_group_done "
           f"group={index + 1}/{contract.local_trajectories} "
           f"rows={reverse_groups[index]} "
-          f"rank_pullbacks={reduction_report['rank_contributions']} "
-          f"reduction_rounds={reduction_report['reduction_rounds']} "
-          f"replicas_exact={int(reduction_report['post_reduction_replicas_exact'])} "
-          f"gradient_nonzero={reports[-1]['gradient_nonzero']}",
+          f"rank_pullbacks={report['dp_reduction']['rank_contributions']} "
+          f"reduction_rounds={report['dp_reduction']['reduction_rounds']} "
+          "replicas_exact="
+          f"{int(report['dp_reduction']['post_reduction_replicas_exact'])} "
+          f"gradient_nonzero={report['gradient_nonzero']} "
+          f"repeat_exact={int(report.get('deterministic_repeat_exact', False))}",
           flush=True,
       )
       if gradient_microbatch_sink is None:
@@ -2389,10 +2448,10 @@ class Qwen3EngineForwardAdapter:
             )
         )
       else:
-        # The accumulator averages its 16 streamed microsteps. Each reduced
-        # group is an unreduced sum over one trajectory from every DP rank, so
+        # The accumulator averages its streamed groups. Each reduced group is
+        # an unreduced sum over one trajectory from every DP rank, so
         # multiplying by the group count makes the final accumulator value
-        # exactly ``scale * sum(all 256 trajectory gradients)``.
+        # exactly ``scale * sum(all trajectory gradients)``.
         gradient_microbatch_sink(
             index,
             one_gradient,
@@ -2441,6 +2500,15 @@ class Qwen3EngineForwardAdapter:
             dp_training.fixed_dp_collective_count(contract.dp_size)
         ),
         "dp_rank_pullbacks_per_transaction": contract.dp_size,
+        "gradient_deterministic_repeat": (
+            bool(reports)
+            and all(
+                report.get("deterministic_repeat_exact") is True
+                for report in reports
+            )
+            if deterministic_repeat
+            else None
+        ),
     }
 
 

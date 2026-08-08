@@ -53,6 +53,9 @@ def matmul(
     *,
     interpret: bool = False,
     shape_invariant_numerics: bool = True,
+    block_m: int = BM,
+    block_n: int = BN,
+    block_k: int = BK,
 ):
     """Compute bf16 [M,K] @ [K,N] with fixed BM/BN/BK and f32 accumulation."""
     jax, jnp, pl, pltpu = _imports()
@@ -64,9 +67,12 @@ def matmul(
         raise ValueError(f"P22.XE contracted dimensions differ: {k} vs {ky}")
     if x.dtype != jnp.bfloat16 or y.dtype != jnp.bfloat16:
         raise ValueError(f"P22.XE requires bf16 inputs, got {x.dtype}, {y.dtype}")
-    if m % BM or n % BN or k % BK:
+    if min(block_m, block_n, block_k) <= 0:
+        raise ValueError("P22.XE block sizes must be positive")
+    if m % block_m or n % block_n or k % block_k:
         raise ValueError(
-            f"P22.XE shape must divide BM/BN/BK={BM}/{BN}/{BK}, got {(m, k, n)}"
+            "P22.XE shape must divide BM/BN/BK="
+            f"{block_m}/{block_n}/{block_k}, got {(m, k, n)}"
         )
 
     def _kernel(x_ref, y_ref, out_ref, acc_ref):
@@ -85,12 +91,12 @@ def matmul(
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                pl.BlockSpec((BM, BK), lambda i, _j, q: (i, q)),
-                pl.BlockSpec((BK, BN), lambda _i, j, q: (q, j)),
+                pl.BlockSpec((block_m, block_k), lambda i, _j, q: (i, q)),
+                pl.BlockSpec((block_k, block_n), lambda _i, j, q: (q, j)),
             ],
-            out_specs=pl.BlockSpec((BM, BN), lambda i, j, _q: (i, j)),
-            grid=(m // BM, n // BN, k // BK),
-            scratch_shapes=[pltpu.VMEM((BM, BN), jnp.float32)],
+            out_specs=pl.BlockSpec((block_m, block_n), lambda i, j, _q: (i, j)),
+            grid=(m // block_m, n // block_n, k // block_k),
+            scratch_shapes=[pltpu.VMEM((block_m, block_n), jnp.float32)],
         ),
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary"),
@@ -98,7 +104,7 @@ def matmul(
             shape_invariant_numerics=shape_invariant_numerics,
         ),
         interpret=interpret,
-        name="canon_matmul_bm128_bn256_bk256",
+        name=f"canon_matmul_bm{block_m}_bn{block_n}_bk{block_k}",
     )(x, y)
 
 

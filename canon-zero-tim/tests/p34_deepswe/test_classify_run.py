@@ -1,0 +1,152 @@
+"""Positive and one-fault-at-a-time tests for the P34 classifier."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import sys
+import unittest
+
+
+PATH = Path(__file__).with_name("classify_run.py")
+SPEC = importlib.util.spec_from_file_location("p34_classifier", PATH)
+if SPEC is None or SPEC.loader is None:
+  raise RuntimeError("cannot import P34 classifier")
+classifier = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = classifier
+SPEC.loader.exec_module(classifier)
+
+
+def _alignment():
+  return {
+      "verdict": "PASS",
+      "boundaries": {
+          name: {"differing_bytes": 0}
+          for name in (
+              "S_decode_vs_S_prefill",
+              "S_prefill_vs_T_old",
+              "T_old_vs_T_current",
+          )
+      },
+      "exact": {
+          "w_all_exactly_1": True,
+          "r_all_exactly_1": True,
+          "wr_all_exactly_1": True,
+      },
+      "clip_hits": 0,
+      "tis_hits": 0,
+  }
+
+
+def _log(updates: int):
+  return "\n".join((
+      "[entrypoint] JOBSET_ATTEMPT 0 (first attempt)",
+      "[P34.PATHWAYS] initialized_once=1 before_jax=1",
+      "[P34.CLI] PASS",
+      "[sync] provenance ok",
+      "[env] P34 whitelist SHA256 OK: " + "a" * 64,
+      "[P34.TOPOLOGY] PASS",
+      "[P34.DATASET] GOLD_FILTER_PASS rows=10->8 images=8",
+      "[P34.R2E] BOUNDED_KUBERNETES_PATCH_PASS",
+      "[CANON_P34_WANDB] ONLINE_RUN_PASS",
+      "CANON_FIXED_AR=1 fixed-order tree",
+      "CANON_FIXED_AR_EMBED=1 fixed-order embed gather",
+      "CANON_LOGPROB_M on",
+      *(["[P28.G6] weight_sync_committed count=1"] * updates),
+  ))
+
+
+class ClassifierTest(unittest.TestCase):
+
+  def test_three_update_positive(self):
+    updates = [{
+        "verdict": "PASS",
+        "commits": 1,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "gradient_deterministic": True,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_memory_kinds_after": ["pinned_host"],
+        "train_steps_after": step,
+    } for step in (1, 2, 3)]
+    report = classifier.classify(
+        log_text=_log(3),
+        alignment=[_alignment() for _ in range(12)],
+        updates=updates,
+        stage="three-update",
+    )
+    self.assertEqual(report["verdict"], "PASS")
+
+  def test_one_bit_boundary_is_rejected(self):
+    records = [_alignment() for _ in range(4)]
+    records[2]["boundaries"]["T_old_vs_T_current"]["differing_bytes"] = 1
+    update = {
+        "verdict": "PASS",
+        "commits": 1,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_memory_kinds_after": ["pinned_host"],
+        "train_steps_after": 1,
+    }
+    report = classifier.classify(
+        log_text=_log(1), alignment=records, updates=[update], stage="one-update"
+    )
+    self.assertEqual(report["verdict"], "FAIL")
+    self.assertIn("four_boundaries_exact", report["failed"])
+
+  def test_retry_is_rejected(self):
+    update = {
+        "verdict": "PASS",
+        "commits": 0,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "gradient_deterministic": True,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+    }
+    report = classifier.classify(
+        log_text=_log(0).replace("ATTEMPT 0", "ATTEMPT 1"),
+        alignment=[_alignment() for _ in range(4)],
+        updates=[update],
+        stage="backward-no-commit",
+    )
+    self.assertEqual(report["verdict"], "FAIL")
+    self.assertIn("attempt_zero", report["failed"])
+
+  def test_missing_full_gradient_repeat_is_rejected(self):
+    update = {
+        "verdict": "PASS",
+        "commits": 0,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "gradient_deterministic": False,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+    }
+    report = classifier.classify(
+        log_text=_log(0),
+        alignment=[_alignment() for _ in range(4)],
+        updates=[update],
+        stage="backward-no-commit",
+    )
+    self.assertEqual(report["verdict"], "FAIL")
+    self.assertIn("gradient_deterministic_repeat", report["failed"])
+
+
+if __name__ == "__main__":
+  unittest.main()
