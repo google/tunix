@@ -127,6 +127,9 @@ sha256sum -c evidence/package_artifacts.sha256
   Its SHA-256 is `4e10d400c7f5330e66ea6a96b5dbb0d0163560b35753081a18f2cca8c3750e62`.
 - `p32_3_rc_one_update_xla1200_fail.raw.log` preserves the Stage 3 diagnostic run (`hpdfs`).
   Its SHA-256 is `1c1f69ae07f6659181dfc10a32b8593560603b60ca7c9a028accf37a41e459cb`.
+  The run reached the post-commit diagnostic fingerprint and then failed with
+  XLA E1200 because a JAX reshape was applied after the optimizer state moved
+  to `pinned_host`. It contains no final JSON or Stage 3 numerical verdict.
 
 
 | Stage | Attempt | Devices | DP x TP | Trajectories (Global/Local) | Checkpoint Loaded | Gradient Health (Norm / Nonzero) | Repeat Exactness | Status |

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from flax import nnx
 import jax
@@ -16,6 +17,7 @@ import optax
 
 from tunix.models.qwen3 import model as model_lib
 
+import probe_qwen8b_rc as probe_rc
 from probe_qwen8b_rc import _build_optimizer_state
 from probe_qwen8b_rc import _commit_program
 from probe_qwen8b_rc import _make_inputs
@@ -175,6 +177,35 @@ class ProbeRCTest(unittest.TestCase):
       )
       parameter_fingerprints.append(_sample_tree_sha256(params))
     self.assertEqual(len(set(parameter_fingerprints)), 3)
+
+  def test_tree_sample_rejects_pinned_host_state(self):
+    pinned = _put_memory_kind(self.state, "pinned_host")
+    self.assertEqual(_state_memory_kinds(pinned), ("pinned_host",))
+    with self.assertRaisesRegex(ValueError, "before optimizer state moves"):
+      _sample_tree_sha256(pinned)
+
+  def test_one_update_fingerprints_before_optimizer_offload(self):
+    model = nnx.merge(self.graphdef, self.state)
+    with (
+        mock.patch.object(
+            probe_rc, "_EXPECTED_PARAM_LEAVES", len(jax.tree.leaves(self.state))
+        ),
+        mock.patch.object(probe_rc, "_GLOBAL_TRAJECTORIES", 4),
+        mock.patch.object(probe_rc, "_LOCAL_TRAJECTORIES", 2),
+        mock.patch.object(probe_rc, "_DP_SIZE", 2),
+        mock.patch.object(probe_rc, "_TP_SIZE", 2),
+        mock.patch.object(probe_rc, "_SEQ_LEN", 4),
+    ):
+      result = probe_rc._run_stage(
+          stage="one-update", model=model, mesh=self.mesh
+      )
+    self.assertEqual(result["execution"]["optimizer_updates"], 1)
+    self.assertEqual(result["optimizer_state_memory_during_commit"], ["device"])
+    self.assertEqual(result["optimizer_state_memory_between_commits"], ["pinned_host"])
+    self.assertEqual(len(result["step_records"]), 1)
+    self.assertRegex(
+        result["step_records"][0]["optimizer_sample_sha256"], r"^[0-9a-f]{64}$"
+    )
 
 
 if __name__ == "__main__":

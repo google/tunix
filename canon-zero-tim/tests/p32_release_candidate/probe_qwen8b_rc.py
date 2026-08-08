@@ -157,6 +157,11 @@ def _tree_health(tree: Any) -> dict[str, Any]:
 
 
 def _sample_tree_sha256(tree: Any, *, samples_per_leaf: int = 8) -> str:
+  memory_kinds = _state_memory_kinds(tree)
+  if "pinned_host" in memory_kinds:
+    raise ValueError(
+        "tree sampling must run before optimizer state moves to pinned_host"
+    )
   digest = hashlib.sha256()
   leaves = jax.tree.leaves(tree)
   for index, leaf in enumerate(leaves):
@@ -611,13 +616,15 @@ def _run_stage(
       jax.block_until_ready((params, optimizer_state))
       if _tree_exact(params_before, params):
         raise RuntimeError("optimizer commit did not change parameters")
+      if _state_memory_kinds(optimizer_state) != ("device",):
+        raise RuntimeError("committed optimizer state did not remain on device")
+      parameter_sample_sha256 = _sample_tree_sha256(params)
+      optimizer_sample_sha256 = _sample_tree_sha256(optimizer_state)
       optimizer_state = _put_memory_kind(optimizer_state, "pinned_host")
       if _state_memory_kinds(optimizer_state) != ("pinned_host",):
         raise RuntimeError("optimizer state did not return to pinned_host")
-      step_record["parameter_sample_sha256"] = _sample_tree_sha256(params)
-      step_record["optimizer_sample_sha256"] = _sample_tree_sha256(
-          optimizer_state
-      )
+      step_record["parameter_sample_sha256"] = parameter_sample_sha256
+      step_record["optimizer_sample_sha256"] = optimizer_sample_sha256
       first_gradients = None
     result["step_records"].append(step_record)
 
