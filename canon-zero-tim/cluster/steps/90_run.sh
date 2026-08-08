@@ -6,6 +6,13 @@
 # checked afterwards: an intervention that never fired produces a perfectly green run.
 set -uo pipefail
 source "$CANON_STATE/env.sh"
+for k in HF_TOKEN WANDB_API_KEY; do
+  inj="INJECTED_$k"
+  if [ -n "${!inj:-}" ]; then
+    v="$(printf '%s' "${!inj}" | tr -d '[:space:]')"
+    export "$k=$v"
+  fi
+done
 export JAX_PLATFORMS="proxy,cpu"
 export JAX_BACKEND_TARGET="grpc://localhost:29000"
 export PATHWAYS_HEAD="localhost"
