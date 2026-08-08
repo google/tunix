@@ -128,5 +128,5 @@ sha256sum -c evidence/package_artifacts.sha256
 - **Diagnostic Finding**: `probe_qwen8b_rc.py` sets `config.use_flash_attention = True` with `flash_attention_block_size = 256` while evaluating contract sequence length `_SEQ_LEN = 16`. Pallas Splash Attention raises `ValueError: q_block_size=256 should divide q_seq_len=16`.
 - **Applied resolution**: Align `config.use_flash_attention = False` with the
   bounded 16-token reference contract, record `attention_backend=dense-reference`
-  in the classified artifact, and leave production Splash coverage to a
-  workload-scale gate with a compatible sequence/block geometry.
+  in the classified artifact, and keep this native Tunix smoke separate from
+  the final canonical `tpu_inference` RPA workload gates.

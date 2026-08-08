@@ -177,8 +177,9 @@ Use `cluster/profiles/qwen3-8b-dp16-tp4-rc.env` and set exactly one
 
 1. `checkpoint-forward`: load the safetensors checkpoint and repeat the bounded
    16-token Qwen3-8B dense-reference forward. This systems RC does not claim
-   production Splash Attention coverage; admit that backend with a
-   workload-scale gate whose sequence length is compatible with its block size.
+   native Tunix Splash Attention or final zero-TIM coverage. The final aligned
+   actor uses the canonical `tpu_inference` RPA path, which has separate
+   workload gates.
 2. `backward`: repeat two no-commit gradient transactions and require exact gradient equality.
 3. `one-update`: initialize AdamW in pinned-host memory and perform one measured commit.
 4. `three-update`: perform three monotonic commits and verify state movement on every step.

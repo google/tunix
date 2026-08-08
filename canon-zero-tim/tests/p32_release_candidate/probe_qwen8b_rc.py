@@ -56,8 +56,9 @@ def _release_candidate_model_config() -> model_lib.ModelConfig:
   The RC deliberately uses a 16-token sequence to keep the real-checkpoint
   systems probe bounded. Splash Attention with the production block size of
   256 cannot represent that shape because the query block must divide the
-  query sequence length. The production Splash path is therefore outside this
-  RC's claim and must be admitted by a workload-scale gate.
+  query sequence length. The native Tunix Splash path is therefore outside
+  this RC's claim. The final zero-TIM actor uses the canonical tpu_inference
+  RPA path and is admitted separately by its workload gates.
   """
   config = model_lib.ModelConfig.qwen3_8b()
   config.dtype = jnp.bfloat16
