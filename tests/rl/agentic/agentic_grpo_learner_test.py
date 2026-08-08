@@ -15,6 +15,7 @@
 """Tests for agentic_grpo_learner."""
 
 import asyncio
+import contextlib
 import functools
 import os
 import queue
@@ -54,6 +55,7 @@ from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepR
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
+from tunix.sft import peft_trainer
 from tunix.tests import test_common
 from tunix.utils import trajectory_logger
 from typing_extensions import override
@@ -227,6 +229,144 @@ class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
 
 
 class AgenticGrpoLearnerTest(parameterized.TestCase):
+
+  def test_p33_backward_no_commit_preserves_training_state(self):
+    class TinyModel(nnx.Module):
+
+      def __init__(self):
+        self.weight = nnx.Param(
+            jnp.arange(256, dtype=jnp.float32).reshape(16, 16)
+        )
+
+    class FakeAdapter:
+
+      def __init__(self, trainer):
+        self._trainer = trainer
+
+      def segmented_dp_grpo_value_and_grad(
+          self, *, gradient_microbatch_sink, **kwargs
+      ):
+        del kwargs
+        template = nnx.state(self._trainer.model, nnx.Param)
+        reports = []
+        for local_index in range(16):
+          gradient = jax.tree.map(
+              lambda value: type(value)(jnp.ones_like(value[...])),
+              template,
+              is_leaf=lambda value: isinstance(value, nnx.Variable),
+          )
+          gradient_microbatch_sink(
+              local_index, gradient, jnp.asarray(1.0, jnp.float32)
+          )
+          reports.append({
+              "trajectory_rows": tuple(
+                  local_index + 16 * rank for rank in range(16)
+              ),
+              "gradient_nonzero": 256,
+          })
+        return {
+            "loss": jnp.asarray(1.0, jnp.float32),
+            "per_token_logps": jnp.zeros((256, 2), jnp.float32),
+            "gradient_microbatches": 16,
+            "reports": tuple(reports),
+        }
+
+    trainer = rl_trainer.Trainer(
+        TinyModel(),
+        optax.adam(1.0e-3),
+        peft_trainer.TrainingConfig(
+            eval_every_n_steps=100,
+            max_steps=1,
+            gradient_accumulation_steps=16,
+            checkpoint_root_directory=None,
+        ),
+        custom_checkpoint_metadata_fn=lambda: {},
+    )
+    trainer_before = {
+        "model": trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(trainer.model, nnx.Param)
+        ),
+        "optimizer": trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(trainer.grad_accumulator), min_elements=1
+        ),
+    }
+    rollout = types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 2)
+    cluster = types.SimpleNamespace(
+        actor_trainer=trainer,
+        rollout=rollout,
+        reference=None,
+        inference_worker=None,
+        _get_mesh_and_logical_axis_rules_cm=lambda role: contextlib.nullcontext(),
+    )
+    learner = object.__new__(agentic_grpo_learner.GRPOLearner)
+    learner.rl_cluster = cluster
+    learner.algo_config = types.SimpleNamespace()
+    train_example = types.SimpleNamespace(
+        completion_ids=jnp.zeros((256, 2), jnp.int32)
+    )
+    sidecar = {"value": jnp.zeros((256, 2), jnp.float32)}
+    workload = types.SimpleNamespace(
+        global_trajectories=256, local_trajectories=16
+    )
+    env = {
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P29_FULL_TRAIN": "1",
+    }
+    with tempfile.TemporaryDirectory() as directory:
+      report_path = os.path.join(directory, "no_commit.json")
+      env["CANON_UPDATE_REPORT"] = report_path
+      with (
+          mock.patch.dict(os.environ, env, clear=False),
+          mock.patch.object(alignment, "execution_mode", return_value="train"),
+          mock.patch.object(
+              alignment,
+              "unwrap_train_example",
+              return_value=(train_example, sidecar),
+          ),
+          mock.patch.object(
+              alignment,
+              "check_batch",
+              return_value={"hashes": {"all": "same"}},
+          ),
+          mock.patch(
+              "tunix.rl.canonical_forward.require_registered",
+              return_value=FakeAdapter(trainer),
+          ),
+          mock.patch(
+              "tunix.rl.dp_workloads.active_workload",
+              return_value=workload,
+          ),
+          mock.patch("tunix.rl.dp_workloads.validate_environment"),
+      ):
+        result = learner._run_p28_g6_update(  # pylint: disable=protected-access
+            object()
+        )
+
+      self.assertEqual(result["verdict"], "PASS")
+      self.assertEqual(result["commits"], 0)
+      self.assertEqual(result["train_steps_before"], 0)
+      self.assertEqual(result["train_steps_after"], 0)
+      self.assertTrue(os.path.exists(report_path))
+    trainer_after = {
+        "model": trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(trainer.model, nnx.Param)
+        ),
+        "optimizer": trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+            nnx.state(trainer.grad_accumulator), min_elements=1
+        ),
+    }
+    for label in trainer_before:
+      self.assertEmpty(trainer._canon_changed_paths(  # pylint: disable=protected-access
+          trainer_before[label], trainer_after[label]
+      ))
 
   def test_p28_g6_reference_fingerprint_accepts_generic_variables(self):
     class _InferenceReference(nnx.Module):

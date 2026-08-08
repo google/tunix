@@ -28,6 +28,7 @@ from unittest import mock
 
 from tunix.rl import algo_core
 from tunix.rl import canonical_qwen3_adapter
+from tunix.rl import dp_training
 
 
 def _state(tree):
@@ -496,6 +497,39 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         reverse_group, adapter
     )
 
+    class FakeReducer:
+
+      def __init__(self, template, *, dp_size):
+        del template
+        self.dp_size = dp_size
+        self.values = []
+
+      def begin(self):
+        self.values = []
+
+      def add(self, rank, contribution):
+        if rank != len(self.values):
+          raise ValueError("rank cadence changed")
+        copied = jax.tree.map(lambda value: value + 0, contribution)
+        jax.block_until_ready(copied)
+        self.values.append(copied)
+
+      def finalize(self):
+        reduced = dp_training.fixed_dp_sum(self.values)
+        fingerprints = tuple(f"rank-{rank}" for rank in range(self.dp_size))
+        return reduced, {
+            "dp_size": self.dp_size,
+            "rank_contributions": self.dp_size,
+            "rank_local_fingerprints": fingerprints,
+            "rank_local_fingerprints_distinct": True,
+            "reduction_transactions": 1,
+            "reduction_rounds": 8,
+            "replica_check_flags": self.dp_size,
+            "post_reduction_replicas_exact": True,
+        }
+
+    adapter._p33_gradient_reducer_factory = FakeReducer  # pylint: disable=protected-access
+
     prompt_ids = jnp.zeros((256, 4096), jnp.int32).at[:, :2].set(
         jnp.asarray([1, 2], jnp.int32)
     )
@@ -542,7 +576,51 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     env = {
         "CANON_P32_DP16_SEGMENTED": "1",
         "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+            "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_DISABLE_EVAL": "1",
+            "CANON_WANDB_ONLINE_REQUIRED": "1",
+          "CANON_P31_MONOTONIC_METRICS": "1",
+          "CANON_WANDB_PROJECT": "zero-tim-frozenlake-dp16-tp4",
+          "CANON_WANDB_GROUP": "qwen3-8b-dp16-tp4",
+          "CANON_WANDB_RUN_NAME": "p33-frozenlake-adapter-test",
+          "WANDB_MODE": "online",
+          "WANDB_API_KEY": "test-key-not-a-credential",
         "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P32_WORKLOAD": "frozenlake",
+        "CANON_DP_SIZE": "16",
+        "CANON_TP_SIZE": "4",
+        "CANON_TOTAL_DEVICES": "64",
+        "CANON_GLOBAL_PROMPTS": "32",
+        "CANON_LOCAL_PROMPTS": "2",
+        "CANON_NUM_GENERATIONS": "8",
+        "CANON_LOCAL_TRAJECTORIES": "16",
+        "CANON_GLOBAL_TRAJECTORIES": "256",
+        "CANON_LOGPROB_M": "256",
+        "CANON_TARGET_M": "256",
+        "MIN_TOKEN_BUCKET": "4096",
+        "CANON_FIXED_AR": "1",
+        "CANON_FIXED_AR_EMBED": "1",
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+        "CANON_PALLAS_LOGSOFTMAX": "1",
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P29_FULL_TRAIN": "1",
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "1",
+        "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
+        "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
+        "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
+        "CANON_P30_RELEASE_CAPTURED_STATE": "1",
+        "CANON_P30_RESHARD_ACCUMULATOR": "1",
+        "FL_SHARED_MESH": "16,4",
+        "XLA_FLAGS": "--xla_allow_excess_precision=false",
     }
     with (
         mock.patch.dict(os.environ, env, clear=False),
@@ -564,7 +642,12 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     self.assertIsNone(result["gradients"])
     self.assertEqual(result["gradient_microbatches"], 16)
     self.assertEqual([item[0] for item in streamed], list(range(16)))
-    self.assertTrue(all(item[2] > 0.0 for item in streamed))
+    expected_multiplier = float(np.asarray(
+        result["loss_output"].primary_loss.compute_scale()
+    )) * 16.0
+    self.assertTrue(all(
+        item[2] == expected_multiplier for item in streamed
+    ))
     self.assertEqual(
         tuple(report["trajectory_rows"] for report in result["reports"]),
         tuple(
@@ -572,8 +655,15 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             for local in range(16)
         ),
     )
-    self.assertEqual(result["dp_reduction_visibility"], "NOT_MEASURED")
-    self.assertEqual(result["replica_equality"], "NOT_MEASURED")
+    self.assertEqual(result["dp_reduction_visibility"], "EXPLICIT_FIXED_TREE")
+    self.assertTrue(result["replica_equality"])
+    self.assertEqual(result["dp_reduction_transactions"], 16)
+    self.assertEqual(result["dp_reduction_rounds_per_transaction"], 8)
+    self.assertEqual(result["dp_rank_pullbacks_per_transaction"], 16)
+    self.assertTrue(all(
+        len(set(fingerprints)) == 16
+        for fingerprints in result["rank_local_gradient_fingerprints"]
+    ))
 
   def test_p32_dp16_rejects_the_legacy_data1_segmented_reverse(self):
     adapter, _ = self._make_p32_group_adapter(sequence_bucket=256)

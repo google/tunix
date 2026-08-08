@@ -444,9 +444,11 @@ class PeftTrainer:
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_precomputed_gradient_step_impl = None
+    self._jitted_precomputed_gradient_scaled_step_impl = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
     self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._p28_precomputed_microstep = 0
@@ -483,9 +485,11 @@ class PeftTrainer:
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_precomputed_gradient_step_impl = None
+    self._jitted_precomputed_gradient_scaled_step_impl = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
     self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
 
@@ -514,6 +518,21 @@ class PeftTrainer:
     grad_accumulator.add(paired, denom=jnp.asarray(1.0, jnp.float32))
     return optax.global_norm(jax.tree.map(
         lambda value: value.astype(jnp.float32), paired
+    ))
+
+  def _precomputed_gradient_scaled_step(
+      self,
+      grad_accumulator: GradientAccumulator,
+      grads: Any,
+      multiplier: ArrayLike,
+  ) -> ArrayLike:
+    """Adds one materialization-free scaled gradient contribution."""
+    scaled = jax.tree.map(
+        lambda value: value * multiplier.astype(value.dtype), grads
+    )
+    grad_accumulator.add(scaled, denom=jnp.asarray(1.0, jnp.float32))
+    return optax.global_norm(jax.tree.map(
+        lambda value: value.astype(jnp.float32), scaled
     ))
 
   def _precomputed_gradient_commit(
@@ -649,13 +668,16 @@ class PeftTrainer:
   def _validate_precomputed_gradient_contract(self) -> None:
     """Validates the exclusive, default-off G6 update contract."""
     p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
+    p33_workload = (
+        os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+    )
     required_env = {
         "CANON_ALIGNMENT_GATE": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
         "CANON_P28_G6_UPDATE": "1",
         (
             "CANON_ALIGNMENT_TRAIN"
-            if p31_convergence
+            if p31_convergence or p33_workload
             else "CANON_ALIGNMENT_UPDATE_CANARY"
         ): "1",
     }
@@ -669,7 +691,7 @@ class PeftTrainer:
           f"canary contract; invalid keys={missing}"
       )
     steps = self.config.get_with_default("gradient_accumulation_steps", 1)
-    expected_steps = 16 if p31_convergence else 4
+    expected_steps = 16 if p31_convergence or p33_workload else 4
     if steps != expected_steps:
       raise ValueError(
           "segmented update accumulation changed: "
@@ -749,12 +771,52 @@ class PeftTrainer:
     self._p28_precomputed_microstep += 1
     return norm
 
+  def accumulate_precomputed_scaled_gradient_microbatch(
+      self,
+      gradients: Any,
+      multiplier: ArrayLike,
+      *,
+      microbatch_index: int,
+  ) -> ArrayLike:
+    """Streams one scaled P33 rank-reduced gradient contribution."""
+    self._validate_precomputed_gradient_contract()
+    if os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1":
+      raise ValueError(
+          "scaled gradient accumulation is reserved for an admitted P33 "
+          "workload"
+      )
+    if self._jitted_precomputed_gradient_scaled_step_fn is None:
+      if self._jitted_precomputed_gradient_scaled_step_impl is None:
+        self._jitted_precomputed_gradient_scaled_step_impl = nnx.jit(
+            self._precomputed_gradient_scaled_step,
+            donate_argnames=("grad_accumulator",),
+        )
+      self._jitted_precomputed_gradient_scaled_step_fn = functools.partial(
+          nnx.cached_partial(
+              self._jitted_precomputed_gradient_scaled_step_impl,
+              self.grad_accumulator,
+          )
+      )
+    if microbatch_index != self._p28_precomputed_microstep:
+      raise ValueError(
+          "P33 scaled gradient microbatch cadence mismatch: "
+          f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
+      )
+    norm = self._jitted_precomputed_gradient_scaled_step_fn(
+        gradients, jnp.asarray(multiplier, jnp.float32)
+    )
+    norm.block_until_ready()
+    self._iter_steps += 1
+    self._p28_precomputed_microstep += 1
+    return norm
+
   def commit_precomputed_gradients(self) -> ArrayLike:
     """Commits after all streamed microbatches and resets the accumulator."""
     self._validate_precomputed_gradient_contract()
-    expected_microsteps = (
-        16 if os.environ.get("CANON_P31_CONVERGENCE", "") == "1" else 4
-    )
+    expected_microsteps = 16 if (
+        os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
+        or os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+    ) else 4
     if self._p28_precomputed_microstep != expected_microsteps:
       raise ValueError(
           "segmented update commit cadence mismatch: "
@@ -816,6 +878,7 @@ class PeftTrainer:
     # Rebuild only the NNX bindings; the transformed JIT callables and their
     # compiled executable caches remain intact.
     self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     if os.environ.get("CANON_P30_POST_COMMIT_GC", "") == "1":

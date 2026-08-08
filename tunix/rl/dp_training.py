@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import math
 from typing import Any, Sequence
 
@@ -432,7 +433,12 @@ def fixed_dp_collective(
   value = local_value
   for round_index, permutation in enumerate(reduce_rounds):
     stride = 1 << round_index
-    peer = jax.lax.ppermute(value, axis_name=axis_name, perm=permutation)
+    peer = jax.tree.map(
+        lambda leaf: jax.lax.ppermute(
+            leaf, axis_name=axis_name, perm=permutation
+        ),
+        value,
+    )
     combined = jax.tree.map(
         lambda left, right: (
             jax.lax.optimization_barrier(left)
@@ -445,7 +451,12 @@ def fixed_dp_collective(
     value = _select_tree(receiver, combined, value)
   for reverse_index, permutation in enumerate(broadcast_rounds):
     stride = 1 << (len(broadcast_rounds) - reverse_index - 1)
-    peer = jax.lax.ppermute(value, axis_name=axis_name, perm=permutation)
+    peer = jax.tree.map(
+        lambda leaf: jax.lax.ppermute(
+            leaf, axis_name=axis_name, perm=permutation
+        ),
+        value,
+    )
     receiver = jnp.mod(rank, 2 * stride) == stride
     value = _select_tree(receiver, peer, value)
   return value
@@ -454,6 +465,236 @@ def fixed_dp_collective(
 def fixed_dp2_collective(local_value: Any, axis_name: str = 'dp') -> Any:
   """Compatibility wrapper for the previously registered DP2 reducer."""
   return fixed_dp_collective(local_value, dp_size=2, axis_name=axis_name)
+
+
+def _contains_axis(spec: jax.sharding.PartitionSpec, axis_name: str) -> bool:
+  for entry in tuple(spec):
+    if entry == axis_name:
+      return True
+    if isinstance(entry, tuple) and axis_name in entry:
+      return True
+  return False
+
+
+def _gradient_signature(tree: Any) -> jax.Array:
+  """Returns a compact deterministic signature without copying full leaves."""
+  total = jnp.asarray(0.0, jnp.float32)
+  absolute = jnp.asarray(0.0, jnp.float32)
+  squared = jnp.asarray(0.0, jnp.float32)
+  weighted = jnp.asarray(0.0, jnp.float32)
+  nonzero = jnp.asarray(0.0, jnp.float32)
+  for index, leaf in enumerate(jax.tree.leaves(tree), start=1):
+    value = leaf.astype(jnp.float32)
+    total = total + jnp.sum(value)
+    absolute = absolute + jnp.sum(jnp.abs(value))
+    squared = squared + jnp.sum(jnp.square(value))
+    weighted = weighted + jnp.asarray(index, jnp.float32) * jnp.sum(value)
+    nonzero = nonzero + jnp.count_nonzero(value).astype(jnp.float32)
+  return jnp.stack((total, absolute, squared, weighted, nonzero))
+
+
+def _signature_sha256(signature: Any) -> str:
+  value = np.ascontiguousarray(jax.device_get(signature))
+  return hashlib.sha256(value.view(np.uint8)).hexdigest()
+
+
+class FixedDPRankGradientReducer:
+  """Stages one contribution per DP rank and reduces it with a fixed tree.
+
+  The leading staging axis is physically partitioned over ``dp``. Therefore a
+  logical ``[dp, ...parameter_shape]`` table stores only one rank contribution
+  per DP replica. Finalization executes one reduce-and-broadcast transaction
+  with the registered collective-permute schedule and returns the original
+  DP-replicated, TP-sharded gradient tree.
+  """
+
+  def __init__(
+      self,
+      template: Any,
+      *,
+      dp_size: int,
+      dp_axis: str = 'dp',
+      require_distinct_fingerprints: bool = True,
+  ):
+    _validate_tree_size(dp_size)
+    leaves = jax.tree.leaves(template)
+    if not leaves or any(not isinstance(leaf, jax.Array) for leaf in leaves):
+      raise ValueError('DP gradient reducer requires a nonempty JAX array tree')
+    shardings = [leaf.sharding for leaf in leaves]
+    if any(
+        not isinstance(sharding, jax.sharding.NamedSharding)
+        for sharding in shardings
+    ):
+      raise ValueError('DP gradient reducer requires NamedSharding leaves')
+    mesh = shardings[0].mesh
+    if dp_axis not in mesh.axis_names or int(mesh.shape[dp_axis]) != dp_size:
+      raise ValueError(
+          'DP gradient reducer mesh mismatch: '
+          f'axes={mesh.axis_names} shape={dict(mesh.shape)} '
+          f'expected {dp_axis}={dp_size}'
+      )
+    for sharding in shardings[1:]:
+      if sharding.mesh != mesh:
+        raise ValueError('DP gradient reducer leaves use different meshes')
+
+    base_specs = jax.tree.map(lambda leaf: leaf.sharding.spec, template)
+    for spec in jax.tree.leaves(base_specs):
+      if _contains_axis(spec, dp_axis):
+        raise ValueError(
+            'DP gradient inputs must be replicated over the DP axis: '
+            f'{spec}'
+        )
+    staged_specs = jax.tree.map(
+        lambda spec: jax.sharding.PartitionSpec(dp_axis, *tuple(spec)),
+        base_specs,
+    )
+    staged_shardings = jax.tree.map(
+        lambda spec: jax.sharding.NamedSharding(mesh, spec), staged_specs
+    )
+
+    def initialize():
+      return jax.tree.map(
+          lambda leaf: jnp.zeros((dp_size,) + leaf.shape, leaf.dtype),
+          template,
+      )
+
+    def write(staged, contribution, rank):
+      return jax.tree.map(
+          lambda table, value: jax.lax.dynamic_update_index_in_dim(
+              table, jnp.expand_dims(value, 0), rank, axis=0
+          ),
+          staged,
+          contribution,
+      )
+
+    def reduce_local(local_staged):
+      local_value = jax.tree.map(
+          lambda value: jnp.squeeze(value, axis=0), local_staged
+      )
+      return fixed_dp_collective(
+          local_value, dp_size=dp_size, axis_name=dp_axis
+      )
+
+    shard_map_kwargs = {
+        'mesh': mesh,
+        'in_specs': (staged_specs,),
+        'out_specs': base_specs,
+    }
+    try:
+      reduce_mapped = jax.shard_map(
+          reduce_local, check_vma=False, **shard_map_kwargs
+      )
+    except TypeError:
+      reduce_mapped = jax.shard_map(
+          reduce_local, check_rep=False, **shard_map_kwargs
+      )
+
+    permutation = tuple(
+        (rank, (rank + 1) % dp_size) for rank in range(dp_size)
+    )
+
+    def compare_local(local_tree):
+      peer_tree = jax.tree.map(
+          lambda leaf: jax.lax.ppermute(
+              leaf, axis_name=dp_axis, perm=permutation
+          ),
+          local_tree,
+      )
+      exact = jnp.asarray(True)
+      for local_leaf, peer_leaf in zip(
+          jax.tree.leaves(local_tree),
+          jax.tree.leaves(peer_tree),
+          strict=True,
+      ):
+        exact = jnp.logical_and(exact, jnp.array_equal(local_leaf, peer_leaf))
+      return jnp.reshape(exact, (1,))
+
+    compare_kwargs = {
+        'mesh': mesh,
+        'in_specs': (base_specs,),
+        'out_specs': jax.sharding.PartitionSpec(dp_axis),
+    }
+    try:
+      compare_mapped = jax.shard_map(
+          compare_local, check_vma=False, **compare_kwargs
+      )
+    except TypeError:
+      compare_mapped = jax.shard_map(
+          compare_local, check_rep=False, **compare_kwargs
+      )
+
+    self._dp_size = dp_size
+    self._require_distinct = require_distinct_fingerprints
+    self._initialize = jax.jit(initialize, out_shardings=staged_shardings)
+    self._write = jax.jit(write, donate_argnums=(0,))
+    self._reduce = jax.jit(reduce_mapped, donate_argnums=(0,))
+    self._compare = jax.jit(compare_mapped)
+    self._signature = jax.jit(_gradient_signature)
+    self._staged = None
+    self._next_rank = 0
+    self._fingerprints = []
+
+  def begin(self) -> None:
+    """Starts one reduction transaction with an empty rank table."""
+    if self._staged is not None:
+      raise ValueError('DP gradient reduction transaction is already active')
+    self._staged = self._initialize()
+    self._next_rank = 0
+    self._fingerprints = []
+
+  def add(self, rank: int, contribution: Any) -> str:
+    """Stages exactly one rank contribution in monotonically increasing order."""
+    if self._staged is None:
+      raise ValueError('DP gradient reduction transaction is not active')
+    rank = int(rank)
+    if rank != self._next_rank:
+      raise ValueError(
+          'DP gradient contribution cadence changed: '
+          f'expected rank {self._next_rank}, got {rank}'
+      )
+    fingerprint = _signature_sha256(self._signature(contribution))
+    self._staged = self._write(
+        self._staged, contribution, jnp.asarray(rank, jnp.int32)
+    )
+    jax.block_until_ready(self._staged)
+    self._fingerprints.append(fingerprint)
+    self._next_rank += 1
+    return fingerprint
+
+  def finalize(self) -> tuple[Any, dict[str, Any]]:
+    """Executes one fixed reduction and proves every resulting replica equal."""
+    if self._staged is None:
+      raise ValueError('DP gradient reduction transaction is not active')
+    if self._next_rank != self._dp_size:
+      raise ValueError(
+          'DP gradient reduction is missing rank contributions: '
+          f'{self._next_rank} != {self._dp_size}'
+      )
+    if self._require_distinct and len(set(self._fingerprints)) != self._dp_size:
+      raise ValueError('DP rank-local gradient fingerprints are not distinct')
+    reduced = self._reduce(self._staged)
+    flags = np.asarray(jax.device_get(self._compare(reduced)), dtype=np.bool_)
+    if flags.size != self._dp_size or not bool(np.all(flags)):
+      raise ValueError(
+          'fixed DP gradient reduction produced unequal replicas: '
+          f'flags={flags.astype(np.int32).tolist()}'
+      )
+    report = {
+        'dp_size': self._dp_size,
+        'rank_contributions': self._next_rank,
+        'rank_local_fingerprints': tuple(self._fingerprints),
+        'rank_local_fingerprints_distinct': (
+            len(set(self._fingerprints)) == self._dp_size
+        ),
+        'reduction_transactions': 1,
+        'reduction_rounds': fixed_dp_collective_count(self._dp_size),
+        'replica_check_flags': int(flags.size),
+        'post_reduction_replicas_exact': True,
+      }
+    self._staged = None
+    self._next_rank = 0
+    self._fingerprints = []
+    return reduced, report
 
 
 def assert_dp_replicas_equal(

@@ -445,9 +445,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     from flax import nnx  # pylint: disable=g-import-not-at-top
     from tunix.rl import alignment  # pylint: disable=g-import-not-at-top
     from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+    from tunix.rl import dp_workloads  # pylint: disable=g-import-not-at-top
 
     p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
-    expected_mode = "train" if p31_convergence else "update-canary"
+    p33_workload = (
+        os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+    )
+    p33_no_commit = (
+        p33_workload
+        and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+    )
+    expected_mode = (
+        "train" if p31_convergence or p33_workload else "update-canary"
+    )
     if alignment.execution_mode() != expected_mode:
       raise alignment.AlignmentGateError(
           f"segmented update requires alignment mode {expected_mode!r}"
@@ -462,23 +472,40 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     actor_trainer = self.rl_cluster.actor_trainer
     full_train = os.environ.get("CANON_P29_FULL_TRAIN", "") == "1"
     num_trajectories = int(train_example.completion_ids.shape[0])
-    trajectory_micro = int(
-        os.environ.get("CANON_P27_TRAJECTORY_MICRO", "2")
-    )
-    if trajectory_micro != 2 or num_trajectories % trajectory_micro:
+    if p33_workload:
+      workload = dp_workloads.active_workload()
+      if workload is None:
+        raise alignment.AlignmentGateError(
+            "P33 update requires an active canonical workload"
+        )
+      dp_workloads.validate_environment(
+          workload, require_reduction_admission=True
+      )
+      trajectory_micro = workload.local_trajectories
+    else:
+      trajectory_micro = int(
+          os.environ.get("CANON_P27_TRAJECTORY_MICRO", "2")
+      )
+    if num_trajectories % trajectory_micro:
       raise alignment.AlignmentGateError(
-          "segmented update requires complete trajectory pairs: "
+          "segmented update trajectory cadence changed: "
           f"trajectories={num_trajectories} micro={trajectory_micro}"
       )
     expected_microbatches = num_trajectories // trajectory_micro
-    expected_trajectories = 32 if p31_convergence else 8
+    expected_trajectories = (
+        workload.global_trajectories
+        if p33_workload
+        else 32 if p31_convergence else 8
+    )
     if num_trajectories != expected_trajectories:
       raise alignment.AlignmentGateError(
           "segmented update trajectory contract changed: "
           f"{num_trajectories} != {expected_trajectories}"
       )
     marker_prefix = (
-        "[CANON_FROZENLAKE_P31]"
+        "[CANON_P33_DP16]"
+        if p33_workload
+        else "[CANON_FROZENLAKE_P31]"
         if p31_convergence
         else "[CANON_FROZENLAKE_P27]"
     )
@@ -557,6 +584,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     fused_pair_accumulation = (
         os.environ.get("CANON_P30_FUSED_PAIR_ACCUMULATION", "") == "1"
     )
+    if p33_workload and fused_pair_accumulation:
+      raise alignment.AlignmentGateError(
+          "P33 uses rank-reduced scaled groups, not pair accumulation"
+      )
     if fused_pair_accumulation:
       print(
           "[P30.G2] FUSED_PAIR_ACCUMULATION on order=(left+right)*scale",
@@ -592,21 +623,57 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             flush=True,
         )
 
+    def consume_scaled(index, gradients, multiplier):
+      if p33_no_commit:
+        multiplier = jnp.asarray(multiplier, jnp.float32)
+        squared_norm = sum(
+            jnp.sum(jnp.square(
+                value.astype(jnp.float32) * multiplier
+            ))
+            for value in jax.tree.leaves(gradients)
+        )
+        norm = jnp.sqrt(squared_norm)
+        norm.block_until_ready()
+      else:
+        norm = actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
+            gradients,
+            multiplier,
+            microbatch_index=index,
+        )
+      micro_norms.append(norm)
+      if index < expected_microbatches - 1:
+        print(
+            f"{marker_prefix} update_accumulation_pending "
+            f"train_steps={actor_trainer.train_steps} "
+            f"microstep={index + 1}/{expected_microbatches}",
+            flush=True,
+        )
+
     start = time.perf_counter()
     with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
         rl_cluster_lib.Role.ACTOR
     ):
-      result = adapter.segmented_grpo_value_and_grad(
-          trainer_state=trainer_state,
-          train_example=train_example,
-          algo_config=self.algo_config,
-          pad_id=self.rl_cluster.rollout.pad_id(),
-          eos_id=self.rl_cluster.rollout.eos_id(),
-          gradient_microbatch_sink=(
-              None if fused_pair_accumulation else consume_microbatch
-          ),
-          gradient_pair_sink=(consume_pair if fused_pair_accumulation else None),
-      )
+      common = {
+          "trainer_state": trainer_state,
+          "train_example": train_example,
+          "algo_config": self.algo_config,
+          "pad_id": self.rl_cluster.rollout.pad_id(),
+          "eos_id": self.rl_cluster.rollout.eos_id(),
+      }
+      if p33_workload:
+        result = adapter.segmented_dp_grpo_value_and_grad(
+            **common, gradient_microbatch_sink=consume_scaled
+        )
+      else:
+        result = adapter.segmented_grpo_value_and_grad(
+            **common,
+            gradient_microbatch_sink=(
+                None if fused_pair_accumulation else consume_microbatch
+            ),
+            gradient_pair_sink=(
+                consume_pair if fused_pair_accumulation else None
+            ),
+        )
     result["loss"].block_until_ready()
     if (
         result["gradient_microbatches"] != expected_microbatches
@@ -623,10 +690,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     records = []
     activity = []
     for index in range(expected_microbatches):
-      start_row = index * trajectory_micro
+      rows = (
+          tuple(result["reports"][index]["trajectory_rows"])
+          if p33_workload
+          else tuple(range(
+              index * trajectory_micro,
+              (index + 1) * trajectory_micro,
+          ))
+      )
       pair_sidecar = jax.tree.map(
           lambda value: (
-              value[start_row : start_row + trajectory_micro]
+              value[np.asarray(rows, dtype=np.int32)]
               if hasattr(value, "shape")
               and value.shape
               and value.shape[0] == num_trajectories
@@ -634,11 +708,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           ),
           sidecar,
       )
-      active = any(
-          report["loss_cotangent"]["nonzero"] > 0
-          for report in result["reports"][
-              start_row : start_row + trajectory_micro
-          ]
+      active = (
+          result["reports"][index]["gradient_nonzero"] > 0
+          if p33_workload
+          else any(
+              report["loss_cotangent"]["nonzero"] > 0
+              for report in result["reports"][rows[0] : rows[-1] + 1]
+          )
       )
       norm_value = float(np.asarray(micro_norms[index]))
       if (norm_value > 0.0) != active or not np.isfinite(norm_value):
@@ -650,10 +726,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       record = alignment.check_batch(
           pair_sidecar,
           t_current=result["per_token_logps"][
-              start_row : start_row + trajectory_micro
+              np.asarray(rows, dtype=np.int32)
           ],
           gradient_norm=micro_norms[index],
-          optimizer_skipped=jnp.asarray(0, jnp.int32),
+          optimizer_skipped=jnp.asarray(
+              1 if p33_no_commit else 0, jnp.int32
+          ),
           step=(
               before["train_steps"] * expected_microbatches + index
               if full_train
@@ -662,10 +740,82 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           fail_closed=True,
       )
       records.append(record)
-    if not any(activity) and not full_train:
+    if not any(activity) and (not full_train or p33_no_commit):
       raise alignment.AlignmentGateError(
           "INCONCLUSIVE_NO_SIGNAL: all four G6 microgradients are zero"
       )
+
+    if p33_no_commit:
+      after_no_commit = {
+          "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),
+          "optimizer": fingerprint(
+              nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+          ),
+          "accumulator": fingerprint(
+              nnx.state(actor_trainer.grad_accumulator), min_elements=1
+          ),
+          "reference": (
+              fingerprint(_p28_reference_state(self.rl_cluster))
+              if ref_state is not None else None
+          ),
+      }
+      changed = {
+          name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+              before[name], after_no_commit[name]
+          )
+          for name in ("model", "optimizer", "accumulator")
+      }
+      reference_changed = (
+          actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+              before["reference"], after_no_commit["reference"]
+          )
+          if before["reference"] is not None else []
+      )
+      unchanged = (
+          not any(changed.values())
+          and not reference_changed
+          and actor_trainer.train_steps == before["train_steps"]
+      )
+      no_commit_record = {
+          "verdict": "PASS" if unchanged else "FAIL",
+          "mode": "backward-no-commit",
+          "microsteps": expected_microbatches,
+          "commits": 0,
+          "train_steps_before": before["train_steps"],
+          "train_steps_after": actor_trainer.train_steps,
+          "gradient_activity": activity,
+          "micro_gradient_norms": [
+              float(np.asarray(value)) for value in micro_norms
+          ],
+          "model_changed_paths": changed["model"],
+          "optimizer_changed_paths": changed["optimizer"],
+          "accumulator_changed_paths": changed["accumulator"],
+          "reference_changed_paths": reference_changed,
+          "alignment_hashes": [record["hashes"] for record in records],
+          "hbm_before": hbm_before,
+          "hbm_after_reverse": hbm_after_accumulation,
+          "optimizer_memory_kinds_before": list(
+              optimizer_memory_kinds_before
+          ),
+      }
+      report_path = os.environ.get("CANON_UPDATE_REPORT", "")
+      if not report_path:
+        raise alignment.AlignmentGateError("CANON_UPDATE_REPORT is required")
+      os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+      with open(report_path, "w", encoding="utf-8") as report_file:
+        json.dump(no_commit_record, report_file, indent=2, sort_keys=True)
+        report_file.write("\n")
+      print(
+          f"{marker_prefix} backward_no_commit "
+          f"verdict={no_commit_record['verdict']} commits=0 "
+          f"microsteps={expected_microbatches}",
+          flush=True,
+      )
+      if not unchanged:
+        raise alignment.AlignmentGateError(
+            f"P33 backward no-commit mutated training state: {no_commit_record}"
+        )
+      return no_commit_record
 
     with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
         rl_cluster_lib.Role.ACTOR
@@ -1652,33 +1802,58 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       p28_g6_update = os.environ.get("CANON_P28_G6_UPDATE", "") == "1"
       if p28_g6_update:
+        p33_workload = (
+            os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+        )
         p31_convergence = (
             os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
         )
-        expected_total = 32 if p31_convergence else 8
-        expected_grad_acc = expected_total // 2
+        expected_total = 256 if p33_workload else 32 if p31_convergence else 8
+        expected_trajectory_micro = 16 if p33_workload else 2
+        expected_grad_acc = expected_total // expected_trajectory_micro
         if (
             is_packed
-            or trajectory_micro_batch_size != 2
+            or trajectory_micro_batch_size != expected_trajectory_micro
             or grad_acc_steps != expected_grad_acc
         ):
           raise ValueError(
               "segmented update geometry changed: expected unpacked "
-              f"{expected_total}->{expected_grad_acc}x2 with "
+              f"{expected_total}->{expected_grad_acc}x"
+              f"{expected_trajectory_micro} with "
               f"grad_acc={expected_grad_acc}"
           )
         marker_prefix = (
-            "[CANON_FROZENLAKE_P31]"
+            "[CANON_P33_DP16]"
+            if p33_workload
+            else "[CANON_FROZENLAKE_P31]"
             if p31_convergence
             else "[CANON_FROZENLAKE_P27]"
         )
         print(
             f"{marker_prefix} trajectory_microbatch "
-            f"total={expected_total} size=2 chunks={expected_grad_acc} "
+            f"total={expected_total} size={expected_trajectory_micro} "
+            f"chunks={expected_grad_acc} "
             f"grad_acc={expected_grad_acc} segmented=1",
             flush=True,
         )
-        self._run_p28_g6_update(merged_train_micro_batch)
+        segmented_result = self._run_p28_g6_update(
+            merged_train_micro_batch
+        )
+        if (
+            p33_workload
+            and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+        ):
+          if (
+              segmented_result.get("verdict") != "PASS"
+              or segmented_result.get("commits") != 0
+          ):
+            raise RuntimeError(
+                "P33 backward no-commit did not produce its signed verdict"
+            )
+          prompt_queue.put(None)
+          _ = producer_future.result()
+          self.rl_cluster.close()
+          return
 
       # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
       # to invoke ``train_step`` multiple times per outer iteration so the

@@ -91,7 +91,7 @@ class DPTrainingTest(absltest.TestCase):
 
   def test_initialized_training_state_inventory_is_dp_replicated(self):
     mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ('dp', 'tp'))
-    sharding = jax.sharding.NamedSharding(mesh, P(None, 'tp'))
+    sharding = jax.sharding.NamedSharding(mesh, P('tp'))
 
     class StateModule(nnx.Module):
 
@@ -237,6 +237,53 @@ class DPTrainingTest(absltest.TestCase):
     dp_training.assert_dp_replicas_equal(
         host, dp_size=16, label='post-reduction gradient'
     )
+
+  def test_rank_gradient_reducer_stages_one_contribution_per_dp_rank(self):
+    if len(jax.devices()) != 64:
+      self.skipTest('requires exactly 64 forced CPU or accelerator devices')
+    mesh = Mesh(np.asarray(jax.devices()).reshape(16, 4), ('dp', 'tp'))
+    sharding = jax.sharding.NamedSharding(mesh, P('tp'))
+    template = {
+        'weight': jax.device_put(jnp.zeros((8,), jnp.float32), sharding)
+    }
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=16
+    )
+    reducer.begin()
+    for rank in range(16):
+      contribution = {
+          'weight': jax.device_put(
+              jnp.full((8,), rank + 1, jnp.float32), sharding
+          )
+      }
+      reducer.add(rank, contribution)
+    reduced, report = reducer.finalize()
+    np.testing.assert_array_equal(
+        np.asarray(reduced['weight']), np.full((8,), 136.0, np.float32)
+    )
+    self.assertEqual(report['rank_contributions'], 16)
+    self.assertLen(set(report['rank_local_fingerprints']), 16)
+    self.assertTrue(report['rank_local_fingerprints_distinct'])
+    self.assertEqual(report['reduction_transactions'], 1)
+    self.assertEqual(report['reduction_rounds'], 8)
+    self.assertEqual(report['replica_check_flags'], 16)
+    self.assertTrue(report['post_reduction_replicas_exact'])
+
+  def test_rank_gradient_reducer_rejects_rank_cadence_fault(self):
+    if len(jax.devices()) != 64:
+      self.skipTest('requires exactly 64 forced CPU or accelerator devices')
+    mesh = Mesh(np.asarray(jax.devices()).reshape(16, 4), ('dp', 'tp'))
+    sharding = jax.sharding.NamedSharding(mesh, P('tp'))
+    template = jax.device_put(jnp.ones((8,), jnp.float32), sharding)
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=16, require_distinct_fingerprints=False
+    )
+    reducer.begin()
+    reducer.add(0, template)
+    with self.assertRaisesRegex(ValueError, 'expected rank 1, got 0'):
+      reducer.add(0, template)
+    with self.assertRaisesRegex(ValueError, 'missing rank contributions'):
+      reducer.finalize()
 
 
 if __name__ == '__main__':

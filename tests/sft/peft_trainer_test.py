@@ -1094,6 +1094,66 @@ class PeftTrainerTest(parameterized.TestCase):
     for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
       np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
 
+  def test_p33_scaled_sixteen_group_update_matches_materialized_scale(self):
+    def make_trainer():
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=1,
+          gradient_accumulation_steps=16,
+          checkpoint_root_directory=None,
+      )
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      return peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    scaled = make_trainer()
+    materialized = make_trainer()
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+    }
+    multiplier = jnp.asarray(0.25, jnp.float32)
+    with mock.patch.dict(os.environ, env, clear=False):
+      for index in range(16):
+        gradient = jax.tree.map(
+            lambda value: type(value)(
+                jnp.full_like(value[...], float(index + 1))
+            ),
+            nnx.state(scaled.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        expected = jax.tree.map(
+            lambda value: value * multiplier.astype(value.dtype), gradient
+        )
+        scaled_norm = scaled.accumulate_precomputed_scaled_gradient_microbatch(
+            gradient, multiplier, microbatch_index=index
+        )
+        expected_norm = materialized.accumulate_precomputed_gradient_microbatch(
+            expected, microbatch_index=index
+        )
+        np.testing.assert_array_equal(
+            np.asarray(scaled_norm), np.asarray(expected_norm)
+        )
+      scaled_commit = scaled.commit_precomputed_gradients()
+      expected_commit = materialized.commit_precomputed_gradients()
+    np.testing.assert_array_equal(
+        np.asarray(scaled_commit), np.asarray(expected_commit)
+    )
+    for actual, expected in zip(
+        jax.tree.leaves(nnx.state(scaled.model, nnx.Param)),
+        jax.tree.leaves(nnx.state(materialized.model, nnx.Param)),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    self.assertIsNone(scaled._jitted_precomputed_gradient_scaled_step_fn)
+    self.assertIsNotNone(scaled._jitted_precomputed_gradient_scaled_step_impl)
+
   def test_p30_optimizer_offload_matches_two_device_commits(self):
     def make_trainer(*, optimizer_offload):
       config = peft_trainer.TrainingConfig(

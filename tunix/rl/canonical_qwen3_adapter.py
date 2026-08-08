@@ -40,6 +40,7 @@ import numpy as np
 from tunix.generate import utils as generate_utils
 from tunix.rl import canonical_logsoftmax
 from tunix.rl import dp_training
+from tunix.rl import dp_workloads
 
 
 class FunctionalMappingError(ValueError):
@@ -2106,13 +2107,14 @@ class Qwen3EngineForwardAdapter:
       eos_id,
       gradient_microbatch_sink=None,
   ):
-    """Runs the DP16 grouped segmented reverse without an optimizer commit.
+    """Runs rank-local DP16 reverse and one fixed reduction per group.
 
-    With a sink, every rank-major group is streamed into an external
-    donated accumulator and its device buffers are released before the next
-    reverse. Without a sink, the method retains a materialized sum for small
-    tests only. This method deliberately makes no claim that rank-local
-    contributions or the final DP reduction are observable.
+    Each rank-major group contains one trajectory from every DP rank. The
+    cotangent is isolated rank by rank, then staged on a physically partitioned
+    leading DP axis. One fixed reduce-and-broadcast transaction produces an
+    exactly replicated gradient before it is streamed into the donated
+    optimizer accumulator. Without a sink, materialized accumulation is kept
+    only for bounded tests.
     """
     del eos_id
     _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
@@ -2134,14 +2136,23 @@ class Qwen3EngineForwardAdapter:
       raise FunctionalMappingError(
           "P32 grouped reverse requires CANON_P28_SEGMENTED_TRAIN=1"
       )
-    contract = dp_training.DPTrainingContract(
-        dp_size=16,
-        tp_size=4,
-        global_prompts=32,
-        num_generations=8,
-        local_trajectories=16,
+    if (
+        os.environ.get("CANON_P32_DP_REDUCTION_ADMITTED", "") != "1"
+        or os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1"
+    ):
+      raise FunctionalMappingError(
+          "P33 rank-local reverse requires admitted reduction and workload "
+          "launch gates"
+      )
+    workload = dp_workloads.active_workload()
+    if workload is None:
+      raise FunctionalMappingError(
+          "P33 rank-local reverse requires CANON_P32_WORKLOAD"
+      )
+    dp_workloads.validate_environment(
+        workload, require_reduction_admission=True
     )
-    contract.validate()
+    contract = workload.training_contract()
     reverse_groups = contract.rank_major_reverse_groups()
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
@@ -2181,10 +2192,15 @@ class Qwen3EngineForwardAdapter:
           "P32 grouped reverse requires the frozen global trajectory count: "
           f"{prompts.shape[0]} != {contract.global_trajectories}"
       )
-    if (int(prompts.shape[1]), int(completions.shape[1])) != (4096, 2048):
+    expected_widths = (
+        workload.max_prompt_length,
+        workload.max_response_length,
+    )
+    if (int(prompts.shape[1]), int(completions.shape[1])) != expected_widths:
       raise FunctionalMappingError(
-          "P32 D3b0 requires the FrozenLake 4096/2048 token contract, got "
-          f"{prompts.shape[1]}/{completions.shape[1]}"
+          f"P33 {workload.name} token contract changed: "
+          f"{prompts.shape[1]}/{completions.shape[1]} != "
+          f"{expected_widths[0]}/{expected_widths[1]}"
       )
 
     grouped_inputs = jax.tree.map(
@@ -2281,34 +2297,67 @@ class Qwen3EngineForwardAdapter:
     scale = loss_output.primary_loss.compute_scale()
 
     trainer_gradients = None
+    reducer = None
     reports = []
     for index, spec in enumerate(specs):
-      reverse = self._p32_reverse_group(
-          segmented,
-          engine_leaves,
-          spec,
-          grouped_dlogps[index],
-          grouped_dentropy[index],
-      )
-      if not bool(np.asarray(jnp.array_equal(
-          reverse["replay_logps"], grouped_logps[index]
-      ))):
-        raise FunctionalMappingError(
-            f"P32 D3b0 group {index} replay logprobs changed"
+      rank_counts = []
+      cache_nonzero = 0
+      for rank in range(contract.dp_size):
+        rank_dlogps = dp_training.isolate_dp_rank_cotangent(
+            grouped_dlogps[index], rank=rank, dp_size=contract.dp_size
         )
-      one_gradient = self.map_engine_cotangents_to_trainer_state(
-          trainer_state, reverse["engine_gradients"]
-      )
-      one_gradient = jax.tree.map(
-          lambda value: value.astype(jnp.float32), one_gradient
-      )
+        rank_dentropy = dp_training.isolate_dp_rank_cotangent(
+            grouped_dentropy[index], rank=rank, dp_size=contract.dp_size
+        )
+        reverse = self._p32_reverse_group(
+            segmented,
+            engine_leaves,
+            spec,
+            rank_dlogps,
+            rank_dentropy,
+        )
+        if not bool(np.asarray(jnp.array_equal(
+            reverse["replay_logps"], grouped_logps[index]
+        ))):
+          raise FunctionalMappingError(
+              f"P33 group {index} rank {rank} replay logprobs changed"
+          )
+        rank_gradient = self.map_engine_cotangents_to_trainer_state(
+            trainer_state, reverse["engine_gradients"]
+        )
+        rank_gradient = jax.tree.map(
+            lambda value: value.astype(jnp.float32), rank_gradient
+        )
+        if reducer is None:
+          reducer_factory = getattr(
+              self,
+              "_p33_gradient_reducer_factory",
+              dp_training.FixedDPRankGradientReducer,
+          )
+          reducer = reducer_factory(rank_gradient, dp_size=contract.dp_size)
+        if rank == 0:
+          reducer.begin()
+        reducer.add(rank, rank_gradient)
+        rank_counts.append(reverse["counts"])
+        cache_nonzero += sum(
+            int(np.asarray(jnp.count_nonzero(value)))
+            for value in jax.tree.leaves(
+                reverse["initial_cache_cotangents"]
+            )
+        )
+        seen = set()
+        for value in jax.tree.leaves((rank_gradient, reverse)):
+          if isinstance(value, jax.Array) and id(value) not in seen:
+            seen.add(id(value))
+            if not value.is_deleted():
+              value.delete()
+      one_gradient, reduction_report = reducer.finalize()
       leaves = jax.tree.leaves(one_gradient)
-      cache_leaves = jax.tree.leaves(reverse["initial_cache_cotangents"])
       reports.append({
           "group": index,
           "trajectory_rows": reverse_groups[index],
           "n_real": spec["host_n_real"],
-          "counts": reverse["counts"],
+          "rank_counts": tuple(rank_counts),
           "gradient_finite": all(
               bool(np.asarray(jnp.all(jnp.isfinite(value))))
               for value in leaves
@@ -2316,15 +2365,16 @@ class Qwen3EngineForwardAdapter:
           "gradient_nonzero": sum(
               int(np.asarray(jnp.count_nonzero(value))) for value in leaves
           ),
-          "initial_cache_cotangent_nonzero": sum(
-              int(np.asarray(jnp.count_nonzero(value)))
-              for value in cache_leaves
-          ),
+          "initial_cache_cotangent_nonzero": cache_nonzero,
+          "dp_reduction": reduction_report,
       })
       print(
-          "[P32.DP16] reverse_group_done "
+          "[P33.DP16] reverse_group_done "
           f"group={index + 1}/{contract.local_trajectories} "
           f"rows={reverse_groups[index]} "
+          f"rank_pullbacks={reduction_report['rank_contributions']} "
+          f"reduction_rounds={reduction_report['reduction_rounds']} "
+          f"replicas_exact={int(reduction_report['post_reduction_replicas_exact'])} "
           f"gradient_nonzero={reports[-1]['gradient_nonzero']}",
           flush=True,
       )
@@ -2339,17 +2389,20 @@ class Qwen3EngineForwardAdapter:
             )
         )
       else:
+        # The accumulator averages its 16 streamed microsteps. Each reduced
+        # group is an unreduced sum over one trajectory from every DP rank, so
+        # multiplying by the group count makes the final accumulator value
+        # exactly ``scale * sum(all 256 trajectory gradients)``.
         gradient_microbatch_sink(
             index,
             one_gradient,
             scale * jnp.asarray(contract.local_trajectories, scale.dtype),
         )
         # The sink blocks after donating the persistent accumulator. The
-        # per-group gradient and reverse tape are now dead; explicit deletion
-        # prevents Python reference lifetime from retaining an entire second
-        # 32B gradient tree into the next group.
+        # reduced per-group gradient is now dead; explicit deletion prevents
+        # Python reference lifetime from retaining a second model-sized tree.
         seen = set()
-        for value in jax.tree.leaves((one_gradient, reverse)):
+        for value in jax.tree.leaves(one_gradient):
           if isinstance(value, jax.Array) and id(value) not in seen:
             seen.add(id(value))
             if not value.is_deleted():
@@ -2371,9 +2424,23 @@ class Qwen3EngineForwardAdapter:
         ),
         "reports": tuple(reports),
         "forward_counts": tuple(result["counts"] for result in forwards),
-        "dp_reduction_visibility": "NOT_MEASURED",
-        "rank_local_gradient_fingerprints": "NOT_MEASURED",
-        "replica_equality": "NOT_MEASURED",
+        "dp_reduction_visibility": "EXPLICIT_FIXED_TREE",
+        "rank_local_gradient_fingerprints": tuple(
+            report["dp_reduction"]["rank_local_fingerprints"]
+            for report in reports
+        ),
+        "replica_equality": all(
+            report["dp_reduction"]["post_reduction_replicas_exact"]
+            for report in reports
+        ),
+        "dp_reduction_transactions": sum(
+            report["dp_reduction"]["reduction_transactions"]
+            for report in reports
+        ),
+        "dp_reduction_rounds_per_transaction": (
+            dp_training.fixed_dp_collective_count(contract.dp_size)
+        ),
+        "dp_rank_pullbacks_per_transaction": contract.dp_size,
     }
 
 
