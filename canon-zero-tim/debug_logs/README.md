@@ -118,3 +118,13 @@ python3 -m unittest -v \
   tests/p32_model_init/test_archived_model_init_evidence.py
 sha256sum -c evidence/package_artifacts.sha256
 ```
+
+---
+
+## 7. Phase 10 DP16xTP4 Release Candidate (RC) Checkpoint-Forward Diagnostic
+
+- `p32_3_rc_checkpoint_forward_splash_fail.raw.log` records the initial RC run on Attempt 0 (`r8s2p`).
+  Its SHA-256 is `4e10d400c7f5330e66ea6a96b5dbb0d0163560b35753081a18f2cca8c3750e62`.
+- **Diagnostic Finding**: `probe_qwen8b_rc.py` sets `config.use_flash_attention = True` with `flash_attention_block_size = 256` while evaluating contract sequence length `_SEQ_LEN = 16`. Pallas Splash Attention raises `ValueError: q_block_size=256 should divide q_seq_len=16`.
+- **Resolution**: Align `config.use_flash_attention = False` to match `test_probe_rc.py` small-sequence reference contract.
+
