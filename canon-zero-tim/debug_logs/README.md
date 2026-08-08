@@ -199,3 +199,34 @@ sha256sum -c evidence/package_artifacts.sha256
     KeyError: 'prompts'
     ```
   - **Diagnostic**: `post_init_dataset()` applies `prompt_length_filter` which expects a `'prompts'` column in the DataFrame.
+
+---
+
+## 10. Phase 33 Attempt `r6` (Commit `8431672f`) Execution & Diagnostics
+
+- `p33_r6_frozenlake_numba_numpy_error.raw.log` records the live execution of `canon-p33-fl-bwd-r6-8431672f` on 64 physical TPU chips.
+  - **Progress**: Tokenizer loaded, FrozenLake datasets created without KeyError! SafeTensors weights loaded and sharded across 64 TPU chips with replicated parameters (`3.8 GiB / TPU device`).
+  - **Traceback**:
+    ```text
+    File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 946, in <module>
+      rl_cluster = rl_cluster_lib.RLCluster(
+    ...
+    File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 50, in <module>
+      from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+    File "/usr/local/lib/python3.12/site-packages/vllm/v1/spec_decode/ngram_proposer.py", line 7, in <module>
+      from numba import get_num_threads, jit, njit, prange, set_num_threads
+    File "/usr/local/lib/python3.12/site-packages/numba/__init__.py", line 45, in _ensure_critical_deps
+      raise ImportError(msg)
+    ImportError: Numba needs NumPy 2.3 or less. Got NumPy 2.5.
+    ```
+  - **Diagnostic**: Initializing the vLLM rollout sampler imports `tpu_inference.runner.tpu_runner` -> `vllm.v1.spec_decode.ngram_proposer` -> `numba`, which fails on `numpy 2.5` because numba requires `numpy <= 2.3`.
+
+- `p33_r6_gsm8k_grad_probe_env_error.raw.log` records the live execution of `canon-p33-gsm8k-full-r6-8431672f` on 64 physical TPU chips.
+  - **Progress**: Model weights downloaded and sharded with replicated parameters data parallelism (`P(None, 'tp')` weights, `P('dp', None, None)` activations) across 64 TPU chips (`2.4 GiB / TPU device`). The `fsdp` resource axis error from Attempt `r5` is 100% resolved!
+  - **Traceback**:
+    ```text
+    File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 817, in main
+      raise ValueError(f"canonical GSM8K environment mismatch: {wrong}")
+    ValueError: canonical GSM8K environment mismatch: {'CANON_GSM8K_GRAD_PROBE': None}
+    ```
+  - **Diagnostic**: Canonical environment check in `qwen3_grpo_demo.py:809` requires `"CANON_GSM8K_GRAD_PROBE": expected_grad_probe` (evaluating to `"0"` in full train mode `CANON_GSM8K_TRAIN=1`), but `CANON_GSM8K_GRAD_PROBE` was not exported in `cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env`. All other 10 environment checks passed.
