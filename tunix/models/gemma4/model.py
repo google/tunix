@@ -120,27 +120,27 @@ class ShardingConfig:
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),
-        q_weight_ndh=P('tp', fsdp, None),
-        kv_weight_cndh=P(None, 'tp', fsdp, None),
-        qkv_weight_cndh=P(None, 'tp', fsdp, None),
-        o_weight_nhd=P('tp', None, fsdp),
-        ffw_weight_df=P(fsdp, 'tp'),
-        ffw_weight_fd=P('tp', fsdp),
-        rms_norm_weight=P('tp',),
-        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=P('fsdp', None, 'tp'),
-        act_btnh=P('fsdp', None, 'tp', None),
-        score_weight_d1=P(fsdp, None),
-        vision_proj=P(fsdp, 'tp'),
-        vision_soft_emb_norm_weight=P('tp',),
-        audio_proj=P(fsdp, 'tp'),  # TODO check if good!
-        exp_weight_edf=P(fsdp, None, None, 'tp'),
-        exp_weight_efd=P(fsdp, 'tp', None),
-        per_layer_model_projection=P(fsdp, 'tp'),
-        per_layer_input_gate=P(fsdp, 'tp'),
-        per_layer_projection=P('tp', fsdp),
-        per_layer_input_embedding=P('tp', fsdp),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        q_weight_ndh=P('tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        rms_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', None, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        vision_proj=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        vision_soft_emb_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
+        audio_proj=P(fsdp, 'tp'),  # TODO check if good!  # pyrefly: ignore[bad-argument-type]
+        exp_weight_edf=P(fsdp, None, None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_efd=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        per_layer_model_projection=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        per_layer_input_gate=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        per_layer_projection=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        per_layer_input_embedding=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
         vision_shd=vision.VisionShardingConfig.get_default_sharding(
             is_sampling
         ),

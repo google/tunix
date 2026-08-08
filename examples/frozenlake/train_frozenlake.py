@@ -334,8 +334,8 @@ def create_datasets(
     item["prompts"] = ""
     return item
 
-  train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
+  train_ds = grain.MapDataset.source(train_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
+  test_ds = grain.MapDataset.source(test_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
   return train_ds, test_ds
 
 

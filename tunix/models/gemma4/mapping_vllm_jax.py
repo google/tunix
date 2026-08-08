@@ -215,8 +215,8 @@ def preprocess_src_state(src_state: Any) -> Any:
         new_flat_state.append((k_keys, k_param))
       else:
         # KV-shared layer
-        k_val = jnp.zeros_like(sample_kv_val[0])
-        v_val = jnp.zeros_like(sample_kv_val[1])
+        k_val = jnp.zeros_like(sample_kv_val[0])  # pyrefly: ignore[unsupported-operation]
+        v_val = jnp.zeros_like(sample_kv_val[1])  # pyrefly: ignore[unsupported-operation]
         k_val_t = jnp.reshape(
             jnp.transpose(k_val, (1, 0, 2)), (hidden_size, -1)
         )

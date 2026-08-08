@@ -64,7 +64,7 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
 
   tokenizer = AutoTokenizer.from_pretrained(args.model_name)
   config = vllm_sampler.VllmConfig(engine_kwargs={"model": args.model_name})
-  sampler_server = legacy_sampler_lib.LegacyVllmSamplerAdapter(
+  sampler_server = legacy_sampler_lib.LegacyVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
       server_id="vllm-0",
       tokenizer=tokenizer,
       config=config,
