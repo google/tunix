@@ -32,6 +32,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
+from tunix.common import configs
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -46,57 +47,12 @@ from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
 
+TrainingConfig = configs.TrainingConfig
+
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
-
-
-@dataclasses.dataclass(slots=True, kw_only=True)
-class TrainingConfig:
-  """Configuration for the trainer."""
-
-  eval_every_n_steps: int
-  max_steps: int | None = None
-  gradient_accumulation_steps: int | None = None
-
-  # If set, the checkpoints will be saved to this path. Checkpoints
-  # contains the model params and the train data iterator state.
-  checkpoint_root_directory: str | None = None
-  # Checkpoint configurations. If None, the default options will be used.
-  checkpointing_options: checkpoint_options.CheckpointingOptions | None = None
-
-  # Configs for the metrics logger.
-  metrics_logging_options: MetricsLoggerOptions | None = None
-
-  # Configs for the profiler.
-  profiler_options: profiler.ProfilerOptions | None = None
-
-  # Configs for performance metrics.
-  perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
-
-  data_sharding_axis: Tuple[str, ...] = ("fsdp",)
-
-  # Controls how many train_steps can be scheduled ahead of time.
-  max_inflight_computations: int = 2
-
-  # Prefix for metric names for logging. Not sticking it in
-  # `metrics_logging_options` because the latter is optional.
-  metrics_prefix: str = ""
-
-  # Progress bar description.
-  pbar_description: str | None = "Training"
-
-  # Sequence packing configuration.
-  max_seq_token_per_tpu: int | None = None
-  max_segments_per_packed_row: int | None = None
-
-
-  def get_with_default(self, key: str, default: Any) -> Any:
-    val = getattr(self, key)
-    if val is None:
-      return default
-    return val
 
 
 @flax.struct.dataclass(frozen=True)
