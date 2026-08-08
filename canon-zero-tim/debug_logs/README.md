@@ -113,19 +113,25 @@ sha256sum -c evidence/package_artifacts.sha256
 
 ---
 
-## 7. Phase 10 DP16xTP4 Release Candidate (RC) Checkpoint-Forward Gate (64 Physical Chips)
+## 7. Phase 10 DP16xTP4 Release Candidate (RC) Staged Gates (64 Physical Chips)
 
-- `p32_3_rc_checkpoint_forward_pass.raw.log` is the successful target run from source `368a6dcb` on Attempt 0 (`47lkm`).
+- `p32_3_rc_checkpoint_forward_pass.raw.log` is the Stage 1 run from source `368a6dcb` on Attempt 0 (`47lkm`).
   Its SHA-256 is `be3cade030b4c477d5c6d7f5e198add1ef15231071e0fa75a3c35a769337430f`.
-- `p32_3_rc_checkpoint_forward_pass.classification.json` is the deterministic PASS report.
+- `p32_3_rc_checkpoint_forward_pass.classification.json` is the deterministic Stage 1 PASS report.
   Its SHA-256 is `f82b783c27e8bb06851f118e25651cf703b55fbbbeb834a5d6b3201d38ab92c4`.
+- `p32_3_rc_backward_pass.raw.log` is the Stage 2 run from source `e8f43997` on Attempt 0 (`lcbs4`).
+  Its SHA-256 is `158ca81c1bc82f62053eb0eff46f109edd8bf10181cc7f9ff319c0d594f12647`.
+- `p32_3_rc_backward_pass.classification.json` is the deterministic Stage 2 PASS report.
+  Its SHA-256 is `be0a8cf168c24601b51cb557473d14c0d4a0acbb0868b6cbf22a13faed7307dc`.
 - `p32_3_rc_checkpoint_forward_splash_fail.raw.log` preserves the preceding diagnostic run (`r8s2p`).
   Its SHA-256 is `4e10d400c7f5330e66ea6a96b5dbb0d0163560b35753081a18f2cca8c3750e62`.
 
-| Stage | Attempt | Devices | DP x TP | Trajectories (Global/Local) | Checkpoint Loaded | Leaves (DP/TP) | Forward Repeat Exact | Status |
+| Stage | Attempt | Devices | DP x TP | Trajectories (Global/Local) | Checkpoint Loaded | Gradient Health (Norm / Nonzero) | Repeat Exactness | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`checkpoint-forward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | **399 (0 DP / 399 TP)** | 🟢 **Bitwise Exact (`[256, 151936]`)** | 🟢 **PASS** |
+| **`checkpoint-forward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | N/A (Forward Only) | 🟢 **Bitwise Exact (`[256, 151936]`)** | 🟢 **PASS** |
+| **`backward`** | **0** | **64** | **16 x 4** | **256 / 16** | **Qwen3-8B (16.38 GB)** | 🟢 **Norm 498.43 / 7.585B Nonzero** | 🟢 **Bitwise Exact Gradients** | 🟢 **PASS** |
 
-* **Deterministic Classification**: `debug_logs/p32_3_rc_checkpoint_forward_pass.classification.json` status: `PASS`.
-* **Zero FSDP Sharding**: 0 DP partitioned leaves across all 399 model leaves.
-* **Immutable Checkpoint Integrity**: Parameter checksum before & after forward pass: `71726d7f83a94390e9c3a62eaf88ea23f65fb6a3902f929ece442f179e232bdf` (0 parameter mutations).
+* **16 Unique DP Rank Gradient Signatures**: All 16 DP ranks produced distinct local gradient signatures across 16 trajectories.
+* **100% Post-Reduction Bit-Identical Replicas**: Across all 16 DP ranks, gradient arrays after reduction are 100% bitwise exact (`post_reduction_replicas_exact: true`).
+* **Deterministic Classification**: Both `checkpoint-forward` and `backward` report status `PASS` with 0 reasons.
+
