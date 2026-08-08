@@ -30,7 +30,7 @@ def _base():
 def _render(base=None, **changes):
   arguments = {
       "source_commit": "1" * 40,
-      "source_branch": "yuxzhang/p34-deepswe-zero-tim",
+      "source_branch": renderer.DEFAULT_SOURCE_BRANCH,
       "client_image": "registry.example/tunix@sha256:" + "2" * 64,
       "run_id": "gate-001",
       "stage": "three-update",
@@ -45,6 +45,13 @@ def _render(base=None, **changes):
 
 
 class RenderP34JobSetTest(unittest.TestCase):
+
+  def test_published_branch_is_the_renderer_default(self):
+    self.assertEqual(
+        renderer.DEFAULT_SOURCE_BRANCH, "yuxzhang/canon-zero-tim"
+    )
+    env = renderer._env(_render())
+    self.assertEqual(env["CANON_SOURCE_BRANCH"], renderer.DEFAULT_SOURCE_BRANCH)
 
   def test_render_is_nonmutating_and_closes_attempt_zero(self):
     base = _base()

@@ -17,6 +17,7 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DIGEST_IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
 _RUN_ID = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,14}[a-z0-9])?")
+DEFAULT_SOURCE_BRANCH = "yuxzhang/canon-zero-tim"
 _STAGE_STEPS = {
     "backward-no-commit": 1,
     "one-update": 1,
@@ -302,7 +303,7 @@ def main() -> None:
   parser.add_argument("--base", type=Path, required=True)
   parser.add_argument("--output", type=Path, required=True)
   parser.add_argument("--source-commit", required=True)
-  parser.add_argument("--source-branch", default="yuxzhang/p34-deepswe-zero-tim")
+  parser.add_argument("--source-branch", default=DEFAULT_SOURCE_BRANCH)
   parser.add_argument("--client-image", required=True)
   parser.add_argument("--run-id", required=True)
   parser.add_argument("--stage", choices=tuple(_STAGE_STEPS), required=True)

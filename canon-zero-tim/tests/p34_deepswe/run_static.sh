@@ -10,4 +10,4 @@ PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
   canon-zero-tim/tests/p34_deepswe/test_render_p34_jobset.py
 PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
   canon-zero-tim/tests/p34_deepswe/test_classify_run.py
-echo "P34_STATIC_PASS tests=18"
+echo "P34_STATIC_PASS tests=19"

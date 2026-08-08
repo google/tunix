@@ -10,7 +10,7 @@ committed, pushed, read back at the exact SHA, and the 256-device experiment is 
 
 ## Required operator inputs
 
-- Exact 40-character source commit on `yuxzhang/p34-deepswe-zero-tim`.
+- Exact 40-character source commit on `yuxzhang/canon-zero-tim`.
 - Client image pinned by registry SHA-256 digest. Tags such as `:latest` are rejected.
 - Gold whitelist on the mounted PVC, plus its lowercase SHA-256 digest.
 - CPU and TPU node-pool names and the model/output PVC name.
@@ -27,7 +27,7 @@ python3 canon-zero-tim/cluster/render_p34_jobset.py \
   --base canon-zero-tim/cluster/jobset-256cluster-64chip.yaml \
   --output /tmp/p34-backward-no-commit.yaml \
   --source-commit "$SOURCE_SHA" \
-  --source-branch yuxzhang/p34-deepswe-zero-tim \
+  --source-branch yuxzhang/canon-zero-tim \
   --client-image "$CLIENT_IMAGE_DIGEST" \
   --run-id "$RUN_ID" \
   --stage backward-no-commit \
