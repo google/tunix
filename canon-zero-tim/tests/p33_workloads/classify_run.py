@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Classify one completed P33 run from immutable local evidence files."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+from typing import Any, Iterable
+
+
+_FULL_STEPS = {"gsm8k": 200, "frozenlake": 450}
+_BOUNDARIES = {
+    "S_decode_vs_S_prefill",
+    "S_prefill_vs_T_old",
+    "T_old_vs_T_current",
+}
+_EXACT_KEYS = {"w_all_exactly_1", "r_all_exactly_1", "wr_all_exactly_1"}
+
+
+def _json_lines(path: Path) -> list[dict[str, Any]]:
+  records = []
+  for line_number, line in enumerate(
+      path.read_text(encoding="utf-8").splitlines(), start=1
+  ):
+    if not line.strip():
+      continue
+    try:
+      record = json.loads(line)
+    except json.JSONDecodeError as exc:
+      raise ValueError(f"invalid JSONL at {path}:{line_number}: {exc}") from exc
+    if not isinstance(record, dict):
+      raise ValueError(f"expected JSON object at {path}:{line_number}")
+    records.append(record)
+  return records
+
+
+def _sha256(path: Path) -> str:
+  digest = hashlib.sha256()
+  with path.open("rb") as source:
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+      digest.update(chunk)
+  return digest.hexdigest()
+
+
+def _expected_updates(workload: str, stage: str) -> int:
+  if stage == "backward-no-commit":
+    return 1
+  if stage == "one-update":
+    return 1
+  if stage == "three-update":
+    return 3
+  if stage == "full":
+    return _FULL_STEPS[workload]
+  raise ValueError(f"unsupported P33 queue stage: {stage!r}")
+
+
+def _require(condition: bool, reason: str, reasons: list[str]) -> None:
+  if not condition:
+    reasons.append(reason)
+
+
+def _validate_alignment_records(
+    records: Iterable[dict[str, Any]],
+    *,
+    expected_count: int,
+    optimizer_skipped: bool,
+    reasons: list[str],
+) -> int:
+  rows = list(records)
+  _require(
+      len(rows) == expected_count,
+      f"alignment_count={len(rows)} expected={expected_count}",
+      reasons,
+  )
+  for index, record in enumerate(rows):
+    prefix = f"alignment[{index}]"
+    _require(record.get("verdict") == "PASS", f"{prefix}.verdict", reasons)
+    _require(record.get("reds") == [], f"{prefix}.reds", reasons)
+    _require(record.get("execution_mode") == "train", f"{prefix}.mode", reasons)
+    _require(record.get("step") == index, f"{prefix}.step", reasons)
+    boundaries = record.get("boundaries", {})
+    _require(set(boundaries) == _BOUNDARIES, f"{prefix}.boundaries", reasons)
+    for name in _BOUNDARIES:
+      _require(
+          boundaries.get(name, {}).get("differing_bytes") == 0,
+          f"{prefix}.{name}.differing_bytes",
+          reasons,
+      )
+    exact = record.get("exact", {})
+    _require(set(exact) == _EXACT_KEYS, f"{prefix}.exact_keys", reasons)
+    _require(all(exact.get(key) is True for key in _EXACT_KEYS), f"{prefix}.exact", reasons)
+    _require(record.get("clip_hits") == 0, f"{prefix}.clip_hits", reasons)
+    _require(record.get("tis_hits") == 0, f"{prefix}.tis_hits", reasons)
+    _require(
+        record.get("optimizer_skipped") is optimizer_skipped,
+        f"{prefix}.optimizer_skipped",
+        reasons,
+    )
+    gradient = record.get("gradient", {})
+    _require(gradient.get("finite") is True, f"{prefix}.gradient_finite", reasons)
+    _require(
+        isinstance(record.get("N_action"), int) and record["N_action"] > 0,
+        f"{prefix}.N_action",
+        reasons,
+    )
+  return len(rows)
+
+
+def classify(
+    *,
+    workload: str,
+    stage: str,
+    run_log: Path,
+    update_report: Path,
+    alignment_report: Path,
+) -> dict[str, Any]:
+  if workload not in _FULL_STEPS:
+    raise ValueError(f"unknown P33 workload: {workload!r}")
+  expected_updates = _expected_updates(workload, stage)
+  expected_alignments = expected_updates * 16
+  reasons: list[str] = []
+
+  for path, label in (
+      (run_log, "run_log"),
+      (update_report, "update_report"),
+      (alignment_report, "alignment_report"),
+  ):
+    _require(path.is_file() and path.stat().st_size > 0, f"missing_{label}", reasons)
+  if reasons:
+    return {
+        "verdict": "FAIL",
+        "workload": workload,
+        "stage": stage,
+        "reasons": reasons,
+    }
+
+  log_text = run_log.read_text(encoding="utf-8", errors="replace")
+  _require(
+      log_text.count("[CANON_P33_WANDB] ONLINE_RUN_PASS") == 1,
+      "wandb_online_attestation_count",
+      reasons,
+  )
+  eval_count = log_text.count("[CANON_P33_EVAL] DISABLED workload=frozenlake")
+  _require(
+      eval_count == (1 if workload == "frozenlake" else 0),
+      f"eval_disabled_count={eval_count}",
+      reasons,
+  )
+  metric_markers = [
+      (int(last_step), int(events), int(regressions))
+      for last_step, events, regressions in re.findall(
+          r"\[CANON_P31_METRICS\] monotonic_direct "
+          r"last_step=(\d+) events=(\d+) regressions=(\d+)",
+          log_text,
+      )
+  ]
+  _require(bool(metric_markers), "missing_monotonic_metrics_marker", reasons)
+  _require(
+      all(events > 0 and regressions == 0 for _, events, regressions in metric_markers),
+      f"monotonic_metrics={metric_markers}",
+      reasons,
+  )
+  _require(
+      any(last_step == expected_updates - 1 for last_step, _, _ in metric_markers),
+      f"monotonic_last_step={metric_markers} expected={expected_updates - 1}",
+      reasons,
+  )
+
+  alignments = _json_lines(alignment_report)
+  alignment_count = _validate_alignment_records(
+      alignments,
+      expected_count=expected_alignments,
+      optimizer_skipped=stage == "backward-no-commit",
+      reasons=reasons,
+  )
+
+  if stage == "backward-no-commit":
+    try:
+      update_records = [json.loads(update_report.read_text(encoding="utf-8"))]
+    except json.JSONDecodeError as exc:
+      raise ValueError(f"invalid no-commit report: {exc}") from exc
+  else:
+    update_records = _json_lines(update_report)
+  _require(
+      len(update_records) == expected_updates,
+      f"update_count={len(update_records)} expected={expected_updates}",
+      reasons,
+  )
+
+  for index, record in enumerate(update_records):
+    prefix = f"update[{index}]"
+    _require(record.get("verdict") == "PASS", f"{prefix}.verdict", reasons)
+    _require(record.get("microsteps") == 16, f"{prefix}.microsteps", reasons)
+    activity = record.get("gradient_activity")
+    _require(
+        isinstance(activity, list) and len(activity) == 16,
+        f"{prefix}.gradient_activity",
+        reasons,
+    )
+    _require(
+        len(record.get("alignment_hashes", [])) == 16,
+        f"{prefix}.alignment_hashes",
+        reasons,
+    )
+    norms = record.get("micro_gradient_norms", [])
+    _require(
+        len(norms) == 16
+        and all(isinstance(value, (int, float)) and math.isfinite(value) for value in norms),
+        f"{prefix}.micro_gradient_norms",
+        reasons,
+    )
+    _require(
+        record.get("optimizer_memory_kinds_before") == ["pinned_host"],
+        f"{prefix}.optimizer_before",
+        reasons,
+    )
+    if stage == "backward-no-commit":
+      _require(record.get("mode") == stage, f"{prefix}.mode", reasons)
+      _require(record.get("commits") == 0, f"{prefix}.commits", reasons)
+      _require(
+          record.get("train_steps_after") == record.get("train_steps_before"),
+          f"{prefix}.train_steps",
+          reasons,
+      )
+      for key in (
+          "model_changed_paths",
+          "optimizer_changed_paths",
+          "accumulator_changed_paths",
+          "reference_changed_paths",
+      ):
+        _require(record.get(key) == [], f"{prefix}.{key}", reasons)
+      _require(any(activity or ()), f"{prefix}.learning_signal", reasons)
+    else:
+      _require(record.get("commits") == 1, f"{prefix}.commits", reasons)
+      _require(record.get("train_steps_before") == index, f"{prefix}.step_before", reasons)
+      _require(record.get("train_steps_after") == index + 1, f"{prefix}.step_after", reasons)
+      _require(
+          record.get("optimizer_memory_kinds_after") == ["pinned_host"],
+          f"{prefix}.optimizer_after",
+          reasons,
+      )
+      _require(
+          record.get("accumulator_changed_paths") == [],
+          f"{prefix}.accumulator_reset",
+          reasons,
+      )
+      _require(
+          record.get("reference_changed_paths") == [],
+          f"{prefix}.reference_unchanged",
+          reasons,
+      )
+      commit_norm = record.get("commit_gradient_norm")
+      _require(
+          isinstance(commit_norm, (int, float)) and math.isfinite(commit_norm),
+          f"{prefix}.commit_gradient_norm",
+          reasons,
+      )
+
+  if stage == "backward-no-commit":
+    marker_count = log_text.count("[CANON_P33_DP16] backward_no_commit verdict=PASS")
+  else:
+    marker_count = log_text.count("[CANON_P33_DP16] update_step_committed")
+  _require(
+      marker_count == expected_updates,
+      f"terminal_marker_count={marker_count} expected={expected_updates}",
+      reasons,
+  )
+
+  return {
+      "verdict": "PASS" if not reasons else "FAIL",
+      "workload": workload,
+      "stage": stage,
+      "expected_updates": expected_updates,
+      "observed_updates": len(update_records),
+      "expected_alignments": expected_alignments,
+      "observed_alignments": alignment_count,
+      "evidence_sha256": {
+          "run_log": _sha256(run_log),
+          "update_report": _sha256(update_report),
+          "alignment_report": _sha256(alignment_report),
+      },
+      "reasons": reasons,
+  }
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--workload", required=True, choices=tuple(_FULL_STEPS))
+  parser.add_argument(
+      "--stage",
+      required=True,
+      choices=("backward-no-commit", "one-update", "three-update", "full"),
+  )
+  parser.add_argument("--run-log", required=True, type=Path)
+  parser.add_argument("--update-report", required=True, type=Path)
+  parser.add_argument("--alignment-report", required=True, type=Path)
+  parser.add_argument("--output", required=True, type=Path)
+  args = parser.parse_args()
+
+  if args.output.exists():
+    raise FileExistsError(f"refusing to overwrite P33 classification: {args.output}")
+  record = classify(
+      workload=args.workload,
+      stage=args.stage,
+      run_log=args.run_log,
+      update_report=args.update_report,
+      alignment_report=args.alignment_report,
+  )
+  args.output.parent.mkdir(parents=True, exist_ok=True)
+  args.output.write_text(
+      json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+  )
+  print(
+      "[P33.RUN] VERDICT "
+      f"{record['verdict']} workload={args.workload} stage={args.stage} "
+      f"updates={record.get('observed_updates', 0)}/"
+      f"{record.get('expected_updates', 0)} alignments="
+      f"{record.get('observed_alignments', 0)}/"
+      f"{record.get('expected_alignments', 0)} reasons={record['reasons']}",
+      flush=True,
+  )
+  print(f"[P33.RUN] classification={args.output}", flush=True)
+  print(f"[P33.RUN] JSON {json.dumps(record, sort_keys=True)}", flush=True)
+  return 0 if record["verdict"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

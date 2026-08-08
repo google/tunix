@@ -18,6 +18,20 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] && \
 fi
 : "${CANON_RUN_CMD:?CANON_RUN_CMD unset -- nothing to run}"
 LOG="${CANON_RUN_LOG:-$CANON_STATE/run.log}"
+if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
+  for report_key in CANON_RUN_LOG CANON_ALIGN_REPORT CANON_UPDATE_REPORT; do
+    report_path="${!report_key:-}"
+    if [ -z "$report_path" ]; then
+      echo "[run] FATAL: admitted P33 workload lacks $report_key" >&2
+      exit 1
+    fi
+    if [ -e "$report_path" ]; then
+      echo "[run] FATAL: admitted P33 evidence path already exists: $report_key=$report_path" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$report_path")"
+  done
+fi
 echo "[run] cmd: $CANON_RUN_CMD"
 echo "[run] log: $LOG"
 cd "${CANON_RUN_CWD:-$CANON_PKG/..}"
@@ -47,5 +61,16 @@ if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && \
    [ "$n_eval_off" -ne 1 ]; then
   echo "[run] FATAL: admitted P33 FrozenLake did not attest evaluation disabled exactly once" >&2
   exit 1
+fi
+if [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
+  classification="$CANON_STATE/p33_${CANON_P32_WORKLOAD}_${CANON_P33_RUN_STAGE}.classification.json"
+  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+    python3 "$CANON_PKG/tests/p33_workloads/classify_run.py" \
+      --workload "$CANON_P32_WORKLOAD" \
+      --stage "$CANON_P33_RUN_STAGE" \
+      --run-log "$LOG" \
+      --update-report "$CANON_UPDATE_REPORT" \
+      --alignment-report "$CANON_ALIGN_REPORT" \
+      --output "$classification" || exit 1
 fi
 exit "$rc"

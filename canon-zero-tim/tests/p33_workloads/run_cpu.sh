@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKTREE="$(cd "$ROOT/.." && pwd)"
 cd "$WORKTREE"
 
-python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
   canon-zero-tim/cluster/steps/00_env.sh \
@@ -17,7 +17,8 @@ bash -n \
   canon-zero-tim/tests/p33_workloads/negative_control.sh
 
 JAX_PLATFORMS=cpu python3 -m unittest \
-  canon-zero-tim/tests/p33_workloads/test_dp_workloads.py
+  canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
+  canon-zero-tim/tests/p33_workloads/test_classify_run.py
 canon-zero-tim/tests/p33_workloads/negative_control.sh
 
 validate_profile() (
@@ -56,6 +57,10 @@ validate_admitted_preflight() (
   export CANON_P32_DP_REDUCTION_ADMITTED=1
   export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
   export CANON_P33_SHARED_MESH=16,4
+  export CANON_RUN_CMD="printf admitted-preflight-only"
+  export CANON_RUN_LOG="$state/run.log"
+  export CANON_ALIGN_REPORT="$state/alignment.jsonl"
+  export CANON_UPDATE_REPORT="$state/updates.jsonl"
   export INJECTED_WANDB_API_KEY=test-key-not-a-credential
   bash "$ROOT/cluster/steps/00_env.sh"
   test -s "$state/env.sh"
@@ -96,4 +101,32 @@ EOF
 
 validate_frozenlake_eval_postflight
 
-echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=24 negative_controls=2 admitted_preflights=1"
+validate_stale_evidence_rejected() (
+  set -euo pipefail
+  local state
+  state="$(mktemp -d)"
+  trap 'rm -r "$state"' EXIT
+  export CANON_STATE="$state"
+  export CANON_PKG="$ROOT"
+  export CANON_RUN_CWD="$WORKTREE"
+  cat > "$state/env.sh" <<EOF
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+export CANON_P32_WORKLOAD=gsm8k
+export CANON_RUN_LOG=$state/run.log
+export CANON_ALIGN_REPORT=$state/alignment.jsonl
+export CANON_UPDATE_REPORT=$state/updates.jsonl
+EOF
+  touch "$state/updates.jsonl"
+  export CANON_RUN_CMD="printf '%s\n' 'CANON_FIXED_AR=1 fixed-order tree' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
+  if bash "$ROOT/cluster/steps/90_run.sh" >/dev/null 2>&1; then
+    echo "[P33.WORKLOAD] stale evidence path was accepted" >&2
+    exit 1
+  fi
+  test ! -e "$state/run.log"
+  echo "[P33.WORKLOAD] STALE_EVIDENCE_REJECTED"
+)
+
+validate_stale_evidence_rejected
+
+echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=29 negative_controls=3 admitted_preflights=1"
