@@ -294,6 +294,28 @@ class DPWorkloadsTest(unittest.TestCase):
         "gsm8k",
     )
 
+  def test_alignment_train_mode_includes_p31_and_p33(self):
+    self.assertFalse(dp_workloads.requires_alignment_train_mode({}))
+    self.assertTrue(
+        dp_workloads.requires_alignment_train_mode(
+            {"CANON_P31_CONVERGENCE": "1"}
+        )
+    )
+    self.assertTrue(
+        dp_workloads.requires_alignment_train_mode(
+            {
+                "CANON_P31_CONVERGENCE": "0",
+                "CANON_P32_WORKLOAD": "frozenlake",
+            }
+        )
+    )
+
+  def test_alignment_train_mode_rejects_unknown_workload(self):
+    with self.assertRaisesRegex(ValueError, "unknown canonical workload"):
+      dp_workloads.requires_alignment_train_mode(
+          {"CANON_P32_WORKLOAD": "unknown"}
+      )
+
   def test_unknown_workload_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "unknown canonical workload"):
       dp_workloads.get_workload("unknown")

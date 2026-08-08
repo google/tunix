@@ -236,6 +236,17 @@ def active_workload(
   return None if not name else get_workload(name)
 
 
+def requires_alignment_train_mode(
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+  """Returns whether the canonical recipe must use alignment train mode."""
+  values = os.environ if environ is None else environ
+  return (
+      values.get("CANON_P31_CONVERGENCE", "") == "1"
+      or active_workload(values) is not None
+  )
+
+
 def requested_max_steps(
     workload: DPWorkloadSpec,
     environ: Mapping[str, str] | None = None,

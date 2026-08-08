@@ -163,7 +163,7 @@ sha256sum -c evidence/package_artifacts.sha256
     (3) an equivalent slow tokenizer class to instantiate and convert. 
     You need to have sentencepiece or tiktoken installed to convert a slow tokenizer to a fast one.
     ```
-  - **Root Cause & Fix**: `sentencepiece` and `tiktoken` are missing in the base python environment. In `canon-zero-tim/cluster/steps/30_install_canon.sh`, add `pip install -q tiktoken sentencepiece`.
+  - **Root Cause & Fix**: `sentencepiece` and `tiktoken` are missing in the base python environment. `canon-zero-tim/cluster/steps/30_install_canon.sh` now installs the lock-file versions `sentencepiece==0.2.2` and `tiktoken==0.13.0` when their imports are unavailable, then verifies both imports with the same Python interpreter.
 
 - `p33_frozenlake_p31_convergence_error.raw.log` records the live execution of `canon-p33-fl-bwd-r2-0bab1a4d` on Attempt 0 (`k72f9`) on 64 physical TPU v5p chips.
   - **Traceback**:
@@ -172,5 +172,4 @@ sha256sum -c evidence/package_artifacts.sha256
       raise ValueError("P28 G6 requires update-canary mode")
     ValueError: P28 G6 requires update-canary mode
     ```
-  - **Root Cause & Fix**: `train_frozenlake_qwen3.py` requires `CANON_P31_CONVERGENCE=1` when running training mode with `CANON_ALIGNMENT_UPDATE_CANARY=0`. In `canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env`, add `export CANON_P31_CONVERGENCE=1`.
-
+  - **Root Cause & Fix**: three legacy P28 selector guards recognized P31 convergence as train mode but did not recognize an active P32/P33 workload. Setting `CANON_P31_CONVERGENCE=1` would also change trainer and adapter behavior, so the P33 profile must not impersonate P31. `dp_workloads.requires_alignment_train_mode()` now classifies both P31 convergence and an active P32 workload as train mode, and the FrozenLake recipe uses that decision in all three selector guards.

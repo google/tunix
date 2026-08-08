@@ -16,6 +16,11 @@ bash -n \
   canon-zero-tim/cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env \
   canon-zero-tim/tests/p33_workloads/negative_control.sh
 
+grep -Fq "sentencepiece==0.2.2" \
+  canon-zero-tim/cluster/steps/30_install_canon.sh
+grep -Fq "tiktoken==0.13.0" \
+  canon-zero-tim/cluster/steps/30_install_canon.sh
+
 JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
   canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py \

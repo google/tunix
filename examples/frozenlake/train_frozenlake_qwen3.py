@@ -182,6 +182,9 @@ if _P32_WORKLOAD_NAME and _P32_WORKLOAD_NAME != "frozenlake":
       f"{_P32_WORKLOAD_NAME!r}"
   )
 CANON_P32_WORKLOAD = _P32_WORKLOAD_NAME == "frozenlake"
+CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
+    os.environ
+)
 CANON_P33_DISABLE_EVAL = os.getenv("CANON_P33_DISABLE_EVAL", "") == "1"
 P32_WORKLOAD = (
     dp_workloads.get_workload("frozenlake") if CANON_P32_WORKLOAD else None
@@ -230,7 +233,7 @@ if CANON_P28_G6_UPDATE and not CANON_P27:
   raise ValueError("P28 G6 requires CANON_FROZENLAKE_P27=1")
 if CANON_P28_G6_UPDATE and os.getenv(
     "CANON_ALIGNMENT_UPDATE_CANARY", ""
-) != ("0" if CANON_P31_CONVERGENCE else "1"):
+) != ("0" if CANON_ALIGNMENT_TRAIN_MODE else "1"):
   raise ValueError("P28 G6 requires update-canary mode")
 if CANON_P31_CONVERGENCE:
   required_p31 = {
@@ -254,7 +257,7 @@ if (
     or CANON_P28_G4_ONLY
     or CANON_P28_G5_ONLY
     or CANON_P28_G5C_ONLY
-    or (CANON_P28_G6_UPDATE and not CANON_P31_CONVERGENCE)
+    or (CANON_P28_G6_UPDATE and not CANON_ALIGNMENT_TRAIN_MODE)
 ):
   expected_p28_geometry = {
       "batch_size": (args.batch_size, 4),
@@ -525,10 +528,11 @@ if CANON_L3:
       "train": os.getenv("CANON_ALIGNMENT_TRAIN") == "1",
   }
   active_modes = [name for name, active in alignment_modes.items() if active]
-  if CANON_P31_CONVERGENCE:
+  if CANON_ALIGNMENT_TRAIN_MODE:
     if active_modes != ["train"]:
       raise ValueError(
-          f"P31 requires alignment train mode, got {active_modes}"
+          "canonical training workload requires alignment train mode, got "
+          f"{active_modes}"
       )
   elif CANON_P27:
     if active_modes not in (["gate-only"], ["update-canary"]):
