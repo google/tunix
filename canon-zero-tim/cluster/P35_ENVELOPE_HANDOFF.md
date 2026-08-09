@@ -101,10 +101,10 @@ this production-model gate.
 
 ## Operator instructions
 
-The producer and multi-chunk metadata gate are published. The mixed-memory repair is locally
-verified but is not published yet, so r27 is **NOT ADMITTED** until the operator fetches a reviewed
-commit containing that repair. After publication, resolve the concrete 40-hex SHA and render
-exactly one source-pinned JobSet:
+The producer, multi-chunk metadata gate and mixed-memory repair are published. The repair's
+implementation commit is `d9c2d690`; the operator must still fetch the branch, resolve its current
+concrete 40-hex SHA and pass a server-side dry run before applying exactly one source-pinned r27
+JobSet:
 
 ```bash
 git fetch origin yuxzhang/canon-zero-tim

@@ -151,3 +151,12 @@ Artifact: `artifacts/p35_2_r26_memory_space_probe.md`.
 
 Rollback: leave `CANON_P35_ENVELOPE` unset. The new transfer and comparison remain unreachable in
 ordinary training. A source-pinned r27 is still required before any carrier classification.
+
+## 2026-08-09 — Mixed-memory repair published
+
+- Published implementation commit `d9c2d690` to `origin/yuxzhang/canon-zero-tim` after verifying
+  that the remote remained at evidence commit `4f692113`.
+- Re-fetched the target branch and verified that its remote SHA exactly matched the local commit.
+- `origin/main` remained untouched at `2e605bb3`.
+- The next external action is a server-side dry run and one source-pinned r27 Attempt 0. No target
+  A/B/C classification was created by publication.

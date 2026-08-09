@@ -1,6 +1,6 @@
 # P35 envelope discriminator state
 
-- Status: active; r26 mixed-memory trap repaired and verified locally, r27 target not run
+- Status: active; mixed-memory repair published, r27 target not run
 - Active phase: P35.2 target admission
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
@@ -99,10 +99,10 @@ Evidence: `artifacts/p35_1_local_gate.md` and `artifacts/p35_2_local_gate.md`.
 
 ## Next action
 
-Review the diagnostic-only mixed-memory patch and, after explicit commit/push approval, publish it
-to `yuxzhang/canon-zero-tim`. Then run one source-pinned r27 Attempt 0. The target must stop before
-backward and return the raw log, schema-v2 report, compact metadata records, classification and
-SHA-256 values. Until that happens no carrier is classified.
+Resolve and verify the published `yuxzhang/canon-zero-tim` SHA, render r27, require a server-side
+Kubernetes dry run, then let the operator launch one source-pinned Attempt 0. The target must stop
+before backward and return the raw log, schema-v2 report, compact metadata records,
+classification and SHA-256 values. Until that happens no carrier is classified.
 
 ## Hard gates
 
@@ -118,10 +118,10 @@ SHA-256 values. Until that happens no carrier is classified.
 
 ## Blockers
 
-The mixed-memory attestation repair is implemented and locally verified but not committed or
-published. The target JobSet must pin the reviewed SHA published on
-`yuxzhang/canon-zero-tim`; the operator must resolve and verify that SHA before rendering. The
-64-chip launch remains an operator action on the GKE cluster.
+The mixed-memory attestation repair was published in implementation commit `d9c2d690`. The target
+JobSet must pin the current reviewed SHA on `yuxzhang/canon-zero-tim`; the operator must resolve
+and verify that SHA before rendering. The 64-chip launch remains an operator action on the GKE
+cluster.
 
 ## Rollback
 

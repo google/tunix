@@ -1,6 +1,6 @@
 # P35.2 three-arm producer
 
-Status: mixed-memory repair locally complete; r26 failed before report, r27 target not run
+Status: mixed-memory repair published; r26 failed before report, r27 target not run
 
 ## Implemented
 
@@ -47,8 +47,9 @@ None of these attempts produced an A/B/C classification.
 The mixed-memory repair explicitly places the host leaf into the existing device sharding one
 leaf at a time, then runs the unchanged exact bytewise reduction. It records the original
 memory-kind pairs and normalized-leaf count. Local, exact-image and four-chip one-host TPU gates
-pass. The repair must be reviewed, published and pass a source-pinned server-side Kubernetes dry
-run before r27. An unchanged earlier attempt cannot answer the P35 question.
+pass. Implementation commit `d9c2d690` is published; the current branch SHA must pass a
+source-pinned server-side Kubernetes dry run before r27. An unchanged earlier attempt cannot
+answer the P35 question.
 
 ## Rollback
 
