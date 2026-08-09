@@ -83,3 +83,10 @@ until the source-pinned 64-chip Attempt 0 returns a complete schema-v2 classific
 
 Rollback: leave `CANON_P35_ENVELOPE` unset. The ordinary training and reference paths remain
 unchanged; preserve r21 as a failed pre-measurement artifact.
+
+## 2026-08-09 — Response-contract repair published
+
+- Published implementation commit `7c81187c` to `origin/yuxzhang/canon-zero-tim` after verifying
+  the remote base remained `b8d3ad8d`.
+- The next authorized external action is the source-pinned r22 server-side dry run followed by one
+  Attempt-0 target launch. No target numerical evidence was created by this publication.
