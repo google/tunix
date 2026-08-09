@@ -589,4 +589,29 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      $1024 + 256 = 1280 = 5 \times 256$. This remains a proposed launch repair until the next
      source-pinned target attempt passes the P35 postflight.
 
+---
+
+## 24. Phase 35 Attempt `r24`: GSM8K Three-Arm Envelope Diagnostic (`response=256` Splash Divisibility and Single-Chunk Gate Trap)
+
+- `p35_r24_gsm8k_envelope.raw.log` (SHA-256: `4f03dd6dd22ff9d153c333d28d9e547d920e3e35d7b5faf57013f1e58aa3c466`)
+- WandB: `https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/x7m148n4`
+
+### Diagnostic Results:
+1. **Splash Attention Divisibility Parity Confirmed**:
+   - Pinned `max_response_length=256` ($1024 + 256 = 1280 = 5 \times 256$).
+   - Full 28 layers of Qwen3-1.7B JIT compiled cleanly with `static_width=1280` without any Splash query block errors.
+2. **Rollout Generation Parity**:
+   - 256 GSM8K trajectories generated smoothly across 64 TPU chips (generation throughput peak `1,611.4 tokens/s`).
+   - Generation metrics: `mean_length=246.16, min_length=114, max_length=256`.
+3. **Arm A Native Serving Rescore Execution**:
+   - Executed full dynamic packing Arm A rescore and completed 24 metadata dump intervals (`P35_METADATA arm=A seq=0..23`).
+   - `[CANON_ALIGN] attached host sidecar rows=256 completion_width=256` verified.
+4. **Arm B Single-Chunk Gate Trapping**:
+   - Trapped inside `agentic_grpo_learner.py:1048`:
+     ```text
+     EnvelopeProbeError: P35 first target admits only one local-M chunk per sequence
+     ```
+   - Cause: The Phase 35 prototype probe assertion inherited a single-chunk assumption from FrozenLake (`len(sequence) <= local_m = 256`). In GSM8K, sequence length (prompt + response) reaches 350-550 tokens across 5 chunks.
+
+
 
