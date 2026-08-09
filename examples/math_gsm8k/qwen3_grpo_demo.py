@@ -819,6 +819,7 @@ def main() -> None:
       raise ValueError("update canary must not persist a checkpoint")
     if os.getenv("CANON_PALLAS_LOGSOFTMAX") not in ("0", "1"):
       raise ValueError("CANON_PALLAS_LOGSOFTMAX=0/1 must select the causal arm")
+    CANON_P35_ENVELOPE = os.getenv("CANON_P35_ENVELOPE", "") == "1"
     if CANON_GSM8K_L3:
       if NUM_PROMPTS_PER_STEP != 1 or NUM_GENERATIONS != 2:
         raise ValueError(
@@ -834,6 +835,52 @@ def main() -> None:
             "response cap 64"
         )
       vllm_max_num_seqs = 2
+    elif CANON_P35_ENVELOPE:
+      if (
+          MAX_STEPS != 1
+          or MAX_PROMPT_LENGTH != 1024
+          or MAX_RESPONSE_LENGTH != 64
+      ):
+        raise ValueError(
+            "canonical GSM8K P35 envelope requires one step, prompt cap 1024 "
+            "and response cap 64"
+        )
+      expected_mesh = (16, 4) if CANON_P32_WORKLOAD else (1, 4)
+      if SHARED_MESH_SHAPE != expected_mesh:
+        raise ValueError(
+            f"canonical GSM8K P35 envelope requires mesh={expected_mesh}"
+        )
+      if BETA != 0.04:
+        raise ValueError(
+            "canonical GSM8K P35 envelope requires reference beta=0.04"
+        )
+      if os.getenv("CANON_PALLAS_LOGSOFTMAX") != "1":
+        raise ValueError(
+            "canonical GSM8K P35 envelope requires canonical log-softmax"
+        )
+      global_num_seqs = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+      if CANON_P32_WORKLOAD:
+        if global_num_seqs != P32_WORKLOAD.global_trajectories:
+          raise ValueError(
+              "real DP16 GSM8K training requires 256 global trajectories; "
+              f"got {global_num_seqs}"
+          )
+        expected_num_seqs = P32_WORKLOAD.local_trajectories
+      else:
+        expected_num_seqs = global_num_seqs
+      if vllm_max_num_seqs != expected_num_seqs:
+        raise ValueError(
+            "canonical GSM8K P35 envelope requires the topology-local "
+            f"max_num_seqs; got {vllm_max_num_seqs} vs {expected_num_seqs}"
+        )
+      expected_batched_tokens = (
+          P32_WORKLOAD.local_m if CANON_P32_WORKLOAD else 256
+      )
+      if vllm_max_batched_tokens != expected_batched_tokens:
+        raise ValueError(
+            "canonical GSM8K P35 envelope requires the topology-local all-M token "
+            f"budget {expected_batched_tokens}"
+        )
     else:
       if os.getenv("CANON_GSM8K_GRAD_PROBE", "") == "1":
         raise ValueError("real GSM8K training forbids diagnostic advantages")
