@@ -378,7 +378,10 @@ the prompt-chunking candidate; no production default changed.
   - All 28 layers of Qwen3-1.7B execute custom Pallas VJP kernels and Fixed-Order AllReduce aggregation;
   - Fails closed at `tunix.rl.alignment.AlignmentGateError: FrozenLake alignment requires sampler_is='token' to preserve w and r`
     in `agentic_grpo_learner.py:947` because GSM8K P32 workload deliberately sets `sampler_is=None` (consuming rollout logprobs directly).
-- `p33_r15_frozenlake_canary_backward_pass.raw.log` confirms that the upstream per-rank token pin
-  (`max_num_batched_tokens=256`) locks the FrozenLake scheduler to a canonical $M=4096$ bucket,
-  achieving 5,209 prompt tok/s and executing the complete 36-layer VJP backward pass in under 2 minutes.
+- `p33_r15_frozenlake_canary_backward_pass.raw.log` confirms the official milestone pass of the FrozenLake Canary test:
+  - The upstream per-rank token pin (`max_num_batched_tokens=256`) locks the FrozenLake scheduler to a canonical $M=4096$ bucket, achieving 5,209 prompt tok/s;
+  - Executes the complete 36-layer VJP backward pass across 64 TPU chips;
+  - Achieves RL game solve ratio of **60.5%** (`solve_ratio=0.605`, `reward_mean=0.605`, `reward_max=1.000` on 256 games);
+  - Zero-TIM numerical alignment achieves Pearson correlation of **0.99859** (`logp_diff=(0.00768, 0.31682)`, `prob_diff=(0.00338, 0.08457)`);
+  - Successfully finishes Canary backward pass verification and unlocks TPU Slice 1 for `FrozenLake Full (r16)` 450-step training.
 

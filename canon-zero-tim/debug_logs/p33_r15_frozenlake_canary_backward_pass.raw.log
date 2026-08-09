@@ -5977,3 +5977,17 @@ INFO 08-09 00:03:45 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 toke
 [PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.35.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
 [PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
 [PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=final prefix=model.norm rows=4096 F=4096 model=qwen3-8b
+2026-08-09 00:38:03 - INFO - [absl] sampler-trainer: logp_diff=(0.00768,0.31682) prob_diff=(0.00338,0.08457) pearson=0.99859
+2026-08-09 00:38:03 - INFO - [absl] [rollout-metric] call=1 n=256 solve_ratio=0.605 reward_mean=0.605 reward_max=1.000 solve_all=0 solve_none=0
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 1048, in <module>
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1819, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1536, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 947, in _process_results
+[rank0]:     raise alignment.AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: FrozenLake alignment requires sampler_is='token' to preserve w and r
