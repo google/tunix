@@ -663,6 +663,26 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - In distributed Pathways mode, vLLM Engine live weights reside on `<host>` while Trainer mapped weights reside on TPU `<device>`. JAX `@jax.jit` rejects comparison across different memory spaces.
    - No P35 report or classification was emitted for r26.
 
+---
+
+## 27. Phase 35 Attempt `r27`: GSM8K Multi-Chunk Diagnostic (`e5b2d294` Execution & Pathways Dynamic Slice Registration Failure)
+
+- `p35_r27_gsm8k_envelope.raw.log` (SHA-256: `4dab10f3757060774f55588ba925bc21a42f6f7804c1b7c418b53294d8a6edf4`)
+
+### Diagnostic Results:
+1. **Host-Device Normalization Code Deployment (`e5b2d294`)**:
+   - Deployed `_normalize_exact_compare_memory` in `canonical_qwen3_adapter.py`.
+   - Verified 6 overlay files with SHA-256 byte identity (`50_verify_overlay.sh` 100% PASS).
+   - Qwen3-1.7B weights successfully downloaded and initialized.
+2. **Infrastructure Precondition Failure**:
+   - During cluster initialization, Head Pod started and worker 0-0 registered with Pathways RM while the remaining 15 TPU nodes were being dynamically provisioned by the GKE Cluster Autoscaler.
+   - Pathways RM rejected the asynchronous instance registration:
+     ```text
+     FAILED_PRECONDITION: The newly added instance does not match with the expected instances; this is currently not allowed. for job 2427047092175463184
+     ```
+   - In Pathways distributed runtime, all 16 TPU worker instances in a slice must register together synchronously.
+   - All 16 TPU nodes are now provisioned and ready on the cluster for the next attempt.
+
 
 
 
