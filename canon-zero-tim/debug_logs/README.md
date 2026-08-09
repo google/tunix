@@ -407,3 +407,14 @@ sampler-contract repair; the raw failure logs remain unchanged.
   - All 28 layers of Qwen3-1.7B execute custom Pallas VJP kernels on $M=4096, 8192, 16384, 32768, 65536$;
   - Terminates at `memory_snapshot()` calling `device.memory_stats()` on Pathways remote device proxies (`MemoryStats is only supported for addressable PjRt devices`);
   - The repair wraps `device.memory_stats()` with `try...except` in `agentic_rl_learner.py` and `canonical_qwen3_adapter.py`.
+
+---
+
+## 17. Phase 33 Attempt `r17`: Step 0 Completion and Tied Embeddings Diagnostics
+
+- `p33_r17_gsm8k_full.raw.log` (SHA-256: `b270bbdb43e5561f77c173a7a3098b93c97bbfa47bbe499bee2b61dcabcb63f4`) records:
+  - Successful memory_snapshot execution on Pathways across 64 devices;
+  - Successful completion of Step 0 rollout and full backward update;
+  - Successful Step 1 rollout across 256 concurrent requests with prompt throughput `13,438 tokens/s` and generation throughput `1,641 tokens/s`;
+  - Reaches `FunctionalMappingError: P28 G5c embed/norm/lm-head must each expose parameter leaves` in `canonical_qwen3_adapter.py:549` during Step 1 segmented value_and_grad because Qwen3-1.7B has tied word embeddings (`runner.model.lm_head` shares weights with `embed_tokens`).
+
