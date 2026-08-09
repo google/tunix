@@ -484,3 +484,23 @@ and `S_prefill` versus `T_old` before backward. This can classify the unresolved
 without spending another full 36-layer reverse on an already-red value boundary. It is a
 diagnostic-only stage and is not a FrozenLake convergence or zero-TIM promotion. Operator steps
 and rollback are frozen in `../cluster/P33_R17_HANDOFF.md`.
+
+---
+
+## 19. Phase 33 Attempt `r18`: GSM8K Full Pre-Backward Alignment Gate Diagnostic
+
+- `p33_r18_gsm8k_full.raw.log` (SHA-256: `39c22f6807aa0da589d944160f5c450b3b73ea64514e964cffc2ff996adc270b`)
+- `p33_r18_gsm8k_pre_alignment.jsonl` (SHA-256: `fa5209e4db8bb62e20195e032396e6fef688c13d84504bdcea49bf02ffe558b7`)
+
+### Diagnostic Breakdown:
+1. **Tied Embedding Verification**:
+   - `[P28.G5C] TIED_EMBEDDING_HEAD on shared_leaves=1` verified on hardware;
+   - Successfully loaded Qwen3-1.7B across 64 TPU chips without architecture mismatch.
+2. **Boundary 1 Parity ($S_{\text{decode}}$ vs $S_{\text{prefill}}$)**:
+   - `differing_bytes: 0`, `max_abs: 0.0`;
+   - SHA-256 hashes of `S_decode` and `S_prefill` are byte-for-byte identical (`cd46abf76aeeb801bbcbfef7be35a5cce2bff40fe2a55da6f10c83d2c52dd860`);
+   - Proves zero KV-cache decode drift inside the vLLM engine across 191,652 action tokens.
+3. **Boundary 2 Gate Trigger ($S_{\text{prefill}}$ vs $T_{\text{old}}$)**:
+   - `differing_bytes: 153089`, `max_abs: 0.22517`, first mismatch at `masked_index=0` (`a=-0.06866` vs `b=-0.06680`, delta ~0.00186);
+   - Fail-fast pre-backward value gate successfully intercepted the run via `AlignmentGateError: pre-backward alignment gate RED: ['S_prefill_vs_T_old']` in `tunix/rl/alignment.py:278`, preventing wasteful backward computation on diverging policy trajectories.
+
