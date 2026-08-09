@@ -34,6 +34,7 @@ It is packaging of work already done, not a new result. What is signed and what 
 | Bounded Qwen3-8B model initialization, backward and three optimizer commits | **TARGET SYSTEMS PASS** — dense-reference RC only; zero-TIM alignment was not measured. |
 | P33 DP16×TP4 rank-local reducer and workload contracts | **LOCAL PASS, PUBLISHED** — 256 reverse calls/update correctness vehicle; target workload not run. |
 | P33 FrozenLake backward-no-commit, GSM8K-200 and FrozenLake-450 | **TARGET NOT RUN** — strict three-JobSet queue is documented in `cluster/P33_QUEUE.md`. |
+| P34 Qwen3-32B DeepSWE DP16×TP8 per role | **LOCAL PASS, TARGET NOT RUN** — role split, canonical M256 adapter, fixed DP16 reducer, renderer and classifier exist; no 4×8×8 workload artifact. |
 
 **Do not spend another 64-chip run repeating the bounded P32 admission.** Its model-init,
 backward and three-update systems gates have already passed, but they used a dense synthetic

@@ -151,9 +151,17 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     echo "[env] P34 grouped model_fn requires CANON_VJP2_MAX_SEQS=1" >&2; fail=1;
   }
   [ "${CANON_P34_PREFIX_CACHE:-}" = "0" ] && \
-  [ "${CANON_P34_MAX_NUM_SEQS:-}" = "64" ] && \
-  [ "${CANON_P34_MAX_BATCHED_TOKENS:-}" = "8192" ] || {
+  [ "${CANON_P34_MAX_NUM_SEQS:-}" = "4" ] && \
+  [ "${CANON_P34_MAX_BATCHED_TOKENS:-}" = "256" ] || {
     echo "[env] P34 rollout scheduler contract changed" >&2; fail=1;
+  }
+  [ "$((CANON_P34_MAX_NUM_SEQS * CANON_DP_SIZE))" -eq \
+      "$CANON_GLOBAL_TRAJECTORIES" ] || {
+    echo "[env] P34 global scheduler request capacity changed" >&2; fail=1;
+  }
+  [ "$((CANON_P34_MAX_BATCHED_TOKENS * CANON_DP_SIZE))" -eq \
+      "$MIN_TOKEN_BUCKET" ] || {
+    echo "[env] P34 global scheduler token capacity changed" >&2; fail=1;
   }
   [ "${CANON_TRAIN_DP_SHARDING:-}" = "replicated-params" ] && \
   [ "${FL_SHARED_MESH:-}" = "16,8" ] || {

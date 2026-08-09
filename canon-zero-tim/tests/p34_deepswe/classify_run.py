@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,35 @@ def _json_records(path: Path) -> list[dict[str, Any]]:
   return records
 
 
+def _scheduler_measurements(
+    log_text: str,
+) -> tuple[list[list[int]], list[dict[str, int]]]:
+  buckets: list[list[int]] = []
+  precompiles: list[dict[str, int]] = []
+  for line in log_text.splitlines():
+    if "Prepared token paddings:" in line:
+      payload = line.split("Prepared token paddings:", 1)[1].strip()
+      try:
+        value = ast.literal_eval(payload)
+      except (SyntaxError, ValueError):
+        continue
+      if isinstance(value, list) and all(isinstance(item, int) for item in value):
+        buckets.append(value)
+    if "Precompile worker0 backbone -->" in line:
+      payload = line.split("Precompile worker0 backbone -->", 1)[1].strip()
+      try:
+        value = ast.literal_eval(payload)
+      except (SyntaxError, ValueError):
+        continue
+      if isinstance(value, dict):
+        geometry = {
+            key: value.get(key) for key in ("num_tokens", "num_reqs")
+        }
+        if all(isinstance(item, int) for item in geometry.values()):
+          precompiles.append(geometry)
+  return buckets, precompiles
+
+
 def classify(
     *, log_text: str, alignment: list[dict[str, Any]], updates: list[dict[str, Any]], stage: str
 ) -> dict[str, Any]:
@@ -45,6 +75,7 @@ def classify(
   expected_updates = _STAGE_UPDATES[stage]
   expected_alignment = expected_updates * 4
   expected_commits = 0 if stage == "backward-no-commit" else expected_updates
+  scheduler_buckets, scheduler_precompiles = _scheduler_measurements(log_text)
   checks = {
       "attempt_zero": log_text.count(
           "[entrypoint] JOBSET_ATTEMPT 0 (first attempt)"
@@ -68,6 +99,9 @@ def classify(
           "CANON_FIXED_AR_EMBED=1 fixed-order embed gather" in log_text
       ),
       "logprob_m_executed": "CANON_LOGPROB_M on" in log_text,
+      "scheduler_bucket_exact": scheduler_buckets == [[4096]],
+      "scheduler_precompile_exact": scheduler_precompiles
+      == [{"num_tokens": 4096, "num_reqs": 64}],
       "alignment_count": len(alignment) == expected_alignment,
       "alignment_pass": all(record.get("verdict") == "PASS" for record in alignment),
       "four_boundaries_exact": all(
@@ -125,6 +159,8 @@ def classify(
       "verdict": "PASS" if not failed else "FAIL",
       "expected_updates": expected_updates,
       "expected_alignment_records": expected_alignment,
+      "scheduler_buckets": scheduler_buckets,
+      "scheduler_precompiles": scheduler_precompiles,
       "checks": checks,
       "failed": failed,
   }

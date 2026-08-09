@@ -611,9 +611,11 @@ if P34_DEEPSWE:
       "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
       "top_k": TOP_K in (None, 0, -1),
       "top_p": TOP_P in (None, 1.0),
-      "rollout_max_num_seqs": VLLM_MAX_NUM_SEQS == p34.max_num_seqs,
+      "rollout_max_num_seqs": (
+          VLLM_MAX_NUM_SEQS == p34.max_num_seqs_per_dp
+      ),
       "rollout_max_batched_tokens": (
-          VLLM_MAX_BATCHED_TOKENS == p34.max_num_batched_tokens
+          VLLM_MAX_BATCHED_TOKENS == p34.max_num_batched_tokens_per_dp
       ),
   }
   failures = [name for name, passed in exact.items() if not passed]
@@ -621,7 +623,7 @@ if P34_DEEPSWE:
     raise ValueError(f"P34 signed DeepSWE CLI mismatch: {failures}")
   print(
       "[P34.CLI] PASS model=Qwen3-32B prompts=8 generations=8 "
-      "prompt=4096 response=32768 turns=50 scheduler=64/8192",
+      "prompt=4096 response=32768 turns=50 scheduler_per_dp=4/256",
       flush=True,
   )
 

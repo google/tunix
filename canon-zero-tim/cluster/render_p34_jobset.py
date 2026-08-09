@@ -93,8 +93,8 @@ def _command(stage: str, *, run_root: str, whitelist: str) -> tuple[str, ...]:
       "--train_mesh_dp=16",
       "--train_mesh_tp=8",
       "--rollout_split_fraction=0.5",
-      "--rollout_vllm_max_num_seqs=64",
-      "--max_num_batched_tokens=8192",
+      "--rollout_vllm_max_num_seqs=4",
+      "--max_num_batched_tokens=256",
       "--max_concurrency=64",
       "--vllm_utilization=0.6",
       "--optimizer_offload=True",
@@ -284,8 +284,8 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
       "--rollout_mesh_tp=8",
       "--train_mesh_dp=16",
       "--train_mesh_tp=8",
-      "--max_num_batched_tokens=8192",
-      "--rollout_vllm_max_num_seqs=64",
+      "--max_num_batched_tokens=256",
+      "--rollout_vllm_max_num_seqs=4",
       "--use_rollout_logps",
   )
   if any(item not in command for item in required):

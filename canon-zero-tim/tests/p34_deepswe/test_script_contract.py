@@ -22,6 +22,7 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     self.assertIn('"--max_num_batched_tokens"', text)
     self.assertIn("args = parser.parse_args()", text)
     self.assertIn('"enable_prefix_caching": not P34_DEEPSWE', text)
+    self.assertIn("scheduler_per_dp=4/256", text)
 
   def test_p34_uses_dp_axes_and_replicated_parameters(self):
     text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()

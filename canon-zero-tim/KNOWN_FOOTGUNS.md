@@ -84,6 +84,14 @@ to a `dp=64` deployment gives each replica a bucket of 4 — the pinning the ent
 on would be gone while every switch still reads "on". Derive it with
 `tests/t1_tpu/probe_bucket_contract.py`.
 
+The TPU inference scheduler limits have the opposite unit: `max_num_seqs` and
+`max_num_batched_tokens` are interpreted **per DP rank**, then multiplied by `dp_size` while
+building the global precompile shapes. P34 originally supplied `64/8192` to DP16 and therefore
+requested 1024 global sequences plus token paddings
+`[4096, 8192, 16384, 32768, 65536, 131072]`. The signed P34 values are `4/256`: they yield 64
+global sequences and exactly `[4096]`. Verify this with
+`tests/p34_deepswe/probe_scheduler_contract.py`; do not infer the unit from the CLI name.
+
 ### 11. Device order is not what you passed in
 
 Topology-aware mesh construction permutes it — on the 4-chip probe host `[0,1,2,3]` comes back

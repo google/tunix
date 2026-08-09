@@ -60,10 +60,35 @@ unless the entire backward-no-commit contract completes.
 - The Pathways 4x8x8 slice is divided by physical coordinates into two host-complete 2x8x8 roles.
 - Each role is logical DP16xTP8; parameters are replicated over DP and sharded only over TP.
 - `CANON_LOGPROB_M=256`, `MIN_TOKEN_BUCKET=4096`, and `CANON_VJP2_MAX_SEQS=1` are distinct signed
-  values. The scheduler capacity remains 64 sequences and 8192 batched tokens.
+  values. TPU inference scheduler limits are per DP rank: 4 sequences and 256 batched tokens.
+  Under DP16 these become exactly 64 global requests and one global M4096 token bucket.
 - FSDP, TIS, sampler importance correction, prefix caching, runtime dependency installation, and
   floating source/image/whitelist inputs are rejected.
 - A missing evidence row is `INCONCLUSIVE`, never PASS.
+
+Before interpreting any numerical row, the target log must contain exactly:
+
+```text
+Prepared token paddings: [4096]
+Precompile worker0 backbone --> {'num_tokens': 4096, 'num_reqs': 64}
+```
+
+Any additional prepared bucket, a different request capacity, or a runtime compile/cache miss for
+a larger backbone shape is a contract failure. `max_num_batched_tokens=256` limits one scheduler
+step per DP rank; it does not shorten the 4096-token prompt or 32768-token response because long
+sequences use chunked prefill/decode steps.
+
+Before using target resources, reproduce the contract in the pinned local image:
+
+```bash
+bash canon-zero-tim/tests/p34_deepswe/run_exact_image.sh
+```
+
+The required terminal marker is:
+
+```text
+P34_EXACT_IMAGE_CPU_PASS unit_cases=38 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b
+```
 
 ## Rollback
 

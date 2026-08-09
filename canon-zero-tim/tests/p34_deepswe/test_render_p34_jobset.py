@@ -83,10 +83,12 @@ class RenderP34JobSetTest(unittest.TestCase):
         "--rollout_mesh_tp=8",
         "--train_mesh_dp=16",
         "--train_mesh_tp=8",
-        "--rollout_vllm_max_num_seqs=64",
-        "--max_num_batched_tokens=8192",
+        "--rollout_vllm_max_num_seqs=4",
+        "--max_num_batched_tokens=256",
     ):
       self.assertIn(value, command)
+    self.assertNotIn("--rollout_vllm_max_num_seqs=64", command)
+    self.assertNotIn("--max_num_batched_tokens=8192", command)
     self.assertNotIn("fsdp", command)
 
   def test_secret_refs_and_pvc_survive_render(self):

@@ -50,6 +50,13 @@ class DeepSWEContractTest(unittest.TestCase):
     workload.validate()
     self.assertEqual(workload.global_trajectories, 64)
     self.assertEqual(workload.local_trajectories, 4)
+    self.assertEqual(workload.max_num_seqs_per_dp, 4)
+    self.assertEqual(workload.max_num_batched_tokens_per_dp, 256)
+    self.assertEqual(workload.max_num_seqs_per_dp * workload.dp_size, 64)
+    self.assertEqual(
+        workload.max_num_batched_tokens_per_dp * workload.dp_size,
+        workload.global_m,
+    )
     self.assertEqual(workload.rank_major_rows(), tuple(
         tuple(group * 16 + rank for rank in range(16))
         for group in range(4)
@@ -78,6 +85,10 @@ class DeepSWEContractTest(unittest.TestCase):
     self.assertIn("export MIN_TOKEN_BUCKET=4096", text)
     self.assertIn("export ABCPROD=256", text)
     self.assertIn("export CANON_VJP2_MAX_SEQS=1", text)
+    self.assertIn("export CANON_P34_MAX_NUM_SEQS=4", text)
+    self.assertIn("export CANON_P34_MAX_BATCHED_TOKENS=256", text)
+    self.assertNotIn("export CANON_P34_MAX_NUM_SEQS=64", text)
+    self.assertNotIn("export CANON_P34_MAX_BATCHED_TOKENS=8192", text)
     self.assertNotIn("CANON_LOGPROB_M=4096", text)
 
   def test_promotion_stage_budget_is_fail_closed(self):

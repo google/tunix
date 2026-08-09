@@ -49,6 +49,8 @@ def _log(updates: int):
       "[P34.DATASET] GOLD_FILTER_PASS rows=10->8 images=8",
       "[P34.R2E] BOUNDED_KUBERNETES_PATCH_PASS",
       "[CANON_P34_WANDB] ONLINE_RUN_PASS",
+      "Prepared token paddings: [4096]",
+      "Precompile worker0 backbone --> {'num_tokens': 4096, 'num_reqs': 64}",
       "CANON_FIXED_AR=1 fixed-order tree",
       "CANON_FIXED_AR_EMBED=1 fixed-order embed gather",
       "CANON_LOGPROB_M on",
@@ -124,6 +126,57 @@ class ClassifierTest(unittest.TestCase):
     )
     self.assertEqual(report["verdict"], "FAIL")
     self.assertIn("attempt_zero", report["failed"])
+
+  def test_extra_scheduler_bucket_is_rejected(self):
+    update = {
+        "verdict": "PASS",
+        "commits": 1,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_memory_kinds_after": ["pinned_host"],
+        "train_steps_after": 1,
+    }
+    log_text = _log(1).replace(
+        "Prepared token paddings: [4096]",
+        "Prepared token paddings: [4096, 8192]",
+    )
+    report = classifier.classify(
+        log_text=log_text,
+        alignment=[_alignment() for _ in range(4)],
+        updates=[update],
+        stage="one-update",
+    )
+    self.assertEqual(report["verdict"], "FAIL")
+    self.assertIn("scheduler_bucket_exact", report["failed"])
+
+  def test_global_as_local_request_capacity_is_rejected(self):
+    update = {
+        "verdict": "PASS",
+        "commits": 1,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_memory_kinds_after": ["pinned_host"],
+        "train_steps_after": 1,
+    }
+    log_text = _log(1).replace("'num_reqs': 64", "'num_reqs': 1024")
+    report = classifier.classify(
+        log_text=log_text,
+        alignment=[_alignment() for _ in range(4)],
+        updates=[update],
+        stage="one-update",
+    )
+    self.assertEqual(report["verdict"], "FAIL")
+    self.assertIn("scheduler_precompile_exact", report["failed"])
 
   def test_missing_full_gradient_repeat_is_rejected(self):
     update = {

@@ -40,8 +40,8 @@ class DeepSWEWorkload:
   devices_per_role: int = 128
   local_m: int = 256
   global_m: int = 4096
-  max_num_seqs: int = 64
-  max_num_batched_tokens: int = 8192
+  max_num_seqs_per_dp: int = 4
+  max_num_batched_tokens_per_dp: int = 256
 
   @property
   def global_trajectories(self) -> int:
@@ -75,8 +75,15 @@ class DeepSWEWorkload:
       raise ValueError("P34 signed context/response/turn limits changed")
     if self.max_steps != 1000 or self.temperature != 0.7:
       raise ValueError("P34 signed optimization campaign changed")
-    if (self.max_num_seqs, self.max_num_batched_tokens) != (64, 8192):
-      raise ValueError("P34 rollout scheduler capacity changed")
+    if (
+        self.max_num_seqs_per_dp,
+        self.max_num_batched_tokens_per_dp,
+    ) != (4, 256):
+      raise ValueError("P34 per-DP rollout scheduler capacity changed")
+    if self.max_num_seqs_per_dp * self.dp_size != self.global_trajectories:
+      raise ValueError("P34 global scheduler request capacity changed")
+    if self.max_num_batched_tokens_per_dp * self.dp_size != self.global_m:
+      raise ValueError("P34 global scheduler token capacity changed")
 
   def rank_major_rows(self) -> tuple[tuple[int, ...], ...]:
     """Returns four groups containing one trajectory from every DP rank."""
@@ -200,8 +207,8 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "ABCPROD": "256",
       "CANON_QWEN3_TP_SIZE": "8",
       "CANON_P34_PREFIX_CACHE": "0",
-      "CANON_P34_MAX_NUM_SEQS": "64",
-      "CANON_P34_MAX_BATCHED_TOKENS": "8192",
+      "CANON_P34_MAX_NUM_SEQS": "4",
+      "CANON_P34_MAX_BATCHED_TOKENS": "256",
       "CANON_P34_STRICT_CLI": "1",
       "WANDB_MODE": "online",
   }
