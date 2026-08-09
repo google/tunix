@@ -22,7 +22,7 @@ One-host artifact:
 `canon-zero-tim/debug_logs/p35_3_onehost_tp4_fixed.log`
 
 SHA-256:
-`3bf21d2b642f7020134bc084cdbd2076ca755417756a4c0b78524d86876cd83b`
+`56f110efcebc5d1c934335eacef643a904a7501a7cf67fe0d25c6420343ad9f2`
 
 One-host command, executed from the disposable source copy after placing the reviewed files at
 their repository-relative paths:

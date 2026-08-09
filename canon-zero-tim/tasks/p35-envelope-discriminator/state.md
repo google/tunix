@@ -5,7 +5,7 @@
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Reviewed base commit: `337ce07c1716d25235c4beb92d2cae1225daa98e`
+- Reviewed implementation commit: `366ac2b1ff2806b48646a0188927e724bf569978`
 - Updated: 2026-08-09 UTC
 
 ## Objective
@@ -116,17 +116,18 @@ reward or correlation to classify this boundary.
   JSON. Full model weights, full logits and cache tensors are not serialized.
 - Focused pinned-image replay tests PASS; the complete P33/P35 CPU gate and both exact-image model
   installs PASS. The complete adapter/envelope suite is 40 PASS/5 skipped. A real four-device
-  one-host v5p TP4 smoke passed the replay and exact-equality controls (2 PASS, 35.90s). No target
-  P35.3 run, cloud-resource lifecycle change, commit or push has occurred.
+  one-host v5p TP4 smoke passed the replay and exact-equality controls (2 PASS, 35.90s). The
+  default-off implementation is published as `366ac2b1`; no target P35.3 run or cloud-resource
+  lifecycle change has occurred.
 
 Evidence: `artifacts/p35_1_local_gate.md`, `artifacts/p35_2_local_gate.md` and
 `artifacts/p35_3_local_gate.md`.
 
 ## Next action
 
-Review and publish the default-off P35.3 implementation, then render one source-pinned r29
-Attempt-0 JobSet exactly as recorded in `cluster/P35_ENVELOPE_HANDOFF.md`. Copy all JSON, metadata
-and raw logs before deleting the coordinator Pod; the state directory is on `/tmp`.
+Render one source-pinned r29 Attempt-0 JobSet from published commit `366ac2b1` exactly as recorded
+in `cluster/P35_ENVELOPE_HANDOFF.md`. Copy all JSON, metadata and raw logs before deleting the
+coordinator Pod; the state directory is on `/tmp`.
 
 ## Hard gates
 
@@ -142,8 +143,8 @@ and raw logs before deleting the coordinator Pod; the state directory is on `/tm
 
 ## Blockers
 
-The P35.3 implementation has only local CPU and exact-image evidence. The 64-chip launch remains
-an operator action after a reviewed implementation SHA is published.
+The P35.3 implementation has only local CPU, exact-image and bounded one-host TP4 evidence. The
+published 64-chip launch remains an operator action.
 
 ## Rollback
 

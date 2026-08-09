@@ -180,7 +180,7 @@ ordinary training. A source-pinned r27 is still required before any carrier clas
   `git diff --check` pass.
 - The real one-host `aaron-v5p-node6` smoke used all four devices `[0,1,2,3]` and passed the TP4
   replay plus signed-zero/one-bit equality controls (2 PASS in 35.90s). Artifact SHA-256:
-  `3bf21d2b642f7020134bc084cdbd2076ca755417756a4c0b78524d86876cd83b`.
+  `56f110efcebc5d1c934335eacef643a904a7501a7cf67fe0d25c6420343ad9f2`.
 - Source diff review caught and repaired an intermediate insertion error in
   `_bitwise_arrays_equal` before publication. The final full suite and TPU smoke ran after the
   repair; the intermediate file was never committed or used for a target classification.
@@ -191,3 +191,19 @@ Artifact: `artifacts/p35_3_local_gate.md`.
 
 Rollback: leave `CANON_P35_ENVELOPE` and `CANON_P35_EXACT_REPLAY` unset; ordinary serving and
 training are unchanged.
+
+## 2026-08-09 — P35.3 exact replay published
+
+- Published implementation commit `366ac2b1` to `origin/yuxzhang/canon-zero-tim` after verifying
+  that the remote remained at reviewed base `337ce07c`.
+- Re-fetched the live refs and verified that the target branch exactly matched `366ac2b1` while
+  `origin/main` remained untouched at `2e605bb3`.
+- Publication creates no target numerical verdict. P35.3 remains NOT RUN on 64-chip Pathways;
+  the next operator action is the source-pinned r29 Attempt 0 in the handoff.
+- Post-publication evidence verification removed trailing whitespace from the committed one-host
+  log. Its content-preserving canonical file SHA-256 is
+  `56f110efcebc5d1c934335eacef643a904a7501a7cf67fe0d25c6420343ad9f2`; the local-gate manifest was
+  updated in this evidence-only follow-up.
+
+Rollback: leave both P35 environment gates unset. Revert `366ac2b1` only if the diagnostic files
+must be removed; do not alter production defaults.

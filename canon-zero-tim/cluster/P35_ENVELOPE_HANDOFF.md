@@ -2,6 +2,9 @@
 
 Updated: 2026-08-09 UTC
 
+Reviewed implementation: `366ac2b1ff2806b48646a0188927e724bf569978` on
+`yuxzhang/canon-zero-tim`. P35.3 target status remains NOT RUN until r29 returns.
+
 ## Current target result
 
 P35.2 is complete on one source-pinned 64-chip DP16xTP4 Pathways attempt (r28):
