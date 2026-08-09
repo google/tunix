@@ -1,6 +1,6 @@
 # P35.2 three-arm producer
 
-Status: locally complete; r21 failed before the producer, target measurement not run
+Status: multi-chunk repair implemented; r24 failed before B, target measurement not run
 
 ## Implemented
 
@@ -21,6 +21,10 @@ Status: locally complete; r21 failed before the producer, target measurement not
   native reference Splash sequence length `1024 + 256 = 1280` divisible by its fixed query block
   size 256. The producer writes one
   immutable report and intentionally exits before backward.
+- One request may span multiple local-M256 calls. B preserves the native request across scheduler
+  invocations, while C preserves its rank-local cache across the same fixed-M sequence. The
+  metadata gate reconstructs tokens and positions across all B records, checks cumulative KV
+  lengths and rejects missing, duplicated or malformed chunks. Local M remains 256 on every call.
 - The postflight accepts only exit 1, one stop marker, a nonempty report and a complete mechanical
   classification.
 
@@ -33,11 +37,11 @@ rejected before launch.
 
 ## Target admission
 
-The producer, classifier and renderer are locally complete. Attempt r21 used response 64 and
-failed in the native reference Splash forward before any A/B/C report was produced. The target
-measurement therefore remains NOT RUN. The response-256 repair must be published and its
-source-pinned manifest must pass a server-side Kubernetes dry run before the next attempt. An
-unchanged r18/r19/r21 rerun cannot answer the P35 question.
+Attempt r21 used response 64 and failed in the native reference Splash forward. Attempt r24
+confirmed the response-256 repair and completed A, but the prototype probe rejected a real
+multi-chunk sequence before B. Neither attempt produced an A/B/C report. The multi-chunk repair
+must pass the complete pinned-image gate, be published, and pass a source-pinned server-side
+Kubernetes dry run before r25. An unchanged r18/r19/r21/r24 rerun cannot answer the P35 question.
 
 ## Rollback
 

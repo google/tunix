@@ -591,7 +591,7 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 
 ---
 
-## 24. Phase 35 Attempt `r24`: GSM8K Three-Arm Envelope Diagnostic (`response=256` Splash Divisibility and Single-Chunk Gate Trap)
+## 24. Phase 35 Attempt `r24`: GSM8K Three-Arm Envelope Diagnostic (`response=256` Splash Divisibility and Probe-Contract Trap)
 
 - `p35_r24_gsm8k_envelope.raw.log` (SHA-256: `4f03dd6dd22ff9d153c333d28d9e547d920e3e35d7b5faf57013f1e58aa3c466`)
 - WandB: `https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/x7m148n4`
@@ -606,12 +606,18 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 3. **Arm A Native Serving Rescore Execution**:
    - Executed full dynamic packing Arm A rescore and completed 24 metadata dump intervals (`P35_METADATA arm=A seq=0..23`).
    - `[CANON_ALIGN] attached host sidecar rows=256 completion_width=256` verified.
-4. **Arm B Single-Chunk Gate Trapping**:
+4. **Arm B Did Not Start**:
    - Trapped inside `agentic_grpo_learner.py:1048`:
      ```text
      EnvelopeProbeError: P35 first target admits only one local-M chunk per sequence
      ```
-   - Cause: The Phase 35 prototype probe assertion inherited a single-chunk assumption from FrozenLake (`len(sequence) <= local_m = 256`). In GSM8K, sequence length (prompt + response) reaches 350-550 tokens across 5 chunks.
-
+   - This was a probe-contract failure, not a model or numerical verdict. The C adapter already
+     schedules a sequence through as many fixed local-M256 calls as needed, and native serving B
+     does the same across scheduler invocations. The prototype incorrectly confused "one request
+     per DP rank" with "one chunk per request" and rejected every selected group containing a
+     sequence longer than 256 before B or the classifier ran.
+   - The static adapter width was 1280 (`1024 + 256`), or five possible M256 calls. Real compact
+     sequence lengths need not occupy all five calls. No P35 report or classification exists for
+     r24, so it does not classify a carrier.
 
 

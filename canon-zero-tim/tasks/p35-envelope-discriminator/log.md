@@ -90,3 +90,20 @@ unchanged; preserve r21 as a failed pre-measurement artifact.
   the remote base remained `b8d3ad8d`.
 - The next authorized external action is the source-pinned r22 server-side dry run followed by one
   Attempt-0 target launch. No target numerical evidence was created by this publication.
+
+## 2026-08-09 — r24 probe-contract failure and multi-chunk repair
+
+- Archived r24 at `debug_logs/p35_r24_gsm8k_envelope.raw.log` with SHA-256
+  `4f03dd6dd22ff9d153c333d28d9e547d920e3e35d7b5faf57013f1e58aa3c466`.
+- r24 confirmed the response-256 Splash repair, completed rollout and the native A rescore, then
+  failed before B on a diagnostic-only assertion that allowed only one local-M chunk per sequence.
+  It emitted no report or classification; no carrier verdict was made.
+- Removed the false sequence-length assertion without changing response, local M, model values or
+  the serving/adapter computation. Extended metadata attestation to reconstruct each rank's full
+  request across multiple fixed-M256 records and validate token order, positions, cumulative KV
+  lengths, request distribution, active page IDs and complete coverage.
+- Added positive 300/513-token multi-chunk coverage and a missing-tail negative control. Added a
+  native grouped-rescore test with 556/500-token requests.
+
+Rollback: leave `CANON_P35_ENVELOPE` unset. Preserve r24 as failed pre-measurement evidence and do
+not change the canonical local M256 contract.

@@ -22,6 +22,13 @@ forward rejected response 64 because Splash query block 256 did not divide seque
 It produced no P35 report or classification. The next attempt must use the unique response cap 256;
 do not rerun r21 or relax this contract.
 
+Attempt r24 confirmed that response 256 fixes the Splash shape failure and completed the native A
+rescore. It then stopped before B because the diagnostic prototype incorrectly rejected sequences
+longer than one local-M256 call. This is not a numerical result. The repair keeps response 256 and
+local M256, admits multiple fixed-M calls per request, and requires metadata to cover the complete
+sequence with contiguous positions and cumulative KV lengths. Changing response to 512 would add
+another static chunk and would not repair the rejected assumption.
+
 ## What is and is not proven
 
 Proven:
@@ -86,7 +93,8 @@ this production-model gate.
 
 ## Operator instructions
 
-The producer, classifier and renderer are locally complete, but the target is **NOT RUN**. Fetch
+The producer, classifier and multi-chunk metadata gate are locally complete, but the target is
+**NOT RUN**. Fetch
 the reviewed target branch, resolve its concrete 40-hex SHA, and render exactly one source-pinned
 JobSet:
 
@@ -95,10 +103,10 @@ git fetch origin yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
 python3 canon-zero-tim/cluster/render_p35_jobset.py \
   --source-commit "$SOURCE_SHA" \
-  --run-id r22 \
-  --output /tmp/canon-p35-gsm8k-envelope-r22.yaml
+  --run-id r25 \
+  --output /tmp/canon-p35-gsm8k-envelope-r25.yaml
 kubectl apply --dry-run=server \
-  -f /tmp/canon-p35-gsm8k-envelope-r22.yaml
+  -f /tmp/canon-p35-gsm8k-envelope-r25.yaml
 ```
 
 Do not apply until the server-side dry run passes and the operator confirms the source SHA. The

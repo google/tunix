@@ -30,20 +30,45 @@ class EnvelopeProbeTest(absltest.TestCase):
       local_m=256,
       sequences=((11, 12), (21, 22, 23)),
       request_ids=("a", "b"),
+      starts=None,
+      query_lengths=None,
   ):
+    starts = tuple(starts or (0,) * data_size)
+    if query_lengths is None:
+      query_lengths = tuple(
+          min(local_m, len(sequence) - start)
+          for sequence, start in zip(sequences, starts)
+      )
     input_ids = np.zeros((data_size, local_m), np.int32)
     positions = np.zeros_like(input_ids)
-    for rank, sequence in enumerate(sequences):
-      input_ids[rank, : len(sequence)] = sequence
-      positions[rank, : len(sequence)] = np.arange(len(sequence))
-    lengths = np.asarray([len(sequence) for sequence in sequences], np.int32)
+    for rank, (sequence, start, query_length) in enumerate(
+        zip(sequences, starts, query_lengths)
+    ):
+      stop = start + query_length
+      input_ids[rank, :query_length] = sequence[start:stop]
+      positions[rank, :query_length] = np.arange(start, stop)
+    lengths = np.asarray(
+        [
+            start + query_length if query_length else 0
+            for start, query_length in zip(starts, query_lengths)
+        ],
+        np.int32,
+    )
+    active = np.asarray([int(length > 0) for length in query_lengths], np.int32)
     arrays = {
         "input_ids": input_ids.reshape(-1),
         "input_positions": positions.reshape(-1),
+        "md_input_positions": positions.reshape(-1),
         "md_seq_lens": lengths,
-        "md_query_start_loc": np.stack((np.zeros_like(lengths), lengths), axis=1).reshape(-1),
-        "md_request_distribution": np.tile(np.asarray([0, 0, 1], np.int32), data_size),
-        "md_block_tables": np.arange(data_size, dtype=np.int32),
+        "md_query_start_loc": np.stack(
+            (np.zeros_like(lengths), np.asarray(query_lengths, np.int32)), axis=1
+        ).reshape(-1),
+        "md_request_distribution": np.stack(
+            (np.zeros_like(active), np.zeros_like(active), active), axis=1
+        ).reshape(-1),
+        "md_block_tables": np.where(
+            active > 0, np.arange(data_size, dtype=np.int32), -1
+        ),
     }
     base = Path(root) / f"p35_metadata_{index:04d}"
     np.savez(str(base) + ".npz", **arrays)
@@ -138,6 +163,73 @@ class EnvelopeProbeTest(absltest.TestCase):
       self.assertTrue(all(attestations.values()), attestations)
       self.assertEqual(summary["B_local_m"], 256)
 
+  def test_metadata_attestation_accepts_multiple_fixed_m_chunks(self):
+    sequences = (
+        tuple(range(300)),
+        tuple(range(1000, 1513)),
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+      self._write_metadata_record(temporary, 0, "A")
+      self._write_metadata_record(
+          temporary,
+          1,
+          "B",
+          sequences=sequences,
+          query_lengths=(256, 256),
+      )
+      self._write_metadata_record(
+          temporary,
+          2,
+          "B",
+          sequences=sequences,
+          starts=(256, 256),
+          query_lengths=(44, 256),
+      )
+      self._write_metadata_record(
+          temporary,
+          3,
+          "B",
+          sequences=sequences,
+          starts=(300, 512),
+          query_lengths=(0, 1),
+      )
+      attestations, summary = envelope_probe.attest_metadata(
+          directory=temporary,
+          expected_b_sequences=sequences,
+          expected_a_rows=2,
+          data_size=2,
+          local_m=256,
+      )
+      self.assertTrue(all(attestations.values()), attestations)
+      self.assertEqual(summary["B_records"], 3)
+      self.assertEqual(summary["B_consumed_lengths"], [300, 513])
+      self.assertEqual(
+          summary["B_query_lengths_by_record"],
+          [[256, 256], [44, 256], [0, 1]],
+      )
+
+  def test_metadata_attestation_rejects_incomplete_chunk_sequence(self):
+    sequences = (tuple(range(300)), tuple(range(1000, 1300)))
+    with tempfile.TemporaryDirectory() as temporary:
+      self._write_metadata_record(temporary, 0, "A")
+      self._write_metadata_record(
+          temporary,
+          1,
+          "B",
+          sequences=sequences,
+          query_lengths=(256, 256),
+      )
+      attestations, summary = envelope_probe.attest_metadata(
+          directory=temporary,
+          expected_b_sequences=sequences,
+          expected_a_rows=2,
+          data_size=2,
+          local_m=256,
+      )
+      self.assertFalse(attestations["grouped_B_observed"])
+      self.assertFalse(attestations["metadata_B_matches_C"])
+      self.assertEqual(summary["B_consumed_lengths"], [256, 256])
+
   def test_metadata_attestation_rejects_missing_rank_request(self):
     with tempfile.TemporaryDirectory() as temporary:
       self._write_metadata_record(temporary, 0, "A")
@@ -169,6 +261,60 @@ class EnvelopeProbeTest(absltest.TestCase):
       attestations, _ = envelope_probe.attest_metadata(
           directory=temporary,
           expected_b_sequences=((11, 12), (21, 22, 23)),
+          expected_a_rows=2,
+          data_size=2,
+          local_m=256,
+      )
+      self.assertFalse(attestations["block_tables_B_observed"])
+      self.assertFalse(attestations["metadata_B_matches_C"])
+
+  def test_metadata_attestation_rejects_position_channel_disagreement(self):
+    with tempfile.TemporaryDirectory() as temporary:
+      self._write_metadata_record(temporary, 0, "A")
+      self._write_metadata_record(temporary, 1, "B")
+      path = Path(temporary) / "p35_metadata_0001.npz"
+      with np.load(path) as original:
+        arrays = {key: original[key].copy() for key in original.files}
+      arrays["md_input_positions"][0] = 9
+      np.savez(path, **arrays)
+      attestations, _ = envelope_probe.attest_metadata(
+          directory=temporary,
+          expected_b_sequences=((11, 12), (21, 22, 23)),
+          expected_a_rows=2,
+          data_size=2,
+          local_m=256,
+      )
+      self.assertTrue(attestations["local_m256_B"])
+      self.assertFalse(attestations["positions_equal"])
+      self.assertFalse(attestations["metadata_B_matches_C"])
+
+  def test_metadata_attestation_rejects_page_change_between_chunks(self):
+    sequences = (tuple(range(300)), tuple(range(1000, 1300)))
+    with tempfile.TemporaryDirectory() as temporary:
+      self._write_metadata_record(temporary, 0, "A")
+      self._write_metadata_record(
+          temporary,
+          1,
+          "B",
+          sequences=sequences,
+          query_lengths=(256, 256),
+      )
+      self._write_metadata_record(
+          temporary,
+          2,
+          "B",
+          sequences=sequences,
+          starts=(256, 256),
+          query_lengths=(44, 44),
+      )
+      path = Path(temporary) / "p35_metadata_0002.npz"
+      with np.load(path) as original:
+        arrays = {key: original[key].copy() for key in original.files}
+      arrays["md_block_tables"][0] = 99
+      np.savez(path, **arrays)
+      attestations, _ = envelope_probe.attest_metadata(
+          directory=temporary,
+          expected_b_sequences=sequences,
           expected_a_rows=2,
           data_size=2,
           local_m=256,

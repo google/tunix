@@ -199,6 +199,38 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
           processed=False,
       )
 
+  def test_grouped_prefill_rescore_preserves_multichunk_sequences(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_prefill_rescore_provenance = None
+    rollout._last_grouped_prefill_rescore_provenance = None
+    prompts = np.arange(2 * 300, dtype=np.int32).reshape(2, 300) + 1
+    completions = np.arange(2 * 256, dtype=np.int32).reshape(2, 256) + 1000
+    with mock.patch.dict(
+        os.environ, {"CANON_P35_ENVELOPE": "1"}, clear=False
+    ):
+      result = rollout.get_grouped_prefill_rescore_logps(
+          prompts,
+          completions,
+          completion_lengths=np.asarray([256, 200], dtype=np.int32),
+          group_size=2,
+          processed=False,
+          source_row_indices=np.asarray([0, 2]),
+          diagnostic_arm="B",
+      )
+
+    self.assertEqual(result.shape, (2, 256))
+    self.assertEqual(
+        rollout._last_grouped_prefill_rescore_provenance[
+            "group_provenance"
+        ][0]["sequence_lengths"],
+        (556, 500),
+    )
+    self.assertEqual(
+        [len(prompt["prompt_token_ids"]) for prompt in rollout._sampler.prompts],
+        [556, 500],
+    )
+
   def test_grouped_prefill_rescore_rejects_duplicate_source_rows(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)
     rollout._sampler = _RescoreSampler()

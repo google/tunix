@@ -1,11 +1,11 @@
 # P35 envelope discriminator state
 
-- Status: active; P35.2 locally complete, r21 failed before measurement
+- Status: active; multi-chunk P35.2 repair locally implemented, r24 failed before measurement
 - Active phase: P35.2 target admission
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Reviewed base commit: `b8d3ad8dc84022e88f4b22a919ba60d46fea64c9`
+- Reviewed base commit: `b2de4f16bf1a0d691ff027c7d74515ad911cc081`
 - Updated: 2026-08-09 UTC
 
 ## Objective
@@ -39,6 +39,10 @@ reward or correlation to classify this boundary.
 9. P35 attempt r21 completed rollout but failed before the three-arm producer while computing
    native reference logprobs: Splash query block 256 did not divide sequence length 1088
    (`1024 + 64`). It produced no P35 report or classification and is not a numerical target.
+10. P35 attempt r24 confirmed that response 256 removes the Splash divisibility failure and ran
+    the unchanged A rescore, but a diagnostic-only single-chunk assertion rejected the selected
+    sequence group before B. The assertion confused one request per rank with one chunk per
+    request. r24 produced no report or classification and is not a carrier verdict.
 
 ## Current hypothesis split
 
@@ -69,6 +73,11 @@ No hypothesis is green yet.
   a `COMPLETE` classification. It rejects missing marker/report and every other exit code.
 - The P35 response contract is uniquely 256 in the renderer, workload command, recipe and cluster
   preflight. A renderer-to-preflight integration test accepts 256 and rejects the known-bad 64.
+- B and C retain canonical local M256 while admitting sequences that span multiple scheduler
+  records. The metadata gate reconstructs every rank's complete token stream across records and
+  checks contiguous positions, cumulative KV lengths, at most one active request per rank,
+  request distribution, active page IDs and complete sequence coverage. Missing tail chunks are
+  rejected.
 - Pinned-image CPU gate PASS; qwen1p7b and qwen8b overlay installs each matched all 29 manifest
   entries and passed 10/10 prompt/decode chunk tests.
 - `git diff --check`, Python AST checks and shell syntax checks PASS.
@@ -77,8 +86,9 @@ Evidence: `artifacts/p35_1_local_gate.md` and `artifacts/p35_2_local_gate.md`.
 
 ## Next action
 
-Resolve and verify the current published `origin/yuxzhang/canon-zero-tim` SHA, render the one
-GSM8K envelope-short JobSet as run r22, run a server-side Kubernetes dry run, then let the
+Publish the reviewed multi-chunk repair, resolve and verify the resulting
+`origin/yuxzhang/canon-zero-tim` SHA, render the one GSM8K envelope-short JobSet as run r25, run a
+server-side Kubernetes dry run, then let the
 operator launch Attempt 0. The target
 must stop before backward and return the raw log, schema-v2 report, compact metadata records,
 classification and SHA-256 values. Until that happens no carrier is classified.

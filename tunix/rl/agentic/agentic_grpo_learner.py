@@ -1044,10 +1044,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             selected_prompt_mask,
             selected_valid_mask,
         )
-        if any(len(sequence) > local_m for sequence in sequences):
-          raise envelope_probe.EnvelopeProbeError(
-              "P35 first target admits only one local-M chunk per sequence"
-          )
 
         b_selected = self.rl_cluster.get_grouped_prefill_rescore_logps(
             selected_prompts,

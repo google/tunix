@@ -164,109 +164,164 @@ def attest_metadata(
     data_size: int,
     local_m: int,
 ) -> tuple[dict[str, bool], dict[str, Any]]:
-  """Checks the compact, arm-labelled serving metadata against C semantics."""
+  """Checks all arm-labelled serving chunks against C sequence semantics."""
   records = _load_metadata_records(directory)
   a_records = [record for record in records if record.get("arm") == "A"]
   b_records = [record for record in records if record.get("arm") == "B"]
   if not a_records:
     raise EnvelopeProbeError("compact metadata contains no native A record")
-  if len(b_records) != 1:
-    raise EnvelopeProbeError(
-        f"compact metadata requires exactly one B record, got {len(b_records)}"
-    )
+  if not b_records:
+    raise EnvelopeProbeError("compact metadata contains no grouped B record")
   if len(expected_b_sequences) != data_size:
     raise EnvelopeProbeError(
         "B sequence group must contain exactly one row per data rank: "
         f"{len(expected_b_sequences)} vs {data_size}"
     )
-  if any(len(sequence) > local_m for sequence in expected_b_sequences):
-    raise EnvelopeProbeError("B metadata gate admits only one local-M chunk per row")
-
-  b_record = b_records[0]
-  arrays = b_record.get("arrays", {})
   required_arrays = {
       "input_ids",
       "input_positions",
+      "md_input_positions",
       "md_seq_lens",
       "md_query_start_loc",
       "md_request_distribution",
       "md_block_tables",
   }
-  if not required_arrays.issubset(arrays):
-    raise EnvelopeProbeError(
-        "B metadata record is missing arrays: "
-        f"{sorted(required_arrays - set(arrays))}"
-    )
-  input_ids = np.asarray(arrays["input_ids"]).reshape(-1)
-  positions = np.asarray(arrays["input_positions"]).reshape(-1)
-  local_m_observed = input_ids.size // data_size if data_size else 0
-  local_m_ok = (
-      input_ids.size == data_size * local_m
-      and positions.size == input_ids.size
-      and local_m_observed == local_m
+  expected_lengths = np.asarray(
+      [len(sequence) for sequence in expected_b_sequences], dtype=np.int64
   )
-  token_rows_ok = local_m_ok
-  positions_ok = local_m_ok
-  if local_m_ok:
+  consumed = np.zeros(data_size, dtype=np.int64)
+  local_m_values: list[int] = []
+  query_lengths: list[list[int]] = []
+  block_table_entries = 0
+  local_m_ok = True
+  token_rows_ok = True
+  positions_ok = True
+  one_per_rank = True
+  block_tables_ok = True
+  cache_fresh = True
+  first_page_ids = np.full(data_size, -1, dtype=np.int64)
+
+  for record_index, b_record in enumerate(b_records):
+    arrays = b_record.get("arrays", {})
+    if not required_arrays.issubset(arrays):
+      raise EnvelopeProbeError(
+          f"B metadata record {record_index} is missing arrays: "
+          f"{sorted(required_arrays - set(arrays))}"
+      )
+    input_ids = np.asarray(arrays["input_ids"]).reshape(-1)
+    positions = np.asarray(arrays["input_positions"]).reshape(-1)
+    metadata_positions = np.asarray(arrays["md_input_positions"]).reshape(-1)
+    local_m_observed = (
+        input_ids.size // data_size
+        if data_size and input_ids.size % data_size == 0
+        else 0
+    )
+    local_m_values.append(int(local_m_observed))
+    record_local_m_ok = bool(
+        input_ids.size == data_size * local_m
+        and positions.size == input_ids.size
+        and metadata_positions.size == positions.size
+        and local_m_observed == local_m
+    )
+    metadata_positions_ok = bool(
+        metadata_positions.size == positions.size
+        and np.array_equal(metadata_positions, positions)
+    )
+    local_m_ok &= record_local_m_ok
+    positions_ok &= metadata_positions_ok
+
+    meta = b_record.get("meta", {})
+    padded_num_reqs = int(meta.get("md_padded_num_reqs", 0) or 0)
+    request_slots_ok = bool(
+        padded_num_reqs > 0 and padded_num_reqs % data_size == 0
+    )
+    local_slots = padded_num_reqs // data_size if request_slots_ok else 0
+    seq_lens = np.asarray(arrays["md_seq_lens"]).reshape(-1)
+    query_start = np.asarray(arrays["md_query_start_loc"]).reshape(-1)
+    distribution = np.asarray(arrays["md_request_distribution"]).reshape(-1)
+    block_tables = np.asarray(arrays["md_block_tables"]).reshape(-1)
+    block_table_entries += int(block_tables.size)
+    record_shapes_ok = bool(
+        request_slots_ok
+        and seq_lens.size == data_size * local_slots
+        and query_start.size == data_size * (local_slots + 1)
+        and distribution.size == data_size * 3
+        and block_tables.size > 0
+        and block_tables.size % padded_num_reqs == 0
+    )
+    one_per_rank &= record_shapes_ok
+    block_tables_ok &= record_shapes_ok
+    if not (record_local_m_ok and metadata_positions_ok and record_shapes_ok):
+      token_rows_ok = False
+      positions_ok = False
+      cache_fresh = False
+      continue
+
     input_by_rank = input_ids.reshape(data_size, local_m)
     position_by_rank = positions.reshape(data_size, local_m)
-    for rank, sequence in enumerate(expected_b_sequences):
-      count = len(sequence)
-      token_rows_ok &= np.array_equal(
-          input_by_rank[rank, :count], np.asarray(sequence, input_ids.dtype)
-      )
-      positions_ok &= np.array_equal(
-          position_by_rank[rank, :count],
-          np.arange(count, dtype=positions.dtype),
-      )
-
-  meta = b_record.get("meta", {})
-  padded_num_reqs = int(meta.get("md_padded_num_reqs", 0) or 0)
-  request_slots_ok = padded_num_reqs > 0 and padded_num_reqs % data_size == 0
-  local_slots = padded_num_reqs // data_size if request_slots_ok else 0
-  seq_lens = np.asarray(arrays["md_seq_lens"]).reshape(-1)
-  query_start = np.asarray(arrays["md_query_start_loc"]).reshape(-1)
-  distribution = np.asarray(arrays["md_request_distribution"]).reshape(-1)
-  block_tables = np.asarray(arrays["md_block_tables"]).reshape(-1)
-  one_per_rank = request_slots_ok
-  block_tables_ok = bool(
-      request_slots_ok
-      and block_tables.size > 0
-      and block_tables.size % padded_num_reqs == 0
-  )
-  cache_fresh = request_slots_ok
-  if request_slots_ok:
-    expected_lengths = np.asarray(
-        [len(sequence) for sequence in expected_b_sequences], dtype=seq_lens.dtype
+    seq_by_rank = seq_lens.reshape(data_size, local_slots)
+    query_by_rank = query_start.reshape(data_size, local_slots + 1)
+    distribution_by_rank = distribution.reshape(data_size, 3)
+    blocks_per_request = block_tables.size // padded_num_reqs
+    block_by_rank = block_tables.reshape(
+        data_size, local_slots, blocks_per_request
     )
-    one_per_rank &= seq_lens.size == data_size * local_slots
-    one_per_rank &= query_start.size == data_size * (local_slots + 1)
-    one_per_rank &= distribution.size == data_size * 3
-    if one_per_rank:
-      seq_by_rank = seq_lens.reshape(data_size, local_slots)
-      query_by_rank = query_start.reshape(data_size, local_slots + 1)
-      distribution_by_rank = distribution.reshape(data_size, 3)
-      one_per_rank &= np.array_equal(
-          (seq_by_rank > 0).sum(axis=1), np.ones(data_size, dtype=np.int64)
+    record_query_lengths = []
+    for rank, sequence in enumerate(expected_b_sequences):
+      active_slots = int(distribution_by_rank[rank, 2])
+      q_len = int(query_by_rank[rank, 1] - query_by_rank[rank, 0])
+      record_query_lengths.append(q_len)
+      remaining = int(expected_lengths[rank] - consumed[rank])
+      rank_active = q_len > 0
+      rank_contract_ok = bool(
+          active_slots in (0, 1)
+          and active_slots == int(rank_active)
+          and query_by_rank[rank, 0] == 0
+          and 0 <= q_len <= local_m
+          and q_len <= remaining
+          and int((seq_by_rank[rank] > 0).sum()) == int(rank_active)
       )
-      one_per_rank &= np.array_equal(seq_by_rank[:, 0], expected_lengths)
-      one_per_rank &= np.array_equal(query_by_rank[:, 0], np.zeros(data_size))
-      one_per_rank &= np.array_equal(query_by_rank[:, 1], expected_lengths)
-      one_per_rank &= np.array_equal(
-          distribution_by_rank[:, 2], np.ones(data_size, distribution.dtype)
-      )
-      if block_tables_ok:
-        blocks_per_request = block_tables.size // padded_num_reqs
-        block_by_rank = block_tables.reshape(
-            data_size, local_slots, blocks_per_request
+      if rank_active:
+        page_id = int(block_by_rank[rank, 0, 0])
+        rank_contract_ok &= bool(
+            int(seq_by_rank[rank, 0]) == int(consumed[rank] + q_len)
+            and page_id >= 0
         )
-        block_tables_ok &= bool(np.all(block_by_rank[:, 0, 0] >= 0))
-      cache_fresh = bool(
-          one_per_rank
-          and block_tables_ok
-          and np.array_equal(seq_by_rank[:, 0], query_by_rank[:, 1])
-          and np.all(position_by_rank[:, 0] == 0)
+        if first_page_ids[rank] < 0:
+          first_page_ids[rank] = page_id
+        else:
+          block_tables_ok &= bool(first_page_ids[rank] == page_id)
+      one_per_rank &= rank_contract_ok
+      block_tables_ok &= bool(
+          not rank_active or int(block_by_rank[rank, 0, 0]) >= 0
       )
+      start = int(consumed[rank])
+      stop = start + q_len
+      expected_tokens = np.asarray(sequence[start:stop], dtype=input_ids.dtype)
+      expected_positions = np.arange(start, stop, dtype=positions.dtype)
+      token_rows_ok &= bool(
+          rank_contract_ok
+          and np.array_equal(input_by_rank[rank, :q_len], expected_tokens)
+      )
+      positions_ok &= bool(
+          rank_contract_ok
+          and np.array_equal(
+              position_by_rank[rank, :q_len], expected_positions
+          )
+      )
+      if rank_active and start == 0:
+        cache_fresh &= bool(position_by_rank[rank, 0] == 0)
+      consumed[rank] = stop
+    one_per_rank &= bool(any(length > 0 for length in record_query_lengths))
+    query_lengths.append(record_query_lengths)
+
+  complete_sequences = bool(np.array_equal(consumed, expected_lengths))
+  token_rows_ok &= complete_sequences
+  positions_ok &= complete_sequences
+  one_per_rank &= complete_sequences
+  cache_fresh &= bool(
+      complete_sequences and positions_ok and block_tables_ok and one_per_rank
+  )
 
   mesh_descriptions = [record.get("meta", {}).get("mesh") for record in records]
   mesh_equal = all(description == mesh_descriptions[0] for description in mesh_descriptions)
@@ -285,7 +340,7 @@ def attest_metadata(
 
   attestations = {
       "native_A_observed": bool(native_a_observed),
-      "grouped_B_observed": True,
+      "grouped_B_observed": bool(b_records and complete_sequences),
       "mesh_shape_expected": bool(mesh_shape_ok),
       "device_order_expected": bool(device_order_ok),
       "local_m256_B": bool(local_m_ok and local_m == 256),
@@ -303,9 +358,13 @@ def attest_metadata(
       "B_records": len(b_records),
       "A_request_ids": len(a_request_ids),
       "expected_A_rows": int(expected_a_rows),
-      "B_local_m": int(local_m_observed),
+      "B_local_m": int(local_m) if local_m_ok else None,
+      "B_local_m_values": local_m_values,
       "B_sequence_lengths": [len(sequence) for sequence in expected_b_sequences],
-      "B_block_table_entries": int(block_tables.size),
+      "B_consumed_lengths": consumed.tolist(),
+      "B_query_lengths_by_record": query_lengths,
+      "B_block_table_entries": int(block_table_entries),
+      "B_first_page_ids": first_page_ids.tolist(),
       "mesh": mesh,
   }
   return attestations, summary
