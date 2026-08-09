@@ -181,25 +181,67 @@ def _hash(value: Any) -> str:
   return hashlib.sha256(array.tobytes()).hexdigest()
 
 
-def _masked_bytes_differ(a: Any, b: Any, mask: Any) -> tuple[int, dict | None]:
+def _masked_hash(value: Any, mask: Any) -> str:
+  array = np.asarray(value)
+  bool_mask = np.asarray(mask, dtype=np.bool_)
+  if array.shape != bool_mask.shape:
+    return "INVALID_SHAPE"
+  return _hash(np.ascontiguousarray(array[bool_mask]))
+
+
+def _masked_bitwise_difference(a: Any, b: Any, mask: Any) -> dict[str, Any]:
+  """Returns byte- and element-level bitwise differences under ``mask``."""
   aa = np.asarray(a)
   bb = np.asarray(b)
   mm = np.asarray(mask, dtype=np.bool_)
   if aa.shape != bb.shape or aa.dtype != bb.dtype or aa.shape != mm.shape:
-    return -1, None
-  av = np.ascontiguousarray(aa[mm])
-  bv = np.ascontiguousarray(bb[mm])
-  byte_diff = av.view(np.uint8) != bv.view(np.uint8)
-  count = int(byte_diff.sum())
-  if not count:
-    return 0, None
-  first_byte = int(np.flatnonzero(byte_diff.reshape(-1))[0])
-  index = first_byte // av.dtype.itemsize
-  return count, {
-      "masked_index": index,
-      "a": float(av.reshape(-1)[index]),
-      "b": float(bv.reshape(-1)[index]),
+    return {
+        "valid": False,
+        "differing_bytes": -1,
+        "total_bytes": -1,
+        "byte_fraction": None,
+        "differing_elements": -1,
+        "total_elements": -1,
+        "element_fraction": None,
+        "first_mismatch": None,
+    }
+
+  av = np.ascontiguousarray(aa[mm]).reshape(-1)
+  bv = np.ascontiguousarray(bb[mm]).reshape(-1)
+  byte_diff = (av.view(np.uint8) != bv.view(np.uint8)).reshape(-1)
+  differing_bytes = int(byte_diff.sum())
+  total_bytes = int(av.nbytes)
+  total_elements = int(av.size)
+  element_diff = byte_diff.reshape(total_elements, av.dtype.itemsize).any(axis=1)
+  differing_elements = int(element_diff.sum())
+  first = None
+  if differing_elements:
+    index = int(np.flatnonzero(element_diff)[0])
+    first = {
+        "masked_index": index,
+        "a": float(av[index]),
+        "b": float(bv[index]),
+    }
+  return {
+      "valid": True,
+      "differing_bytes": differing_bytes,
+      "total_bytes": total_bytes,
+      "byte_fraction": (
+          float(differing_bytes / total_bytes) if total_bytes else 0.0
+      ),
+      "differing_elements": differing_elements,
+      "total_elements": total_elements,
+      "element_fraction": (
+          float(differing_elements / total_elements) if total_elements else 0.0
+      ),
+      "first_mismatch": first,
   }
+
+
+def _masked_bytes_differ(a: Any, b: Any, mask: Any) -> tuple[int, dict | None]:
+  """Compatibility wrapper for callers that only consume the legacy fields."""
+  result = _masked_bitwise_difference(a, b, mask)
+  return result["differing_bytes"], result["first_mismatch"]
 
 
 def check_pre_backward(
@@ -226,18 +268,14 @@ def check_pre_backward(
       ("S_decode_vs_S_prefill", sd, sp),
       ("S_prefill_vs_T_old", sp, to),
   ):
-    count, first = _masked_bytes_differ(a, b, mask)
+    difference = _masked_bitwise_difference(a, b, mask)
     max_abs = float("nan")
     if a.shape == b.shape == mask.shape and n_action:
       max_abs = float(
           np.max(np.abs(a.astype(np.float64)[mask] - b.astype(np.float64)[mask]))
       )
-    boundaries[name] = {
-        "differing_bytes": count,
-        "max_abs": max_abs,
-        "first_mismatch": first,
-    }
-    if count != 0:
+    boundaries[name] = {**difference, "max_abs": max_abs}
+    if difference["differing_bytes"] != 0:
       reds.append(name)
   record = {
       "timestamp": time.time(),
@@ -253,6 +291,11 @@ def check_pre_backward(
           "tokens": _hash(sidecar.tokens),
           "action_mask": _hash(mask),
           "policy_version": _hash(sidecar.policy_version),
+      },
+      "masked_hashes": {
+          "S_decode": _masked_hash(sd, mask),
+          "S_prefill": _masked_hash(sp, mask),
+          "T_old": _masked_hash(to, mask),
       },
       "context": {
           "source": sidecar.source_name,
@@ -336,18 +379,14 @@ def check_batch(
       ("S_prefill_vs_T_old", sp, to),
       ("T_old_vs_T_current", to, tc),
   ):
-    count, first = _masked_bytes_differ(a, b, mask)
+    difference = _masked_bitwise_difference(a, b, mask)
     max_abs = float("nan")
     if a.shape == b.shape == mask.shape and n_action:
       max_abs = float(
           np.max(np.abs(a.astype(np.float64)[mask] - b.astype(np.float64)[mask]))
       )
-    boundaries[name] = {
-        "differing_bytes": count,
-        "max_abs": max_abs,
-        "first_mismatch": first,
-    }
-    if count != 0:
+    boundaries[name] = {**difference, "max_abs": max_abs}
+    if difference["differing_bytes"] != 0:
       reds.append(name)
 
   w = np.exp(to.astype(np.float64) - sd.astype(np.float64))
@@ -417,6 +456,12 @@ def check_batch(
           "tokens": _hash(sidecar.tokens),
           "action_mask": _hash(mask),
           "policy_version": _hash(sidecar.policy_version),
+      },
+      "masked_hashes": {
+          "S_decode": _masked_hash(sd, mask),
+          "S_prefill": _masked_hash(sp, mask),
+          "T_old": _masked_hash(to, mask),
+          "T_current": _masked_hash(tc, mask),
       },
       "context": {
           "source": sidecar.source_name,

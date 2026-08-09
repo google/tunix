@@ -1151,6 +1151,31 @@ class RLCluster:
           )
       )
 
+  def get_grouped_prefill_rescore_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      *,
+      completion_lengths: np.ndarray,
+      group_size: int,
+  ) -> np.ndarray:
+    """Returns native serving re-scores with fixed request grouping."""
+    source = getattr(self.rollout, "get_grouped_prefill_rescore_logps", None)
+    if source is None or not getattr(source, "is_real_rescore", False):
+      raise RuntimeError(
+          "rollout engine has no declared grouped S_prefill source"
+      )
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+      return np.asarray(
+          source(
+              prompt_tokens,
+              completion_tokens,
+              completion_lengths=completion_lengths,
+              group_size=group_size,
+              processed=True,
+          )
+      )
+
   def get_actor_per_token_logps(
       self,
       prompt_tokens: jax.Array,

@@ -2,6 +2,10 @@
 
 Updated: 2026-08-09 UTC
 
+> Superseded for the current FrozenLake boundary-2 investigation by
+> `P35_ENVELOPE_HANDOFF.md`. Do not rerun the r18 FrozenLake job unchanged. This document remains
+> the immutable record of the r18 launch contract and returned evidence.
+
 GSM8K r18 passed `S_decode == S_prefill` and failed closed at
 `S_prefill != T_old`. Its scheduler used per-rank `max_seqs=256,max_tokens=4096`, which DP16
 expanded to global M65536, while the trainer used global M4096/local M256. The current candidate

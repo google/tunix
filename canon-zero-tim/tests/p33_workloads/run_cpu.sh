@@ -8,6 +8,7 @@ cd "$WORKTREE"
 
 python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','tests/rl/canonical_qwen3_adapter_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 python3 -c "import ast,pathlib; files=('tunix/rl/alignment.py','tests/rl/alignment_test.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('canon-zero-tim/tests/p35_envelope/classify_envelope.py','canon-zero-tim/tests/p35_envelope/test_classify_envelope.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
   canon-zero-tim/cluster/steps/00_env.sh \
@@ -40,6 +41,12 @@ JAX_PLATFORMS=cpu python3 -m unittest \
 JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl \
   -p alignment_test.py
+JAX_PLATFORMS=cpu python3 -m unittest discover \
+  -s tests/rl/rollout \
+  -p vllm_rollout_canonical_test.py
+python3 -m unittest discover \
+  -s canon-zero-tim/tests/p35_envelope \
+  -p 'test_*.py'
 JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl \
   -p canonical_qwen3_adapter_test.py \

@@ -96,6 +96,7 @@ class VllmRollout(base_rollout.BaseRollout):
     )
     self._last_sampling_transforms: dict[str, Any] | None = None
     self._last_prefill_rescore_provenance: dict[str, Any] | None = None
+    self._last_grouped_prefill_rescore_provenance: dict[str, Any] | None = None
     state = nnx.state(model)
     self._sampler.load_checkpoint(state)
     self._canonical_engine_contract = None
@@ -370,6 +371,66 @@ class VllmRollout(base_rollout.BaseRollout):
   # Consumed by the alignment gate to refuse a `S_prefill` that is really a decode alias.
   get_prefill_rescore_logps.is_real_rescore = True
   get_prefill_rescore_logps.is_processed_rescore = True
+
+  def get_grouped_prefill_rescore_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      *,
+      completion_lengths: np.ndarray,
+      group_size: int,
+      processed: bool = True,
+  ) -> np.ndarray:
+    """Re-scores fixed request groups through the native serving envelope.
+
+    This diagnostic primitive changes only request submission grouping. Every
+    group still executes through ``get_prefill_rescore_logps`` with a fresh
+    prefix-cache reset. It is not used by normal rollout or training paths.
+    """
+    prompts = np.atleast_2d(np.asarray(prompt_tokens))
+    completions = np.atleast_2d(np.asarray(completion_tokens))
+    lengths = np.asarray(completion_lengths, dtype=np.int64).reshape(-1)
+    if group_size <= 0:
+      raise ValueError(f"group_size must be positive, got {group_size}")
+    if (
+        prompts.shape[0] != completions.shape[0]
+        or prompts.shape[0] != lengths.size
+    ):
+      raise ValueError(
+          "grouped prefill inputs have different row counts: "
+          f"prompts={prompts.shape[0]} completions={completions.shape[0]} "
+          f"lengths={lengths.size}"
+      )
+    if prompts.shape[0] == 0 or prompts.shape[0] % group_size:
+      raise ValueError(
+          "grouped prefill requires a nonempty exact number of groups: "
+          f"rows={prompts.shape[0]} group_size={group_size}"
+      )
+
+    outputs = []
+    provenance = []
+    for start in range(0, prompts.shape[0], group_size):
+      stop = start + group_size
+      outputs.append(
+          self.get_prefill_rescore_logps(
+              prompts[start:stop],
+              completions[start:stop],
+              completion_lengths=lengths[start:stop],
+              reset_prefix_cache=True,
+              processed=processed,
+          )
+      )
+      provenance.append(dict(self._last_prefill_rescore_provenance or {}))
+    self._last_grouped_prefill_rescore_provenance = {
+        "group_size": int(group_size),
+        "groups": len(outputs),
+        "rows": int(prompts.shape[0]),
+        "group_provenance": tuple(provenance),
+    }
+    return np.concatenate(outputs, axis=0)
+
+  get_grouped_prefill_rescore_logps.is_real_rescore = True
+  get_grouped_prefill_rescore_logps.is_processed_rescore = True
 
   def update_params(
       self,

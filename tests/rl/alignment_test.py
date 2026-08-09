@@ -142,6 +142,18 @@ class AlignmentTest(absltest.TestCase):
           set(result["boundaries"]),
           {"S_decode_vs_S_prefill", "S_prefill_vs_T_old"},
       )
+      for boundary in result["boundaries"].values():
+        self.assertTrue(boundary["valid"])
+        self.assertEqual(boundary["differing_bytes"], 0)
+        self.assertEqual(boundary["differing_elements"], 0)
+        self.assertEqual(boundary["total_elements"], 6)
+        self.assertEqual(boundary["total_bytes"], 24)
+        self.assertEqual(boundary["byte_fraction"], 0.0)
+        self.assertEqual(boundary["element_fraction"], 0.0)
+      self.assertEqual(
+          result["masked_hashes"]["S_decode"],
+          result["masked_hashes"]["S_prefill"],
+      )
       with open(report, encoding="utf-8") as report_file:
         self.assertEqual(json.loads(report_file.readline()), result)
 
@@ -326,13 +338,51 @@ class AlignmentTest(absltest.TestCase):
     self.assertEqual(core.completion_ids.shape, (2, 3))
 
   def test_signed_zero_reports_bitwise_mismatch_without_index_error(self):
-    count, first = alignment._masked_bytes_differ(  # pylint: disable=protected-access
+    result = alignment._masked_bitwise_difference(  # pylint: disable=protected-access
         np.asarray([[0.0]], np.float32),
         np.asarray([[-0.0]], np.float32),
         np.asarray([[True]]),
     )
-    self.assertGreater(count, 0)
-    self.assertEqual(first["masked_index"], 0)
+    self.assertGreater(result["differing_bytes"], 0)
+    self.assertEqual(result["differing_elements"], 1)
+    self.assertEqual(result["total_elements"], 1)
+    self.assertEqual(result["first_mismatch"]["masked_index"], 0)
+
+  def test_one_ulp_is_one_differing_element(self):
+    left = np.asarray([[1.0, 2.0]], np.float32)
+    right = left.copy()
+    right[0, 1] = np.nextafter(right[0, 1], np.float32(np.inf))
+    result = alignment._masked_bitwise_difference(  # pylint: disable=protected-access
+        left, right, np.asarray([[True, True]])
+    )
+    self.assertEqual(result["differing_elements"], 1)
+    self.assertEqual(result["total_elements"], 2)
+    self.assertGreater(result["differing_bytes"], 0)
+
+  def test_full_hash_can_differ_while_masked_boundary_is_exact(self):
+    wrapped = self._wrapped(rows=1)
+    mask = wrapped.action_mask.copy()
+    mask[0, 0] = False
+    drift = wrapped.s_prefill.copy()
+    drift[0, 0] = np.nextafter(drift[0, 0], np.float32(np.inf))
+    wrapped = wrapped.replace(action_mask=mask, s_prefill=drift)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ):
+      result = alignment.check_pre_backward(wrapped, step=0)
+    self.assertEqual(result["verdict"], "PASS")
+    self.assertNotEqual(
+        result["hashes"]["S_decode"], result["hashes"]["S_prefill"]
+    )
+    self.assertEqual(
+        result["masked_hashes"]["S_decode"],
+        result["masked_hashes"]["S_prefill"],
+    )
 
 
 if __name__ == "__main__":

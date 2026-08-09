@@ -38,6 +38,7 @@ class _RescoreSampler:
     self.tokenizer = _Tokenizer()
     self.reset_calls = 0
     self.prompts = None
+    self.prompt_batches = []
 
   def reset_prefix_cache_when_idle(self):
     self.reset_calls += 1
@@ -49,6 +50,7 @@ class _RescoreSampler:
     if reset_prefix_cache:
       self.reset_calls += 1
     self.prompts = prompts
+    self.prompt_batches.append(prompts)
     outputs = []
     for prompt in prompts:
       token_ids = prompt["prompt_token_ids"]
@@ -125,6 +127,55 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         [prompt["prompt_token_ids"] for prompt in rollout._sampler.prompts],
         [[1, 2, 3, 4], [5, 6]],
     )
+
+  def test_grouped_prefill_rescore_changes_only_submission_grouping(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_prefill_rescore_provenance = None
+    rollout._last_grouped_prefill_rescore_provenance = None
+    prompts = np.asarray(
+        [[0, 1], [0, 2], [0, 3], [0, 4]], dtype=np.int32
+    )
+    completions = np.asarray(
+        [[5, 0], [6, 0], [7, 0], [8, 0]], dtype=np.int32
+    )
+    result = rollout.get_grouped_prefill_rescore_logps(
+        prompts,
+        completions,
+        completion_lengths=np.ones((4,), dtype=np.int32),
+        group_size=2,
+        processed=False,
+    )
+
+    np.testing.assert_array_equal(
+        result,
+        np.asarray(
+            [[-5.0, 0.0], [-6.0, 0.0], [-7.0, 0.0], [-8.0, 0.0]],
+            dtype=np.float32,
+        ),
+    )
+    self.assertEqual(rollout._sampler.reset_calls, 2)
+    self.assertEqual(
+        [len(batch) for batch in rollout._sampler.prompt_batches], [2, 2]
+    )
+    self.assertEqual(
+        rollout._last_grouped_prefill_rescore_provenance["group_size"], 2
+    )
+    self.assertEqual(
+        rollout._last_grouped_prefill_rescore_provenance["groups"], 2
+    )
+
+  def test_grouped_prefill_rescore_rejects_partial_group(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    with self.assertRaisesRegex(ValueError, "exact number of groups"):
+      rollout.get_grouped_prefill_rescore_logps(
+          np.ones((3, 2), dtype=np.int32),
+          np.ones((3, 2), dtype=np.int32),
+          completion_lengths=np.ones((3,), dtype=np.int32),
+          group_size=2,
+          processed=False,
+      )
 
 
 if __name__ == "__main__":
