@@ -1,11 +1,11 @@
 # P35 envelope discriminator state
 
-- Status: active; P35.2 locally complete, target not run
+- Status: active; P35.2 locally complete, r21 failed before measurement
 - Active phase: P35.2 target admission
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Base commit: `c660134bababc9123e6820c1f241246cfbf602a7`
+- Reviewed base commit: `b8d3ad8dc84022e88f4b22a919ba60d46fea64c9`
 - Updated: 2026-08-09 UTC
 
 ## Objective
@@ -36,6 +36,9 @@ reward or correlation to classify this boundary.
 8. GSM8K r19 corrected the scheduler contract to global M4096/local M256, but the action-only
    `S_prefill != T_old` result was effectively unchanged. M mismatch is therefore excluded as
    the load-bearing carrier for that boundary.
+9. P35 attempt r21 completed rollout but failed before the three-arm producer while computing
+   native reference logprobs: Splash query block 256 did not divide sequence length 1088
+   (`1024 + 64`). It produced no P35 report or classification and is not a numerical target.
 
 ## Current hypothesis split
 
@@ -64,6 +67,8 @@ No hypothesis is green yet.
   reproduce the known production red.
 - The runner accepts only diagnostic exit 1 plus exactly one stop marker, one immutable report and
   a `COMPLETE` classification. It rejects missing marker/report and every other exit code.
+- The P35 response contract is uniquely 256 in the renderer, workload command, recipe and cluster
+  preflight. A renderer-to-preflight integration test accepts 256 and rejects the known-bad 64.
 - Pinned-image CPU gate PASS; qwen1p7b and qwen8b overlay installs each matched all 29 manifest
   entries and passed 10/10 prompt/decode chunk tests.
 - `git diff --check`, Python AST checks and shell syntax checks PASS.
@@ -72,8 +77,9 @@ Evidence: `artifacts/p35_1_local_gate.md` and `artifacts/p35_2_local_gate.md`.
 
 ## Next action
 
-After commit/push approval, pin the published source SHA, render the one GSM8K envelope-short
-JobSet, run a server-side Kubernetes dry run, then let the operator launch Attempt 0. The target
+Publish the response-contract repair, pin its source SHA, render the one GSM8K envelope-short
+JobSet as run r22, run a server-side Kubernetes dry run, then let the operator launch Attempt 0.
+The target
 must stop before backward and return the raw log, schema-v2 report, compact metadata records,
 classification and SHA-256 values. Until that happens no carrier is classified.
 

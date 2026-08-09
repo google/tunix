@@ -133,7 +133,7 @@ class DPWorkloadSpec:
     if envelope_short and self.name != "gsm8k":
       raise ValueError("envelope-short is only defined for GSM8K")
     max_response_length = (
-        64
+        256
         if envelope_short
         else 512 if short_alignment else self.max_response_length
     )

@@ -584,7 +584,9 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      ValueError: q_block_size=256 should divide q_seq_len=1088.
      ```
    - Total sequence length $1088 = 1024 (\text{prompt}) + 64 (\text{response})$ is not divisible by Splash Attention block size $256$ ($1088 / 256 = 4.25$).
-   - Resolved by setting `max_response_length=256` so that $1024 + 256 = 1280 = 5 \times 256$.
-
+   - r21 itself did not validate a repair: it emitted no P35 report or classification.
+   - The follow-up source pins `max_response_length=256`, so that
+     $1024 + 256 = 1280 = 5 \times 256$. This remains a proposed launch repair until the next
+     source-pinned target attempt passes the P35 postflight.
 
 

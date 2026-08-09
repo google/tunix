@@ -17,6 +17,11 @@ GSM8K r19 fixed the serving M contract, but the red boundary was effectively unc
 longer a live load-bearing hypothesis for this boundary. The next report records differing action
 elements explicitly. Do not divide byte counts by token counts.
 
+Attempt r21 is a failed pre-measurement run. It completed rollout, then the native reference
+forward rejected response 64 because Splash query block 256 did not divide sequence length 1088.
+It produced no P35 report or classification. The next attempt must use the unique response cap 256;
+do not rerun r21 or relax this contract.
+
 ## What is and is not proven
 
 Proven:
@@ -90,14 +95,14 @@ git fetch origin yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
 python3 canon-zero-tim/cluster/render_p35_jobset.py \
   --source-commit "$SOURCE_SHA" \
-  --run-id r20 \
-  --output /tmp/canon-p35-gsm8k-envelope-r20.yaml
+  --run-id r22 \
+  --output /tmp/canon-p35-gsm8k-envelope-r22.yaml
 kubectl apply --dry-run=server \
-  -f /tmp/canon-p35-gsm8k-envelope-r20.yaml
+  -f /tmp/canon-p35-gsm8k-envelope-r22.yaml
 ```
 
 Do not apply until the server-side dry run passes and the operator confirms the source SHA. The
-target is GSM8K Qwen3-1.7B, DP16xTP4, response 64, max step 1, no commit, Attempt 0. It intentionally
+target is GSM8K Qwen3-1.7B, DP16xTP4, response 256, max step 1, no commit, Attempt 0. It intentionally
 terminates before backward. A valid return contains:
 
 - exactly one `[CANON_P35] REPORT_COMPLETE ... STOP_BEFORE_BACKWARD` marker;

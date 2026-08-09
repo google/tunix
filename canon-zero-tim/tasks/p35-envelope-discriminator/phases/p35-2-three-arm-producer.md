@@ -1,6 +1,6 @@
 # P35.2 three-arm producer
 
-Status: locally complete; target not run
+Status: locally complete; r21 failed before the producer, target measurement not run
 
 ## Implemented
 
@@ -17,7 +17,9 @@ Status: locally complete; target not run
 - The schema contains A-B, B-C and direct A-C. Exact/exact is inconclusive unless the historical
   red was truly removed in the unchanged A arm; a red A-C with exact/exact is a transitivity
   failure.
-- The workload is bounded to GSM8K response 64, max step 1 and no commit. The producer writes one
+- The workload is bounded to GSM8K response 256, max step 1 and no commit. The 256 cap keeps the
+  native reference Splash sequence length `1024 + 256 = 1280` divisible by its fixed query block
+  size 256. The producer writes one
   immutable report and intentionally exits before backward.
 - The postflight accepts only exit 1, one stop marker, a nonempty report and a complete mechanical
   classification.
@@ -31,9 +33,11 @@ rejected before launch.
 
 ## Target admission
 
-The producer, classifier and renderer are locally complete. The target remains NOT RUN and not yet
-admitted because these changes are uncommitted and no source-pinned manifest has passed a
-server-side Kubernetes dry run. An unchanged r18/r19 rerun cannot answer the P35 question.
+The producer, classifier and renderer are locally complete. Attempt r21 used response 64 and
+failed in the native reference Splash forward before any A/B/C report was produced. The target
+measurement therefore remains NOT RUN. The response-256 repair must be published and its
+source-pinned manifest must pass a server-side Kubernetes dry run before the next attempt. An
+unchanged r18/r19/r21 rerun cannot answer the P35 question.
 
 ## Rollback
 

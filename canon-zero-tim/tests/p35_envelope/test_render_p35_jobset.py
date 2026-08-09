@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -43,6 +46,55 @@ class RenderP35JobSetTest(unittest.TestCase):
     next(item for item in env if item["name"] == "CANON_P33_RUN_STAGE")["value"] = "full"
     with self.assertRaisesRegex(ValueError, "drifted"):
       renderer.validate(document, source_commit="1" * 40, run_id="r20")
+
+  def test_rendered_command_passes_cluster_preflight_and_64_fails(self):
+    document = renderer.render(
+        base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        source_commit="1" * 40,
+        run_id="bridge",
+    )
+    rendered_env = renderer.p33._env_values(document)
+    with tempfile.TemporaryDirectory() as state:
+      runtime_env = os.environ.copy()
+      runtime_env.update(rendered_env)
+      runtime_env.update({
+          "CANON_PKG": str(ROOT / "canon-zero-tim"),
+          "CANON_STATE": state,
+          "CANON_P35_ENVELOPE_REPORT": f"{state}/p35.json",
+          "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
+          "CANON_P35_CLASSIFICATION": f"{state}/p35.classification.json",
+          "CANON_RUN_LOG": f"{state}/run.log",
+          "CANON_PRE_ALIGN_REPORT": f"{state}/pre_alignment.jsonl",
+          "CANON_ALIGN_REPORT": f"{state}/alignment.jsonl",
+          "CANON_UPDATE_REPORT": f"{state}/updates.jsonl",
+          "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+      })
+      preflight = ROOT / "canon-zero-tim/cluster/steps/00_env.sh"
+      accepted = subprocess.run(
+          ["bash", str(preflight)],
+          cwd=ROOT,
+          env=runtime_env,
+          check=False,
+          capture_output=True,
+          text=True,
+      )
+      self.assertEqual(accepted.returncode, 0, accepted.stderr)
+      self.assertIn("response-256", accepted.stdout)
+
+      runtime_env["CANON_RUN_CMD"] = rendered_env["CANON_RUN_CMD"].replace(
+          "--max_response_length=256", "--max_response_length=64"
+      )
+      rejected = subprocess.run(
+          ["bash", str(preflight)],
+          cwd=ROOT,
+          env=runtime_env,
+          check=False,
+          capture_output=True,
+          text=True,
+      )
+      self.assertNotEqual(rejected.returncode, 0)
+      self.assertNotIn("P35 envelope contract OK", rejected.stdout)
+      self.assertIn("must pin max_response_length=256", rejected.stderr)
 
 
 if __name__ == "__main__":

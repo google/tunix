@@ -839,11 +839,11 @@ def main() -> None:
       if (
           MAX_STEPS != 1
           or MAX_PROMPT_LENGTH != 1024
-          or MAX_RESPONSE_LENGTH not in (64, 256)
+          or MAX_RESPONSE_LENGTH != 256
       ):
         raise ValueError(
             "canonical GSM8K P35 envelope requires one step, prompt cap 1024 "
-            "and response cap 64 or 256"
+            "and response cap 256"
         )
       expected_mesh = (16, 4) if CANON_P32_WORKLOAD else (1, 4)
       if SHARED_MESH_SHAPE != expected_mesh:

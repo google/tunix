@@ -136,7 +136,7 @@ validate_p35_preflight() (
   export CANON_P35_ENVELOPE_REPORT="$state/p35.json"
   export CANON_P35_METADATA_DIR="$state/p35_metadata"
   export CANON_P35_CLASSIFICATION="$state/p35.classification.json"
-  export CANON_RUN_CMD="python3 probe.py --max_response_length=64"
+  export CANON_RUN_CMD="python3 probe.py --max_response_length=256"
   export CANON_RUN_LOG="$state/run.log"
   export CANON_PRE_ALIGN_REPORT="$state/pre_alignment.jsonl"
   export CANON_ALIGN_REPORT="$state/alignment.jsonl"
@@ -145,12 +145,14 @@ validate_p35_preflight() (
   bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
   grep -q 'export CANON_P35_ENVELOPE=1' "$state/env.sh"
 
-  export CANON_RUN_CMD="python3 probe.py --max_response_length=65"
-  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
-    echo "[P35.ENVELOPE] preflight accepted response-length drift" >&2
-    exit 1
-  fi
-  echo "[P35.ENVELOPE] PREFLIGHT_PASS response64=accepted response65=rejected"
+  for rejected_response in 64 65; do
+    export CANON_RUN_CMD="python3 probe.py --max_response_length=$rejected_response"
+    if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+      echo "[P35.ENVELOPE] preflight accepted response-length drift: $rejected_response" >&2
+      exit 1
+    fi
+  done
+  echo "[P35.ENVELOPE] PREFLIGHT_PASS response256=accepted response64_65=rejected"
 )
 
 validate_p35_preflight

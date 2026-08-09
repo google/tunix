@@ -66,3 +66,20 @@ Artifact: `artifacts/p35_2_local_gate.md`.
 
 Rollback: leave `CANON_P35_ENVELOPE` unset. Preserve r18/r19 artifacts and do not claim a carrier
 until the source-pinned 64-chip Attempt 0 returns a complete schema-v2 classification.
+
+## 2026-08-09 — r21 reference-Splash failure and response-contract repair
+
+- Archived r21 at `debug_logs/p35_r21_gsm8k_envelope.raw.log` with SHA-256
+  `f8d982a3db614a4edcb6163dce9b9206cd4325dc6bb6ecf2afd49ce5c93d43ec`.
+- r21 completed rollout, then failed in native reference `get_ref_per_token_logps` before the P35
+  producer because Splash query block 256 did not divide sequence length 1088. Report count and
+  complete-classification count were both zero; no carrier verdict was made.
+- Replaced every executable P35 envelope-short response contract with the unique value 256. The
+  resulting reference length is 1280, divisible by the unchanged Splash block size 256.
+- Added a renderer-to-cluster-preflight integration test. The canonical response 256 is accepted;
+  the known-bad 64 and off-contract 65 are rejected. Invalid commands no longer print an OK line.
+- Pinned-image CPU gate PASS: P33 59, alignment 13, native rollout 9, P35 producer 8, and P35
+  classifier/renderer 11 tests. Python compilation, shell syntax and `git diff --check` PASS.
+
+Rollback: leave `CANON_P35_ENVELOPE` unset. The ordinary training and reference paths remain
+unchanged; preserve r21 as a failed pre-measurement artifact.
