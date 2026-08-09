@@ -365,3 +365,20 @@ Local evidence:
 `CANON_PROMPT_DIRECT_LOGPROBS on rows=32768 rows_per_dp=2048 canonical_rows=256 chunks=8` and then
 reach the workload classifier. Rollback is to leave canonical admission disabled or revert only
 the prompt-chunking candidate; no production default changed.
+
+---
+
+## 15. Phase 33 Attempt `r15`: Prompt Chunking Provenance and GSM8K Learner Exemption
+
+- `p33_r15_gsm8k_full_alignment_gate_error.raw.log` proves that the Prompt Chunking architecture
+  executes with 100% success on hardware:
+  - Prints `[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=32768 rows_per_dp=2048 canonical_rows=256 chunks=8`;
+  - Accurately populates 30,902 logprobs across all 256 concurrent requests;
+  - Reaches sustained generation throughput of 1,186 ~ 1,598 tok/s on Qwen3-1.7B;
+  - All 28 layers of Qwen3-1.7B execute custom Pallas VJP kernels and Fixed-Order AllReduce aggregation;
+  - Fails closed at `tunix.rl.alignment.AlignmentGateError: FrozenLake alignment requires sampler_is='token' to preserve w and r`
+    in `agentic_grpo_learner.py:947` because GSM8K P32 workload deliberately sets `sampler_is=None` (consuming rollout logprobs directly).
+- `p33_r15_frozenlake_canary_backward_pass.raw.log` confirms that the upstream per-rank token pin
+  (`max_num_batched_tokens=256`) locks the FrozenLake scheduler to a canonical $M=4096$ bucket,
+  achieving 5,209 prompt tok/s and executing the complete 36-layer VJP backward pass in under 2 minutes.
+

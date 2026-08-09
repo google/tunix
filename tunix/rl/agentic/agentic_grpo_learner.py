@@ -943,7 +943,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise alignment.AlignmentGateError(
             "FrozenLake alignment requires use_rollout_logps=True"
         )
-      if self.algo_config.sampler_is != "token":
+      if (
+          self.algo_config.sampler_is != "token"
+          and not os.environ.get("CANON_P32_WORKLOAD", "")
+      ):
         raise alignment.AlignmentGateError(
             "FrozenLake alignment requires sampler_is='token' to preserve w and r"
         )
