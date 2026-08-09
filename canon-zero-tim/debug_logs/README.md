@@ -541,6 +541,7 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 ## 21. Phase 33 Attempt `r19`: GSM8K Full Pre-Backward Diagnostic ($M=4096$ Scheduler Contract)
 
 - `p33_r19_gsm8k_full.raw.log` (SHA-256: `138e86eb4de6f8dbb2923fba963af9e84a50290dbcf4e7839062429cc38a93d8`)
+- `p33_r19_gsm8k_pre_alignment.jsonl` (SHA-256: `e6e3ce27b7a1db03b4cd6924cd9a9d29f8af0775d98b9f685d5b9b4013eaae72`)
 
 ### Diagnostic Results:
 1. **$M=4096$ Scheduler Contract Verification**:
