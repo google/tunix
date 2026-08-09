@@ -46,7 +46,7 @@ SPEC = p33.JobSpec(
     stage="envelope-short",
     profile="cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env",
     no_commit=True,
-    job_prefix="canon-p35-gsm8k-envelope",
+    job_prefix="canon-p35-gsm8k-env",
     command=_command(),
 )
 
