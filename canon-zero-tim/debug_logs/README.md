@@ -396,3 +396,14 @@ is not unlocked by this evidence. The repair narrows the learner exemption to ex
 `sampler_is="token"`. A fresh source-pinned Attempt 0 is required. Rollback is to disable P33
 workload admission or revert only the sampler-contract repair; the raw failure logs remain
 unchanged.
+
+---
+
+## 16. Phase 33 Attempt `r16`: Backward Pass Completion and Pathways MemoryStats Resilience
+
+- Attempt `r16` verifies full forward and backward graph execution on hardware across 64 TPU chips:
+  - GSM8K achieves prompt throughput of 21,366 tokens/s and generation throughput of 1,658 tokens/s across 256 concurrent requests;
+  - All 28 layers of Qwen3-1.7B execute custom Pallas VJP kernels on $M=4096, 8192, 16384, 32768, 65536$;
+  - Terminates at `memory_snapshot()` calling `device.memory_stats()` on Pathways remote device proxies (`MemoryStats is only supported for addressable PjRt devices`);
+  - The repair wraps `device.memory_stats()` with `try...except` in `agentic_rl_learner.py` and `canonical_qwen3_adapter.py`.
+

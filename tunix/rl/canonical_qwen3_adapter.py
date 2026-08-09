@@ -3033,7 +3033,11 @@ class Qwen3EngineForwardAdapter:
     def memory_snapshot():
       snapshots = []
       for device in jax.local_devices():
-        stats = device.memory_stats() or {}
+        stats = {}
+        try:
+          stats = device.memory_stats() or {}
+        except Exception:
+          pass
         snapshots.append({
             "device": int(device.id),
             "bytes_in_use": stats.get("bytes_in_use"),
@@ -3225,7 +3229,11 @@ class Qwen3EngineForwardAdapter:
     def memory_snapshot():
       snapshots = []
       for device in jax.local_devices():
-        stats = device.memory_stats() or {}
+        stats = {}
+        try:
+          stats = device.memory_stats() or {}
+        except Exception:
+          pass
         snapshots.append({
             "device": int(device.id),
             "bytes_in_use": stats.get("bytes_in_use"),

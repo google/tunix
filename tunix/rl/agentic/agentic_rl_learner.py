@@ -289,14 +289,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     _, trainer_state = nnx.split(actor_trainer.model)
     adapter = canonical_forward.require_registered()
     def memory_snapshot():
-      return tuple({
-          "device": int(device.id),
-          "bytes_in_use": (device.memory_stats() or {}).get("bytes_in_use"),
-          "peak_bytes_in_use": (
-              device.memory_stats() or {}
-          ).get("peak_bytes_in_use"),
-          "bytes_limit": (device.memory_stats() or {}).get("bytes_limit"),
-      } for device in jax.local_devices())
+      snapshots = []
+      for device in jax.local_devices():
+        stats = {}
+        try:
+          stats = device.memory_stats() or {}
+        except Exception:
+          pass
+        snapshots.append({
+            "device": int(device.id),
+            "bytes_in_use": stats.get("bytes_in_use"),
+            "peak_bytes_in_use": stats.get("peak_bytes_in_use"),
+            "bytes_limit": stats.get("bytes_limit"),
+        })
+      return tuple(snapshots)
 
     def block_all(tree):
       for leaf in jax.tree.leaves(tree):
@@ -529,14 +535,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
 
     def memory_snapshot():
-      return tuple({
-          "device": int(device.id),
-          "bytes_in_use": (device.memory_stats() or {}).get("bytes_in_use"),
-          "peak_bytes_in_use": (
-              device.memory_stats() or {}
-          ).get("peak_bytes_in_use"),
-          "bytes_limit": (device.memory_stats() or {}).get("bytes_limit"),
-      } for device in jax.local_devices())
+      snapshots = []
+      for device in jax.local_devices():
+        stats = {}
+        try:
+          stats = device.memory_stats() or {}
+        except Exception:
+          pass
+        snapshots.append({
+            "device": int(device.id),
+            "bytes_in_use": stats.get("bytes_in_use"),
+            "peak_bytes_in_use": stats.get("peak_bytes_in_use"),
+            "bytes_limit": stats.get("bytes_limit"),
+        })
+      return tuple(snapshots)
 
     def fingerprint(value, *, min_elements=128):
       return actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
