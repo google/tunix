@@ -198,7 +198,7 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     # Record complete step with conversation context and parsed action.
     cur_step = self._trajectory.steps[-1]
     cur_step.thought = thought
-    cur_step.action = action_str
+    cur_step.action = action_str  # pyrefly: ignore[bad-assignment]
     cur_step.model_response = response
 
     self.step += 1

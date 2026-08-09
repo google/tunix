@@ -569,7 +569,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       if isinstance(out, utils.LossOutput):
         return out.primary_loss.unreduced_sum, out
       elif self._has_aux:
-        return out[0], out[1]
+        return out[0], out[1]  # pyrefly: ignore[bad-index]
       else:
         return out, None
 
@@ -702,7 +702,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         return x
       if p is None:
         p = shd.PartitionSpec()
-      sharding = sharding_utils.get_sharding(x, mesh, p)
+      sharding = sharding_utils.get_sharding(x, mesh, p)  # pyrefly: ignore[bad-argument-type]
       if hasattr(x, "sharding") and x.sharding == sharding:
         return x
       if getattr(x, "is_fully_addressable", True):
@@ -1318,7 +1318,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           span.device_end([computation_to_track])
           span_v2.async_end([computation_to_track])
 
-        self._throttler.add_computation(computation_to_track)
+        self._throttler.add_computation(computation_to_track)  # pyrefly: ignore[bad-argument-type]
         if is_update_step_val:
           self.save_checkpoint()
           if (

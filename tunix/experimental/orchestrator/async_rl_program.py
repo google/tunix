@@ -165,9 +165,9 @@ class StandardRLProgram(AsyncRLProgram):
       for idx, payload in enumerate(trainer_payloads):
         adv = payload.advantages
         reward_val = (
-            float(adv[0])
-            if hasattr(adv, "__len__") and len(adv) > 0
-            else float(adv)
+            float(adv[0])  # pyrefly: ignore[bad-index]
+            if hasattr(adv, "__len__") and len(adv) > 0  # pyrefly: ignore[bad-argument-type]
+            else float(adv)  # pyrefly: ignore[bad-argument-type]
         )
         item = datatypes.TrajectoryItem(
             pair_index=idx,
@@ -176,7 +176,7 @@ class StandardRLProgram(AsyncRLProgram):
             traj=datatypes.Trajectory(reward=reward_val),
             # TODO: Stream RLTrainerPayload directly instead of re-wrapping in TrajectoryItem.
         )
-        item.payload = payload
+        item.payload = payload  # pyrefly: ignore[missing-attribute]
         await self.scored_q.put(item)
 
   async def train_stage(
@@ -199,7 +199,7 @@ class StandardRLProgram(AsyncRLProgram):
 
         payloads = [getattr(item, "payload", None) for item in scored_items]
         # TODO: Implement streaming microbatch assembly to overlap packing with trainer execution.
-        microbatches = self.assembler.pack(payloads)
+        microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
 
         is_final = group_idx == self.mini_batch_size - 1
         for batch in microbatches:
@@ -243,9 +243,9 @@ class StandardRLProgram(AsyncRLProgram):
         )
         for task in done:
           if task.exception():
-            raise task.exception()
+            raise task.exception()  # pyrefly: ignore[bad-raise]
       if train_task.exception():
-        raise train_task.exception()
+        raise train_task.exception()  # pyrefly: ignore[bad-raise]
     except Exception as exc:
       logging.error("Exception in StandardRLProgram execution: %s", exc)
       await self.raw_q.abort(exc)

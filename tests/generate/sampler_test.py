@@ -431,7 +431,7 @@ class SamplerTest(parameterized.TestCase):
     prompt_tokens = sampler.tokenize('input string')
     all_input_ids = jnp.array([
         utils.pad_to_length(
-            prompt_tokens,
+            prompt_tokens,  # pyrefly: ignore[bad-argument-type]
             target_length=max_prompt_length,
             pad_value=vocab.pad_id(),
             left=True,

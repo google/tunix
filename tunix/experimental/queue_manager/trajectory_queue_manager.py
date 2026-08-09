@@ -110,7 +110,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
         out.extend(g)
       return out
     actual_batch_size = batch_size if batch_size is not None else self.group_size
-    return await super().get_batch(batch_size=actual_batch_size)
+    return await super().get_batch(batch_size=actual_batch_size)  # pyrefly: ignore[bad-argument-type]
 
   def commit(self, step: int, groups: Sequence[Any] | None = None) -> None:
     """Commits in-flight groups after a successful global step boundary."""
