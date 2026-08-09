@@ -431,3 +431,32 @@ does **not** prove a completed backward pass or Step 0 update.
 run must print `[P28.G5C] TIED_EMBEDDING_HEAD on`, reach all required alignment boundaries, commit
 the update, and pass the workload classifier. Rollback is to disable P33 workload admission or
 revert only the tied-endpoint candidate; the r17 artifact remains immutable.
+
+---
+
+## 18. Phase 33 Attempt `r17`: FrozenLake Canary Performance Analysis and Reducer Mesh Mismatch
+
+- `p33_r17_fl_canary.raw.log` (SHA-256: `8c6f4473ee3325be55b2a3d903d63d48862c1c0ba8a669570cd33e9ece15292c`) records:
+  - Total elapsed time: ~68 minutes on DP16xTP4 (64 TPU v5p chips) across 16 remote workers;
+  - **Performance & Timeline Breakdown:**
+    1. **Cluster Boot & Overlay Verification (01:10:00 - 01:13:00, 3 min)**:
+       - Verified all 6 overlay files by SHA256 byte identity; 16 TPU workers registered with Pathways RM.
+    2. **Rollout Generation (01:13:00 - 01:38:35, 25.5 min)**:
+       - 256 game episodes evaluated concurrently;
+       - 255/256 episodes converged rapidly; 1 long-tail chain-of-thought episode decoded ~2000 tokens at ~2.3 tokens/s, consuming ~14 minutes alone;
+       - Rollout metric recorded: `call=1 n=256 solve_ratio=0.617 reward_mean=0.617 reward_max=1.000`.
+    3. **8B 36-Layer Pallas VJP & Logprob JIT Compilation (01:38:38 - 02:11:23, 32.7 min)**:
+       - 64 TPU chips JIT-compiled over 100+ distributed graphs including `jit_compute_per_token_logps` and 36 layers of custom Pallas VJP kernels on $M=4096$ with $K=4096, N=1024, 256, 3072$.
+    4. **Forward Group Evaluation & Alignment Capture (02:11:23 - 02:12:15, 0.9 min)**:
+       - Evaluated all 16 DP ranks, filling `populated=4096` logprobs at prompt throughput up to `9,243.6 tokens/s`; attached 256-row alignment host sidecar.
+    5. **16-Group Segmented Backward Sweep (02:12:15 - 02:18:01, 5.8 min)**:
+       - Completed all 16 forward groups (`[P32.DP16] forward_group_done group=16/16`);
+       - Fully executed 36 layers of reverse gradient computation down to Layer 0 and Embed tokens.
+    6. **Reducer Mesh Mismatch Failure (02:18:01)**:
+       - At `reverse_reduce_group` calling `FixedDPRankGradientReducer(rank_gradient, dp_size=16)`, raised:
+         `ValueError: DP gradient reducer mesh mismatch: axes=('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp') shape={'data': 16, ...} expected dp=16`
+       - **Root Cause**: `FixedDPRankGradientReducer` defaults to `dp_axis='dp'`, but the Tunix mesh axis for 16-way DP is named `'data'`.
+  - **Required Repair**:
+    - In `tunix/rl/dp_training.py:530`, fallback to `dp_axis = 'data'` when `'dp'` is absent and `'data'` is present in `mesh.axis_names`;
+    - In `tunix/rl/canonical_qwen3_adapter.py:2432`, explicitly pass `dp_axis` from the active mesh.
+
