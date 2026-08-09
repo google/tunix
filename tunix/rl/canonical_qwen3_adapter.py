@@ -522,10 +522,21 @@ class _P28SegmentedEngineForward:
     embed_local_leaves = ()
     norm_local_leaves = ()
     head_local_leaves = ()
+    tied_word_embeddings = False
     if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") == "1":
-      if not hasattr(runner.model, "lm_head"):
+      model_config = getattr(runner, "model_config", None)
+      hf_config = getattr(model_config, "hf_config", None)
+      if hf_config is None:
+        vllm_model_config = getattr(
+            getattr(runner, "vllm_config", None), "model_config", None
+        )
+        hf_config = getattr(vllm_model_config, "hf_config", None)
+      tied_word_embeddings = bool(
+          getattr(hf_config, "tie_word_embeddings", False)
+      )
+      if not tied_word_embeddings and not hasattr(runner.model, "lm_head"):
         raise FunctionalMappingError(
-            "P28 G5c currently requires an explicit untied lm_head"
+            "P28 G5c untied model requires an explicit lm_head"
         )
       (
           embed_graphdef,
@@ -539,12 +550,22 @@ class _P28SegmentedEngineForward:
           norm_local_leaves,
           norm_full_indices,
       ) = split_local(final_norm, "final norm")
-      (
-          head_graphdef,
-          head_treedef,
-          head_local_leaves,
-          head_full_indices,
-      ) = split_local(runner.model.lm_head, "lm head")
+      if tied_word_embeddings:
+        if not callable(getattr(embed_tokens, "decode", None)):
+          raise FunctionalMappingError(
+              "P28 G5c tied embeddings require embed_tokens.decode"
+          )
+        head_graphdef = embed_graphdef
+        head_treedef = embed_treedef
+        head_local_leaves = embed_local_leaves
+        head_full_indices = embed_full_indices
+      else:
+        (
+            head_graphdef,
+            head_treedef,
+            head_local_leaves,
+            head_full_indices,
+        ) = split_local(runner.model.lm_head, "lm head")
       if not embed_local_leaves or not norm_local_leaves or not head_local_leaves:
         raise FunctionalMappingError(
             "P28 G5c embed/norm/lm-head must each expose parameter leaves"
@@ -569,6 +590,8 @@ class _P28SegmentedEngineForward:
 
       def run_local_head(leaves, hidden):
         module = merge_local(head_graphdef, head_treedef, leaves)
+        if tied_word_embeddings:
+          return module.decode(hidden)
         return module(hidden)
 
       def pullback_local_head(leaves, hidden, dlogits):
@@ -586,6 +609,12 @@ class _P28SegmentedEngineForward:
           "norm": norm_full_indices,
           "head": head_full_indices,
       }
+      if tied_word_embeddings:
+        print(
+            "[P28.G5C] TIED_EMBEDDING_HEAD on "
+            f"shared_leaves={len(embed_full_indices)}",
+            flush=True,
+        )
 
     layer_fns = []
     local_layer_fns = []
@@ -673,11 +702,23 @@ class _P28SegmentedEngineForward:
       local_layer_full_indices.append(full_indices)
 
     if endpoint_contract is not None:
-      covered = (
-          set(embed_full_indices)
-          | set(norm_full_indices)
-          | set(head_full_indices)
-      )
+      if tied_word_embeddings and head_full_indices != embed_full_indices:
+        raise FunctionalMappingError(
+            "P28 G5c tied head must map exactly to embedding state leaves"
+        )
+      endpoint_groups = [
+          ("embed", embed_full_indices),
+          ("norm", norm_full_indices),
+      ]
+      if not tied_word_embeddings:
+        endpoint_groups.append(("head", head_full_indices))
+      covered = set()
+      for label, full_indices in endpoint_groups:
+        if covered.intersection(full_indices):
+          raise FunctionalMappingError(
+              f"P28 G5c {label} parameter group overlaps another endpoint"
+          )
+        covered.update(full_indices)
       for full_indices in local_layer_full_indices:
         if covered.intersection(full_indices):
           raise FunctionalMappingError(
@@ -713,6 +754,7 @@ class _P28SegmentedEngineForward:
     self._embed_full_indices = tuple(embed_full_indices)
     self._norm_full_indices = tuple(norm_full_indices)
     self._head_full_indices = tuple(head_full_indices)
+    self._tied_word_embeddings = tied_word_embeddings
     self._endpoint_contract = endpoint_contract
     self._full_state_leaves = tuple(live_leaves)
     self._num_state_leaves = len(live_leaves)
@@ -1035,7 +1077,7 @@ class _P28SegmentedEngineForward:
     return self._norm_pullback_fn(leaves, hidden, dnormalized)
 
   def run_head_forward(self, hidden, *, state_leaves=None):
-    """Runs the isolated untied lm-head endpoint used by G5c."""
+    """Runs the isolated tied or untied output endpoint used by G5c."""
     self._reject_outer_transform(hidden)
     self._require_full_loss_endpoints()
     leaves = self._endpoint_leaves(
@@ -1061,7 +1103,7 @@ class _P28SegmentedEngineForward:
   def assemble_full_state_gradient(
       self, *, embed, layers, norm, head
   ):
-    """Scatters disjoint local cotangents into full engine-state order."""
+    """Assembles endpoint and layer cotangents in full-state order."""
     self._reject_outer_transform(embed, layers, norm, head)
     self._require_full_loss_endpoints()
     if len(layers) != len(self._local_layer_full_indices):
@@ -1102,13 +1144,43 @@ class _P28SegmentedEngineForward:
         else:
           full[index] = full[index] + value.astype(full[index].dtype)
 
-    add(self._embed_full_indices, embed, "embed")
+    if self._tied_word_embeddings:
+      embed_values = tuple(jax.tree_util.tree_leaves(embed))
+      head_values = tuple(jax.tree_util.tree_leaves(head))
+      if (
+          len(embed_values) != len(self._embed_full_indices)
+          or len(head_values) != len(self._embed_full_indices)
+      ):
+        raise FunctionalMappingError(
+            "P28 G5c tied embed/head cotangent count changed"
+        )
+      tied_values = []
+      for index, embed_value, head_value in zip(
+          self._embed_full_indices,
+          embed_values,
+          head_values,
+          strict=True,
+      ):
+        target = self._full_state_leaves[index]
+        if embed_value.shape != target.shape or head_value.shape != target.shape:
+          raise FunctionalMappingError(
+              "P28 G5c tied embed/head cotangent shape changed at full leaf "
+              f"{index}: {embed_value.shape}/{head_value.shape} != "
+              f"{target.shape}"
+          )
+        tied_values.append(
+            embed_value.astype(target.dtype) + head_value.astype(target.dtype)
+        )
+      add(self._embed_full_indices, tuple(tied_values), "tied embed/head")
+    else:
+      add(self._embed_full_indices, embed, "embed")
     for layer_index, (indices, values) in enumerate(
         zip(self._local_layer_full_indices, layers, strict=True)
     ):
       add(indices, values, f"layer {layer_index}")
     add(self._norm_full_indices, norm, "norm")
-    add(self._head_full_indices, head, "head")
+    if not self._tied_word_embeddings:
+      add(self._head_full_indices, head, "head")
     if self._p30_sparse_grad_assembly:
       missing = [index for index, value in enumerate(full) if value is None]
       if missing:

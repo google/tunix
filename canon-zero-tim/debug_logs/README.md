@@ -410,11 +410,24 @@ sampler-contract repair; the raw failure logs remain unchanged.
 
 ---
 
-## 17. Phase 33 Attempt `r17`: Step 0 Completion and Tied Embeddings Diagnostics
+## 17. Phase 33 Attempt `r17`: Rollout Completion and Tied Embeddings Failure
 
 - `p33_r17_gsm8k_full.raw.log` (SHA-256: `b270bbdb43e5561f77c173a7a3098b93c97bbfa47bbe499bee2b61dcabcb63f4`) records:
   - Successful memory_snapshot execution on Pathways across 64 devices;
-  - Successful completion of Step 0 rollout and full backward update;
-  - Successful Step 1 rollout across 256 concurrent requests with prompt throughput `13,438 tokens/s` and generation throughput `1,641 tokens/s`;
-  - Reaches `FunctionalMappingError: P28 G5c embed/norm/lm-head must each expose parameter leaves` in `canonical_qwen3_adapter.py:549` during Step 1 segmented value_and_grad because Qwen3-1.7B has tied word embeddings (`runner.model.lm_head` shares weights with `embed_tokens`).
+  - Successful rollout/logprob preparation for the first global step and attachment of the
+    256-row alignment sidecar;
+  - A following producer batch reaches prompt throughput `13,438 tokens/s` and generation
+    throughput `1,641 tokens/s` while the consumer enters its first segmented reverse;
+  - Reaches `FunctionalMappingError: P28 G5c embed/norm/lm-head must each expose parameter leaves`
+    in `canonical_qwen3_adapter.py:549` while constructing that first segmented
+    `value_and_grad`. Qwen3-1.7B has tied word embeddings: the engine intentionally exposes no
+    independent `lm_head` parameters and computes logits through `embed_tokens.decode(hidden)`.
 
+The log contains no alignment boundary record, committed update, or terminal workload classifier.
+It therefore proves rollout execution and identifies a pre-gradient adapter-contract failure; it
+does **not** prove a completed backward pass or Step 0 update.
+
+**Target status:** FAIL before the first numerical alignment/update verdict. A fresh source-pinned
+run must print `[P28.G5C] TIED_EMBEDDING_HEAD on`, reach all required alignment boundaries, commit
+the update, and pass the workload classifier. Rollback is to disable P33 workload admission or
+revert only the tied-endpoint candidate; the r17 artifact remains immutable.

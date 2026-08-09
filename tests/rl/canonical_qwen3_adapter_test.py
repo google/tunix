@@ -297,6 +297,63 @@ class _CompleteSegmentedRunner:
     )
 
 
+class _TiedSegmentedEmbed(nnx.Module):
+
+  def __init__(self):
+    self.weight = nnx.Param(
+        jnp.asarray(
+            [[0.5], [1.0], [1.5], [2.0], [2.5]], jnp.float32
+        )
+    )
+
+  def __call__(self, token_ids):
+    return self.weight[token_ids]
+
+  def decode(self, hidden):
+    return jnp.dot(hidden, self.weight[...].T)
+
+
+class _TiedSegmentedBackbone(nnx.Module):
+
+  def __init__(self):
+    self.embed_tokens = _TiedSegmentedEmbed()
+    self.layers = nnx.List(
+        [_SegmentedLayer(1.5), _SegmentedLayer(2.0)]
+    )
+    self.start_layer = 0
+    self.end_layer = 2
+    self.norm = _SegmentedNorm()
+
+
+class _ParameterlessHead(nnx.Module):
+
+  def __call__(self, hidden):
+    return hidden
+
+
+class _TiedSegmentedModel(nnx.Module):
+
+  def __init__(self):
+    self.model = _TiedSegmentedBackbone()
+    self.lm_head = _ParameterlessHead()
+
+
+class _TiedSegmentedRunner:
+
+  def __init__(self):
+    self.model = _TiedSegmentedModel()
+    _, self.state = nnx.split(self.model)
+    self.state_leaves = tuple(jax.tree.leaves(self.state))
+    self.kv_caches = [jnp.asarray(0.0), jnp.asarray(0.0)]
+    self.is_first_rank = True
+    self.is_last_rank = True
+    hf_config = types.SimpleNamespace(tie_word_embeddings=True)
+    self.model_config = types.SimpleNamespace(hf_config=hf_config)
+    self.vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(hf_config=hf_config)
+    )
+
+
 class CanonicalQwen3AdapterTest(absltest.TestCase):
 
   def _make_p32_group_adapter(self, *, sequence_bucket=4):
@@ -1414,6 +1471,101 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           hashlib.sha256(np.asarray(actual).tobytes()).hexdigest(),
           hashlib.sha256(np.asarray(expected).tobytes()).hexdigest(),
       )
+
+  def test_p28_tied_embedding_head_reuses_value_and_adds_both_gradients(self):
+    runner = _TiedSegmentedRunner()
+    base_env = {
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    with mock.patch.dict(os.environ, base_env, clear=False):
+      legacy = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+          runner
+      )
+    with mock.patch.dict(
+        os.environ,
+        {**base_env, "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1"},
+        clear=False,
+    ):
+      sparse = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+          runner
+      )
+
+    self.assertTrue(legacy._tied_word_embeddings)  # pylint: disable=protected-access
+    self.assertEqual(
+        legacy._embed_full_indices,  # pylint: disable=protected-access
+        legacy._head_full_indices,  # pylint: disable=protected-access
+    )
+    hidden = jnp.asarray([[0.25], [-0.5]], jnp.float32)
+    expected_logits = runner.model.model.embed_tokens.decode(hidden)
+    np.testing.assert_array_equal(
+        legacy.run_head_forward(hidden), expected_logits
+    )
+
+    token_ids = jnp.asarray([1, 3], jnp.int32)
+    embedded = legacy.run_embed_forward(token_ids)
+    head_grad, dembedded = legacy.run_head_pullback(
+        embedded, jnp.ones((2, 5), jnp.float32)
+    )
+    embed_grad = legacy.run_embed_pullback(
+        token_ids, dembedded
+    )
+    layers = tuple(
+        jax.tree.map(jnp.zeros_like, leaves)
+        for leaves in legacy._local_layer_leaves  # pylint: disable=protected-access
+    )
+    norm = jax.tree.map(
+        jnp.zeros_like,
+        legacy._norm_local_leaves,  # pylint: disable=protected-access
+    )
+    composed_full = legacy.assemble_full_state_gradient(
+        embed=embed_grad, layers=layers, norm=norm, head=head_grad
+    )
+    shared_index = legacy._embed_full_indices[0]  # pylint: disable=protected-access
+    weight = runner.model.model.embed_tokens.weight[...]
+    oracle = jax.grad(
+        lambda value: jnp.sum(jnp.dot(value[token_ids], value.T))
+    )(weight)
+    np.testing.assert_array_equal(composed_full[shared_index], oracle)
+
+    embed = jax.tree.map(
+        lambda leaf: jnp.full_like(leaf, 1.25),
+        legacy._embed_local_leaves,  # pylint: disable=protected-access
+    )
+    head = jax.tree.map(
+        lambda leaf: jnp.full_like(leaf, -0.5),
+        legacy._head_local_leaves,  # pylint: disable=protected-access
+    )
+    legacy_full = legacy.assemble_full_state_gradient(
+        embed=embed, layers=layers, norm=norm, head=head
+    )
+    sparse_full = sparse.assemble_full_state_gradient(
+        embed=embed, layers=layers, norm=norm, head=head
+    )
+    np.testing.assert_array_equal(
+        legacy_full[shared_index],
+        jnp.full_like(legacy_full[shared_index], 0.75),
+    )
+    for actual, expected in zip(sparse_full, legacy_full, strict=True):
+      np.testing.assert_array_equal(actual, expected)
+
+  def test_p28_tied_embedding_requires_decode_contract(self):
+    runner = _SegmentedRunner()
+    hf_config = types.SimpleNamespace(tie_word_embeddings=True)
+    runner.model_config = types.SimpleNamespace(hf_config=hf_config)
+    runner.vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(hf_config=hf_config)
+    )
+    env = {
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "tied embeddings require embed_tokens.decode",
+      ):
+        canonical_qwen3_adapter.build_p28_segmented_engine_forward(runner)
 
   def test_p28_complete_loss_schedule_matches_monolithic_oracle(self):
     runner = _CompleteSegmentedRunner()
