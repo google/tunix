@@ -19,6 +19,7 @@ from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.experimental import mesh_utils
 from kubernetes import client, config as k8s_config
 import numpy as np
 import optax
@@ -745,10 +746,10 @@ rollout_shape = tuple(d for _, d in rollout_dims)
 train_axis_names = tuple(name for name, _ in train_dims)
 train_shape = tuple(d for _, d in train_dims)
 
-rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
-train_devices = np.array(
-    devices[num_rollout_devices : num_rollout_devices + num_train_devices]
-).reshape(train_shape)
+rollout_devices = mesh_utils.create_device_mesh(rollout_shape, devices[:num_rollout_devices], allow_split_physical_axes=True)
+train_devices = mesh_utils.create_device_mesh(
+    train_shape, devices[num_rollout_devices : num_rollout_devices + num_train_devices], allow_split_physical_axes=True
+)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
 train_mesh = Mesh(train_devices, axis_names=train_axis_names)
