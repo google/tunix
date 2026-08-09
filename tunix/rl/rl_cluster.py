@@ -983,7 +983,7 @@ class RLEngine:
     logits = None
     if outputs[0].logits is not None:
       logits = list(
-          itertools.chain.from_iterable(out.logits for out in outputs)  # pyrefly: ignore[bad-argument-type]
+          itertools.chain.from_iterable(out.logits for out in outputs)
       )
 
     return base_rollout.RolloutOutput(

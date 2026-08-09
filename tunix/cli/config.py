@@ -283,7 +283,7 @@ class HyperParameters:
           f" {type(value).__name__}."
       )
     if isinstance(value, omegaconf.DictConfig):
-      return omegaconf.OmegaConf.to_container(value, resolve=True)  # pyrefly: ignore[bad-return]
+      return omegaconf.OmegaConf.to_container(value, resolve=True)
     return dict(value)
 
   def _mutable_config_mapping(self, key: str) -> MutableMapping[str, Any]:

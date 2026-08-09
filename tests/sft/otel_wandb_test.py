@@ -35,7 +35,7 @@ class WandbMetricsExporterTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.run = _FakeWandbRun()  # pyrefly: ignore[bad-assignment]
+    self.run = _FakeWandbRun()
     self.exporter = otel_wandb.WandbMetricsExporter(self.run)
     self.reader = otel_sdk_export.PeriodicExportingMetricReader(
         self.exporter, export_interval_millis=3_600_000
@@ -76,8 +76,8 @@ class WandbMetricsExporterTest(absltest.TestCase):
 
     self.meter_provider.force_flush()
 
-    self.assertLen(self.run.calls, 1)  # pyrefly: ignore[missing-attribute]
-    values, step = self.run.calls[0]  # pyrefly: ignore[missing-attribute]
+    self.assertLen(self.run.calls, 1)
+    values, step = self.run.calls[0]
     self.assertEqual(step, 3)
     self.assertAlmostEqual(values["actor/train/tunix.training.loss"], 0.5)
     self.assertAlmostEqual(
@@ -91,10 +91,10 @@ class WandbMetricsExporterTest(absltest.TestCase):
 
     self.meter_provider.force_flush()
 
-    steps = [step for _, step in self.run.calls]  # pyrefly: ignore[missing-attribute]
+    steps = [step for _, step in self.run.calls]
     self.assertEqual(steps, sorted(steps))
     logged_keys = set()
-    for values, _ in self.run.calls:  # pyrefly: ignore[missing-attribute]
+    for values, _ in self.run.calls:
       logged_keys.update(values)
     self.assertIn("actor/train/tunix.training.loss", logged_keys)
     self.assertIn("critic/eval/tunix.training.loss", logged_keys)

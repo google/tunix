@@ -236,7 +236,7 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
-      self.agent.trajectory.env_time = self.env_time  # pyrefly: ignore[bad-assignment]
+      self.agent.trajectory.env_time = self.env_time
       self.agent.trajectory.reward_time = self.reward_time
       return self.agent.trajectory
     elif mode == "Steps":

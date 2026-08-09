@@ -249,7 +249,7 @@ def put_params_on_memory_kind(
   return params_on_memory_kind
 
 def create_critic_model(
-    actor_model: nnx.Module, seed: int = 0, rngs: nnx.Rngs = None, lm_head_to_replace: str = "lm_head"  # pyrefly: ignore[bad-function-definition]
+    actor_model: nnx.Module, seed: int = 0, rngs: nnx.Rngs = None, lm_head_to_replace: str = "lm_head"
 ) -> nnx.Module:
   """Creates a critic model from an actor model."""
 
@@ -274,7 +274,7 @@ def create_critic_model(
 
   # If Qwix is active for the model, also assign qwix_path for the new head
   if hasattr(critic_model, "qwix_path"):
-    new_head.qwix_path = getattr(lm_head, "qwix_path", (lm_head_to_replace,))  # pyrefly: ignore[missing-attribute]
+    new_head.qwix_path = getattr(lm_head, "qwix_path", (lm_head_to_replace,))
   setattr(
       critic_model,
       lm_head_to_replace,
@@ -294,8 +294,8 @@ class TransformerWithScoreHead(nnx.Module):
     """
     if hasattr(transformer, 'embed_dim'):
       embed_dim = transformer.embed_dim
-    elif hasattr(transformer.config, 'embed_dim'):  # pyrefly: ignore[missing-attribute]
-      embed_dim = transformer.config.embed_dim  # pyrefly: ignore[missing-attribute]
+    elif hasattr(transformer.config, 'embed_dim'):
+      embed_dim = transformer.config.embed_dim
     else:
       raise ValueError("Could not determine embed dim for the transformer.")
 
@@ -306,7 +306,7 @@ class TransformerWithScoreHead(nnx.Module):
         use_bias=False,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.normal(),
-            transformer.config.shd_config.score_weight_d1,  # pyrefly: ignore[missing-attribute]
+            transformer.config.shd_config.score_weight_d1,
         ),
         rngs=rngs,
     )
@@ -379,12 +379,12 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "completion_mask": c_mask[i, :c_len],
         "advantages": adv[i, :c_len] if adv_is_per_token else adv[i],
         "adv_is_per_token": adv_is_per_token,
-        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,  # pyrefly: ignore[unbound-name]
-        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,  # pyrefly: ignore[unbound-name]
-        "returns": returns_np[i, :c_len] if has_returns else None,  # pyrefly: ignore[unbound-name]
-        "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
+        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,
+        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,
+        "returns": returns_np[i, :c_len] if has_returns else None,
+        "old_values": old_values_np[i, :c_len] if has_old_values else None,
         "policy_version": (
-            policy_version_np[i : i + 1] if has_policy_version else None  # pyrefly: ignore[unbound-name]
+            policy_version_np[i : i + 1] if has_policy_version else None
         ),
     }
     res.append(item)
@@ -672,7 +672,7 @@ def pack_sequences(
     # once. Set here (not per bin) so every emitted chunk carries it.
     kwargs = dict(is_update_step=jnp.array([is_update], dtype=jnp.bool_))
     if hasattr(merged, "num_segments"):
-      kwargs["num_segments"] = effective_max_segments + 1  # pyrefly: ignore[bad-assignment]
+      kwargs["num_segments"] = effective_max_segments + 1
     return [merged.replace(**kwargs)]
 
   # See the docstring: buffer sequences, emit a chunk once it holds a chunk's

@@ -57,11 +57,11 @@ class RolloutManager:
       elif sampler_type == "legacy_vllm":
         from tunix.experimental.rollout import legacy_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
 
-        sampler = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+        sampler = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(
             server_id="legacy_vllm_sampler",
         )
       elif sampler_type == "vanilla":
-        sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+        sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
             server_id="vanilla_sampler",
         )
       else:
@@ -164,7 +164,7 @@ class RolloutManager:
           for req in requests
       ]
       return await asyncio.gather(*tasks)
-    return await self._generate_one(requests, on_complete=on_complete)  # pyrefly: ignore[bad-argument-type]
+    return await self._generate_one(requests, on_complete=on_complete)
 
   async def _run_and_enqueue(
       self,

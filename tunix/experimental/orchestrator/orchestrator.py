@@ -165,7 +165,7 @@ class ClusterOrchestrator:
         assembler=active_assembler,
     )
     self.run_program(
-        program=active_program,  # pyrefly: ignore[bad-argument-type]
+        program=active_program,
         train_dataset=dataset,
         num_steps=num_steps,
         bring_up=False,

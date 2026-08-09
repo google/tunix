@@ -246,7 +246,7 @@ def ppo_policy_loss_fn(
   }
 
   if return_entropy:
-    unreduced_entropy = jnp.sum(token_entropy * completion_mask)  # pyrefly: ignore[unbound-name]
+    unreduced_entropy = jnp.sum(token_entropy * completion_mask)
     unreduced_policy_loss = (
         unreduced_policy_loss - entropy_coef * unreduced_entropy
     )
@@ -458,10 +458,10 @@ def grpo_loss_fn(
       # scatter each token its own segment's mean via take_along_axis. Padding
       # (segment 0, mask 0) yields 0 and is masked out downstream.
       per_seg_sum = common.segmented_sum(
-          seq_importance_ratio * completion_mask, segment_ids, num_segments  # pyrefly: ignore[bad-argument-type]
+          seq_importance_ratio * completion_mask, segment_ids, num_segments
       )
       per_seg_count = common.segmented_count(
-          segment_ids, num_segments, mask=completion_mask  # pyrefly: ignore[bad-argument-type]
+          segment_ids, num_segments, mask=completion_mask
       )
       per_seg_mean = per_seg_sum / jnp.clip(per_seg_count, min=1.0)
       seq_mean_ratio = jnp.take_along_axis(
@@ -617,7 +617,7 @@ def grpo_loss_fn(
     aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
   if beta is not None and beta != 0.0:
     total_loss = sft_utils.WeightedMetric(
-        unreduced_pg_loss.unreduced_sum + beta * kl_loss.unreduced_sum,  # pyrefly: ignore[unbound-name]
+        unreduced_pg_loss.unreduced_sum + beta * kl_loss.unreduced_sum,
         unreduced_pg_loss.denominator,
         eps=unreduced_pg_loss.eps,
         min_denom=unreduced_pg_loss.min_denom,
@@ -632,7 +632,7 @@ def grpo_loss_fn(
   )
   aux["entropy"] = entropy_loss
 
-  return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)  # pyrefly: ignore[bad-argument-type]
+  return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
 
 
 @function_registry.register_advantage_estimator("grpo")

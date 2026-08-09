@@ -255,7 +255,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
+    self.rl_engine.actor_trainer.with_rl_metrics_to_log({
         "kl": common.mean_of_means,
         "entropy": common.mean_of_means,
         "reduced_pg_loss": common.mean_of_means,
@@ -455,7 +455,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         updates["old_per_token_logps"] = trainer_logps
 
     if updates:
-      example = example.replace(**updates)  # pyrefly: ignore[missing-attribute]
+      example = example.replace(**updates)
     return example
 
   def _process_results(

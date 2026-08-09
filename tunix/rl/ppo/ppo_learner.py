@@ -235,7 +235,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         actor_rl_metrics_to_log  # pyrefly: ignore[bad-argument-type]
     )
 
-    self.rl_engine.critic_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
+    self.rl_engine.critic_trainer.with_rl_metrics_to_log({
         "vpred_mean": common.mean_of_means,
         "vf_clipfrac": common.mean_of_means,
     })

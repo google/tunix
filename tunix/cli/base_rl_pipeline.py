@@ -589,7 +589,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           params=jax.random.key(critic_model_config.get("rng_seed", 0))
       )
 
-      if hasattr(critic_model.config.shd_config, "score_weight_d1"):  # pyrefly: ignore[missing-attribute]
+      if hasattr(critic_model.config.shd_config, "score_weight_d1"):
         critic_model = rl_utils.TransformerWithScoreHead(
             critic_model, rngs=rngs
         )
@@ -886,7 +886,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
   def run_trainer(self):
     """Dispatch to standard or agentic trainer based on training_mode."""
     mode = self.config.get("training_mode", self._default_training_mode)
-    self._run(mode=mode)  # pyrefly: ignore[bad-argument-type]
+    self._run(mode=mode)
 
 
 def setup_jax_pathways(pathways_bns: str):

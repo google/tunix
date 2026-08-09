@@ -286,7 +286,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       args["additional_config"]["lora_config"] = config.lora_config
 
     tp, dp, ep = utils.resolve_parallelism_sizes(
-        mesh=config.mesh,  # pyrefly: ignore[bad-argument-type]
+        mesh=config.mesh,
         tensor_parallel_size=config.tensor_parallel_size,
         data_parallel_size=config.data_parallel_size,
         expert_parallel_size=config.expert_parallel_size,
@@ -377,10 +377,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             np.array(single_output.token_ids, dtype=np.int32)
         )
         decoded_outputs[idx].append(
-            self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
+            self.tokenizer.decode(single_output.token_ids)
         )
         logprobs = utils.get_logprobs_from_vllm_output(
-            list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
+            list(single_output.token_ids), single_output.logprobs
         )
         out_logprobs[idx].append(logprobs)
         logging.debug(
@@ -470,7 +470,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else:
           sampling_params = SamplingParams()
       else:
-        sampling_params = self.llm.get_default_sampling_params()  # pyrefly: ignore[missing-attribute]
+        sampling_params = self.llm.get_default_sampling_params()
       sampling_params.detokenize = False
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
@@ -532,7 +532,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:
-      outputs = self.llm.generate(  # pyrefly: ignore[missing-attribute]
+      outputs = self.llm.generate(
           prompts=prompt_objects,
           sampling_params=sampling_params,
           use_tqdm=True,
@@ -566,5 +566,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        logprobs=out_logprobs[0] if self.config.return_logprobs else None,
     )

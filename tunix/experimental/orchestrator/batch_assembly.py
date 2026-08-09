@@ -52,7 +52,7 @@ class SequencePackedBatchAssembler:
     # Calculate token lengths from explicit fields
     item_lengths = []
     for it in items:
-      item_lengths.append(len(it.token_ids) if it.token_ids is not None else 0)  # pyrefly: ignore[bad-argument-type]
+      item_lengths.append(len(it.token_ids) if it.token_ids is not None else 0)
 
     item_list = sorted(zip(items, item_lengths), key=lambda x: x[1], reverse=True)
 

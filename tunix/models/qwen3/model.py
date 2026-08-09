@@ -115,22 +115,22 @@ class ShardingConfig:
     fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        emb_dv=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        q_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        kv_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        rms_norm_weight=P(  # pyrefly: ignore[bad-argument-type]
+        emb_vd=P('tp', fsdp),
+        emb_dv=P(fsdp, 'tp'),
+        q_weight_dnh=P(fsdp, 'tp', None),
+        kv_weight_dnh=P(fsdp, 'tp', None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P(
             'tp',
         ),
-        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btf=P('fsdp', sp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btnh=P('fsdp', sp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        exp_weight_edf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        exp_weight_efd=P('fsdp', 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', sp, 'tp'),
+        act_btnh=P('fsdp', sp, 'tp', None),
+        score_weight_d1=P(fsdp, None),
+        exp_weight_edf=P('fsdp', None, 'tp'),
+        exp_weight_efd=P('fsdp', 'tp', None),
     )
 
 
@@ -440,7 +440,7 @@ class RMSNorm(nnx.Module):
   ):
     self.w = nnx.Param(
         nnx.initializers.ones_init()(
-            rngs.params(), dim, param_dtype  # pyrefly: ignore[bad-argument-type]
+            rngs.params(), dim, param_dtype
         ),  # pyrefly: ignore[bad-argument-type]
         sharding=shd_config.rms_norm_weight,
     )
@@ -533,13 +533,13 @@ class Attention(nnx.Module):
     value_proj = self.v_proj(x)
 
     query_proj = shard(
-        query_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+        query_proj, self.shd_config.act_btnh
     )  # pyrefly: ignore[bad-argument-type]
     key_proj = shard(
-        key_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+        key_proj, self.shd_config.act_btnh
     )  # pyrefly: ignore[bad-argument-type]
     value_proj = shard(
-        value_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+        value_proj, self.shd_config.act_btnh
     )  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rope(
@@ -687,7 +687,7 @@ class Attention(nnx.Module):
 
     outputs = self.o_proj(qkv)
     outputs = shard(
-        outputs, self.shd_config.act_btd  # pyrefly: ignore[bad-argument-type]
+        outputs, self.shd_config.act_btd
     )  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
@@ -804,7 +804,7 @@ class MoELayer(nnx.Module):
     if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
       dispatch_mask = jax.nn.one_hot(
           routing_idx,
-          num_classes=self.num_experts,  # pyrefly: ignore[bad-argument-type]
+          num_classes=self.num_experts,
           dtype=self.dtype,  # pyrefly: ignore[bad-argument-type]
       )  # [B, T, K, E]
       dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
@@ -879,12 +879,12 @@ class MoELayer(nnx.Module):
         ep_shard_idx = 0
 
       num_local_experts = (
-          self.num_experts // num_ep  # pyrefly: ignore[unsupported-operation]
+          self.num_experts // num_ep
       )  # pyrefly: ignore[unsupported-operation]
 
       flat_repeated_inputs = jnp.repeat(
           inputs.reshape(B * T, D_global),
-          self.experts_per_tok,  # pyrefly: ignore[bad-argument-type]
+          self.experts_per_tok,
           axis=0,  # pyrefly: ignore[bad-argument-type]
       )
       flat_selected_indices = indices.reshape(-1)
@@ -918,7 +918,7 @@ class MoELayer(nnx.Module):
         local_output_offsets = global_out_offsets[ep_shard_idx]
 
         output_buffer_size = (
-            min(self.experts_per_tok, num_local_experts)  # pyrefly: ignore[bad-specialization]
+            min(self.experts_per_tok, num_local_experts)
             * B
             * T
             * num_ep  # pyrefly: ignore[bad-specialization]
@@ -1095,7 +1095,7 @@ class MLP(nnx.Module):
   ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
     activations = shard(
-        activations, self.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
+        activations, self.shd_config.act_btf
     )  # pyrefly: ignore[bad-argument-type]
     outputs = self.down_proj(activations)
     return outputs

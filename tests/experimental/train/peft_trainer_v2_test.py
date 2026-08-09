@@ -149,19 +149,19 @@ class PeftTrainerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     self.assertGreater(
-        trainer.metrics_logger.get_metric('', 'perplexity', 'train'), 0  # pyrefly: ignore[missing-attribute]
+        trainer.metrics_logger.get_metric('', 'perplexity', 'train'), 0
     )
     self.assertEqual(
-        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
     self.assertGreater(
-        trainer.metrics_logger.get_metric('', 'perplexity', 'eval'), 0  # pyrefly: ignore[missing-attribute]
+        trainer.metrics_logger.get_metric('', 'perplexity', 'eval'), 0
     )
     self.assertGreater(trainer._train_steps, 0)
 
     self.assertLen(
-        trainer.metrics_logger.get_metric_history('', 'perplexity', 'train'),  # pyrefly: ignore[missing-attribute]
+        trainer.metrics_logger.get_metric_history('', 'perplexity', 'train'),
         trainer._train_steps,
     )
 
@@ -416,7 +416,7 @@ class PeftTrainerTest(parameterized.TestCase):
         tc.assert_not_equal, original_lora_params, lora_params
     )
     self.assertEqual(
-        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
 
@@ -446,7 +446,7 @@ class PeftTrainerTest(parameterized.TestCase):
 
       trainer.train(train_ds, self.eval_ds)
       self.assertEqual(
-          trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+          trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
           TEST_LEARNING_RATE,
       )
       return nnx.state(model, nnx.Param), trainer
@@ -675,7 +675,7 @@ class PeftTrainerTest(parameterized.TestCase):
         if self._buffered_train_metrics is not None:
           self._buffered_train_metrics.additional_metrics['foo'] = (
               [aux['foo']],
-              lambda xs: xs[-1],  # pyrefly: ignore[bad-index]
+              lambda xs: xs[-1],
           )
 
       def _post_process_eval_step(self, aux):
@@ -686,7 +686,7 @@ class PeftTrainerTest(parameterized.TestCase):
         if self._buffered_eval_metrics is not None:
           self._buffered_eval_metrics.additional_metrics['foo'] = (
               [aux['foo']],
-              lambda xs: xs[-1],  # pyrefly: ignore[bad-index]
+              lambda xs: xs[-1],
           )
 
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
@@ -732,7 +732,7 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(metrics.id, 0)
     self.assertEqual(metrics.mode, 'eval')
     self.assertIn('loss', metrics.scalar_metrics)
-    self.assertGreater(metrics.scalar_metrics['loss'], 0)  # pyrefly: ignore[no-matching-overload]
+    self.assertGreater(metrics.scalar_metrics['loss'], 0)
 
     # After calling get_metrics, the buffer should be cleared
     self.assertEqual(trainer.get_metrics().id, -1)
@@ -744,7 +744,7 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(train_metrics.mode, 'train')
     self.assertIn('loss', train_metrics.scalar_metrics)
     self.assertIn('grad_norm', train_metrics.scalar_metrics)
-    self.assertGreater(train_metrics.scalar_metrics['loss'], 0)  # pyrefly: ignore[no-matching-overload]
+    self.assertGreater(train_metrics.scalar_metrics['loss'], 0)
 
   def test_injected_params(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
@@ -760,7 +760,7 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(
-        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
 

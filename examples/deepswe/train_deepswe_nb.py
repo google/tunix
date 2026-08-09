@@ -645,7 +645,7 @@ def mixed_type_batch_fn(elements):
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,
-    tokenizer,  # pyrefly: ignore[bad-argument-type]
+    tokenizer,
     batch_size=BATCH_SIZE,
     num_batches=None,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -856,7 +856,7 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],  # pyrefly: ignore[missing-attribute]
+    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
     "return_logprobs": USE_ROLLOUT_LOGPS,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
@@ -911,9 +911,9 @@ if MODEL_SOURCE == "maxtext":
   }
   # Force no-op mappings for weight sync if both trainer and sampler use MaxText
   if hasattr(qwen_reference, "use_no_op_mappings"):
-    qwen_reference.use_no_op_mappings = True  # pyrefly: ignore[missing-attribute]
+    qwen_reference.use_no_op_mappings = True
   if hasattr(qwen_actor, "use_no_op_mappings"):
-    qwen_actor.use_no_op_mappings = True  # pyrefly: ignore[missing-attribute]
+    qwen_actor.use_no_op_mappings = True
     logging.info("Forced use_no_op_mappings=True on actor/reference models.")
 
 

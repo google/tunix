@@ -373,7 +373,7 @@ chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
-    tokenizer,  # pyrefly: ignore[bad-argument-type]
+    tokenizer,
     batch_size=BATCH_SIZE,
     num_batches=NUM_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -383,7 +383,7 @@ train_dataset, val_dataset = data_lib.post_init_dataset(
 
 test_dataset, _ = data_lib.post_init_dataset(
     test_dataset,
-    tokenizer,  # pyrefly: ignore[bad-argument-type]
+    tokenizer,
     batch_size=BATCH_SIZE,
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,

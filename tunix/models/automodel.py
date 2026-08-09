@@ -571,7 +571,7 @@ class AutoModel:
       # Get load_dtype explicitly from kwargs
       load_dtype_str = kwargs.get('load_dtype')
       try:
-        load_dtype = getattr(jnp, load_dtype_str)  # pyrefly: ignore[bad-argument-type]
+        load_dtype = getattr(jnp, load_dtype_str)
       except AttributeError:
         raise ValueError(
             f"Invalid load_dtype: {load_dtype_str}. Must be a valid"
@@ -586,7 +586,7 @@ class AutoModel:
         valid_fields = {f.name for f in dataclasses.fields(model_params)}
         overrides = {k: v for k, v in kwargs.items() if k in valid_fields and v is not None}
         if 'remat_config' in overrides and isinstance(overrides['remat_config'], str):
-          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)  # pyrefly: ignore[bad-argument-type]
+          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)
           if hasattr(model_module, 'RematConfig'):
             remat_cfg_str = overrides['remat_config']
             try:

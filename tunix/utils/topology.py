@@ -560,7 +560,7 @@ def supported_topology_shapes_for_chip_count(
     if chip_rank == 2:
       return [shape[:2] for shape in supported_shapes]
     if chip_rank == 3:
-      return supported_shapes  # pyrefly: ignore[bad-return]
+      return supported_shapes
     return []
 
   if chip_rank != 3:
@@ -580,11 +580,11 @@ def supported_topology_shapes_for_chip_count(
       required_chips, parsed_available_shape
   )
   if single_host_shapes:
-    return single_host_shapes  # pyrefly: ignore[bad-return]
+    return single_host_shapes
 
   cube_shapes = _supported_fish_cube_shapes(required_chips, parsed_available_shape)
   if cube_shapes:
-    return cube_shapes  # pyrefly: ignore[bad-return]
+    return cube_shapes
 
   return []
 

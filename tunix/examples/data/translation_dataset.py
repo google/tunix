@@ -69,7 +69,7 @@ def create_datasets(
         dataset_name, split=("train", "valid"), download=tfds_download
     )
   elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
-    train_ds, eval_ds = datasets.load_dataset(  # pyrefly: ignore[no-matching-overload]
+    train_ds, eval_ds = datasets.load_dataset(
         dataset_name, data_dir="en-fr", split=("train", "validation")  # pyrefly: ignore[bad-argument-type]
     )
   else:
