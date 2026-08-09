@@ -128,6 +128,15 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertIn("--vllm_max_num_batched_tokens=256", frozenlake_command)
       self.assertNotIn("--vllm_max_num_seqs=256", frozenlake_command)
       self.assertNotIn("--vllm_max_num_batched_tokens=4096", frozenlake_command)
+      gsm8k_command = by_stage[("gsm8k", "full")]["CANON_RUN_CMD"]
+      self.assertIn("--rollout_vllm_max_num_seqs=16", gsm8k_command)
+      self.assertIn(
+          "--rollout_vllm_max_num_batched_tokens=256", gsm8k_command
+      )
+      self.assertNotIn("--rollout_vllm_max_num_seqs=256", gsm8k_command)
+      self.assertNotIn(
+          "--rollout_vllm_max_num_batched_tokens=4096", gsm8k_command
+      )
       short_env = by_stage[("frozenlake", "alignment-short")]
       self.assertEqual(short_env["CANON_P33_SHORT_ALIGNMENT"], "1")
       self.assertIn("--max_response_length=512", short_env["CANON_RUN_CMD"])

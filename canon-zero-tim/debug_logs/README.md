@@ -504,3 +504,17 @@ and rollback are frozen in `../cluster/P33_R17_HANDOFF.md`.
    - `differing_bytes: 153089`, `max_abs: 0.22517`, first mismatch at `masked_index=0` (`a=-0.06866` vs `b=-0.06680`, delta ~0.00186);
    - Fail-fast pre-backward value gate successfully intercepted the run via `AlignmentGateError: pre-backward alignment gate RED: ['S_prefill_vs_T_old']` in `tunix/rl/alignment.py:278`, preventing wasteful backward computation on diverging policy trajectories.
 
+### Scheduler-shape diagnosis and candidate repair
+
+The r18 scheduler reports per-rank `max_seqs=256,max_tokens=4096`; DP16 therefore prepares a
+global M65536 backbone. The trainer adapter reports global M4096/local M256. This is the same
+global-versus-per-rank scheduler-contract error previously repaired for FrozenLake. The candidate
+sets GSM8K to per-rank `max_seqs=16,max_tokens=256`, preserving 256 global trajectories and global
+M4096 while leaving model, prompt/response lengths, precision, sampling, loss, gradients,
+optimizer and W&B/HF handling unchanged.
+
+**Target status remains FAIL.** Local contract tests can prove the command arithmetic and reject
+the stale `256/4096` values, but only a fresh source-pinned target run can establish causality. It
+must report one global M4096 backbone and make both pre-backward boundaries exactly zero before
+backward or update evidence is interpreted. Rollback is an additive revert of only the GSM8K
+per-rank scheduler commit; preserve the r18 log and JSONL unchanged.

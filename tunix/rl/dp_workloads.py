@@ -150,8 +150,8 @@ class DPWorkloadSpec:
           "--train_micro_batch_size=32",
           "--compute_logps_micro_batch_size=32",
           "--rollout_vllm_hbm_utilization=0.20",
-          "--rollout_vllm_max_num_seqs=256",
-          "--rollout_vllm_max_num_batched_tokens=4096",
+          f"--rollout_vllm_max_num_seqs={self.local_trajectories}",
+          f"--rollout_vllm_max_num_batched_tokens={self.local_m}",
           f"--wandb_project={self.wandb_project}",
       )
     if self.name == "frozenlake":

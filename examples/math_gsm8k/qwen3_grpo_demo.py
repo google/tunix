@@ -850,19 +850,32 @@ def main() -> None:
         raise ValueError("real GSM8K training requires reference beta=0.04")
       if os.getenv("CANON_PALLAS_LOGSOFTMAX") != "1":
         raise ValueError("real GSM8K training requires canonical log-softmax")
-      expected_num_seqs = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+      global_num_seqs = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+      if CANON_P32_WORKLOAD:
+        if global_num_seqs != P32_WORKLOAD.global_trajectories:
+          raise ValueError(
+              "real DP16 GSM8K training requires 256 global trajectories; "
+              f"got {global_num_seqs}"
+          )
+        expected_num_seqs = P32_WORKLOAD.local_trajectories
+      else:
+        expected_num_seqs = global_num_seqs
       if vllm_max_num_seqs != expected_num_seqs:
         raise ValueError(
-            "real GSM8K training requires max_num_seqs == batch*generations; "
+            "real GSM8K training requires the topology-local max_num_seqs; "
             f"got {vllm_max_num_seqs} vs {expected_num_seqs}"
         )
-      expected_batched_tokens = 4096 if CANON_P32_WORKLOAD else 256
+      expected_batched_tokens = (
+          P32_WORKLOAD.local_m if CANON_P32_WORKLOAD else 256
+      )
       if vllm_max_batched_tokens != expected_batched_tokens:
         raise ValueError(
-            "real GSM8K training requires the topology-specific all-M "
-            f"token budget {expected_batched_tokens}"
+            "real GSM8K training requires the topology-local all-M token "
+            f"budget {expected_batched_tokens}"
         )
-    vllm_max_batched_tokens = 4096 if CANON_P32_WORKLOAD else 256
+    vllm_max_batched_tokens = (
+        P32_WORKLOAD.local_m if CANON_P32_WORKLOAD else 256
+    )
   vllm_rollout_dict = {
       "rollout_vllm_model_version": (
           MODEL_DOWNLOAD_DIR if CANON_GSM8K_ACTIVE else MODEL_ID

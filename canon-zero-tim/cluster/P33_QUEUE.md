@@ -30,10 +30,11 @@ writes output. Each JobSet has:
 - Kubernetes Secret references for Hugging Face and W&B, with no literal credential;
 - FrozenLake periodic evaluation disabled in both the profile and manifest.
 
-For FrozenLake, vLLM scheduler limits are per DP rank. The frozen command therefore sets
-`vllm_max_num_batched_tokens=256` and `vllm_max_num_seqs=16`. Under DP16 this is global token
-capacity 4096 and global sequence capacity 256. With `MIN_TOKEN_BUCKET=4096`, TPU inference must
-prepare exactly one global token bucket, `[4096]`, whose local executable row count is 256.
+For both workloads, vLLM scheduler limits are per DP rank. The frozen commands therefore set
+`max_num_batched_tokens=256` and `max_num_seqs=16` (with each recipe's CLI prefix). Under DP16
+this is global token capacity 4096 and global sequence capacity 256. With
+`MIN_TOKEN_BUCKET=4096`, TPU inference must prepare exactly one global token bucket, `[4096]`,
+whose local executable row count is 256.
 Long prompts remain supported through chunked prefill; these limits bound one scheduler step,
 not the model context length.
 

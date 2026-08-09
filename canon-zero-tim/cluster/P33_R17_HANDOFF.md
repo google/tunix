@@ -1,6 +1,12 @@
-# P33 r17 recovery handoff
+# P33 r18 recovery handoff
 
 Updated: 2026-08-09 UTC
+
+GSM8K r18 passed `S_decode == S_prefill` and failed closed at
+`S_prefill != T_old`. Its scheduler used per-rank `max_seqs=256,max_tokens=4096`, which DP16
+expanded to global M65536, while the trainer used global M4096/local M256. The current candidate
+uses per-rank `16/256`, matching the already-correct FrozenLake contract. This is a causal
+candidate until a target rerun makes boundary 2 exactly zero.
 
 This handoff admits exactly two fresh, source-pinned target jobs:
 
@@ -46,7 +52,7 @@ test -z "$(git status --porcelain)"
 git pull --ff-only origin yuxzhang/canon-zero-tim
 
 SOURCE_COMMIT="$(git rev-parse HEAD)"
-RUN_ID="r18"
+RUN_ID="r19"
 OUT="/tmp/p33-jobsets-$RUN_ID"
 python3 canon-zero-tim/cluster/render_p33_jobsets.py \
   --source-commit "$SOURCE_COMMIT" \
@@ -86,11 +92,16 @@ downstream values because backward did not run.
 GSM8K must include:
 
 ```text
+Per-rank limits: max_seqs=16, max_tokens=256; global max_tokens across dp=16: 4096
+[CANON_ALIGN_PRE] step=0 verdict=PASS
 [P28.G5C] TIED_EMBEDDING_HEAD on
-[CANON_ALIGN_PRE]
 [CANON_P33_DP16] update_step_committed
 [P33.RUN] VERDICT PASS
 ```
+
+Any GSM8K global backbone M above 4096, per-rank request capacity above 16, missing boundary row,
+or nonzero boundary remains a failure. The local CPU gate does not prove the target numerical
+repair.
 
 FrozenLake must include:
 

@@ -141,6 +141,32 @@ class DPWorkloadsTest(unittest.TestCase):
           workload, environ, require_reduction_admission=False
       )
 
+  def test_gsm8k_rollout_limits_are_per_dp_rank(self):
+    workload = dp_workloads.get_workload("gsm8k")
+    command = workload.command()
+    self.assertIn("--rollout_vllm_max_num_seqs=16", command)
+    self.assertIn("--rollout_vllm_max_num_batched_tokens=256", command)
+    self.assertEqual(
+        workload.dp_size * workload.local_trajectories,
+        workload.global_trajectories,
+    )
+    self.assertEqual(workload.dp_size * workload.local_m, workload.global_m)
+    self.assertNotIn("--rollout_vllm_max_num_seqs=256", command)
+    self.assertNotIn("--rollout_vllm_max_num_batched_tokens=4096", command)
+
+  def test_gsm8k_recipe_validates_topology_local_scheduler_limits(self):
+    source = (
+        Path(__file__).parents[3]
+        / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        "expected_num_seqs = P32_WORKLOAD.local_trajectories", source
+    )
+    self.assertIn("P32_WORKLOAD.local_m if CANON_P32_WORKLOAD", source)
+    self.assertNotIn(
+        "expected_batched_tokens = 4096 if CANON_P32_WORKLOAD", source
+    )
+
   def test_frozenlake_preserves_signed_convergence_lengths(self):
     workload = dp_workloads.get_workload("frozenlake")
     self.assertEqual(workload.max_steps, 450)
