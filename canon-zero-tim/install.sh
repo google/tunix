@@ -96,6 +96,11 @@ apply 03-linear.patch              layers/jax/linear.py                 linear_p
 apply 04-qwen3.patch               models/jax/qwen3.py                  qwen3.py
 apply 05-qwen2.patch               models/jax/qwen2.py                  qwen2_patched.py
 apply 06-tpu-runner.patch          runner/tpu_runner.py                 tpu_runner_p21_l30.py
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/07-tpu-runner-p35-metadata.patch" || {
+  echo "      PATCH FAILED: 07-tpu-runner-p35-metadata.patch" >&2
+  exit 1
+}
 
 echo "[3/4] laying down the shim chain (model=$MODEL)"
 cp "$PKG"/src/engine_shims/*.py "$OUT/"

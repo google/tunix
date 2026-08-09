@@ -48,6 +48,32 @@ class FunctionalMappingError(ValueError):
   """Raised when a trainer-to-engine weight map is not a bijection."""
 
 
+@jax.jit
+def _exact_leaf_bits_equal(left: Any, right: Any) -> jax.Array:
+  """Reduces one same-shaped leaf to an exact bytewise device boolean."""
+  left_bits = jax.lax.bitcast_convert_type(left, jnp.uint8)
+  right_bits = jax.lax.bitcast_convert_type(right, jnp.uint8)
+  return jnp.all(left_bits == right_bits)
+
+
+def _bitwise_arrays_equal(left: Any, right: Any) -> bool:
+  """Returns exact device-side equality, including NaN payloads and signed zero."""
+  left_value = getattr(left, "value", left)
+  right_value = getattr(right, "value", right)
+  if (
+      tuple(left_value.shape) != tuple(right_value.shape)
+      or left_value.dtype != right_value.dtype
+  ):
+    return False
+  if jnp.dtype(left_value.dtype).itemsize not in (1, 2, 4, 8):
+    raise FunctionalMappingError(
+        f"exact bitwise equality does not support dtype {left_value.dtype}"
+    )
+  return bool(
+      np.asarray(jax.device_get(_exact_leaf_bits_equal(left_value, right_value)))
+  )
+
+
 def _canonical_topology_contract() -> tuple[int, int, int, int]:
   """Returns the admitted data, tensor, local-M, and global-M contract."""
   training_admitted = os.environ.get("CANON_P32_TRAIN_ADMITTED", "0")
@@ -1432,6 +1458,77 @@ class Qwen3EngineForwardAdapter:
     self._static_kv_indices = tuple(
         runner.layer_name_to_kvcache_index.items()
     )
+
+  def attest_exact_live_weights(self, trainer_state) -> dict[str, Any]:
+    """Bitwise-compares mapped trainer leaves with the live serving state.
+
+    This diagnostic never substitutes a checksum for equality. Each comparison
+    reduces on device to one boolean; model leaves are not copied to the host.
+    """
+    model_config = self._runner.model_config
+    mapped = map_trainer_state_to_engine_leaves(
+        trainer_state=trainer_state,
+        engine_state_contract=self._engine_state_contract,
+        key_mappings=self._key_mappings,
+        transpose_keys=self._transpose_keys,
+        key_mapping_hook_fns=self._hook_fns,
+        num_kv_heads=model_config.get_total_num_kv_heads(),
+        head_dim=model_config.get_head_size(),
+        tp_size=self._tp_size,
+    )
+    mapped_leaves = tuple(mapped.leaves)
+    live_leaves = tuple(self._runner.state_leaves)
+    if len(mapped_leaves) != len(live_leaves):
+      raise FunctionalMappingError(
+          "mapped/live engine leaf counts differ: "
+          f"{len(mapped_leaves)} != {len(live_leaves)}"
+      )
+
+    mismatches = []
+    total_elements = 0
+    for index, (mapped_leaf, live_leaf) in enumerate(
+        zip(mapped_leaves, live_leaves)
+    ):
+      mapped_value = getattr(mapped_leaf, "value", mapped_leaf)
+      live_value = getattr(live_leaf, "value", live_leaf)
+      exact = _bitwise_arrays_equal(mapped_value, live_value)
+      if not exact:
+        mismatches.append(index)
+      if tuple(mapped_value.shape) == tuple(live_value.shape):
+        total_elements += int(mapped_value.size)
+
+    mesh_devices = tuple(int(device.id) for device in self._runner.mesh.devices.flat)
+    return {
+        "equal": not mismatches,
+        "mapped_leaves": len(mapped_leaves),
+        "live_leaves": len(live_leaves),
+        "total_elements": total_elements,
+        "mismatch_indices": tuple(mismatches),
+        "mesh_shape": tuple(
+            (str(name), int(size))
+            for name, size in self._runner.mesh.shape.items()
+        ),
+        "mesh_device_ids": mesh_devices,
+    }
+
+  def p35_envelope_contract_attestation(self) -> dict[str, Any]:
+    """Returns runtime facts needed to admit the adapter C arm."""
+    return {
+        "data_size": self._data_size,
+        "tp_size": self._tp_size,
+        "local_m": self._sequence_bucket,
+        "global_m": self._bucket,
+        "rank_strided_groups": True,
+        "fresh_cache_per_group": True,
+        "block_tables_rank_local_contiguous": True,
+        "mesh_shape": tuple(
+            (str(name), int(size))
+            for name, size in self._runner.mesh.shape.items()
+        ),
+        "mesh_device_ids": tuple(
+            int(device.id) for device in self._runner.mesh.devices.flat
+        ),
+    }
 
   def _engine_array(self, value):
     return jax.lax.with_sharding_constraint(value, self._input_sharding)

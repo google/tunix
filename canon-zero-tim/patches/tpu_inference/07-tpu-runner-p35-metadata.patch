@@ -1,0 +1,111 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -930,6 +930,8 @@
+ #    the logits -- an assumption P18.1 must test rather than assume.
+ _P18_CAPTURE_DIR = os.environ.get("P18_CAPTURE_DIR", "")
+ _P18_SEQ = {"n": 0}
++_P35_METADATA_DIR = os.environ.get("CANON_P35_METADATA_DIR", "")
++_P35_METADATA_SEQ = {"n": 0}
+ 
+ 
+ def _p18_leaf(x):
+@@ -972,6 +974,47 @@
+           f"path={base}", flush=True)
+ 
+ 
++def _p35_metadata_dump(arm, payload, meta):
++    """Write compact, arm-labelled P35 metadata without hidden/logit tensors."""
++    import json as _json
++    import numpy as _np
++    from pathlib import Path as _Path
++    if arm not in ("A", "B"):
++        raise RuntimeError(f"unsupported P35 metadata arm: {arm!r}")
++    directory = _Path(_P35_METADATA_DIR)
++    directory.mkdir(parents=True, exist_ok=True)
++    seq = _P35_METADATA_SEQ["n"]
++    _P35_METADATA_SEQ["n"] += 1
++    arrays, describe = {}, {}
++    for key, value in payload.items():
++        if isinstance(value, dict) and "array" in value:
++            arrays[key] = value["array"]
++            describe[key] = {
++                name: field for name, field in value.items() if name != "array"
++            }
++        else:
++            describe[key] = value
++    base = directory / f"p35_metadata_{seq:04d}"
++    json_path = _Path(str(base) + ".json")
++    npz_path = _Path(str(base) + ".npz")
++    if json_path.exists() or npz_path.exists():
++        raise RuntimeError(f"P35 metadata evidence collision at {base}")
++    _np.savez(npz_path, **arrays)
++    with json_path.open("x", encoding="utf-8") as stream:
++        _json.dump({
++            "schema_version": 1,
++            "arm": arm,
++            "seq": seq,
++            "describe": describe,
++            "meta": meta,
++        }, stream, indent=2, default=str)
++    print(
++        f"[PATHTRACE] P35_METADATA arm={arm} seq={seq} "
++        f"arrays={sorted(arrays)} path={base}",
++        flush=True,
++    )
++
++
+ 
+ def _p18_weight_fingerprint(state_leaves):
+     """Exact bitwise checksum over the weights, computed on-device (cheap).
+@@ -1854,6 +1897,51 @@
+                     scheduler_output) as kv_connector_output:
+                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
+                 # but one of them would be `None`
++                _p35_arm = os.environ.get("CANON_P35_ARM", "")
++                if (
++                    _P35_METADATA_DIR
++                    and _p35_arm in ("A", "B")
++                    and self.input_batch.num_prompt_logprobs
++                ):
++                    _md = attn_metadata
++                    _p35_metadata_dump(_p35_arm, {
++                        "input_ids": _p18_leaf(input_ids),
++                        "input_positions": _p18_leaf(input_positions),
++                        "md_input_positions": _p18_leaf(
++                            getattr(_md, "input_positions", None)
++                        ),
++                        "md_block_tables": _p18_leaf(
++                            getattr(_md, "block_tables", None)
++                        ),
++                        "md_seq_lens": _p18_leaf(
++                            getattr(_md, "seq_lens", None)
++                        ),
++                        "md_query_start_loc": _p18_leaf(
++                            getattr(_md, "query_start_loc", None)
++                        ),
++                        "md_request_distribution": _p18_leaf(
++                            getattr(_md, "request_distribution", None)
++                        ),
++                    }, {
++                        **_p18_contract_meta(self.mesh),
++                        "md_padded_num_reqs": getattr(
++                            _md, "padded_num_reqs", None
++                        ),
++                        "num_prompt_logprobs": dict(
++                            self.input_batch.num_prompt_logprobs
++                        ),
++                        "kv_caches_spec": [
++                            {
++                                "shape": tuple(cache.shape),
++                                "dtype": str(cache.dtype),
++                                "sharding": str(
++                                    getattr(cache, "sharding", None)
++                                ),
++                            }
++                            for cache in self.kv_caches[:2]
++                        ],
++                        "num_kv_caches": len(self.kv_caches),
++                    })
+                 if _P18_CAPTURE_DIR and self.input_batch.num_prompt_logprobs:
+                     # B path only: dump the real run_model inputs (contract C2/C6/C7/C9/C10).
+                     _md = attn_metadata

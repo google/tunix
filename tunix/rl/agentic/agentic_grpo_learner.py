@@ -42,6 +42,7 @@ from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import alignment
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
+from tunix.rl import envelope_probe
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
@@ -965,11 +966,23 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "alignment batch is missing S_decode or trainer T_old"
         )
       rescore_source = self.rl_cluster.rollout.get_prefill_rescore_logps
-      s_prefill = self.rl_cluster.get_prefill_rescore_logps(
-          prompt_ids,
-          completion_ids,
-          completion_lengths=np.asarray(raw_completion_lengths, dtype=np.int32),
-      )
+      if envelope_probe.enabled():
+        s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+            prompt_ids,
+            completion_ids,
+            completion_lengths=np.asarray(
+                raw_completion_lengths, dtype=np.int32
+            ),
+            diagnostic_arm="A",
+        )
+      else:
+        s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+            prompt_ids,
+            completion_ids,
+            completion_lengths=np.asarray(
+                raw_completion_lengths, dtype=np.int32
+            ),
+        )
       rollout_config = self.rl_cluster.get_rollout_config(
           mode=rl_cluster_lib.Mode.TRAIN
       )
@@ -991,6 +1004,178 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_ids.shape[0],
           completion_ids.shape[1],
       )
+      if envelope_probe.enabled():
+        try:
+          data_size = int(os.environ.get(envelope_probe.DATA_SIZE_ENV, "0"))
+          local_m = int(os.environ.get(envelope_probe.LOCAL_M_ENV, "0"))
+        except ValueError as exc:
+          raise envelope_probe.EnvelopeProbeError(
+              "P35 DP size and local M must be integers"
+          ) from exc
+        report_path = os.environ.get(envelope_probe.REPORT_ENV, "")
+        metadata_dir = os.environ.get(envelope_probe.METADATA_DIR_ENV, "")
+        if not report_path or not metadata_dir:
+          raise envelope_probe.EnvelopeProbeError(
+              "P35 requires explicit report and metadata paths"
+          )
+
+        a_full = np.asarray(s_prefill)
+        c_full = np.asarray(trainer_per_token_logps)
+        action_full = np.asarray(completion_mask, dtype=np.bool_)
+        rows, first_ac = envelope_probe.select_reproducing_group(
+            a_full,
+            c_full,
+            action_full,
+            data_size=data_size,
+        )
+        selected_prompts = np.asarray(prompt_ids)[rows]
+        selected_completions = np.asarray(completion_ids)[rows]
+        selected_prompt_mask = np.asarray(prompt_mask, dtype=np.bool_)[rows]
+        selected_valid_mask = np.asarray(
+            completion_valid_mask, dtype=np.bool_
+        )[rows]
+        selected_action_mask = action_full[rows]
+        selected_lengths = np.asarray(
+            raw_completion_lengths, dtype=np.int32
+        )[rows]
+        sequences = envelope_probe.compact_sequences(
+            selected_prompts,
+            selected_completions,
+            selected_prompt_mask,
+            selected_valid_mask,
+        )
+        if any(len(sequence) > local_m for sequence in sequences):
+          raise envelope_probe.EnvelopeProbeError(
+              "P35 first target admits only one local-M chunk per sequence"
+          )
+
+        b_selected = self.rl_cluster.get_grouped_prefill_rescore_logps(
+            selected_prompts,
+            selected_completions,
+            completion_lengths=selected_lengths,
+            group_size=data_size,
+            source_row_indices=rows,
+            diagnostic_arm="B",
+        )
+        b_contract = (
+            self.rl_cluster.canonical_p35_grouped_prefill_contract()
+        )
+        weight_attestation = (
+            self.rl_cluster.attest_actor_anchor_matches_engine()
+        )
+        adapter_contract = self.rl_cluster.canonical_p35_adapter_contract()
+
+        metadata_error = None
+        try:
+          metadata_attestations, metadata_summary = (
+              envelope_probe.attest_metadata(
+                  directory=metadata_dir,
+                  expected_b_sequences=sequences,
+                  expected_a_rows=int(a_full.shape[0]),
+                  data_size=data_size,
+                  local_m=local_m,
+              )
+          )
+        except envelope_probe.EnvelopeProbeError as exc:
+          metadata_error = str(exc)
+          metadata_attestations = {
+              "native_A_observed": False,
+              "grouped_B_observed": False,
+              "mesh_shape_expected": False,
+              "device_order_expected": False,
+              "local_m256_B": False,
+              "positions_equal": False,
+              "block_tables_B_observed": False,
+              "request_distribution_B_one_per_rank": False,
+              "metadata_B_matches_C": False,
+              "cache_fresh_B": False,
+          }
+          metadata_summary = {"error": metadata_error}
+
+        captured_mesh_ids = tuple(
+            metadata_summary.get("mesh", {}).get("device_ids", ())
+            if isinstance(metadata_summary.get("mesh"), dict)
+            else ()
+        )
+        adapter_mesh_ids = tuple(adapter_contract.get("mesh_device_ids", ()))
+        weight_mesh_ids = tuple(weight_attestation.get("mesh_device_ids", ()))
+        metadata_attestations["device_order_expected"] = bool(
+            captured_mesh_ids
+            and captured_mesh_ids == adapter_mesh_ids == weight_mesh_ids
+        )
+        selected_policy = np.asarray(policy_versions)[rows]
+        b_groups = tuple(b_contract.get("group_provenance", ()))
+        attestations = {
+            **metadata_attestations,
+            "weights_equal": bool(weight_attestation.get("equal")),
+            "policy_version_equal": bool(
+                selected_policy.size
+                and np.all(selected_policy == selected_policy.reshape(-1)[0])
+            ),
+            "selected_token_ids_equal": bool(
+                len(sequences) == data_size
+                and metadata_attestations.get("metadata_B_matches_C") is True
+            ),
+            "action_masks_equal": bool(
+                selected_action_mask.shape == np.asarray(b_selected).shape
+                and np.all(~selected_action_mask | selected_valid_mask)
+            ),
+            "validity_masks_equal": bool(
+                np.array_equal(
+                    selected_lengths,
+                    selected_valid_mask.sum(axis=1, dtype=np.int32),
+                )
+            ),
+            "rank_strided_group": bool(
+                np.array_equal(
+                    rows,
+                    envelope_probe.rank_strided_row_groups(
+                        a_full.shape[0], data_size
+                    )[first_ac[0] % (a_full.shape[0] // data_size)],
+                )
+                and adapter_contract.get("rank_strided_groups") is True
+            ),
+            "local_m256_C": bool(
+                adapter_contract.get("local_m") == 256 and local_m == 256
+            ),
+            "block_tables_C_canonical": bool(
+                adapter_contract.get("block_tables_rank_local_contiguous")
+                is True
+            ),
+            "prefix_cache_reset_B": bool(
+                len(b_groups) == 1
+                and b_groups[0].get("reset_prefix_cache") is True
+            ),
+            "cache_fresh_C": bool(
+                adapter_contract.get("fresh_cache_per_group") is True
+            ),
+        }
+        report = envelope_probe.build_report(
+            a=a_full[rows],
+            b=np.asarray(b_selected),
+            c=c_full[rows],
+            action_mask=selected_action_mask,
+            selected_row_indices=rows,
+            first_full_ac_mismatch=first_ac,
+            attestations=attestations,
+            metadata={
+                "serving": metadata_summary,
+                "adapter": adapter_contract,
+                "grouped_serving": b_contract,
+                "weights": weight_attestation,
+                "metadata_error": metadata_error,
+            },
+        )
+        output = envelope_probe.write_report(report, report_path)
+        print(
+            "[CANON_P35] REPORT_COMPLETE "
+            f"path={output} rows={rows.tolist()} "
+            "STOP_BEFORE_BACKWARD",
+            flush=True,
+        )
+        raise envelope_probe.EnvelopeProbeComplete(
+            f"P35 diagnostic complete before backward: {output}"
+        )
       if alignment.precheck_enabled():
         alignment.check_pre_backward(
             combined_batch,

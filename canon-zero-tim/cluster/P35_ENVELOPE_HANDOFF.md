@@ -13,8 +13,9 @@ The valid r18 rates are byte fractions, not token mismatch rates:
 - GSM8K: 153,089 differing bytes out of 766,608 action bytes, 20.0%.
 - FrozenLake: 28,161 differing bytes out of 118,776 action bytes, 23.7%.
 
-The next report schema records differing action elements explicitly. Do not divide byte counts by
-token counts.
+GSM8K r19 fixed the serving M contract, but the red boundary was effectively unchanged. M is no
+longer a live load-bearing hypothesis for this boundary. The next report records differing action
+elements explicitly. Do not divide byte counts by token counts.
 
 ## What is and is not proven
 
@@ -38,8 +39,9 @@ Not proven:
 One source-pinned 64-chip run must produce three pre-backward arms in the same process:
 
 1. A: native serving rescore with dynamic packing.
-2. B: native serving rescore with one sequence per DP rank and canonical local M256.
-3. C: current adapter rescore with the same sequence and canonical local M256.
+2. B: native serving rescore of the exact rank-strided 16-row C group containing the current first
+   A-C mismatch, with one sequence per DP rank and canonical local M256.
+3. C: current adapter rescore for those same source rows and canonical local M256.
 
 Before comparing values, fail closed unless the run attests:
 
@@ -48,18 +50,20 @@ Before comparing values, fail closed unless the run attests:
 - expected DP16xTP4 mesh shape and device order;
 - canonical local M256 in B and C;
 - positions, context lengths, page/block tables and cache initialization for each arm;
-- exactly one completed A/B/C measurement row.
+- exactly one completed A/B/C measurement row;
+- a direct A-C red that reproduces the production boundary before classifying A-B or B-C.
 
 The classifier is mechanical:
 
 | A vs B | B vs C | Verdict |
 |---|---|---|
 | red | exact | packing/metadata carrier |
-| exact | red | wrapper/program-context carrier |
+| exact | red | adapter-envelope carrier; run exact-input replay before naming program context |
 | red | red | both carriers |
-| exact | exact | pre-backward envelope issue removed; advance to actual-model THIRDPROG |
+| exact | exact | reproduction failure/inconclusive |
 
-Any missing arm is `INCONCLUSIVE`. A red earlier contract makes all value comparisons VOID.
+Any missing arm is `INCONCLUSIVE`. Exact A-B and exact B-C with red A-C violates bitwise
+transitivity and is also `INCONCLUSIVE`. A red earlier contract makes all value comparisons VOID.
 
 ## If B vs C is red
 
@@ -77,23 +81,34 @@ this production-model gate.
 
 ## Operator instructions
 
-At this commit the P35 target producer is **NOT RUN and not yet admitted**. Do not render or apply
-a target manifest until the task state says P35.2 is locally complete and names the exact runner
-and expected artifact paths. The fail-closed classifier is
-`canon-zero-tim/tests/p35_envelope/classify_envelope.py`; it already rejects missing arms, red
-contracts, an unobserved negative control and inconsistent hashes/counts. Continue using the
-existing r18 logs as immutable input.
+The producer, classifier and renderer are locally complete, but the target is **NOT RUN**. Fetch
+the reviewed target branch, resolve its concrete 40-hex SHA, and render exactly one source-pinned
+JobSet:
 
-The native serving B-arm primitive now exists as
-`VllmRollout.get_grouped_prefill_rescore_logps` with an RL-cluster passthrough. It has an
-exact-image complete-group control and rejects partial groups. It is not wired into the workload
-yet. Two admission gaps remain: observing the actual serving page/block metadata, and attesting
-exact equality between the trainer anchor mapped leaves and the live engine leaves.
+```bash
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
+python3 canon-zero-tim/cluster/render_p35_jobset.py \
+  --source-commit "$SOURCE_SHA" \
+  --run-id r20 \
+  --output /tmp/canon-p35-gsm8k-envelope-r20.yaml
+kubectl apply --dry-run=server \
+  -f /tmp/canon-p35-gsm8k-envelope-r20.yaml
+```
 
-The existing P18 TPU-runner capture can provide the A/B page/block metadata without a new callback.
-Its engine weight fingerprint is only a checksum and must not be promoted to an exact
-trainer-versus-engine equality gate. Implementation details and the remaining producer steps are
-in `tasks/p35-envelope-discriminator/phases/p35-2-three-arm-producer.md`.
+Do not apply until the server-side dry run passes and the operator confirms the source SHA. The
+target is GSM8K Qwen3-1.7B, DP16xTP4, response 64, max step 1, no commit, Attempt 0. It intentionally
+terminates before backward. A valid return contains:
+
+- exactly one `[CANON_P35] REPORT_COMPLETE ... STOP_BEFORE_BACKWARD` marker;
+- `p35_envelope.json` with schema version 2;
+- compact `p35_metadata_*.json/.npz` A/B records;
+- `p35_envelope.classification.json` with `measurement_verdict=COMPLETE`;
+- raw log and SHA-256 values for every returned artifact.
+
+The postflight accepts only the expected diagnostic exit code 1. Missing evidence, any other exit
+code, stale output paths or an inconclusive classifier are failures. No production training,
+backward or optimizer update is part of this run.
 
 ## Rollback
 

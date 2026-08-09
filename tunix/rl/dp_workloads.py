@@ -28,6 +28,7 @@ from tunix.rl import dp_training
 
 
 _RUN_STAGE_STEPS = {
+    "envelope-short": 1,
     "alignment-short": 1,
     "backward-no-commit": 1,
     "one-update": 1,
@@ -125,10 +126,17 @@ class DPWorkloadSpec:
         max_steps = _RUN_STAGE_STEPS[run_stage]
       except KeyError as exc:
         raise ValueError(f"unknown P33 run stage: {run_stage!r}") from exc
+    envelope_short = run_stage == "envelope-short"
     short_alignment = run_stage == "alignment-short"
     if short_alignment and self.name != "frozenlake":
       raise ValueError("alignment-short is only defined for FrozenLake")
-    max_response_length = 512 if short_alignment else self.max_response_length
+    if envelope_short and self.name != "gsm8k":
+      raise ValueError("envelope-short is only defined for GSM8K")
+    max_response_length = (
+        64
+        if envelope_short
+        else 512 if short_alignment else self.max_response_length
+    )
     common = (
         "--mesh_dp=16",
         "--mesh_tp=4",
@@ -283,7 +291,9 @@ def requested_max_steps(
       raise ValueError(f"unknown P33 run stage: {stage!r}") from exc
   no_commit = values.get("CANON_P33_NO_COMMIT", "0")
   expected_no_commit = (
-      "1" if stage in ("alignment-short", "backward-no-commit") else "0"
+      "1"
+      if stage in ("envelope-short", "alignment-short", "backward-no-commit")
+      else "0"
   )
   if no_commit != expected_no_commit:
     raise ValueError(

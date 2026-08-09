@@ -1134,6 +1134,7 @@ class RLCluster:
       completion_tokens: jax.Array,
       *,
       completion_lengths: np.ndarray,
+      diagnostic_arm: str | None = None,
   ) -> np.ndarray:
     """Returns a fresh processed prefill re-score from the rollout engine."""
     source = getattr(self.rollout, "get_prefill_rescore_logps", None)
@@ -1148,6 +1149,7 @@ class RLCluster:
               completion_tokens,
               completion_lengths=completion_lengths,
               processed=True,
+              diagnostic_arm=diagnostic_arm,
           )
       )
 
@@ -1158,6 +1160,8 @@ class RLCluster:
       *,
       completion_lengths: np.ndarray,
       group_size: int,
+      source_row_indices: np.ndarray | None = None,
+      diagnostic_arm: str | None = None,
   ) -> np.ndarray:
     """Returns native serving re-scores with fixed request grouping."""
     source = getattr(self.rollout, "get_grouped_prefill_rescore_logps", None)
@@ -1173,8 +1177,34 @@ class RLCluster:
               completion_lengths=completion_lengths,
               group_size=group_size,
               processed=True,
+              source_row_indices=source_row_indices,
+              diagnostic_arm=diagnostic_arm,
           )
       )
+
+  def attest_actor_anchor_matches_engine(self) -> dict[str, Any]:
+    """Runs the P35 exact mapped-anchor versus live-engine weight gate."""
+    if self._anchor_policy_state is None:
+      raise RuntimeError("P35 weight attestation requires an anchor policy state")
+    source = getattr(self.rollout, "attest_canonical_engine_weights", None)
+    if source is None:
+      raise RuntimeError("rollout has no exact canonical weight attestation")
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+      return dict(source(self._anchor_policy_state))
+
+  def canonical_p35_adapter_contract(self) -> dict[str, Any]:
+    """Returns the runtime C-arm geometry without fabricating defaults."""
+    source = getattr(self.rollout, "canonical_p35_adapter_contract", None)
+    if source is None:
+      raise RuntimeError("rollout has no canonical P35 adapter contract")
+    return dict(source())
+
+  def canonical_p35_grouped_prefill_contract(self) -> dict[str, Any]:
+    """Returns the observed B-arm grouping and prefix-cache provenance."""
+    source = getattr(self.rollout, "p35_grouped_prefill_contract", None)
+    if source is None:
+      raise RuntimeError("rollout has no P35 grouped-prefill attestation")
+    return dict(source())
 
   def get_actor_per_token_logps(
       self,

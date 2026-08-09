@@ -356,6 +356,27 @@ class _TiedSegmentedRunner:
 
 class CanonicalQwen3AdapterTest(absltest.TestCase):
 
+  def test_bitwise_array_equality_detects_signed_zero_and_one_bit(self):
+    positive_zero = jnp.asarray([0.0, 1.0], jnp.float32)
+    self.assertTrue(
+        canonical_qwen3_adapter._bitwise_arrays_equal(  # pylint: disable=protected-access
+            positive_zero, positive_zero.copy()
+        )
+    )
+    negative_zero = jnp.asarray([-0.0, 1.0], jnp.float32)
+    self.assertFalse(
+        canonical_qwen3_adapter._bitwise_arrays_equal(  # pylint: disable=protected-access
+            positive_zero, negative_zero
+        )
+    )
+    one_bit = np.asarray([0.0, 1.0], np.float32)
+    one_bit.view(np.uint32)[1] ^= np.uint32(1)
+    self.assertFalse(
+        canonical_qwen3_adapter._bitwise_arrays_equal(  # pylint: disable=protected-access
+            positive_zero, jnp.asarray(one_bit)
+        )
+    )
+
   def _make_p32_group_adapter(self, *, sequence_bucket=4):
     runner = _CompleteSegmentedRunner()
     adapter = object.__new__(

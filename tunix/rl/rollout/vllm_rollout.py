@@ -230,6 +230,7 @@ class VllmRollout(base_rollout.BaseRollout):
       reset_prefix_cache: bool = True,
       processed: bool = True,
       completion_lengths: np.ndarray | None = None,
+      diagnostic_arm: str | None = None,
   ) -> np.ndarray:
     """Engine-native re-score of already-generated tokens (`S_prefill`).
 
@@ -331,18 +332,34 @@ class VllmRollout(base_rollout.BaseRollout):
     # no longer the same forward the gate claims to be comparing.  The sampler's driver-mode
     # path performs wait-idle + reset + request submission atomically, preventing another
     # continuous-batching producer from racing between the reset and this score request.
-    outputs = self._sampler.generate_request_outputs(
-        [TokensPrompt(prompt_token_ids=s) for s in seqs],
-        SamplingParams(
-            max_tokens=1,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            prompt_logprobs=0,
-            detokenize=False,
-        ),
-        reset_prefix_cache=reset_prefix_cache,
-    )
+    if diagnostic_arm not in (None, "A", "B"):
+      raise ValueError(f"unsupported P35 diagnostic arm: {diagnostic_arm!r}")
+    previous_arm = os.environ.get("CANON_P35_ARM")
+    if diagnostic_arm is not None:
+      if os.environ.get("CANON_P35_ENVELOPE", "") != "1":
+        raise RuntimeError(
+            "a P35 diagnostic arm requires CANON_P35_ENVELOPE=1"
+        )
+      os.environ["CANON_P35_ARM"] = diagnostic_arm
+    try:
+      outputs = self._sampler.generate_request_outputs(
+          [TokensPrompt(prompt_token_ids=s) for s in seqs],
+          SamplingParams(
+              max_tokens=1,
+              temperature=temperature,
+              top_p=top_p,
+              top_k=top_k,
+              prompt_logprobs=0,
+              detokenize=False,
+          ),
+          reset_prefix_cache=reset_prefix_cache,
+      )
+    finally:
+      if diagnostic_arm is not None:
+        if previous_arm is None:
+          os.environ.pop("CANON_P35_ARM", None)
+        else:
+          os.environ["CANON_P35_ARM"] = previous_arm
 
     self._last_prefill_rescore_provenance = {
         "processed": bool(processed),
@@ -351,6 +368,8 @@ class VllmRollout(base_rollout.BaseRollout):
         "top_k": top_k,
         "batch_size": len(seqs),
         "sequence_lengths": tuple(len(s) for s in seqs),
+        "diagnostic_arm": diagnostic_arm,
+        "reset_prefix_cache": bool(reset_prefix_cache),
     }
 
     out = np.zeros(comps.shape, np.float32)
@@ -380,6 +399,8 @@ class VllmRollout(base_rollout.BaseRollout):
       completion_lengths: np.ndarray,
       group_size: int,
       processed: bool = True,
+      source_row_indices: np.ndarray | None = None,
+      diagnostic_arm: str | None = None,
   ) -> np.ndarray:
     """Re-scores fixed request groups through the native serving envelope.
 
@@ -406,6 +427,17 @@ class VllmRollout(base_rollout.BaseRollout):
           "grouped prefill requires a nonempty exact number of groups: "
           f"rows={prompts.shape[0]} group_size={group_size}"
       )
+    if source_row_indices is None:
+      source_rows = np.arange(prompts.shape[0], dtype=np.int64)
+    else:
+      source_rows = np.asarray(source_row_indices, dtype=np.int64).reshape(-1)
+      if source_rows.size != prompts.shape[0]:
+        raise ValueError(
+            "grouped prefill source-row count differs from request rows: "
+            f"{source_rows.size} vs {prompts.shape[0]}"
+        )
+      if np.unique(source_rows).size != source_rows.size:
+        raise ValueError("grouped prefill source-row indices contain duplicates")
 
     outputs = []
     provenance = []
@@ -418,6 +450,7 @@ class VllmRollout(base_rollout.BaseRollout):
               completion_lengths=lengths[start:stop],
               reset_prefix_cache=True,
               processed=processed,
+              diagnostic_arm=diagnostic_arm,
           )
       )
       provenance.append(dict(self._last_prefill_rescore_provenance or {}))
@@ -425,6 +458,8 @@ class VllmRollout(base_rollout.BaseRollout):
         "group_size": int(group_size),
         "groups": len(outputs),
         "rows": int(prompts.shape[0]),
+        "source_row_indices": tuple(int(value) for value in source_rows),
+        "diagnostic_arm": diagnostic_arm,
         "group_provenance": tuple(provenance),
     }
     return np.concatenate(outputs, axis=0)
@@ -432,12 +467,34 @@ class VllmRollout(base_rollout.BaseRollout):
   get_grouped_prefill_rescore_logps.is_real_rescore = True
   get_grouped_prefill_rescore_logps.is_processed_rescore = True
 
+  def p35_grouped_prefill_contract(self) -> dict[str, Any]:
+    """Returns the observed grouped-rescore provenance for P35 attestation."""
+    if self._last_grouped_prefill_rescore_provenance is None:
+      raise RuntimeError("P35 grouped rescore has not executed")
+    return dict(self._last_grouped_prefill_rescore_provenance)
+
   def update_params(
       self,
       params: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
   ) -> None:
     self._sampler.update_params(params, filter_types)
+
+  def attest_canonical_engine_weights(self, trainer_state) -> dict[str, Any]:
+    """Compares mapped trainer-anchor leaves with live engine leaves bitwise."""
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError(
+          "canonical weight attestation requires the registered engine adapter"
+      )
+    return self._canonical_engine_adapter.attest_exact_live_weights(
+        trainer_state
+    )
+
+  def canonical_p35_adapter_contract(self) -> dict[str, Any]:
+    """Returns the registered adapter's runtime P35 envelope contract."""
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError("P35 adapter contract requires canonical engine C")
+    return self._canonical_engine_adapter.p35_envelope_contract_attestation()
 
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()

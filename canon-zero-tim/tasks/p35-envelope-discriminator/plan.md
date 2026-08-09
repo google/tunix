@@ -18,7 +18,7 @@ Result: PASS. See `artifacts/p35_1_local_gate.md`.
 
 ## Phase P35.2 — Three-arm Pathways discriminator
 
-Status: in progress
+Status: locally complete; target not run
 
 Produce all three value arms before backward in one source-pinned process:
 
@@ -26,20 +26,24 @@ Produce all three value arms before backward in one source-pinned process:
 - B: native serving rescore constrained to one sequence per DP rank and canonical local M256.
 - C: current adapter rescore constrained to the same sequence and local M256.
 
-Attest identical weights, selected action IDs, masks, positions and policy version. Record exact
-element/byte counts and masked hashes for A-B and B-C.
+Select the exact C rank-strided group containing the current first A-C mismatch. Attest identical
+weights, selected token IDs, masks, positions, policy version, mesh/device order, request
+distribution and fresh-cache semantics. Record exact element/byte counts and masked hashes for
+A-B, B-C and direct A-C.
 
 Decision table:
 
 | A vs B | B vs C | Classification |
 |---|---|---|
 | red | exact | packing/metadata carrier |
-| exact | red | wrapper/program-context carrier |
+| exact | red | adapter-envelope carrier; exact-input replay is still required before naming program context |
 | red | red | both carriers |
-| exact | exact | r18 contract/configuration carrier removed; advance to THIRDPROG |
+| exact | exact | reproduction failure/inconclusive; direct A-C must reproduce the known red |
 
 Exit gate: exactly one complete A/B/C row, expected measurement count verified, all producer
 attestations present, and an injected-drift negative control is rejected.
+
+Local result: PASS. The target result remains NOT RUN. See `artifacts/p35_2_local_gate.md`.
 
 ## Phase P35.3 — Exact-input replay if B vs C is red
 
@@ -65,12 +69,18 @@ divergent actual-model boundary recorded.
 
 ## Commands
 
-Local gate:
+Local gates:
 
 ```bash
-python3 -m pytest -q tests/rl/alignment_test.py
+sudo docker run --rm -v "$PWD:/workspace:ro" -w /workspace \
+  -e PYTHONDONTWRITEBYTECODE=1 -e JAX_PLATFORMS=cpu \
+  tunix_frozenlake_image:vllm-tpu0.25.0 \
+  bash canon-zero-tim/tests/p33_workloads/run_cpu.sh
+bash canon-zero-tim/tests/p33_workloads/run_exact_image.sh \
+  tunix_frozenlake_image:vllm-tpu0.25.0
 git diff --check
 ```
 
-Target commands are intentionally withheld until P35.2 has a fail-closed producer, classifier
-and dry-run-validated manifest. Do not rerun r18 unchanged.
+After a reviewed commit is pushed, render with
+`canon-zero-tim/cluster/render_p35_jobset.py`, then require a server-side dry run before apply.
+The exact operator commands are in `cluster/P35_ENVELOPE_HANDOFF.md`. Do not rerun r18 unchanged.

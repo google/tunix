@@ -44,3 +44,25 @@ Artifacts to preserve:
 - the complete generic way-count target log referenced by the package evidence manifest
 
 Rollback: disable the P35 runner and retain all old logs. Do not overwrite r18 artifacts.
+
+## 2026-08-09 — P35.2 local producer complete
+
+- Rebound the active task facts to source commit
+  `c660134bababc9123e6820c1f241246cfbf602a7`, which includes the returned r19 evidence.
+- Recorded the r19 result: correcting the scheduler M contract did not materially reduce the
+  GSM8K `S_prefill != T_old` boundary. M is excluded as the load-bearing carrier.
+- Wired the default-off A/B/C producer before backward. It selects the exact C rank-strided group
+  containing the current first A-C mismatch and refuses a no-red batch.
+- Added compact arm-labelled serving metadata, exact on-device trainer-anchor/live-engine weight
+  equality, direct A-C reproduction, classifier negative controls and immutable evidence paths.
+- Added a bounded GSM8K envelope-short renderer: response 64, max step 1, no commit, Attempt 0.
+- Fixed runner postflight so only diagnostic exit 1 plus one stop marker, a report and a complete
+  classification is accepted. Missing marker/report and exit 17 are explicit negative controls.
+- Pinned-image CPU gate PASS. qwen1p7b and qwen8b overlays each matched 29 manifest entries and
+  passed 10/10 chunk tests. Exact-weight signed-zero/one-bit gate PASS.
+- Target execution, Kubernetes apply, cloud mutation, commit and push were not performed.
+
+Artifact: `artifacts/p35_2_local_gate.md`.
+
+Rollback: leave `CANON_P35_ENVELOPE` unset. Preserve r18/r19 artifacts and do not claim a carrier
+until the source-pinned 64-chip Attempt 0 returns a complete schema-v2 classification.

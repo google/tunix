@@ -42,6 +42,21 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
     fi
     mkdir -p "$(dirname "$report_path")"
   done
+  if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
+    for report_key in CANON_P35_ENVELOPE_REPORT CANON_P35_METADATA_DIR \
+                      CANON_P35_CLASSIFICATION; do
+      report_path="${!report_key:-}"
+      if [ -z "$report_path" ]; then
+        echo "[run] FATAL: P35 lacks $report_key" >&2
+        exit 1
+      fi
+      if [ -e "$report_path" ]; then
+        echo "[run] FATAL: P35 evidence path already exists: $report_key=$report_path" >&2
+        exit 1
+      fi
+      mkdir -p "$(dirname "$report_path")"
+    done
+  fi
 fi
 echo "[run] cmd: $CANON_RUN_CMD"
 echo "[run] log: $LOG"
@@ -58,7 +73,8 @@ n_lp=$(grep -ac 'CANON_LOGPROB_M on' "$LOG" || true)
 n_wandb=$(grep -ac '\[CANON_P33_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_wandb_p34=$(grep -ac '\[CANON_P34_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_eval_off=$(grep -ac '\[CANON_P33_EVAL\] DISABLED workload=frozenlake' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off"
+n_p35_stop=$(grep -ac '\[CANON_P35\] REPORT_COMPLETE .*STOP_BEFORE_BACKWARD' "$LOG" || true)
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_stop=$n_p35_stop"
 if [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]; then
   echo "[run] FATAL: no PATHTRACE for the fixed-order reductions -- the intervention did not" >&2
   echo "[run]        execute.  Any result from this run is void regardless of its exit code." >&2
@@ -76,7 +92,26 @@ if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && \
   echo "[run] FATAL: admitted P33 FrozenLake did not attest evaluation disabled exactly once" >&2
   exit 1
 fi
-if [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
+if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
+  if [ "$rc" -ne 1 ]; then
+    echo "[run] FATAL: P35 producer must terminate with its expected diagnostic exit=1; got $rc" >&2
+    exit 1
+  fi
+  if [ "$n_p35_stop" -ne 1 ]; then
+    echo "[run] FATAL: P35 did not stop exactly once before backward" >&2
+    exit 1
+  fi
+  if [ ! -s "$CANON_P35_ENVELOPE_REPORT" ]; then
+    echo "[run] FATAL: P35 stop marker exists without a report" >&2
+    exit 1
+  fi
+  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+    python3 "$CANON_PKG/tests/p35_envelope/classify_envelope.py" \
+      --report "$CANON_P35_ENVELOPE_REPORT" \
+      --output "$CANON_P35_CLASSIFICATION" || exit 1
+  echo "[run] P35 expected diagnostic exit=1 accepted after COMPLETE classification"
+  rc=0
+elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   classification="$CANON_STATE/p34_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
     python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \

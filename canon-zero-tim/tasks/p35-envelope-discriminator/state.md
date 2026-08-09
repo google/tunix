@@ -1,11 +1,11 @@
 # P35 envelope discriminator state
 
-- Status: active
-- Active phase: P35.2 three-arm producer
+- Status: active; P35.2 locally complete, target not run
+- Active phase: P35.2 target admission
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Base commit: `ad309a810e35121d7d25db67c32c2712d9f8e086`
+- Base commit: `c660134bababc9123e6820c1f241246cfbf602a7`
 - Updated: 2026-08-09 UTC
 
 ## Objective
@@ -33,6 +33,9 @@ reward or correlation to classify this boundary.
    of forward-only envelopes.
 7. The same-session canonical Qwen operator probe is bitwise exact across its tested program
    contexts. Canonical operators remain useful, but they do not prove the whole model envelope.
+8. GSM8K r19 corrected the scheduler contract to global M4096/local M256, but the action-only
+   `S_prefill != T_old` result was effectively unchanged. M mismatch is therefore excluded as
+   the load-bearing carrier for that boundary.
 
 ## Current hypothesis split
 
@@ -46,29 +49,41 @@ No hypothesis is green yet.
 
 ## Completed locally
 
-- P35.1 report schema is additive and preserves the legacy byte field.
-- Exact-image alignment tests: 13/13 PASS.
-- Three-arm classifier tests: 5/5 PASS.
-- Native serving grouped-rescore tests: 6/6 PASS, including the complete-group positive control
-  and partial-group rejection.
-- Negative controls cover one ULP, signed zero, masked-out full-array drift, missing arms, red
-  attestations, unobserved injected drift and hash/count inconsistency.
-- `git diff --check`, Python compilation and executable English-only scan PASS.
+- P35 schema v2 records A-B, B-C and direct A-C element/byte counts and masked hashes.
+- The producer selects the exact rank-strided C group containing the current first A-C mismatch;
+  it refuses a batch that does not reproduce the known red boundary.
+- A is the unchanged native serving rescore. B reuses the native serving API with one selected
+  request per DP rank. C is the existing canonical adapter value.
+- Compact arm-labelled engine evidence records tokens, positions, sequence lengths, query starts,
+  request distribution, active block tables, prefix-cache reset, cache contract and concrete mesh order. It does not dump
+  hidden states, logits, model weights or cache contents.
+- Trainer-anchor leaves are mapped to live engine leaves and compared bitwise on device. Checksums
+  remain provenance only; signed zero and one-bit drift are rejected.
+- The classifier rejects missing arms, red attestations, ineffective negative controls,
+  count/hash inconsistency, bitwise-transitivity violations and an exact A-C pair that failed to
+  reproduce the known production red.
+- The runner accepts only diagnostic exit 1 plus exactly one stop marker, one immutable report and
+  a `COMPLETE` classification. It rejects missing marker/report and every other exit code.
+- Pinned-image CPU gate PASS; qwen1p7b and qwen8b overlay installs each matched all 29 manifest
+  entries and passed 10/10 prompt/decode chunk tests.
+- `git diff --check`, Python AST checks and shell syntax checks PASS.
 
-Evidence: `artifacts/p35_1_local_gate.md`.
+Evidence: `artifacts/p35_1_local_gate.md` and `artifacts/p35_2_local_gate.md`.
 
 ## Next action
 
-Wire the grouped native-rescore B arm into a default-off, pre-backward P35 producer. It must emit
-the classifier schema, verify expected measurement count and stop before backward. The remaining
-admission gaps are actual page/block metadata attestation and exact trainer-anchor versus engine
-weight attestation. Do not ask the operator to launch the 64-chip run until both are fail-closed.
+After commit/push approval, pin the published source SHA, render the one GSM8K envelope-short
+JobSet, run a server-side Kubernetes dry run, then let the operator launch Attempt 0. The target
+must stop before backward and return the raw log, schema-v2 report, compact metadata records,
+classification and SHA-256 values. Until that happens no carrier is classified.
 
 ## Hard gates
 
 - Missing expected measurement rows is `INCONCLUSIVE`, never PASS.
 - Any red earlier gate makes downstream values from that run VOID.
 - A target numerical conclusion requires all three arms A/B/C in one source-pinned run.
+- Direct A-C must reproduce the known red boundary. Exact A-B plus exact B-C with red A-C is a
+  transitivity failure and therefore `INCONCLUSIVE`, never a pass.
 - Bitwise verdicts use `differing_elements == 0` and matching masked hashes. Correlation and
   `max_abs` are descriptive only.
 - Target inputs must attest weights, mesh/device order, token IDs, validity/action masks,
@@ -76,10 +91,11 @@ weight attestation. Do not ask the operator to launch the 64-chip run until both
 
 ## Blockers
 
-The local observability work is unblocked. The eventual 64-chip target run requires the user's
-separate launch decision and an operator on the GKE cluster.
+The target JobSet must pin the reviewed SHA published on `yuxzhang/canon-zero-tim`; the operator
+must resolve and verify that SHA before rendering. The 64-chip launch remains an operator action
+on the GKE cluster.
 
 ## Rollback
 
-Keep `CANON_PRE_ALIGN_GATE` disabled and do not render the P35 target manifest. Local report-field
-changes are additive; reverting them must preserve all r18 logs and prior handoffs.
+Leave `CANON_P35_ENVELOPE` unset. The A path, training, backward, optimizer, W&B and credentials
+remain unchanged. Preserve all r18/r19 logs and prior handoffs.

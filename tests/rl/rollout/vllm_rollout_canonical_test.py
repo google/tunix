@@ -14,6 +14,7 @@
 
 """CPU contracts for canonical re-score through both in-process vLLM modes."""
 
+import os
 from absl.testing import absltest
 import numpy as np
 import types
@@ -139,13 +140,18 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
     completions = np.asarray(
         [[5, 0], [6, 0], [7, 0], [8, 0]], dtype=np.int32
     )
-    result = rollout.get_grouped_prefill_rescore_logps(
-        prompts,
-        completions,
-        completion_lengths=np.ones((4,), dtype=np.int32),
-        group_size=2,
-        processed=False,
-    )
+    with mock.patch.dict(
+        os.environ, {"CANON_P35_ENVELOPE": "1"}, clear=False
+    ):
+      result = rollout.get_grouped_prefill_rescore_logps(
+          prompts,
+          completions,
+          completion_lengths=np.ones((4,), dtype=np.int32),
+          group_size=2,
+          processed=False,
+          source_row_indices=np.asarray([0, 2, 1, 3]),
+          diagnostic_arm="B",
+      )
 
     np.testing.assert_array_equal(
         result,
@@ -164,6 +170,22 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
     self.assertEqual(
         rollout._last_grouped_prefill_rescore_provenance["groups"], 2
     )
+    self.assertEqual(
+        rollout._last_grouped_prefill_rescore_provenance["source_row_indices"],
+        (0, 2, 1, 3),
+    )
+    self.assertEqual(
+        rollout._last_grouped_prefill_rescore_provenance["diagnostic_arm"], "B"
+    )
+    contract = rollout.p35_grouped_prefill_contract()
+    self.assertEqual(len(contract["group_provenance"]), 2)
+    self.assertTrue(
+        all(
+            group["reset_prefix_cache"] is True
+            for group in contract["group_provenance"]
+        )
+    )
+    self.assertNotIn("CANON_P35_ARM", os.environ)
 
   def test_grouped_prefill_rescore_rejects_partial_group(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)
@@ -176,6 +198,43 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
           group_size=2,
           processed=False,
       )
+
+  def test_grouped_prefill_rescore_rejects_duplicate_source_rows(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    with self.assertRaisesRegex(ValueError, "duplicates"):
+      rollout.get_grouped_prefill_rescore_logps(
+          np.ones((2, 2), dtype=np.int32),
+          np.ones((2, 2), dtype=np.int32),
+          completion_lengths=np.ones((2,), dtype=np.int32),
+          group_size=2,
+          processed=False,
+          source_row_indices=np.asarray([1, 1]),
+      )
+
+  def test_exact_weight_attestation_is_forwarded(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = mock.Mock()
+    rollout._canonical_engine_adapter.attest_exact_live_weights.return_value = {
+        "equal": True
+    }
+    state = object()
+    self.assertEqual(
+        rollout.attest_canonical_engine_weights(state), {"equal": True}
+    )
+    rollout._canonical_engine_adapter.attest_exact_live_weights.assert_called_once_with(
+        state
+    )
+
+  def test_p35_adapter_contract_is_forwarded(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = mock.Mock()
+    rollout._canonical_engine_adapter.p35_envelope_contract_attestation.return_value = {
+        "local_m": 256
+    }
+    self.assertEqual(
+        rollout.canonical_p35_adapter_contract(), {"local_m": 256}
+    )
 
 
 if __name__ == "__main__":

@@ -29,9 +29,9 @@ def _pair(exact: bool) -> dict:
   }
 
 
-def _report(ab_exact: bool, bc_exact: bool) -> dict:
+def _report(ab_exact: bool, bc_exact: bool, ac_exact: bool = False) -> dict:
   return {
-      "schema_version": 1,
+      "schema_version": 2,
       "measurement_rows": 1,
       "arms": ["A", "B", "C"],
       "attestations": {
@@ -45,24 +45,34 @@ def _report(ab_exact: bool, bc_exact: bool) -> dict:
       "pairs": {
           classifier._PAIR_AB: _pair(ab_exact),
           classifier._PAIR_BC: _pair(bc_exact),
+          classifier._PAIR_AC: _pair(ac_exact),
       },
   }
 
 
 class ClassifyEnvelopeTest(unittest.TestCase):
 
-  def test_classifies_all_four_outcomes(self):
+  def test_classifies_three_reproduced_red_outcomes(self):
     expected = {
         (False, True): "packing_metadata_carrier",
-        (True, False): "wrapper_program_context_carrier",
-        (False, False): "both_carriers",
-        (True, True): "pre_backward_envelope_exact",
+        (True, False): "adapter_envelope_carrier",
+        (False, False): "mixed_envelope_carriers",
     }
     for exactness, classification in expected.items():
       with self.subTest(exactness=exactness):
         result = classifier.classify(_report(*exactness))
         self.assertEqual(result["measurement_verdict"], "COMPLETE")
         self.assertEqual(result["classification"], classification)
+
+  def test_exact_exact_is_inconclusive_when_known_red_is_not_reproduced(self):
+    result = classifier.classify(_report(True, True, True))
+    self.assertEqual(result["measurement_verdict"], "INCONCLUSIVE")
+    self.assertIn("known_A_vs_C_red_not_reproduced", result["reasons"])
+
+  def test_transitivity_conflict_is_inconclusive(self):
+    result = classifier.classify(_report(True, True, False))
+    self.assertEqual(result["measurement_verdict"], "INCONCLUSIVE")
+    self.assertIn("bitwise_transitivity", result["reasons"])
 
   def test_missing_arm_is_inconclusive(self):
     report = _report(True, True)
@@ -94,6 +104,13 @@ class ClassifyEnvelopeTest(unittest.TestCase):
     self.assertIn(
         f"{classifier._PAIR_BC}.hash_count_consistency", result["reasons"]
     )
+
+  def test_missing_direct_reproduction_pair_is_inconclusive(self):
+    report = _report(False, True)
+    del report["pairs"][classifier._PAIR_AC]
+    result = classifier.classify(report)
+    self.assertEqual(result["measurement_verdict"], "INCONCLUSIVE")
+    self.assertIn("pair_keys", result["reasons"])
 
 
 if __name__ == "__main__":

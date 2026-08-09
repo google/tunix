@@ -1,45 +1,42 @@
 # P35.2 three-arm producer
 
-Status: in progress
+Status: locally complete; target not run
 
 ## Implemented
 
-- `VllmRollout.get_grouped_prefill_rescore_logps` submits complete fixed-size request groups
-  through the native serving API.
-- Every group resets prefix cache and preserves processed temperature/top-k/top-p semantics.
-- The RL cluster exposes the diagnostic method without changing the normal rescore path.
-- Exact-image controls pass for complete groups and reject a partial final group.
-- `classify_envelope.py` mechanically classifies all four A/B/C outcomes and rejects incomplete
-  evidence.
+- The learner keeps A on the unchanged native serving path and labels its compact metadata.
+- The producer finds the current first A-C mismatch and selects the exact rank-strided 16-row C
+  group containing it. A no-red batch is rejected rather than reported as success.
+- B submits those same source rows through native serving as one complete 16-request group,
+  resets prefix cache and preserves processed temperature/top-k/top-p semantics.
+- Compact metadata records verify local M256, tokens, positions, sequence/query lengths, one
+  request per data rank, request distribution, active block tables, explicit prefix-cache reset,
+  cache freshness and concrete mesh order.
+- Mapped trainer-anchor and live engine leaves are compared bytewise on device. A one-bit change
+  and signed zero both fail the equality gate.
+- The schema contains A-B, B-C and direct A-C. Exact/exact is inconclusive unless the historical
+  red was truly removed in the unchanged A arm; a red A-C with exact/exact is a transitivity
+  failure.
+- The workload is bounded to GSM8K response 64, max step 1 and no commit. The producer writes one
+  immutable report and intentionally exits before backward.
+- The postflight accepts only exit 1, one stop marker, a nonempty report and a complete mechanical
+  classification.
 
-## Existing instrumentation that can be reused
+## Engine instrumentation
 
-The canonical TPU-runner patch already has default-off P18 capture for prompt-logprob requests.
-It records input IDs, positions, block tables, sequence lengths, query starts, request
-distribution, mesh order, cache sharding and an engine weight fingerprint. A and B can therefore
-reuse this capture instead of adding another engine-side callback.
-
-The engine weight fingerprint is a checksum, not a collision-free equality proof. It may support
-provenance but cannot satisfy the trainer-anchor versus engine exact-weight gate by itself.
-
-## Remaining producer work
-
-1. In the learner, retain A from the normal native rescore and call grouped native rescore for B
-   under a default-off P35 environment switch.
-2. Select one complete 16-row DP group and compare A/B/C under the same action mask.
-3. Parse and cross-reference the existing P18 A/B metadata records; fail closed unless the
-   scheduler actually placed one request on each DP rank with the admitted local M256 program.
-4. Add an exact device-side bitwise equality check between trainer-anchor mapped leaves and live
-   engine leaves. Do not use byte sums as the release equality gate.
-5. Emit one P35 schema row, inject one masked action-value drift in a classifier-only control and
-   stop before backward.
+Patch `07-tpu-runner-p35-metadata.patch` adds a compact, arm-labelled P35 record instead of reusing
+the large P18 tensor dump. It stores metadata arrays only; hidden states, logits, model weights and
+cache contents are not serialized. Evidence paths are exclusive-create and stale paths are
+rejected before launch.
 
 ## Target admission
 
-NOT ADMITTED. There is no target command until steps 1–5 pass CPU/schema tests and the rendered
-manifest has a server-side dry run. An unchanged r18 rerun cannot answer the P35 question.
+The producer, classifier and renderer are locally complete. The target remains NOT RUN and not yet
+admitted because these changes are uncommitted and no source-pinned manifest has passed a
+server-side Kubernetes dry run. An unchanged r18/r19 rerun cannot answer the P35 question.
 
 ## Rollback
 
-Leave the P35 switch unset. The grouped method is then unreachable from the workload path, and
-normal serving, rescore, training, W&B and optimizer behavior remain unchanged.
+Leave `CANON_P35_ENVELOPE` unset. The grouped method, metadata patch and diagnostic termination are
+then unreachable; normal serving, rescore, training, W&B, credentials and optimizer behavior are
+unchanged.

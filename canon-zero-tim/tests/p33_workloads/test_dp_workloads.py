@@ -192,6 +192,24 @@ class DPWorkloadsTest(unittest.TestCase):
           run_stage="alignment-short"
       )
 
+  def test_gsm8k_envelope_short_preserves_shape_contract(self):
+    command = dp_workloads.get_workload("gsm8k").command(
+        run_stage="envelope-short"
+    )
+    self.assertIn("--batch_size=32", command)
+    self.assertIn("--num_generations=8", command)
+    self.assertIn("--max_prompt_length=1024", command)
+    self.assertIn("--max_response_length=64", command)
+    self.assertIn("--rollout_vllm_max_num_seqs=16", command)
+    self.assertIn("--rollout_vllm_max_num_batched_tokens=256", command)
+    self.assertIn("--max_steps=1", command)
+
+  def test_frozenlake_rejects_gsm8k_envelope_short_stage(self):
+    with self.assertRaisesRegex(ValueError, "only defined for GSM8K"):
+      dp_workloads.get_workload("frozenlake").command(
+          run_stage="envelope-short"
+      )
+
   def test_frozenlake_rollout_limits_are_per_dp_rank(self):
     workload = dp_workloads.get_workload("frozenlake")
     command = workload.command()
@@ -405,6 +423,18 @@ class DPWorkloadsTest(unittest.TestCase):
     environ = _environment("gsm8k")
     environ["CANON_P33_RUN_STAGE"] = "one-update"
     environ["CANON_P33_NO_COMMIT"] = "1"
+    with self.assertRaisesRegex(ValueError, "stage/no-commit mismatch"):
+      dp_workloads.requested_max_steps(workload, environ)
+
+  def test_envelope_short_requires_no_commit(self):
+    workload = dp_workloads.get_workload("gsm8k")
+    environ = _environment("gsm8k")
+    environ["CANON_P33_RUN_STAGE"] = "envelope-short"
+    environ["CANON_P33_NO_COMMIT"] = "1"
+    self.assertEqual(
+        dp_workloads.requested_max_steps(workload, environ), 1
+    )
+    environ["CANON_P33_NO_COMMIT"] = "0"
     with self.assertRaisesRegex(ValueError, "stage/no-commit mismatch"):
       dp_workloads.requested_max_steps(workload, environ)
 

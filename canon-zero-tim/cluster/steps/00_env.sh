@@ -93,6 +93,29 @@ case "${XLA_FLAGS:-}" in
   *--xla_allow_excess_precision=false*) ;;
   *) echo "[env] MISSING: XLA_FLAGS lacks --xla_allow_excess_precision=false" >&2; fail=1;;
 esac
+
+if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
+  for k in CANON_P35_ENVELOPE_REPORT CANON_P35_METADATA_DIR \
+           CANON_P35_CLASSIFICATION CANON_DP_SIZE CANON_LOGPROB_M; do
+    req "$k"
+  done
+  [ "${CANON_P32_WORKLOAD:-}" = "gsm8k" ] || {
+    echo "[env] P35 envelope-short requires the GSM8K workload" >&2; fail=1;
+  }
+  [ "${CANON_P33_RUN_STAGE:-}" = "envelope-short" ] && \
+  [ "${CANON_P33_NO_COMMIT:-}" = "1" ] || {
+    echo "[env] P35 requires envelope-short with no-commit=1" >&2; fail=1;
+  }
+  [ "${CANON_DP_SIZE:-}" = "16" ] && \
+  [ "${CANON_LOGPROB_M:-}" = "256" ] || {
+    echo "[env] P35 requires DP16 and canonical local M256" >&2; fail=1;
+  }
+  case " ${CANON_RUN_CMD:-} " in
+    *" --max_response_length=64 "*) ;;
+    *) echo "[env] P35 command must pin max_response_length=64" >&2; fail=1;;
+  esac
+  echo "[env] P35 envelope contract OK: gsm8k DP16 local-M256 response-64"
+fi
 if [ -n "${CANON_RPA_VJP:-}" ] && [ "${CANON_RPA_VJP:-}" = "1" ]; then
   echo "[env] NOTE: CANON_RPA_VJP=1 is set alongside VJP2.  VJP2 wins in the engine, but if"
   echo "[env]       VJP2 were ever unset this would silently select the prefill-only contract"
@@ -342,8 +365,12 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       0|1) ;;
       *) echo "[env] CANON_P33_NO_COMMIT must be 0 or 1" >&2; fail=1 ;;
     esac
-    case "${CANON_P33_RUN_STAGE:-}" in
-      alignment-short|backward-no-commit)
+  case "${CANON_P33_RUN_STAGE:-}" in
+    envelope-short)
+      [ "${CANON_P33_NO_COMMIT:-}" = "1" ] || {
+        echo "[env] P33 envelope-short requires no-commit=1" >&2; fail=1;
+      } ;;
+    alignment-short|backward-no-commit)
         [ "${CANON_P33_NO_COMMIT:-0}" = "1" ] || {
           echo "[env] diagnostic no-commit stage requires CANON_P33_NO_COMMIT=1" >&2
           fail=1
