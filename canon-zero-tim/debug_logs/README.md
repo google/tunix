@@ -567,4 +567,24 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - All 6 overlay files verified by SHA-256 byte identity.
    - All 36 layers of Qwen3-8B executed with canonical `M=4096, Mp=4096, padded=0`.
 
+---
+
+## 23. Phase 35 Attempt `r21`: GSM8K Three-Arm Envelope Diagnostic (`response=64` vs Splash `q_block_size=256`)
+
+- `p35_r21_gsm8k_envelope.raw.log` (SHA-256: `f8d982a3db614a4edcb6163dce9b9206cd4325dc6bb6ecf2afd49ce5c93d43ec`)
+
+### Diagnostic Results:
+1. **Rollout Execution**:
+   - 64 TPU v5p chips (1 Head + 16 Workers, DP16xTP4).
+   - Qwen3-1.7B weights loaded across 64 chips (`2.4 GiB / TPU device`).
+   - vLLM Rollout generation successfully executed all 256 GSM8K trajectories.
+2. **Actor/Ref Forward Attention Alignment Trapping**:
+   - During `get_ref_per_token_logps` forward pass in `qwen3/model.py` (`make_splash_mha`), trapped:
+     ```text
+     ValueError: q_block_size=256 should divide q_seq_len=1088.
+     ```
+   - Total sequence length $1088 = 1024 (\text{prompt}) + 64 (\text{response})$ is not divisible by Splash Attention block size $256$ ($1088 / 256 = 4.25$).
+   - Resolved by setting `max_response_length=256` so that $1024 + 256 = 1280 = 5 \times 256$.
+
+
 

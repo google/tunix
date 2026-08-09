@@ -30,7 +30,7 @@ def _command() -> tuple[str, ...]:
       "python3",
       "-u",
       "examples/math_gsm8k/qwen3_grpo_demo.py",
-      *p33._common_args(max_steps=1, prompt=1024, response=64),
+      *p33._common_args(max_steps=1, prompt=1024, response=256),
       "--train_micro_batch_size=32",
       "--compute_logps_micro_batch_size=32",
       "--rollout_vllm_hbm_utilization=0.20",
@@ -98,7 +98,7 @@ def validate(document: dict[str, Any], *, source_commit: str, run_id: str) -> No
   if wrong:
     raise ValueError(f"generated P35 environment drifted: {wrong}")
   command = env["CANON_RUN_CMD"]
-  if "--max_response_length=64" not in command or "--max_steps=1" not in command:
+  if "--max_response_length=256" not in command or "--max_steps=1" not in command:
     raise ValueError("P35 command lost its response or step bound")
 
 

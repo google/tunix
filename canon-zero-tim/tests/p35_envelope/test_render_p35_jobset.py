@@ -30,7 +30,7 @@ class RenderP35JobSetTest(unittest.TestCase):
     self.assertEqual(env["CANON_P35_ENVELOPE"], "1")
     self.assertEqual(env["CANON_P33_RUN_STAGE"], "envelope-short")
     self.assertEqual(env["CANON_P33_NO_COMMIT"], "1")
-    self.assertIn("--max_response_length=64", env["CANON_RUN_CMD"])
+    self.assertIn("--max_response_length=256", env["CANON_RUN_CMD"])
     self.assertIn("--max_steps=1", env["CANON_RUN_CMD"])
 
   def test_negative_control_rejects_training_stage(self):
