@@ -620,4 +620,23 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      sequence lengths need not occupy all five calls. No P35 report or classification exists for
      r24, so it does not classify a carrier.
 
+---
+
+## 25. Phase 35 Attempt `r25`: GSM8K Multi-Chunk Diagnostic (`04d6e315` Execution & Pathways Compilation Service Interruption)
+
+- `p35_r25_gsm8k_envelope.raw.log` (SHA-256: `12a021f2df10a86cd3f41f9a85f68eb7922ef567da054aca7998d324b3e14e6a`)
+- WandB: `https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/8m0g8hk8`
+
+### Diagnostic Results:
+1. **Multi-Chunk Code Deployment (`04d6e315`)**:
+   - Deployed multi-chunk probe contracts with streaming metadata attestation.
+   - Initialized 64 TPU chips cleanly on node `qf47`.
+2. **Rollout Generation**:
+   - 256 GSM8K trajectories generated smoothly across 64 TPU chips.
+3. **Reference Policy Compilation Interruption**:
+   - During `get_ref_per_token_logps()` (`jit_compute_per_token_logps`), the first compilation pass (`9f5cb244ad7e0db`) completed in 1m43s (status OK).
+   - The subsequent compilation pass hit a 10s Pathways RPC compilation deadline (`DEADLINE_EXCEEDED: lost connection to peer at http://machine/gke-mlperf-v5p-cpu-np-b188bf3f-qf47/events#srcs=borg%2Bcoroner since 10.99987274s ago`).
+   - No P35 report or classification was emitted for r25.
+
+
 
