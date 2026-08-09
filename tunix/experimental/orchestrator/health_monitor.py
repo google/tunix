@@ -151,7 +151,7 @@ class HealthMonitor:
     now = self._clock()
     result: list[OverdueWorker] = []
     for worker_id, (state, since) in sorted(self._state_since.items()):
-      deadline = self._deadlines.get(state)
+      deadline = self._deadlines.get(state)  # pyrefly: ignore[bad-argument-type]
       if deadline is None:
         continue
       elapsed = now - since

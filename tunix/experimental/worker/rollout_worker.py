@@ -158,7 +158,7 @@ class RolloutWorker(abstract_worker.Worker):
           or getattr(item, "trajectory_id", "")
           or getattr(item, "prompt_id", ""),
           status="ERROR",
-          error=item.error_message,
+          error=item.error_message,  # pyrefly: ignore[bad-argument-type]
           prompt_tokens=(
               prompt_tokens
               if prompt_tokens is not None
@@ -170,7 +170,7 @@ class RolloutWorker(abstract_worker.Worker):
       req_id = request_id or getattr(item, "trajectory_id", "default")
       return datatypes.RolloutResponse.from_trajectory(
           request_id=req_id,
-          traj=item,
+          traj=item,  # pyrefly: ignore[bad-argument-type]
           prompt_tokens=(
               prompt_tokens
               if prompt_tokens is not None

@@ -53,7 +53,7 @@ class VllmRollout(base_rollout.BaseRollout):
             mapping_config=mapping_config,
             return_logprobs=rollout_config.return_logprobs,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
-            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
+            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,  # pyrefly: ignore[bad-argument-type]
             additional_config=rollout_config.rollout_vllm_additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
@@ -105,7 +105,7 @@ class VllmRollout(base_rollout.BaseRollout):
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
-        seed=rollout_config.seed,
+        seed=rollout_config.seed,  # pyrefly: ignore[bad-argument-type]
         echo=False,
         pad_output=True,
         **kwargs,
@@ -114,9 +114,9 @@ class VllmRollout(base_rollout.BaseRollout):
     return base_rollout.RolloutOutput(
         text=self.output.text,
         logits=None,
-        tokens=self.output.tokens,
+        tokens=self.output.tokens,  # pyrefly: ignore[bad-argument-type]
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
-        logprobs=self.output.logprobs,
+        logprobs=self.output.logprobs,  # pyrefly: ignore[bad-argument-type]
     )
 
   def get_per_token_logps(

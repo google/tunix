@@ -845,7 +845,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_token_per_tpu,  # pyrefly: ignore[bad-argument-type]
           sequences_per_update=mini_batch_size * self._num_generations(),
           pack_size=pack_size,
           max_segments_per_packed_row=getattr(
@@ -905,7 +905,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             jnp.array(float((seg == 0).sum())), jnp.array(float(seg.size))
         )
         self.rl_engine.buffer_metrics_async(
-            {
+            {  # pyrefly: ignore[bad-argument-type]
                 "packing/dummy_ratio": (
                     dummy_ratio,
                     common.global_weighted_mean,

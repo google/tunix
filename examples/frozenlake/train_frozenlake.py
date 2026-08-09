@@ -334,8 +334,8 @@ def create_datasets(
     item["prompts"] = ""
     return item
 
-  train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
+  train_ds = grain.MapDataset.source(train_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
+  test_ds = grain.MapDataset.source(test_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
   return train_ds, test_ds
 
 
@@ -349,7 +349,7 @@ chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -358,7 +358,7 @@ train_dataset, val_dataset = data_lib.post_init_dataset(
 )
 test_dataset, _ = data_lib.post_init_dataset(
     test_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,

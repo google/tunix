@@ -290,7 +290,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         **kwargs,
     )
 
-  async def sync_weights(
+  async def sync_weights(  # pyrefly: ignore[bad-override]
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,

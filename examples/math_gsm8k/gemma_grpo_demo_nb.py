@@ -291,7 +291,7 @@ MODEL_CONFIG = {
 def get_ref_model():
   """Loads the reference model, from CNS in g3 or Kaggle in OSS."""
   mesh = jax.make_mesh(
-      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
+      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])  # pyrefly: ignore[bad-argument-type]
   )
 
   if ENV == 'g3':
