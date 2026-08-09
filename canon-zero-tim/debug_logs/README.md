@@ -536,3 +536,34 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - `differing_bytes: 28161`, `max_abs: 0.30953`, first mismatch at `masked_index=0` (`a=-0.88766` vs `b=-0.82699`);
    - Successfully intercepted by `check_pre_backward()` before the 36-layer Pallas backward sweep.
 
+---
+
+## 21. Phase 33 Attempt `r19`: GSM8K Full Pre-Backward Diagnostic ($M=4096$ Scheduler Contract)
+
+- `p33_r19_gsm8k_full.raw.log` (SHA-256: `138e86eb4de6f8dbb2923fba963af9e84a50290dbcf4e7839062429cc38a93d8`)
+
+### Diagnostic Results:
+1. **$M=4096$ Scheduler Contract Verification**:
+   - Pinned per-rank `max_seqs=16, max_tokens=256` confirmed working on hardware.
+   - All 28 layers of Qwen3-1.7B Pallas kernels executed with exact `M=4096, Mp=4096, padded=0`.
+   - Complete 256 trajectories rolled out smoothly (generation peak `1,610 tokens/s`, `N_action = 189,919` tokens).
+2. **Boundary 1 ($S_{\text{decode}}$ vs $S_{\text{prefill}}$)**:
+   - `differing_bytes: 0`, `max_abs: 0.0` across 189,919 action tokens.
+   - Re-confirms 100% zero-drift parity between decode and prefill inside vLLM inference engine.
+3. **Boundary 2 ($S_{\text{prefill}}$ vs $T_{\text{old}}$)**:
+   - `differing_bytes: 152593`, `max_abs: 0.22517`, first mismatch delta ~0.0018 (20.0% bytes differing).
+   - Fast-fail gate intercepted the run before backward computation.
+   - Motivates the Phase 35 Three-Arm Discriminator to bisect serving dynamic packing vs JAX adapter wrapper.
+
+---
+
+## 22. Phase 33 Attempt `r19`: FrozenLake Alignment-Short Pre-Backward Diagnostic
+
+- `p33_r19_fl_align.raw.log` (SHA-256: `a5f5440bdc81663712441bb87672a4d945806a3f2383f7407d7f1eb483b5bfd5`)
+
+### Diagnostic Results:
+1. **Overlay Verification**:
+   - All 6 overlay files verified by SHA-256 byte identity.
+   - All 36 layers of Qwen3-8B executed with canonical `M=4096, Mp=4096, padded=0`.
+
+
