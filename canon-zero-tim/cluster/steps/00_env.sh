@@ -111,10 +111,10 @@ if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
     echo "[env] P35 requires DP16 and canonical local M256" >&2; fail=1;
   }
   case " ${CANON_RUN_CMD:-} " in
-    *" --max_response_length=64 "*) ;;
-    *) echo "[env] P35 command must pin max_response_length=64" >&2; fail=1;;
+    *" --max_response_length=64 "*|*" --max_response_length=256 "*) ;;
+    *) echo "[env] P35 command must pin max_response_length=64 or 256" >&2; fail=1;;
   esac
-  echo "[env] P35 envelope contract OK: gsm8k DP16 local-M256 response-64"
+  echo "[env] P35 envelope contract OK: gsm8k DP16 local-M256"
 fi
 if [ -n "${CANON_RPA_VJP:-}" ] && [ "${CANON_RPA_VJP:-}" = "1" ]; then
   echo "[env] NOTE: CANON_RPA_VJP=1 is set alongside VJP2.  VJP2 wins in the engine, but if"
