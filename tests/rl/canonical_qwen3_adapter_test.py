@@ -2344,6 +2344,84 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             sampler=sampler, trainer_state=source
         )
 
+  def test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly(self):
+    names = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    model_devices = tuple(jax.devices())
+    mesh = jax.make_mesh(
+        (1, 1, 1, 1, len(model_devices), 1),
+        names,
+        devices=model_devices,
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    runner = _ForwardRunner(self.target, mesh)
+    sampler = _Sampler(runner, self.mapping)
+    sampler.args["tensor_parallel_size"] = len(model_devices)
+    source = _state({"trainer": {
+        "w": jnp.full((2, 3), -7, jnp.bfloat16),
+        "n": jnp.full((2,), -9, jnp.bfloat16),
+    }})
+    block_tables = np.zeros((2, 512), np.int32)
+    block_tables[0, :2] = np.asarray([0, 1], np.int32)
+    input_ids = np.zeros((256,), np.int32)
+    input_ids[:4] = np.asarray([1, 2, 3, 4], np.int32)
+    positions = np.zeros_like(input_ids)
+    positions[:4] = np.arange(4, dtype=np.int32)
+    records = ({
+        "arm": "B",
+        "meta": {"md_padded_num_reqs": 2},
+        "arrays": {
+            "input_ids": input_ids,
+            "input_positions": positions,
+            "md_input_positions": positions.copy(),
+            "md_block_tables": block_tables.reshape(-1),
+            "md_seq_lens": np.asarray([4, 0], np.int32),
+            "md_query_start_loc": np.asarray([0, 4, 4], np.int32),
+            "md_request_distribution": np.asarray([0, 0, 1], np.int32),
+        },
+    },)
+    env = {
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+        "CANON_LOGPROB_M": "256",
+        "MIN_TOKEN_BUCKET": "256",
+        "CANON_P35_EXACT_REPLAY": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
+          sampler=sampler
+      )
+      result = adapter.p35_exact_input_replay(
+          source,
+          records,
+          full_prompt_tokens=jnp.asarray([[0, 1, 2]], jnp.int32),
+          full_completion_tokens=jnp.asarray([[3, 4, 0]], jnp.int32),
+          full_prompt_mask=jnp.asarray([[False, True, True]]),
+          full_completion_mask=jnp.asarray([[True, True, False]]),
+          selected_row_indices=np.asarray([0], np.int64),
+          pad_id=0,
+          eos_id=7,
+          temperature=1.0,
+      )
+    self.assertEqual(result["r0_live_logps"].shape, (1, 3))
+    self.assertEqual(result["r1_mapped_logps"].shape, (1, 3))
+    self.assertEqual(result["r2_adapter_direct_logps"].shape, (1, 3))
+    self.assertEqual(result["r3_adapter_envelope_logps"].shape, (1, 3))
+    for comparison_group in result["repeat_comparisons"].values():
+      self.assertTrue(all(item["exact"] for item in comparison_group.values()))
+    self.assertTrue(all(
+        item["exact"]
+        for item in result["stage_comparisons"][
+            "R0_live_vs_R1_mapped"
+        ].values()
+    ))
+
   def test_long_sequence_uses_cache_carried_fixed_m_chunks(self):
     names = (
         "data",

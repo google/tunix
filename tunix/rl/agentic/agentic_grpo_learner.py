@@ -1146,6 +1146,93 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 adapter_contract.get("fresh_cache_per_group") is True
             ),
         }
+        exact_replay_path = None
+        if os.environ.get(envelope_probe.EXACT_REPLAY_ENV, "") == "1":
+          exact_replay_path = os.environ.get(
+              envelope_probe.EXACT_REPLAY_REPORT_ENV, ""
+          )
+          if not exact_replay_path:
+            raise envelope_probe.EnvelopeProbeError(
+                "P35.3 requires CANON_P35_EXACT_REPLAY_REPORT"
+            )
+          b_records = envelope_probe.load_arm_metadata_records(
+              metadata_dir, "B"
+          )
+          replay = self.rl_cluster.p35_exact_input_replay(
+              b_records,
+              full_prompt_tokens=prompt_ids,
+              full_completion_tokens=completion_ids,
+              full_prompt_mask=prompt_mask,
+              full_completion_mask=completion_valid_mask,
+              selected_row_indices=rows,
+          )
+
+          def comparisons_exact(comparisons):
+            return bool(
+                comparisons
+                and all(
+                    summary.get("valid") is True
+                    and summary.get("exact") is True
+                    for group in comparisons.values()
+                    for summary in group.values()
+                )
+            )
+
+          exact_attestations = {
+              "weights_equal": bool(weight_attestation.get("equal")),
+              "captured_B_metadata_admitted": bool(
+                  metadata_attestations.get("metadata_B_matches_C") is True
+              ),
+              "selected_token_ids_equal": bool(
+                  attestations.get("selected_token_ids_equal") is True
+              ),
+              "action_masks_equal": bool(
+                  attestations.get("action_masks_equal") is True
+              ),
+              "cache_fresh_B": bool(
+                  attestations.get("cache_fresh_B") is True
+              ),
+              "cache_fresh_replay": True,
+              "local_m256": bool(
+                  attestations.get("local_m256_B") is True
+                  and attestations.get("local_m256_C") is True
+              ),
+              "device_order_expected": bool(
+                  attestations.get("device_order_expected") is True
+              ),
+              "repeat_exact": bool(
+                  comparisons_exact(replay["repeat_comparisons"])
+              ),
+          }
+          exact_report = envelope_probe.build_exact_replay_report(
+              b=np.asarray(b_selected),
+              c=c_full[rows],
+              r0_live=np.asarray(replay["r0_live_logps"]),
+              r1_mapped=np.asarray(replay["r1_mapped_logps"]),
+              r2_adapter_direct=np.asarray(
+                  replay["r2_adapter_direct_logps"]
+              ),
+              r3_adapter_envelope=np.asarray(
+                  replay["r3_adapter_envelope_logps"]
+              ),
+              action_mask=selected_action_mask,
+              stage_comparisons=replay["stage_comparisons"],
+              repeat_comparisons=replay["repeat_comparisons"],
+              attestations=exact_attestations,
+              metadata={
+                  "replay": replay["metadata"],
+                  "selected_rows": rows.tolist(),
+                  "captured_B_records": len(b_records),
+              },
+          )
+          replay_output = envelope_probe.write_report(
+              exact_report, exact_replay_path
+          )
+          print(
+              "[CANON_P35.3] REPLAY_COMPLETE "
+              f"path={replay_output}",
+              flush=True,
+          )
         report = envelope_probe.build_report(
             a=a_full[rows],
             b=np.asarray(b_selected),
@@ -1160,6 +1247,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 "grouped_serving": b_contract,
                 "weights": weight_attestation,
                 "metadata_error": metadata_error,
+                "exact_replay_report": exact_replay_path,
             },
         )
         output = envelope_probe.write_report(report, report_path)

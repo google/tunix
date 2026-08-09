@@ -1,11 +1,11 @@
 # P35 envelope discriminator state
 
-- Status: active; mixed-memory repair published, r27 target not run
-- Active phase: P35.2 target admission
+- Status: active; P35.2 target complete, P35.3 exact-input replay in progress
+- Active phase: P35.3 exact-input replay
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Reviewed base commit: `4f6921135ff4fc28aad42292708cf5c4ef1afd9e`
+- Reviewed base commit: `337ce07c1716d25235c4beb92d2cae1225daa98e`
 - Updated: 2026-08-09 UTC
 
 ## Objective
@@ -52,6 +52,15 @@ reward or correlation to classify this boundary.
     Explicitly placing the host leaf into the device `NamedSharding` made equal values pass and a
     changed-value negative control fail. This validates the placement repair direction, not the
     target A/B/C result.
+14. P35 attempt r28 completed one source-pinned A/B/C measurement on 64-chip Pathways. A versus B
+    was bitwise exact at all 3,244 selected action elements, while B versus C and direct A versus C
+    each differed at 1,529/3,244 elements and 3,106/12,976 bytes. The mechanical classifier returned
+    `COMPLETE / adapter_envelope_carrier` and the injected one-bit negative control was observed.
+15. r28 attested all 310 mapped/live leaves bitwise equal, but every pair crossed
+    `pinned_host->device`. This excludes different weight bits, not memory placement as an executable
+    variable. Likewise `metadata_B_matches_C` proves the selected sequence semantics, positions,
+    request distribution and active page contract; it is not a byte-for-byte equality claim for the
+    complete B and C metadata/cache tensors.
 
 ## Current hypothesis split
 
@@ -61,7 +70,11 @@ reward or correlation to classify this boundary.
   adapter wrapper compile/lower the same `runner.model_fn` in different program contexts.
 - H3, both carriers: H1 and H2 are independently load-bearing.
 
-No hypothesis is green yet.
+- H1 is not load-bearing for the measured r28 group: changing native serving from dynamic A to
+  grouped B left every selected action logprob bitwise exact.
+- The remaining carrier is inside the B-serving versus C-adapter envelope. P35.3 must separate
+  exact captured metadata/cache inputs, weight memory placement, adapter outer-program context and
+  the processed-logprob tail before naming a kernel or compiler cause.
 
 ## Completed locally
 
@@ -94,15 +107,26 @@ No hypothesis is green yet.
   sharding. Both operand orders pass on a four-chip one-host v5p; signed-zero and one-bit negative
   controls fail as required. The adapter suite, complete CPU gate and both exact-image model gates
   pass.
+- P35.3 is implemented behind `CANON_P35_EXACT_REPLAY=1`. Its six-arm chain is
+  B -> R0(captured/live) -> R1(captured/mapped) -> R2(adapter metadata/direct) ->
+  R3(production adapter repeat) -> C(original production value). B/R0 and R3/C are hard anchors;
+  placement, metadata/cache construction and outer-program boundaries are classified separately.
+- The replay repeats R0, R1 and R2, reports compact target-stage equality, refuses ineffective
+  negative controls and known-red reproduction failures, and prints SHA-256 for every returned
+  JSON. Full model weights, full logits and cache tensors are not serialized.
+- Focused pinned-image replay tests PASS; the complete P33/P35 CPU gate and both exact-image model
+  installs PASS. The complete adapter/envelope suite is 40 PASS/5 skipped. A real four-device
+  one-host v5p TP4 smoke passed the replay and exact-equality controls (2 PASS, 35.90s). No target
+  P35.3 run, cloud-resource lifecycle change, commit or push has occurred.
 
-Evidence: `artifacts/p35_1_local_gate.md` and `artifacts/p35_2_local_gate.md`.
+Evidence: `artifacts/p35_1_local_gate.md`, `artifacts/p35_2_local_gate.md` and
+`artifacts/p35_3_local_gate.md`.
 
 ## Next action
 
-Resolve and verify the published `yuxzhang/canon-zero-tim` SHA, render r27, require a server-side
-Kubernetes dry run, then let the operator launch one source-pinned Attempt 0. The target must stop
-before backward and return the raw log, schema-v2 report, compact metadata records,
-classification and SHA-256 values. Until that happens no carrier is classified.
+Review and publish the default-off P35.3 implementation, then render one source-pinned r29
+Attempt-0 JobSet exactly as recorded in `cluster/P35_ENVELOPE_HANDOFF.md`. Copy all JSON, metadata
+and raw logs before deleting the coordinator Pod; the state directory is on `/tmp`.
 
 ## Hard gates
 
@@ -118,12 +142,10 @@ classification and SHA-256 values. Until that happens no carrier is classified.
 
 ## Blockers
 
-The mixed-memory attestation repair was published in implementation commit `d9c2d690`. The target
-JobSet must pin the current reviewed SHA on `yuxzhang/canon-zero-tim`; the operator must resolve
-and verify that SHA before rendering. The 64-chip launch remains an operator action on the GKE
-cluster.
+The P35.3 implementation has only local CPU and exact-image evidence. The 64-chip launch remains
+an operator action after a reviewed implementation SHA is published.
 
 ## Rollback
 
-Leave `CANON_P35_ENVELOPE` unset. The A path, training, backward, optimizer, W&B and credentials
-remain unchanged. Preserve all r18/r19 logs and prior handoffs.
+Leave `CANON_P35_ENVELOPE` and `CANON_P35_EXACT_REPLAY` unset. The A path, training, backward,
+optimizer, W&B and credentials remain unchanged. Preserve all earlier logs and handoffs.

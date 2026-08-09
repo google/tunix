@@ -1206,6 +1206,37 @@ class RLCluster:
       raise RuntimeError("rollout has no P35 grouped-prefill attestation")
     return dict(source())
 
+  def p35_exact_input_replay(
+      self,
+      records,
+      *,
+      full_prompt_tokens,
+      full_completion_tokens,
+      full_prompt_mask,
+      full_completion_mask,
+      selected_row_indices,
+  ) -> dict[str, Any]:
+    """Runs the P35.3 captured-input replay under the rollout mesh."""
+    if self._anchor_policy_state is None:
+      raise RuntimeError("P35.3 exact replay requires an anchor policy state")
+    source = getattr(self.rollout, "p35_exact_input_replay", None)
+    if source is None:
+      raise RuntimeError("rollout has no P35.3 exact-input replay")
+    temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+      return dict(
+          source(
+              self._anchor_policy_state,
+              records,
+              full_prompt_tokens=full_prompt_tokens,
+              full_completion_tokens=full_completion_tokens,
+              full_prompt_mask=full_prompt_mask,
+              full_completion_mask=full_completion_mask,
+              selected_row_indices=selected_row_indices,
+              temperature=temperature,
+          )
+      )
+
   def get_actor_per_token_logps(
       self,
       prompt_tokens: jax.Array,

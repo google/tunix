@@ -160,3 +160,34 @@ ordinary training. A source-pinned r27 is still required before any carrier clas
 - `origin/main` remained untouched at `2e605bb3`.
 - The next external action is a server-side dry run and one source-pinned r27 Attempt 0. No target
   A/B/C classification was created by publication.
+
+## 2026-08-09 — r28 target classification and P35.3 local implementation
+
+- Reconciled the complete r28 64-chip result: A/B was exact at 3,244 action elements, while B/C
+  and direct A/C each differed at 1,529 elements and 3,106/12,976 bytes. The negative control and
+  all P35.2 attestations passed, so `adapter_envelope_carrier` is a valid target classification.
+- Preserved two limitations: mapped/live weights crossed `pinned_host->device`, and the B/C
+  metadata claim was semantic rather than bytewise full-tensor equality. Neither limitation may
+  be silently renamed as program-context proof.
+- Implemented a default-off six-arm exact replay. B/R0 and R3/C are hard anchors; R0/R1 isolates
+  weight placement, R1/R2 isolates metadata/cache construction, and R2/R3 isolates the adapter
+  outer program. R0, R1 and R2 repeat exactly or the classifier rejects the run.
+- Added immutable replay evidence, compact pair/stage summaries, effective negative controls,
+  evidence SHA printing, a bounded r29 renderer contract and an operator handoff that copies
+  `/tmp` artifacts before Pod deletion.
+- Focused pinned-image replay tests, the complete P33/P35 CPU gate, both exact-image model gates,
+  the complete adapter/envelope suite (40 PASS, 5 skipped), AST/shell checks and
+  `git diff --check` pass.
+- The real one-host `aaron-v5p-node6` smoke used all four devices `[0,1,2,3]` and passed the TP4
+  replay plus signed-zero/one-bit equality controls (2 PASS in 35.90s). Artifact SHA-256:
+  `3bf21d2b642f7020134bc084cdbd2076ca755417756a4c0b78524d86876cd83b`.
+- Source diff review caught and repaired an intermediate insertion error in
+  `_bitwise_arrays_equal` before publication. The final full suite and TPU smoke ran after the
+  repair; the intermediate file was never committed or used for a target classification.
+- No 64-chip target run, cloud mutation, commit or push was performed. Target P35.3 remains NOT
+  RUN until a reviewed SHA is published and r29 Attempt 0 returns.
+
+Artifact: `artifacts/p35_3_local_gate.md`.
+
+Rollback: leave `CANON_P35_ENVELOPE` and `CANON_P35_EXACT_REPLAY` unset; ordinary serving and
+training are unchanged.

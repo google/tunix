@@ -496,6 +496,34 @@ class VllmRollout(base_rollout.BaseRollout):
       raise RuntimeError("P35 adapter contract requires canonical engine C")
     return self._canonical_engine_adapter.p35_envelope_contract_attestation()
 
+  def p35_exact_input_replay(
+      self,
+      trainer_state,
+      records,
+      *,
+      full_prompt_tokens,
+      full_completion_tokens,
+      full_prompt_mask,
+      full_completion_mask,
+      selected_row_indices,
+      temperature,
+  ) -> dict[str, Any]:
+    """Replays captured B tensors with live and mapped leaves."""
+    if self._canonical_engine_adapter is None:
+      raise RuntimeError("P35.3 exact replay requires canonical engine C")
+    return self._canonical_engine_adapter.p35_exact_input_replay(
+        trainer_state,
+        records,
+        full_prompt_tokens=full_prompt_tokens,
+        full_completion_tokens=full_completion_tokens,
+        full_prompt_mask=full_prompt_mask,
+        full_completion_mask=full_completion_mask,
+        selected_row_indices=selected_row_indices,
+        pad_id=self.pad_id(),
+        eos_id=self.eos_id(),
+        temperature=temperature,
+    )
+
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()
 

@@ -1,139 +1,134 @@
-# P35 Pathways envelope discriminator handoff
+# P35 Pathways exact-envelope handoff
 
 Updated: 2026-08-09 UTC
 
-## Current verdict
+## Current target result
 
-Do not rerun the old FrozenLake alignment job unchanged. Its first action-only boundary is exact
-and its second is red, but the returned data does not distinguish scheduler packing/metadata from
-wrapper/program context.
+P35.2 is complete on one source-pinned 64-chip DP16xTP4 Pathways attempt (r28):
 
-The valid r18 rates are byte fractions, not token mismatch rates:
+- A, native serving with dynamic packing, versus B, grouped native serving: 0/3,244
+  selected action elements and 0/12,976 bytes differ.
+- B versus C, the canonical adapter: 1,529/3,244 selected action elements and
+  3,106/12,976 bytes differ.
+- Direct A versus C has the same red counts, so the three-arm probe reproduced the production
+  boundary and its negative control fired.
+- All 310 mapped/live leaves were bitwise equal, but the comparison normalized
+  `pinned_host->device`. Equal bits do not remove memory placement as a compiled-program
+  variable.
 
-- GSM8K: 153,089 differing bytes out of 766,608 action bytes, 20.0%.
-- FrozenLake: 28,161 differing bytes out of 118,776 action bytes, 23.7%.
+The valid conclusion is `adapter_envelope_carrier`. It excludes dynamic serving packing for the
+selected group. It does not yet distinguish weight memory placement, physical metadata/cache
+construction, or the adapter's outer `lax.map` program.
 
-GSM8K r19 fixed the serving M contract, but the red boundary was effectively unchanged. M is no
-longer a live load-bearing hypothesis for this boundary. The next report records differing action
-elements explicitly. Do not divide byte counts by token counts.
+## P35.3 arms
 
-Attempt r21 is a failed pre-measurement run. It completed rollout, then the native reference
-forward rejected response 64 because Splash query block 256 did not divide sequence length 1088.
-It produced no P35 report or classification. The next attempt must use the unique response cap 256;
-do not rerun r21 or relax this contract.
+The next run keeps A/B/C and adds four in-process replay arms before backward:
 
-Attempt r24 confirmed that response 256 fixes the Splash shape failure and completed the native A
-rescore. It then stopped before B because the diagnostic prototype incorrectly rejected sequences
-longer than one local-M256 call. This is not a numerical result. The repair keeps response 256 and
-local M256, admits multiple fixed-M calls per request, and requires metadata to cover the complete
-sequence with contiguous positions and cumulative KV lengths. Changing response to 512 would add
-another static chunk and would not repair the rejected assumption.
+1. R0: exact captured B IDs, positions, attention metadata and page tables; fresh cache; live
+   serving leaves; direct canonical model entry.
+2. R1: exactly the R0 tensors and direct entry; bitwise-equal trainer-mapped leaves.
+3. R2: trainer-mapped leaves and direct entry; adapter-generated metadata and fresh cache.
+4. R3: the unchanged production adapter envelope replayed on the complete original batch.
+5. C: the original production adapter value already measured in the batch.
 
-Attempt r25 stopped in the Pathways compilation service before A/B/C and is an infrastructure
-interruption, not a numerical verdict. Attempt r26 completed rollout, native A, reference
-logprobs and two B metadata records, then failed before the report because exact weight
-attestation passed a host-memory leaf and a device-memory leaf to one JAX `eq`. A one-host v5p
-reproduced the same rule and verified the diagnostic-only repair: place the host leaf in the
-existing device sharding, then run the unchanged bytewise reduction. Equal values pass in both
-operand orders; signed-zero and one-bit controls remain red.
+This gives a single-variable chain:
 
-## What is and is not proven
+| Boundary | Variable isolated |
+|---|---|
+| B vs R0 | Whether the captured direct replay reproduces the serving result |
+| R0 vs R1 | Live-serving versus trainer-mapped leaf placement, with equal bits |
+| R1 vs R2 | Captured serving metadata/cache contract versus adapter construction |
+| R2 vs R3 | Direct adapter group versus the production outer `lax.map` envelope |
+| R3 vs C | Repeat/production anchor |
 
-Proven:
+B-vs-R0 and R3-vs-C are hard anchors. Either red makes the measurement `INCONCLUSIVE`; it is
+not reclassified as a carrier. B-vs-C must remain red. R0, R1 and R2 are repeated, and every
+repeat must be bitwise exact.
 
-- action-only `S_decode == S_prefill` in both returned r18 workloads;
-- `S_prefill != T_old` in both returned r18 workloads;
-- GSM8K had a scheduler M contract error;
-- FrozenLake already had serving and adapter canonical local M256, so M alone is insufficient;
-- generic Pathways `jit(f)` versus `jit(value_and_grad(f)).primal` can drift without TP reduction.
+## Fail-closed contract
 
-Not proven:
+The run must satisfy all of the following before its numerical classification is usable:
 
-- that generic THIRDPROG drift causes the current forward-only boundary;
-- that F4 is ineffective for the production Qwen boundary;
-- that packing, page metadata or wrapper context is the unique carrier;
-- that any training/backward boundary is green on this platform.
+- Attempt 0, source-pinned SHA, DP16xTP4, canonical local M256 and response 256;
+- all P35.2 weight, token, mask, device-order and metadata attestations;
+- exactly one P35.2 report marker and one P35.3 replay marker;
+- effective injected-drift negative controls;
+- immutable report and classification paths;
+- diagnostic exit 1 before backward, converted to success only after both classifiers return
+  `COMPLETE`;
+- no training commit, optimizer update, W&B mutation, precision change or sampling change.
 
-## Required next target experiment
+The postflight prints SHA-256 for all four JSON artifacts. The detailed files still live under
+`CANON_STATE`, which is `/tmp` on the coordinator host. Copy them before deleting the Pod; the
+log SHA is provenance, not a replacement for the files.
 
-One source-pinned 64-chip run must produce three pre-backward arms in the same process:
+## Operator commands
 
-1. A: native serving rescore with dynamic packing.
-2. B: native serving rescore of the exact rank-strided 16-row C group containing the current first
-   A-C mismatch, with one sequence per DP rank and canonical local M256.
-3. C: current adapter rescore for those same source rows and canonical local M256.
-
-Before comparing values, fail closed unless the run attests:
-
-- identical model-leaf fingerprints and policy version;
-- identical selected action token IDs and action/validity masks;
-- expected DP16xTP4 mesh shape and device order;
-- canonical local M256 in B and C;
-- positions, context lengths, page/block tables and cache initialization for each arm;
-- exactly one completed A/B/C measurement row;
-- a direct A-C red that reproduces the production boundary before classifying A-B or B-C.
-
-The classifier is mechanical:
-
-| A vs B | B vs C | Verdict |
-|---|---|---|
-| red | exact | packing/metadata carrier |
-| exact | red | adapter-envelope carrier; run exact-input replay before naming program context |
-| red | red | both carriers |
-| exact | exact | reproduction failure/inconclusive |
-
-Any missing arm is `INCONCLUSIVE`. Exact A-B and exact B-C with red A-C violates bitwise
-transitivity and is also `INCONCLUSIVE`. A red earlier contract makes all value comparisons VOID.
-
-## If B vs C is red
-
-Run an in-process exact-input replay. Feed identical engine leaves, IDs, positions, attention
-metadata and initialized caches to the direct `runner.model_fn` entry and adapter wrapper. Record
-hashes and selected target statistics only; do not serialize full weights or caches. Bisect raw
-target logits, log-normalizers and per-layer hidden checkpoints until the first divergence is
-identified.
-
-## If the three arms are exact
-
-Only then enable the actual Qwen training forward and compare `T_old` with the primal returned by
-the real `value_and_grad` program. The generic way-count probe is a warning, not a substitute for
-this production-model gate.
-
-## Operator instructions
-
-The producer, multi-chunk metadata gate and mixed-memory repair are published. The repair's
-implementation commit is `d9c2d690`; the operator must still fetch the branch, resolve its current
-concrete 40-hex SHA and pass a server-side dry run before applying exactly one source-pinned r27
-JobSet:
+Run these only after the reviewed implementation commit is published to
+`yuxzhang/canon-zero-tim`. Use the next unused run id (`r29` is reserved by this handoff):
 
 ```bash
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
+RUN_ID=r29
+OUT="/tmp/canon-p35-gsm8k-${RUN_ID}.yaml"
+
 python3 canon-zero-tim/cluster/render_p35_jobset.py \
   --source-commit "$SOURCE_SHA" \
-  --run-id r27 \
-  --output /tmp/canon-p35-gsm8k-envelope-r27.yaml
-kubectl apply --dry-run=server \
-  -f /tmp/canon-p35-gsm8k-envelope-r27.yaml
+  --run-id "$RUN_ID" \
+  --output "$OUT"
+kubectl apply --dry-run=server -f "$OUT"
 ```
 
-Do not apply until the server-side dry run passes and the operator confirms the source SHA. The
-target is GSM8K Qwen3-1.7B, DP16xTP4, response 256, max step 1, no commit, Attempt 0. It intentionally
-terminates before backward. A valid return contains:
+After the dry run passes, confirm the concrete SHA and apply that one rendered file. Do not edit
+the YAML between dry run and apply.
 
-- exactly one `[CANON_P35] REPORT_COMPLETE ... STOP_BEFORE_BACKWARD` marker;
-- `p35_envelope.json` with schema version 2;
-- compact `p35_metadata_*.json/.npz` A/B records;
-- `p35_envelope.classification.json` with `measurement_verdict=COMPLETE`;
-- a weight attestation containing `memory_kind_pairs` and `normalized_memory_leaves`;
-- raw log and SHA-256 values for every returned artifact.
+```bash
+kubectl apply -f "$OUT"
+JOBSET="canon-p35-gsm8k-env-${RUN_ID}-${SOURCE_SHA:0:8}"
+kubectl logs -f "jobs/${JOBSET}-pathways-head-0"
+```
 
-The postflight accepts only the expected diagnostic exit code 1. Missing evidence, any other exit
-code, stale output paths or an inconclusive classifier are failures. No production training,
-backward or optimizer update is part of this run.
+Before deleting the JobSet, resolve the coordinator Pod and copy the evidence:
+
+```bash
+POD="$(kubectl get pods \
+  -l "jobset.sigs.k8s.io/jobset-name=${JOBSET}" \
+  -l jobset.sigs.k8s.io/replicatedjob-name=pathways-head \
+  -o jsonpath='{.items[0].metadata.name}')"
+STATE="/tmp/canon-state/${JOBSET}"
+DEST="canon-zero-tim/debug_logs/p35_${RUN_ID}"
+mkdir -p "$DEST"
+kubectl logs "$POD" > "$DEST/head_jax_tpu.raw.log"
+kubectl cp "$POD:$STATE/p35_envelope.json" "$DEST/p35_envelope.json"
+kubectl cp "$POD:$STATE/p35_envelope.classification.json" \
+  "$DEST/p35_envelope.classification.json"
+kubectl cp "$POD:$STATE/p35_exact_replay.json" "$DEST/p35_exact_replay.json"
+kubectl cp "$POD:$STATE/p35_exact_replay.classification.json" \
+  "$DEST/p35_exact_replay.classification.json"
+kubectl cp "$POD:$STATE/p35_metadata" "$DEST/p35_metadata"
+find "$DEST" -type f ! -name SHA256SUMS -print0 | sort -z | \
+  xargs -0 sha256sum > "$DEST/SHA256SUMS"
+```
+
+If the label resolves zero or multiple coordinator Pods, stop and resolve it explicitly; do not
+guess. Preserve every red or inconclusive artifact.
+
+## Reading the result
+
+Only the P35.3 classification JSON decides the branch:
+
+- `weight_memory_placement_carrier`: R0/R1 is the only red internal boundary.
+- `metadata_cache_construction_carrier`: R1/R2 is the only red internal boundary.
+- `adapter_outer_program_carrier`: R2/R3 is the only red internal boundary.
+- `mixed_exact_replay_carriers`: more than one internal boundary is red.
+- `INCONCLUSIVE`: an anchor, attestation, repeat, negative control or transitivity check failed.
+
+P35.3 localizes the final logprob boundary and compact captured-input stages. It does not by
+itself prove actual-model THIRDPROG or gradient correctness. Those remain later gates.
 
 ## Rollback
 
-Leave all P35 environment switches unset. Do not alter precision, canonical M, DP/TP geometry,
-sampling, loss, fixed reductions, VJP, optimizer semantics, W&B or Hugging Face configuration.
-Preserve all red and inconclusive artifacts.
+Leave `CANON_P35_ENVELOPE` and `CANON_P35_EXACT_REPLAY` unset. The diagnostic methods are then
+unreachable. Do not change precision, canonical M, DP/TP geometry, sampling, loss, fixed
+reductions, VJP, optimizer semantics, W&B or Hugging Face configuration.

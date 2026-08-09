@@ -140,6 +140,53 @@ class EnvelopeProbeTest(absltest.TestCase):
     self.assertEqual(report["negative_control"]["differing_elements"], 1)
     self.assertFalse(report["negative_control"]["masked_hashes_equal"])
 
+  def test_exact_replay_report_contains_six_anchored_pairs(self):
+    b = np.zeros((2, 3), np.float32)
+    r0 = b.copy()
+    r1 = b.copy()
+    r2 = b.copy()
+    c = b.copy()
+    c[0, 0] = np.nextafter(c[0, 0], np.float32(np.inf))
+    r3 = c.copy()
+    stage = {
+        "logps": {
+            "valid": True,
+            "differing_elements": 0,
+            "total_elements": 6,
+            "exact": True,
+        }
+    }
+    report = envelope_probe.build_exact_replay_report(
+        b=b,
+        c=c,
+        r0_live=r0,
+        r1_mapped=r1,
+        r2_adapter_direct=r2,
+        r3_adapter_envelope=r3,
+        action_mask=np.ones_like(b, dtype=np.bool_),
+        stage_comparisons={"R0_live_vs_R1_mapped": stage},
+        repeat_comparisons={
+            "R0_live_repeat": stage,
+            "R1_mapped_repeat": stage,
+            "R2_adapter_direct_repeat": stage,
+        },
+        attestations={"repeat_exact": True},
+        metadata={"source": "test"},
+    )
+    self.assertEqual(report["schema_version"], 1)
+    self.assertEqual(
+        set(report["pairs"]),
+        {
+            envelope_probe.REPLAY_PAIR_B0,
+            envelope_probe.REPLAY_PAIR_01,
+            envelope_probe.REPLAY_PAIR_12,
+            envelope_probe.REPLAY_PAIR_23,
+            envelope_probe.REPLAY_PAIR_3C,
+            envelope_probe.REPLAY_PAIR_BC,
+        },
+    )
+    self.assertEqual(report["negative_control"]["differing_elements"], 1)
+
   def test_report_refuses_evidence_collision(self):
     with tempfile.TemporaryDirectory() as temporary:
       path = f"{temporary}/report.json"

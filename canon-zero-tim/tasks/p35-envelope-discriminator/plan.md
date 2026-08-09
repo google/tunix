@@ -18,7 +18,7 @@ Result: PASS. See `artifacts/p35_1_local_gate.md`.
 
 ## Phase P35.2 — Three-arm Pathways discriminator
 
-Status: locally complete; target not run
+Status: completed on target
 
 Produce all three value arms before backward in one source-pinned process:
 
@@ -43,18 +43,32 @@ Decision table:
 Exit gate: exactly one complete A/B/C row, expected measurement count verified, all producer
 attestations present, and an injected-drift negative control is rejected.
 
-Local result: PASS. The target result remains NOT RUN. See `artifacts/p35_2_local_gate.md`.
+Result: PASS. r28 returned one complete source-pinned measurement:
+`A==B`, `B!=C`, `A!=C`, classified as `adapter_envelope_carrier`.
+See `debug_logs/p35_r28_gsm8k_envelope.json` and its classification artifact.
 
 ## Phase P35.3 — Exact-input replay if B vs C is red
 
-Status: pending
+Status: locally complete; target not run
 
-Capture one real B input contract in process, then invoke the direct `runner.model_fn` entry and
-the adapter wrapper with identical leaves, IDs, positions, attention metadata and initialized
-caches. Store hashes and selected target statistics, not full model weights or cache tensors.
+Capture one real B input contract in process. The replay chain is:
 
-Exit gate: the first semantic boundary is localized to raw logits, log-softmax/sampling tail or
-an earlier hidden-state checkpoint without changing precision, shape, loss or reductions.
+- R0: captured B tensors, fresh cache, live leaves, direct model entry;
+- R1: exact R0 tensors and direct entry, trainer-mapped leaves;
+- R2: mapped leaves and direct entry, adapter-generated metadata/cache contract;
+- R3: unchanged production adapter envelope replayed on the original complete batch;
+- C: the original production adapter value.
+
+This separates weight memory placement, metadata/cache construction and the outer `lax.map`
+program. B/R0 and R3/C are hard anchors. Store exact reduced comparisons and compact selected
+target stages, not full model weights, full-vocabulary rows or cache tensors.
+
+Local exit gate: classifier/renderer negative controls, focused adapter replay, complete CPU gate,
+both exact-image model installs and `git diff --check` pass. Result: PASS; see
+`artifacts/p35_3_local_gate.md`.
+
+Target exit gate: one Attempt-0 report reproduces B!=C, keeps both anchors and all repeats exact,
+and classifies at least one of placement, metadata/cache construction or outer-program context.
 
 ## Phase P35.4 — Actual-model THIRDPROG
 

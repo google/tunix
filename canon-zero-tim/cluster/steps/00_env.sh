@@ -116,6 +116,13 @@ if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
       ;;
     *) echo "[env] P35 command must pin max_response_length=256" >&2; fail=1;;
   esac
+  if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ]; then
+    for k in CANON_P35_EXACT_REPLAY_REPORT \
+             CANON_P35_EXACT_REPLAY_CLASSIFICATION; do
+      req "$k"
+    done
+    echo "[env] P35.3 exact-input replay enabled"
+  fi
 fi
 if [ -n "${CANON_RPA_VJP:-}" ] && [ "${CANON_RPA_VJP:-}" = "1" ]; then
   echo "[env] NOTE: CANON_RPA_VJP=1 is set alongside VJP2.  VJP2 wins in the engine, but if"

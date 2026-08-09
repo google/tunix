@@ -110,6 +110,51 @@ def _bitwise_arrays_equal(left: Any, right: Any) -> bool:
   )
 
 
+def _bitwise_difference_summary(left: Any, right: Any) -> dict[str, Any]:
+  """Returns a small exact-bit comparison without copying full tensors."""
+  left_value = getattr(left, "value", left)
+  right_value = getattr(right, "value", right)
+  if (
+      tuple(left_value.shape) != tuple(right_value.shape)
+      or left_value.dtype != right_value.dtype
+  ):
+    return {
+        "valid": False,
+        "shape_left": tuple(left_value.shape),
+        "shape_right": tuple(right_value.shape),
+        "dtype_left": str(left_value.dtype),
+        "dtype_right": str(right_value.dtype),
+    }
+  itemsize = jnp.dtype(left_value.dtype).itemsize
+  bit_dtype = {
+      1: jnp.uint8,
+      2: jnp.uint16,
+      4: jnp.uint32,
+      8: jnp.uint64,
+  }.get(itemsize)
+  if bit_dtype is None:
+    raise FunctionalMappingError(
+        f"P35.3 cannot compare dtype {left_value.dtype} bitwise"
+    )
+  left_value, right_value = _normalize_exact_compare_memory(
+      left_value, right_value
+  )
+  left_bits = jax.lax.bitcast_convert_type(left_value, bit_dtype)
+  right_bits = jax.lax.bitcast_convert_type(right_value, bit_dtype)
+  differing = int(
+      np.asarray(jax.device_get(jnp.count_nonzero(left_bits != right_bits)))
+  )
+  total = int(left_value.size)
+  return {
+      "valid": True,
+      "shape": tuple(int(value) for value in left_value.shape),
+      "dtype": str(left_value.dtype),
+      "differing_elements": differing,
+      "total_elements": total,
+      "exact": differing == 0,
+  }
+
+
 def _canonical_topology_contract() -> tuple[int, int, int, int]:
   """Returns the admitted data, tensor, local-M, and global-M contract."""
   training_admitted = os.environ.get("CANON_P32_TRAIN_ADMITTED", "0")
@@ -1584,6 +1629,417 @@ class Qwen3EngineForwardAdapter:
         "mesh_device_ids": tuple(
             int(device.id) for device in self._runner.mesh.devices.flat
         ),
+    }
+
+  def _p35_run_captured_records(
+      self,
+      engine_leaves,
+      records,
+      *,
+      prompt_tokens,
+      completion_tokens,
+      prompt_mask,
+      completion_mask,
+      temperature,
+  ):
+    """Replays captured B tensors through the canonical model entry."""
+    prompts = np.asarray(prompt_tokens)
+    completions = np.asarray(completion_tokens)
+    prompt_valid = np.asarray(prompt_mask, dtype=np.bool_)
+    completion_valid = np.asarray(completion_mask, dtype=np.bool_)
+    if (
+        prompts.ndim != 2
+        or completions.ndim != 2
+        or prompts.shape != prompt_valid.shape
+        or completions.shape != completion_valid.shape
+        or prompts.shape[0] != self._data_size
+        or completions.shape[0] != self._data_size
+    ):
+      raise FunctionalMappingError(
+          "P35.3 captured replay requires one prompt/completion per data rank"
+      )
+    prompt_lengths = prompt_valid.sum(axis=1, dtype=np.int64)
+    completion_lengths = completion_valid.sum(axis=1, dtype=np.int64)
+    sequences = []
+    for rank in range(self._data_size):
+      sequences.append(
+          np.concatenate(
+              (
+                  prompts[rank][prompt_valid[rank]],
+                  completions[rank][completion_valid[rank]],
+              )
+          )
+      )
+
+    sampling_metadata = self._sampling_metadata_cls(
+        temperature=self._engine_array(
+            jnp.full((self._bucket,), temperature, jnp.float32)
+        ),
+        top_k=self._engine_array(jnp.full((self._bucket,), -1, jnp.int32)),
+        top_p=self._engine_array(jnp.ones((self._bucket,), jnp.float32)),
+        do_sampling=True,
+        logprobs=True,
+    )
+    caches = self._fresh_caches()
+    completion_width = completions.shape[1]
+    replay_logps = jnp.zeros(
+        (self._data_size, completion_width), jnp.float32
+    )
+    raw_targets = jnp.zeros_like(replay_logps)
+    processed_targets = jnp.zeros_like(replay_logps)
+    log_normalizers = jnp.zeros_like(replay_logps)
+    hidden_rows = None
+    observed = np.zeros_like(completion_valid)
+
+    for record_index, record in enumerate(records):
+      arrays = record.get("arrays", {})
+      required = {
+          "input_ids",
+          "input_positions",
+          "md_input_positions",
+          "md_block_tables",
+          "md_seq_lens",
+          "md_query_start_loc",
+          "md_request_distribution",
+      }
+      if not required.issubset(arrays):
+        raise FunctionalMappingError(
+            f"P35.3 B record {record_index} lacks captured tensors: "
+            f"{sorted(required - set(arrays))}"
+        )
+      input_ids_host = np.asarray(arrays["input_ids"]).reshape(-1)
+      positions_host = np.asarray(arrays["input_positions"]).reshape(-1)
+      metadata_positions_host = np.asarray(
+          arrays["md_input_positions"]
+      ).reshape(-1)
+      if (
+          input_ids_host.size != self._bucket
+          or positions_host.size != self._bucket
+          or not np.array_equal(positions_host, metadata_positions_host)
+      ):
+        raise FunctionalMappingError(
+            f"P35.3 B record {record_index} lost the global-M input contract"
+        )
+      meta = record.get("meta", {})
+      padded_num_reqs = int(meta.get("md_padded_num_reqs", 0) or 0)
+      if padded_num_reqs <= 0 or padded_num_reqs % self._data_size:
+        raise FunctionalMappingError(
+            f"P35.3 B record {record_index} has invalid padded requests"
+        )
+      local_slots = padded_num_reqs // self._data_size
+      query_start_host = np.asarray(
+          arrays["md_query_start_loc"]
+      ).reshape(self._data_size, local_slots + 1)
+      seq_lens_host = np.asarray(arrays["md_seq_lens"]).reshape(
+          self._data_size, local_slots
+      )
+      block_tables_host = np.asarray(arrays["md_block_tables"]).reshape(-1)
+      if block_tables_host.size % padded_num_reqs:
+        raise FunctionalMappingError(
+            f"P35.3 B record {record_index} has malformed block tables"
+        )
+      blocks_per_request = block_tables_host.size // padded_num_reqs
+      blocks_by_rank = block_tables_host.reshape(
+          self._data_size, local_slots, blocks_per_request
+      )
+      input_by_rank = input_ids_host.reshape(
+          self._data_size, self._sequence_bucket
+      )
+      positions_by_rank = positions_host.reshape(
+          self._data_size, self._sequence_bucket
+      )
+      target_ids = np.zeros((self._bucket,), np.int32)
+      scatter_rows = []
+      scatter_slots = []
+      flat_predictor_rows = []
+      for rank, sequence in enumerate(sequences):
+        q_len = int(query_start_host[rank, 1] - query_start_host[rank, 0])
+        if q_len < 0 or q_len > self._sequence_bucket:
+          raise FunctionalMappingError(
+              f"P35.3 B record {record_index} rank {rank} has invalid q_len"
+          )
+        if q_len:
+          active_seq_len = int(seq_lens_host[rank, 0])
+          blocks_needed = (
+              active_seq_len + self._block_size - 1
+          ) // self._block_size
+          active_pages = blocks_by_rank[rank, 0, :blocks_needed]
+          if (
+              active_pages.size
+              and (
+                  int(active_pages.min()) < 0
+                  or int(active_pages.max()) >= self._cache_shape[0]
+              )
+          ):
+            raise FunctionalMappingError(
+                "P35.3 captured active page ids do not fit the fresh replay "
+                f"cache: record={record_index} rank={rank} "
+                f"pages={active_pages.tolist()} cache_blocks={self._cache_shape[0]}"
+            )
+        for local_row in range(q_len):
+          position = int(positions_by_rank[rank, local_row])
+          if position < 0 or position >= len(sequence):
+            raise FunctionalMappingError(
+                f"P35.3 B record {record_index} rank {rank} position out of range"
+            )
+          if int(input_by_rank[rank, local_row]) != int(sequence[position]):
+            raise FunctionalMappingError(
+                f"P35.3 B record {record_index} rank {rank} token mismatch"
+            )
+          target_position = position + 1
+          if target_position >= len(sequence):
+            continue
+          flat_row = rank * self._sequence_bucket + local_row
+          target_ids[flat_row] = int(sequence[target_position])
+          completion_slot = target_position - int(prompt_lengths[rank])
+          if 0 <= completion_slot < int(completion_lengths[rank]):
+            if observed[rank, completion_slot]:
+              raise FunctionalMappingError(
+                  "P35.3 captured records duplicate one action predictor"
+              )
+            observed[rank, completion_slot] = True
+            scatter_rows.append(rank)
+            scatter_slots.append(completion_slot)
+            flat_predictor_rows.append(flat_row)
+
+      input_ids = self._engine_array(jnp.asarray(input_ids_host, jnp.int32))
+      positions = self._engine_array(jnp.asarray(positions_host, jnp.int32))
+      metadata = self._metadata_cls(
+          input_positions=self._engine_array(
+              jnp.asarray(metadata_positions_host, jnp.int32)
+          ),
+          block_tables=self._engine_array(
+              jnp.asarray(block_tables_host, jnp.int32)
+          ),
+          seq_lens=self._engine_array(
+              jnp.asarray(np.asarray(arrays["md_seq_lens"]), jnp.int32)
+          ),
+          query_start_loc=self._engine_array(
+              jnp.asarray(np.asarray(arrays["md_query_start_loc"]), jnp.int32)
+          ),
+          request_distribution=self._engine_array(
+              jnp.asarray(
+                  np.asarray(arrays["md_request_distribution"]), jnp.int32
+              )
+          ),
+      )
+      metadata.padded_num_reqs = padded_num_reqs
+      with self._set_forward_context(None, self._runner.vllm_config):
+        caches, hidden, _, _ = self._runner.model_fn(
+            engine_leaves,
+            caches,
+            input_ids,
+            metadata,
+            None,
+            positions,
+            self._static_kv_indices,
+            None,
+            None,
+            bool(self._runner.is_first_rank),
+            bool(self._runner.is_last_rank),
+        )
+      logits = self._runner.compute_logits_fn(
+          engine_leaves, hidden, None
+      ).astype(jnp.float32)
+      _, processed_logits = self._sample(
+          jax.random.PRNGKey(0), self._runner.mesh, logits, sampling_metadata
+      )
+      target_ids_device = self._engine_array(jnp.asarray(target_ids, jnp.int32))
+      all_logps = self._processed_target_logprobs(
+          processed_logits, target_ids_device
+      )
+      raw_target_all = jnp.take_along_axis(
+          logits, target_ids_device[:, None], axis=-1
+      )[:, 0]
+      processed_target_all = jnp.take_along_axis(
+          processed_logits, target_ids_device[:, None], axis=-1
+      )[:, 0]
+      if scatter_rows:
+        ranks = jnp.asarray(scatter_rows, jnp.int32)
+        slots = jnp.asarray(scatter_slots, jnp.int32)
+        predictors = jnp.asarray(flat_predictor_rows, jnp.int32)
+        selected_logps = all_logps[predictors]
+        selected_raw = raw_target_all[predictors]
+        selected_processed = processed_target_all[predictors]
+        replay_logps = replay_logps.at[ranks, slots].set(selected_logps)
+        raw_targets = raw_targets.at[ranks, slots].set(selected_raw)
+        processed_targets = processed_targets.at[ranks, slots].set(
+            selected_processed
+        )
+        log_normalizers = log_normalizers.at[ranks, slots].set(
+            selected_processed - selected_logps
+        )
+        if hidden_rows is None:
+          hidden_rows = jnp.zeros(
+              (self._data_size, completion_width, hidden.shape[-1]),
+              hidden.dtype,
+          )
+        hidden_rows = hidden_rows.at[ranks, slots].set(hidden[predictors])
+
+    if not np.array_equal(observed, completion_valid):
+      missing = np.argwhere(completion_valid & ~observed)
+      extra = np.argwhere(observed & ~completion_valid)
+      raise FunctionalMappingError(
+          "P35.3 captured records do not cover the selected action mask: "
+          f"missing={missing[:8].tolist()} extra={extra[:8].tolist()}"
+      )
+    if hidden_rows is None:
+      raise FunctionalMappingError("P35.3 captured replay produced no actions")
+    mask = jnp.asarray(completion_valid)
+    return replay_logps, {
+        "final_hidden": jnp.where(mask[..., None], hidden_rows, 0),
+        "raw_targets": jnp.where(mask, raw_targets, 0),
+        "processed_targets": jnp.where(mask, processed_targets, 0),
+        "implied_log_normalizers": jnp.where(mask, log_normalizers, 0),
+        "logps": jnp.where(mask, replay_logps, 0),
+    }
+
+  def p35_exact_input_replay(
+      self,
+      trainer_state,
+      records,
+      *,
+      full_prompt_tokens,
+      full_completion_tokens,
+      full_prompt_mask,
+      full_completion_mask,
+      selected_row_indices,
+      pad_id,
+      eos_id,
+      temperature,
+  ) -> dict[str, Any]:
+    """Separates captured inputs, weight placement, and adapter envelope."""
+    if os.environ.get("CANON_P35_EXACT_REPLAY", "") != "1":
+      raise FunctionalMappingError(
+          "P35.3 exact replay requires CANON_P35_EXACT_REPLAY=1"
+      )
+    model_config = self._runner.model_config
+    mapped = map_trainer_state_to_engine_leaves(
+        trainer_state=trainer_state,
+        engine_state_contract=self._engine_state_contract,
+        key_mappings=self._key_mappings,
+        transpose_keys=self._transpose_keys,
+        key_mapping_hook_fns=self._hook_fns,
+        num_kv_heads=model_config.get_total_num_kv_heads(),
+        head_dim=model_config.get_head_size(),
+        tp_size=self._tp_size,
+    )
+
+    prompts = jnp.asarray(full_prompt_tokens)
+    completions = jnp.asarray(full_completion_tokens)
+    prompt_mask = jnp.asarray(full_prompt_mask, dtype=jnp.bool_)
+    completion_mask = jnp.asarray(full_completion_mask, dtype=jnp.bool_)
+    rows = np.asarray(selected_row_indices, dtype=np.int64)
+    if (
+        prompts.ndim != 2
+        or completions.ndim != 2
+        or prompts.shape != prompt_mask.shape
+        or completions.shape != completion_mask.shape
+        or prompts.shape[0] != completions.shape[0]
+        or rows.shape != (self._data_size,)
+        or np.unique(rows).size != rows.size
+        or np.any(rows < 0)
+        or np.any(rows >= prompts.shape[0])
+    ):
+      raise FunctionalMappingError(
+          "P35.3 full-batch replay inputs or selected rows are malformed"
+      )
+    selected_prompts = prompts[rows]
+    selected_completions = completions[rows]
+    selected_prompt_mask = prompt_mask[rows]
+    selected_completion_mask = completion_mask[rows]
+
+    def execute_captured(leaves):
+      return self._p35_run_captured_records(
+          leaves,
+          records,
+          prompt_tokens=selected_prompts,
+          completion_tokens=selected_completions,
+          prompt_mask=selected_prompt_mask,
+          completion_mask=selected_completion_mask,
+          temperature=temperature,
+      )
+
+    def execute_adapter_direct():
+      return self._sequence_group(
+          tuple(mapped.leaves),
+          selected_prompts,
+          selected_completions,
+          selected_prompt_mask,
+          selected_completion_mask,
+          pad_id,
+          temperature,
+      )[0]
+
+    live_first = execute_captured(tuple(self._runner.state_leaves))
+    live_second = execute_captured(tuple(self._runner.state_leaves))
+    mapped_first = execute_captured(tuple(mapped.leaves))
+    mapped_second = execute_captured(tuple(mapped.leaves))
+    adapter_direct_first = execute_adapter_direct()
+    adapter_direct_second = execute_adapter_direct()
+    adapter_envelope = self.compute_per_token_logps(
+        graphdef=None,
+        state=trainer_state,
+        prompt_tokens=prompts,
+        completion_tokens=completions,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        stop_gradient=True,
+        temperature=temperature,
+        prompt_mask=prompt_mask,
+        completion_mask=completion_mask,
+    )[rows]
+    stages = tuple(live_first[1])
+
+    def memory_kind_counts(leaves):
+      counts: dict[str, int] = {}
+      for leaf in leaves:
+        kind = str(
+            getattr(getattr(leaf, "sharding", None), "memory_kind", None)
+        )
+        counts[kind] = counts.get(kind, 0) + 1
+      return counts
+
+    return {
+        "r0_live_logps": live_first[0],
+        "r1_mapped_logps": mapped_first[0],
+        "r2_adapter_direct_logps": adapter_direct_first,
+        "r3_adapter_envelope_logps": adapter_envelope,
+        "stage_comparisons": {
+            "R0_live_vs_R1_mapped": {
+                stage: _bitwise_difference_summary(
+                    live_first[1][stage], mapped_first[1][stage]
+                )
+                for stage in stages
+            }
+        },
+        "repeat_comparisons": {
+            "R0_live_repeat": {
+                stage: _bitwise_difference_summary(
+                    live_first[1][stage], live_second[1][stage]
+                )
+                for stage in stages
+            },
+            "R1_mapped_repeat": {
+                stage: _bitwise_difference_summary(
+                    mapped_first[1][stage], mapped_second[1][stage]
+                )
+                for stage in stages
+            },
+            "R2_adapter_direct_repeat": {
+                "logps": _bitwise_difference_summary(
+                    adapter_direct_first, adapter_direct_second
+                )
+            },
+        },
+        "metadata": {
+            "records": len(records),
+            "stages": stages,
+            "live_memory_kind_counts": memory_kind_counts(
+                self._runner.state_leaves
+            ),
+            "mapped_memory_kind_counts": memory_kind_counts(mapped.leaves),
+        },
     }
 
   def _engine_array(self, value):

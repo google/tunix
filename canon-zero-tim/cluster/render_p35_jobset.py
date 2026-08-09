@@ -72,6 +72,11 @@ def render(
           "CANON_P35_ENVELOPE_REPORT": f"{state}/p35_envelope.json",
           "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
           "CANON_P35_CLASSIFICATION": f"{state}/p35_envelope.classification.json",
+          "CANON_P35_EXACT_REPLAY": "1",
+          "CANON_P35_EXACT_REPLAY_REPORT": f"{state}/p35_exact_replay.json",
+          "CANON_P35_EXACT_REPLAY_CLASSIFICATION": (
+              f"{state}/p35_exact_replay.classification.json"
+          ),
       },
       remove=(),
   )
@@ -89,6 +94,11 @@ def validate(document: dict[str, Any], *, source_commit: str, run_id: str) -> No
       "CANON_P35_ENVELOPE_REPORT": f"{state}/p35_envelope.json",
       "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
       "CANON_P35_CLASSIFICATION": f"{state}/p35_envelope.classification.json",
+      "CANON_P35_EXACT_REPLAY": "1",
+      "CANON_P35_EXACT_REPLAY_REPORT": f"{state}/p35_exact_replay.json",
+      "CANON_P35_EXACT_REPLAY_CLASSIFICATION": (
+          f"{state}/p35_exact_replay.classification.json"
+      ),
       "CANON_P33_RUN_STAGE": "envelope-short",
       "CANON_P33_NO_COMMIT": "1",
       "CANON_PRE_ALIGN_GATE": "1",

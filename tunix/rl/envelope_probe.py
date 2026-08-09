@@ -31,10 +31,19 @@ REPORT_ENV = "CANON_P35_ENVELOPE_REPORT"
 METADATA_DIR_ENV = "CANON_P35_METADATA_DIR"
 DATA_SIZE_ENV = "CANON_DP_SIZE"
 LOCAL_M_ENV = "CANON_LOGPROB_M"
+EXACT_REPLAY_ENV = "CANON_P35_EXACT_REPLAY"
+EXACT_REPLAY_REPORT_ENV = "CANON_P35_EXACT_REPLAY_REPORT"
 
 PAIR_AB = "A_native_vs_B_canonical_serving"
 PAIR_BC = "B_canonical_serving_vs_C_adapter"
 PAIR_AC = "A_native_vs_C_adapter"
+
+REPLAY_PAIR_B0 = "B_serving_vs_R0_live_replay"
+REPLAY_PAIR_01 = "R0_live_vs_R1_mapped_replay"
+REPLAY_PAIR_12 = "R1_captured_vs_R2_adapter_direct"
+REPLAY_PAIR_23 = "R2_adapter_direct_vs_R3_adapter_envelope"
+REPLAY_PAIR_3C = "R3_adapter_envelope_vs_C_original"
+REPLAY_PAIR_BC = "B_serving_vs_C_adapter"
 
 
 class EnvelopeProbeError(RuntimeError):
@@ -153,6 +162,22 @@ def _load_metadata_records(directory: str | os.PathLike[str]) -> list[dict[str, 
     records.append(record)
   if not records:
     raise EnvelopeProbeError(f"no P35 metadata records in {root}")
+  return records
+
+
+def load_arm_metadata_records(
+    directory: str | os.PathLike[str], arm: str
+) -> tuple[dict[str, Any], ...]:
+  """Loads one observed P35 arm without weakening the evidence contract."""
+  if arm not in ("A", "B"):
+    raise EnvelopeProbeError(f"unsupported P35 metadata arm: {arm!r}")
+  records = tuple(
+      record
+      for record in _load_metadata_records(directory)
+      if record.get("arm") == arm
+  )
+  if not records:
+    raise EnvelopeProbeError(f"compact metadata contains no {arm} record")
   return records
 
 
@@ -439,6 +464,67 @@ def build_report(
           PAIR_AB: _pair(aa, bb, mask),
           PAIR_BC: _pair(bb, cc, mask),
           PAIR_AC: _pair(aa, cc, mask),
+      },
+  }
+
+
+def build_exact_replay_report(
+    *,
+    b: Any,
+    c: Any,
+    r0_live: Any,
+    r1_mapped: Any,
+    r2_adapter_direct: Any,
+    r3_adapter_envelope: Any,
+    action_mask: Any,
+    stage_comparisons: Mapping[str, Any],
+    repeat_comparisons: Mapping[str, Any],
+    attestations: Mapping[str, bool],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+  """Builds one fail-closed P35.3 replay report.
+
+  R0 and R1 consume the same captured B tensors and fresh cache contract. The
+  only intended difference between them is live-serving versus trainer-mapped
+  leaves. R2 keeps mapped leaves and direct execution but reconstructs the
+  adapter metadata/cache contract. R3 re-enters the production adapter
+  envelope, and C is the original production value from the same batch.
+  """
+  values = tuple(
+      np.asarray(value)
+      for value in (
+          b,
+          c,
+          r0_live,
+          r1_mapped,
+          r2_adapter_direct,
+          r3_adapter_envelope,
+      )
+  )
+  mask = np.asarray(action_mask, dtype=np.bool_)
+  if any(value.shape != mask.shape for value in values):
+    raise EnvelopeProbeError(
+        "P35.3 replay values and action mask must have exactly one shape"
+    )
+  bb, cc, r0, r1, r2, r3 = values
+  return {
+      "schema_version": 1,
+      "measurement_rows": 1,
+      "arms": ["B", "R0", "R1", "R2", "R3", "C"],
+      "attestations": {
+          key: bool(value) for key, value in attestations.items()
+      },
+      "metadata": dict(metadata),
+      "negative_control": _negative_control(bb, mask),
+      "repeat_comparisons": dict(repeat_comparisons),
+      "stage_comparisons": dict(stage_comparisons),
+      "pairs": {
+          REPLAY_PAIR_B0: _pair(bb, r0, mask),
+          REPLAY_PAIR_01: _pair(r0, r1, mask),
+          REPLAY_PAIR_12: _pair(r1, r2, mask),
+          REPLAY_PAIR_23: _pair(r2, r3, mask),
+          REPLAY_PAIR_3C: _pair(r3, cc, mask),
+          REPLAY_PAIR_BC: _pair(bb, cc, mask),
       },
   }
 
