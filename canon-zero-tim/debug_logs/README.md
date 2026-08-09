@@ -518,3 +518,21 @@ the stale `256/4096` values, but only a fresh source-pinned target run can estab
 must report one global M4096 backbone and make both pre-backward boundaries exactly zero before
 backward or update evidence is interpreted. Rollback is an additive revert of only the GSM8K
 per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
+
+---
+
+## 20. Phase 33 Attempt `r18`: FrozenLake Alignment-Short Pre-Backward Diagnostic
+
+- `p33_r18_fl_align.raw.log` (SHA-256: `e8151078f40cc0588ff7f42ed83d46335885634b1efc50e1616c40f3ceec12ce`)
+- `p33_r18_fl_pre_alignment.jsonl` (SHA-256: `82bf7c125307d637084bc339a30892750f3b3d734ba013e43f491cefc7f329a3`)
+
+### Diagnostic Results:
+1. **Accelerated Rollout**:
+   - 256 game episodes with capped horizon completed in ~3 minutes (prompt throughput peak `5,439 tokens/s`).
+2. **Boundary 1 ($S_{\text{decode}}$ vs $S_{\text{prefill}}$)**:
+   - `differing_bytes: 0`, `max_abs: 0.0` across all 29,694 action tokens;
+   - Proves 100% exact numerical agreement inside vLLM inference engine between decode and prefill on hardware.
+3. **Boundary 2 ($S_{\text{prefill}}$ vs $T_{\text{old}}$)**:
+   - `differing_bytes: 28161`, `max_abs: 0.30953`, first mismatch at `masked_index=0` (`a=-0.88766` vs `b=-0.82699`);
+   - Successfully intercepted by `check_pre_backward()` before the 36-layer Pallas backward sweep.
+
