@@ -7,6 +7,7 @@ WORKTREE="$(cd "$ROOT/.." && pwd)"
 cd "$WORKTREE"
 
 python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','tests/rl/canonical_qwen3_adapter_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('tunix/rl/alignment.py','tests/rl/alignment_test.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
   canon-zero-tim/cluster/steps/00_env.sh \
@@ -38,8 +39,17 @@ JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py
 JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl \
+  -p alignment_test.py
+JAX_PLATFORMS=cpu python3 -m unittest discover \
+  -s tests/rl \
   -p canonical_qwen3_adapter_test.py \
   -k tied_embedding
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+python3 -m unittest discover \
+  -s tests/rl \
+  -p dp_training_test.py \
+  -k explicit_data_axis
 canon-zero-tim/tests/p33_workloads/negative_control.sh
 
 validate_profile() (
@@ -80,6 +90,7 @@ validate_admitted_preflight() (
   export CANON_P33_SHARED_MESH=16,4
   export CANON_RUN_CMD="printf admitted-preflight-only"
   export CANON_RUN_LOG="$state/run.log"
+  export CANON_PRE_ALIGN_REPORT="$state/pre_alignment.jsonl"
   export CANON_ALIGN_REPORT="$state/alignment.jsonl"
   export CANON_UPDATE_REPORT="$state/updates.jsonl"
   export INJECTED_WANDB_API_KEY=test-key-not-a-credential
@@ -135,6 +146,7 @@ export CANON_P32_TRAIN_ADMITTED=1
 export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
 export CANON_P32_WORKLOAD=gsm8k
 export CANON_RUN_LOG=$state/run.log
+export CANON_PRE_ALIGN_REPORT=$state/pre_alignment.jsonl
 export CANON_ALIGN_REPORT=$state/alignment.jsonl
 export CANON_UPDATE_REPORT=$state/updates.jsonl
 EOF
@@ -150,4 +162,4 @@ EOF
 
 validate_stale_evidence_rejected
 
-echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=50 negative_controls=3 admitted_preflights=1"
+echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 unit_tests=68 negative_controls=3 admitted_preflights=1"

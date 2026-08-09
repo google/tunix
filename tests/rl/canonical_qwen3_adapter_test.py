@@ -363,6 +363,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     )
     adapter._runner = runner  # pylint: disable=protected-access
     adapter._data_size = 16  # pylint: disable=protected-access
+    adapter._dp_axis = "data"  # pylint: disable=protected-access
     adapter._tp_size = 4  # pylint: disable=protected-access
     adapter._sequence_bucket = sequence_bucket  # pylint: disable=protected-access
     adapter._bucket = 16 * sequence_bucket  # pylint: disable=protected-access
@@ -556,9 +557,10 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
 
     class FakeReducer:
 
-      def __init__(self, template, *, dp_size):
+      def __init__(self, template, *, dp_size, dp_axis):
         del template
         self.dp_size = dp_size
+        self.dp_axis = dp_axis
         self.values = []
 
       def begin(self):
@@ -576,6 +578,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         fingerprints = tuple(f"rank-{rank}" for rank in range(self.dp_size))
         return reduced, {
             "dp_size": self.dp_size,
+            "dp_axis": self.dp_axis,
             "rank_contributions": self.dp_size,
             "rank_local_fingerprints": fingerprints,
             "rank_local_fingerprints_distinct": True,
@@ -668,9 +671,11 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         "CANON_P29_FULL_TRAIN": "1",
         "CANON_ALIGNMENT_GATE": "1",
         "CANON_ALIGNMENT_GATE_ONLY": "0",
-        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
-        "CANON_ALIGNMENT_TRAIN": "1",
-        "CANON_P30_OPT_STATE_OFFLOAD": "1",
+          "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+          "CANON_ALIGNMENT_TRAIN": "1",
+          "CANON_PRE_ALIGN_GATE": "1",
+          "CANON_P33_SHORT_ALIGNMENT": "0",
+          "CANON_P30_OPT_STATE_OFFLOAD": "1",
         "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
         "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
         "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
@@ -717,6 +722,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     self.assertTrue(result["replica_equality"])
     self.assertEqual(result["dp_reduction_transactions"], 16)
     self.assertEqual(result["dp_reduction_rounds_per_transaction"], 8)
+    self.assertEqual(result["dp_axis"], "data")
     self.assertEqual(result["dp_rank_pullbacks_per_transaction"], 16)
     self.assertTrue(result["gradient_deterministic_repeat"])
     self.assertTrue(all(

@@ -1278,6 +1278,11 @@ class Qwen3EngineForwardAdapter:
     self._tp_size = int(
         getattr(sampler, "args", {}).get("tensor_parallel_size", 1)
     )
+    if "data" not in runner.mesh.axis_names:
+      raise FunctionalMappingError(
+          "canonical adapter requires an explicit 'data' mesh axis"
+      )
+    self._dp_axis = "data"
     self._data_size = int(runner.mesh.shape.get("data", 1))
     mesh_tp_size = int(runner.mesh.shape.get("model", 1))
     if self._data_size != admitted_data_size:
@@ -2429,7 +2434,17 @@ class Qwen3EngineForwardAdapter:
               "_p33_gradient_reducer_factory",
               dp_training.FixedDPRankGradientReducer,
           )
-          reducer = reducer_factory(rank_gradient, dp_size=contract.dp_size)
+          reducer = reducer_factory(
+              rank_gradient,
+              dp_size=contract.dp_size,
+              dp_axis=self._dp_axis,
+          )
+          print(
+              f"[{'P34' if p34 else 'P33'}.DP16] "
+              f"gradient_reducer_ready dp_axis={self._dp_axis} "
+              f"dp_size={contract.dp_size}",
+              flush=True,
+          )
         if rank == 0:
           reducer.begin()
         reducer.add(rank, rank_gradient)
@@ -2556,6 +2571,7 @@ class Qwen3EngineForwardAdapter:
         "reports": tuple(reports),
         "forward_counts": tuple(result["counts"] for result in forwards),
         "dp_reduction_visibility": "EXPLICIT_FIXED_TREE",
+        "dp_axis": self._dp_axis,
         "rank_local_gradient_fingerprints": tuple(
             report["dp_reduction"]["rank_local_fingerprints"]
             for report in reports

@@ -468,6 +468,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             else os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
         )
     )
+    run_stage = os.environ.get(
+        "CANON_P34_RUN_STAGE" if p34_workload else "CANON_P33_RUN_STAGE",
+        "",
+    )
     expected_mode = (
         "train" if p31_convergence or canonical_workload else "update-canary"
     )
@@ -815,7 +819,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       no_commit_record = {
           "verdict": "PASS" if unchanged else "FAIL",
-          "mode": "backward-no-commit",
+          "mode": run_stage,
           "microsteps": expected_microbatches,
           "commits": 0,
           "train_steps_before": before["train_steps"],
@@ -826,6 +830,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           ),
           "gradient_deterministic": gradient_deterministic,
           "dp_replicas_exact": result["replica_equality"],
+          "dp_axis": result["dp_axis"],
           "dp_reduction_transactions": result["dp_reduction_transactions"],
           "dp_reduction_rounds_per_transaction": result[
               "dp_reduction_rounds_per_transaction"
@@ -981,6 +986,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             np.isfinite(float(np.asarray(value))) for value in micro_norms
         ),
         "dp_replicas_exact": result["replica_equality"],
+        "dp_axis": result["dp_axis"],
         "dp_reduction_transactions": result["dp_reduction_transactions"],
         "dp_reduction_rounds_per_transaction": result[
             "dp_reduction_rounds_per_transaction"

@@ -269,6 +269,34 @@ class DPTrainingTest(absltest.TestCase):
     self.assertEqual(report['replica_check_flags'], 16)
     self.assertTrue(report['post_reduction_replicas_exact'])
 
+  def test_rank_gradient_reducer_accepts_explicit_data_axis(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    template = jax.device_put(jnp.zeros((8,), jnp.float32), sharding)
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=2, dp_axis='data'
+    )
+    reducer.begin()
+    for rank in range(2):
+      reducer.add(
+          rank,
+          jax.device_put(
+              jnp.full((8,), rank + 1, jnp.float32), sharding
+          ),
+      )
+    reduced, report = reducer.finalize()
+    np.testing.assert_array_equal(
+        np.asarray(reduced), np.full((8,), 3.0, np.float32)
+    )
+    self.assertEqual(report['dp_axis'], 'data')
+    self.assertEqual(report['rank_contributions'], 2)
+    self.assertEqual(report['reduction_rounds'], 2)
+    self.assertTrue(report['post_reduction_replicas_exact'])
+
   def test_rank_gradient_reducer_rejects_rank_cadence_fault(self):
     if len(jax.devices()) != 64:
       self.skipTest('requires exactly 64 forced CPU or accelerator devices')

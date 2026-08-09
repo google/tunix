@@ -37,6 +37,8 @@ GATE_ONLY_ENV = "CANON_ALIGNMENT_GATE_ONLY"
 UPDATE_CANARY_ENV = "CANON_ALIGNMENT_UPDATE_CANARY"
 TRAIN_ENV = "CANON_ALIGNMENT_TRAIN"
 REPORT_ENV = "CANON_ALIGN_REPORT"
+PRE_GATE_ENV = "CANON_PRE_ALIGN_GATE"
+PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
 
 
 class AlignmentGateError(RuntimeError):
@@ -79,6 +81,11 @@ class ObservedTrainExample:
 
 def enabled() -> bool:
   return os.environ.get(ALIGN_ENV, "") == "1"
+
+
+def precheck_enabled() -> bool:
+  """Returns whether the pre-backward value-boundary gate is enabled."""
+  return os.environ.get(PRE_GATE_ENV, "") == "1"
 
 
 def execution_mode() -> str:
@@ -193,6 +200,85 @@ def _masked_bytes_differ(a: Any, b: Any, mask: Any) -> tuple[int, dict | None]:
       "a": float(av.reshape(-1)[index]),
       "b": float(bv.reshape(-1)[index]),
   }
+
+
+def check_pre_backward(
+    sidecar: ObservedTrainExample,
+    *,
+    step: int,
+    fail_closed: bool = True,
+) -> dict[str, Any]:
+  """Checks decode, engine-prefill and trainer-old values before backward."""
+  if not precheck_enabled():
+    raise AlignmentGateError(
+        f"pre-backward alignment requires {PRE_GATE_ENV}=1"
+    )
+  sd = np.asarray(sidecar.s_decode)
+  sp = np.asarray(sidecar.s_prefill)
+  to = np.asarray(sidecar.t_old)
+  mask = np.asarray(sidecar.action_mask, dtype=np.bool_)
+  n_action = int(mask.sum())
+  reds: list[str] = []
+  if n_action == 0:
+    reds.append("N_action=0")
+  boundaries = {}
+  for name, a, b in (
+      ("S_decode_vs_S_prefill", sd, sp),
+      ("S_prefill_vs_T_old", sp, to),
+  ):
+    count, first = _masked_bytes_differ(a, b, mask)
+    max_abs = float("nan")
+    if a.shape == b.shape == mask.shape and n_action:
+      max_abs = float(
+          np.max(np.abs(a.astype(np.float64)[mask] - b.astype(np.float64)[mask]))
+      )
+    boundaries[name] = {
+        "differing_bytes": count,
+        "max_abs": max_abs,
+        "first_mismatch": first,
+    }
+    if count != 0:
+      reds.append(name)
+  record = {
+      "timestamp": time.time(),
+      "step": int(step),
+      "verdict": "PASS" if not reds else "FAIL",
+      "reds": reds,
+      "N_action": n_action,
+      "boundaries": boundaries,
+      "hashes": {
+          "S_decode": _hash(sd),
+          "S_prefill": _hash(sp),
+          "T_old": _hash(to),
+          "tokens": _hash(sidecar.tokens),
+          "action_mask": _hash(mask),
+          "policy_version": _hash(sidecar.policy_version),
+      },
+      "context": {
+          "source": sidecar.source_name,
+          "mesh": os.environ.get("FL_SHARED_MESH", ""),
+          "bucket": os.environ.get("MIN_TOKEN_BUCKET", ""),
+          "run_stage": os.environ.get("CANON_P33_RUN_STAGE", ""),
+      },
+  }
+  report_path = os.environ.get(
+      PRE_REPORT_ENV,
+      "/mnt/disks/tunix-data/frozenlake/logs/pre_alignment_report.jsonl",
+  )
+  os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+  with open(report_path, "a", encoding="utf-8") as report_file:
+    report_file.write(json.dumps(record, sort_keys=True) + "\n")
+  print(
+      "[CANON_ALIGN_PRE] "
+      f"step={step} verdict={record['verdict']} N_action={n_action} "
+      f"bounds={[(name, value['differing_bytes']) for name, value in boundaries.items()]}",
+      flush=True,
+  )
+  if reds and fail_closed:
+    raise AlignmentGateError(
+        f"pre-backward alignment gate RED: {reds}; report={report_path}"
+    )
+  return record
 
 
 def check_batch(

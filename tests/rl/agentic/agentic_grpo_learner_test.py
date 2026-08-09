@@ -269,6 +269,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "per_token_logps": jnp.zeros((256, 2), jnp.float32),
             "gradient_microbatches": 16,
             "reports": tuple(reports),
+            "replica_equality": True,
+            "dp_axis": "data",
+            "dp_reduction_transactions": 16,
+            "dp_reduction_rounds_per_transaction": 8,
+            "dp_rank_pullbacks_per_transaction": 16,
         }
 
     trainer = rl_trainer.Trainer(

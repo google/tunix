@@ -26,7 +26,11 @@ fi
 : "${CANON_RUN_CMD:?CANON_RUN_CMD unset -- nothing to run}"
 LOG="${CANON_RUN_LOG:-$CANON_STATE/run.log}"
 if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
-  for report_key in CANON_RUN_LOG CANON_ALIGN_REPORT CANON_UPDATE_REPORT; do
+  report_keys=(CANON_RUN_LOG CANON_ALIGN_REPORT CANON_UPDATE_REPORT)
+  if [ "${CANON_P34_DEEPSWE:-0}" != "1" ]; then
+    report_keys+=(CANON_PRE_ALIGN_REPORT)
+  fi
+  for report_key in "${report_keys[@]}"; do
     report_path="${!report_key:-}"
     if [ -z "$report_path" ]; then
       echo "[run] FATAL: admitted P33 workload lacks $report_key" >&2
@@ -88,6 +92,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       --workload "$CANON_P32_WORKLOAD" \
       --stage "$CANON_P33_RUN_STAGE" \
       --run-log "$LOG" \
+      --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
       --update-report "$CANON_UPDATE_REPORT" \
       --alignment-report "$CANON_ALIGN_REPORT" \
       --output "$classification" || exit 1

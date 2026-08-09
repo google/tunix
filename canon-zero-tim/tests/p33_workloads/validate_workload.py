@@ -17,6 +17,17 @@ def build_record(name: str, *, require_reduction_admission: bool) -> dict:
       workload,
       require_reduction_admission=require_reduction_admission,
   )
+  run_stage = (
+      os.environ.get("CANON_P33_RUN_STAGE", "full")
+      if require_reduction_admission
+      else "full"
+  )
+  command = workload.command(run_stage=run_stage)
+  response_length = next(
+      int(value.split("=", 1)[1])
+      for value in command
+      if value.startswith("--max_response_length=")
+  )
   return {
       "verdict": "PASS",
       "scope": (
@@ -39,14 +50,23 @@ def build_record(name: str, *, require_reduction_admission: bool) -> dict:
       },
       "tokens": {
           "prompt": workload.max_prompt_length,
-          "response": workload.max_response_length,
+          "response": response_length,
           "local_m": workload.local_m,
           "global_m": workload.global_m,
       },
-      "max_steps": workload.max_steps,
+      "max_steps": dp_workloads.requested_max_steps(
+          workload,
+          {
+              "CANON_P33_RUN_STAGE": run_stage,
+              "CANON_P33_NO_COMMIT": os.environ.get(
+                  "CANON_P33_NO_COMMIT", "0"
+              ),
+          },
+      ),
+      "run_stage": run_stage,
       "periodic_evaluation": workload.periodic_evaluation,
       "wandb_project": workload.wandb_project,
-      "command": list(workload.command()),
+      "command": list(command),
       "dp_reduction_admitted": (
           os.environ.get("CANON_P32_DP_REDUCTION_ADMITTED") == "1"
       ),

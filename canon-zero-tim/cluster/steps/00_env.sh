@@ -303,6 +303,13 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         fail=1
       }
     done
+    if [ "${CANON_P34_DEEPSWE:-0}" != "1" ]; then
+      req CANON_PRE_ALIGN_GATE
+      [ "${CANON_PRE_ALIGN_GATE:-0}" = "1" ] || {
+        echo "[env] admitted P33 training requires CANON_PRE_ALIGN_GATE=1" >&2
+        fail=1
+      }
+    fi
     case "${CANON_P32_WORKLOAD:-}" in
       gsm8k|frozenlake) ;;
       *) echo "[env] admitted P33 training has invalid workload" >&2; fail=1 ;;
@@ -336,9 +343,9 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       *) echo "[env] CANON_P33_NO_COMMIT must be 0 or 1" >&2; fail=1 ;;
     esac
     case "${CANON_P33_RUN_STAGE:-}" in
-      backward-no-commit)
+      alignment-short|backward-no-commit)
         [ "${CANON_P33_NO_COMMIT:-0}" = "1" ] || {
-          echo "[env] backward-no-commit stage requires CANON_P33_NO_COMMIT=1" >&2
+          echo "[env] diagnostic no-commit stage requires CANON_P33_NO_COMMIT=1" >&2
           fail=1
         }
         ;;
@@ -353,9 +360,26 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
     for k in CANON_WANDB_ONLINE_REQUIRED CANON_P31_MONOTONIC_METRICS \
              CANON_WANDB_PROJECT CANON_WANDB_GROUP CANON_WANDB_RUN_NAME \
              WANDB_MODE WANDB_API_KEY CANON_RUN_CMD CANON_RUN_LOG \
-             CANON_ALIGN_REPORT CANON_UPDATE_REPORT; do
+             CANON_ALIGN_REPORT \
+             CANON_UPDATE_REPORT; do
       req "$k"
     done
+    if [ "${CANON_P34_DEEPSWE:-0}" != "1" ]; then
+      req CANON_PRE_ALIGN_REPORT
+      case "${CANON_P33_SHORT_ALIGNMENT:-}" in
+        0|1) ;;
+        *) echo "[env] CANON_P33_SHORT_ALIGNMENT must be 0 or 1" >&2; fail=1 ;;
+      esac
+      if [ "${CANON_P33_RUN_STAGE:-}" = "alignment-short" ]; then
+        [ "${CANON_P33_SHORT_ALIGNMENT:-0}" = "1" ] || {
+          echo "[env] alignment-short requires CANON_P33_SHORT_ALIGNMENT=1" >&2
+          fail=1
+        }
+      elif [ "${CANON_P33_SHORT_ALIGNMENT:-0}" != "0" ]; then
+        echo "[env] only alignment-short may enable CANON_P33_SHORT_ALIGNMENT" >&2
+        fail=1
+      fi
+    fi
     [ "${CANON_WANDB_ONLINE_REQUIRED:-0}" = "1" ] || {
       echo "[env] admitted P33 training requires online W&B" >&2
       fail=1

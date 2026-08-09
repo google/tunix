@@ -28,6 +28,7 @@ from tunix.rl import dp_training
 
 
 _RUN_STAGE_STEPS = {
+    "alignment-short": 1,
     "backward-no-commit": 1,
     "one-update": 1,
     "three-update": 3,
@@ -124,6 +125,10 @@ class DPWorkloadSpec:
         max_steps = _RUN_STAGE_STEPS[run_stage]
       except KeyError as exc:
         raise ValueError(f"unknown P33 run stage: {run_stage!r}") from exc
+    short_alignment = run_stage == "alignment-short"
+    if short_alignment and self.name != "frozenlake":
+      raise ValueError("alignment-short is only defined for FrozenLake")
+    max_response_length = 512 if short_alignment else self.max_response_length
     common = (
         "--mesh_dp=16",
         "--mesh_tp=4",
@@ -133,7 +138,7 @@ class DPWorkloadSpec:
         f"--max_steps={max_steps}",
         "--num_generations=8",
         f"--max_prompt_length={self.max_prompt_length}",
-        f"--max_response_length={self.max_response_length}",
+        f"--max_response_length={max_response_length}",
         "--max_concurrency=256",
     )
     if self.name == "gsm8k":
@@ -157,7 +162,7 @@ class DPWorkloadSpec:
           *common,
           f"--vllm_max_num_seqs={self.local_trajectories}",
           f"--vllm_max_num_batched_tokens={self.local_m}",
-          "--env_max_steps=5",
+          f"--env_max_steps={2 if short_alignment else 5}",
           "--num_batches=150",
           "--learning_rate=1e-6",
           "--b1=0.9",
@@ -277,7 +282,9 @@ def requested_max_steps(
     except KeyError as exc:
       raise ValueError(f"unknown P33 run stage: {stage!r}") from exc
   no_commit = values.get("CANON_P33_NO_COMMIT", "0")
-  expected_no_commit = "1" if stage == "backward-no-commit" else "0"
+  expected_no_commit = (
+      "1" if stage in ("alignment-short", "backward-no-commit") else "0"
+  )
   if no_commit != expected_no_commit:
     raise ValueError(
         "P33 run stage/no-commit mismatch: "
@@ -322,6 +329,7 @@ def validate_environment(
       "CANON_ALIGNMENT_GATE_ONLY": "0",
       "CANON_ALIGNMENT_UPDATE_CANARY": "0",
       "CANON_ALIGNMENT_TRAIN": "1",
+      "CANON_PRE_ALIGN_GATE": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "1",
       "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
       "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
@@ -331,6 +339,11 @@ def validate_environment(
   }
   expected["FL_SHARED_MESH"] = (
       "16,4" if require_reduction_admission else "1,4"
+  )
+  expected["CANON_P33_SHORT_ALIGNMENT"] = (
+      "1"
+      if values.get("CANON_P33_RUN_STAGE", "") == "alignment-short"
+      else "0"
   )
   if workload.name == "frozenlake":
     expected["CANON_P33_DISABLE_EVAL"] = "1"

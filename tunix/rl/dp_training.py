@@ -501,11 +501,11 @@ def _signature_sha256(signature: Any) -> str:
 class FixedDPRankGradientReducer:
   """Stages one contribution per DP rank and reduces it with a fixed tree.
 
-  The leading staging axis is physically partitioned over ``dp``. Therefore a
-  logical ``[dp, ...parameter_shape]`` table stores only one rank contribution
-  per DP replica. Finalization executes one reduce-and-broadcast transaction
-  with the registered collective-permute schedule and returns the original
-  DP-replicated, TP-sharded gradient tree.
+  The leading staging axis is physically partitioned over the explicitly named
+  DP mesh axis. Therefore a logical ``[dp, ...parameter_shape]`` table stores
+  only one rank contribution per DP replica. Finalization executes one
+  reduce-and-broadcast transaction with the registered collective-permute
+  schedule and returns the original DP-replicated, TP-sharded gradient tree.
   """
 
   def __init__(
@@ -624,6 +624,7 @@ class FixedDPRankGradientReducer:
       )
 
     self._dp_size = dp_size
+    self._dp_axis = dp_axis
     self._require_distinct = require_distinct_fingerprints
     self._initialize = jax.jit(initialize, out_shardings=staged_shardings)
     self._write = jax.jit(write, donate_argnums=(0,))
@@ -681,6 +682,7 @@ class FixedDPRankGradientReducer:
       )
     report = {
         'dp_size': self._dp_size,
+        'dp_axis': self._dp_axis,
         'rank_contributions': self._next_rank,
         'rank_local_fingerprints': tuple(self._fingerprints),
         'rank_local_fingerprints_distinct': (

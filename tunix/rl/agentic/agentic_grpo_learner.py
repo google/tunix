@@ -991,6 +991,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_ids.shape[0],
           completion_ids.shape[1],
       )
+      if alignment.precheck_enabled():
+        alignment.check_pre_backward(
+            combined_batch,
+            step=int(expected_step),
+            fail_closed=True,
+        )
     return [combined_batch]
 
 

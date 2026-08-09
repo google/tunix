@@ -18,6 +18,10 @@ _BOUNDARIES = {
     "S_prefill_vs_T_old",
     "T_old_vs_T_current",
 }
+_PRE_BOUNDARIES = {
+    "S_decode_vs_S_prefill",
+    "S_prefill_vs_T_old",
+}
 _EXACT_KEYS = {"w_all_exactly_1", "r_all_exactly_1", "wr_all_exactly_1"}
 
 
@@ -47,7 +51,7 @@ def _sha256(path: Path) -> str:
 
 
 def _expected_updates(workload: str, stage: str) -> int:
-  if stage == "backward-no-commit":
+  if stage in ("alignment-short", "backward-no-commit"):
     return 1
   if stage == "one-update":
     return 1
@@ -110,11 +114,45 @@ def _validate_alignment_records(
   return len(rows)
 
 
+def _validate_pre_alignment_records(
+    records: Iterable[dict[str, Any]],
+    *,
+    expected_count: int,
+    reasons: list[str],
+) -> int:
+  rows = list(records)
+  _require(
+      len(rows) == expected_count,
+      f"pre_alignment_count={len(rows)} expected={expected_count}",
+      reasons,
+  )
+  for index, record in enumerate(rows):
+    prefix = f"pre_alignment[{index}]"
+    _require(record.get("verdict") == "PASS", f"{prefix}.verdict", reasons)
+    _require(record.get("reds") == [], f"{prefix}.reds", reasons)
+    _require(record.get("step") == index, f"{prefix}.step", reasons)
+    boundaries = record.get("boundaries", {})
+    _require(set(boundaries) == _PRE_BOUNDARIES, f"{prefix}.boundaries", reasons)
+    for name in _PRE_BOUNDARIES:
+      _require(
+          boundaries.get(name, {}).get("differing_bytes") == 0,
+          f"{prefix}.{name}.differing_bytes",
+          reasons,
+      )
+    _require(
+        isinstance(record.get("N_action"), int) and record["N_action"] > 0,
+        f"{prefix}.N_action",
+        reasons,
+    )
+  return len(rows)
+
+
 def classify(
     *,
     workload: str,
     stage: str,
     run_log: Path,
+    pre_alignment_report: Path,
     update_report: Path,
     alignment_report: Path,
 ) -> dict[str, Any]:
@@ -126,6 +164,7 @@ def classify(
 
   for path, label in (
       (run_log, "run_log"),
+      (pre_alignment_report, "pre_alignment_report"),
       (update_report, "update_report"),
       (alignment_report, "alignment_report"),
   ):
@@ -171,14 +210,20 @@ def classify(
   )
 
   alignments = _json_lines(alignment_report)
+  pre_alignments = _json_lines(pre_alignment_report)
+  pre_alignment_count = _validate_pre_alignment_records(
+      pre_alignments,
+      expected_count=expected_updates,
+      reasons=reasons,
+  )
   alignment_count = _validate_alignment_records(
       alignments,
       expected_count=expected_alignments,
-      optimizer_skipped=stage == "backward-no-commit",
+      optimizer_skipped=stage in ("alignment-short", "backward-no-commit"),
       reasons=reasons,
   )
 
-  if stage == "backward-no-commit":
+  if stage in ("alignment-short", "backward-no-commit"):
     try:
       update_records = [json.loads(update_report.read_text(encoding="utf-8"))]
     except json.JSONDecodeError as exc:
@@ -194,6 +239,7 @@ def classify(
   for index, record in enumerate(update_records):
     prefix = f"update[{index}]"
     _require(record.get("verdict") == "PASS", f"{prefix}.verdict", reasons)
+    _require(record.get("dp_axis") == "data", f"{prefix}.dp_axis", reasons)
     _require(record.get("microsteps") == 16, f"{prefix}.microsteps", reasons)
     activity = record.get("gradient_activity")
     _require(
@@ -218,7 +264,7 @@ def classify(
         f"{prefix}.optimizer_before",
         reasons,
     )
-    if stage == "backward-no-commit":
+    if stage in ("alignment-short", "backward-no-commit"):
       _require(record.get("mode") == stage, f"{prefix}.mode", reasons)
       _require(record.get("commits") == 0, f"{prefix}.commits", reasons)
       _require(
@@ -260,7 +306,7 @@ def classify(
           reasons,
       )
 
-  if stage == "backward-no-commit":
+  if stage in ("alignment-short", "backward-no-commit"):
     marker_count = log_text.count("[CANON_P33_DP16] backward_no_commit verdict=PASS")
   else:
     marker_count = log_text.count("[CANON_P33_DP16] update_step_committed")
@@ -278,8 +324,12 @@ def classify(
       "observed_updates": len(update_records),
       "expected_alignments": expected_alignments,
       "observed_alignments": alignment_count,
+      "expected_pre_alignments": expected_updates,
+      "observed_pre_alignments": pre_alignment_count,
+      "diagnostic_only": stage == "alignment-short",
       "evidence_sha256": {
           "run_log": _sha256(run_log),
+          "pre_alignment_report": _sha256(pre_alignment_report),
           "update_report": _sha256(update_report),
           "alignment_report": _sha256(alignment_report),
       },
@@ -293,9 +343,16 @@ def main() -> int:
   parser.add_argument(
       "--stage",
       required=True,
-      choices=("backward-no-commit", "one-update", "three-update", "full"),
+      choices=(
+          "alignment-short",
+          "backward-no-commit",
+          "one-update",
+          "three-update",
+          "full",
+      ),
   )
   parser.add_argument("--run-log", required=True, type=Path)
+  parser.add_argument("--pre-alignment-report", required=True, type=Path)
   parser.add_argument("--update-report", required=True, type=Path)
   parser.add_argument("--alignment-report", required=True, type=Path)
   parser.add_argument("--output", required=True, type=Path)
@@ -307,6 +364,7 @@ def main() -> int:
       workload=args.workload,
       stage=args.stage,
       run_log=args.run_log,
+      pre_alignment_report=args.pre_alignment_report,
       update_report=args.update_report,
       alignment_report=args.alignment_report,
   )

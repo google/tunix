@@ -1,24 +1,20 @@
-# P33 three-JobSet queue
+# P33 four-JobSet queue
 
-> **Current FrozenLake recovery:** r15 failed before the three-boundary reporter ran. Before
-> launching FrozenLake full training, follow `P33_R15_HANDOFF.md` and apply only the freshly
-> rendered FrozenLake `backward-no-commit` manifest. The general three-JobSet instructions below
-> remain the queue reference; they are not permission to skip the r15 diagnostic stop rule.
+> **Current r17 recovery:** follow `P33_R17_HANDOFF.md`. It admits only GSM8K `full` and
+> FrozenLake `alignment-short`; do not apply the whole rendered directory.
 
-This runbook renders and queues three independent, strict Attempt-0 JobSets:
+This runbook renders four independent, strict Attempt-0 JobSets:
 
 | Queue entry | Model | Stage | Update budget | Purpose |
 |---|---|---|---:|---|
+| FrozenLake alignment-short | Qwen3-8B | `alignment-short` | 1 diagnostic transaction, 0 commits | Classify the first two value boundaries before an expensive reverse. |
 | FrozenLake backward-no-commit | Qwen3-8B | `backward-no-commit` | 1 reverse transaction, 0 commits | Exercise the largest rollout/RPA/VJP2/DP16-reducer path without mutating training state. |
 | GSM8K full | Qwen3-1.7B | `full` | 200 | Run the signed full GSM8K convergence recipe with online W&B. |
 | FrozenLake full | Qwen3-8B | `full` | 450 | Run the signed full FrozenLake recipe with online W&B and periodic evaluation disabled. |
 
-GSM8K remains independent from the FrozenLake diagnostic. FrozenLake full was originally
-packaged as an independent queue entry, but the archived r15 failure now places a temporary stop
-on that one entry: do not submit it until `P33_R15_HANDOFF.md` classifies a fresh
-backward-no-commit attempt. After that stop is explicitly cleared, Kueue may run the independent
-entries concurrently or wait for separate 64-chip allocations; there is no hidden in-process
-stage transition.
+GSM8K remains independent from the FrozenLake diagnostic. FrozenLake full and the old
+full-length backward-no-commit entry remain stopped by `P33_R17_HANDOFF.md` until the short gate
+classifies the two pre-backward boundaries.
 
 ## What the renderer freezes
 
@@ -28,8 +24,8 @@ writes output. Each JobSet has:
 - `maxRestarts: 0` and head/worker `backoffLimit: 0`;
 - one exact 40-character source commit assertion;
 - no inherited autoscaling device ids;
-- a unique JobSet name, Pathways GCS scratch, state directory, run log, alignment JSONL, update
-  report and W&B run name;
+- a unique JobSet name, Pathways GCS scratch, state directory, run log, pre-alignment JSONL,
+  alignment JSONL, update report and W&B run name;
 - all three P33 admissions enabled, DP16xTP4, global M4096/local M256 and the exact frozen command;
 - Kubernetes Secret references for Hugging Face and W&B, with no literal credential;
 - FrozenLake periodic evaluation disabled in both the profile and manifest.
@@ -72,7 +68,7 @@ raw pod logs and `[P33.RUN] JSON` records are the evidence that must be archived
 Expected render terminal marker:
 
 ```text
-[P33.JOBSET] VERDICT PASS count=3 source=<40-char-sha> run_id=<run-id>
+[P33.JOBSET] VERDICT PASS count=4 source=<40-char-sha> run_id=<run-id>
 ```
 
 ## Validate without allocating resources
@@ -118,9 +114,11 @@ kubectl apply --dry-run=server -f "$OUT"
 Any renderer, unit-gate or server-dry-run failure stops the queue. Do not edit a generated YAML to
 bypass it; fix the reviewed base or renderer and use a new `RUN_ID`.
 
-## Queue all three
+## Queue selected manifests
 
-This is the externally consequential step. Run it only after resource approval:
+This is the externally consequential step. Run it only after resource approval and the active
+handoff has named the allowed manifests. Never apply the whole directory merely because all four
+manifests rendered successfully.
 
 ```bash
 kubectl apply -f "$OUT"

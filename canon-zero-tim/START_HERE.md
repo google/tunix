@@ -33,15 +33,15 @@ It is packaging of work already done, not a new result. What is signed and what 
 | DP16×TP4 Qwen3 adapter and abstract state inventory | **LOCAL CPU PASS** — fixed placement, grouped segmented adapter, deterministic DP16 tree and exact Qwen3-8B state shapes; no target materialization claim. |
 | Bounded Qwen3-8B model initialization, backward and three optimizer commits | **TARGET SYSTEMS PASS** — dense-reference RC only; zero-TIM alignment was not measured. |
 | P33 DP16×TP4 rank-local reducer and workload contracts | **LOCAL PASS, PUBLISHED** — 256 reverse calls/update correctness vehicle; target workload not run. |
-| P33 FrozenLake backward-no-commit, GSM8K-200 and FrozenLake-450 | **R15 FROZENLAKE FAIL ARCHIVED; SAMPLER CONTROL-FLOW REPAIR PUBLISHED; FRESH BACKWARD-NO-COMMIT NOT RUN** — use `cluster/P33_R15_HANDOFF.md`; the general queue remains in `cluster/P33_QUEUE.md`. |
+| P33 FrozenLake and GSM8K production workloads | **R17 FAILURES ARCHIVED; LOCAL RECOVERY GATES PASS; TARGET RERUN NOT RUN** — tied GSM endpoint and explicit `data` DP-axis candidates are local/published inputs; use `cluster/P33_R17_HANDOFF.md` for exactly the GSM full plus FrozenLake short diagnostic reruns. |
 | P34 Qwen3-32B DeepSWE DP16×TP8 per role | **LOCAL PASS, TARGET NOT RUN** — role split, canonical M256 adapter, fixed DP16 reducer, renderer and classifier exist; no 4×8×8 workload artifact. |
 
 **Do not spend another 64-chip run repeating the bounded P32 admission.** Its model-init,
 backward and three-update systems gates have already passed, but they used a dense synthetic
 objective and did not measure A=B=C. The next target work is the P33 queue in
 `cluster/P33_QUEUE.md`. For FrozenLake specifically, r15 stopped before the boundary reporter;
-follow `cluster/P33_R15_HANDOFF.md` and run only its fresh backward-no-commit diagnostic before
-any FrozenLake full campaign. GSM8K remains independently classified. TP8 remains a generic
+follow `cluster/P33_R17_HANDOFF.md` and run only its short pre-backward diagnostic before any
+FrozenLake full campaign. GSM8K remains independently classified. TP8 remains a generic
 platform diagnostic until it has a separate Qwen8B production contract.
 
 ---

@@ -457,6 +457,30 @@ revert only the tied-endpoint candidate; the r17 artifact remains immutable.
          `ValueError: DP gradient reducer mesh mismatch: axes=('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp') shape={'data': 16, ...} expected dp=16`
        - **Root Cause**: `FixedDPRankGradientReducer` defaults to `dp_axis='dp'`, but the Tunix mesh axis for 16-way DP is named `'data'`.
   - **Required Repair**:
-    - In `tunix/rl/dp_training.py:530`, fallback to `dp_axis = 'data'` when `'dp'` is absent and `'data'` is present in `mesh.axis_names`;
-    - In `tunix/rl/canonical_qwen3_adapter.py:2432`, explicitly pass `dp_axis` from the active mesh.
+    - The candidate must explicitly pass the already-admitted engine DP axis `data` from the
+      Qwen adapter into `FixedDPRankGradientReducer`; the generic reducer must not silently infer
+      or rename mesh axes;
+    - The update evidence and classifier must record and require `dp_axis=data` so a future axis
+      mismatch cannot be hidden by a successful numerical-looking run.
 
+**Target status:** FAIL after the first full segmented reverse and before the first fixed DP
+reduction. No alignment boundary record, no-commit verdict or workload classifier was emitted.
+The local explicit-axis and pre-backward diagnostic candidate passes the pinned-image P33 CPU
+gate (`68` tests and `3` negative controls), the full fixed-reducer suite (`17` tests), the full
+Qwen adapter suite (`22` tests and `5` skips), the focused learner backward-no-commit regression
+(`1` test), P34 static regression (`24` tests), and both exact-image overlay suites (`10` tests
+each). These
+local results do not promote the target. The admitted short run must first pass both pre-backward
+boundaries; if it continues through reverse, it must print `gradient_reducer_ready dp_axis=data`,
+complete all fixed-tree reductions, and pass the terminal classifier before any promotion.
+Rollback is to disable P33 workload admission or revert only the recovery candidate; the r17
+artifact remains immutable.
+
+The next target diagnostic is now narrower than the full-length r17 retry. The
+`alignment-short` stage preserves Qwen3-8B, DP16xTP4, 32 prompts x 8 generations, local
+M256/global M4096, precision, sampling, reductions and VJP2, while limiting the response cap to
+512 and the environment horizon to 2. It writes and fail-closes on `S_decode` versus `S_prefill`
+and `S_prefill` versus `T_old` before backward. This can classify the unresolved r15/r17 endpoint
+without spending another full 36-layer reverse on an already-red value boundary. It is a
+diagnostic-only stage and is not a FrozenLake convergence or zero-TIM promotion. Operator steps
+and rollback are frozen in `../cluster/P33_R17_HANDOFF.md`.

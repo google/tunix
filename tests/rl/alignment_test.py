@@ -123,6 +123,58 @@ class AlignmentTest(absltest.TestCase):
       with open(report, encoding="utf-8") as report_file:
         self.assertEqual(json.loads(report_file.readline())["verdict"], "PASS")
 
+  def test_pre_backward_gate_passes_and_writes_two_boundaries(self):
+    wrapped = self._wrapped()
+    with tempfile.TemporaryDirectory() as tmpdir:
+      report = os.path.join(tmpdir, "pre.jsonl")
+      with mock.patch.dict(
+          os.environ,
+          {
+              alignment.PRE_GATE_ENV: "1",
+              alignment.PRE_REPORT_ENV: report,
+          },
+          clear=False,
+      ):
+        result = alignment.check_pre_backward(wrapped, step=3)
+      self.assertEqual(result["verdict"], "PASS")
+      self.assertEqual(result["step"], 3)
+      self.assertEqual(
+          set(result["boundaries"]),
+          {"S_decode_vs_S_prefill", "S_prefill_vs_T_old"},
+      )
+      with open(report, encoding="utf-8") as report_file:
+        self.assertEqual(json.loads(report_file.readline()), result)
+
+  def test_pre_backward_gate_localizes_first_red_boundary(self):
+    wrapped = self._wrapped()
+    drift = wrapped.s_prefill.copy()
+    drift[0, 0] = np.nextafter(drift[0, 0], np.float32(np.inf))
+    wrapped = wrapped.replace(s_prefill=drift)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          alignment.AlignmentGateError,
+          "S_decode_vs_S_prefill.*S_prefill_vs_T_old",
+      ):
+        alignment.check_pre_backward(wrapped, step=0)
+
+  def test_pre_backward_gate_rejects_missing_admission(self):
+    with mock.patch.dict(
+        os.environ,
+        {alignment.PRE_GATE_ENV: "0"},
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          alignment.AlignmentGateError, alignment.PRE_GATE_ENV
+      ):
+        alignment.check_pre_backward(self._wrapped(), step=0)
+
   def test_one_ulp_drift_fails_closed(self):
     wrapped = self._wrapped()
     drift = wrapped.t_old.copy()

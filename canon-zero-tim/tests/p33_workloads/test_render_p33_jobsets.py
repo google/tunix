@@ -1,4 +1,4 @@
-"""Tests for the strict three-JobSet P33 queue renderer."""
+"""Tests for the strict P33 queue renderer."""
 
 from __future__ import annotations
 
@@ -51,13 +51,13 @@ class RenderP33JobSetsTest(unittest.TestCase):
         run_id=_RUN_ID,
     )
 
-  def test_renders_three_isolated_strict_jobsets(self):
+  def test_renders_four_isolated_strict_jobsets(self):
     with tempfile.TemporaryDirectory() as tmp:
       outputs = self._render(Path(tmp))
-      self.assertEqual(len(outputs), 3)
+      self.assertEqual(len(outputs), 4)
       documents = [yaml.safe_load(path.read_text()) for path in outputs]
       names = [document["metadata"]["name"] for document in documents]
-      self.assertEqual(len(set(names)), 3)
+      self.assertEqual(len(set(names)), 4)
       scratches = []
       states = []
       wandb_names = []
@@ -82,6 +82,8 @@ class RenderP33JobSetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P32_DP_REDUCTION_ADMITTED"], "1")
         self.assertEqual(env["CANON_P33_WORKLOAD_LAUNCH_ADMITTED"], "1")
         self.assertEqual(env["CANON_P33_SHARED_MESH"], "16,4")
+        self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
+        self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
         self.assertEqual(env["CANON_P32_EXPECT_MODEL_MESH_IDS"], "")
         self.assertNotIn("CANON_P32_RC_STAGE", env)
         states.append(env["CANON_STATE"])
@@ -95,9 +97,9 @@ class RenderP33JobSetsTest(unittest.TestCase):
             for arg in container["args"]
             if arg.startswith("--gcs_scratch_location=")
         ))
-      self.assertEqual(len(set(states)), 3)
-      self.assertEqual(len(set(wandb_names)), 3)
-      self.assertEqual(len(set(scratches)), 3)
+      self.assertEqual(len(set(states)), 4)
+      self.assertEqual(len(set(wandb_names)), 4)
+      self.assertEqual(len(set(scratches)), 4)
       self.assertTrue(all(len(values) == 2 for values in scratches))
 
   def test_rendered_commands_equal_frozen_workload_commands(self):
@@ -111,6 +113,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
         workload_name = "gsm8k" if "gsm8k" in profile else "frozenlake"
         by_stage[(workload_name, env["CANON_P33_RUN_STAGE"])] = env
       for workload_name, stage in (
+          ("frozenlake", "alignment-short"),
           ("frozenlake", "backward-no-commit"),
           ("gsm8k", "full"),
           ("frozenlake", "full"),
@@ -125,6 +128,11 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertIn("--vllm_max_num_batched_tokens=256", frozenlake_command)
       self.assertNotIn("--vllm_max_num_seqs=256", frozenlake_command)
       self.assertNotIn("--vllm_max_num_batched_tokens=4096", frozenlake_command)
+      short_env = by_stage[("frozenlake", "alignment-short")]
+      self.assertEqual(short_env["CANON_P33_SHORT_ALIGNMENT"], "1")
+      self.assertIn("--max_response_length=512", short_env["CANON_RUN_CMD"])
+      self.assertIn("--env_max_steps=2", short_env["CANON_RUN_CMD"])
+      self.assertEqual(by_stage[("frozenlake", "full")]["CANON_P33_SHORT_ALIGNMENT"], "0")
 
   def test_frozenlake_jobs_disable_periodic_evaluation(self):
     with tempfile.TemporaryDirectory() as tmp:

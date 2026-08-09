@@ -181,6 +181,9 @@ if _P32_WORKLOAD_NAME and _P32_WORKLOAD_NAME != "frozenlake":
       f"{_P32_WORKLOAD_NAME!r}"
   )
 CANON_P32_WORKLOAD = _P32_WORKLOAD_NAME == "frozenlake"
+CANON_P33_SHORT_ALIGNMENT = (
+    os.getenv("CANON_P33_SHORT_ALIGNMENT", "0") == "1"
+)
 CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
     os.environ
 )
@@ -332,17 +335,22 @@ BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
 if CANON_P32_WORKLOAD:
+  expected_response_length = 512 if CANON_P33_SHORT_ALIGNMENT else 2048
+  expected_env_steps = 2 if CANON_P33_SHORT_ALIGNMENT else 5
   expected_geometry = {
       "batch_size": (BATCH_SIZE, 32),
       "mini_batch_size": (MINI_BATCH_SIZE, 32),
       "num_batches": (NUM_BATCHES, 150),
       "num_generations": (NUM_GENERATIONS, 8),
       "max_prompt_length": (MAX_PROMPT_LENGTH, 4096),
-      "max_response_length": (MAX_RESPONSE_LENGTH, 2048),
+      "max_response_length": (
+          MAX_RESPONSE_LENGTH,
+          expected_response_length,
+      ),
       "max_concurrency": (args.max_concurrency, 256),
       "vllm_max_num_seqs": (VLLM_MAX_NUM_SEQS, 16),
       "vllm_max_num_batched_tokens": (VLLM_MAX_BATCHED_TOKENS, 256),
-      "env_max_steps": (args.env_max_steps, 5),
+      "env_max_steps": (args.env_max_steps, expected_env_steps),
       "learning_rate": (args.learning_rate, 1e-6),
       "b1": (args.b1, 0.9),
       "b2": (args.b2, 0.95),

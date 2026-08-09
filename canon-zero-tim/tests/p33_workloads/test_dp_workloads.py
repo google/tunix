@@ -57,6 +57,8 @@ def _environment(name: str) -> dict[str, str]:
       "CANON_ALIGNMENT_GATE_ONLY": "0",
       "CANON_ALIGNMENT_UPDATE_CANARY": "0",
       "CANON_ALIGNMENT_TRAIN": "1",
+      "CANON_PRE_ALIGN_GATE": "1",
+      "CANON_P33_SHORT_ALIGNMENT": "0",
       "CANON_P30_OPT_STATE_OFFLOAD": "1",
       "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
       "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
@@ -147,6 +149,22 @@ class DPWorkloadsTest(unittest.TestCase):
         (workload.max_prompt_length, workload.max_response_length),
         (4096, 2048),
     )
+
+  def test_frozenlake_short_alignment_preserves_shape_contract(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    command = workload.command(run_stage="alignment-short")
+    self.assertIn("--batch_size=32", command)
+    self.assertIn("--num_generations=8", command)
+    self.assertIn("--max_prompt_length=4096", command)
+    self.assertIn("--max_response_length=512", command)
+    self.assertIn("--env_max_steps=2", command)
+    self.assertIn("--vllm_max_num_batched_tokens=256", command)
+
+  def test_gsm8k_rejects_frozenlake_short_alignment_stage(self):
+    with self.assertRaisesRegex(ValueError, "only defined for FrozenLake"):
+      dp_workloads.get_workload("gsm8k").command(
+          run_stage="alignment-short"
+      )
 
   def test_frozenlake_rollout_limits_are_per_dp_rank(self):
     workload = dp_workloads.get_workload("frozenlake")
@@ -275,6 +293,25 @@ class DPWorkloadsTest(unittest.TestCase):
     environ["CANON_P33_NO_COMMIT"] = "1"
     environ["CANON_P33_RUN_STAGE"] = "backward-no-commit"
     environ["FL_SHARED_MESH"] = "16,4"
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+
+  def test_launch_accepts_frozenlake_short_alignment(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    environ = _environment("frozenlake")
+    environ.update({
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P33_RUN_STAGE": "alignment-short",
+        "CANON_P33_SHORT_ALIGNMENT": "1",
+        "FL_SHARED_MESH": "16,4",
+    })
+    self.assertEqual(
+        dp_workloads.requested_max_steps(workload, environ), 1
+    )
     dp_workloads.validate_environment(
         workload, environ, require_reduction_admission=True
     )

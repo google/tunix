@@ -52,15 +52,21 @@ def _common_args(*, max_steps: int, prompt: int, response: int) -> tuple[str, ..
   )
 
 
-def _frozenlake_command(max_steps: int) -> tuple[str, ...]:
+def _frozenlake_command(
+    max_steps: int, *, short_alignment: bool = False
+) -> tuple[str, ...]:
   return (
     "python3",
     "-u",
     "examples/frozenlake/train_frozenlake_qwen3.py",
-    *_common_args(max_steps=max_steps, prompt=4096, response=2048),
+    *_common_args(
+        max_steps=max_steps,
+        prompt=4096,
+        response=512 if short_alignment else 2048,
+    ),
     "--vllm_max_num_seqs=16",
     "--vllm_max_num_batched_tokens=256",
-    "--env_max_steps=5",
+    f"--env_max_steps={2 if short_alignment else 5}",
     "--num_batches=150",
     "--learning_rate=1e-6",
     "--b1=0.9",
@@ -77,6 +83,15 @@ def _frozenlake_command(max_steps: int) -> tuple[str, ...]:
   )
 
 _SPECS = (
+    JobSpec(
+        key="frozenlake-alignment-short",
+        workload="frozenlake",
+        stage="alignment-short",
+        profile="cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env",
+        no_commit=True,
+        job_prefix="canon-p33-fl-align",
+        command=_frozenlake_command(1, short_alignment=True),
+    ),
     JobSpec(
         key="frozenlake-backward-no-commit",
         workload="frozenlake",
@@ -227,8 +242,13 @@ def render_jobset(
           "CANON_P33_SHARED_MESH": "16,4",
           "CANON_P33_RUN_STAGE": spec.stage,
           "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
+          "CANON_P33_SHORT_ALIGNMENT": (
+              "1" if spec.stage == "alignment-short" else "0"
+          ),
+          "CANON_PRE_ALIGN_GATE": "1",
           "CANON_RUN_CMD": shlex.join(spec.command),
           "CANON_RUN_LOG": f"{state}/run.log",
+          "CANON_PRE_ALIGN_REPORT": f"{state}/pre_alignment.jsonl",
           "CANON_ALIGN_REPORT": f"{state}/alignment.jsonl",
           "CANON_UPDATE_REPORT": f"{state}/updates.jsonl",
           "CANON_WANDB_RUN_NAME": name,
@@ -310,6 +330,10 @@ def validate_jobset(
       "CANON_P33_SHARED_MESH": "16,4",
       "CANON_P33_RUN_STAGE": spec.stage,
       "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
+      "CANON_P33_SHORT_ALIGNMENT": (
+          "1" if spec.stage == "alignment-short" else "0"
+      ),
+      "CANON_PRE_ALIGN_GATE": "1",
       "CANON_RUN_CMD": shlex.join(spec.command),
       "CANON_WANDB_RUN_NAME": name,
       "MIN_TOKEN_BUCKET": "4096",
@@ -342,6 +366,7 @@ def validate_jobset(
   state_paths = (
       env.get("CANON_STATE", ""),
       env.get("CANON_RUN_LOG", ""),
+      env.get("CANON_PRE_ALIGN_REPORT", ""),
       env.get("CANON_ALIGN_REPORT", ""),
       env.get("CANON_UPDATE_REPORT", ""),
   )
