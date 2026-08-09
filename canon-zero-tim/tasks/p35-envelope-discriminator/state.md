@@ -1,6 +1,6 @@
 # P35 envelope discriminator state
 
-- Status: active; multi-chunk P35.2 repair locally implemented, r24 failed before measurement
+- Status: active; multi-chunk P35.2 repair published, r25 target not run
 - Active phase: P35.2 target admission
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
@@ -86,9 +86,8 @@ Evidence: `artifacts/p35_1_local_gate.md` and `artifacts/p35_2_local_gate.md`.
 
 ## Next action
 
-Publish the reviewed multi-chunk repair, resolve and verify the resulting
-`origin/yuxzhang/canon-zero-tim` SHA, render the one GSM8K envelope-short JobSet as run r25, run a
-server-side Kubernetes dry run, then let the
+Resolve and verify the published `origin/yuxzhang/canon-zero-tim` SHA, render the one GSM8K
+envelope-short JobSet as run r25, run a server-side Kubernetes dry run, then let the
 operator launch Attempt 0. The target
 must stop before backward and return the raw log, schema-v2 report, compact metadata records,
 classification and SHA-256 values. Until that happens no carrier is classified.

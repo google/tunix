@@ -93,8 +93,8 @@ this production-model gate.
 
 ## Operator instructions
 
-The producer, classifier and multi-chunk metadata gate are locally complete, but the target is
-**NOT RUN**. Fetch
+The producer, classifier and multi-chunk metadata gate are published, but the target is **NOT
+RUN**. Fetch
 the reviewed target branch, resolve its concrete 40-hex SHA, and render exactly one source-pinned
 JobSet:
 

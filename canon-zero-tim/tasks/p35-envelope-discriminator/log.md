@@ -107,3 +107,10 @@ unchanged; preserve r21 as a failed pre-measurement artifact.
 
 Rollback: leave `CANON_P35_ENVELOPE` unset. Preserve r24 as failed pre-measurement evidence and do
 not change the canonical local M256 contract.
+
+## 2026-08-09 — Multi-chunk repair published
+
+- Published implementation commit `973ad471` to `origin/yuxzhang/canon-zero-tim` after verifying
+  the remote remained at r24 evidence commit `b2de4f16`.
+- The next external action is one source-pinned r25 server-side dry run and Attempt-0 target
+  launch. No target numerical evidence was created by this publication.

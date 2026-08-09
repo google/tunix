@@ -1,6 +1,6 @@
 # P35.2 three-arm producer
 
-Status: multi-chunk repair implemented; r24 failed before B, target measurement not run
+Status: multi-chunk repair published; r24 failed before B, r25 target not run
 
 ## Implemented
 
