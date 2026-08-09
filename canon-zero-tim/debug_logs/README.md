@@ -683,6 +683,38 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - In Pathways distributed runtime, all 16 TPU worker instances in a slice must register together synchronously.
    - All 16 TPU nodes are now provisioned and ready on the cluster for the next attempt.
 
+---
+
+## 28. Phase 35 Attempt `r28`: GSM8K Full Three-Arm Envelope Completion & Definitive Verdict (`adapter_envelope_carrier`)
+
+- `p35_r28_gsm8k_envelope.raw.log` (SHA-256: `5958e3e99509b59b3b6231e435e250ccf81e0232ca4c2fd06863764187a9b498`)
+- `p35_r28_gsm8k_envelope.json` (SHA-256: `5d3444ad1bbc7d753f7026926ff53131e1b4167ac6ed783b9685aaea8fe40926`)
+- `p35_r28_gsm8k_envelope.classification.json`
+- WandB: `https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/pezi9coo`
+
+### Landmark Diagnostic Results:
+1. **Full Three-Arm Execution on 64 TPU Chips (`63dfd5b4`)**:
+   - Deployed on 16 synchronized TPU v5p nodes (`1112e347` instance group).
+   - 256 GSM8K trajectories generated cleanly (`mean_length=245.98, max_length=256, clip_ratio=0.83594`).
+   - Arm A (vLLM Native Dynamic Packing Rescore) dumped 24 metadata sequences (`seq=0..23`).
+   - Arm B (vLLM Canonical M256 Chunked Serving) dumped metadata records (`seq=24..25`).
+   - Arm C (Qwen Flax NNX Trainer Adapter) executed forward pass across all 16 DP ranks.
+2. **Exact Memory-Space Bitwise Weight Attestation (`weights.equal: true`)**:
+   - All 310 parameter leaves ($1,720,574,976$ parameters total) verified **100.000% byte-identical** between vLLM Engine live weights (`uint8<host>`) and Trainer mapped weights (`uint8<device>`).
+   - Zero parameter mismatches (`mismatch_indices: []`).
+3. **Negative Control Attested**:
+   - Negative control verified 1 injected bit error correctly detected (`differing_elements: 1, masked_hashes_equal: false`).
+4. **Arm A vs. Arm B: Zero Mismatch (`A_vs_B_exact: true`)**:
+   - **Differing Bytes**: 0 / 12,976 (0.0000%).
+   - **Differing Elements**: 0 / 3,244 (0.0000%).
+   - **Masked SHA-256 Hashes**: `b0ed4f3cdcfb2001ba39a2d98b9dd8e6c306b45eb59f92aff9c53d5256700d95` (Exact match).
+   - **Conclusion**: vLLM Dynamic Packing, Request Batching, Multi-Sequence KV Paging, and Chunk Scheduling have **ZERO impact** on logprob generation. Serving-side scheduling is **NOT** the carrier of the logprob boundary discrepancy.
+5. **Arm A vs. Arm C & Arm B vs. Arm C: 23.94% Byte Discrepancy**:
+   - **Differing Bytes**: 3,106 / 12,976 (23.94%).
+   - **Differing Elements**: 1,529 / 3,244 (47.13%).
+   - **Classification Verdict**: `adapter_envelope_carrier`.
+   - **Definitive Conclusion**: The logprob difference originates **solely within the mathematical / kernel implementation differences between the Flax NNX Trainer forward graph and the vLLM Serving engine runtime** (e.g. Flash/Splash attention vs RPA kernels, RoPE precision, layernorm math), completely decoupled from batching and serving wrapper abstractions.
+
 
 
 

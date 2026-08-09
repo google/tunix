@@ -1,0 +1,9 @@
+{
+  "A_vs_B_exact": true,
+  "A_vs_C_exact": false,
+  "B_vs_C_exact": false,
+  "classification": "adapter_envelope_carrier",
+  "input_report_sha256": "5d3444ad1bbc7d753f7026926ff53131e1b4167ac6ed783b9685aaea8fe40926",
+  "measurement_verdict": "COMPLETE",
+  "reasons": []
+}
