@@ -638,5 +638,31 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - The subsequent compilation pass hit a 10s Pathways RPC compilation deadline (`DEADLINE_EXCEEDED: lost connection to peer at http://machine/gke-mlperf-v5p-cpu-np-b188bf3f-qf47/events#srcs=borg%2Bcoroner since 10.99987274s ago`).
    - No P35 report or classification was emitted for r25.
 
+---
+
+## 26. Phase 35 Attempt `r26`: GSM8K Multi-Chunk Diagnostic (`b8eda03b` Execution & Host-Device Memory Space Weight Attestation Trap)
+
+- `p35_r26_gsm8k_envelope.raw.log` (SHA-256: `3384f01a6864e549c3f8630653e9733465e8556e41a72a922897dbd657a54a0f`)
+- WandB: `https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/p4d9c877`
+
+### Diagnostic Results:
+1. **Multi-Chunk Code Deployment (`b8eda03b`)**:
+   - Deployed multi-chunk probe contracts with streaming metadata attestation.
+   - Initialized 64 TPU chips cleanly on node `dplr`.
+2. **Rollout Generation Parity**:
+   - 256 GSM8K trajectories generated smoothly across 64 TPU chips (`solve_ratio=0.137, reward_mean=0.138, logp_diff=(0.00581, 0.21968), pearson=0.99960`).
+3. **Arm A Native Serving Rescore Execution**:
+   - Executed full dynamic packing Arm A rescore and completed 24 metadata dump intervals (`P35_METADATA arm=A seq=0..23`).
+4. **Reference Policy Execution**:
+   - `get_ref_per_token_logps` completed with 0 errors.
+5. **Arm B Interrupted at Weight Anchor Check**:
+   - Trapped inside `agentic_grpo_learner.py:1060` calling `attest_actor_anchor_matches_engine()`:
+     ```text
+     ValueError: memory_space of all inputs passed to `eq` must be the same. Got one operand with type: uint8<host>[151936,2048,2] and another operand with type: uint8[151936,2048,2]
+     ```
+   - In distributed Pathways mode, vLLM Engine live weights reside on `<host>` while Trainer mapped weights reside on TPU `<device>`. JAX `@jax.jit` rejects comparison across different memory spaces.
+   - No P35 report or classification was emitted for r26.
+
+
 
 
