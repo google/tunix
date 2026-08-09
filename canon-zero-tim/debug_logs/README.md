@@ -393,9 +393,10 @@ the prompt-chunking candidate; no production default changed.
 `[CANON_P33_DP16] backward_no_commit verdict=PASS` or `[P33.RUN] VERDICT PASS`, and FrozenLake full
 is not unlocked by this evidence. The repair narrows the learner exemption to exactly
 `CANON_P32_WORKLOAD=gsm8k` with `sampler_is=None` and restores FrozenLake to
-`sampler_is="token"`. A fresh source-pinned Attempt 0 is required. Rollback is to disable P33
-workload admission or revert only the sampler-contract repair; the raw failure logs remain
-unchanged.
+`sampler_is="token"` in commit `b3d8e278`. A fresh source-pinned Attempt 0 is required. The exact
+operator procedure, required artifacts and three-boundary decision tree are in
+`../cluster/P33_R15_HANDOFF.md`. Rollback is to disable P33 workload admission or revert only the
+sampler-contract repair; the raw failure logs remain unchanged.
 
 ---
 
@@ -406,4 +407,3 @@ unchanged.
   - All 28 layers of Qwen3-1.7B execute custom Pallas VJP kernels on $M=4096, 8192, 16384, 32768, 65536$;
   - Terminates at `memory_snapshot()` calling `device.memory_stats()` on Pathways remote device proxies (`MemoryStats is only supported for addressable PjRt devices`);
   - The repair wraps `device.memory_stats()` with `try...except` in `agentic_rl_learner.py` and `canonical_qwen3_adapter.py`.
-

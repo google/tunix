@@ -1,5 +1,10 @@
 # P33 three-JobSet queue
 
+> **Current FrozenLake recovery:** r15 failed before the three-boundary reporter ran. Before
+> launching FrozenLake full training, follow `P33_R15_HANDOFF.md` and apply only the freshly
+> rendered FrozenLake `backward-no-commit` manifest. The general three-JobSet instructions below
+> remain the queue reference; they are not permission to skip the r15 diagnostic stop rule.
+
 This runbook renders and queues three independent, strict Attempt-0 JobSets:
 
 | Queue entry | Model | Stage | Update budget | Purpose |
@@ -8,9 +13,12 @@ This runbook renders and queues three independent, strict Attempt-0 JobSets:
 | GSM8K full | Qwen3-1.7B | `full` | 200 | Run the signed full GSM8K convergence recipe with online W&B. |
 | FrozenLake full | Qwen3-8B | `full` | 450 | Run the signed full FrozenLake recipe with online W&B and periodic evaluation disabled. |
 
-The diagnostic does not gate the two full JobSets. All three can be submitted at once. Kueue
-decides whether they run concurrently or wait for separate 64-chip allocations; there is no
-cross-JobSet dependency or hidden stage transition.
+GSM8K remains independent from the FrozenLake diagnostic. FrozenLake full was originally
+packaged as an independent queue entry, but the archived r15 failure now places a temporary stop
+on that one entry: do not submit it until `P33_R15_HANDOFF.md` classifies a fresh
+backward-no-commit attempt. After that stop is explicitly cleared, Kueue may run the independent
+entries concurrently or wait for separate 64-chip allocations; there is no hidden in-process
+stage transition.
 
 ## What the renderer freezes
 
