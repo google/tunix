@@ -377,6 +377,62 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         )
     )
 
+  def test_exact_compare_moves_host_operand_to_device_sharding(self):
+    host_sharding = types.SimpleNamespace(memory_kind="pinned_host")
+    device_sharding = types.SimpleNamespace(memory_kind="device")
+    host_value = types.SimpleNamespace(sharding=host_sharding)
+    device_value = types.SimpleNamespace(sharding=device_sharding)
+    placed_value = object()
+
+    with mock.patch.object(
+        jax, "device_put", return_value=placed_value
+    ) as device_put:
+      left, right = (
+          canonical_qwen3_adapter._normalize_exact_compare_memory(  # pylint: disable=protected-access
+              host_value, device_value
+          )
+      )
+
+    self.assertIs(left, placed_value)
+    self.assertIs(right, device_value)
+    device_put.assert_called_once_with(host_value, device_sharding)
+
+  def test_exact_compare_moves_reversed_host_operand_to_device_sharding(self):
+    device_sharding = types.SimpleNamespace(memory_kind="device")
+    host_sharding = types.SimpleNamespace(memory_kind="pinned_host")
+    device_value = types.SimpleNamespace(sharding=device_sharding)
+    host_value = types.SimpleNamespace(sharding=host_sharding)
+    placed_value = object()
+
+    with mock.patch.object(
+        jax, "device_put", return_value=placed_value
+    ) as device_put:
+      left, right = (
+          canonical_qwen3_adapter._normalize_exact_compare_memory(  # pylint: disable=protected-access
+              device_value, host_value
+          )
+      )
+
+    self.assertIs(left, device_value)
+    self.assertIs(right, placed_value)
+    device_put.assert_called_once_with(host_value, device_sharding)
+
+  def test_exact_compare_rejects_two_nondevice_memory_spaces(self):
+    left = types.SimpleNamespace(
+        sharding=types.SimpleNamespace(memory_kind="pinned_host")
+    )
+    right = types.SimpleNamespace(
+        sharding=types.SimpleNamespace(memory_kind="unpinned_host")
+    )
+
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "requires a device operand",
+    ):
+      canonical_qwen3_adapter._normalize_exact_compare_memory(  # pylint: disable=protected-access
+          left, right
+      )
+
   def _make_p32_group_adapter(self, *, sequence_bucket=4):
     runner = _CompleteSegmentedRunner()
     adapter = object.__new__(

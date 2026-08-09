@@ -114,3 +114,40 @@ not change the canonical local M256 contract.
   the remote remained at r24 evidence commit `b2de4f16`.
 - The next external action is one source-pinned r25 server-side dry run and Attempt-0 target
   launch. No target numerical evidence was created by this publication.
+
+## 2026-08-09 — r26 mixed-memory attestation failure reproduced on one-host v5p
+
+- Pulled evidence commit `4f692113`. The r26 run completed rollout, native A, reference logprobs
+  and two B metadata records, then stopped before the report in exact weight attestation.
+- The immediate failure compared a `uint8<host>` live-engine leaf with a `uint8` device trainer
+  leaf in one JAX `eq`. It emitted no report or classification; no carrier verdict was made.
+- Reproduced the same mixed-memory exception in the pinned FrozenLake image on the existing
+  four-chip `aaron-v5p-node6` host with JAX 0.10.2.
+- Explicitly placed the host value into the device `NamedSharding`: exact equal values returned
+  `True`, while a changed-value negative control returned `False`.
+- No production code, precision, model configuration, cloud resource or credential was changed.
+
+Artifact: `artifacts/p35_2_r26_memory_space_probe.md`.
+
+Rollback: leave `CANON_P35_ENVELOPE` unset. The next code change must remain diagnostic-only and
+must preserve exact signed-zero and one-bit negative controls.
+
+## 2026-08-09 — Mixed-memory attestation repair locally complete
+
+- Added one-leaf-at-a-time normalization into the existing device operand's sharding before the
+  unchanged exact uint8 reduction. Two differing explicit non-device memory spaces fail closed.
+- Added host-left and host-right unit controls plus a standalone TPU probe. Weight attestation now
+  records memory-kind pair counts and the number of normalized leaves.
+- Complete adapter suite: 31 tests PASS, 5 skipped.
+- Complete P33/P35 CPU gate: PASS.
+- Pinned exact-image gate: qwen1p7b and qwen8b each matched 29 files and passed 10/10 tests.
+- Final four-chip one-host v5p gate: direct mixed-memory comparison rejected; normalized equal
+  values passed in both operand orders; signed-zero and one-bit controls both rejected.
+- `git diff --check`, Python compilation and executable English-only checks pass.
+- No commit, push, production default, precision, model configuration, credential or cloud
+  resource was changed.
+
+Artifact: `artifacts/p35_2_r26_memory_space_probe.md`.
+
+Rollback: leave `CANON_P35_ENVELOPE` unset. The new transfer and comparison remain unreachable in
+ordinary training. A source-pinned r27 is still required before any carrier classification.

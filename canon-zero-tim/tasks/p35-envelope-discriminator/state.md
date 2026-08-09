@@ -1,11 +1,11 @@
 # P35 envelope discriminator state
 
-- Status: active; multi-chunk P35.2 repair published, r25 target not run
+- Status: active; r26 mixed-memory trap repaired and verified locally, r27 target not run
 - Active phase: P35.2 target admission
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Reviewed base commit: `b2de4f16bf1a0d691ff027c7d74515ad911cc081`
+- Reviewed base commit: `4f6921135ff4fc28aad42292708cf5c4ef1afd9e`
 - Updated: 2026-08-09 UTC
 
 ## Objective
@@ -43,6 +43,15 @@ reward or correlation to classify this boundary.
     the unchanged A rescore, but a diagnostic-only single-chunk assertion rejected the selected
     sequence group before B. The assertion confused one request per rank with one chunk per
     request. r24 produced no report or classification and is not a carrier verdict.
+11. P35 attempt r25 stopped in the Pathways compilation service before A/B/C and emitted no P35
+    report. It is an infrastructure interruption, not a numerical verdict.
+12. P35 attempt r26 completed rollout, native arm A, reference logprobs and two arm-B metadata
+    records, then stopped in exact weight attestation because one leaf was in host memory and the
+    other was in device memory. JAX rejects a single `eq` with mixed memory-space input types.
+13. A four-chip one-host v5p probe reproduced the same mixed-memory exception on JAX 0.10.2.
+    Explicitly placing the host leaf into the device `NamedSharding` made equal values pass and a
+    changed-value negative control fail. This validates the placement repair direction, not the
+    target A/B/C result.
 
 ## Current hypothesis split
 
@@ -81,16 +90,19 @@ No hypothesis is green yet.
 - Pinned-image CPU gate PASS; qwen1p7b and qwen8b overlay installs each matched all 29 manifest
   entries and passed 10/10 prompt/decode chunk tests.
 - `git diff --check`, Python AST checks and shell syntax checks PASS.
+- Mixed host/device exact comparison now normalizes one leaf at a time into the existing device
+  sharding. Both operand orders pass on a four-chip one-host v5p; signed-zero and one-bit negative
+  controls fail as required. The adapter suite, complete CPU gate and both exact-image model gates
+  pass.
 
 Evidence: `artifacts/p35_1_local_gate.md` and `artifacts/p35_2_local_gate.md`.
 
 ## Next action
 
-Resolve and verify the published `origin/yuxzhang/canon-zero-tim` SHA, render the one GSM8K
-envelope-short JobSet as run r25, run a server-side Kubernetes dry run, then let the
-operator launch Attempt 0. The target
-must stop before backward and return the raw log, schema-v2 report, compact metadata records,
-classification and SHA-256 values. Until that happens no carrier is classified.
+Review the diagnostic-only mixed-memory patch and, after explicit commit/push approval, publish it
+to `yuxzhang/canon-zero-tim`. Then run one source-pinned r27 Attempt 0. The target must stop before
+backward and return the raw log, schema-v2 report, compact metadata records, classification and
+SHA-256 values. Until that happens no carrier is classified.
 
 ## Hard gates
 
@@ -106,9 +118,10 @@ classification and SHA-256 values. Until that happens no carrier is classified.
 
 ## Blockers
 
-The target JobSet must pin the reviewed SHA published on `yuxzhang/canon-zero-tim`; the operator
-must resolve and verify that SHA before rendering. The 64-chip launch remains an operator action
-on the GKE cluster.
+The mixed-memory attestation repair is implemented and locally verified but not committed or
+published. The target JobSet must pin the reviewed SHA published on
+`yuxzhang/canon-zero-tim`; the operator must resolve and verify that SHA before rendering. The
+64-chip launch remains an operator action on the GKE cluster.
 
 ## Rollback
 

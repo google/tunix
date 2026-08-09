@@ -56,6 +56,39 @@ def _exact_leaf_bits_equal(left: Any, right: Any) -> jax.Array:
   return jnp.all(left_bits == right_bits)
 
 
+def _normalize_exact_compare_memory(
+    left: Any, right: Any
+) -> tuple[Any, Any]:
+  """Places mixed host/device inputs in one existing device sharding."""
+  left_sharding = getattr(left, "sharding", None)
+  right_sharding = getattr(right, "sharding", None)
+  left_memory = getattr(left_sharding, "memory_kind", None)
+  right_memory = getattr(right_sharding, "memory_kind", None)
+  if (
+      left_memory is None
+      or right_memory is None
+      or left_memory == right_memory
+  ):
+    return left, right
+
+  if left_memory == "device":
+    device_sharding = left_sharding
+  elif right_memory == "device":
+    device_sharding = right_sharding
+  else:
+    raise FunctionalMappingError(
+        "exact bitwise equality requires a device operand when explicit "
+        "memory spaces differ; got "
+        f"{left_memory!r} and {right_memory!r}"
+    )
+
+  if left_memory != "device":
+    left = jax.device_put(left, device_sharding)
+  if right_memory != "device":
+    right = jax.device_put(right, device_sharding)
+  return left, right
+
+
 def _bitwise_arrays_equal(left: Any, right: Any) -> bool:
   """Returns exact device-side equality, including NaN payloads and signed zero."""
   left_value = getattr(left, "value", left)
@@ -69,6 +102,9 @@ def _bitwise_arrays_equal(left: Any, right: Any) -> bool:
     raise FunctionalMappingError(
         f"exact bitwise equality does not support dtype {left_value.dtype}"
     )
+  left_value, right_value = _normalize_exact_compare_memory(
+      left_value, right_value
+  )
   return bool(
       np.asarray(jax.device_get(_exact_leaf_bits_equal(left_value, right_value)))
   )
@@ -1486,11 +1522,29 @@ class Qwen3EngineForwardAdapter:
 
     mismatches = []
     total_elements = 0
+    normalized_memory_leaves = 0
+    memory_kind_pairs: dict[str, int] = {}
     for index, (mapped_leaf, live_leaf) in enumerate(
         zip(mapped_leaves, live_leaves)
     ):
       mapped_value = getattr(mapped_leaf, "value", mapped_leaf)
       live_value = getattr(live_leaf, "value", live_leaf)
+      mapped_memory = getattr(
+          getattr(mapped_value, "sharding", None), "memory_kind", None
+      )
+      live_memory = getattr(
+          getattr(live_value, "sharding", None), "memory_kind", None
+      )
+      memory_pair = (
+          f"{mapped_memory or 'unspecified'}->"
+          f"{live_memory or 'unspecified'}"
+      )
+      memory_kind_pairs[memory_pair] = memory_kind_pairs.get(memory_pair, 0) + 1
+      if mapped_memory != live_memory and "device" in (
+          mapped_memory,
+          live_memory,
+      ):
+        normalized_memory_leaves += 1
       exact = _bitwise_arrays_equal(mapped_value, live_value)
       if not exact:
         mismatches.append(index)
@@ -1504,6 +1558,8 @@ class Qwen3EngineForwardAdapter:
         "live_leaves": len(live_leaves),
         "total_elements": total_elements,
         "mismatch_indices": tuple(mismatches),
+        "normalized_memory_leaves": normalized_memory_leaves,
+        "memory_kind_pairs": memory_kind_pairs,
         "mesh_shape": tuple(
             (str(name), int(size))
             for name, size in self._runner.mesh.shape.items()

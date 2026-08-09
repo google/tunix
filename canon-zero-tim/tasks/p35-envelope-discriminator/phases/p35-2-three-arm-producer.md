@@ -1,6 +1,6 @@
 # P35.2 three-arm producer
 
-Status: multi-chunk repair published; r24 failed before B, r25 target not run
+Status: mixed-memory repair locally complete; r26 failed before report, r27 target not run
 
 ## Implemented
 
@@ -39,9 +39,16 @@ rejected before launch.
 
 Attempt r21 used response 64 and failed in the native reference Splash forward. Attempt r24
 confirmed the response-256 repair and completed A, but the prototype probe rejected a real
-multi-chunk sequence before B. Neither attempt produced an A/B/C report. The multi-chunk repair
-must pass the complete pinned-image gate, be published, and pass a source-pinned server-side
-Kubernetes dry run before r25. An unchanged r18/r19/r21/r24 rerun cannot answer the P35 question.
+multi-chunk sequence before B. Attempt r25 stopped in the Pathways compilation service before the
+producer. Attempt r26 reached A and B execution but passed a host-memory live engine leaf and a
+device-memory mapped trainer leaf to one JAX equality operation; it stopped before the report.
+None of these attempts produced an A/B/C classification.
+
+The mixed-memory repair explicitly places the host leaf into the existing device sharding one
+leaf at a time, then runs the unchanged exact bytewise reduction. It records the original
+memory-kind pairs and normalized-leaf count. Local, exact-image and four-chip one-host TPU gates
+pass. The repair must be reviewed, published and pass a source-pinned server-side Kubernetes dry
+run before r27. An unchanged earlier attempt cannot answer the P35 question.
 
 ## Rollback
 

@@ -29,6 +29,14 @@ local M256, admits multiple fixed-M calls per request, and requires metadata to 
 sequence with contiguous positions and cumulative KV lengths. Changing response to 512 would add
 another static chunk and would not repair the rejected assumption.
 
+Attempt r25 stopped in the Pathways compilation service before A/B/C and is an infrastructure
+interruption, not a numerical verdict. Attempt r26 completed rollout, native A, reference
+logprobs and two B metadata records, then failed before the report because exact weight
+attestation passed a host-memory leaf and a device-memory leaf to one JAX `eq`. A one-host v5p
+reproduced the same rule and verified the diagnostic-only repair: place the host leaf in the
+existing device sharding, then run the unchanged bytewise reduction. Equal values pass in both
+operand orders; signed-zero and one-bit controls remain red.
+
 ## What is and is not proven
 
 Proven:
@@ -93,20 +101,20 @@ this production-model gate.
 
 ## Operator instructions
 
-The producer, classifier and multi-chunk metadata gate are published, but the target is **NOT
-RUN**. Fetch
-the reviewed target branch, resolve its concrete 40-hex SHA, and render exactly one source-pinned
-JobSet:
+The producer and multi-chunk metadata gate are published. The mixed-memory repair is locally
+verified but is not published yet, so r27 is **NOT ADMITTED** until the operator fetches a reviewed
+commit containing that repair. After publication, resolve the concrete 40-hex SHA and render
+exactly one source-pinned JobSet:
 
 ```bash
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
 python3 canon-zero-tim/cluster/render_p35_jobset.py \
   --source-commit "$SOURCE_SHA" \
-  --run-id r25 \
-  --output /tmp/canon-p35-gsm8k-envelope-r25.yaml
+  --run-id r27 \
+  --output /tmp/canon-p35-gsm8k-envelope-r27.yaml
 kubectl apply --dry-run=server \
-  -f /tmp/canon-p35-gsm8k-envelope-r25.yaml
+  -f /tmp/canon-p35-gsm8k-envelope-r27.yaml
 ```
 
 Do not apply until the server-side dry run passes and the operator confirms the source SHA. The
@@ -117,6 +125,7 @@ terminates before backward. A valid return contains:
 - `p35_envelope.json` with schema version 2;
 - compact `p35_metadata_*.json/.npz` A/B records;
 - `p35_envelope.classification.json` with `measurement_verdict=COMPLETE`;
+- a weight attestation containing `memory_kind_pairs` and `normalized_memory_leaves`;
 - raw log and SHA-256 values for every returned artifact.
 
 The postflight accepts only the expected diagnostic exit code 1. Missing evidence, any other exit
