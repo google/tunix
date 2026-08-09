@@ -141,3 +141,12 @@ change the live client guard, and `probe_dp_update.py` later rejected them as un
 arguments before any DP measurement ran. The bootstrap no longer mutates application arguments.
 More importantly, the probes no longer need the flag: they construct host-valid full-slice
 meshes. A runtime safety check should be satisfied structurally, not disabled speculatively.
+
+### 17. A truthy workload flag is not a workload-specific exception
+
+`CANON_P32_WORKLOAD` names a semantic contract; it is not a generic admission boolean. A broad
+`if CANON_P32_WORKLOAD` exception intended for GSM8K also admitted FrozenLake with
+`sampler_is=None`, bypassing the token-correction requirement until the runtime alignment gate
+failed. Compare the exact workload name and test both the intended exception and a neighboring
+workload negative control. A rollout-quality metric or completed model trace before that failure
+does not promote the run.

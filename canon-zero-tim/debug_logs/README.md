@@ -368,20 +368,31 @@ the prompt-chunking candidate; no production default changed.
 
 ---
 
-## 15. Phase 33 Attempt `r15`: Prompt Chunking Provenance and GSM8K Learner Exemption
+## 15. Phase 33 Attempt `r15`: Prompt Chunking Provenance and Sampler Contract Failure
 
-- `p33_r15_gsm8k_full_alignment_gate_error.raw.log` proves that the Prompt Chunking architecture
-  executes with 100% success on hardware:
-  - Prints `[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=32768 rows_per_dp=2048 canonical_rows=256 chunks=8`;
+- `p33_r15_gsm8k_full_alignment_gate_error.raw.log` proves that the prompt-chunking path executes
+  on hardware before the learner gate:
+  - Prints
+    `[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=32768 rows_per_dp=2048 canonical_rows=256 chunks=8`;
   - Accurately populates 30,902 logprobs across all 256 concurrent requests;
   - Reaches sustained generation throughput of 1,186 ~ 1,598 tok/s on Qwen3-1.7B;
-  - All 28 layers of Qwen3-1.7B execute custom Pallas VJP kernels and Fixed-Order AllReduce aggregation;
-  - Fails closed at `tunix.rl.alignment.AlignmentGateError: FrozenLake alignment requires sampler_is='token' to preserve w and r`
-    in `agentic_grpo_learner.py:947` because GSM8K P32 workload deliberately sets `sampler_is=None` (consuming rollout logprobs directly).
-- `p33_r15_frozenlake_canary_backward_pass.raw.log` confirms the official milestone pass of the FrozenLake Canary test:
-  - The upstream per-rank token pin (`max_num_batched_tokens=256`) locks the FrozenLake scheduler to a canonical $M=4096$ bucket, achieving 5,209 prompt tok/s;
-  - Executes the complete 36-layer VJP backward pass across 64 TPU chips;
-  - Achieves RL game solve ratio of **60.5%** (`solve_ratio=0.605`, `reward_mean=0.605`, `reward_max=1.000` on 256 games);
-  - Zero-TIM numerical alignment achieves Pearson correlation of **0.99859** (`logp_diff=(0.00768, 0.31682)`, `prob_diff=(0.00338, 0.08457)`);
-  - Successfully finishes Canary backward pass verification and unlocks TPU Slice 1 for `FrozenLake Full (r16)` 450-step training.
+  - All 28 layers of Qwen3-1.7B execute custom Pallas VJP kernels and fixed-order AllReduce
+    aggregation;
+  - Fails closed at
+    `tunix.rl.alignment.AlignmentGateError: FrozenLake alignment requires sampler_is='token' to preserve w and r`
+    in `agentic_grpo_learner.py:947` because GSM8K deliberately sets `sampler_is=None` while
+    consuming rollout logprobs directly. The broad truthy-workload exemption added after this run
+    was incorrect because it also exempted FrozenLake.
+- `p33_r15_frozenlake_canary_backward_pass.raw.log` reaches all 36 layers of the promoted Pallas
+  forward path and records rollout quality (`solve_ratio=0.605`), but terminates at the same
+  `AlignmentGateError` before the backward-no-commit classifier or an optimizer update. Its
+  `logp_diff=(0.00768, 0.31682)` and Pearson `0.99859` are explicitly non-bitwise and cannot be
+  reported as zero-TIM evidence.
 
+**Target status:** FAIL. Neither r15 log contains
+`[CANON_P33_DP16] backward_no_commit verdict=PASS` or `[P33.RUN] VERDICT PASS`, and FrozenLake full
+is not unlocked by this evidence. The repair narrows the learner exemption to exactly
+`CANON_P32_WORKLOAD=gsm8k` with `sampler_is=None` and restores FrozenLake to
+`sampler_is="token"`. A fresh source-pinned Attempt 0 is required. Rollback is to disable P33
+workload admission or revert only the sampler-contract repair; the raw failure logs remain
+unchanged.

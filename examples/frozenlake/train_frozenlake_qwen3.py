@@ -933,9 +933,10 @@ grpo_config = GRPOConfig(
     # Recommended for multi-turn agentic rollouts where residual numerical
     # drift between sampler and trainer can produce occasional outlier
     # importance ratios.
-    # P32 treats any sampler/trainer discrepancy as a hard alignment failure.
-    # TIS remains available to the legacy recipe but cannot mask P32 drift.
-    sampler_is=None if CANON_P32_WORKLOAD else "token",
+    # Canonical FrozenLake keeps the token correction path present. Exact
+    # alignment requires its weights to remain bitwise one with zero clips, so
+    # it cannot silently mask sampler/trainer drift.
+    sampler_is="token",
     sampler_is_threshold=2.0,
     use_rollout_logps=True,
     advantage_estimator=args.advantage_estimator,
