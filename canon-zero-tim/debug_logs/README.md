@@ -776,3 +776,38 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    is fixed and does not classify the 64-chip adapter-envelope carrier. One source-pinned r30
    Attempt 0 remains required.
 
+---
+
+## 31. Phase 35.3b Attempt `r30`: 64-Chip Bounded Replay Execution & Base Evidence Persistence
+
+- `p35_r30_gsm8k_exact_replay.raw.log` (SHA-256: `fdfd6df0305c4bea055d8cf191ec47a0a6cde60a5eb601468dfbf435a6fd0dc8`)
+- Target Commit: `78bde02f059d4984eb4fd2ac7079668b94fee980` (*Record the bounded P35 source pin*)
+
+### Execution & Diagnostic Summary:
+1. **Rollout & Pre-Replay Persistence Succeeded on 64 TPU Chips (`8koelywb` instance group)**:
+   - Cluster Autoscaler provisioned 16 fresh TPU v5p nodes (`gke-tpu-c730f282-*`).
+   - All 16 workers booted and joined Pathways runtime synchronously.
+   - 256 GSM8K rollout trajectories generated with peak prompt throughput **5,501.2 tokens/s** and generation throughput **1,801.3 tokens/s**.
+   - **Pre-Replay Base Evidence Persistence Succeeded**:
+     ```text
+     [CANON_P35] BASE_REPORT_COMPLETE path=/tmp/canon-state/canon-p35-gsm8k-env-r30-78bde02f/p35_envelope.pre_replay.json rows=[0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240] REPLAY_PENDING
+     ```
+2. **Failure Point During Phase 35.3b Exact Replay**:
+   - Replay began for `R0_live_first` over 2 captured grouped records:
+     ```text
+     [CANON_P35.3] CAPTURED_REPLAY_BEGIN replay=R0_live_first records=2 logical_logits_shape=(4096, 151936) logical_logits_bytes=2489319424 tail=original_program_serialized
+     [CANON_P35.3] RECORD_BEGIN replay=R0_live_first record=1/2 logical_logits_shape=(4096, 151936) logical_logits_bytes=2489319424
+     ```
+   - Inside `_p35_run_captured_records` -> `_processed_target_logprobs` -> `exact_value` -> `compute_and_gather`:
+     ```text
+     File "/app/tunix/rl/canonical_qwen3_adapter.py", line 1870, in _p35_run_captured_records
+       all_logps = self._processed_target_logprobs(
+     File "/app/tunix/rl/canonical_qwen3_adapter.py", line 403, in exact_value
+       return compute_and_gather(
+     jax.errors.JaxRuntimeError: UNAVAILABLE: Connection to IFRT proxy server was terminated: UNAVAILABLE: Socket closed
+     ```
+3. **Diagnostic Analysis**:
+   - While the base report is now securely persisted, executing `_processed_target_logprobs` over the 2.49 GB unjitted `processed_logits` inside an eager Pathways call still triggers an IFRT proxy socket closure on the 64-chip distributed cluster.
+4. **Next Steps**:
+   - JIT-compile the target logprob computation or compute logprobs in-place on device within the model runner to avoid eager IFRT proxy socket saturation.
+
