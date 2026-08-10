@@ -715,6 +715,34 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - **Classification Verdict**: `adapter_envelope_carrier`.
    - **Definitive Conclusion**: The logprob difference originates **solely within the mathematical / kernel implementation differences between the Flax NNX Trainer forward graph and the vLLM Serving engine runtime** (e.g. Flash/Splash attention vs RPA kernels, RoPE precision, layernorm math), completely decoupled from batching and serving wrapper abstractions.
 
+---
+
+## 29. Phase 35.3 Attempt `r29`: GSM8K Exact-Input Replay (`cf4c12e4`) Execution & IFRT Preemption Diagnosis
+
+- `p35_r29_gsm8k_exact_replay.raw.log` (SHA-256: `de0edfab5d5a9439ec125559d7fc9ed11fcbc68391da8c19b34108c7718f6f00`)
+- Target Commit: `cf4c12e4003199cd80c73603f8b54a0f80f49657` (*Reconcile the P35 replay evidence index*)
+
+### Execution & Diagnostic Summary:
+1. **Rollout Generation Succeeded on 64 TPU Chips (`14c88694` instance group)**:
+   - Cluster Autoscaler provisioned 16 fresh TPU v5p nodes (`gke-tpu-14c88694-*`).
+   - All 16 workers booted and joined Pathways runtime synchronously.
+   - Qwen3-1.7B Safetensors downloaded in 24 seconds.
+   - All 28 layers compiled with `[PATHTRACE]` canonical switches active (`CANON_FIXED_AR_EMBED=1`, `RPA_VJP2=1`, `CANON_LOGPROB_M=1`).
+   - 256 GSM8K rollout trajectories generated with peak prompt throughput 2,757 tokens/s and generation throughput 1,641 tokens/s.
+2. **Failure Point During Phase 35.3 In-Process Exact Replay**:
+   - During `_process_results` -> `rl_cluster.p35_exact_input_replay` -> `_p35_run_captured_records`:
+     ```text
+     File "/app/tunix/rl/canonical_qwen3_adapter.py", line 1851, in _p35_run_captured_records
+       raw_target_all = jnp.take_along_axis(
+     jax.errors.JaxRuntimeError: UNAVAILABLE: Connection to IFRT proxy server was terminated: UNAVAILABLE: Socket closed
+     ```
+   - Simultaneously, the dynamically provisioned TPU instance group `nap-ct5p-hightp-4t-wbuwvyc8-temporary-mig-1mo4b9n7-async-0` entered `NotReady,SchedulingDisabled` (node termination / GKE autoscaler eviction during heavy unjitted RPC loop).
+3. **Root Cause Analysis**:
+   - `_p35_run_captured_records` executes a Python loop across 256 captured decode steps with unjitted `self._runner.compute_logits_fn` returning full vocabulary logits `(4096, 151936)` of float32 (~2.5 GB per step).
+   - Generating and transferring unjitted 2.5 GB intermediate arrays over 256 steps without JIT compilation creates massive IFRT proxy memory pressure and gRPC stream saturation.
+4. **Next Step / Engineering Fix**:
+   - Vectorize / batch the captured records execution or extract logprobs directly on-device without accumulating large unjitted logits across 256 individual Pathways RPC calls.
+
 
 
 
