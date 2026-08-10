@@ -115,6 +115,10 @@ spec:
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
               imagePullPolicy: IfNotPresent
               resources:
+                requests:
+                  cpu: '8'
+                  memory: 32Gi
+                  ephemeral-storage: 20Gi
                 limits: {cpu: '24', memory: 200G}
               command:
               - bash
