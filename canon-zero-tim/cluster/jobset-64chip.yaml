@@ -88,7 +88,7 @@ spec:
                 - name: XLA_FLAGS
                   value: --xla_allow_excess_precision=false
               resources:
-                requests: {cpu: '16', memory: 100Gi}
+                requests: {cpu: '32', memory: 200Gi}
                 limits:   {cpu: '32', memory: 350G}
               restartPolicy: Always
             - name: pathways-rm
@@ -116,8 +116,8 @@ spec:
               imagePullPolicy: IfNotPresent
               resources:
                 requests:
-                  cpu: '8'
-                  memory: 32Gi
+                  cpu: '16'
+                  memory: 64Gi
                 limits: {cpu: '24', memory: 200G}
               command:
               - bash
