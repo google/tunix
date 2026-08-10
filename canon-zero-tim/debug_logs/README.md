@@ -784,11 +784,11 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 - Target Commit: `78bde02f059d4984eb4fd2ac7079668b94fee980` (*Record the bounded P35 source pin*)
 
 ### Execution & Diagnostic Summary:
-1. **Rollout & Pre-Replay Persistence Succeeded on 64 TPU Chips (`8koelywb` instance group)**:
+1. **Rollout & Pre-Replay Write Succeeded on 64 TPU Chips (`8koelywb` instance group)**:
    - Cluster Autoscaler provisioned 16 fresh TPU v5p nodes (`gke-tpu-c730f282-*`).
    - All 16 workers booted and joined Pathways runtime synchronously.
    - 256 GSM8K rollout trajectories generated with peak prompt throughput **5,501.2 tokens/s** and generation throughput **1,801.3 tokens/s**.
-   - **Pre-Replay Base Evidence Persistence Succeeded**:
+   - **The coordinator wrote the pre-replay base report before replay**:
      ```text
      [CANON_P35] BASE_REPORT_COMPLETE path=/tmp/canon-state/canon-p35-gsm8k-env-r30-78bde02f/p35_envelope.pre_replay.json rows=[0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240] REPLAY_PENDING
      ```
@@ -807,7 +807,23 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      jax.errors.JaxRuntimeError: UNAVAILABLE: Connection to IFRT proxy server was terminated: UNAVAILABLE: Socket closed
      ```
 3. **Diagnostic Analysis**:
-   - While the base report is now securely persisted, executing `_processed_target_logprobs` over the 2.49 GB unjitted `processed_logits` inside an eager Pathways call still triggers an IFRT proxy socket closure on the 64-chip distributed cluster.
+   - The marker proves that the coordinator wrote the preliminary report under `/tmp` before
+     replay. This evidence commit archives only the raw log, not the JSON report itself; the
+     marker is not a durable replacement for that artifact.
+   - The first record did not emit `RECORD_COMPLETE`. This excludes accumulation across later
+     replay records, but it does not exclude buffers or executables retained by the completed
+     A/B/C work before replay.
+   - The exception surfaced while calling `_processed_target_logprobs`, whose canonical
+     `compute_and_gather` callable is already `jax.jit`. Because JAX dispatch is asynchronous,
+     the stack location does not identify whether the peer exited during the model, logits,
+     sampling, canonical logprob or target-gather stage.
+   - The raw client log contains no Pathways proxy, resource-manager, worker-exit, node-event or
+     HBM-at-failure evidence. OOM, transport limits, eager dispatch saturation and the causal
+     operation remain hypotheses.
 4. **Next Steps**:
-   - JIT-compile the target logprob computation or compute logprobs in-place on device within the model runner to avoid eager IFRT proxy socket saturation.
-
+   - Run one default-off first-record stage probe with explicit `BEGIN/READY` barriers at model,
+     logits, sampling, canonical-logprob, target-gather and compact-output boundaries. Stop after
+     that record with `NO_NUMERICAL_VERDICT`.
+   - Archive the preliminary JSON, stage JSONL, Pathways proxy/RM/worker logs and Kubernetes
+     events before deleting the JobSet. Do not introduce a new observer executable until the
+     failing stage is known and any observer has passed a standalone-versus-observer bitwise gate.

@@ -77,13 +77,34 @@ autoscaler eviction. Replay must be bounded and instrumented before r30.
 
 ### Phase P35.3b — Bounded replay execution repair
 
-Status: locally complete and published; target r30 pending
+Status: locally complete and published; target r30 infrastructure-inconclusive
 
 Persist the completed P35.2 evidence before replay and serialize every captured record with
 explicit begin/complete markers while preserving the original numerical program boundaries. A
 fused target-only candidate was rejected after a CPU bitwise gate found 178/256 changed target
 logprobs. Prove the serialized original path on CPU, exact image and one-host TP4 before
 publishing an r30 source pin. See `phases/p35-3b-bounded-replay.md`.
+
+### Phase P35.3c — First-record stage localization
+
+Status: locally complete; implementation source pin `7484ab78`; no target run
+
+r30 wrote the preliminary report but lost the IFRT service inside the first captured/live record.
+The canonical target-logprob callable was already jitted, so the Python stack cannot identify an
+unjitted scorer as the cause. Add a default-off probe that preserves every numerical callable and
+waits after model, logits, sampling, canonical logprob, target gathers and compact output assembly.
+Append one fsynced JSONL event per ready stage and stop after record 1 with an explicit
+`NO_NUMERICAL_VERDICT` marker.
+
+Exit gate: local classifier, renderer, postflight, CPU, exact-image and TP4 mechanics gates pass;
+then one source-pinned r31 Attempt 0 mechanically identifies the last ready stage while archiving
+the complete Pathways service and Kubernetes evidence. See
+`phases/p35-3c-first-record-stage-probe.md`.
+
+Local result: PASS. Focused classifier/renderer tests pass 14/14; the complete P33/P35 CPU
+contract, both exact-image overlays and a real four-device v5p TP4 production-shape mechanics
+test pass. The TP4 test uses a synthetic forward and proves array/stage mechanics only. See
+`artifacts/p35_3c_local_gate.md`. Target r31 remains NOT RUN.
 
 ## Phase P35.4 — Actual-model THIRDPROG
 

@@ -75,8 +75,9 @@ sudo docker run --rm --privileged --net=host \
 
 ## Target status
 
-P35.3c target status is NOT RUN. After explicit commit/push and 64-chip approvals, r31 must use
-the source-pinned `--stage-probe` renderer path and archive coordinator, proxy, resource-manager,
+P35.3c target status is NOT RUN. The reviewed implementation source pin is
+`7484ab7844ca79fda6399f6f6dcd475ef8c6d632`. After separate 64-chip approval, r31 must use the
+source-pinned `--stage-probe` renderer path and archive coordinator, proxy, resource-manager,
 worker and Kubernetes event evidence. A complete r31 identifies infrastructure progress only and
 still has `numerical_verdict=false`.
 

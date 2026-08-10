@@ -1,6 +1,6 @@
 # Phase P35.3c — First-record stage localization
 
-Status: locally complete; not committed or published; no target run
+Status: locally complete; implementation source pin `7484ab78`; no target run
 
 ## Objective
 

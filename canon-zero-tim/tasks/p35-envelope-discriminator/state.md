@@ -1,12 +1,12 @@
 # P35 envelope discriminator state
 
-- Status: active; P35.2 target complete, P35.3 target r29 infrastructure-inconclusive
-- Active phase: P35.3b published; target r30 pending
+- Status: active; P35.2 target complete, P35.3 target r29/r30 infrastructure-inconclusive
+- Active phase: P35.3c first-record stage localization; local gates complete, target not run
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Reviewed implementation commit: `9344259f1582cd7c3eb8954474ce44854cca6ce6`
-- Updated: 2026-08-10 UTC
+- Reviewed implementation commit: `7484ab7844ca79fda6399f6f6dcd475ef8c6d632`
+- Updated: 2026-08-10 UTC after r30 evidence reconciliation
 
 ## Objective
 
@@ -61,6 +61,15 @@ reward or correlation to classify this boundary.
     variable. Likewise `metadata_B_matches_C` proves the selected sequence semantics, positions,
     request distribution and active page contract; it is not a byte-for-byte equality claim for the
     complete B and C metadata/cache tensors.
+16. P35.3b target r30 was Attempt 0 at source `78bde02f`. It completed rollout and wrote the
+    preliminary A/B/C report, then lost the IFRT connection during `R0_live_first` record 1 of 2.
+    It emitted no record-complete, replay-complete or final numerical-report marker.
+17. r30 excludes accumulation across later replay records, but not state retained by the completed
+    A/B/C work before replay. Its client log has no proxy/RM/worker exit reason, node event or
+    memory-at-failure evidence, so the causal infrastructure mechanism remains unknown.
+18. The r30 exception surfaced while calling the processed target-logprob path, but that path's
+    canonical `compute_and_gather` callable is already `jax.jit`. Asynchronous error surfacing does
+    not identify model, logits, sampling, logprob or gather as the failing stage.
 
 ## Current hypothesis split
 
@@ -155,15 +164,25 @@ reward or correlation to classify this boundary.
   matching record-complete markers and 2 passing bitwise tests in 34.72s. The first record has no
   action predictor, so the test covers the formerly unanchored tail. Raw SHA-256 is
   `2d2aca9c4c25bffd58e48a66ebe4177eeaba9068c8c86d9f983798b3121638b8`.
+- P35.3c implementation is default-off and locally complete. It adds six ordered first-record
+  readiness boundaries, fsynced JSONL evidence, a non-numerical classifier and a
+  renderer/postflight contract that rejects missing, duplicate or reordered stages while
+  preserving partial-stage localization. Focused classifier/renderer tests pass 14/14; the
+  complete P33/P35 CPU contract, both exact-image
+  overlays and a real four-device v5p TP4 production-shape mechanics gate pass. The TP4 gate uses
+  a synthetic forward with real local M256 and vocabulary 151936; it does not run Qwen or
+  Pathways and cannot localize the target failure. No target r31 run exists.
 
 Evidence: `artifacts/p35_1_local_gate.md`, `artifacts/p35_2_local_gate.md` and
-`artifacts/p35_3_local_gate.md`.
+`artifacts/p35_3_local_gate.md`, `artifacts/p35_3b_local_gate.md` and
+`artifacts/p35_3c_local_gate.md`.
 
 ## Next action
 
-Render r30 from reviewed source `9344259f1582cd7c3eb8954474ce44854cca6ce6` and run one Attempt 0.
-Copy the preliminary report even if replay fails; a target numerical classification still
-requires the final P35.2 and P35.3 artifacts. The one-host result remains a platform contrast only.
+Use reviewed source pin `7484ab7844ca79fda6399f6f6dcd475ef8c6d632` for one separately
+approved r31 Attempt 0 rendered with `--stage-probe`. The operator must archive coordinator, proxy,
+resource-manager, worker and Kubernetes event evidence before deleting the JobSet. A successful
+r31 stage probe still has no numerical verdict.
 
 ## Hard gates
 
@@ -179,9 +198,11 @@ requires the final P35.2 and P35.3 artifacts. The one-host result remains a plat
 
 ## Blockers
 
-The bounded P35.3b implementation is published with local CPU, exact-image and one-host TP4
-evidence. The direct-attached production run did not reproduce the known carrier, and only
-another 64-chip Pathways attempt can decide the target result.
+P35.3c implementation is source-pinned at `7484ab7844ca79fda6399f6f6dcd475ef8c6d632`.
+One separately approved 64-chip Pathways Attempt 0 is required to classify the first failing
+replay stage. The
+direct-attached production run did not reproduce the known carrier and cannot replace this target
+stage probe.
 
 ## Rollback
 

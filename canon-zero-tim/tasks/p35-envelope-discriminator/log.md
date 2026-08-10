@@ -310,3 +310,30 @@ runtime default, model value, precision, optimizer, checkpoint, credential or cl
   language scans clean, and `git diff --check` PASS.
 - Next external action: push the reviewed commits, render r30 from the resulting source pin, and
   run one 64-chip Attempt 0. No target run or cloud-resource lifecycle change occurred here.
+
+## 2026-08-10 — P35.3c first-record stage localization locally complete
+
+- Reconciled r30 without promoting the Python traceback into a causal claim: the canonical
+  target-logprob callable was already jitted, and the client log lacks proxy, resource-manager,
+  worker and Kubernetes event evidence.
+- Added a default-off six-stage readiness probe for only `R0_live_first` record 1. Each completed
+  stage is appended to an fsynced JSONL file; the probe stops after compact outputs with
+  `NO_NUMERICAL_VERDICT`, before record 2, repeat arms, backward or optimizer.
+- Added a fail-closed classifier, renderer/preflight/postflight contracts and negative controls
+  for missing, duplicate, reordered, record-count drift and second-record events. Partial reports
+  persist `last_ready_stage` and `first_missing_stage` before postflight rejects the run.
+- Local gates PASS: 14/14 focused classifier/renderer tests, focused pinned-image adapter test,
+  complete P33/P35 CPU contract, both exact-image overlays and a real four-device v5p TP4
+  production-shape mechanics test. The TP4 test uses synthetic forward data at local M256 and
+  vocabulary 151936; it is not a Qwen or Pathways result.
+- No commit, push, 64-chip run, numerical carrier verdict or cloud-resource lifecycle change was
+  performed. Evidence: `artifacts/p35_3c_local_gate.md`.
+
+## 2026-08-10 — P35.3c implementation source-pinned
+
+- Created reviewed implementation commit `7484ab78` on unchanged target base `8d89e10a`.
+- The commit contains only the default-off stage probe, fail-closed evidence contracts, local
+  gates, phase specification and rollback. It does not change production defaults or create a
+  Pathways numerical verdict.
+- The source-pinned handoff requires separate approval for r31 and retains
+  `NO_NUMERICAL_VERDICT` even when all six stages complete.
