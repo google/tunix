@@ -1,5 +1,11 @@
 # P33 five-JobSet queue
 
+> **2026-08-10 P38.2d amendment:** the next approved pair is FrozenLake
+> `backward-no-commit` plus GSM8K `full`. The renderer enables the bounded A/B
+> report policy only for GSM8K full. A successful GSM8K classifier is
+> `PASS_WITH_AB_REPORT_POLICY` with `claim_level=alignment-degraded`; it is not
+> a zero-TIM completion claim. Do not apply FrozenLake full.
+
 > **Current r17 recovery:** follow `P33_R17_HANDOFF.md`. It admits only GSM8K `full` and
 > FrozenLake `alignment-short`; do not apply the whole rendered directory.
 
@@ -40,8 +46,9 @@ not the model context length.
 
 Step 90 refuses a pre-existing evidence path before executing the command. A successful child
 process is then classified from the immutable update and alignment reports. The final log must
-contain one `[P33.RUN] VERDICT PASS` and one `[P33.RUN] JSON ...` line. The JSON includes SHA-256
-identities for the run log, update report and alignment report.
+contain one `[P33.RUN] VERDICT` and one `[P33.RUN] JSON ...` line. Strict jobs require `PASS`;
+P38.2d GSM8K full requires `PASS_WITH_AB_REPORT_POLICY`. The JSON includes SHA-256 identities
+for the run log, update report and alignment report.
 
 ## Pull and render
 
@@ -172,9 +179,13 @@ A green JobSet requires all of the following in the same Attempt 0 log:
 4. a monotonic-metrics close marker at the expected final step with zero regressions;
 5. FrozenLake only: exactly one evaluation-disabled attestation;
 6. the expected update count (`1`, `200` or `450`) and 16 alignment records per update;
-7. every three-boundary comparison at zero bytes, exact `w=r=w*r=1`, zero clip/TIS hits;
+7. strict jobs: every three-boundary comparison at zero bytes and exact
+   `w=r=w*r=1`; GSM8K full under P38.2d: only bounded A/B plus the derived
+   `w` and `w*r` observations may be reported, while B/C and old/current stay
+   exact; all jobs require zero effective clip/TIS hits;
 8. finite gradients, fixed DP16 reduction evidence and exact post-reduction replicas;
-9. `[P33.RUN] VERDICT PASS ... reasons=[]`.
+9. strict jobs: `[P33.RUN] VERDICT PASS ... reasons=[]`; GSM8K full under the
+   P38.2d amendment: `PASS_WITH_AB_REPORT_POLICY ... reasons=[]`.
 
 A missing classifier line, retry, stale evidence rejection, traceback, red boundary or wrong count
 is not a partial pass. Preserve the raw log and classify the named JobSet as failed or
@@ -187,6 +198,11 @@ Do not reapply the JobSet. Leaving all three P33 admission variables at their pr
 renderer/classifier CL; preserve all target logs and do not alter `main`.
 
 ## Preregistered launch contract: first flag-on full campaigns (2026-08-10)
+
+The GSM8K column below records the earlier strict contract. P38.2d supersedes
+only its A/B admission rule; the update budget, W&B, B/C, old/current,
+gradient, DP, and optimizer requirements remain unchanged. FrozenLake full is
+not admitted by P38.2d.
 
 User-approved launch of both full workloads under the verified proxy-XLA regime. Source must be
 pinned at or after the commit that records this contract; both JobSets render from

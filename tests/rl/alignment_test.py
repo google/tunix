@@ -372,6 +372,113 @@ class AlignmentTest(absltest.TestCase):
             step=1,
         )
 
+  def test_gsm8k_full_reports_bounded_ab_drift_and_keeps_hard_boundaries(self):
+    wrapped = self._wrapped(rows=100)
+    decode = wrapped.s_decode.copy()
+    decode[0, 1] = np.nextafter(decode[0, 1], np.float32(np.inf))
+    wrapped = wrapped.replace(s_decode=decode)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.GATE_ONLY_ENV: "0",
+            alignment.UPDATE_CANARY_ENV: "0",
+            alignment.TRAIN_ENV: "1",
+            alignment.PRE_GATE_ENV: "1",
+            alignment.GSM8K_AB_REPORT_ONLY_ENV: "1",
+            "CANON_P32_WORKLOAD": "gsm8k",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+            alignment.REPORT_ENV: os.path.join(tmpdir, "post.jsonl"),
+        },
+        clear=False,
+    ):
+      pre = alignment.check_pre_backward(wrapped, step=0)
+      post = alignment.check_batch(
+          wrapped,
+          t_current=wrapped.t_old,
+          gradient_norm=np.asarray(1.0, np.float32),
+          optimizer_skipped=np.asarray(0, np.int32),
+          step=0,
+      )
+    self.assertEqual(pre["verdict"], "PASS_WITH_REPORTED_DRIFT")
+    self.assertEqual(pre["blocking_reds"], [])
+    self.assertEqual(pre["reported_reds"], ["S_decode_vs_S_prefill"])
+    self.assertEqual(post["verdict"], "PASS_WITH_REPORTED_DRIFT")
+    self.assertEqual(post["blocking_reds"], [])
+    self.assertIn("S_decode_vs_S_prefill", post["reported_reds"])
+    self.assertTrue(post["exact"]["r_all_exactly_1"])
+    self.assertFalse(post["exact"]["w_all_exactly_1"])
+    self.assertFalse(post["exact"]["wr_all_exactly_1"])
+    self.assertEqual(post["clip_hits"], 0)
+    self.assertEqual(post["tis_hits"], 0)
+
+  def test_gsm8k_ab_policy_rejects_wrong_scope_and_out_of_budget_drift(self):
+    wrapped = self._wrapped()
+    with mock.patch.dict(
+        os.environ,
+        {
+            alignment.GATE_ONLY_ENV: "0",
+            alignment.UPDATE_CANARY_ENV: "0",
+            alignment.TRAIN_ENV: "1",
+            alignment.PRE_GATE_ENV: "1",
+            alignment.GSM8K_AB_REPORT_ONLY_ENV: "1",
+            "CANON_P32_WORKLOAD": "frozenlake",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "only for committed GSM8K"
+    ):
+      alignment.check_pre_backward(wrapped, step=0)
+
+    decode = wrapped.s_decode.copy()
+    decode[0, 1] += np.float32(1.0e-2)
+    wrapped = wrapped.replace(s_decode=decode)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.GATE_ONLY_ENV: "0",
+            alignment.UPDATE_CANARY_ENV: "0",
+            alignment.TRAIN_ENV: "1",
+            alignment.PRE_GATE_ENV: "1",
+            alignment.GSM8K_AB_REPORT_ONLY_ENV: "1",
+            "CANON_P32_WORKLOAD": "gsm8k",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "S_decode_vs_S_prefill"
+    ):
+      alignment.check_pre_backward(wrapped, step=0)
+
+  def test_gsm8k_ab_policy_rejects_nonfinite_values(self):
+    wrapped = self._wrapped()
+    decode = wrapped.s_decode.copy()
+    decode[0, 1] = np.nan
+    wrapped = wrapped.replace(s_decode=decode)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.GATE_ONLY_ENV: "0",
+            alignment.UPDATE_CANARY_ENV: "0",
+            alignment.TRAIN_ENV: "1",
+            alignment.PRE_GATE_ENV: "1",
+            alignment.GSM8K_AB_REPORT_ONLY_ENV: "1",
+            "CANON_P32_WORKLOAD": "gsm8k",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "S_decode_vs_S_prefill"
+    ):
+      alignment.check_pre_backward(wrapped, step=0)
+
   def test_execution_mode_rejects_multiple_modes(self):
     with mock.patch.dict(
         os.environ,

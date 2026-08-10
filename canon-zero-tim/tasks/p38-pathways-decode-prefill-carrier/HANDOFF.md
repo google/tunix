@@ -141,3 +141,23 @@ boundary. A tail-only repair is not admitted for a `0.10390` upstream signature.
 
 No tolerance, report-only committing mode, old-logprob recomputation, precision change, or
 optimizer commit is authorized by this handoff.
+
+The paragraph above records the original strict handoff. It is superseded only
+by the user-approved P38.2d amendment in
+`phases/p38-2d-gsm8k-bounded-ab-campaign.md`: committed report-only behavior is
+limited to bounded `S_decode_vs_S_prefill` drift in GSM8K full. It does not
+apply to FrozenLake, B/C, old/current, gradients, DP reduction, or optimizer
+integrity, and it disables a zero-TIM completion claim for that campaign. Old
+logprob recomputation and precision changes remain forbidden.
+
+## P38.2d operator handoff
+
+After pulling the source commit, render the P33 queue with a fresh run id. The
+renderer must show `CANON_GSM8K_AB_REPORT_ONLY=1` only in `gsm8k-full`; every
+other YAML must show `0`. Apply only the FrozenLake backward-no-commit and
+GSM8K full manifests. Do not apply FrozenLake full.
+
+The GSM8K classifier may exit successfully as
+`PASS_WITH_AB_REPORT_POLICY`. This means the run completed under a downgraded
+admission policy, not that A=B=C was proven. Archive the raw log and all
+alignment/update JSONL before deleting either JobSet.

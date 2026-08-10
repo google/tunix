@@ -169,3 +169,31 @@
   production paths exclude the probe.
 - Next: run the same discriminator on DP16xTP4 Pathways. A green target result
   still cannot replace the GSM8K and FrozenLake production probes.
+
+## 2026-08-10 UTC — P38.2d bounded campaign amendment
+
+- Type: user-authorized operational policy change.
+- Action: added a default-off, scope-checked GSM8K full A/B report policy with
+  preregistered `max_abs <= 1e-4` and byte-fraction `<= 4e-3` tripwires.
+- Preserved: B/C, old/current, `r`, clip/TIS, finite gradient, DP replica,
+  optimizer, and FrozenLake gates remain hard. The loss and old-logprob source
+  are unchanged.
+- Claim: a completed GSM8K run under this policy is
+  `alignment-degraded`, never a zero-TIM closure when drift is observed.
+- Companion job: FrozenLake backward-no-commit, all boundaries strict.
+- Rollback: set `CANON_GSM8K_AB_REPORT_ONLY=0` or revert the policy commit.
+
+## 2026-08-10 UTC — P38.2d local release gates
+
+- Type: frozen-image CPU and overlay verification.
+- Command: `sudo docker run --rm --entrypoint bash -e PYTHONDONTWRITEBYTECODE=1 -e JAX_PLATFORMS=cpu -v "$PWD:/workspace:ro" -w /workspace tunix_frozenlake_image:vllm-tpu0.25.0 -lc 'bash canon-zero-tim/tests/p33_workloads/run_cpu.sh'`.
+- Result: PASS. The workload/classifier suite ran 66 tests, the alignment suite
+  ran 24 tests, all adjacent suites passed, the GSM8K policy preflight accepted
+  only the committed full-train scope, and the final CPU gate printed
+  `[P33.WORKLOAD] CPU_GATE PASS`.
+- Command: `bash canon-zero-tim/tests/p33_workloads/run_exact_image.sh`.
+- Result: `P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 overlays=2`.
+- Status: local implementation complete; the DP16xTP4 target campaign is
+  `NOT RUN` and no target numerical claim is made.
+- Rollback: leave `CANON_GSM8K_AB_REPORT_ONLY=0`, or revert the bounded-policy
+  commit. The strict default path is unchanged.

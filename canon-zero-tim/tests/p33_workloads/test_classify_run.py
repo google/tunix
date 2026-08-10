@@ -20,10 +20,28 @@ sys.modules[_MODULE_SPEC.name] = classifier
 _MODULE_SPEC.loader.exec_module(classifier)
 
 
-def _alignment(step: int, *, optimizer_skipped: bool) -> dict:
+def _policy(enabled: bool) -> dict:
   return {
+      "id": classifier._AB_POLICY_ID,
+      "enabled": enabled,
+      "workload": "gsm8k" if enabled else "",
+      "stage": "full" if enabled else "",
+      "max_abs_limit": classifier._AB_MAX_ABS,
+      "byte_fraction_limit": classifier._AB_MAX_BYTE_FRACTION,
+      "claim_level": "alignment-degraded" if enabled else "strict-zero-tim",
+  }
+
+
+def _alignment(
+    step: int, *, optimizer_skipped: bool, ab_policy: bool = False,
+    degraded: bool = False
+) -> dict:
+  record = {
       "verdict": "PASS",
       "reds": [],
+      "blocking_reds": [],
+      "reported_reds": [],
+      "admission_policy": _policy(ab_policy),
       "execution_mode": "train",
       "step": step,
       "N_action": 4,
@@ -37,12 +55,35 @@ def _alignment(step: int, *, optimizer_skipped: bool) -> dict:
       "optimizer_skipped": optimizer_skipped,
       "gradient": {"finite": True, "nonzero": True, "norm": 1.0},
   }
+  if degraded:
+    record["verdict"] = "PASS_WITH_REPORTED_DRIFT"
+    record["reds"] = [
+        "S_decode_vs_S_prefill",
+        "w_all_exactly_1",
+        "wr_all_exactly_1",
+    ]
+    record["reported_reds"] = list(record["reds"])
+    record["boundaries"]["S_decode_vs_S_prefill"] = {
+        "valid": True,
+        "finite": True,
+        "differing_bytes": 1,
+        "byte_fraction": 1.0e-6,
+        "max_abs": 1.0e-6,
+    }
+    record["exact"]["w_all_exactly_1"] = False
+    record["exact"]["wr_all_exactly_1"] = False
+  return record
 
 
-def _pre_alignment(step: int) -> dict:
-  return {
+def _pre_alignment(
+    step: int, *, ab_policy: bool = False, degraded: bool = False
+) -> dict:
+  record = {
       "verdict": "PASS",
       "reds": [],
+      "blocking_reds": [],
+      "reported_reds": [],
+      "admission_policy": _policy(ab_policy),
       "step": step,
       "N_action": 4,
       "boundaries": {
@@ -50,6 +91,18 @@ def _pre_alignment(step: int) -> dict:
           for name in classifier._PRE_BOUNDARIES
       },
   }
+  if degraded:
+    record["verdict"] = "PASS_WITH_REPORTED_DRIFT"
+    record["reds"] = ["S_decode_vs_S_prefill"]
+    record["reported_reds"] = ["S_decode_vs_S_prefill"]
+    record["boundaries"]["S_decode_vs_S_prefill"] = {
+        "valid": True,
+        "finite": True,
+        "differing_bytes": 1,
+        "byte_fraction": 1.0e-6,
+        "max_abs": 1.0e-6,
+    }
+  return record
 
 
 def _update(index: int) -> dict:
@@ -94,11 +147,15 @@ class ClassifyP33RunTest(unittest.TestCase):
       )
       self._write_jsonl(updates, (_update(index) for index in range(200)))
       self._write_jsonl(
-          pre_alignments, (_pre_alignment(index) for index in range(200))
+          pre_alignments,
+          (_pre_alignment(index, ab_policy=True) for index in range(200)),
       )
       self._write_jsonl(
           alignments,
-          (_alignment(index, optimizer_skipped=False) for index in range(3200)),
+          (
+              _alignment(index, optimizer_skipped=False, ab_policy=True)
+              for index in range(3200)
+          ),
       )
       record = classifier.classify(
           workload="gsm8k",
@@ -108,9 +165,75 @@ class ClassifyP33RunTest(unittest.TestCase):
           update_report=updates,
           alignment_report=alignments,
       )
-      self.assertEqual(record["verdict"], "PASS")
+      self.assertEqual(record["verdict"], "PASS_WITH_AB_REPORT_POLICY")
       self.assertEqual(record["observed_updates"], 200)
       self.assertEqual(record["observed_alignments"], 3200)
+
+  def test_full_gsm8k_accepts_only_bounded_reported_ab_drift(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      run_log = root / "run.log"
+      updates = root / "updates.jsonl"
+      pre_alignments = root / "pre_alignment.jsonl"
+      alignments = root / "alignment.jsonl"
+      run_log.write_text(
+          "[CANON_P33_WANDB] ONLINE_RUN_PASS\n"
+          "[CANON_P31_METRICS] monotonic_direct last_step=199 events=200 regressions=0\n"
+          + "[CANON_P33_DP16] update_step_committed\n" * 200,
+          encoding="utf-8",
+      )
+      self._write_jsonl(updates, (_update(index) for index in range(200)))
+      pre_rows = [
+          _pre_alignment(index, ab_policy=True) for index in range(200)
+      ]
+      pre_rows[0] = _pre_alignment(0, ab_policy=True, degraded=True)
+      self._write_jsonl(pre_alignments, pre_rows)
+      alignment_rows = [
+          _alignment(index, optimizer_skipped=False, ab_policy=True)
+          for index in range(3200)
+      ]
+      alignment_rows[0] = _alignment(
+          0, optimizer_skipped=False, ab_policy=True, degraded=True
+      )
+      self._write_jsonl(alignments, alignment_rows)
+      record = classifier.classify(
+          workload="gsm8k",
+          stage="full",
+          run_log=run_log,
+          pre_alignment_report=pre_alignments,
+          update_report=updates,
+          alignment_report=alignments,
+      )
+      self.assertEqual(record["verdict"], "PASS_WITH_AB_REPORT_POLICY")
+      self.assertEqual(record["pre_alignment_reported_drift_records"], 1)
+      self.assertEqual(record["alignment_reported_drift_records"], 1)
+      self.assertEqual(record["claim_level"], "alignment-degraded")
+
+  def test_reported_ab_policy_rejects_budget_overrun_and_frozenlake(self):
+    over_budget = _pre_alignment(0, ab_policy=True, degraded=True)
+    over_budget["boundaries"]["S_decode_vs_S_prefill"]["max_abs"] = 1.0e-2
+    reasons = []
+    classifier._validate_pre_alignment_records(
+        [over_budget],
+        expected_count=1,
+        workload="gsm8k",
+        stage="full",
+        reasons=reasons,
+    )
+    self.assertIn(
+        "pre_alignment[0].S_decode_vs_S_prefill.max_abs", reasons
+    )
+
+    frozenlake = _pre_alignment(0, ab_policy=True, degraded=True)
+    reasons = []
+    classifier._validate_pre_alignment_records(
+        [frozenlake],
+        expected_count=1,
+        workload="frozenlake",
+        stage="backward-no-commit",
+        reasons=reasons,
+    )
+    self.assertIn("pre_alignment[0].unexpected_degraded", reasons)
 
   def test_full_frozenlake_positive(self):
     with tempfile.TemporaryDirectory() as tmp:

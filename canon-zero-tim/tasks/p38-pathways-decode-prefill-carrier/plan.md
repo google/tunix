@@ -21,6 +21,7 @@ while A-B is red.
 | P38.4 | One diagnostic backward with optimizer forcibly skipped | B-C and T-old/T-current stay hard; model and optimizer arrays do not change | pending |
 | P38.5 | Carrier-specific numerical repair | A-B returns to zero under the source-pinned flag-on regime | pending |
 | P38.6 | GSM8K and FrozenLake full campaigns | All step-0 boundaries are zero and the unchanged hard gates automatically admit training | pending |
+| P38.2d | User-approved bounded GSM8K full campaign plus strict FrozenLake backward-no-commit | Renderer, preflight, runtime gate, classifier, and negative controls enforce the workload-specific policy | active |
 
 ## Decisions
 
@@ -49,3 +50,7 @@ while A-B is red.
   shard layouts, processed-target values, target logprobs, and implied
   normalizers. A shared Python callable already exists; only equal compilation
   signatures can support a one-executable claim.
+- Amendment (2026-08-10): the user explicitly authorized one committed GSM8K
+  full campaign with bounded A/B drift reported rather than blocked. This does
+  not replace P38.5 or P38.6 and cannot support a zero-TIM completion claim.
+  FrozenLake remains fail-closed and is limited to backward-no-commit.

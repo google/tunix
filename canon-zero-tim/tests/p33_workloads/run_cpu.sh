@@ -134,6 +134,41 @@ validate_admitted_preflight() (
 
 validate_admitted_preflight
 
+validate_gsm8k_ab_report_policy_preflight() (
+  set -euo pipefail
+  local state
+  state="$(mktemp -d)"
+  trap 'rm -r "$state"' EXIT
+  export CANON_PKG="$ROOT"
+  export CANON_STATE="$state"
+  export CANON_MODE=run
+  export CANON_PROFILE_FILE=cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env
+  export CANON_P32_TRAIN_ADMITTED=1
+  export CANON_P32_DP_REDUCTION_ADMITTED=1
+  export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+  export CANON_P33_SHARED_MESH=16,4
+  export CANON_P33_RUN_STAGE=full
+  export CANON_P33_NO_COMMIT=0
+  export CANON_GSM8K_AB_REPORT_ONLY=1
+  export CANON_RUN_CMD="printf ab-report-policy-preflight-only"
+  export CANON_RUN_LOG="$state/run.log"
+  export CANON_PRE_ALIGN_REPORT="$state/pre_alignment.jsonl"
+  export CANON_ALIGN_REPORT="$state/alignment.jsonl"
+  export CANON_UPDATE_REPORT="$state/updates.jsonl"
+  export INJECTED_WANDB_API_KEY=test-key-not-a-credential
+  bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
+  grep -q 'export CANON_GSM8K_AB_REPORT_ONLY=1' "$state/env.sh"
+
+  export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P33.WORKLOAD] FrozenLake accepted the GSM8K A/B report policy" >&2
+    exit 1
+  fi
+  echo "[P33.WORKLOAD] AB_REPORT_POLICY_PREFLIGHT_PASS gsm8k=accepted frozenlake=rejected"
+)
+
+validate_gsm8k_ab_report_policy_preflight
+
 validate_p35_preflight() (
   set -euo pipefail
   local state

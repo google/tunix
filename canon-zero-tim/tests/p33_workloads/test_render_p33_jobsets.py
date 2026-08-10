@@ -148,6 +148,41 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertIn("--max_response_length=512", short_env["CANON_RUN_CMD"])
       self.assertIn("--env_max_steps=2", short_env["CANON_RUN_CMD"])
       self.assertEqual(by_stage[("frozenlake", "full")]["CANON_P33_SHORT_ALIGNMENT"], "0")
+      self.assertEqual(
+          by_stage[("gsm8k", "full")]["CANON_GSM8K_AB_REPORT_ONLY"],
+          "1",
+      )
+      for workload_name, stage in (
+          ("gsm8k", "alignment-short"),
+          ("frozenlake", "alignment-short"),
+          ("frozenlake", "backward-no-commit"),
+          ("frozenlake", "full"),
+      ):
+        self.assertEqual(
+            by_stage[(workload_name, stage)]["CANON_GSM8K_AB_REPORT_ONLY"],
+            "0",
+        )
+
+  def test_rejects_report_policy_outside_gsm8k_full(self):
+    base = renderer.load_base(_BASE_PATH)
+    spec = next(
+        item for item in renderer._SPECS
+        if item.key == "frozenlake-backward-no-commit"
+    )
+    document = renderer.render_jobset(base, spec, _SOURCE_COMMIT, _RUN_ID)
+    pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    main = next(
+        item for item in pod["containers"] if item["name"] == "jax-tpu"
+    )
+    policy = next(
+        item for item in main["env"]
+        if item["name"] == "CANON_GSM8K_AB_REPORT_ONLY"
+    )
+    policy["value"] = "1"
+    with self.assertRaisesRegex(ValueError, "environment drifted"):
+      renderer.validate_jobset(document, spec, _SOURCE_COMMIT, _RUN_ID)
 
   def test_frozenlake_jobs_disable_periodic_evaluation(self):
     with tempfile.TemporaryDirectory() as tmp:

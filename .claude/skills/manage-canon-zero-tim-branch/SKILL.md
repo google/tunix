@@ -20,6 +20,10 @@ mechanism itself.
 - Do not push, open a PR, apply a JobSet, or allocate/change cloud resources without explicit
   approval.
 - Keep code docstrings and program output in English.
+- An explicit user-approved operational exception does not turn a red numerical boundary green.
+  Encode it as a default-off, scope-locked policy with preregistered bounds, a distinct verdict
+  and claim level, negative controls for every rejected scope, and a one-switch rollback. Preserve
+  the original strict gate for all other workloads, stages, and boundaries.
 
 ## 1. Resolve the exact object under review
 
@@ -139,6 +143,11 @@ When the user asks for a fix:
    the secret-bearing values.
 7. Show the proposed commits, tests, residual `NOT RUN` items, and rollback before requesting
    push approval.
+
+If a user has explicitly approved a bounded training exception, additionally require the runtime
+record and final classifier to distinguish `reported_reds` from `blocking_reds`. A successful
+process exit under that exception must use a non-zero-TIM verdict name and must never be promoted
+to `TARGET PASS` for the original bitwise claim.
 
 ## 7. Report the result
 

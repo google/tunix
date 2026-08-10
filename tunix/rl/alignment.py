@@ -40,6 +40,10 @@ REPORT_ENV = "CANON_ALIGN_REPORT"
 PRE_GATE_ENV = "CANON_PRE_ALIGN_GATE"
 PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
 PRECHECK_ONLY_ENV = "CANON_P38_PRECHECK_ONLY"
+GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
+_GSM8K_AB_POLICY_ID = "gsm8k-full-ab-report-v1"
+_GSM8K_AB_MAX_ABS = 1.0e-4
+_GSM8K_AB_MAX_BYTE_FRACTION = 4.0e-3
 _MAX_MISMATCH_DETAILS = 1024
 
 
@@ -145,6 +149,73 @@ def execution_mode() -> str:
         f"{GATE_ONLY_ENV}=1, {UPDATE_CANARY_ENV}=1, or {TRAIN_ENV}=1"
     )
   return enabled_modes[0]
+
+
+def gsm8k_ab_report_policy() -> dict[str, Any]:
+  """Returns the narrow, preregistered GSM8K full-run A/B policy."""
+  raw = os.environ.get(GSM8K_AB_REPORT_ONLY_ENV, "")
+  if raw not in ("", "0", "1"):
+    raise AlignmentGateError(
+        f"{GSM8K_AB_REPORT_ONLY_ENV} must be exactly 0 or 1, got {raw!r}"
+    )
+  enabled_policy = raw == "1"
+  workload = os.environ.get("CANON_P32_WORKLOAD", "")
+  stage = os.environ.get("CANON_P33_RUN_STAGE", "")
+  no_commit = os.environ.get("CANON_P33_NO_COMMIT", "")
+  if enabled_policy:
+    admitted = (
+        workload == "gsm8k"
+        and stage == "full"
+        and no_commit == "0"
+        and execution_mode() == "train"
+    )
+    if not admitted:
+      raise AlignmentGateError(
+          f"{GSM8K_AB_REPORT_ONLY_ENV}=1 is admitted only for committed "
+          "GSM8K full training"
+      )
+  return {
+      "id": _GSM8K_AB_POLICY_ID,
+      "enabled": enabled_policy,
+      "workload": workload,
+      "stage": stage,
+      "max_abs_limit": _GSM8K_AB_MAX_ABS,
+      "byte_fraction_limit": _GSM8K_AB_MAX_BYTE_FRACTION,
+      "claim_level": (
+          "alignment-degraded" if enabled_policy else "strict-zero-tim"
+      ),
+  }
+
+
+def _masked_pair_is_finite(a: Any, b: Any, mask: Any) -> bool:
+  """Returns whether a shape-valid masked pair contains only finite values."""
+  aa = np.asarray(a)
+  bb = np.asarray(b)
+  mm = np.asarray(mask, dtype=np.bool_)
+  if aa.shape != bb.shape or aa.shape != mm.shape:
+    return False
+  return bool(np.all(np.isfinite(aa[mm])) and np.all(np.isfinite(bb[mm])))
+
+
+def _ab_drift_is_reportable(
+    difference: dict[str, Any],
+    *,
+    max_abs: float | str | None,
+    finite: bool,
+    policy: dict[str, Any],
+) -> bool:
+  """Returns whether an A/B drift is inside the preregistered report budget."""
+  return bool(
+      policy["enabled"]
+      and difference.get("valid") is True
+      and difference.get("differing_bytes", 0) > 0
+      and finite
+      and isinstance(max_abs, (int, float))
+      and np.isfinite(max_abs)
+      and max_abs <= policy["max_abs_limit"]
+      and isinstance(difference.get("byte_fraction"), (int, float))
+      and difference["byte_fraction"] <= policy["byte_fraction_limit"]
+  )
 
 
 def wrap_train_example(
@@ -563,9 +634,11 @@ def check_pre_backward(
   to = np.asarray(sidecar.t_old)
   mask = np.asarray(sidecar.action_mask, dtype=np.bool_)
   n_action = int(mask.sum())
-  reds: list[str] = []
+  policy = gsm8k_ab_report_policy()
+  blocking_reds: list[str] = []
+  reported_reds: list[str] = []
   if n_action == 0:
-    reds.append("N_action=0")
+    blocking_reds.append("N_action=0")
   boundaries = {}
   for name, a, b in (
       ("S_decode_vs_S_prefill", sd, sp),
@@ -602,18 +675,38 @@ def check_pre_backward(
               )
           )
       )
+    finite = _masked_pair_is_finite(a, b, mask)
     boundaries[name] = {
         **difference,
         "max_abs": max_abs,
         "max_abs_mismatch": max_abs_mismatch,
+        "finite": finite,
     }
-    if difference["differing_bytes"] != 0:
-      reds.append(name)
+    if difference["valid"] is not True or not finite:
+      blocking_reds.append(name)
+    elif difference["differing_bytes"] != 0:
+      if name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
+          difference, max_abs=max_abs, finite=finite, policy=policy
+      ):
+        reported_reds.append(name)
+      else:
+        blocking_reds.append(name)
+  verdict = (
+      "FAIL"
+      if blocking_reds
+      else "PASS_WITH_REPORTED_DRIFT"
+      if reported_reds
+      else "PASS"
+  )
+  reds = blocking_reds + reported_reds
   record = {
       "timestamp": time.time(),
       "step": int(step),
-      "verdict": "PASS" if not reds else "FAIL",
+      "verdict": verdict,
       "reds": reds,
+      "blocking_reds": blocking_reds,
+      "reported_reds": reported_reds,
+      "admission_policy": policy,
       "N_action": n_action,
       "boundaries": boundaries,
       "hashes": {
@@ -660,9 +753,10 @@ def check_pre_backward(
       f"bounds={[(name, value['differing_bytes']) for name, value in boundaries.items()]}",
       flush=True,
   )
-  if reds and fail_closed:
+  if blocking_reds and fail_closed:
     raise AlignmentGateError(
-        f"pre-backward alignment gate RED: {reds}; report={report_path}"
+        "pre-backward alignment gate RED: "
+        f"{blocking_reds}; report={report_path}"
     )
   return record
 
@@ -693,23 +787,25 @@ def check_batch(
   mask = np.asarray(sidecar.action_mask, dtype=np.bool_)
   sampling_values = np.asarray(sidecar.sampling_values, dtype=np.float32)
   n_action = int(mask.sum())
-  reds: list[str] = []
+  policy = gsm8k_ab_report_policy()
+  blocking_reds: list[str] = []
+  reported_reds: list[str] = []
   if n_action == 0:
-    reds.append("N_action=0")
+    blocking_reds.append("N_action=0")
   canonical_c = None
   if os.environ.get("CANON_ENGINE_MODULE_C", "") != "1":
-    reds.append("CANON_ENGINE_MODULE_C!=1")
+    blocking_reds.append("CANON_ENGINE_MODULE_C!=1")
   else:
     from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
 
     canonical_c = canonical_forward.attestation()
   if sampling_values.shape != (sd.shape[0], 3):
-    reds.append(
+    blocking_reds.append(
         "sampling_values_shape="
         f"{sampling_values.shape},expected={(sd.shape[0], 3)}"
     )
   elif not np.all(sampling_values == sampling_values[:1]):
-    reds.append("sampling_values_vary_within_batch")
+    blocking_reds.append("sampling_values_vary_within_batch")
   sampling_row = (
       sampling_values[0]
       if sampling_values.shape == (sd.shape[0], 3) and sd.shape[0]
@@ -723,14 +819,26 @@ def check_batch(
       ("T_old_vs_T_current", to, tc),
   ):
     difference = _masked_bitwise_difference(a, b, mask)
-    max_abs = float("nan")
+    max_abs: float | str = "nan"
     if a.shape == b.shape == mask.shape and n_action:
-      max_abs = float(
+      max_abs = _json_number(
           np.max(np.abs(a.astype(np.float64)[mask] - b.astype(np.float64)[mask]))
       )
-    boundaries[name] = {**difference, "max_abs": max_abs}
-    if difference["differing_bytes"] != 0:
-      reds.append(name)
+    finite = _masked_pair_is_finite(a, b, mask)
+    boundaries[name] = {
+        **difference,
+        "max_abs": max_abs,
+        "finite": finite,
+    }
+    if difference["valid"] is not True or not finite:
+      blocking_reds.append(name)
+    elif difference["differing_bytes"] != 0:
+      if name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
+          difference, max_abs=max_abs, finite=finite, policy=policy
+      ):
+        reported_reds.append(name)
+      else:
+        blocking_reds.append(name)
 
   w = np.exp(to.astype(np.float64) - sd.astype(np.float64))
   r = np.exp(tc.astype(np.float64) - to.astype(np.float64))
@@ -740,15 +848,23 @@ def check_batch(
       "r_all_exactly_1": bool(np.all(r[mask] == 1.0)),
       "wr_all_exactly_1": bool(np.all(wr[mask] == 1.0)),
   }
+  ab_reported = "S_decode_vs_S_prefill" in reported_reds
   for key, ok in exact.items():
-    if not ok:
-      reds.append(key)
-  clip_hits = int(np.sum((r[mask] < 0.8) | (r[mask] > 1.28)))
+    if ok:
+      continue
+    if ab_reported and key in ("w_all_exactly_1", "wr_all_exactly_1"):
+      reported_reds.append(key)
+    else:
+      blocking_reds.append(key)
+  # Canonical GSM8K keeps rollout logprobs as the PPO old values.  Therefore
+  # the ratio that actually reaches the loss is w*r = exp(T_current-A), while
+  # r separately attests the trainer-old/current program boundary.
+  clip_hits = int(np.sum((wr[mask] < 0.8) | (wr[mask] > 1.28)))
   tis_hits = int(np.sum(w[mask] > 2.0))
   if clip_hits:
-    reds.append(f"clip_hits={clip_hits}")
+    blocking_reds.append(f"clip_hits={clip_hits}")
   if tis_hits:
-    reds.append(f"tis_hits={tis_hits}")
+    blocking_reds.append(f"tis_hits={tis_hits}")
 
   grad_norm = float(np.asarray(gradient_norm))
   gradient = {
@@ -757,7 +873,7 @@ def check_batch(
       "nonzero": bool(grad_norm > 0.0),
   }
   if not gradient["finite"]:
-    reds.append("gradient_nonfinite")
+    blocking_reds.append("gradient_nonfinite")
   # A real GRPO group may legitimately have identical rewards and therefore a
   # zero advantage/gradient.  Keep that measurement visible, but do not turn
   # it into a numerical alignment red in the multi-step training mode.  The
@@ -769,15 +885,26 @@ def check_batch(
       and os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
   )
   if not gradient["nonzero"] and mode != "train" and not p27_real_update:
-    reds.append("gradient_zero")
+    blocking_reds.append("gradient_zero")
 
   delta = (tc.astype(np.float64) - sd.astype(np.float64))[mask]
+  verdict = (
+      "FAIL"
+      if blocking_reds
+      else "PASS_WITH_REPORTED_DRIFT"
+      if reported_reds
+      else "PASS"
+  )
+  reds = blocking_reds + reported_reds
   record = {
       "timestamp": time.time(),
       "step": int(step),
       "execution_mode": mode,
-      "verdict": "PASS" if not reds else "FAIL",
+      "verdict": verdict,
       "reds": reds,
+      "blocking_reds": blocking_reds,
+      "reported_reds": reported_reds,
+      "admission_policy": policy,
       "N_action": n_action,
       "boundaries": boundaries,
       "exact": exact,
@@ -836,8 +963,9 @@ def check_batch(
       f"w/r/wr={exact} clip={clip_hits} tis={tis_hits} grad_norm={grad_norm:.6g}",
       flush=True,
   )
-  if reds and fail_closed:
+  if blocking_reds and fail_closed:
     raise AlignmentGateError(
-        f"alignment gate RED mode={mode}: {reds}; report={report_path}"
+        "alignment gate RED mode="
+        f"{mode}: {blocking_reds}; report={report_path}"
     )
   return record
