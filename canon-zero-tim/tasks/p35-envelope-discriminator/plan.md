@@ -77,7 +77,7 @@ autoscaler eviction. Replay must be bounded and instrumented before r30.
 
 ### Phase P35.3b — Bounded replay execution repair
 
-Status: locally complete; target r30 pending
+Status: locally complete and published; target r30 pending
 
 Persist the completed P35.2 evidence before replay and serialize every captured record with
 explicit begin/complete markers while preserving the original numerical program boundaries. A

@@ -1,12 +1,12 @@
 # P35 envelope discriminator state
 
 - Status: active; P35.2 target complete, P35.3 target r29 infrastructure-inconclusive
-- Active phase: P35.3b local complete; source review and target r30 pending
+- Active phase: P35.3b published; target r30 pending
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
-- Reviewed implementation commit: `366ac2b1ff2806b48646a0188927e724bf569978`
-- Updated: 2026-08-09 UTC
+- Reviewed implementation commit: `9344259f1582cd7c3eb8954474ce44854cca6ce6`
+- Updated: 2026-08-10 UTC
 
 ## Objective
 
@@ -161,10 +161,9 @@ Evidence: `artifacts/p35_1_local_gate.md`, `artifacts/p35_2_local_gate.md` and
 
 ## Next action
 
-Review the bounded replay diff, then commit and publish it only after user approval. Render r30
-from that concrete source SHA and run one Attempt 0. Copy the preliminary report even if replay
-fails; a target numerical classification still requires the final P35.2 and P35.3 artifacts.
-The one-host result remains a platform contrast only.
+Render r30 from reviewed source `9344259f1582cd7c3eb8954474ce44854cca6ce6` and run one Attempt 0.
+Copy the preliminary report even if replay fails; a target numerical classification still
+requires the final P35.2 and P35.3 artifacts. The one-host result remains a platform contrast only.
 
 ## Hard gates
 
@@ -180,9 +179,9 @@ The one-host result remains a platform contrast only.
 
 ## Blockers
 
-The bounded P35.3b implementation has local CPU, exact-image and one-host TP4 evidence. It is not
-yet committed or published. The direct-attached production run did not reproduce the known
-carrier, and only another 64-chip Pathways attempt can decide the target result.
+The bounded P35.3b implementation is published with local CPU, exact-image and one-host TP4
+evidence. The direct-attached production run did not reproduce the known carrier, and only
+another 64-chip Pathways attempt can decide the target result.
 
 ## Rollback
 

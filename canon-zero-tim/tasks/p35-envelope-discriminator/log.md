@@ -298,3 +298,15 @@ runtime default, model value, precision, optimizer, checkpoint, credential or cl
   SHA-256 `2d2aca9c4c25bffd58e48a66ebe4177eeaba9068c8c86d9f983798b3121638b8`.
 - Local mechanics are closed; target status remains pending. No commit, push or 64-chip run was
   performed.
+
+## 2026-08-10 — P35.3b bounded replay repair committed for publication
+
+- Created reviewed implementation commit `9344259f` on unchanged remote base `a3cdc852`.
+- The commit preserves the default-off numerical program, publishes the preliminary evidence and
+  serialized-record repair, and corrects the r28/r29 evidence index without asserting an OOM,
+  eviction, host transfer, gRPC limit, or target numerical result.
+- Pre-commit gates: frozen-image CPU contracts PASS (59 + 13 + 10 + 14 + 20 tests), renderer
+  unit tests 4/4 PASS, classifier self-test PASS, AST/shell checks PASS, credential and executable
+  language scans clean, and `git diff --check` PASS.
+- Next external action: push the reviewed commits, render r30 from the resulting source pin, and
+  run one 64-chip Attempt 0. No target run or cloud-resource lifecycle change occurred here.

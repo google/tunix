@@ -2,9 +2,9 @@
 
 Updated: 2026-08-10 UTC
 
-The published r29 implementation is `cf4c12e4003199cd80c73603f8b54a0f80f49657` on
-`yuxzhang/canon-zero-tim`. The bounded r30 repair is locally verified but not yet committed or
-published. Do not render r30 until a reviewed source SHA containing P35.3b is pushed.
+The reviewed bounded-r30 implementation is `9344259f1582cd7c3eb8954474ce44854cca6ce6` on
+`yuxzhang/canon-zero-tim`. Its local CPU, exact-image and four-device TP4 gates are complete. The
+64-chip target result remains pending until r30 returns.
 
 ## Current target result
 
