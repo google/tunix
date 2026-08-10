@@ -196,6 +196,11 @@ class RolloutOrchestrator:
           env.extra_kwargs["pair_index"],
           episode_count,
       )
+      try:
+        await asyncio.get_running_loop().run_in_executor(None, env.close)
+      except Exception as close_err:
+        logging.error("Failed to close environment: %s", close_err)
+
 
   async def run_producers_from_stream(
       self,
