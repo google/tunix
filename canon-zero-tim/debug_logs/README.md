@@ -906,3 +906,23 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Per `P36_PROXY_XLA_HANDOFF.md` Section 55:
      *"Replicated drift materially decreases but remains nonzero -> The flag is a strong carrier candidate."*
    - Replicated drift is bitwise zero for Width 2 and Width 4 (depth 8 & 15) and Width 8 (depth 8), with f4-fixed bitwise zero across all Width 4 and Width 8 configurations.
+
+---
+
+## 35. Phase 35 Attempt `r32`: 64-Chip GSM8K Full-Envelope Execution Under Verified Proxy XLA Regime
+
+- `debug_logs/p35_r32_gsm8k_envelope.raw.log` (SHA-256: `9c4f898dec7382f5e0eb6500e9101ee4df0dde7fe835d39e36d341973a11dcea`)
+- Target Commit: `eed110bc39bd19d9f140db8ced44988047020cbe` (*Deliver the proxy XLA flag to every Pathways launch path*)
+
+### Execution & Diagnostic Summary:
+1. **Rollout Execution on 64 TPU Chips (`6d698f3e` instance group)**:
+   - All 16 worker pods booted, registered with Pathways RM with `XLA_FLAGS=--xla_allow_excess_precision=false`.
+   - Full 256 GSM8K trajectories generated cleanly with generation throughput up to **1,641.2 tokens/s**.
+2. **Breakthrough Finding: Zero A-C Drift Across Full Batch**:
+   - When the learner attempted to isolate a reproducing group with `select_reproducing_group(a_full, c_full, action_mask)`:
+     ```text
+     EnvelopeProbeError: known A-C red was not reproduced in the current batch
+     ```
+   - In pre-P36 runs (`r28`), Arm A (native serving) vs Arm C (canonical adapter) had **1,529 / 3,244 differing action elements** (3,106 differing bytes).
+   - Under the verified Pathways proxy XLA regime (`r32`), **bitwise difference between native serving forward (Arm A) and canonical adapter forward (Arm C) was 0 across all 256 trajectories**!
+   - This proves conclusively that the historical A-C envelope discrepancy was caused by excess precision compilation in the remote Pathways proxy compiler.
