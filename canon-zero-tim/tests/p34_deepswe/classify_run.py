@@ -67,7 +67,12 @@ def _scheduler_measurements(
 
 
 def classify(
-    *, log_text: str, alignment: list[dict[str, Any]], updates: list[dict[str, Any]], stage: str
+    *,
+    log_text: str,
+    pre_alignment: list[dict[str, Any]],
+    alignment: list[dict[str, Any]],
+    updates: list[dict[str, Any]],
+    stage: str,
 ) -> dict[str, Any]:
   """Returns the complete verdict without synthesizing missing evidence."""
   if stage not in _STAGE_UPDATES:
@@ -102,6 +107,24 @@ def classify(
       "scheduler_bucket_exact": scheduler_buckets == [[4096]],
       "scheduler_precompile_exact": scheduler_precompiles
       == [{"num_tokens": 4096, "num_reqs": 64}],
+      "pre_alignment_count": len(pre_alignment) == expected_updates,
+      "pre_alignment_pass": all(
+          record.get("verdict") == "PASS" for record in pre_alignment
+      ),
+      "pre_backward_boundaries_exact": all(
+          record.get("N_action", 0) > 0
+          and all(
+              record.get("boundaries", {})
+              .get(name, {})
+              .get("differing_bytes")
+              == 0
+              for name in (
+                  "S_decode_vs_S_prefill",
+                  "S_prefill_vs_T_old",
+              )
+          )
+          for record in pre_alignment
+      ),
       "alignment_count": len(alignment) == expected_alignment,
       "alignment_pass": all(record.get("verdict") == "PASS" for record in alignment),
       "four_boundaries_exact": all(
@@ -158,6 +181,7 @@ def classify(
       "stage": stage,
       "verdict": "PASS" if not failed else "FAIL",
       "expected_updates": expected_updates,
+      "expected_pre_alignment_records": expected_updates,
       "expected_alignment_records": expected_alignment,
       "scheduler_buckets": scheduler_buckets,
       "scheduler_precompiles": scheduler_precompiles,
@@ -170,12 +194,14 @@ def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--stage", required=True, choices=tuple(_STAGE_UPDATES))
   parser.add_argument("--run-log", type=Path, required=True)
+  parser.add_argument("--pre-alignment-report", type=Path, required=True)
   parser.add_argument("--alignment-report", type=Path, required=True)
   parser.add_argument("--update-report", type=Path, required=True)
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
   report = classify(
       log_text=args.run_log.read_text(errors="replace"),
+      pre_alignment=_json_records(args.pre_alignment_report),
       alignment=_json_records(args.alignment_report),
       updates=_json_records(args.update_report),
       stage=args.stage,

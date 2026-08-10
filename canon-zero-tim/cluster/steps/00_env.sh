@@ -158,6 +158,7 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P34_PREFIX_CACHE CANON_P34_MAX_NUM_SEQS \
            CANON_P34_MAX_BATCHED_TOKENS CANON_P34_STRICT_CLI \
            CANON_P34_DISABLE_SAMPLER_IS CANON_P34_DISABLE_TIS \
+           CANON_PRE_ALIGN_GATE \
            CANON_TRAIN_DP_SHARDING FL_SHARED_MESH \
            CANON_P34_WHITELIST CANON_P34_WHITELIST_SHA256; do
     req "$k"
@@ -217,8 +218,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   }
   [ "${CANON_P34_STRICT_CLI:-}" = "1" ] && \
   [ "${CANON_P34_DISABLE_SAMPLER_IS:-}" = "1" ] && \
-  [ "${CANON_P34_DISABLE_TIS:-}" = "1" ] || {
-    echo "[env] P34 strict CLI and neutral importance paths are mandatory" >&2; fail=1;
+  [ "${CANON_P34_DISABLE_TIS:-}" = "1" ] && \
+  [ "${CANON_PRE_ALIGN_GATE:-}" = "1" ] || {
+    echo "[env] P34 strict CLI, neutral importance paths and pre-backward gate are mandatory" >&2; fail=1;
   }
   if [[ ! "${CANON_P34_WHITELIST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
     echo "[env] P34 whitelist SHA-256 is malformed" >&2
@@ -261,7 +263,8 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     }
   done
   if [ "$p34_admitted" = "1" ]; then
-    for k in CANON_RUN_ID CANON_RUN_CMD CANON_RUN_LOG CANON_ALIGN_REPORT \
+    for k in CANON_RUN_ID CANON_RUN_CMD CANON_RUN_LOG CANON_PRE_ALIGN_REPORT \
+             CANON_ALIGN_REPORT \
              CANON_UPDATE_REPORT CANON_WANDB_PROJECT CANON_WANDB_GROUP \
              CANON_WANDB_RUN_NAME WANDB_API_KEY; do
       req "$k"

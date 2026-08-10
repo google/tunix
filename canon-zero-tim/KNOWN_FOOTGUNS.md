@@ -172,3 +172,17 @@ Delivery contract, verified by P36 flagon1/envon1:
 
 Corollary: a "flags OK" assertion is only as good as the process it inspects. Assert the
 rendered manifest, not the launcher's own environment.
+
+### 18. A renderer test does not prove the rendered workload reaches the learner
+
+P34 originally passed its static renderer and exact-image overlay tests while
+the real learner would reject the first batch: the recipe deliberately disabled
+sampler IS and TIS, but the generic alignment guard admitted
+`sampler_is=None` only for GSM8K. None of the old tests fed the rendered
+environment through `00_env.sh` and then exercised the workload-specific
+learner policy.
+
+Every production recipe now needs both layers: run the renderer output through
+the real environment preflight, and test the exact workload-specific policy
+with a neighboring negative control. A green manifest or overlay import alone
+is only `STATIC PASS`; it is not launch readiness.

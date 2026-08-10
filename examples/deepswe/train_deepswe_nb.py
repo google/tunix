@@ -608,6 +608,36 @@ if P34_DEEPSWE:
       "max_steps": MAX_STEPS
       == deepswe_contract.requested_max_steps(os.environ),
       "temperature": TEMPERATURE == p34.temperature,
+      "per_turn_timeout_secs": (
+          PER_TURN_TIMEOUT_SECS == p34.per_turn_timeout_secs
+      ),
+      "episode_timeout_secs": (
+          EPISODE_TIMEOUT_SECS == p34.episode_timeout_secs
+      ),
+      "step_timeout_secs": STEP_TIMEOUT_SECS == p34.step_timeout_secs,
+      "reward_timeout_secs": (
+          REWARD_TIMEOUT_SECS == p34.reward_timeout_secs
+      ),
+      "num_iterations": NUM_ITERATIONS == p34.num_iterations,
+      "beta": BETA == p34.beta,
+      "epsilon": EPSILON == p34.epsilon,
+      "epsilon_high": EPSILON_HIGH == p34.epsilon_high,
+      "off_policy_steps": OFF_POLICY_STEPS == p34.off_policy_steps,
+      "learning_rate": LEARNING_RATE == p34.learning_rate,
+      "optimizer_b1": B1 == p34.b1,
+      "optimizer_b2": B2 == p34.b2,
+      "weight_decay": WEIGHT_DECAY == p34.weight_decay,
+      "max_grad_norm": MAX_GRAD_NORM == p34.max_grad_norm,
+      "loss_agg_mode": LOSS_AGG_MODE == p34.loss_agg_mode,
+      "advantage_estimator": (
+          ADVANTAGE_ESTIMATOR == p34.advantage_estimator
+      ),
+      "eval_every_n_steps": (
+          EVAL_EVERY_N_STEPS == p34.eval_every_n_steps
+      ),
+      "train_fraction": TRAIN_FRACTION == p34.train_fraction,
+      "num_epochs": NUM_EPOCHS == p34.num_epochs,
+      "remat": ENABLE_REMAT is True and REMAT_POLICY == p34.remat_policy,
       "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
       "top_k": TOP_K in (None, 0, -1),
       "top_p": TOP_P in (None, 1.0),

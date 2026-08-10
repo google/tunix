@@ -26,10 +26,7 @@ fi
 : "${CANON_RUN_CMD:?CANON_RUN_CMD unset -- nothing to run}"
 LOG="${CANON_RUN_LOG:-$CANON_STATE/run.log}"
 if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
-  report_keys=(CANON_RUN_LOG CANON_ALIGN_REPORT CANON_UPDATE_REPORT)
-  if [ "${CANON_P34_DEEPSWE:-0}" != "1" ]; then
-    report_keys+=(CANON_PRE_ALIGN_REPORT)
-  fi
+  report_keys=(CANON_RUN_LOG CANON_PRE_ALIGN_REPORT CANON_ALIGN_REPORT CANON_UPDATE_REPORT)
   for report_key in "${report_keys[@]}"; do
     report_path="${!report_key:-}"
     if [ -z "$report_path" ]; then
@@ -247,6 +244,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
       --stage "$CANON_P34_RUN_STAGE" \
       --run-log "$LOG" \
+      --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
       --update-report "$CANON_UPDATE_REPORT" \
       --alignment-report "$CANON_ALIGN_REPORT" \
       --output "$classification" || exit 1

@@ -93,6 +93,8 @@ class RenderP34JobSetTest(unittest.TestCase):
     self.assertEqual(env["MIN_TOKEN_BUCKET"], "4096")
     self.assertEqual(env["CANON_LOGPROB_M"], "256")
     self.assertEqual(env["CANON_VJP2_MAX_SEQS"], "1")
+    self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
+    self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
     self.assertEqual(env["CANON_P34_WHITELIST_SHA256"], "3" * 64)
     command = env["CANON_RUN_CMD"]
     for value in (
@@ -107,6 +109,26 @@ class RenderP34JobSetTest(unittest.TestCase):
         "--train_mesh_tp=8",
         "--rollout_vllm_max_num_seqs=4",
         "--max_num_batched_tokens=256",
+        "--train_fraction=1.0",
+        "--num_epochs=1",
+        "--enable_remat=True",
+        "--remat_policy=decoder",
+        "--num_iterations=1",
+        "--beta=0.0",
+        "--epsilon=0.2",
+        "--epsilon_high=0.28",
+        "--off_policy_steps=0",
+        "--per_turn_timeout_secs=300",
+        "--episode_timeout_secs=5400",
+        "--step_timeout_secs=1800",
+        "--reward_timeout_secs=1800",
+        "--loss_agg_mode=sequence-mean-token-scale",
+        "--advantage_estimator=rloo",
+        "--learning_rate=1e-6",
+        "--b1=0.9",
+        "--b2=0.99",
+        "--weight_decay=0.01",
+        "--max_grad_norm=1.0",
     ):
       self.assertIn(value, command)
     self.assertNotIn("--rollout_vllm_max_num_seqs=64", command)

@@ -35,6 +35,26 @@ class DeepSWEWorkload:
   max_turns: int = 50
   max_steps: int = 1000
   temperature: float = 0.7
+  per_turn_timeout_secs: int = 300
+  episode_timeout_secs: int = 5400
+  step_timeout_secs: int = 1800
+  reward_timeout_secs: int = 1800
+  num_iterations: int = 1
+  beta: float = 0.0
+  epsilon: float = 0.2
+  epsilon_high: float = 0.28
+  off_policy_steps: int = 0
+  learning_rate: float = 1e-6
+  b1: float = 0.9
+  b2: float = 0.99
+  weight_decay: float = 0.01
+  max_grad_norm: float = 1.0
+  loss_agg_mode: str = "sequence-mean-token-scale"
+  advantage_estimator: str = "rloo"
+  eval_every_n_steps: int = 10
+  train_fraction: float = 1.0
+  num_epochs: int = 1
+  remat_policy: str = "decoder"
   dp_size: int = 16
   tp_size: int = 8
   devices_per_role: int = 128
@@ -75,6 +95,41 @@ class DeepSWEWorkload:
       raise ValueError("P34 signed context/response/turn limits changed")
     if self.max_steps != 1000 or self.temperature != 0.7:
       raise ValueError("P34 signed optimization campaign changed")
+    if (
+        self.per_turn_timeout_secs,
+        self.episode_timeout_secs,
+        self.step_timeout_secs,
+        self.reward_timeout_secs,
+    ) != (300, 5400, 1800, 1800):
+      raise ValueError("P34 signed environment timeouts changed")
+    if (
+        self.num_iterations,
+        self.beta,
+        self.epsilon,
+        self.epsilon_high,
+        self.off_policy_steps,
+    ) != (1, 0.0, 0.2, 0.28, 0):
+      raise ValueError("P34 signed GRPO algorithm changed")
+    if (
+        self.learning_rate,
+        self.b1,
+        self.b2,
+        self.weight_decay,
+        self.max_grad_norm,
+    ) != (1e-6, 0.9, 0.99, 0.01, 1.0):
+      raise ValueError("P34 signed optimizer algorithm changed")
+    if (
+        self.loss_agg_mode,
+        self.advantage_estimator,
+        self.eval_every_n_steps,
+    ) != ("sequence-mean-token-scale", "rloo", 10):
+      raise ValueError("P34 signed loss or evaluation schedule changed")
+    if (
+        self.train_fraction,
+        self.num_epochs,
+        self.remat_policy,
+    ) != (1.0, 1, "decoder"):
+      raise ValueError("P34 signed data epoch or remat policy changed")
     if (
         self.max_num_seqs_per_dp,
         self.max_num_batched_tokens_per_dp,
@@ -210,6 +265,9 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_P34_MAX_NUM_SEQS": "4",
       "CANON_P34_MAX_BATCHED_TOKENS": "256",
       "CANON_P34_STRICT_CLI": "1",
+      "CANON_P34_DISABLE_SAMPLER_IS": "1",
+      "CANON_P34_DISABLE_TIS": "1",
+      "CANON_PRE_ALIGN_GATE": "1",
       "WANDB_MODE": "online",
   }
   wrong = {

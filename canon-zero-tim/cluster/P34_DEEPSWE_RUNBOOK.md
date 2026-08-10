@@ -5,6 +5,12 @@ processed-logprob contract accepts only global compact M256 and global padded
 M4096. Both shard to the same local canonical M256 program; every other global
 row count fails closed.
 
+The production configuration and branch provenance are frozen in
+`tasks/p39-deepswe-production/plan.md`. The workload behavior comes from
+`yuxzhang/deepswe-quality-fix`; the P34 renderer replaces its FSDP-named
+topology with DP16xTP8 replicated parameters and pins every algorithm field
+that would otherwise depend on a Python default.
+
 This runbook renders manifests only. Do not apply a manifest until the implementation branch is
 committed, pushed, read back at the exact SHA, and the 256-device experiment is approved.
 
@@ -64,6 +70,9 @@ unless the entire backward-no-commit contract completes.
   Under DP16 these become exactly 64 global requests and one global M4096 token bucket.
 - FSDP, TIS, sampler importance correction, prefix caching, runtime dependency installation, and
   floating source/image/whitelist inputs are rejected.
+- `CANON_PRE_ALIGN_GATE=1` is mandatory. Every update must flush exactly one
+  passing A-B/B-C record before backward. A red record stops before gradient
+  computation and optimizer commit.
 - A missing evidence row is `INCONCLUSIVE`, never PASS.
 
 Before interpreting any numerical row, the target log must contain exactly:
@@ -87,7 +96,7 @@ bash canon-zero-tim/tests/p34_deepswe/run_exact_image.sh
 The required terminal marker is:
 
 ```text
-P34_EXACT_IMAGE_CPU_PASS unit_cases=38 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b
+P34_EXACT_IMAGE_CPU_PASS unit_cases=45 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b
 ```
 
 ## Rollback

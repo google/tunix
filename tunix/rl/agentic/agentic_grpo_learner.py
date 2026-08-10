@@ -62,12 +62,21 @@ TrainExample = agentic_rl_learner.TrainExample
 
 
 def _canonical_alignment_sampler_is_valid(
-    sampler_is: str | None, workload_name: str
+    sampler_is: str | None,
+    workload_name: str,
+    *,
+    p34_deepswe: bool = False,
+    p34_disable_sampler_is: bool = False,
+    p34_disable_tis: bool = False,
 ) -> bool:
   """Return whether sampler IS preserves the workload contract."""
-  return sampler_is == "token" or (
-      workload_name == "gsm8k" and sampler_is is None
-  )
+  if sampler_is == "token":
+    return True
+  if sampler_is is not None:
+    return False
+  if workload_name == "gsm8k":
+    return True
+  return p34_deepswe and p34_disable_sampler_is and p34_disable_tis
 
 
 def _canonical_gsm8k_gate_advantages(advantages: Any) -> np.ndarray:
@@ -956,10 +965,19 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if not _canonical_alignment_sampler_is_valid(
           self.algo_config.sampler_is,
           os.environ.get("CANON_P32_WORKLOAD", ""),
+          p34_deepswe=(
+              os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+          ),
+          p34_disable_sampler_is=(
+              os.environ.get("CANON_P34_DISABLE_SAMPLER_IS", "") == "1"
+          ),
+          p34_disable_tis=(
+              os.environ.get("CANON_P34_DISABLE_TIS", "") == "1"
+          ),
       ):
         raise alignment.AlignmentGateError(
-            "canonical alignment requires sampler_is='token'; only the GSM8K "
-            "workload may use sampler_is=None with direct rollout logprobs"
+            "canonical alignment requires sampler_is='token'; sampler_is=None "
+            "is admitted only by the signed GSM8K or P34 DeepSWE contract"
         )
       if rollout_per_token_logps is None or trainer_per_token_logps is None:
         raise alignment.AlignmentGateError(

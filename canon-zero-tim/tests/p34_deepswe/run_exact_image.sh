@@ -18,6 +18,8 @@ $DOCKER run --rm \
       --model qwen32b
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_contract.py
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_script_contract.py
+    PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_env_contract.py
+    JAX_PLATFORMS=cpu PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_sampler_contract.py
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_qwen32b_tp8.py
     PYTHONPATH=/workspace/canon-zero-tim/src/engine_shims/models/qwen32b \
       python3 canon-zero-tim/src/engine_shims/models/qwen32b/p22xf_contract.py
@@ -29,5 +31,5 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/probe_scheduler_contract.py
     CANON_FIXED_AR=1 CANON_PALLAS_MATMUL=1 PYTHONPATH=/workspace \
       python3 canon-zero-tim/tests/p34_deepswe/probe_pallas_128.py
-    echo "P34_EXACT_IMAGE_CPU_PASS unit_cases=38 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b"
+    echo "P34_EXACT_IMAGE_CPU_PASS unit_cases=45 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b"
   '

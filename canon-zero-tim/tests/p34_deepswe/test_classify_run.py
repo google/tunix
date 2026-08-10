@@ -38,6 +38,20 @@ def _alignment():
   }
 
 
+def _pre_alignment():
+  return {
+      "verdict": "PASS",
+      "N_action": 8,
+      "boundaries": {
+          name: {"differing_bytes": 0}
+          for name in (
+              "S_decode_vs_S_prefill",
+              "S_prefill_vs_T_old",
+          )
+      },
+  }
+
+
 def _log(updates: int):
   return "\n".join((
       "[entrypoint] JOBSET_ATTEMPT 0 (first attempt)",
@@ -77,6 +91,7 @@ class ClassifierTest(unittest.TestCase):
     } for step in (1, 2, 3)]
     report = classifier.classify(
         log_text=_log(3),
+        pre_alignment=[_pre_alignment() for _ in range(3)],
         alignment=[_alignment() for _ in range(12)],
         updates=updates,
         stage="three-update",
@@ -100,7 +115,11 @@ class ClassifierTest(unittest.TestCase):
         "train_steps_after": 1,
     }
     report = classifier.classify(
-        log_text=_log(1), alignment=records, updates=[update], stage="one-update"
+        log_text=_log(1),
+        pre_alignment=[_pre_alignment()],
+        alignment=records,
+        updates=[update],
+        stage="one-update",
     )
     self.assertEqual(report["verdict"], "FAIL")
     self.assertIn("four_boundaries_exact", report["failed"])
@@ -120,6 +139,7 @@ class ClassifierTest(unittest.TestCase):
     }
     report = classifier.classify(
         log_text=_log(0).replace("ATTEMPT 0", "ATTEMPT 1"),
+        pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
         stage="backward-no-commit",
@@ -147,6 +167,7 @@ class ClassifierTest(unittest.TestCase):
     )
     report = classifier.classify(
         log_text=log_text,
+        pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
         stage="one-update",
@@ -171,6 +192,7 @@ class ClassifierTest(unittest.TestCase):
     log_text = _log(1).replace("'num_reqs': 64", "'num_reqs': 1024")
     report = classifier.classify(
         log_text=log_text,
+        pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
         stage="one-update",
@@ -193,12 +215,40 @@ class ClassifierTest(unittest.TestCase):
     }
     report = classifier.classify(
         log_text=_log(0),
+        pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
         stage="backward-no-commit",
     )
     self.assertEqual(report["verdict"], "FAIL")
     self.assertIn("gradient_deterministic_repeat", report["failed"])
+
+  def test_nonzero_pre_backward_boundary_is_rejected(self):
+    pre_alignment = _pre_alignment()
+    pre_alignment["boundaries"]["S_decode_vs_S_prefill"][
+        "differing_bytes"
+    ] = 1
+    update = {
+        "verdict": "PASS",
+        "commits": 0,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "gradient_deterministic": True,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+    }
+    report = classifier.classify(
+        log_text=_log(0),
+        pre_alignment=[pre_alignment],
+        alignment=[_alignment() for _ in range(4)],
+        updates=[update],
+        stage="backward-no-commit",
+    )
+    self.assertEqual(report["verdict"], "FAIL")
+    self.assertIn("pre_backward_boundaries_exact", report["failed"])
 
 
 if __name__ == "__main__":
