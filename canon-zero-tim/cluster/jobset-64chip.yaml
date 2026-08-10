@@ -113,7 +113,7 @@ spec:
             - name: jax-tpu
               # PIN THIS BY DIGEST.  See the header note.
               image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image:vllm-tpu0.25.0
-              imagePullPolicy: Always
+              imagePullPolicy: IfNotPresent
               resources:
                 limits: {cpu: '24', memory: 200G}
               command:
