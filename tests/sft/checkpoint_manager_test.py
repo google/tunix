@@ -39,9 +39,16 @@ if hasattr(flax_config, 'flax_always_shard_variable'):
 
 
 def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
-  np.testing.assert_allclose(
-      x, y, atol, rtol, err_msg=f'Mismatch at path: {path}'
-  )
+  if jax.dtypes.issubdtype(getattr(x, 'dtype', None), jax.dtypes.prng_key):
+    np.testing.assert_array_equal(
+        jax.random.key_data(x),
+        jax.random.key_data(y),
+        err_msg=f'Mismatch at path: {path}',
+    )
+  else:
+    np.testing.assert_allclose(
+        x, y, atol, rtol, err_msg=f'Mismatch at path: {path}'
+    )
 
 
 def assert_not_equal(path, x, y):
@@ -69,6 +76,19 @@ class TestModel(nnx.Module):
 
   def __call__(self, x):
     h = nnx.relu(self.w1(x))
+    h = self.w2(h) + x
+    return h
+
+
+class TestModelWithRngs(TestModel):
+
+  def __init__(self, rngs: nnx.Rngs):
+    super().__init__(rngs)
+    self.dropout = nnx.Dropout(rate=0.1, rngs=rngs)
+
+  def __call__(self, x):
+    h = nnx.relu(self.w1(x))
+    h = self.dropout(h)
     h = self.w2(h) + x
     return h
 
@@ -170,6 +190,75 @@ class CheckpointManagerTest(parameterized.TestCase):
         expected_state,
         nnx.state(model),
     )
+
+  def test_restore_with_pathways_persistence(self):
+    with mock.patch.dict(
+        os.environ,
+        {'JAX_PLATFORMS': 'proxy', 'ENABLE_PATHWAYS_PERSISTENCE': '1'},
+    ):
+      cp_path = f'{self.temp_path}/{self.id()}'
+      cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+      model, _ = create_sharded_model(TestModelWithRngs, nnx.Rngs(0), self.mesh)
+      optimizer = nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)
+
+      # Verify model state contains PRNG key states (key<fry>).
+      prng_key_leaves = [
+          x
+          for x in jax.tree.leaves(nnx.state(model))
+          if jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
+      ]
+      self.assertNotEmpty(prng_key_leaves)
+
+      # Save checkpoint at step 25.
+      self.assertTrue(
+          cp_manager.save(25, model, optimizer=optimizer, force=True)
+      )
+      assert cp_manager._checkpointer is not None
+      cp_manager._checkpointer.wait()
+
+      # Mutate state before saving step 50.
+      changed_model_state = jax.tree.map(
+          lambda x: x
+          if jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
+          else x + 1,
+          nnx.state(model),
+      )
+      nnx.update(model, changed_model_state)
+
+      # Save checkpoint at step 50.
+      expected_opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      self.assertTrue(
+          cp_manager.save(50, model, optimizer=optimizer, force=True)
+      )
+      cp_manager._checkpointer.wait()
+      cp_manager.close()
+
+      # Simulate workload restart by creating a new CheckpointManager instance.
+      restart_cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+      restore_model, _ = create_sharded_model(
+          TestModelWithRngs, nnx.Rngs(1), self.mesh
+      )
+      restore_optimizer = nnx.Optimizer(
+          restore_model, optax.adam(1e-3), wrt=nnx.Param
+      )
+
+      # Restore latest step (50) automatically upon restart.
+      restored_step, _ = restart_cp_manager.maybe_restore(
+          restore_model, optimizer=restore_optimizer
+      )
+      self.assertEqual(restored_step, 50)
+
+      # Verify model and optimizer states match expected step 50 state.
+      jax.tree.map_with_path(
+          assert_close,
+          changed_model_state,
+          nnx.state(restore_model),
+      )
+      jax.tree.map_with_path(
+          assert_close,
+          expected_opt_state,
+          nnx.state(restore_optimizer, nnx.optimizer.OptState),
+      )
 
   def test_restore_different_sharding(self):
     cp_path = f'{self.temp_path}/{self.id()}'
