@@ -827,3 +827,35 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Archive the preliminary JSON, stage JSONL, Pathways proxy/RM/worker logs and Kubernetes
      events before deleting the JobSet. Do not introduce a new observer executable until the
      failing stage is known and any observer has passed a standalone-versus-observer bitwise gate.
+
+---
+
+## 32. Phase 35.3c Attempt `r31`: 64-Chip Stage Probe Execution & Trace Localization
+
+- `p35_r31_gsm8k_stage_probe.raw.log` (SHA-256: `989355c9a5d22b6bb4eb3221e2477fc94de7e5fe466246e922a201a2e994dd39`)
+- Target Commit: `d31acb23fdc0c37536596c7e9ab3fbf310fe13c0` (*Record the reviewed P35 stage-probe source pin*)
+
+### Execution & Diagnostic Summary:
+1. **Rollout & Pre-Replay Persistence Succeeded on 64 TPU Chips (`aef104b1` instance group)**:
+   - All 16 worker pods booted, registered with Pathways RM, and preflight overlay checks passed 100%.
+   - 256 GSM8K rollout trajectories generated cleanly.
+   - **Pre-Replay Base Report Successfully Persisted**:
+     ```text
+     [CANON_P35] BASE_REPORT_COMPLETE path=/tmp/canon-state/canon-p35-gsm8k-env-r31-d31acb23/p35_envelope.pre_replay.json rows=[0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240] REPLAY_PENDING
+     ```
+2. **Stage Probe Failure & Root Cause Identification**:
+   - Replay began for `R0_live_first` over 2 captured grouped records:
+     ```text
+     [CANON_P35.3] CAPTURED_REPLAY_BEGIN replay=R0_live_first records=2 logical_logits_shape=(4096, 151936) logical_logits_bytes=2489319424 tail=original_program_serialized
+     ```
+   - At line 1759 in `_p35_run_captured_records`:
+     ```text
+     File "/app/tunix/rl/canonical_qwen3_adapter.py", line 1759, in _p35_run_captured_records
+       prompts = np.asarray(prompt_tokens)
+     File "/usr/local/lib/python3.12/site-packages/jax/_src/array.py", line 623, in _value
+       npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+     jax.errors.JaxRuntimeError: UNAVAILABLE: Connection to IFRT proxy server was terminated: UNAVAILABLE: Socket closed
+     ```
+   - The failure occurred during Device $\to$ Host array conversion (`np.asarray(prompt_tokens)`) where `prompt_tokens` was an on-device array transferred synchronously across Pathways.
+3. **Next Steps**:
+   - Ensure all input tokens/masks passed to `_p35_run_captured_records` are converted to NumPy arrays on host prior to device placement or kept on device throughout execution without eager D2H sync.
