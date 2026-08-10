@@ -83,12 +83,14 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     step_filename = _STEP_FILENAME_TEMPLATE.format(step_id=step_id)
     return self.get_trajectory_dir(trajectory_id) / step_filename
 
+  # TODO(b/542311229): Add trajectory_ids filtering.  # copybara:strip
   def get_trajectories_metadata(
       self,
   ) -> list[trajectory_lib.TrajectoryMetadata]:
     """Retrieves metadata for each trajectory in the run."""
     metas: list[trajectory_lib.TrajectoryMetadata] = []
 
+    # TODO(b/537040620): Parallelize loading.  # copybara:strip
     for entry in self.root_dir.iterdir():
       if not entry.is_dir():
         continue
@@ -124,6 +126,7 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     """
     trajs: list[trajectory_lib.Trajectory] = []
 
+    # TODO(b/537040620): Parallelize loading.  # copybara:strip
     for traj_id in trajectory_ids:
       traj_dir = self.get_trajectory_dir(traj_id)
       meta_path = self.get_trajectory_metadata_path(traj_id)
@@ -173,6 +176,10 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
           "letters, digits, underscores, and hyphens are allowed."
       )
 
+    # copybara:strip_begin
+    # TODO(b/541388896): Make the entire write operation atomic.
+    # TODO(b/537042218): Run the write operations asynchronously.
+    # copybara:strip_end
     traj_dir = self.get_trajectory_dir(traj_id)
     traj_dir.mkdir(parents=True, exist_ok=True)
 

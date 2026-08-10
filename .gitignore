@@ -2,16 +2,35 @@
 *.so
 *.egg-info
 *.whl
+*.lock
 /dist/
 .ipynb_checkpoints
 .DS_Store
 .mypy_cache/
 .pytype/
+__pycache__/
 .idea
 .vscode
 .envrc
+.env
+.ui
+
+# tunix/experimental/common/
+# tunix/experimental/metrics/
+# tunix/experimental/orchestrator/
+# tunix/experimental/rollout/
+# tunix/experimental/train/
+# tunix/experimental/worker/
+artifacts/
+
+# proto compile output
+# **/*_pb2.py
+# **/*_pb2_grpc.py
 
 # virtualenv/venv directories
+/.*/
+/tests/
+/data/
 /venv/
 /bin/
 /include/

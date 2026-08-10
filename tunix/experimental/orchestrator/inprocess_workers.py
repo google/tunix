@@ -37,23 +37,85 @@ class InProcessTrainerWorker:
 
   Contract driven by ``OrchestratorRLEngine``:
 
-      train(role, train_ds, eval_ds, skip_jit) -> None
+      fwd_bwd(payload) -> None
+      update(skip_jit=False) -> int
+      run_eval(eval_ds) -> None
+      eval_step(payload) -> None
       per_token_logps(prompt_ids, completion_ids, pad_id, eos_id) -> array
       sync_weights() -> None
   """
 
   def __init__(self, rl_engine: Any):
     self._rl_engine = rl_engine
+    self._pending_payloads: list[Any] = []
+
+  def fwd_bwd(self, payload: Any) -> None:
+    """Stages one actor micro-batch for the next optimizer update."""
+    if isinstance(payload, list):
+      self._pending_payloads.extend(payload)
+    else:
+      self._pending_payloads.append(payload)
+
+  def update(self, eval_ds: Any = None, skip_jit: bool = False) -> int:
+    """Runs an actor update over the staged micro-batches."""
+    if not self._pending_payloads:
+      return int(getattr(self._rl_engine.actor_trainer, "train_steps", 0))
+    chunks = self._pending_payloads
+    self._pending_payloads = []
+    try:
+      self._rl_engine.train(
+          rl_engine_lib.Role.ACTOR, chunks, None, skip_jit
+      )
+      if eval_ds is not None:
+        self.run_eval(eval_ds)
+    except Exception:
+      self._pending_payloads = chunks + self._pending_payloads
+      raise
+    return int(getattr(self._rl_engine.actor_trainer, "train_steps", 0))
 
   def train(
       self,
-      role: rl_engine_lib.Role,
       train_ds: Any,
       eval_ds: Any,
       skip_jit: bool = False,
   ) -> None:
-    """Runs a training update for the specified role."""
-    self._rl_engine.train(role, train_ds, eval_ds, skip_jit)
+    """Compatibility shim for callers that still submit a full train_ds."""
+    self.fwd_bwd(train_ds)
+    self.update(eval_ds=eval_ds, skip_jit=skip_jit)
+
+  def eval_step(self, payload: Any) -> None:
+    """Runs one actor eval micro-batch."""
+    eval_step = getattr(self._rl_engine.actor_trainer, "eval_step", None)
+    if not callable(eval_step):
+      raise TypeError("actor_trainer must expose eval_step(...).")
+    eval_step(payload)
+
+  def run_eval(self, eval_ds: Any) -> None:
+    """Runs an explicit actor evaluation phase."""
+    actor_trainer = self._rl_engine.actor_trainer
+    run_eval = getattr(actor_trainer, "_run_eval", None)
+    if callable(run_eval):
+      run_eval(eval_ds)
+      return
+
+    eval_context = getattr(actor_trainer, "eval_context", None)
+    if callable(eval_context):
+      with eval_context():
+        for payload in eval_ds:
+          self.eval_step(payload)
+      return
+
+    for payload in eval_ds:
+      self.eval_step(payload)
+
+  def train_critic(
+      self,
+      train_ds: Any,
+      eval_ds: Any,
+      skip_jit: bool = False,
+  ) -> None:
+    """Runs a training update for the Critic."""
+    self._rl_engine.train(rl_engine_lib.Role.CRITIC, train_ds, eval_ds, skip_jit)
 
   def per_token_logps(
       self,

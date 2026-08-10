@@ -32,7 +32,6 @@ from tunix.rl.agentic.agents import agent_types
 
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
-TrajectoryItem = agent_types.TrajectoryItem
 Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
 
@@ -266,7 +265,6 @@ class RolloutResponse(Response):
   response.
 
   Attributes:
-    prompt_id: Unique identifier for this prompt within a task or dataset.
     status: Terminal status name (e.g. a rollout trajectory status, or
       "CANCELLED").
     prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
@@ -278,7 +276,6 @@ class RolloutResponse(Response):
     error: Failure details when the request did not succeed, else None.
   """
 
-  prompt_id: str = ""
   status: str
   prompt_tokens: np.ndarray = dataclasses.field(
       default_factory=lambda: np.zeros(0, dtype=np.int32)
@@ -370,6 +367,7 @@ class TrainerPayload:
   token_ids: ArrayLike
   token_mask: ArrayLike
   segment_ids: ArrayLike | None = None
+
 
 ##### Weight Sync DTOs #####
 
