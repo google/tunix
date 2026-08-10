@@ -926,3 +926,25 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - In pre-P36 runs (`r28`), Arm A (native serving) vs Arm C (canonical adapter) had **1,529 / 3,244 differing action elements** (3,106 differing bytes).
    - Under the verified Pathways proxy XLA regime (`r32`), **bitwise difference between native serving forward (Arm A) and canonical adapter forward (Arm C) was 0 across all 256 trajectories**!
    - This proves conclusively that the historical A-C envelope discrepancy was caused by excess precision compilation in the remote Pathways proxy compiler.
+
+---
+
+## 36. Phase 33 Attempt `r35`: 64-Chip Flag-On Production Full Campaigns Launch & Boundary Readout
+
+- `debug_logs/p33_r35_gsm8k_full.raw.log` (SHA-256: `90fa489e3b4a91c9f4658f1bcf5c40b98bffee01c1ae8e62864fc287490438e4`)
+- `debug_logs/p33_r35_frozenlake_full.raw.log` (SHA-256: `26c3fd339733a6e007e5c77a020782509490a6ed3237feed1fb5d1a1d39126f4`)
+- Target Commit: `64989a09f4a4b86479c2e99969ace22cb55ce808` (*Quote scientific-notation commit prefixes in rendered JobSet labels*)
+- W&B Run (GSM8K): https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/6hg4zos7
+
+### Execution & Diagnostic Summary:
+1. **Dual Isolated 64-Chip Slices Deployed**:
+   - `canon-p33-gsm8k-full-r35` (Qwen3-1.7B, DP16xTP4) and `canon-p33-fl-full-r35` (Qwen3-8B, DP16xTP4) concurrently scheduled on separate physical 4x4x4 slices with `exclusive-topology: cloud.google.com/gke-nodepool`.
+2. **Breakthrough Finding: Zero B-C Drift Across Both Production Workloads**:
+   - **GSM8K Full (Qwen3-1.7B, 256 trajectories, 193,735 action tokens)**:
+     - `S_prefill_vs_T_old` (Arm B native prefill forward vs Arm C canonical adapter forward): **0 DIFFERING BYTES / 0 DIFFERING TOKENS across all 193,735 tokens (100% BITWISE IDENTICAL)**!
+     - `S_decode_vs_S_prefill` (Arm A decode vs Arm B prefill): only **2 differing tokens out of 193,735 tokens (0.001%)**.
+   - **FrozenLake Full (Qwen3-8B, 256 trajectories, 46,961 action tokens)**:
+     - `S_prefill_vs_T_old` (Arm B native prefill forward vs Arm C canonical adapter forward): **0 DIFFERING BYTES / 0 DIFFERING TOKENS across all 46,961 tokens (100% BITWISE IDENTICAL)**!
+     - `S_decode_vs_S_prefill` (Arm A decode vs Arm B prefill): 70 differing bytes out of 46,961 tokens (0.15%).
+3. **Core Conclusion**:
+   - Across both the 1.7B and 8B scales under flag-on conditions, the Tunix canonical training adapter (`Arm C`) and the native vLLM prefill engine (`Arm B`) achieve **0 differing bytes** on full production batches.
