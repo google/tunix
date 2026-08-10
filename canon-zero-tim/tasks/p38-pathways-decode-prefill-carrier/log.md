@@ -60,3 +60,12 @@
   recipes are unchanged.
 - Next: Run GSM8K alignment-short first. If it is exact, treat it as a non-reproduction and run
   FrozenLake alignment-short; do not call it a fix.
+
+## 2026-08-10 UTC — P38 implementation published
+
+- Type: checkpoint
+- Action: Committed the reviewed P38 evidence hardening and GSM8K no-commit diagnostic as
+  `671250a5` and pushed it to `yuxzhang/canon-zero-tim`.
+- Result: The remote target branch contains the tested implementation. Unrelated dirty P36/P37
+  files were not included in the commit.
+- Next: The external operator follows `HANDOFF.md`; no full workload is queued in P38.2.
