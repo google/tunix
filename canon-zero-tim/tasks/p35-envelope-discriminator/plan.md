@@ -49,7 +49,7 @@ See `debug_logs/p35_r28_gsm8k_envelope.json` and its classification artifact.
 
 ## Phase P35.3 — Exact-input replay if B vs C is red
 
-Status: locally complete; target not run
+Status: locally complete; target r29 infrastructure-inconclusive
 
 Capture one real B input contract in process. The replay chain is:
 
@@ -70,6 +70,21 @@ both exact-image model installs and `git diff --check` pass. Result: PASS; see
 Target exit gate: one Attempt-0 report reproduces B!=C, keeps both anchors and all repeats exact,
 and classifies at least one of placement, metadata/cache construction or outer-program context.
 
+r29 result: NOT PASSED. The run entered the first captured/live replay but the IFRT proxy socket
+closed before either report was written. The archived log proves two B records and one logical
+`(4096, 151936)` float32 logits tensor per record; it does not prove OOM, host transfer or
+autoscaler eviction. Replay must be bounded and instrumented before r30.
+
+### Phase P35.3b — Bounded replay execution repair
+
+Status: locally complete; target r30 pending
+
+Persist the completed P35.2 evidence before replay and serialize every captured record with
+explicit begin/complete markers while preserving the original numerical program boundaries. A
+fused target-only candidate was rejected after a CPU bitwise gate found 178/256 changed target
+logprobs. Prove the serialized original path on CPU, exact image and one-host TP4 before
+publishing an r30 source pin. See `phases/p35-3b-bounded-replay.md`.
+
 ## Phase P35.4 — Actual-model THIRDPROG
 
 Status: pending
@@ -80,6 +95,22 @@ the production model.
 
 Exit gate: complete action distribution is bitwise exact, or the run remains red with the first
 divergent actual-model boundary recorded.
+
+## Phase P35.3a — Direct-attached one-host reproduction
+
+Status: completed; local carrier not reproduced
+
+Run one bounded DP1xTP4 diagnostic on the existing four-chip v5p host before r29. Match one target
+DP rank's 16-trajectory local geometry, keep local M256, stop before backward and disable W&B.
+This is a platform contrast, not a substitute for the 64-chip result.
+
+Exit gate: either one complete fail-closed six-arm report or an explicit
+`LOCAL_NOT_REPRODUCED` result from the known-red guard after A/C measurement. See
+`phases/p35-3a-onehost-reproduction.md`.
+
+Result: `LOCAL_NOT_REPRODUCED`. The DP1xTP4 direct-attached run found no bitwise A/C action
+mismatch and stopped before B/replay as required. This narrows the known r28 carrier toward the
+64-chip Pathways/multi-host envelope; it does not replace target r29.
 
 ## Commands
 

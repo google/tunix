@@ -32,6 +32,9 @@ class RenderP35JobSetTest(unittest.TestCase):
     self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
     self.assertEqual(env["CANON_P35_ENVELOPE"], "1")
     self.assertEqual(env["CANON_P35_EXACT_REPLAY"], "1")
+    self.assertTrue(env["CANON_P35_PRE_REPLAY_REPORT"].endswith(
+        "/p35_envelope.pre_replay.json"
+    ))
     self.assertTrue(env["CANON_P35_EXACT_REPLAY_REPORT"].endswith(
         "/p35_exact_replay.json"
     ))

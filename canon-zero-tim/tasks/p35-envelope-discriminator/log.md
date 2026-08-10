@@ -207,3 +207,94 @@ training are unchanged.
 
 Rollback: leave both P35 environment gates unset. Revert `366ac2b1` only if the diagnostic files
 must be removed; do not alter production defaults.
+
+## 2026-08-09 — P35.3a one-host r2 stopped before model load
+
+- The first managed DP1xTP4 attempt verified the published source, canonical install `29/29`,
+  overlay byte identity `6/6` and four direct-attached TPU devices `[0,1,2,3]`.
+- It then stopped after 42 seconds, before model forward or any PATHTRACE, because the offline
+  Hugging Face cache contained `refs/main` but no corresponding snapshot directory. The complete
+  tokenizer files already existed in the immutable local model directory.
+- The mechanical result is `VOID_CONTRACT`; no A/B/C value, replay arm, backward, update, W&B
+  online run or target verdict was produced. Raw/result SHA-256 are
+  `45825ca6f312bb3c63c577fee7a80908b62903514451449272949afdc290c10e` and
+  `62d84e6853a42c5a1d6fe2224c3457e89bec2a04c84b4ed2e638161c785e2476`.
+- The r3 correction adds a read-only bind mount from the existing model directory to the cache
+  snapshot path named by the existing 40-hex ref. It does not download data, change tokenizer
+  files, use a credential or modify model code.
+
+Artifacts: `/mnt/disks/tunix-data/logp_probe_1host/p35_onehost_0809_dp1tp4_r2.raw.log` and
+`p35_onehost_0809_dp1tp4_r2.result.json`.
+
+Rollback: stop invoking the one-host runner and leave the P35 switches unset. The read-only cache
+mount exists only for the lifetime of its disposable container.
+
+## 2026-08-09 — P35.3a one-host r3 did not reproduce the target carrier
+
+- r3 verified source `cf4c12e4`, canonical install `29/29`, overlay byte identity `6/6`, four
+  direct-attached TPU devices, clean C7/C8 postflight and nonzero canonical PATHTRACE.
+- The full production boundary reached `sampler-trainer: logp_diff=(0,0)`. More importantly, the
+  P35 selector's unrounded element-bitwise scan found no red action position and fired the
+  pre-registered known-red reproduction guard. B and the six replay arms were intentionally not
+  executed.
+- The Python process retained vLLM background threads after the terminal guard. The named
+  diagnostic container was stopped after the numerical path had ended; no VM or other container
+  was changed.
+- The schema-v1 wrapper miscounted the one exception as two textual occurrences (`raise` source
+  echo plus terminal exception) and retained an `INCONCLUSIVE` result. The runner now anchors the
+  terminal line, and a self-tested schema-v2 reclassifier returns `LOCAL_NOT_REPRODUCED` over the
+  immutable raw log.
+- Raw/result-v2 SHA-256:
+  `13f77d5b13110b995582089a7a0f40be85f04dcb0e50116ee5ba240070534af6` and
+  `516c1ad9c7bc3a963c856e674421df236b30a5a71b637e204310ae63903c8908`.
+
+Artifacts: `/mnt/disks/tunix-data/logp_probe_1host/p35_onehost_0809_dp1tp4_r3.raw.log` and
+`p35_onehost_0809_dp1tp4_r3.result.v2.json`.
+
+Rollback: leave `CANON_P35_ENVELOPE` and `CANON_P35_EXACT_REPLAY` unset. This local contrast made
+no production-default, precision, weight, optimizer, checkpoint, W&B or cloud-resource change.
+
+## 2026-08-10 — r29 entered exact replay but lost the Pathways IFRT service
+
+- Fast-forwarded the working branch from `cf4c12e4` to evidence commit `a3cdc852`; the remote
+  changed only `debug_logs/README.md` and added the r29 raw log, with no overlap with the local
+  one-host phase files.
+- r29 was Attempt 0 at source `cf4c12e4`. Image/overlay checks passed, 64 TPU devices joined, the
+  rollout completed, and the run reproduced a nonzero broad sampler/trainer logprob difference.
+- The producer captured 24 native-A metadata records and two grouped-B records, then entered
+  `live_first = execute_captured(...)`. The IFRT gRPC stream closed before either
+  `[CANON_P35.3] REPLAY_COMPLETE` or `[CANON_P35] REPORT_COMPLETE` was emitted. The target replay
+  verdict is therefore `INCONCLUSIVE`, not a numerical failure or pass.
+- Source inspection disproved the archived README's claim of a loop over 256 captured replay
+  steps: `_p35_run_captured_records` received the two B records. A record does create logical
+  float32 logits `(4096, 151936)` (about 2.49 GB), but JAX keeps them as remote arrays until a host
+  conversion. The raw log has no OOM, HBM-at-failure, Kubernetes node event or worker-exit reason.
+  It proves a socket closure, not memory pressure or autoscaler eviction as the cause.
+- Before r30, write the completed P35.2 report ahead of optional replay, add record/shape and
+  stage-completion instrumentation, serialize record completion, and gate any fused target-only
+  tail against the existing bitwise implementation.
+
+Artifact: `debug_logs/p35_r29_gsm8k_exact_replay.raw.log`, SHA-256
+`de0edfab5d5a9439ec125559d7fc9ed11fcbc68391da8c19b34108c7718f6f00`.
+
+Rollback: leave both P35 gates unset. The evidence pull and ledger reconciliation changed no
+runtime default, model value, precision, optimizer, checkpoint, credential or cloud resource.
+## 2026-08-10 — P35.3b bounded replay repair started
+
+- Reconciled r29 as an infrastructure-inconclusive IFRT socket closure, not a numerical verdict.
+- Added a preliminary immutable A/B/C report before optional replay and explicit per-record
+  replay begin/complete markers with logical logits shape and byte count.
+- Tested a target-only fused-tail candidate before admitting it. The CPU bitwise gate rejected
+  it: 178/256 canonical target logprobs changed by roughly one ULP. The candidate was removed;
+  the original sampling/logprob program boundaries remain intact.
+- The active repair now serializes and blocks each captured record, releases the full-vocabulary
+  temporaries before the next record, and does not change production precision, loss, backward
+  or optimizer behavior.
+- Complete CPU contracts PASS, including a negative control that preserves and hashes the
+  preliminary report while rejecting a missing replay. Both exact-image overlays PASS.
+- Final one-host v5p TP4 smoke PASS: four devices, four replay arms over two records, eight
+  matching record-complete markers, and 2 passing bitwise tests in 34.72s. The first record has
+  no action predictor. Raw artifact: `canon-zero-tim/debug_logs/p35_3b_onehost_tp4_r3.log`,
+  SHA-256 `2d2aca9c4c25bffd58e48a66ebe4177eeaba9068c8c86d9f983798b3121638b8`.
+- Local mechanics are closed; target status remains pending. No commit, push or 64-chip run was
+  performed.

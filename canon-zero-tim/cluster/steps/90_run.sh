@@ -57,7 +57,8 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
       mkdir -p "$(dirname "$report_path")"
     done
     if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ]; then
-      for report_key in CANON_P35_EXACT_REPLAY_REPORT \
+      for report_key in CANON_P35_PRE_REPLAY_REPORT \
+                        CANON_P35_EXACT_REPLAY_REPORT \
                         CANON_P35_EXACT_REPLAY_CLASSIFICATION; do
         report_path="${!report_key:-}"
         if [ -z "$report_path" ]; then
@@ -89,8 +90,14 @@ n_wandb=$(grep -ac '\[CANON_P33_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_wandb_p34=$(grep -ac '\[CANON_P34_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_eval_off=$(grep -ac '\[CANON_P33_EVAL\] DISABLED workload=frozenlake' "$LOG" || true)
 n_p35_stop=$(grep -ac '\[CANON_P35\] REPORT_COMPLETE .*STOP_BEFORE_BACKWARD' "$LOG" || true)
+n_p35_base=$(grep -ac '\[CANON_P35\] BASE_REPORT_COMPLETE .*REPLAY_PENDING' "$LOG" || true)
 n_p35_replay=$(grep -ac '\[CANON_P35.3\] REPLAY_COMPLETE' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_stop=$n_p35_stop p35_replay=$n_p35_replay"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay"
+if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
+   [ -s "${CANON_P35_PRE_REPLAY_REPORT:-}" ]; then
+  p35_base_sha="$(sha256sum "$CANON_P35_PRE_REPLAY_REPORT" | awk '{print $1}')"
+  echo "[CANON_P35.3] PRE_REPLAY_EVIDENCE path=$CANON_P35_PRE_REPLAY_REPORT sha256=$p35_base_sha"
+fi
 if [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]; then
   echo "[run] FATAL: no PATHTRACE for the fixed-order reductions -- the intervention did not" >&2
   echo "[run]        execute.  Any result from this run is void regardless of its exit code." >&2
@@ -126,6 +133,14 @@ if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
       --report "$CANON_P35_ENVELOPE_REPORT" \
       --output "$CANON_P35_CLASSIFICATION" || exit 1
   if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ]; then
+    if [ "$n_p35_base" -ne 1 ]; then
+      echo "[run] FATAL: P35.3 did not emit exactly one pre-replay marker" >&2
+      exit 1
+    fi
+    if [ ! -s "$CANON_P35_PRE_REPLAY_REPORT" ]; then
+      echo "[run] FATAL: P35.3 pre-replay marker exists without a report" >&2
+      exit 1
+    fi
     if [ "$n_p35_replay" -ne 1 ]; then
       echo "[run] FATAL: P35.3 did not emit exactly one replay marker" >&2
       exit 1
@@ -139,6 +154,7 @@ if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
         --report "$CANON_P35_EXACT_REPLAY_REPORT" \
         --output "$CANON_P35_EXACT_REPLAY_CLASSIFICATION" || exit 1
     for evidence_path in \
+      "$CANON_P35_PRE_REPLAY_REPORT" \
       "$CANON_P35_ENVELOPE_REPORT" \
       "$CANON_P35_CLASSIFICATION" \
       "$CANON_P35_EXACT_REPLAY_REPORT" \

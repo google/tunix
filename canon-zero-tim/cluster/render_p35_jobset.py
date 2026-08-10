@@ -70,6 +70,9 @@ def render(
       {
           "CANON_P35_ENVELOPE": "1",
           "CANON_P35_ENVELOPE_REPORT": f"{state}/p35_envelope.json",
+          "CANON_P35_PRE_REPLAY_REPORT": (
+              f"{state}/p35_envelope.pre_replay.json"
+          ),
           "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
           "CANON_P35_CLASSIFICATION": f"{state}/p35_envelope.classification.json",
           "CANON_P35_EXACT_REPLAY": "1",
@@ -92,6 +95,9 @@ def validate(document: dict[str, Any], *, source_commit: str, run_id: str) -> No
   expected = {
       "CANON_P35_ENVELOPE": "1",
       "CANON_P35_ENVELOPE_REPORT": f"{state}/p35_envelope.json",
+      "CANON_P35_PRE_REPLAY_REPORT": (
+          f"{state}/p35_envelope.pre_replay.json"
+      ),
       "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
       "CANON_P35_CLASSIFICATION": f"{state}/p35_envelope.classification.json",
       "CANON_P35_EXACT_REPLAY": "1",

@@ -1472,6 +1472,7 @@ class Qwen3EngineForwardAdapter:
     self._processed_target_logprobs = _make_processed_target_logprob_vjp(
         self._compute_and_gather_logprobs, self._max_logprobs
     )
+
     g5c_shared_logsoftmax = os.environ.get(
         "CANON_P28_G5C_SHARED_LOGSOFTMAX", "1"
     )
@@ -1636,6 +1637,7 @@ class Qwen3EngineForwardAdapter:
       engine_leaves,
       records,
       *,
+      replay_label,
       prompt_tokens,
       completion_tokens,
       prompt_mask,
@@ -1643,6 +1645,19 @@ class Qwen3EngineForwardAdapter:
       temperature,
   ):
     """Replays captured B tensors through the canonical model entry."""
+    records = tuple(records)
+    logical_logits_shape = (self._bucket, self._vocab_size)
+    logical_logits_bytes = (
+        self._bucket * self._vocab_size * np.dtype(np.float32).itemsize
+    )
+    print(
+        "[CANON_P35.3] CAPTURED_REPLAY_BEGIN "
+        f"replay={replay_label} records={len(records)} "
+        f"logical_logits_shape={logical_logits_shape} "
+        f"logical_logits_bytes={logical_logits_bytes} "
+        "tail=original_program_serialized",
+        flush=True,
+    )
     prompts = np.asarray(prompt_tokens)
     completions = np.asarray(completion_tokens)
     prompt_valid = np.asarray(prompt_mask, dtype=np.bool_)
@@ -1692,6 +1707,13 @@ class Qwen3EngineForwardAdapter:
     observed = np.zeros_like(completion_valid)
 
     for record_index, record in enumerate(records):
+      print(
+          "[CANON_P35.3] RECORD_BEGIN "
+          f"replay={replay_label} record={record_index + 1}/{len(records)} "
+          f"logical_logits_shape={logical_logits_shape} "
+          f"logical_logits_bytes={logical_logits_bytes}",
+          flush=True,
+      )
       arrays = record.get("arrays", {})
       required = {
           "input_ids",
@@ -1876,6 +1898,37 @@ class Qwen3EngineForwardAdapter:
           )
         hidden_rows = hidden_rows.at[ranks, slots].set(hidden[predictors])
 
+      jax.block_until_ready((
+          caches,
+          replay_logps,
+          raw_targets,
+          processed_targets,
+          log_normalizers,
+          hidden_rows if hidden_rows is not None else (),
+          all_logps,
+          raw_target_all,
+          processed_target_all,
+      ))
+      del (
+          all_logps,
+          logits,
+          processed_logits,
+          processed_target_all,
+          raw_target_all,
+          target_ids_device,
+      )
+      print(
+          "[CANON_P35.3] RECORD_COMPLETE "
+          f"replay={replay_label} record={record_index + 1}/{len(records)}",
+          flush=True,
+      )
+
+    print(
+        "[CANON_P35.3] CAPTURED_REPLAY_COMPLETE "
+        f"replay={replay_label} records={len(records)}",
+        flush=True,
+    )
+
     if not np.array_equal(observed, completion_valid):
       missing = np.argwhere(completion_valid & ~observed)
       extra = np.argwhere(observed & ~completion_valid)
@@ -1949,10 +2002,11 @@ class Qwen3EngineForwardAdapter:
     selected_prompt_mask = prompt_mask[rows]
     selected_completion_mask = completion_mask[rows]
 
-    def execute_captured(leaves):
+    def execute_captured(leaves, replay_label):
       return self._p35_run_captured_records(
           leaves,
           records,
+          replay_label=replay_label,
           prompt_tokens=selected_prompts,
           completion_tokens=selected_completions,
           prompt_mask=selected_prompt_mask,
@@ -1971,10 +2025,16 @@ class Qwen3EngineForwardAdapter:
           temperature,
       )[0]
 
-    live_first = execute_captured(tuple(self._runner.state_leaves))
-    live_second = execute_captured(tuple(self._runner.state_leaves))
-    mapped_first = execute_captured(tuple(mapped.leaves))
-    mapped_second = execute_captured(tuple(mapped.leaves))
+    live_first = execute_captured(
+        tuple(self._runner.state_leaves), "R0_live_first"
+    )
+    live_second = execute_captured(
+        tuple(self._runner.state_leaves), "R0_live_repeat"
+    )
+    mapped_first = execute_captured(tuple(mapped.leaves), "R1_mapped_first")
+    mapped_second = execute_captured(
+        tuple(mapped.leaves), "R1_mapped_repeat"
+    )
     adapter_direct_first = execute_adapter_direct()
     adapter_direct_second = execute_adapter_direct()
     adapter_envelope = self.compute_per_token_logps(

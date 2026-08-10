@@ -1,0 +1,98 @@
+WARNING 08-10 04:24:08 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-10 04:24:15 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-10 04:24:15 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-10 04:24:15 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+INFO 08-10 04:24:15 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=4 | num_cores_per_chip=2
+[CANON_ADAPTER] processed-logprob custom VJP installed m=256 max_logprobs=1
+[CANON_P35.3] CAPTURED_REPLAY_BEGIN replay=R0_live_first records=2 logical_logits_shape=(256, 8) logical_logits_bytes=8192 tail=original_program_serialized
+[CANON_P35.3] RECORD_BEGIN replay=R0_live_first record=1/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R0_live_first record=1/2
+[CANON_P35.3] RECORD_BEGIN replay=R0_live_first record=2/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R0_live_first record=2/2
+[CANON_P35.3] CAPTURED_REPLAY_COMPLETE replay=R0_live_first records=2
+[CANON_P35.3] CAPTURED_REPLAY_BEGIN replay=R0_live_repeat records=2 logical_logits_shape=(256, 8) logical_logits_bytes=8192 tail=original_program_serialized
+[CANON_P35.3] RECORD_BEGIN replay=R0_live_repeat record=1/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R0_live_repeat record=1/2
+[CANON_P35.3] RECORD_BEGIN replay=R0_live_repeat record=2/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R0_live_repeat record=2/2
+[CANON_P35.3] CAPTURED_REPLAY_COMPLETE replay=R0_live_repeat records=2
+[CANON_P35.3] CAPTURED_REPLAY_BEGIN replay=R1_mapped_first records=2 logical_logits_shape=(256, 8) logical_logits_bytes=8192 tail=original_program_serialized
+[CANON_P35.3] RECORD_BEGIN replay=R1_mapped_first record=1/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R1_mapped_first record=1/2
+[CANON_P35.3] RECORD_BEGIN replay=R1_mapped_first record=2/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R1_mapped_first record=2/2
+[CANON_P35.3] CAPTURED_REPLAY_COMPLETE replay=R1_mapped_first records=2
+[CANON_P35.3] CAPTURED_REPLAY_BEGIN replay=R1_mapped_repeat records=2 logical_logits_shape=(256, 8) logical_logits_bytes=8192 tail=original_program_serialized
+[CANON_P35.3] RECORD_BEGIN replay=R1_mapped_repeat record=1/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R1_mapped_repeat record=1/2
+[CANON_P35.3] RECORD_BEGIN replay=R1_mapped_repeat record=2/2 logical_logits_shape=(256, 8) logical_logits_bytes=8192
+[CANON_P35.3] RECORD_COMPLETE replay=R1_mapped_repeat record=2/2
+[CANON_P35.3] CAPTURED_REPLAY_COMPLETE replay=R1_mapped_repeat records=2
+[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS data=1 static_width=6 chunks=1 global_M=256 local_M=256
+[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS data=1 static_width=6 chunks=1 global_M=256 local_M=256
+[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS data=1 static_width=6 chunks=1 global_M=256 local_M=256
+..
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py:324
+  /usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py:324: DeprecationWarning: jax.core.Effect is deprecated. Use jax.extend.core.Effect.
+    class VariableEffect(jax.core.Effect): ...
+
+tunix/models/gemma4/model.py:28
+  /workspace/tunix/models/gemma4/model.py:28: DeprecationWarning: jax.experimental.shard_map is deprecated in v0.8.0. Used jax.shard_map instead.
+    from jax.experimental.shard_map import shard_map
+
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+  /usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+    return jax.core.get_opaque_trace_state(convention="nnx")
+
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+  /usr/local/lib/python3.12/site-packages/tpu_info/device.py:33: DeprecationWarning: In 3.13 classes created inside an enum will not become a member.  Use the `member` decorator to keep the current behavior.
+    class Info(typing.NamedTuple):
+
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+  /usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+    self.pid = os.fork()
+
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+  /usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=1) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    self.pid = os.fork()
+
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+  /usr/local/lib/python3.12/site-packages/flax/nnx/statelib.py:317: DeprecationWarning: `flax.nnx.State` will be deprecated and be replaced by the built-in Python dict. Please use the equivalent `nnx.to_flat_state` instead.
+    warnings.warn(
+
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+  /workspace/tunix/generate/utils.py:510: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+    variable[...]
+
+  For other Variable types use:
+
+    variable.get_value()
+
+    unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
+
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+tests/rl/canonical_qwen3_adapter_test.py::CanonicalQwen3AdapterTest::test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly
+  /workspace/tunix/rl/canonical_qwen3_adapter.py:4849: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+    variable[...]
+
+  For other Variable types use:
+
+    variable.get_value()
+
+    target_value = getattr(target_param, "value", target_param)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 20 warnings in 34.72s

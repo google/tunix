@@ -1,9 +1,10 @@
 # P35 Pathways exact-envelope handoff
 
-Updated: 2026-08-09 UTC
+Updated: 2026-08-10 UTC
 
-Reviewed implementation: `366ac2b1ff2806b48646a0188927e724bf569978` on
-`yuxzhang/canon-zero-tim`. P35.3 target status remains NOT RUN until r29 returns.
+The published r29 implementation is `cf4c12e4003199cd80c73603f8b54a0f80f49657` on
+`yuxzhang/canon-zero-tim`. The bounded r30 repair is locally verified but not yet committed or
+published. Do not render r30 until a reviewed source SHA containing P35.3b is pushed.
 
 ## Current target result
 
@@ -22,6 +23,17 @@ P35.2 is complete on one source-pinned 64-chip DP16xTP4 Pathways attempt (r28):
 The valid conclusion is `adapter_envelope_carrier`. It excludes dynamic serving packing for the
 selected group. It does not yet distinguish weight memory placement, physical metadata/cache
 construction, or the adapter's outer `lax.map` program.
+
+P35.3 r29 is infrastructure-inconclusive. It completed rollout and entered the first
+captured/live replay, then the Pathways IFRT socket closed. It emitted no base or replay report.
+The log proves two captured B records and a logical float32 logits shape of `(4096, 151936)` per
+record. It does not prove OOM, host transfer or worker eviction.
+
+P35.3b preserves the original numerical program boundaries and serializes every captured record.
+It writes `p35_envelope.pre_replay.json` before optional replay, prints the record count and
+logical logits size, blocks each record before submitting the next, and releases full-vocabulary
+temporaries at that boundary. A fused-tail candidate was rejected because it changed 178/256 CPU
+target logprobs by about one ULP.
 
 ## P35.3 arms
 
@@ -54,26 +66,27 @@ The run must satisfy all of the following before its numerical classification is
 
 - Attempt 0, source-pinned SHA, DP16xTP4, canonical local M256 and response 256;
 - all P35.2 weight, token, mask, device-order and metadata attestations;
-- exactly one P35.2 report marker and one P35.3 replay marker;
+- exactly one preliminary P35.2 marker, one final P35.2 marker and one P35.3 replay marker;
 - effective injected-drift negative controls;
 - immutable report and classification paths;
 - diagnostic exit 1 before backward, converted to success only after both classifiers return
   `COMPLETE`;
 - no training commit, optimizer update, W&B mutation, precision change or sampling change.
 
-The postflight prints SHA-256 for all four JSON artifacts. The detailed files still live under
-`CANON_STATE`, which is `/tmp` on the coordinator host. Copy them before deleting the Pod; the
-log SHA is provenance, not a replacement for the files.
+The postflight prints SHA-256 for all five JSON artifacts. If replay fails after the preliminary
+marker, it still prints the preliminary report SHA before failing closed. The detailed files
+still live under `CANON_STATE`, which is `/tmp` on the coordinator host. Copy them before
+deleting the Pod; the log SHA is provenance, not a replacement for the files.
 
 ## Operator commands
 
 Run these only after the reviewed implementation commit is published to
-`yuxzhang/canon-zero-tim`. Use the next unused run id (`r29` is reserved by this handoff):
+`yuxzhang/canon-zero-tim`. Use the next unused run id (`r30` is reserved by this handoff):
 
 ```bash
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
-RUN_ID=r29
+RUN_ID=r30
 OUT="/tmp/canon-p35-gsm8k-${RUN_ID}.yaml"
 
 python3 canon-zero-tim/cluster/render_p35_jobset.py \
@@ -103,6 +116,8 @@ STATE="/tmp/canon-state/${JOBSET}"
 DEST="canon-zero-tim/debug_logs/p35_${RUN_ID}"
 mkdir -p "$DEST"
 kubectl logs "$POD" > "$DEST/head_jax_tpu.raw.log"
+kubectl cp "$POD:$STATE/p35_envelope.pre_replay.json" \
+  "$DEST/p35_envelope.pre_replay.json"
 kubectl cp "$POD:$STATE/p35_envelope.json" "$DEST/p35_envelope.json"
 kubectl cp "$POD:$STATE/p35_envelope.classification.json" \
   "$DEST/p35_envelope.classification.json"

@@ -2369,23 +2369,38 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     }})
     block_tables = np.zeros((2, 512), np.int32)
     block_tables[0, :2] = np.asarray([0, 1], np.int32)
-    input_ids = np.zeros((256,), np.int32)
-    input_ids[:4] = np.asarray([1, 2, 3, 4], np.int32)
-    positions = np.zeros_like(input_ids)
-    positions[:4] = np.arange(4, dtype=np.int32)
-    records = ({
-        "arm": "B",
-        "meta": {"md_padded_num_reqs": 2},
-        "arrays": {
-            "input_ids": input_ids,
-            "input_positions": positions,
-            "md_input_positions": positions.copy(),
-            "md_block_tables": block_tables.reshape(-1),
-            "md_seq_lens": np.asarray([4, 0], np.int32),
-            "md_query_start_loc": np.asarray([0, 4, 4], np.int32),
-            "md_request_distribution": np.asarray([0, 0, 1], np.int32),
-        },
-    },)
+    def record(tokens, token_positions, sequence_length):
+      input_ids = np.zeros((256,), np.int32)
+      input_ids[:len(tokens)] = np.asarray(tokens, np.int32)
+      positions = np.zeros_like(input_ids)
+      positions[:len(token_positions)] = np.asarray(
+          token_positions, np.int32
+      )
+      query_length = len(tokens)
+      return {
+          "arm": "B",
+          "meta": {"md_padded_num_reqs": 2},
+          "arrays": {
+              "input_ids": input_ids,
+              "input_positions": positions,
+              "md_input_positions": positions.copy(),
+              "md_block_tables": block_tables.reshape(-1),
+              "md_seq_lens": np.asarray([sequence_length, 0], np.int32),
+              "md_query_start_loc": np.asarray(
+                  [0, query_length, query_length], np.int32
+              ),
+              "md_request_distribution": np.asarray(
+                  [0, 0, 1], np.int32
+              ),
+          },
+      }
+
+    # The first record has no completion predictor. It must still finish its
+    # full-vocabulary tail before the second record is submitted.
+    records = (
+        record([1], [0], 1),
+        record([2, 3, 4], [1, 2, 3], 4),
+    )
     env = {
         "CANON_RPA_VJP2": "1",
         "CANON_VJP2_MAX_SEQS": "1",

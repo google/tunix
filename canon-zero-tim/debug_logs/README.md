@@ -713,11 +713,15 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - **Differing Bytes**: 3,106 / 12,976 (23.94%).
    - **Differing Elements**: 1,529 / 3,244 (47.13%).
    - **Classification Verdict**: `adapter_envelope_carrier`.
-   - **Definitive Conclusion**: The logprob difference originates **solely within the mathematical / kernel implementation differences between the Flax NNX Trainer forward graph and the vLLM Serving engine runtime** (e.g. Flash/Splash attention vs RPA kernels, RoPE precision, layernorm math), completely decoupled from batching and serving wrapper abstractions.
+   - **Supported Conclusion**: Dynamic serving arm A and grouped serving arm B are bitwise exact
+     for the selected group, while grouped serving arm B and adapter arm C are red. This excludes
+     serving request grouping as the load-bearing carrier for this measurement. It does not yet
+     distinguish weight memory placement, metadata/cache construction, the adapter outer program,
+     or a particular kernel. P35.3 exact-input replay is required for that separation.
 
 ---
 
-## 29. Phase 35.3 Attempt `r29`: GSM8K Exact-Input Replay (`cf4c12e4`) Execution & IFRT Preemption Diagnosis
+## 29. Phase 35.3 Attempt `r29`: GSM8K Exact-Input Replay (`cf4c12e4`) and IFRT Disconnection
 
 - `p35_r29_gsm8k_exact_replay.raw.log` (SHA-256: `de0edfab5d5a9439ec125559d7fc9ed11fcbc68391da8c19b34108c7718f6f00`)
 - Target Commit: `cf4c12e4003199cd80c73603f8b54a0f80f49657` (*Reconcile the P35 replay evidence index*)
@@ -736,13 +740,39 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
        raw_target_all = jnp.take_along_axis(
      jax.errors.JaxRuntimeError: UNAVAILABLE: Connection to IFRT proxy server was terminated: UNAVAILABLE: Socket closed
      ```
-   - Simultaneously, the dynamically provisioned TPU instance group `nap-ct5p-hightp-4t-wbuwvyc8-temporary-mig-1mo4b9n7-async-0` entered `NotReady,SchedulingDisabled` (node termination / GKE autoscaler eviction during heavy unjitted RPC loop).
-3. **Root Cause Analysis**:
-   - `_p35_run_captured_records` executes a Python loop across 256 captured decode steps with unjitted `self._runner.compute_logits_fn` returning full vocabulary logits `(4096, 151936)` of float32 (~2.5 GB per step).
-   - Generating and transferring unjitted 2.5 GB intermediate arrays over 256 steps without JIT compilation creates massive IFRT proxy memory pressure and gRPC stream saturation.
-4. **Next Step / Engineering Fix**:
-   - Vectorize / batch the captured records execution or extract logprobs directly on-device without accumulating large unjitted logits across 256 individual Pathways RPC calls.
+   - The client log records `UNAVAILABLE: Socket closed`, but it does not contain the Pathways
+     worker exit reason, a Kubernetes node event, HBM-at-failure, or an OOM report.
+3. **Evidence Boundary**:
+   - The replay received two grouped-B metadata records, not 256 decode steps.
+   - Each record logically forms float32 logits with shape `(4096, 151936)` (about 2.49 GB), but
+     those logits remain JAX device arrays in the inspected code. The archive contains no evidence
+     that the complete tensor crossed to the host or was serialized as one gRPC message.
+   - Therefore the proven result is an IFRT service disconnection before either report completed.
+     Memory pressure, transfer limits, worker eviction, and the operation that caused the peer to
+     exit remain hypotheses.
+4. **Next Step / Engineering Repair**:
+   - Persist the completed A/B/C report before optional replay.
+   - Preserve the original numerical program boundaries, serialize each captured record with
+     explicit completion barriers, release full-vocabulary temporaries at the record boundary, and
+     retain logical shape/byte instrumentation.
+   - Re-run one source-pinned Attempt 0 as r30. Only the target log plus Pathways worker/resource
+     evidence may determine whether the infrastructure interruption is resolved or classify its
+     cause.
 
+---
 
+## 30. Phase 35.3b Local Bounded-Replay Gate
 
+- `p35_3b_onehost_tp4_r3.log` (SHA-256:
+  `2d2aca9c4c25bffd58e48a66ebe4177eeaba9068c8c86d9f983798b3121638b8`)
+
+### Local Result
+
+1. The final four-device v5p smoke executed four replay arms over two captured records. All eight
+   record begin/complete pairs were observed, including a first record with no action predictor.
+2. Both focused bitwise tests passed in 34.72 seconds. Signed-zero and one-bit controls remained
+   effective.
+3. This is a local code-mechanics gate only. It does not prove that the r29 Pathways interruption
+   is fixed and does not classify the 64-chip adapter-envelope carrier. One source-pinned r30
+   Attempt 0 remains required.
 

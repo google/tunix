@@ -1146,8 +1146,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 adapter_contract.get("fresh_cache_per_group") is True
             ),
         }
+        exact_replay_enabled = (
+            os.environ.get(envelope_probe.EXACT_REPLAY_ENV, "") == "1"
+        )
         exact_replay_path = None
-        if os.environ.get(envelope_probe.EXACT_REPLAY_ENV, "") == "1":
+        if exact_replay_enabled:
           exact_replay_path = os.environ.get(
               envelope_probe.EXACT_REPLAY_REPORT_ENV, ""
           )
@@ -1155,6 +1158,53 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             raise envelope_probe.EnvelopeProbeError(
                 "P35.3 requires CANON_P35_EXACT_REPLAY_REPORT"
             )
+
+        def build_base_report():
+          return envelope_probe.build_report(
+              a=a_full[rows],
+              b=np.asarray(b_selected),
+              c=c_full[rows],
+              action_mask=selected_action_mask,
+              selected_row_indices=rows,
+              first_full_ac_mismatch=first_ac,
+              attestations=attestations,
+              metadata={
+                  "serving": metadata_summary,
+                  "adapter": adapter_contract,
+                  "grouped_serving": b_contract,
+                  "weights": weight_attestation,
+                  "metadata_error": metadata_error,
+                  "exact_replay_report": exact_replay_path,
+              },
+          )
+
+        if exact_replay_enabled:
+          preliminary_path = os.environ.get(
+              envelope_probe.PRE_REPLAY_REPORT_ENV, ""
+          ) or envelope_probe.pre_replay_report_path(report_path)
+          evidence_paths = {
+              os.path.abspath(os.fspath(path))
+              for path in (
+                  report_path,
+                  preliminary_path,
+                  exact_replay_path,
+              )
+          }
+          if len(evidence_paths) != 3:
+            raise envelope_probe.EnvelopeProbeError(
+                "P35.3 base, preliminary, and replay reports must use "
+                "three distinct paths"
+            )
+          preliminary_output = envelope_probe.write_report(
+              build_base_report(),
+              preliminary_path,
+          )
+          print(
+              "[CANON_P35] BASE_REPORT_COMPLETE "
+              f"path={preliminary_output} rows={rows.tolist()} "
+              "REPLAY_PENDING",
+              flush=True,
+          )
           b_records = envelope_probe.load_arm_metadata_records(
               metadata_dir, "B"
           )
@@ -1233,23 +1283,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               f"path={replay_output}",
               flush=True,
           )
-        report = envelope_probe.build_report(
-            a=a_full[rows],
-            b=np.asarray(b_selected),
-            c=c_full[rows],
-            action_mask=selected_action_mask,
-            selected_row_indices=rows,
-            first_full_ac_mismatch=first_ac,
-            attestations=attestations,
-            metadata={
-                "serving": metadata_summary,
-                "adapter": adapter_contract,
-                "grouped_serving": b_contract,
-                "weights": weight_attestation,
-                "metadata_error": metadata_error,
-                "exact_replay_report": exact_replay_path,
-            },
-        )
+        report = build_base_report()
         output = envelope_probe.write_report(report, report_path)
         print(
             "[CANON_P35] REPORT_COMPLETE "

@@ -1,7 +1,7 @@
 # P35 envelope discriminator state
 
-- Status: active; P35.2 target complete, P35.3 exact-input replay in progress
-- Active phase: P35.3 exact-input replay
+- Status: active; P35.2 target complete, P35.3 target r29 infrastructure-inconclusive
+- Active phase: P35.3b local complete; source review and target r30 pending
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
 - Directory state: tracked
 - Branch at bind: `codex/p34-scheduler-contract-0809`
@@ -119,15 +119,52 @@ reward or correlation to classify this boundary.
   one-host v5p TP4 smoke passed the replay and exact-equality controls (2 PASS, 35.90s). The
   default-off implementation is published as `366ac2b1`; no target P35.3 run or cloud-resource
   lifecycle change has occurred.
+- P35.3a one-host r2 passed source, install, overlay and four-device preflight but stopped before
+  model forward because its offline Hugging Face cache lacked the snapshot directory named by an
+  existing ref. The result is `VOID_CONTRACT`; no numerical boundary was measured. r3 will mount
+  the already-present local model directory at that snapshot path read-only.
+- P35.3a one-host r3 completed rollout and the real A/C production-boundary measurement on
+  direct-attached DP1xTP4. The P35 selector performed an element-bitwise scan over all action
+  positions and found no mismatch, so the pre-registered known-red guard stopped the run before B
+  and before replay. Postflight was clean, and canonical traces were present (fixed AR 168, fixed
+  embed 1, logprob M 1). The corrected verdict is `LOCAL_NOT_REPRODUCED`, not P35.3 PASS.
+- The r3 schema-v1 wrapper output remains `INCONCLUSIVE` because it counted the exception's source
+  echo and terminal line as two events. A tested schema-v2 reclassifier anchors the terminal line
+  and returns `LOCAL_NOT_REPRODUCED` over the same immutable raw log. Raw/result-v2 SHA-256 are
+  `13f77d5b13110b995582089a7a0f40be85f04dcb0e50116ee5ba240070534af6` and
+  `516c1ad9c7bc3a963c856e674421df236b30a5a71b637e204310ae63903c8908`.
+- P35.3 target r29 Attempt 0 ran the pinned commit `cf4c12e4` on all 64 Pathways devices, completed
+  rollout and entered the first captured/live replay. It then lost the IFRT proxy connection and
+  raised `UNAVAILABLE: Socket closed` while dispatching `jnp.take_along_axis`. It emitted neither
+  `REPLAY_COMPLETE` nor `REPORT_COMPLETE`; P35.3 therefore remains target-inconclusive.
+- r29 captured 24 A metadata records and two B records. The replay loop was over two B records,
+  not 256 decode steps. Each record forms a logical float32 logits tensor of shape
+  `(4096, 151936)` (about 2.49 GB), but the archived raw log contains no OOM, HBM-at-failure,
+  worker termination event or evidence that this complete tensor crossed to the host. The socket
+  closure is proven; memory pressure, autoscaler eviction and the causal failing operation are
+  hypotheses requiring independent evidence.
+- P35.3b preserves the original numerical program boundaries and serializes every captured
+  record. A fused-tail candidate was rejected after changing 178/256 CPU target logprobs by about
+  one ULP. The admitted path blocks all target outputs and caches before releasing logits and
+  processed logits or submitting the next record.
+- The learner now writes an immutable `p35_envelope.pre_replay.json` before exact replay. Cluster
+  postflight collision-checks this path and prints its SHA even when replay later fails. A CPU
+  negative control proves missing replay is rejected while the preliminary artifact survives.
+- P35.3b local gates PASS: complete CPU contracts, both exact-image overlays, and a four-device
+  one-host v5p TP4 smoke. The final two-record TP4 log has four replay-arm begin markers, eight
+  matching record-complete markers and 2 passing bitwise tests in 34.72s. The first record has no
+  action predictor, so the test covers the formerly unanchored tail. Raw SHA-256 is
+  `2d2aca9c4c25bffd58e48a66ebe4177eeaba9068c8c86d9f983798b3121638b8`.
 
 Evidence: `artifacts/p35_1_local_gate.md`, `artifacts/p35_2_local_gate.md` and
 `artifacts/p35_3_local_gate.md`.
 
 ## Next action
 
-Render one source-pinned r29 Attempt-0 JobSet from published commit `366ac2b1` exactly as recorded
-in `cluster/P35_ENVELOPE_HANDOFF.md`. Copy all JSON, metadata and raw logs before deleting the
-coordinator Pod; the state directory is on `/tmp`.
+Review the bounded replay diff, then commit and publish it only after user approval. Render r30
+from that concrete source SHA and run one Attempt 0. Copy the preliminary report even if replay
+fails; a target numerical classification still requires the final P35.2 and P35.3 artifacts.
+The one-host result remains a platform contrast only.
 
 ## Hard gates
 
@@ -143,8 +180,9 @@ coordinator Pod; the state directory is on `/tmp`.
 
 ## Blockers
 
-The P35.3 implementation has only local CPU, exact-image and bounded one-host TP4 evidence. The
-published 64-chip launch remains an operator action.
+The bounded P35.3b implementation has local CPU, exact-image and one-host TP4 evidence. It is not
+yet committed or published. The direct-attached production run did not reproduce the known
+carrier, and only another 64-chip Pathways attempt can decide the target result.
 
 ## Rollback
 

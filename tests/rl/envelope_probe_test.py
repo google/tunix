@@ -196,6 +196,16 @@ class EnvelopeProbeTest(absltest.TestCase):
       with self.assertRaises(FileExistsError):
         envelope_probe.write_report({"value": 2}, path)
 
+  def test_pre_replay_report_path_is_distinct_and_stable(self):
+    self.assertEqual(
+        envelope_probe.pre_replay_report_path("/tmp/p35.json"),
+        Path("/tmp/p35.pre_replay.json"),
+    )
+    self.assertEqual(
+        envelope_probe.pre_replay_report_path("/tmp/p35"),
+        Path("/tmp/p35.pre_replay.json"),
+    )
+
   def test_metadata_attestation_accepts_one_request_per_rank(self):
     with tempfile.TemporaryDirectory() as temporary:
       self._write_metadata_record(temporary, 0, "A")

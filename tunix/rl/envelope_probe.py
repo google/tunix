@@ -33,6 +33,7 @@ DATA_SIZE_ENV = "CANON_DP_SIZE"
 LOCAL_M_ENV = "CANON_LOGPROB_M"
 EXACT_REPLAY_ENV = "CANON_P35_EXACT_REPLAY"
 EXACT_REPLAY_REPORT_ENV = "CANON_P35_EXACT_REPLAY_REPORT"
+PRE_REPLAY_REPORT_ENV = "CANON_P35_PRE_REPLAY_REPORT"
 
 PAIR_AB = "A_native_vs_B_canonical_serving"
 PAIR_BC = "B_canonical_serving_vs_C_adapter"
@@ -537,3 +538,10 @@ def write_report(report: Mapping[str, Any], path: str | os.PathLike[str]) -> Pat
     json.dump(report, stream, indent=2, sort_keys=True)
     stream.write("\n")
   return output
+
+
+def pre_replay_report_path(path: str | os.PathLike[str]) -> Path:
+  """Returns a distinct immutable path for evidence available before replay."""
+  output = Path(path)
+  suffix = output.suffix or ".json"
+  return output.with_name(f"{output.stem}.pre_replay{suffix}")
