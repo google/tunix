@@ -941,10 +941,11 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - `canon-p33-gsm8k-full-r35` (Qwen3-1.7B, DP16xTP4) and `canon-p33-fl-full-r35` (Qwen3-8B, DP16xTP4) concurrently scheduled on separate physical 4x4x4 slices with `exclusive-topology: cloud.google.com/gke-nodepool`.
 2. **Breakthrough Finding: Zero B-C Drift Across Both Production Workloads**:
    - **GSM8K Full (Qwen3-1.7B, 256 trajectories, 193,735 action tokens)**:
-     - `S_prefill_vs_T_old` (Arm B native prefill forward vs Arm C canonical adapter forward): **0 DIFFERING BYTES / 0 DIFFERING TOKENS across all 193,735 tokens (100% BITWISE IDENTICAL)**!
-     - `S_decode_vs_S_prefill` (Arm A decode vs Arm B prefill): only **2 differing tokens out of 193,735 tokens (0.001%)**.
+     - `S_prefill_vs_T_old` (Arm B native prefill forward vs Arm C canonical adapter forward): **0 / 774,940 differing action bytes across 193,735 action elements (100% BITWISE IDENTICAL)**.
+     - `S_decode_vs_S_prefill` (Arm A decode vs Arm B prefill): **2 / 774,940 differing action bytes (0.000258%)**. The archived stdout does not contain the element count; for float32 this is between one and two differing action elements, not two established token mismatches.
    - **FrozenLake Full (Qwen3-8B, 256 trajectories, 46,961 action tokens)**:
-     - `S_prefill_vs_T_old` (Arm B native prefill forward vs Arm C canonical adapter forward): **0 DIFFERING BYTES / 0 DIFFERING TOKENS across all 46,961 tokens (100% BITWISE IDENTICAL)**!
-     - `S_decode_vs_S_prefill` (Arm A decode vs Arm B prefill): 70 differing bytes out of 46,961 tokens (0.15%).
+     - `S_prefill_vs_T_old` (Arm B native prefill forward vs Arm C canonical adapter forward): **0 / 187,844 differing action bytes across 46,961 action elements (100% BITWISE IDENTICAL)**.
+     - `S_decode_vs_S_prefill` (Arm A decode vs Arm B prefill): **70 / 187,844 differing action bytes (0.037265%)**. The archived stdout bounds this to 18--70 differing float32 action elements but does not recover the exact element count.
+     - This sparse boundary is not established as a one-ULP effect: the same action-mask diagnostic reports `logp_diff_max=0.10390`, `prob_diff_max=0.07350`, and sampler-IS `weight_max=1.0858`.
 3. **Core Conclusion**:
    - Across both the 1.7B and 8B scales under flag-on conditions, the Tunix canonical training adapter (`Arm C`) and the native vLLM prefill engine (`Arm B`) achieve **0 differing bytes** on full production batches.

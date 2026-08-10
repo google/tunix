@@ -217,6 +217,36 @@ EOF
 
 validate_stale_evidence_rejected
 
+validate_failed_pre_alignment_stdout() (
+  set -euo pipefail
+  local state output
+  state="$(mktemp -d)"
+  trap 'rm -r "$state"' EXIT
+  output="$state/runner.stdout"
+  cat > "$state/env.sh" <<EOF
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+export CANON_P32_TRAIN_ADMITTED=0
+export CANON_RUN_LOG=$state/run.log
+export CANON_PRE_ALIGN_REPORT=$state/pre_alignment.jsonl
+export CANON_ALIGN_REPORT=$state/alignment.jsonl
+export CANON_UPDATE_REPORT=$state/updates.jsonl
+export CANON_RUN_CMD="printf '%s\\n' '{\"verdict\":\"FAIL\",\"reds\":[\"S_decode_vs_S_prefill\"]}' > '$state/pre_alignment.jsonl'; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'; exit 17"
+EOF
+  export CANON_STATE="$state"
+  export CANON_PKG="$ROOT"
+  export CANON_RUN_CWD="$WORKTREE"
+  if bash "$ROOT/cluster/steps/90_run.sh" >"$output" 2>&1; then
+    echo "[P38.EVIDENCE] failed workload was accepted" >&2
+    exit 1
+  fi
+  grep -Fq '[CANON_PRE_ALIGN_ARTIFACT] path=' "$output"
+  grep -Fq 'rows=1 sha256=' "$output"
+  grep -Fq '[CANON_PRE_ALIGN_ARTIFACT_JSON] {"verdict":"FAIL","reds":["S_decode_vs_S_prefill"]}' "$output"
+  echo "[P38.EVIDENCE] FAILED_REPORT_STDOUT_PASS"
+)
+
+validate_failed_pre_alignment_stdout
+
 validate_p35_postflight() (
   set -euo pipefail
   local state report_source report_output classification

@@ -51,13 +51,13 @@ class RenderP33JobSetsTest(unittest.TestCase):
         run_id=_RUN_ID,
     )
 
-  def test_renders_four_isolated_strict_jobsets(self):
+  def test_renders_five_isolated_strict_jobsets(self):
     with tempfile.TemporaryDirectory() as tmp:
       outputs = self._render(Path(tmp))
-      self.assertEqual(len(outputs), 4)
+      self.assertEqual(len(outputs), 5)
       documents = [yaml.safe_load(path.read_text()) for path in outputs]
       names = [document["metadata"]["name"] for document in documents]
-      self.assertEqual(len(set(names)), 4)
+      self.assertEqual(len(set(names)), 5)
       scratches = []
       states = []
       wandb_names = []
@@ -97,9 +97,9 @@ class RenderP33JobSetsTest(unittest.TestCase):
             for arg in container["args"]
             if arg.startswith("--gcs_scratch_location=")
         ))
-      self.assertEqual(len(set(states)), 4)
-      self.assertEqual(len(set(wandb_names)), 4)
-      self.assertEqual(len(set(scratches)), 4)
+      self.assertEqual(len(set(states)), 5)
+      self.assertEqual(len(set(wandb_names)), 5)
+      self.assertEqual(len(set(scratches)), 5)
       self.assertTrue(all(len(values) == 2 for values in scratches))
 
   def test_rendered_commands_equal_frozen_workload_commands(self):
@@ -113,6 +113,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
         workload_name = "gsm8k" if "gsm8k" in profile else "frozenlake"
         by_stage[(workload_name, env["CANON_P33_RUN_STAGE"])] = env
       for workload_name, stage in (
+          ("gsm8k", "alignment-short"),
           ("frozenlake", "alignment-short"),
           ("frozenlake", "backward-no-commit"),
           ("gsm8k", "full"),
@@ -137,6 +138,11 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertNotIn(
           "--rollout_vllm_max_num_batched_tokens=4096", gsm8k_command
       )
+      gsm8k_short = by_stage[("gsm8k", "alignment-short")]
+      self.assertEqual(gsm8k_short["CANON_P33_SHORT_ALIGNMENT"], "1")
+      self.assertEqual(gsm8k_short["CANON_P33_NO_COMMIT"], "1")
+      self.assertIn("--max_steps=1", gsm8k_short["CANON_RUN_CMD"])
+      self.assertIn("--max_response_length=1024", gsm8k_short["CANON_RUN_CMD"])
       short_env = by_stage[("frozenlake", "alignment-short")]
       self.assertEqual(short_env["CANON_P33_SHORT_ALIGNMENT"], "1")
       self.assertIn("--max_response_length=512", short_env["CANON_RUN_CMD"])

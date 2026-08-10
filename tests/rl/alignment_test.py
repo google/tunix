@@ -14,6 +14,8 @@
 
 """Tests for the fail-closed zero-TIM alignment sidecar."""
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -156,6 +158,31 @@ class AlignmentTest(absltest.TestCase):
       )
       with open(report, encoding="utf-8") as report_file:
         self.assertEqual(json.loads(report_file.readline()), result)
+
+  def test_pre_backward_gate_prints_complete_json_and_evidence_sha(self):
+    wrapped = self._wrapped()
+    stdout = io.StringIO()
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ), contextlib.redirect_stdout(stdout):
+      result = alignment.check_pre_backward(wrapped, step=7)
+    lines = stdout.getvalue().splitlines()
+    json_line = next(
+        line for line in lines if line.startswith("[CANON_ALIGN_PRE_JSON] ")
+    )
+    printed = json.loads(json_line.split(" ", 1)[1])
+    self.assertEqual(printed, result)
+    evidence_line = next(
+        line
+        for line in lines
+        if line.startswith("[CANON_ALIGN_PRE_EVIDENCE] ")
+    )
+    self.assertIn("sha256=", evidence_line)
 
   def test_pre_backward_gate_localizes_first_red_boundary(self):
     wrapped = self._wrapped()
@@ -347,6 +374,11 @@ class AlignmentTest(absltest.TestCase):
     self.assertEqual(result["differing_elements"], 1)
     self.assertEqual(result["total_elements"], 1)
     self.assertEqual(result["first_mismatch"]["masked_index"], 0)
+    self.assertEqual(result["first_mismatch"]["coordinate"], [0, 0])
+    self.assertEqual(result["first_mismatch"]["a_bits"], "0x00000000")
+    self.assertEqual(result["first_mismatch"]["b_bits"], "0x80000000")
+    self.assertEqual(result["first_mismatch"]["xor_bits"], "0x80000000")
+    self.assertEqual(result["first_mismatch"]["ulp_distance"], 1)
 
   def test_one_ulp_is_one_differing_element(self):
     left = np.asarray([[1.0, 2.0]], np.float32)
@@ -358,6 +390,90 @@ class AlignmentTest(absltest.TestCase):
     self.assertEqual(result["differing_elements"], 1)
     self.assertEqual(result["total_elements"], 2)
     self.assertGreater(result["differing_bytes"], 0)
+    mismatch = result["first_mismatch"]
+    self.assertEqual(mismatch["coordinate"], [0, 1])
+    self.assertEqual(mismatch["sequence_row"], 0)
+    self.assertEqual(mismatch["completion_position"], 1)
+    self.assertEqual(mismatch["ulp_distance"], 1)
+
+  def test_pre_backward_mismatch_includes_token_and_sparse_max_abs(self):
+    wrapped = self._wrapped()
+    drift = wrapped.s_prefill.copy()
+    drift[1, 2] = drift[1, 2] + np.float32(0.1039)
+    wrapped = wrapped.replace(s_prefill=drift)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ):
+      result = alignment.check_pre_backward(
+          wrapped, step=0, fail_closed=False
+      )
+    boundary = result["boundaries"]["S_decode_vs_S_prefill"]
+    self.assertEqual(boundary["differing_elements"], 1)
+    self.assertAlmostEqual(boundary["max_abs"], 0.1039, places=6)
+    mismatch = boundary["first_mismatch"]
+    self.assertEqual(mismatch["coordinate"], [1, 2])
+    self.assertEqual(mismatch["token_id"], int(wrapped.tokens[1, 2]))
+    self.assertGreater(mismatch["abs_delta"], 0.1)
+
+  def test_mismatch_details_are_bounded_and_marked_truncated(self):
+    left = np.zeros((1, 1025), dtype=np.float32)
+    right = np.ones_like(left)
+    result = alignment._masked_bitwise_difference(  # pylint: disable=protected-access
+        left, right, np.ones_like(left, dtype=np.bool_)
+    )
+    self.assertEqual(result["differing_elements"], 1025)
+    self.assertEqual(result["reported_mismatches"], 1024)
+    self.assertLen(result["mismatches"], 1024)
+    self.assertTrue(result["mismatches_truncated"])
+
+  def test_pre_backward_invalid_shape_is_a_hard_failure(self):
+    wrapped = self._wrapped().replace(
+        s_prefill=np.zeros((1, 1), dtype=np.float32)
+    )
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          alignment.AlignmentGateError, "S_decode_vs_S_prefill"
+      ):
+        alignment.check_pre_backward(wrapped, step=0)
+
+  def test_pre_backward_nonfinite_mismatch_preserves_strict_json_evidence(self):
+    wrapped = self._wrapped()
+    drift = wrapped.s_prefill.copy()
+    drift[0, 0] = np.nan
+    wrapped = wrapped.replace(s_prefill=drift)
+    stdout = io.StringIO()
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ), contextlib.redirect_stdout(stdout):
+      result = alignment.check_pre_backward(
+          wrapped, step=0, fail_closed=False
+      )
+    boundary = result["boundaries"]["S_decode_vs_S_prefill"]
+    self.assertEqual(boundary["first_mismatch"]["b"], "nan")
+    self.assertEqual(boundary["max_abs"], "nan")
+    json_line = next(
+        line
+        for line in stdout.getvalue().splitlines()
+        if line.startswith("[CANON_ALIGN_PRE_JSON] ")
+    )
+    self.assertEqual(json.loads(json_line.split(" ", 1)[1]), result)
 
   def test_full_hash_can_differ_while_masked_boundary_is_exact(self):
     wrapped = self._wrapped(rows=1)

@@ -128,14 +128,14 @@ class DPWorkloadSpec:
         raise ValueError(f"unknown P33 run stage: {run_stage!r}") from exc
     envelope_short = run_stage == "envelope-short"
     short_alignment = run_stage == "alignment-short"
-    if short_alignment and self.name != "frozenlake":
-      raise ValueError("alignment-short is only defined for FrozenLake")
     if envelope_short and self.name != "gsm8k":
       raise ValueError("envelope-short is only defined for GSM8K")
     max_response_length = (
         256
         if envelope_short
-        else 512 if short_alignment else self.max_response_length
+        else 512
+        if short_alignment and self.name == "frozenlake"
+        else self.max_response_length
     )
     common = (
         "--mesh_dp=16",

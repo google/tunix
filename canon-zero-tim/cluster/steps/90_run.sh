@@ -96,6 +96,15 @@ set -o pipefail
 bash -c "$CANON_RUN_CMD" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 echo "[run] exit=$rc"
+# A fail-closed numerical gate exits before the normal P33 classifier runs.  Preserve the
+# complete pre-backward record in the pod log, which is the only artifact guaranteed to survive
+# a deleted pod.  The report contains hashes and numerical diagnostics, never credentials.
+if [ "$rc" -ne 0 ] && [ -s "${CANON_PRE_ALIGN_REPORT:-}" ]; then
+  pre_align_sha="$(sha256sum "$CANON_PRE_ALIGN_REPORT" | awk '{print $1}')"
+  pre_align_rows="$(wc -l < "$CANON_PRE_ALIGN_REPORT" | tr -d '[:space:]')"
+  echo "[CANON_PRE_ALIGN_ARTIFACT] path=$CANON_PRE_ALIGN_REPORT rows=$pre_align_rows sha256=$pre_align_sha"
+  sed 's/^/[CANON_PRE_ALIGN_ARTIFACT_JSON] /' "$CANON_PRE_ALIGN_REPORT"
+fi
 # grep -a: progress-bar control characters make grep treat the log as binary and drop every
 # match silently, which reads exactly like "the intervention never fired".
 n_ar=$(grep -ac 'CANON_FIXED_AR=1 fixed-order tree' "$LOG" || true)

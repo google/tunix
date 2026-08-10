@@ -1,9 +1,9 @@
-# P33 four-JobSet queue
+# P33 five-JobSet queue
 
 > **Current r17 recovery:** follow `P33_R17_HANDOFF.md`. It admits only GSM8K `full` and
 > FrozenLake `alignment-short`; do not apply the whole rendered directory.
 
-This runbook renders four independent, strict Attempt-0 JobSets:
+This runbook renders five independent, strict Attempt-0 JobSets:
 
 | Queue entry | Model | Stage | Update budget | Purpose |
 |---|---|---|---:|---|
@@ -69,7 +69,7 @@ raw pod logs and `[P33.RUN] JSON` records are the evidence that must be archived
 Expected render terminal marker:
 
 ```text
-[P33.JOBSET] VERDICT PASS count=4 source=<40-char-sha> run_id=<run-id>
+[P33.JOBSET] VERDICT PASS count=5 source=<40-char-sha> run_id=<run-id>
 ```
 
 ## Validate without allocating resources
@@ -118,7 +118,7 @@ bypass it; fix the reviewed base or renderer and use a new `RUN_ID`.
 ## Queue selected manifests
 
 This is the externally consequential step. Run it only after resource approval and the active
-handoff has named the allowed manifests. Never apply the whole directory merely because all four
+handoff has named the allowed manifests. Never apply the whole directory merely because all five
 manifests rendered successfully.
 
 ```bash

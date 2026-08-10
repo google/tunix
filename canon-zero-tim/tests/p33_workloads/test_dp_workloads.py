@@ -186,11 +186,17 @@ class DPWorkloadsTest(unittest.TestCase):
     self.assertIn("--env_max_steps=2", command)
     self.assertIn("--vllm_max_num_batched_tokens=256", command)
 
-  def test_gsm8k_rejects_frozenlake_short_alignment_stage(self):
-    with self.assertRaisesRegex(ValueError, "only defined for FrozenLake"):
-      dp_workloads.get_workload("gsm8k").command(
-          run_stage="alignment-short"
-      )
+  def test_gsm8k_short_alignment_preserves_full_response_shape(self):
+    command = dp_workloads.get_workload("gsm8k").command(
+        run_stage="alignment-short"
+    )
+    self.assertIn("--batch_size=32", command)
+    self.assertIn("--num_generations=8", command)
+    self.assertIn("--max_prompt_length=1024", command)
+    self.assertIn("--max_response_length=1024", command)
+    self.assertIn("--max_steps=1", command)
+    self.assertIn("--rollout_vllm_max_num_seqs=16", command)
+    self.assertIn("--rollout_vllm_max_num_batched_tokens=256", command)
 
   def test_gsm8k_envelope_short_preserves_shape_contract(self):
     command = dp_workloads.get_workload("gsm8k").command(
@@ -345,6 +351,25 @@ class DPWorkloadsTest(unittest.TestCase):
   def test_launch_accepts_frozenlake_short_alignment(self):
     workload = dp_workloads.get_workload("frozenlake")
     environ = _environment("frozenlake")
+    environ.update({
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P33_RUN_STAGE": "alignment-short",
+        "CANON_P33_SHORT_ALIGNMENT": "1",
+        "FL_SHARED_MESH": "16,4",
+    })
+    self.assertEqual(
+        dp_workloads.requested_max_steps(workload, environ), 1
+    )
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+
+  def test_launch_accepts_gsm8k_short_alignment(self):
+    workload = dp_workloads.get_workload("gsm8k")
+    environ = _environment("gsm8k")
     environ.update({
         "CANON_P32_TRAIN_ADMITTED": "1",
         "CANON_P32_DP_REDUCTION_ADMITTED": "1",

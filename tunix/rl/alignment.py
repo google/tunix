@@ -39,6 +39,7 @@ TRAIN_ENV = "CANON_ALIGNMENT_TRAIN"
 REPORT_ENV = "CANON_ALIGN_REPORT"
 PRE_GATE_ENV = "CANON_PRE_ALIGN_GATE"
 PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
+_MAX_MISMATCH_DETAILS = 1024
 
 
 class AlignmentGateError(RuntimeError):
@@ -189,6 +190,97 @@ def _masked_hash(value: Any, mask: Any) -> str:
   return _hash(np.ascontiguousarray(array[bool_mask]))
 
 
+def _scalar_bits(value: Any, dtype: np.dtype) -> tuple[int | None, str | None]:
+  """Returns the exact in-memory scalar bits as an integer and hex string."""
+  unsigned = {
+      1: np.uint8,
+      2: np.uint16,
+      4: np.uint32,
+      8: np.uint64,
+  }.get(dtype.itemsize)
+  if unsigned is None:
+    return None, None
+  scalar = np.asarray([value], dtype=dtype)
+  bits = int(scalar.view(unsigned)[0])
+  return bits, f"0x{bits:0{dtype.itemsize * 2}x}"
+
+
+def _float_ulp_distance(a_bits: int, b_bits: int, bit_width: int) -> int:
+  """Returns ordered-representation distance for two IEEE floating values."""
+  sign_mask = 1 << (bit_width - 1)
+  value_mask = (1 << bit_width) - 1
+
+  def ordered(bits: int) -> int:
+    if bits & sign_mask:
+      return (~bits) & value_mask
+    return bits | sign_mask
+
+  return abs(ordered(a_bits) - ordered(b_bits))
+
+
+def _json_number(value: Any) -> float | str:
+  """Returns a strict-JSON representation without losing nonfinite state."""
+  number = float(value)
+  if np.isnan(number):
+    return "nan"
+  if np.isposinf(number):
+    return "inf"
+  if np.isneginf(number):
+    return "-inf"
+  return number
+
+
+def _mismatch_detail(
+    av: np.ndarray,
+    bv: np.ndarray,
+    coordinates: np.ndarray,
+    byte_diff_by_element: np.ndarray,
+    masked_index: int,
+) -> dict[str, Any]:
+  """Builds one JSON-safe exact-value record for a masked mismatch."""
+  coordinate = tuple(int(value) for value in coordinates[masked_index])
+  a_value = av[masked_index]
+  b_value = bv[masked_index]
+  abs_delta = abs(np.float64(a_value) - np.float64(b_value))
+  a_bits, a_bits_hex = _scalar_bits(a_value, av.dtype)
+  b_bits, b_bits_hex = _scalar_bits(b_value, bv.dtype)
+  detail = {
+      "masked_index": int(masked_index),
+      "coordinate": list(coordinate),
+      "a": _json_number(a_value),
+      "b": _json_number(b_value),
+      "abs_delta": _json_number(abs_delta),
+      "a_bits": a_bits_hex,
+      "b_bits": b_bits_hex,
+      "xor_bits": (
+          f"0x{(a_bits ^ b_bits):0{av.dtype.itemsize * 2}x}"
+          if a_bits is not None and b_bits is not None
+          else None
+      ),
+      "differing_byte_offsets": [
+          int(value)
+          for value in np.flatnonzero(byte_diff_by_element[masked_index])
+      ],
+      "ulp_distance": None,
+  }
+  if len(coordinate) == 2:
+    detail.update({
+        "sequence_row": coordinate[0],
+        "completion_position": coordinate[1],
+    })
+  if (
+      a_bits is not None
+      and b_bits is not None
+      and av.dtype.kind == "f"
+      and np.isfinite(a_value)
+      and np.isfinite(b_value)
+  ):
+    detail["ulp_distance"] = _float_ulp_distance(
+        a_bits, b_bits, av.dtype.itemsize * 8
+    )
+  return detail
+
+
 def _masked_bitwise_difference(a: Any, b: Any, mask: Any) -> dict[str, Any]:
   """Returns byte- and element-level bitwise differences under ``mask``."""
   aa = np.asarray(a)
@@ -204,6 +296,9 @@ def _masked_bitwise_difference(a: Any, b: Any, mask: Any) -> dict[str, Any]:
         "total_elements": -1,
         "element_fraction": None,
         "first_mismatch": None,
+        "mismatches": [],
+        "reported_mismatches": 0,
+        "mismatches_truncated": False,
     }
 
   av = np.ascontiguousarray(aa[mm]).reshape(-1)
@@ -212,16 +307,23 @@ def _masked_bitwise_difference(a: Any, b: Any, mask: Any) -> dict[str, Any]:
   differing_bytes = int(byte_diff.sum())
   total_bytes = int(av.nbytes)
   total_elements = int(av.size)
-  element_diff = byte_diff.reshape(total_elements, av.dtype.itemsize).any(axis=1)
+  byte_diff_by_element = byte_diff.reshape(total_elements, av.dtype.itemsize)
+  element_diff = byte_diff_by_element.any(axis=1)
   differing_elements = int(element_diff.sum())
-  first = None
-  if differing_elements:
-    index = int(np.flatnonzero(element_diff)[0])
-    first = {
-        "masked_index": index,
-        "a": float(av[index]),
-        "b": float(bv[index]),
-    }
+  coordinates = np.argwhere(mm)
+  mismatch_indices = np.flatnonzero(element_diff)
+  reported_indices = mismatch_indices[:_MAX_MISMATCH_DETAILS]
+  mismatches = [
+      _mismatch_detail(
+          av,
+          bv,
+          coordinates,
+          byte_diff_by_element,
+          int(index),
+      )
+      for index in reported_indices
+  ]
+  first = mismatches[0] if mismatches else None
   return {
       "valid": True,
       "differing_bytes": differing_bytes,
@@ -235,7 +337,65 @@ def _masked_bitwise_difference(a: Any, b: Any, mask: Any) -> dict[str, Any]:
           float(differing_elements / total_elements) if total_elements else 0.0
       ),
       "first_mismatch": first,
+      "mismatches": mismatches,
+      "reported_mismatches": len(mismatches),
+      "mismatches_truncated": differing_elements > len(mismatches),
   }
+
+
+def _attach_tokens(
+    difference: dict[str, Any], tokens: Any, expected_shape: tuple[int, ...]
+) -> None:
+  """Adds token ids to localized records when the sidecar shape is valid."""
+  token_array = np.asarray(tokens)
+  if token_array.shape != expected_shape:
+    return
+  for detail in difference.get("mismatches", []):
+    coordinate = tuple(detail.get("coordinate", ()))
+    if len(coordinate) == token_array.ndim:
+      detail["token_id"] = int(token_array[coordinate])
+  first = difference.get("first_mismatch")
+  if first is not None and difference.get("mismatches"):
+    difference["first_mismatch"] = difference["mismatches"][0]
+
+
+def _max_abs_mismatch(a: Any, b: Any, mask: Any) -> dict[str, Any] | None:
+  """Returns an exact record for the largest numerical masked mismatch."""
+  aa = np.asarray(a)
+  bb = np.asarray(b)
+  mm = np.asarray(mask, dtype=np.bool_)
+  if aa.shape != bb.shape or aa.dtype != bb.dtype or aa.shape != mm.shape:
+    return None
+  av = np.ascontiguousarray(aa[mm]).reshape(-1)
+  bv = np.ascontiguousarray(bb[mm]).reshape(-1)
+  if not av.size:
+    return None
+  byte_diff_by_element = (
+      av.view(np.uint8) != bv.view(np.uint8)
+  ).reshape(av.size, av.dtype.itemsize)
+  mismatch_indices = np.flatnonzero(byte_diff_by_element.any(axis=1))
+  if not mismatch_indices.size:
+    return None
+  deltas = np.abs(
+      av[mismatch_indices].astype(np.float64)
+      - bv[mismatch_indices].astype(np.float64)
+  )
+  masked_index = int(mismatch_indices[int(np.argmax(deltas))])
+  return _mismatch_detail(
+      av,
+      bv,
+      np.argwhere(mm),
+      byte_diff_by_element,
+      masked_index,
+  )
+
+
+def _report_sha256(path: str) -> str:
+  digest = hashlib.sha256()
+  with open(path, "rb") as report_file:
+    for chunk in iter(lambda: report_file.read(1024 * 1024), b""):
+      digest.update(chunk)
+  return digest.hexdigest()
 
 
 def _masked_bytes_differ(a: Any, b: Any, mask: Any) -> tuple[int, dict | None]:
@@ -269,12 +429,27 @@ def check_pre_backward(
       ("S_prefill_vs_T_old", sp, to),
   ):
     difference = _masked_bitwise_difference(a, b, mask)
-    max_abs = float("nan")
+    _attach_tokens(difference, sidecar.tokens, mask.shape)
+    max_abs = None
+    max_abs_mismatch = _max_abs_mismatch(a, b, mask)
+    if max_abs_mismatch is not None:
+      coordinate = tuple(max_abs_mismatch.get("coordinate", ()))
+      token_array = np.asarray(sidecar.tokens)
+      if token_array.shape == mask.shape and len(coordinate) == token_array.ndim:
+        max_abs_mismatch["token_id"] = int(token_array[coordinate])
     if a.shape == b.shape == mask.shape and n_action:
-      max_abs = float(
-          np.max(np.abs(a.astype(np.float64)[mask] - b.astype(np.float64)[mask]))
+      max_abs = _json_number(
+          np.max(
+              np.abs(
+                  a.astype(np.float64)[mask] - b.astype(np.float64)[mask]
+              )
+          )
       )
-    boundaries[name] = {**difference, "max_abs": max_abs}
+    boundaries[name] = {
+        **difference,
+        "max_abs": max_abs,
+        "max_abs_mismatch": max_abs_mismatch,
+    }
     if difference["differing_bytes"] != 0:
       reds.append(name)
   record = {
@@ -311,6 +486,17 @@ def check_pre_backward(
   os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
   with open(report_path, "a", encoding="utf-8") as report_file:
     report_file.write(json.dumps(record, sort_keys=True) + "\n")
+    report_file.flush()
+    os.fsync(report_file.fileno())
+  compact_record = json.dumps(
+      record, sort_keys=True, separators=(",", ":"), allow_nan=False
+  )
+  print(f"[CANON_ALIGN_PRE_JSON] {compact_record}", flush=True)
+  print(
+      "[CANON_ALIGN_PRE_EVIDENCE] "
+      f"path={report_path} sha256={_report_sha256(report_path)}",
+      flush=True,
+  )
   print(
       "[CANON_ALIGN_PRE] "
       f"step={step} verdict={record['verdict']} N_action={n_action} "

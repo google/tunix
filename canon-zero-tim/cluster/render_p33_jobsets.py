@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render three strict, independent P33 JobSets from the reviewed 64-chip base."""
+"""Render strict, independent P33 JobSets from the reviewed 64-chip base."""
 
 from __future__ import annotations
 
@@ -91,7 +91,32 @@ def _frozenlake_command(
     "--top_p=1.0",
   )
 
+
+def _gsm8k_command(max_steps: int) -> tuple[str, ...]:
+  return (
+      "python3",
+      "-u",
+      "examples/math_gsm8k/qwen3_grpo_demo.py",
+      *_common_args(max_steps=max_steps, prompt=1024, response=1024),
+      "--train_micro_batch_size=32",
+      "--compute_logps_micro_batch_size=32",
+      "--rollout_vllm_hbm_utilization=0.20",
+      "--rollout_vllm_max_num_seqs=16",
+      "--rollout_vllm_max_num_batched_tokens=256",
+      "--wandb_project=zero-tim-gsm8k-dp16-tp4",
+  )
+
+
 _SPECS = (
+    JobSpec(
+        key="gsm8k-alignment-short",
+        workload="gsm8k",
+        stage="alignment-short",
+        profile="cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env",
+        no_commit=True,
+        job_prefix="canon-p33-gsm8k-align",
+        command=_gsm8k_command(1),
+    ),
     JobSpec(
         key="frozenlake-alignment-short",
         workload="frozenlake",
@@ -117,18 +142,7 @@ _SPECS = (
         profile="cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env",
         no_commit=False,
         job_prefix="canon-p33-gsm8k-full",
-        command=(
-            "python3",
-            "-u",
-            "examples/math_gsm8k/qwen3_grpo_demo.py",
-            *_common_args(max_steps=200, prompt=1024, response=1024),
-            "--train_micro_batch_size=32",
-            "--compute_logps_micro_batch_size=32",
-            "--rollout_vllm_hbm_utilization=0.20",
-            "--rollout_vllm_max_num_seqs=16",
-            "--rollout_vllm_max_num_batched_tokens=256",
-            "--wandb_project=zero-tim-gsm8k-dp16-tp4",
-        ),
+        command=_gsm8k_command(200),
     ),
     JobSpec(
         key="frozenlake-full",
