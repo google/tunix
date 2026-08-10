@@ -20,7 +20,6 @@ Contains:
 """
 
 import asyncio
-import collections
 from collections.abc import Mapping, Sequence
 import inspect
 from typing import Any
@@ -29,7 +28,6 @@ import uuid
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import rl_engine_interface
-from tunix.experimental.worker import remote_execution
 
 # TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
@@ -92,31 +90,62 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   )
 
 
+class WorkerPoolBalancer:
+  """Load balancing and prefix-cache affinity tracking across worker replicas."""
+
+  def __init__(self, workers: Sequence[Any]):
+    self._workers = list(workers)
+    self._in_flight: dict[int, int] = {i: 0 for i in range(len(self._workers))}
+
+  def select_worker_for_request(
+      self, req: datatypes.RolloutRequest
+  ) -> tuple[int, Any]:
+    """Selects a worker using prefix affinity or least in-flight fallback."""
+    if not self._workers:
+      raise ValueError("WorkerPoolBalancer has no registered rollout workers.")
+
+    metadata = req.metadata if req.metadata else {}
+    if "prefix_hash" in metadata:
+      idx = hash(metadata["prefix_hash"]) % len(self._workers)
+    else:
+      idx = min(self._in_flight, key=self._in_flight.get)
+    self._in_flight[idx] += 1
+    return idx, self._workers[idx]
+
+  def record_completion(self, worker_idx: int, count: int = 1) -> None:
+    """Decrements in-flight count for a worker upon task completion."""
+    if worker_idx in self._in_flight:
+      self._in_flight[worker_idx] = max(0, self._in_flight[worker_idx] - count)
+
+
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   """Worker-backed compute router dispatching RPCs across role pools."""
 
   def __init__(
       self,
-      rollout_workers: Sequence[remote_execution.ActorHandle],
-      trainer_workers: Mapping[datatypes.Role, remote_execution.ActorHandle],
-      inference_workers: (
-          Mapping[datatypes.Role, remote_execution.ActorHandle] | None
-      ) = None,
+      rollout_workers: Sequence[Any],
+      trainer_workers: Mapping[datatypes.Role, Any],
+      inference_workers: Mapping[datatypes.Role, Any] | None = None,
   ):
     self._rollout_workers = list(rollout_workers)
-    self._rollout_pool = remote_execution.RoutingActorPool(
-        self._rollout_workers
-    )
+    self._balancer = WorkerPoolBalancer(self._rollout_workers)
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
 
   async def _invoke_worker(
       self,
-      worker: remote_execution.ActorHandle,
+      worker: Any,
       method_name: str,
       **kwargs: Any,
   ) -> Any:
-    """Helper invoking method on remote handle."""
+    """Helper invoking method on a v2 Worker or remote ActorHandle."""
+    method = getattr(worker, method_name, None)
+    if method is not None:
+      res = method(**kwargs)
+      if inspect.isawaitable(res):
+        return await res
+      return res
+
     res = worker.asubmit(method_name, **kwargs)
     if inspect.isawaitable(res):
       return await res
@@ -158,17 +187,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
 
     for req in rollout_reqs:
-      metadata = req.metadata or {}
-      route_key = metadata.get("prefix_hash")
-      if route_key is None:
-        route_key = req.prompt_id
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
-      )
+      _, worker = self._balancer.select_worker_for_request(req)
 
-      res = worker.dispatch_task(method_name="generate", requests=[req])
-      if inspect.isawaitable(res):
-        await res
+      if hasattr(worker, "dispatch_task"):
+        res = worker.dispatch_task(method_name="generate", requests=[req])
+        if inspect.isawaitable(res):
+          await res
+      else:
+        await self._invoke_worker(worker, "generate", requests=[req])
 
     return [r.request_id for r in rollout_reqs]
 
@@ -179,7 +205,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if not self._rollout_workers:
       return []
 
-    async def _poll_worker(worker: remote_execution.ActorHandle) -> Any:
+    async def _poll_worker(worker: Any) -> Any:
       return await self._invoke_worker(
           worker, "poll_responses", timeout_s=timeout_s
       )
@@ -197,6 +223,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
       if res is not None:
         items = res if isinstance(res, list) else [res]
+        self._balancer.record_completion(i, len(items))
         for it in items:
           if isinstance(it, dict):
             it = datatypes.RolloutResponse(**it)
@@ -208,26 +235,39 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if not self._rollout_workers:
       raise ValueError("DistributedRLEngine has no registered rollout workers.")
 
-    worker_to_prompts: dict[Any, list[Any]] = collections.defaultdict(list)
-    for p in prompts:
-      metadata = dict(kwargs.get("metadata", {}))
-      route_key = metadata.get("prefix_hash") or metadata.get("prompt_id")
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
+    worker_to_prompts: dict[int, list[Any]] = {
+        i: [] for i in range(len(self._rollout_workers))
+    }
+    for idx, p in enumerate(prompts):
+      req = (
+          p
+          if isinstance(p, datatypes.RolloutRequest)
+          else datatypes.RolloutRequest(
+              request_id=f"gen_{idx}_{uuid.uuid4().hex[:8]}",
+              prompt=p,
+              target_policy_version=kwargs.get("policy_version", 0),
+              metadata=dict(kwargs.get("metadata", {})),
+          )
       )
-      worker_to_prompts[worker].append(p)
+      w_idx, _ = self._balancer.select_worker_for_request(req)
+      worker_to_prompts[w_idx].append(p)
 
     tasks = []
-    for worker, w_prompts in worker_to_prompts.items():
+    task_worker_indices = []
+    for w_idx, w_prompts in worker_to_prompts.items():
       if w_prompts:
+        worker = self._rollout_workers[w_idx]
         tasks.append(
             self._invoke_worker(worker, "generate", prompts=w_prompts, **kwargs)
         )
+        task_worker_indices.append((w_idx, len(w_prompts)))
 
     if not tasks:
       return []
 
     results = await asyncio.gather(*tasks)
+    for w_idx, count in task_worker_indices:
+      self._balancer.record_completion(w_idx, count)
 
     raw_items = [
         item

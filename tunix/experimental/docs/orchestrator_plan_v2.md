@@ -5,7 +5,7 @@
 > 1. **Layer 3: Workflow & Program Layer** (`async_rl_program.py` / `rl_program.py`)
 > 2. **Layer 2: Algorithm Math & Batch Assembly Layer** (`algorithm_adapter.py` & `batch_assembly.py`)
 > 3. **Layer 1: Cluster Compute & Infrastructure Layer** (`distributed_rl_engine.py` & `orchestrator.py` with `trajectory_queue_manager.py`)
-> 
+>
 > It details the **3-Tier Ergonomic User Experience** (Zero Boilerplate for 90% of users), **Long-Polling Rollout Pipelining & Streaming Gradient Accumulation** (zero-bubble pipelined execution), an **Orbax Composite Manifest Checkpointing** protocol for isolated trainer failure recovery without pipeline resets, standalone **1D Sequence Packing** (`batch_assembly.py`), a single off-the-shelf **`StandardRLProgram`** covering 95% of use cases, and complete end-to-end prototype code.
 
 ---
@@ -28,7 +28,7 @@ graph TD
         V1_A["AlgorithmAdapter (L3 Math)"]
         V1_E["DistributedRLEngine (L2 Compute)"]
         V1_W["Workers (L1)"]
-        
+
         V1_O --> V1_P --> V1_D --> V1_E --> V1_W
         V1_D -.-> V1_A
     end
@@ -37,7 +37,7 @@ graph TD
         V2_P["Layer 3: Workflow & Program<br/>(async_rl_program.py / rl_program.py)<br/>• StandardRLProgram covers 95% of use cases (GRPO, PPO, PRM, Agentic)<br/>• Subclass AsyncRLProgram for novel research (MCTS, Self-Play)"]
         V2_A["Layer 2: Algorithm Math & Batch Assembly<br/>(algorithm_adapter.py & batch_assembly.py)<br/>• Pure functional advantage math (GRPO, GAE, PPO)<br/>• Standalone 1D sequence packing (>90% MXU density)"]
         V2_E["Layer 1: Cluster Compute & Infrastructure<br/>(distributed_rl_engine.py & orchestrator.py)<br/>• Worker registry, health heartbeats, lifecycle & Orbax manifest recovery<br/>• Stateless compute primitives: generate_async, train_step_async, sync_weights_async"]
-        
+
         V2_P -->|Calls compute primitives| V2_E
         V2_P -->|Calls math & packing| V2_A
     end
@@ -124,7 +124,7 @@ graph TD
 
 ## 3. Data Flow & Queue Management: Streaming Gradient Accumulation
 
-In agentic RL, waiting for all $N$ prompt groups (e.g. 4 groups of $G=8$ rollouts = 32 rollouts total) before touching the trainer creates massive **GPU/TPU idle bubbles**. 
+In agentic RL, waiting for all $N$ prompt groups (e.g. 4 groups of $G=8$ rollouts = 32 rollouts total) before touching the trainer creates massive **GPU/TPU idle bubbles**.
 
 V2 implements **Long-Polling Rollout Pipelining & Streaming Gradient Accumulation with `TrainExample`s**:
 1. **Fire-and-Forget Dispatch:** `rollout_dispatch_stage` streams `RolloutRequest`s across the worker pool using non-blocking RPCs (`await engine.dispatch_rollouts(requests)`).
@@ -391,7 +391,7 @@ class BatchAssembler(Generic[T], Protocol):
 
 class SequencePackedBatchAssembler(Generic[T]):
   """1D Sequence Packing: Concatenates variable-length items into dense [1, max_packed_len] static buffers.
-  
+
   Achieves >90% MXU compute density on TPUs/GPUs with Flash/FlexAttention.
   Works out-of-the-box on TrainExample (RL), SFTExample (Supervised), DPOPair (Preference), or custom PyTrees.
   """
@@ -641,7 +641,7 @@ class StandardRLProgram(AsyncRLProgram):
 
         # 1. Assembles self-contained TrainExamples (math + observation masks)
         train_examples = self.algo.create_train_examples(group, group.rewards, ref_logps=group.ref_logps)
-        
+
         # 2. 1D Sequence packing into hardware-sized microbatches
         microbatches = self.assembler.pack(train_examples)
 
@@ -742,7 +742,7 @@ class ClusterOrchestrator:
         reward_fns=reward_fns,
         assembler=active_assembler,
     )
-    
+
     # Executes stages concurrently on event loop
     asyncio.run(active_program.run_async(self.engine, num_steps))
 ```
@@ -813,4 +813,3 @@ graph LR
 | **CL 2** | **Universal Batch Assembly** | • Introduce `batch_assembly.py` (`BatchAssembler[T]` protocol, `SequencePackedBatchAssembler[T]` for 1D token packing, and `PaddedBatchAssembler[T]` for 2D rectangular padding).<br/>• Support universal packing across RL (`TrainExample`), Supervised (`SFTExample`), and Preference (`DPOPair`) dataclasses.<br/>• Add block-diagonal attention mask generation and tool observation loss masking (`action_mask = 0`). | `test //third_party/py/tunix/experimental/orchestrator:all` |
 | **CL 3** | **Streaming & Queue ACK** | • Implement streaming gradient accumulation in `StandardRLProgram` with `TrainExample` pipeline.<br/>• Add uncommitted in-flight buffer and `queue.commit()` to `TrajectoryQueueManager`. | `test //third_party/py/tunix/experimental/orchestrator:all` |
 | **CL 4** | **Isolated Recovery** | • Implement Orbax `CompositeCheckpointHandler` (`manifest.json` with step, model weights, queue offsets).<br/>• Wire `LifecycleDriver.restart_worker(role=Role.ACTOR)` and queue seek on failure. | `test //third_party/py/tunix/experimental/orchestrator:all` |
-

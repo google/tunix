@@ -142,6 +142,10 @@ class GRPOAdapter(AlgorithmAdapter):
           loss_mask=seq_loss_mask,
           advantages=seq_adv,
           action_mask=seq_loss_mask,
+          prompt_ids=p_arr,
+          prompt_mask=np.ones(len(p_arr), dtype=np.float32),
+          completion_ids=c_arr,
+          completion_mask=act_arr,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
       )
       payloads.append(payload)
@@ -239,6 +243,10 @@ class PPOAdapter(AlgorithmAdapter):
           loss_mask=seq_loss_mask,
           advantages=seq_adv,
           action_mask=seq_loss_mask,
+          prompt_ids=p_arr,
+          prompt_mask=np.ones(len(p_arr), dtype=np.float32),
+          completion_ids=c_arr,
+          completion_mask=act_arr,
           old_per_token_logps=np.asarray(old_lp, dtype=np.float32) if old_lp is not None else None,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
           returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),

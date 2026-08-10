@@ -94,7 +94,7 @@ class ClusterOrchestrator:
   def _get_role_members(self, role: datatypes.Role | str) -> list[Any]:
     role_key = role.value if isinstance(role, datatypes.Role) else role
     members = self.registry.group(role_key).members()
-    
+
     # Fallback in case workers were registered with the enum object directly
     if not members and isinstance(role, datatypes.Role):
       members = self.registry.group(role).members()

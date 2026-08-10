@@ -22,9 +22,10 @@ custom objects with token arrays). Supports:
 # TODO: Align SequencePackedBatchAssembler with the rest of the ecosystem and potentially move to a common library.
 """
 
-from typing import Generic, Protocol, Sequence, TypeVar
+from typing import Any, Generic, Protocol, Sequence, TypeVar
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.rl import common as rl_common
 
 T = TypeVar("T")
 
@@ -35,6 +36,74 @@ class BatchAssembler(Generic[T], Protocol):
   def pack(self, items: Sequence[T]) -> list[datatypes.RLTrainerPayload]:
     """Packs items into hardware-sized microbatch trainer payloads."""
     ...
+
+
+def _left_pad(
+    values: np.ndarray,
+    length: int,
+    *,
+    pad_id: int,
+) -> tuple[np.ndarray, np.ndarray]:
+  arr = np.asarray(values, dtype=np.int32).reshape(-1)[-length:]
+  out = np.full(length, pad_id, dtype=np.int32)
+  mask = np.zeros(length, dtype=np.float32)
+  if arr.size:
+    out[-arr.size:] = arr
+    mask[-arr.size:] = 1.0
+  return out, mask
+
+
+def _right_pad(
+    values: np.ndarray,
+    length: int,
+    *,
+    pad_value: float | int = 0,
+    dtype: Any = np.int32,
+) -> tuple[np.ndarray, np.ndarray]:
+  arr = np.asarray(values, dtype=dtype).reshape(-1)[:length]
+  out = np.full(length, pad_value, dtype=dtype)
+  mask = np.zeros(length, dtype=np.float32)
+  if arr.size:
+    out[:arr.size] = arr
+    mask[:arr.size] = 1.0
+  return out, mask
+
+
+def _completion_aligned(
+    values: Any | None,
+    completion_len: int,
+    max_response_length: int,
+    *,
+    fill_value: float = 0.0,
+    prompt_len: int | None = None,
+    full_completion_len: int | None = None,
+) -> np.ndarray:
+  if values is None:
+    arr = np.full(completion_len, fill_value, dtype=np.float32)
+  else:
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    if arr.size == 1:
+      arr = np.full(completion_len, float(arr[0]), dtype=np.float32)
+    elif (
+        prompt_len is not None
+        and full_completion_len is not None
+        and arr.size == prompt_len + full_completion_len
+    ):
+      arr = arr[prompt_len : prompt_len + full_completion_len]
+    elif full_completion_len is not None and arr.size >= full_completion_len:
+      arr = arr[:full_completion_len]
+    elif arr.size >= completion_len:
+      arr = arr[:completion_len]
+    else:
+      arr = np.pad(arr, (0, completion_len - arr.size), constant_values=0.0)
+    arr = arr[:completion_len]
+  out, _ = _right_pad(
+      arr,
+      max_response_length,
+      pad_value=0.0,
+      dtype=np.float32,
+  )
+  return out
 
 
 class SequencePackedBatchAssembler:
@@ -167,6 +236,147 @@ class SequencePackedBatchAssembler:
       payloads.append(payload)
 
     return payloads
+
+
+class GRPOTrainExampleAssembler:
+  """Pads GRPO payloads into `TrainExample` microbatches.
+
+  Generic assemblers operate on concatenated token streams. GRPO loss consumes
+  separate prompt and completion tensors, so this assembler keeps those fields
+  aligned while still implementing the common `BatchAssembler.pack()` contract.
+  """
+
+  def __init__(
+      self,
+      *,
+      batch_size: int,
+      max_prompt_length: int,
+      max_response_length: int,
+      pad_id: int,
+  ):
+    if batch_size <= 0:
+      raise ValueError("train microbatch size must be positive.")
+    self.batch_size = batch_size
+    self.max_prompt_length = max_prompt_length
+    self.max_response_length = max_response_length
+    self.pad_id = pad_id
+
+  def pack(
+      self, items: Sequence[datatypes.RLTrainerPayload]
+  ) -> list[rl_common.TrainExample]:
+    item_list = list(items)
+    if not item_list:
+      return []
+
+    microbatches = []
+    for start in range(0, len(item_list), self.batch_size):
+      chunk = item_list[start : start + self.batch_size]
+      microbatches.append(self._pack_chunk(chunk))
+    return microbatches
+
+  def _pack_chunk(
+      self, chunk: Sequence[datatypes.RLTrainerPayload]
+  ) -> rl_common.TrainExample:
+    prompt_ids = []
+    prompt_mask = []
+    completion_ids = []
+    completion_mask = []
+    advantages = []
+    ref_logps = []
+    old_logps = []
+    has_ref_logps = any(x.ref_per_token_logps is not None for x in chunk)
+    has_old_logps = any(x.old_per_token_logps is not None for x in chunk)
+
+    for item in chunk:
+      p = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
+      c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
+      c_mask_src = (
+          np.asarray(item.completion_mask, dtype=np.float32).reshape(-1)
+          if item.completion_mask is not None
+          else np.ones(c_full.shape, dtype=np.float32)
+      )
+      c = c_full[: self.max_response_length]
+      c_mask_src = c_mask_src[: c.size]
+
+      p_ids, p_mask = _left_pad(
+          p, self.max_prompt_length, pad_id=self.pad_id
+      )
+      c_ids, c_default_mask = _right_pad(
+          c,
+          self.max_response_length,
+          pad_value=self.pad_id,
+          dtype=np.int32,
+      )
+      c_mask = np.zeros(self.max_response_length, dtype=np.float32)
+      if c_mask_src.size:
+        c_mask[: c_mask_src.size] = c_mask_src
+      else:
+        c_mask = c_default_mask
+
+      prompt_ids.append(p_ids)
+      prompt_mask.append(p_mask)
+      completion_ids.append(c_ids)
+      completion_mask.append(c_mask)
+
+      adv_arr = (
+          np.asarray(item.advantages, dtype=np.float32).reshape(-1)
+          if item.advantages is not None
+          else None
+      )
+      advantages.append(
+          _completion_aligned(
+              adv_arr,
+              c.size,
+              self.max_response_length,
+              fill_value=0.0,
+              prompt_len=p.size,
+              full_completion_len=c_full.size,
+          )
+      )
+
+      if has_ref_logps:
+        ref_logps.append(
+            _completion_aligned(
+                item.ref_per_token_logps,
+                c.size,
+                self.max_response_length,
+                full_completion_len=c_full.size,
+            )
+        )
+      if has_old_logps:
+        old_logps.append(
+            _completion_aligned(
+                item.old_per_token_logps,
+                c.size,
+                self.max_response_length,
+                full_completion_len=c_full.size,
+            )
+        )
+
+    while len(prompt_ids) < self.batch_size:
+      prompt_ids.append(np.full(self.max_prompt_length, self.pad_id, np.int32))
+      prompt_mask.append(np.zeros(self.max_prompt_length, dtype=np.float32))
+      completion_ids.append(
+          np.full(self.max_response_length, self.pad_id, np.int32)
+      )
+      completion_mask.append(
+          np.zeros(self.max_response_length, dtype=np.float32)
+      )
+      advantages.append(np.zeros(self.max_response_length, dtype=np.float32))
+      if has_ref_logps:
+        ref_logps.append(np.zeros(self.max_response_length, dtype=np.float32))
+      if has_old_logps:
+        old_logps.append(np.zeros(self.max_response_length, dtype=np.float32))
+
+    return rl_common.TrainExample(
+        prompt_ids=np.stack(prompt_ids),
+        prompt_mask=np.stack(prompt_mask),
+        completion_ids=np.stack(completion_ids),
+        completion_mask=np.stack(completion_mask),
+        advantages=np.stack(advantages),
+        ref_per_token_logps=np.stack(ref_logps) if has_ref_logps else None,
+        old_per_token_logps=np.stack(old_logps) if has_old_logps else None,
+    )
 
 
 class PaddedBatchAssembler:

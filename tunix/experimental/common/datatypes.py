@@ -30,17 +30,6 @@ from tunix.rl.agentic.agents import agent_types
 ##### Worker-internal datatypes #####
 
 
-# TODO(noghabi): Consolidate Role with rl_cluster.Role.
-class Role(enum.Enum):
-  """Role of the model."""
-
-  ACTOR = "actor"  # policy model
-  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
-  REFERENCE = "reference"  # kept fixed during training
-  REWARD = "reward"
-  ROLLOUT = "rollout"
-
-
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
 Step = agent_types.Step
@@ -56,7 +45,6 @@ class TrajectoryItem(agent_types.TrajectoryItem):
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
   policy_version: int = 0
-  # TODO: trajectory item having the completion tokens, masks, etc is quite redundant since those are in the trainer payload already.
 
 class Role(str, enum.Enum):
   """Orchestrator worker roles."""
@@ -491,6 +479,10 @@ class RLTrainerPayload(TrainerPayload):
     advantages: [B] or [B, C] advantages.
     loss_mask: [B, T], 1 where the position contributes to the loss.
     action_mask: Optional [B, T] or [B, C] mask of policy actions.
+    prompt_ids: Optional [B, P] prompt token ids for GRPO-style losses.
+    prompt_mask: Optional [B, P] prompt mask.
+    completion_ids: Optional [B, C] completion token ids.
+    completion_mask: Optional [B, C] completion/action mask.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
@@ -502,6 +494,10 @@ class RLTrainerPayload(TrainerPayload):
   advantages: ArrayLike
   loss_mask: ArrayLike
   action_mask: ArrayLike | None = None
+  prompt_ids: ArrayLike | None = None
+  prompt_mask: ArrayLike | None = None
+  completion_ids: ArrayLike | None = None
+  completion_mask: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
