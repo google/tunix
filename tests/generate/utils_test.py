@@ -1307,6 +1307,355 @@ class UtilsTest(parameterized.TestCase):
         jnp.array(200.0),
     )
 
+  def test_transfer_state_directly_gemma4_scanned_blocks(self):
+    """Tests Gemma4 (MaxText) source layout: scanned_blocks wrapper + size-1 scan dim.
+
+    Gemma4 in MaxText stores per-layer params under
+    `decoder.scanned_blocks.layers_X.<rest>` and keeps the scan axis as a
+    size-1 dim inside each chunk (e.g. wi_0 shape `(experts, 1, embed, mlp)`).
+    The destination drops both the wrapper and the size-1 dim.
+    """
+    # Source: per-layer chunks under scanned_blocks with size-1 scan dim at
+    # axis 1 (MaxText's default scan_axis).
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                decoder_norm=nnx.Dict(
+                    scale=nnx.Param(jnp.array([1.0, 2.0, 3.0]))
+                ),
+                scanned_blocks=nnx.Dict(
+                    layers_0=nnx.Dict(
+                        mlp=nnx.Dict(
+                            wo=nnx.Param(
+                                jnp.arange(12, dtype=jnp.float32)
+                                .reshape(2, 1, 2, 3)
+                            )
+                        ),
+                        norm=nnx.Dict(
+                            scale=nnx.Param(jnp.array([[10.0], [11.0], [12.0]]))
+                        ),
+                    ),
+                    layers_1=nnx.Dict(
+                        mlp=nnx.Dict(
+                            wo=nnx.Param(
+                                (jnp.arange(12, dtype=jnp.float32) + 100)
+                                .reshape(2, 1, 2, 3)
+                            )
+                        ),
+                        norm=nnx.Dict(
+                            scale=nnx.Param(jnp.array([[20.0], [21.0], [22.0]]))
+                        ),
+                    ),
+                ),
+            )
+        )
+    )
+
+    # Destination: no scanned_blocks wrapper and no size-1 scan dim.
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(
+            decoder_norm=nnx.Dict(
+                scale=nnx.Param(jnp.zeros((3,), dtype=jnp.float32))
+            ),
+            layers_0=nnx.Dict(
+                mlp=nnx.Dict(
+                    wo=nnx.Param(jnp.zeros((2, 2, 3), dtype=jnp.float32))
+                ),
+                norm=nnx.Dict(
+                    scale=nnx.Param(jnp.zeros((3,), dtype=jnp.float32))
+                ),
+            ),
+            layers_1=nnx.Dict(
+                mlp=nnx.Dict(
+                    wo=nnx.Param(jnp.zeros((2, 2, 3), dtype=jnp.float32))
+                ),
+                norm=nnx.Dict(
+                    scale=nnx.Param(jnp.zeros((3,), dtype=jnp.float32))
+                ),
+            ),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=1
+    )
+
+    # Non-layer param under decoder transfers unchanged.
+    np.testing.assert_array_equal(
+        dst_state['decoder']['decoder_norm']['scale'][...],
+        jnp.array([1.0, 2.0, 3.0]),
+    )
+    # Each layer chunk is squeezed along the size-1 scan_axis.
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_0']['mlp']['wo'][...],
+        jnp.arange(12, dtype=jnp.float32).reshape(2, 2, 3),
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_0']['norm']['scale'][...],
+        jnp.array([10.0, 11.0, 12.0]),
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_1']['mlp']['wo'][...],
+        (jnp.arange(12, dtype=jnp.float32) + 100).reshape(2, 2, 3),
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_1']['norm']['scale'][...],
+        jnp.array([20.0, 21.0, 22.0]),
+    )
+
+  def test_transfer_state_directly_gemma4_multi_chunk_scanned_blocks(self):
+    """Tests Gemma4 (MaxText) source layout where layers are split across
+    multiple scanned chunks (e.g. `layers_0` for layers [0,1], `layers_2` for
+    layers [2,3]) — each chunk has `chunk_size` consecutive layers stacked at
+    `scan_axis`. The destination is fully unrolled.
+    """
+    # Source: two chunks of 2 layers each, scan dim of size 2 at axis 1.
+    # `wo` per-layer shape is (2, 3); chunks store (2, 2, 3).
+    # `layer_scalar` per-layer shape is (1,); chunks store (1, 2).
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                scanned_blocks=nnx.Dict(
+                    layers_0=nnx.Dict(
+                        mlp=nnx.Dict(
+                            wo=nnx.Param(
+                                jnp.arange(12, dtype=jnp.float32).reshape(2, 2, 3)
+                            )
+                        ),
+                        layer_scalar=nnx.Param(jnp.array([[1.0, 2.0]])),
+                    ),
+                    layers_2=nnx.Dict(
+                        mlp=nnx.Dict(
+                            wo=nnx.Param(
+                                (jnp.arange(12, dtype=jnp.float32) + 100)
+                                .reshape(2, 2, 3)
+                            )
+                        ),
+                        layer_scalar=nnx.Param(jnp.array([[3.0, 4.0]])),
+                    ),
+                ),
+            )
+        )
+    )
+
+    # Destination: 4 fully-unrolled layers, no scanned_blocks wrapper, no
+    # scan dim.
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(
+            layers_0=nnx.Dict(
+                mlp=nnx.Dict(wo=nnx.Param(jnp.zeros((2, 3), dtype=jnp.float32))),
+                layer_scalar=nnx.Param(jnp.zeros((1,), dtype=jnp.float32)),
+            ),
+            layers_1=nnx.Dict(
+                mlp=nnx.Dict(wo=nnx.Param(jnp.zeros((2, 3), dtype=jnp.float32))),
+                layer_scalar=nnx.Param(jnp.zeros((1,), dtype=jnp.float32)),
+            ),
+            layers_2=nnx.Dict(
+                mlp=nnx.Dict(wo=nnx.Param(jnp.zeros((2, 3), dtype=jnp.float32))),
+                layer_scalar=nnx.Param(jnp.zeros((1,), dtype=jnp.float32)),
+            ),
+            layers_3=nnx.Dict(
+                mlp=nnx.Dict(wo=nnx.Param(jnp.zeros((2, 3), dtype=jnp.float32))),
+                layer_scalar=nnx.Param(jnp.zeros((1,), dtype=jnp.float32)),
+            ),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=1
+    )
+
+    # layers_0 direct-matches src layers_0 chunk; within-chunk slot 0.
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_0']['mlp']['wo'][...],
+        jnp.arange(12, dtype=jnp.float32).reshape(2, 2, 3)[:, 0, :],
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_0']['layer_scalar'][...],
+        jnp.array([1.0]),
+    )
+    # layers_1 falls into scanned-candidate path; src layers_0 chunk, slot 1.
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_1']['mlp']['wo'][...],
+        jnp.arange(12, dtype=jnp.float32).reshape(2, 2, 3)[:, 1, :],
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_1']['layer_scalar'][...],
+        jnp.array([2.0]),
+    )
+    # layers_2 direct-matches src layers_2 chunk; within-chunk slot 0.
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_2']['mlp']['wo'][...],
+        (jnp.arange(12, dtype=jnp.float32) + 100).reshape(2, 2, 3)[:, 0, :],
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_2']['layer_scalar'][...],
+        jnp.array([3.0]),
+    )
+    # layers_3 falls into scanned-candidate path; src layers_2 chunk, slot 1.
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_3']['mlp']['wo'][...],
+        (jnp.arange(12, dtype=jnp.float32) + 100).reshape(2, 2, 3)[:, 1, :],
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layers_3']['layer_scalar'][...],
+        jnp.array([4.0]),
+    )
+
+  def test_transfer_state_directly_gemma4_moe_interleaved_chunks(self):
+    """Gemma4 MaxText MoE: per-slot `layers_K` chunks with `num_reps>1` along
+    `scan_axis`. Target layer X maps to (slot=X%n, rep=X//n) where n is the
+    number of chunk keys (NUM_SLOTS). Within `layers_{slot}` the scan-axis
+    index is `rep`. Source `wi_0`/`wi_1` fuse into target `wi`.
+    """
+    num_slots = 3
+    num_reps = 2
+    num_experts = 2
+    embed = 2
+    inner = 2
+    total_layers = num_slots * num_reps
+
+    # Build distinct values per (slot, rep, experts, embed, inner).
+    def _chunk(base):
+      vals = jnp.arange(
+          num_experts * num_reps * embed * inner, dtype=jnp.float32
+      ).reshape(num_experts, num_reps, embed, inner)
+      return vals + base
+
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                scanned_blocks=nnx.Dict(**{
+                    f'layers_{slot}': nnx.Dict(
+                        mlp=nnx.Dict(
+                            wi_0=nnx.Param(_chunk(slot * 1000.0)),
+                            wi_1=nnx.Param(_chunk(slot * 1000.0 + 500.0)),
+                        )
+                    )
+                    for slot in range(num_slots)
+                }),
+            )
+        )
+    )
+
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(**{
+            f'layers_{i}': nnx.Dict(
+                mlp=nnx.Dict(
+                    wi=nnx.Param(
+                        jnp.zeros(
+                            (num_experts, embed, 2 * inner), dtype=jnp.float32
+                        )
+                    )
+                )
+            )
+            for i in range(total_layers)
+        })
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=1
+    )
+
+    for i in range(total_layers):
+      slot = i % num_slots
+      rep = i // num_slots
+      wi_0_full = _chunk(slot * 1000.0)
+      wi_1_full = _chunk(slot * 1000.0 + 500.0)
+      # Per-layer slice at scan_axis=1.
+      expected_wi_0 = wi_0_full[:, rep, :, :]
+      expected_wi_1 = wi_1_full[:, rep, :, :]
+      expected = jnp.concatenate([expected_wi_0, expected_wi_1], axis=-1)
+      np.testing.assert_array_equal(
+          dst_state['decoder'][f'layers_{i}']['mlp']['wi'][...],
+          expected,
+      )
+
+  def test_transfer_state_directly_gemma4_dense_interleaved_chunks(self):
+    """Gemma4 MaxText dense path: per-slot `layers_K` chunks with `num_reps>1`
+    for a non-MoE param. Exercises Candidate C (non-MoE scanned chunk) under
+    the interleaved layout where chunk K = slot and within-chunk index = rep.
+    """
+    num_slots = 3
+    num_reps = 2
+    in_dim = 2
+    out_dim = 3
+    total_layers = num_slots * num_reps
+
+    def _chunk(base):
+      # Shape (in_dim, num_reps, out_dim) — scan axis at position 1.
+      return jnp.arange(
+          in_dim * num_reps * out_dim, dtype=jnp.float32
+      ).reshape(in_dim, num_reps, out_dim) + base
+
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                scanned_blocks=nnx.Dict(**{
+                    f'layers_{slot}': nnx.Dict(
+                        mlp=nnx.Dict(wo=nnx.Param(_chunk(slot * 1000.0)))
+                    )
+                    for slot in range(num_slots)
+                }),
+            )
+        )
+    )
+
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(**{
+            f'layers_{i}': nnx.Dict(
+                mlp=nnx.Dict(
+                    wo=nnx.Param(jnp.zeros((in_dim, out_dim), dtype=jnp.float32))
+                )
+            )
+            for i in range(total_layers)
+        })
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=1
+    )
+
+    for i in range(total_layers):
+      slot = i % num_slots
+      rep = i // num_slots
+      expected = _chunk(slot * 1000.0)[:, rep, :]
+      np.testing.assert_array_equal(
+          dst_state['decoder'][f'layers_{i}']['mlp']['wo'][...],
+          expected,
+      )
+
+  def test_transfer_state_directly_keeps_scanned_blocks_when_target_has_it(self):
+    """When destination also has scanned_blocks, source paths are not lifted."""
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(
+            scanned_blocks=nnx.Dict(
+                layers_0=nnx.Dict(weight=nnx.Param(jnp.array([1.0, 2.0]))),
+            ),
+        )
+    )
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(
+            scanned_blocks=nnx.Dict(
+                layers_0=nnx.Dict(
+                    weight=nnx.Param(jnp.zeros((2,), dtype=jnp.float32))
+                ),
+            ),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['decoder']['scanned_blocks']['layers_0']['weight'][...],
+        jnp.array([1.0, 2.0]),
+    )
+
   def test_transfer_state_directly_with_dtype_casting(self):
     """Tests that transfer_state_directly correctly casts dtypes (e.g., f32 to bf16)."""
     # Source state in float32
@@ -1604,6 +1953,133 @@ class UtilsTest(parameterized.TestCase):
         dst_state['layers_1']['wi'][...],
         jnp.concatenate([wi_0_val[:, 1, :], wi_1_val[:, 1, :]], axis=-1),
     )
+
+  def test_transfer_state_directly_fuses_per_expert_scale_unscanned(self):
+    """fuse_expert_scales=True pre-multiplies `wo` by sibling `per_expert_scale`
+    on the source side (unscanned src/tgt). Mirrors MaxText's init-time
+    `wo *= per_expert_scale[:, None, None]` so that targets initialized with
+    `model_call_mode=='inference'` and `fuse_expert_scales=True` receive the
+    pre-fused product. `per_expert_scale` is still transferred to its
+    (now-vestigial) target slot.
+    """
+    wo_val = jnp.arange(12, dtype=jnp.float32).reshape(2, 2, 3)
+    scale_val = jnp.array([2.0, 3.0], dtype=jnp.float32)
+    src_state = nnx.Dict(
+        moe=nnx.Dict(
+            wo=nnx.Param(wo_val),
+            per_expert_scale=nnx.Param(scale_val),
+        )
+    )
+    dst_state = nnx.Dict(
+        moe=nnx.Dict(
+            wo=nnx.Param(jnp.zeros((2, 2, 3), dtype=jnp.float32)),
+            per_expert_scale=nnx.Param(jnp.zeros((2,), dtype=jnp.float32)),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard,
+        fuse_expert_scales=True,
+    )
+
+    expected_wo = wo_val * scale_val[:, None, None]
+    np.testing.assert_array_equal(
+        dst_state['moe']['wo'][...], expected_wo
+    )
+    # Scale is still transferred to its (vestigial) slot.
+    np.testing.assert_array_equal(
+        dst_state['moe']['per_expert_scale'][...], scale_val
+    )
+
+  def test_transfer_state_directly_per_expert_scale_disabled_by_default(self):
+    """Without the flag, `wo` and `per_expert_scale` transfer separately —
+    the new fusion is purely additive and off-by-default."""
+    wo_val = jnp.arange(12, dtype=jnp.float32).reshape(2, 2, 3)
+    scale_val = jnp.array([2.0, 3.0], dtype=jnp.float32)
+    src_state = nnx.Dict(
+        moe=nnx.Dict(
+            wo=nnx.Param(wo_val),
+            per_expert_scale=nnx.Param(scale_val),
+        )
+    )
+    dst_state = nnx.Dict(
+        moe=nnx.Dict(
+            wo=nnx.Param(jnp.zeros((2, 2, 3), dtype=jnp.float32)),
+            per_expert_scale=nnx.Param(jnp.zeros((2,), dtype=jnp.float32)),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(dst_state['moe']['wo'][...], wo_val)
+    np.testing.assert_array_equal(
+        dst_state['moe']['per_expert_scale'][...], scale_val
+    )
+
+  def test_transfer_state_directly_fuses_per_expert_scale_scanned(self):
+    """Gemma4-style scanned src: per_expert_scale has shape (E, num_reps) and
+    wo has shape (E, num_reps, d_in, d_out) along scan_axis=1. Fusion happens
+    on the scanned source before the per-layer unrolling.
+    """
+    num_experts = 2
+    num_reps = 2
+    d_in = 2
+    d_out = 3
+    wo_val = jnp.arange(
+        num_experts * num_reps * d_in * d_out, dtype=jnp.float32
+    ).reshape(num_experts, num_reps, d_in, d_out)
+    scale_val = jnp.array(
+        [[2.0, 3.0], [4.0, 5.0]], dtype=jnp.float32
+    )  # shape (E=2, L=2)
+
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                scanned_blocks=nnx.Dict(
+                    layers_0=nnx.Dict(
+                        moe=nnx.Dict(
+                            wo=nnx.Param(wo_val),
+                            per_expert_scale=nnx.Param(scale_val),
+                        )
+                    ),
+                )
+            )
+        )
+    )
+
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(**{
+            f'layers_{i}': nnx.Dict(
+                moe=nnx.Dict(
+                    wo=nnx.Param(jnp.zeros((num_experts, d_in, d_out),
+                                           dtype=jnp.float32)),
+                    per_expert_scale=nnx.Param(jnp.zeros((num_experts,),
+                                                         dtype=jnp.float32)),
+                )
+            )
+            for i in range(num_reps)
+        })
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard,
+        scan_axis=1, fuse_expert_scales=True,
+    )
+
+    # Each unrolled layer's wo == src_wo[:, rep] * src_scale[:, rep, None, None].
+    for i in range(num_reps):
+      expected_wo = wo_val[:, i, :, :] * scale_val[:, i, None, None]
+      np.testing.assert_array_equal(
+          dst_state['decoder'][f'layers_{i}']['moe']['wo'][...],
+          expected_wo,
+      )
+      np.testing.assert_array_equal(
+          dst_state['decoder'][f'layers_{i}']['moe']['per_expert_scale'][...],
+          scale_val[:, i],
+      )
 
   def test_transfer_state_directly_delete_dst_buffers_no_chunking(self):
     """delete_dst_buffers=True must never pass deleted arrays to reshard_fn."""
