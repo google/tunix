@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 
 PACKAGE = Path(__file__).resolve().parents[2]
 ENV_SCRIPT = PACKAGE / "cluster" / "steps" / "00_env.sh"
@@ -127,3 +129,40 @@ class RepositoryProvenanceContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class StaticManifestProxyXlaTest(unittest.TestCase):
+  """Both static Pathways manifests must deliver the flag through proxy env.
+
+  P36 flagon1 proved the pinned proxy rejects the flag as a command-line
+  argument; P36 envon1 proved the environment channel is consumed (replicated
+  arm 0/262144).  A manifest that regresses either side silently reverts the
+  whole Pathways numerical regime to flag-off.
+  """
+
+  _EXPECTED = {
+      "name": "XLA_FLAGS",
+      "value": "--xla_allow_excess_precision=false",
+  }
+
+  def _proxy(self, relative_path):
+    document = yaml.safe_load((PACKAGE / relative_path).read_text())
+    pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    containers = pod.get("initContainers", []) + pod.get("containers", [])
+    return next(
+        item for item in containers if item["name"] == "pathways-proxy"
+    )
+
+  def test_64chip_manifest_delivers_proxy_xla_env(self):
+    proxy = self._proxy("cluster/jobset-64chip.yaml")
+    entries = [e for e in proxy["env"] if e["name"] == "XLA_FLAGS"]
+    self.assertEqual(entries, [self._EXPECTED])
+    self.assertFalse([a for a in proxy["args"] if "excess_precision" in a])
+
+  def test_256cluster_manifest_delivers_proxy_xla_env(self):
+    proxy = self._proxy("cluster/jobset-256cluster-64chip.yaml")
+    entries = [e for e in proxy["env"] if e["name"] == "XLA_FLAGS"]
+    self.assertEqual(entries, [self._EXPECTED])
+    self.assertFalse([a for a in proxy["args"] if "excess_precision" in a])

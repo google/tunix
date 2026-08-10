@@ -48,6 +48,13 @@ platform diagnostic until it has a separate Qwen8B production contract.
 
 ---
 
+**Pathways regime note (2026-08-10).** P36 proved the excess-precision flag never reached
+the server-side compiler before `envon1` (KNOWN_FOOTGUNS #13). All Pathways renderers and both
+static manifests now deliver `XLA_FLAGS=--xla_allow_excess_precision=false` through the
+`pathways-proxy` container environment, and contract tests lock it. Every Pathways number
+recorded before `envon1` is a flag-off baseline. The active target is P36.3: rerun the P35
+three-arm envelope discriminator under the flag-on regime.
+
 ## What can your machine do?
 
 | You have | Run | Time |

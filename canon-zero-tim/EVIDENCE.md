@@ -41,6 +41,16 @@ changed and not good enough to prove it. The fix is one line in the runner: exte
 that is done and a fresh run is recorded, treat the engine side of the 200-step claim as
 strongly-supported rather than proven.
 
+## Pathways regime boundary (2026-08-10)
+
+P36 established that every Pathways result recorded before `envon1` ran with
+`--xla_allow_excess_precision=false` **undelivered** (client-env only; the server-side
+compiler never saw it — KNOWN_FOOTGUNS #13). Those results remain valid **flag-off
+baselines** and are not retroactively edited. From `envon1` onward the canonical Pathways
+regime delivers the flag through the `pathways-proxy` container environment; renderers
+enforce it and `tests/t0_cpu/test_cluster_contracts.py` locks both static manifests.
+Flag-off and flag-on numbers must never be compared as if from one regime.
+
 ## What is *not* claimed
 
 - **Convergence.** The 200-step campaign proves a stable training loop and exact numerics.

@@ -96,9 +96,23 @@ Historical directly-attached four-device observations, in differing bytes out of
 not be used to rank two dirty arms. Use `rel_l2`, `one_minus_cos`, and `max_abs` for magnitude.
 In particular, `91371 > 90582` does not show that F4 made anything worse.
 
-The current 64-chip discovery artifact completed widths `2,4,8`: 18 rows for depths `8,15` and
-three arms. Every row is dirty, including the replicated arms. TP8 here is a generic platform
-diagnostic only. The installed Qwen8B production contract, P1b and T2 remain TP4.
+Two complete 64-chip tables now exist and they belong to two different regimes:
+
+- **flag-off** (pre-P36 discovery artifact): 18 rows, every arm dirty including replicated
+  (`~90k–107k/262144`). Root cause: the client-container `XLA_FLAGS` never reaches the
+  Pathways server-side compiler, so `--xla_allow_excess_precision=false` was effectively
+  unset (KNOWN_FOOTGUNS #13).
+- **flag-on** (P36 `envon1`, flag delivered via the proxy container environment): replicated
+  is `0/262144` everywhere except one `390`-byte residual at width 8 depth 15; stock-ar keeps
+  a reduction-order layer (`320` / `8123–7696` / `20205–19006` at widths 2/4/8); **f4-fixed is
+  `0` across widths 4 and 8** — the first verification of F4 at width 8. At width 2 the F4
+  tree has no order freedom, so its arm equals stock (`320` at depth 8), a residue matching
+  the direct-attached history and still unexplained.
+
+With delivery in place, the 4-chip layer structure reproduces on Pathways: the flag removes
+the excess-precision layer and F4 closes the remaining reduction-order layer. Every Pathways
+number produced before `envon1` is a flag-off baseline; do not mix the regimes. TP8 remains a
+generic platform diagnostic; the installed Qwen8B production contract, P1b and T2 remain TP4.
 
 Read the generic P1 table as a paired diagnostic:
 

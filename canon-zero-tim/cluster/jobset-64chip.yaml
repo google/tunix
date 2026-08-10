@@ -85,6 +85,8 @@ spec:
               env:
                 - name: PATHWAYS_HEAD
                   value: localhost
+                - name: XLA_FLAGS
+                  value: --xla_allow_excess_precision=false
               resources:
                 requests: {cpu: '16', memory: 100Gi}
                 limits:   {cpu: '32', memory: 350G}

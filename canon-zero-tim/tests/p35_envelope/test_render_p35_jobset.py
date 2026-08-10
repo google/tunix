@@ -22,6 +22,31 @@ SPEC.loader.exec_module(renderer)
 
 class RenderP35JobSetTest(unittest.TestCase):
 
+  def test_proxy_inherits_excess_precision_env_from_p33(self):
+    document = renderer.render(
+        base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        source_commit="1" * 40,
+        run_id="r20",
+    )
+    pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    proxy = next(
+        item
+        for item in pod["initContainers"]
+        if item["name"] == "pathways-proxy"
+    )
+    entries = [e for e in proxy["env"] if e["name"] == "XLA_FLAGS"]
+    self.assertEqual(
+        entries,
+        [{
+            "name": "XLA_FLAGS",
+            "value": "--xla_allow_excess_precision=false",
+        }],
+    )
+    self.assertFalse([a for a in proxy["args"] if "excess_precision" in a])
+
+
   def test_renders_one_attempt_zero_pre_backward_job(self):
     document = renderer.render(
         base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",

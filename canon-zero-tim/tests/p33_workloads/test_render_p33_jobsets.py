@@ -165,6 +165,84 @@ class RenderP33JobSetsTest(unittest.TestCase):
       with self.assertRaisesRegex(FileExistsError, "refusing to overwrite"):
         self._render(output_dir)
 
+
+  def _proxy(self, document):
+    pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    return next(
+        item
+        for item in pod["initContainers"]
+        if item["name"] == "pathways-proxy"
+    )
+
+  def test_proxy_delivers_excess_precision_through_env(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      for path in self._render(Path(tmp)):
+        document = yaml.safe_load(path.read_text())
+        proxy = self._proxy(document)
+        entries = [
+            entry
+            for entry in proxy["env"]
+            if entry["name"] == renderer.PROXY_XLA_ENV
+        ]
+        self.assertEqual(
+            entries,
+            [{
+                "name": renderer.PROXY_XLA_ENV,
+                "value": renderer.PROXY_XLA_FLAG,
+            }],
+        )
+        self.assertFalse(
+            [a for a in proxy["args"] if "excess_precision" in a]
+        )
+
+  def test_rejects_base_with_raw_proxy_excess_precision_arg(self):
+    base = yaml.safe_load(Path(_BASE_PATH).read_text())
+    pod = base["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]
+    proxy = next(
+        item
+        for item in pod["initContainers"]
+        if item["name"] == "pathways-proxy"
+    )
+    proxy["args"].append("--xla_allow_excess_precision=false")
+    with tempfile.TemporaryDirectory() as tmp:
+      bad = Path(tmp) / "bad_base.yaml"
+      bad.write_text(yaml.safe_dump(base))
+      with self.assertRaisesRegex(ValueError, "raw excess-precision"):
+        renderer.render_all(
+            base_path=bad,
+            output_dir=Path(tmp) / "out",
+            source_commit=_SOURCE_COMMIT,
+            run_id=_RUN_ID,
+        )
+
+  def test_rejects_base_with_conflicting_proxy_xla_env(self):
+    base = yaml.safe_load(Path(_BASE_PATH).read_text())
+    pod = base["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]
+    proxy = next(
+        item
+        for item in pod["initContainers"]
+        if item["name"] == "pathways-proxy"
+    )
+    proxy.setdefault("env", []).append(
+        {"name": "XLA_FLAGS", "value": "--xla_allow_excess_precision=true"}
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+      bad = Path(tmp) / "bad_base.yaml"
+      bad.write_text(yaml.safe_dump(base))
+      with self.assertRaisesRegex(ValueError, "conflicting or duplicate"):
+        renderer.render_all(
+            base_path=bad,
+            output_dir=Path(tmp) / "out",
+            source_commit=_SOURCE_COMMIT,
+            run_id=_RUN_ID,
+        )
+
   def test_negative_control_rejects_shared_scratch(self):
     base = renderer.load_base(_BASE_PATH)
     spec = renderer._SPECS[0]

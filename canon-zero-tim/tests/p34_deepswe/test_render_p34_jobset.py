@@ -46,6 +46,28 @@ def _render(base=None, **changes):
 
 class RenderP34JobSetTest(unittest.TestCase):
 
+  def test_proxy_delivers_excess_precision_through_env(self):
+    document = _render()
+    head = renderer._head(document)
+    proxy = renderer._container(head["containers"], "pathways-proxy")
+    entries = [e for e in proxy["env"] if e["name"] == "XLA_FLAGS"]
+    self.assertEqual(
+        entries,
+        [{
+            "name": "XLA_FLAGS",
+            "value": "--xla_allow_excess_precision=false",
+        }],
+    )
+    self.assertFalse([a for a in proxy["args"] if "excess_precision" in a])
+
+  def test_rejects_base_with_raw_proxy_excess_precision_arg(self):
+    base = _base()
+    head = renderer._head(base)
+    proxy = renderer._container(head["containers"], "pathways-proxy")
+    proxy["args"].append("--xla_allow_excess_precision=false")
+    with self.assertRaisesRegex(ValueError, "raw excess-precision"):
+      _render(base=base)
+
   def test_published_branch_is_the_renderer_default(self):
     self.assertEqual(
         renderer.DEFAULT_SOURCE_BRANCH, "yuxzhang/canon-zero-tim"

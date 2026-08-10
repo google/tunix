@@ -133,6 +133,39 @@ _SPECS = (
 )
 
 
+PROXY_XLA_ENV = "XLA_FLAGS"
+PROXY_XLA_FLAG = "--xla_allow_excess_precision=false"
+_PROXY_XLA_PREFIX = "--xla_allow_excess_precision="
+
+
+def ensure_proxy_xla_env(proxy: dict[str, Any]) -> None:
+  """Deliver the excess-precision flag through the proxy environment.
+
+  Pathways compiles on the server side, so a client-container XLA_FLAGS value
+  never reaches the TPU compiler, and the pinned proxy rejects the flag as a
+  command-line argument (P36 flagon1: unknown command line flag).  The verified
+  channel is the proxy container environment (P36 envon1: replicated arm
+  0/262144 across widths 2/4/8 at depth 8).  Exactly one XLA_FLAGS entry with
+  exactly this value is admitted; a raw argv flag or a conflicting entry is a
+  contract violation, not something to repair silently.
+  """
+  raw = [a for a in proxy.get("args", []) if a.startswith(_PROXY_XLA_PREFIX)]
+  if raw:
+    raise ValueError(
+        "Pathways proxy args carry a raw excess-precision flag; the pinned "
+        "proxy rejects it as an unknown command line flag"
+    )
+  env = proxy.setdefault("env", [])
+  matches = [e for e in env if e.get("name") == PROXY_XLA_ENV]
+  if not matches:
+    env.append({"name": PROXY_XLA_ENV, "value": PROXY_XLA_FLAG})
+    return
+  if matches != [{"name": PROXY_XLA_ENV, "value": PROXY_XLA_FLAG}]:
+    raise ValueError(
+        "Pathways proxy has a conflicting or duplicate XLA_FLAGS entry"
+    )
+
+
 def _head_pod(document: Mapping[str, Any]) -> dict[str, Any]:
   jobs = document["spec"]["replicatedJobs"]
   if [job["name"] for job in jobs] != ["pathways-head", "pathways-worker"]:
@@ -216,6 +249,7 @@ def render_jobset(
     raise ValueError("strict P33 head must retain restartPolicy=Never")
   proxy = _container(head["initContainers"], "pathways-proxy")
   resource_manager = _container(head["initContainers"], "pathways-rm")
+  ensure_proxy_xla_env(proxy)
   _replace_arg(
       proxy["args"], "--gcs_scratch_location=", f"--gcs_scratch_location={scratch}"
   )

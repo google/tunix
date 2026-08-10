@@ -11,8 +11,8 @@ Test one controlled variable: delivery of `--xla_allow_excess_precision=false` t
 | P36.1 | Initial proxy-argv delivery contract | Local renderer gate plus target proxy startup | failed on target; superseded |
 | P36.1a | Direct-attached one-host OFF/ON sensitivity control | Eight paired depths with fixed image/probe | passed |
 | P36.1b | Proxy-container `XLA_FLAGS` delivery contract | `bash canon-zero-tim/tests/p36_proxy_xla/run_cpu.sh` | passed locally; target pending |
-| P36.2 | One source-pinned 64-chip flag-on way-count result | Complete expected way-count rows plus proxy manifest/log evidence | active |
-| P36.3 | Conditional P35 envelope-only recheck | Run only if P36.2 materially changes the replicated arm | pending |
+| P36.2 | One source-pinned 64-chip flag-on way-count result | Complete expected way-count rows plus proxy manifest/log evidence | passed (`envon1`, Section 34: replicated 0/262144 across widths at depth 8; f4-fixed 0 at widths 4/8) |
+| P36.3 | Conditional P35 envelope-only recheck | Run only if P36.2 materially changes the replicated arm | active (condition met: replicated ~34% -> 0; P35 renderer now inherits proxy env delivery from the shared P33 path) |
 
 ## Decisions
 

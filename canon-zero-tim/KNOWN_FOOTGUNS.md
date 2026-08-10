@@ -150,3 +150,25 @@ meshes. A runtime safety check should be satisfied structurally, not disabled sp
 failed. Compare the exact workload name and test both the intended exception and a neighboring
 workload negative control. A rollout-quality metric or completed model trace before that failure
 does not promote the run.
+
+### 13. Client-container `XLA_FLAGS` never reaches the Pathways TPU compiler
+
+Under Pathways, HLO is compiled on the server side. An `XLA_FLAGS` value exported in the
+JAX client container configures nothing but the client's own CPU backend — while every
+launch-time check that greps the client environment happily reports the flag as present.
+That is how `--xla_allow_excess_precision=false`, load-bearing for third-program closure,
+ran effectively unset through every Pathways campaign before P36 (replicated-arm drift
+`~90k/262144`; with delivery it is `0/262144`).
+
+Delivery contract, verified by P36 flagon1/envon1:
+
+- the pinned proxy **rejects** the flag as a command-line argument
+  (`ERROR: Unknown command line flag`) — args are the wrong channel;
+- the working channel is the **proxy container environment**:
+  `XLA_FLAGS=--xla_allow_excess_precision=false` on `pathways-proxy`;
+- every renderer enforces exactly one such env entry and refuses a raw argv flag
+  (`ensure_proxy_xla_env`); the static manifests are locked by
+  `tests/t0_cpu/test_cluster_contracts.py`.
+
+Corollary: a "flags OK" assertion is only as good as the process it inspects. Assert the
+rendered manifest, not the launcher's own environment.
