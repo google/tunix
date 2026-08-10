@@ -16,11 +16,17 @@
 
 import dataclasses
 from typing import Any, Protocol, Sequence, runtime_checkable
+
 from jax import typing
 import numpy as np
+from tunix.experimental.common import datatypes
+# The transport-neutral contracts module: `WorkUnitMetadata` is the shape the
+# coordinator registers with whatever transport handler is installed. It
+# carries no Raiden types, so depending on it does not couple the rollout
+# layer to a transport.
+from tunix.experimental.orchestrator import weight_sync as weight_sync_lib
 
 ArrayLike = typing.ArrayLike
-from tunix.experimental.common import datatypes
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -105,23 +111,13 @@ class SamplingResponse(datatypes.Response):
       )
 
 
-@dataclasses.dataclass(kw_only=True)
-class WeightSyncRequest(datatypes.Request):
-  """Configuration and routing metadata for synchronizing policy model weights.
-
-  Attributes:
-    controller_id: Optional identifier for transport controllers (e.g., TPU
-      Raiden).
-    policy_version: Target policy version identifier of the weights to sync.
-    source_metadata: Optional transport/layout metadata describing source
-      weights.
-    extra_config: Optional backend-specific configuration parameters.
-  """
-
-  controller_id: str = ""
-  policy_version: int = 0
-  source_metadata: Any = None
-  extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+# One canonical request type crosses trainer, coordinator, and rollout-worker
+# process boundaries.  Keep this alias for callers that historically imported
+# it from sampler.py, but do not define a second dataclass here: CL4 constructs
+# `datatypes.WeightSyncRequest`, and two merely duck-compatible classes make
+# type checking and cloudpickle compatibility depend on which import a caller
+# happened to use.
+WeightSyncRequest = datatypes.WeightSyncRequest
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -176,24 +172,32 @@ class Sampler(Protocol):
     ...
 
   # --- Weight Synchronization ---
-  async def get_weight_sync_metadata(self, **kwargs) -> Any:
-    """Returns the sharding specs and layout metadata across devices for policy model weights."""
+  async def get_weight_sync_metadata(
+      self, **kwargs
+  ) -> Sequence[weight_sync_lib.WorkUnitMetadata]:
+    """Returns the registration metadata for this sampler's policy weights.
+
+    One entry per physical host. Variable names inside the manifest are the
+    names the transfer pairs BY EXACT STRING against the source side; a
+    mismatch is silently skipped by the planner, so they must come from the
+    shared model mapping, never be hand-written.
+    """
     ...
 
   async def pre_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: datatypes.WeightSyncRequest | None = None, **kwargs
   ) -> str | None | Any:
-    """Prepares staging handshake prior to policy weight update from the specified controller."""
+    """Quiesces inference and prepares staging for a policy update."""
     ...
 
   async def weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: datatypes.WeightSyncRequest | None = None, **kwargs
   ) -> str | None | Any:
-    """Updates model weights in-place from the specified controller."""
+    """Materializes the requested policy weights into inactive staging."""
     ...
 
   async def post_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: datatypes.WeightSyncRequest | None = None, **kwargs
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
     ...
@@ -217,3 +221,46 @@ class Sampler(Protocol):
   async def get_load_info(self, **kwargs) -> LoadInfo | Any:
     """Returns the current load information for this sampler."""
     ...
+
+
+# TODO: Converge this capability protocol onto the shared
+# WeightSyncDestination contract in orchestrator/weight_sync.py so the weight
+# sync protocol has one source of truth.
+@runtime_checkable
+class WeightSyncCapableSampler(Protocol):
+  """Optional coordinated-weight-sync capability layered on `Sampler`.
+
+  Kept out of `Sampler` deliberately: a `runtime_checkable` isinstance check
+  tests member PRESENCE only, so folding these three in would make every
+  sampler that predates coordinated weight sync fail the `Sampler` check and
+  stop constructing. A sampler that drives rounds satisfies both protocols;
+  this one is checked only when a round actually needs the capability, never
+  on the sampling path.
+  """
+
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Initializes destination-side weight-sync resources if absent.
+
+    This sampler-level method is a facade: any resource that must live beside
+    device arrays is constructed by delegating to the TPU worker/process that
+    owns those arrays.  It is idempotent and called every round. Existing
+    externally advertised endpoints remain stable; rebinding an inactive
+    staging set is allowed.
+    """
+    raise NotImplementedError(
+        "this sampler does not implement coordinated weight sync"
+    )
+
+  async def abort_weight_sync(
+      self, sync_request: datatypes.WeightSyncRequest | None = None, **kwargs
+  ) -> Any:
+    """Rolls back to serving the previous weights. Safe at any phase."""
+    raise NotImplementedError(
+        "this sampler does not implement coordinated weight sync"
+    )
+
+  async def get_weight_sync_status(self, **kwargs) -> Any:
+    """The round report the coordinator reconciles failed RPCs against."""
+    raise NotImplementedError(
+        "this sampler does not implement coordinated weight sync"
+    )

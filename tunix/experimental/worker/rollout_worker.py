@@ -14,7 +14,9 @@
 
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
+import asyncio
 import dataclasses
+import threading
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -22,6 +24,8 @@ from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.worker import abstract_worker
+from tunix.experimental.orchestrator import weight_sync as weight_sync_lib
+from tunix.experimental.orchestrator import weight_sync_coordinator
 from tunix.rl.rollout import base_rollout
 
 
@@ -73,12 +77,25 @@ class RolloutWorker(abstract_worker.Worker):
     super().__init__()
     self.worker_id = worker_id
     self.config = config
-    self._policy_version = 0
     if tokenizer is None or chat_parser is None:
       raise ValueError(
           "RolloutWorker requires valid tokenizer and chat_parser arguments"
           " (none can be None)."
       )
+    # The AUTHORITATIVE round tracker: the coordinator reconciles failed
+    # phase RPCs against THIS, not the sampler's internal sub-state. Its
+    # terminal "committed" is composite: publish + worker READY + admission
+    # reopened. The async phase lock makes admit->manager->complete atomic
+    # against another phase; `_serving_transition_lock` below linearizes the
+    # synchronous stop path with the terminal tail.
+    self._round_tracker = weight_sync_coordinator.WorkerRoundTracker()
+    self._phase_lock = asyncio.Lock()
+    # stop() is synchronous and can be re-entered by a collector resume
+    # callback while an async terminal phase is completing. This lock
+    # linearizes STOPPED against the serving terminal (READY + admission open
+    # + tracker terminal); the manager's closed bit then makes the terminal
+    # fail closed.
+    self._serving_transition_lock = threading.RLock()
     self.manager = manager_lib.RolloutManager(
         config=config,
         sampler=sampler,
@@ -90,7 +107,7 @@ class RolloutWorker(abstract_worker.Worker):
     )
 
   @property
-  def sampler(self) -> sampler_lib.Sampler:
+  def sampler(self) -> Any:
     return self.manager.sampler
 
   def get_worker_id(self) -> str:
@@ -99,31 +116,17 @@ class RolloutWorker(abstract_worker.Worker):
 
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
-        worker_id=self.worker_id,
-        roles=frozenset({"rollout"}),
-        resources={
-            "sampler": type(self.sampler).__name__,
-            "policy_version": self._policy_version,
-        },
+        worker_id=self.worker_id, roles=frozenset({"rollout"})
     )
 
   def initialize(self) -> datatypes.Response:
     self.state = WorkerState.INITIALIZING
-    self.sampler.initialize()
     try:
-      return datatypes.Response(
-          metadata={
-              "worker_id": self.worker_id,
-              "state": self.state.value,
-              "policy_version": self._policy_version,
-          }
-      )
+      return datatypes.Response()
     finally:
       self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
-    if self.state == WorkerState.PENDING:
-      self.initialize()
     self.state = WorkerState.COMPILING
     try:
       return datatypes.Response()
@@ -131,19 +134,12 @@ class RolloutWorker(abstract_worker.Worker):
       self.state = WorkerState.READY
 
   def start(self) -> datatypes.Response:
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    return datatypes.Response(
-        metadata={
-            "worker_id": self.worker_id,
-            "state": self.state.value,
-            "policy_version": self._policy_version,
-        }
-    )
+    return datatypes.Response()
 
   def stop(self) -> datatypes.Response:
-    self.state = WorkerState.STOPPED
-    self.manager.cancel_all()
+    with self._serving_transition_lock:
+      self.state = WorkerState.STOPPED
+      self.manager.cancel_all()
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
@@ -161,110 +157,7 @@ class RolloutWorker(abstract_worker.Worker):
     pass
 
   def heartbeat(self) -> datatypes.HealthReport:
-    return datatypes.HealthReport(
-        state=self.state,
-        policy_version=self._policy_version,
-        inflight=len(self.manager._active_tasks),  # pylint: disable=protected-access
-        queue_depth=self.manager._completed_queue.qsize(),  # pylint: disable=protected-access
-    )
-
-  def _left_pad_prompt_token_ids(
-      self, prompt_token_ids: Sequence[np.ndarray]
-  ) -> np.ndarray:
-    pad_id = getattr(self.manager.tokenizer, "pad_token_id", None)
-    if pad_id is None:
-      pad_id = getattr(self.manager.tokenizer, "eos_token_id", 0) or 0
-    configured_len = (
-        getattr(self.config, "max_prompt_length", 0) if self.config else 0
-    )
-    max_len = max([1, configured_len] + [len(ids) for ids in prompt_token_ids])
-    padded = np.full((len(prompt_token_ids), max_len), pad_id, dtype=np.int32)
-    for i, ids in enumerate(prompt_token_ids):
-      if ids.size:
-        padded[i, -min(ids.size, max_len) :] = ids[-max_len:]
-    return padded
-
-  def _as_sampling_response_list(
-      self, responses: Any
-  ) -> list[sampler_lib.SamplingResponse]:
-    if isinstance(responses, (list, tuple)):
-      return list(responses)
-    return [responses]
-
-  async def sample_prompts(
-      self,
-      prompts: str | Sequence[str],
-      *,
-      max_generation_steps: int | None = None,
-      temperature: float | None = None,
-      top_p: float | None = None,
-      top_k: int | None = None,
-      seed: int | None = None,
-      return_logprobs: bool = True,
-  ) -> base_rollout.RolloutOutput:
-    """Direct single-turn prompt sampling path using the worker's Sampler."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
-    if not prompt_list:
-      return base_rollout.RolloutOutput(
-          text=[],
-          logits=None,
-          tokens=[],
-          left_padded_prompt_tokens=np.zeros((0, 1), dtype=np.int32),
-          logprobs=[] if return_logprobs else None,
-      )
-
-    config = self.config or base_rollout.RolloutConfig()
-    sampling_params = sampler_lib.SamplingParams(
-        max_tokens=(
-            max_generation_steps
-            if max_generation_steps is not None
-            else config.max_tokens_to_generate
-        ),
-        temperature=temperature if temperature is not None else config.temperature,
-        top_p=top_p if top_p is not None else config.top_p,
-        top_k=top_k if top_k is not None else config.top_k,
-        seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
-        return_logprobs=return_logprobs,
-    )
-    requests = [
-        sampler_lib.SamplingRequest(
-            request_id=f"{self.worker_id}_sample_{i}",
-            prompt=prompt,
-            sampling_params=sampling_params,
-        )
-        for i, prompt in enumerate(prompt_list)
-    ]
-    responses = self._as_sampling_response_list(
-        await self.sampler.sample(requests)
-    )
-    if len(responses) != len(prompt_list):
-      raise RuntimeError(
-          f"Sampler returned {len(responses)} responses for"
-          f" {len(prompt_list)} prompts."
-      )
-    prompt_token_ids = [
-        np.asarray(response.prompt_token_ids, dtype=np.int32).reshape(-1)
-        for response in responses
-    ]
-
-    logprobs: list[np.ndarray] | None = None
-    if return_logprobs:
-      logprobs = []
-      for response in responses:
-        assert response.logprobs is not None
-        logprobs.append(response.logprobs)
-
-    return base_rollout.RolloutOutput(
-        text=[response.text for response in responses],
-        logits=None,
-        tokens=[response.token_ids for response in responses],
-        left_padded_prompt_tokens=self._left_pad_prompt_token_ids(
-            prompt_token_ids
-        ),
-        logprobs=logprobs,
-    )
+    return datatypes.HealthReport(state=self.state)
 
   def _to_rollout_response(
       self,
@@ -304,131 +197,14 @@ class RolloutWorker(abstract_worker.Worker):
       )
     return item
 
-  def _sampling_to_rollout_response(
-      self,
-      request: datatypes.RolloutRequest,
-      text: str,
-      prompt_tokens: Any,
-      token_ids: Any,
-      logprobs: Any | None,
-  ) -> datatypes.RolloutResponse:
-    """Builds the v2 rollout DTO for the direct single-turn sampler path."""
-    completion_tokens = np.asarray(token_ids, dtype=np.int32).reshape(-1)
-    completion_logps = (
-        np.asarray(logprobs, dtype=np.float32).reshape(-1)
-        if logprobs is not None
-        else None
-    )
-    if (
-        completion_logps is not None
-        and completion_logps.shape != completion_tokens.shape
-    ):
-      completion_logps = None
-    prompt_token_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
-    if prompt_token_arr.size == 0:
-      raise RuntimeError(
-          "Sampler response is missing prompt_token_ids for "
-          f"{request.request_id or request.traj_id}."
-      )
-    metadata = dict(request.metadata or {})
-    metadata.setdefault("text", text)
-    return datatypes.RolloutResponse(
-        request_id=request.request_id or request.traj_id,
-        prompt_id=request.prompt_id,
-        status="COMPLETED",
-        prompt_tokens=prompt_token_arr,
-        segments=[
-            datatypes.TokenSegment(
-                source="assistant",
-                tokens=completion_tokens,
-                loss_mask=np.ones(completion_tokens.shape, dtype=np.float32),
-                logps=completion_logps,
-            )
-        ],
-        env_reward=0.0,
-        policy_version=self._policy_version,
-        metadata=metadata,
-    )
-
-  async def _generate_rollout_requests_direct(
-      self,
-      requests: Sequence[datatypes.RolloutRequest],
-      **generation_kwargs,
-  ) -> list[datatypes.RolloutResponse]:
-    """Runs RolloutRequest batches through the direct string sampler."""
-    config = self.config or base_rollout.RolloutConfig()
-    sampling_requests = []
-    for req in requests:
-      sample_kwargs = dict(req.generation_kwargs)
-      sample_kwargs.update(generation_kwargs)
-      sampling_requests.append(
-          sampler_lib.SamplingRequest(
-              request_id=req.request_id or req.traj_id,
-              prompt=req.prompt,
-              metadata=sample_kwargs,
-              sampling_params=sampler_lib.SamplingParams(
-                  max_tokens=sample_kwargs.get(
-                      "max_generation_steps", config.max_tokens_to_generate
-                  ),
-                  temperature=sample_kwargs.get("temperature", config.temperature),
-                  top_p=sample_kwargs.get("top_p", config.top_p),
-                  top_k=sample_kwargs.get("top_k", config.top_k),
-                  seed=sample_kwargs.get("seed", config.seed),
-                  return_logprobs=sample_kwargs.get("return_logprobs", True),
-              ),
-          )
-      )
-    responses = self._as_sampling_response_list(
-        await self.sampler.sample(sampling_requests)
-    )
-    if len(responses) != len(requests):
-      raise RuntimeError(
-          f"Sampler returned {len(responses)} responses for"
-          f" {len(requests)} rollout requests."
-      )
-    return [
-        self._sampling_to_rollout_response(
-            request=req,
-            text=responses[i].text,
-            prompt_tokens=responses[i].prompt_token_ids,
-            token_ids=responses[i].token_ids,
-            logprobs=responses[i].logprobs,
-        )
-        for i, req in enumerate(requests)
-    ]
-
   async def generate(
       self,
       requests: (
           datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest] | Any
-      ) = None,
+      ),
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
-      prompts: Any = None,
-      **generation_kwargs,
   ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse] | Any:
     """Coroutine method for single or batched generate requests."""
-    if requests is None:
-      requests = prompts
-    if requests is None:
-      raise ValueError("generate requires `requests` or v2 `prompts`.")
-    if isinstance(requests, str) or (
-        isinstance(requests, (list, tuple))
-        and all(isinstance(req, str) for req in requests)
-    ):
-      return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
-    # if isinstance(requests, datatypes.RolloutRequest):
-    #   return (
-    #       await self._generate_rollout_requests_direct(
-    #           [requests], **generation_kwargs
-    #       )
-    #   )[0]
-    # if isinstance(requests, (list, tuple)) and all(
-    #     isinstance(req, datatypes.RolloutRequest) for req in requests
-    # ):
-    #   return await self._generate_rollout_requests_direct(
-    #       list(requests), **generation_kwargs
-    #   )
-
     cb = None
     if on_complete is not None:
       cb = lambda item: on_complete(self._to_rollout_response(item))
@@ -449,30 +225,210 @@ class RolloutWorker(abstract_worker.Worker):
     async for res in self.manager.as_completed_stream():
       yield self._to_rollout_response(res)
 
-  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Prepares the worker for an upcoming weight synchronization step."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    self.state = WorkerState.SYNCING
-    try:
-      return await self.manager.pre_weight_sync(sync_request, **kwargs)
-    finally:
-      self.state = WorkerState.READY
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Binds destination-side resources through the array-owning sampler."""
+    return await self.manager.bind_weight_sync(**kwargs)
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Synchronizes the worker's internal model weights."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    self.state = WorkerState.SYNCING
-    try:
-      metadata = kwargs.pop("metadata", None)
-      request = sync_request if sync_request is not None else metadata
-      result = await self.manager.weight_sync(request, **kwargs)
-      self._policy_version += 1
-      return result
-    finally:
-      self.state = WorkerState.READY
+  async def get_weight_sync_metadata(
+      self, **kwargs
+  ) -> Optional[Sequence[weight_sync_lib.WorkUnitMetadata]]:
+    """Returns registration metadata, one entry per physical host."""
+    return await self.manager.get_weight_sync_metadata(**kwargs)
 
-  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Finalizes policy weight update and resumes workers."""
-    return await self.manager.post_weight_sync(sync_request, **kwargs)
+  async def pre_weight_sync(
+      self,
+      sync_request: datatypes.WeightSyncRequest | None = None,
+      **kwargs,
+  ) -> Any:
+    """Quiesces the worker; it stays SYNCING until post/abort completes.
+
+    Restoring READY in a finally here (the previous behavior) reported a
+    drained, cache-less worker as healthy while it could not serve.
+    """
+    async with self._phase_lock:
+      # The round's high-water mark and the lifecycle claim are one short
+      # transaction with stop(). If stop wins, pre must neither resurrect the
+      # worker nor consume this round key; otherwise a later legitimate retry
+      # can be rejected as stale even though pre never ran.
+      with self._serving_transition_lock:
+        # Enumerated ALLOWED states, not a STOPPED denylist: READY is the
+        # normal case; SYNCING covers a duplicate delivery (no-op via admit),
+        # a crash-between-do-and-record retry of this round, and the
+        # tracker-sanctioned supersede by a newer round. Everything else --
+        # STOPPED, INITIALIZING, COMPILING, any future state -- is refused,
+        # because quiescing a worker that is not serving would let the
+        # post/abort terminal later mark it READY without it ever having
+        # finished initialization. The check sits BEFORE admit so a refused
+        # pre does not consume the round key; a later legitimate retry must
+        # not be rejected as stale for a pre that never ran.
+        if self.state not in (WorkerState.READY, WorkerState.SYNCING):
+          raise RuntimeError(
+              f"pre_weight_sync refused: worker is {self.state}, not serving"
+          )
+        if not self._round_tracker.admit(sync_request, "prepared"):
+          return None
+        self.state = WorkerState.SYNCING
+      res = await self.manager.pre_weight_sync(sync_request, **kwargs)
+      self._round_tracker.complete(sync_request, "prepared")
+      return res
+
+  async def weight_sync(
+      self,
+      sync_request: datatypes.WeightSyncRequest | None = None,
+      **kwargs,
+  ) -> Any:
+    """Materializes candidate weights into inactive staging only."""
+    async with self._phase_lock:
+      if not self._round_tracker.admit(sync_request, "h2d_done"):
+        return None
+      if self.state != WorkerState.SYNCING:
+        raise RuntimeError(
+            f"weight_sync in state {self.state}; pre_weight_sync must run"
+            " first"
+        )
+      res = await self.manager.weight_sync(sync_request, **kwargs)
+      self._round_tracker.complete(sync_request, "h2d_done")
+      return res
+
+  async def post_weight_sync(
+      self,
+      sync_request: datatypes.WeightSyncRequest | None = None,
+      **kwargs,
+  ) -> Any:
+    """COMPOSITE terminal: "committed" is recorded only after the sampler
+    published, admission reopened, AND this worker is READY."""
+    async with self._phase_lock:
+      if not self._round_tracker.admit(sync_request, "committed"):
+        return None
+      # Phase ORDER, not just phase identity: publishing a round whose H2D
+      # never completed would publish stale staging and then record it as
+      # committed.
+      report = self._round_tracker.report()
+      if report.get("phase") != "h2d_done":
+        raise RuntimeError(
+            f"post_weight_sync with round phase {report.get('phase')!r};"
+            " weight_sync (H2D) must complete first"
+        )
+      if self.state != WorkerState.SYNCING:
+        # Do not start a new publish after stop already won. A stop arriving
+        # while an already-started publish RPC is in flight is handled again
+        # by the composite-terminal check below.
+        raise RuntimeError(
+            f"post_weight_sync started in state {self.state}; publish is not"
+            " serving"
+        )
+      res = await self.manager.post_weight_sync(sync_request, **kwargs)
+      with self._serving_transition_lock:
+
+        def mark_ready() -> None:
+          if self.state != WorkerState.SYNCING:
+            raise RuntimeError(
+                f"post_weight_sync finished in state {self.state}; publish"
+                " is not serving"
+            )
+          self.state = WorkerState.READY
+
+        # The manager sets its admission event only after mark_ready succeeds.
+        # stop() takes the same outer lock, so it either wins before this
+        # composite terminal (which then fails) or occurs after a real commit.
+        if not self.manager.reopen_admission(before_open=mark_ready):
+          raise RuntimeError(
+              "post_weight_sync could not reopen admission; publish is not"
+              " serving"
+          )
+        if self.state != WorkerState.READY:
+          raise RuntimeError(
+              f"post_weight_sync finished in state {self.state}; publish is"
+              " not serving"
+          )
+        self._round_tracker.complete(sync_request, "committed")
+      return res
+
+  async def abort_weight_sync(
+      self,
+      sync_request: datatypes.WeightSyncRequest | None = None,
+      **kwargs,
+  ) -> Any:
+    """Rolls back to the previous weights; idempotent from READY; never
+    resurrects a STOPPED worker."""
+    async with self._phase_lock:
+      if not self._round_tracker.admit(sync_request, "aborted"):
+        return None
+      res = await self.manager.abort_weight_sync(sync_request, **kwargs)
+      # FAIL-CLOSED terminal reconciliation: "aborted" is recorded only
+      # when the sampler's own sub-state POSITIVELY confirms the rollback
+      # for THIS round. An already-published round, an unknown report
+      # format, a mismatched round key, or any future phase name all fall
+      # through to needs-restart -- an abort that cannot be confirmed must
+      # never be recorded as one.
+      sampler_state = await self.manager.get_weight_sync_status(**kwargs)
+      # No escape hatch for None. A sampler whose status endpoint answers
+      # nothing has told us nothing, and "nothing" is the one answer that
+      # must never be read as a confirmed rollback.
+      # Same hybrid as manager.weight_sync's version lookup: None handled
+      # explicitly, the field still a defaulted lookup so request shapes
+      # without extra_config (e.g. upstream WeightSyncMetadata) keep their
+      # existing no-op behavior instead of raising.
+      extra = (
+          (getattr(sync_request, "extra_config", None) or {})
+          if sync_request
+          else {}
+      )
+      # "idle" is deliberately NOT accepted: in tracker terms it means the
+      # round was admitted and nothing completed -- an abort that started and
+      # never recorded, which is the absence of confirmation, not a form of
+      # it. The no-op-rollback case (abort arriving before pre) does not need
+      # it either: a tracker-bracketed sampler admits "aborted", does
+      # nothing, completes "aborted", and reports "aborted".
+      confirmed = (
+          isinstance(sampler_state, dict)
+          and sampler_state.get("phase") in ("aborted", "rollback_complete")
+          # `is not None` on BOTH ids before the equality: a request and a
+          # report that each lack the field would otherwise confirm via
+          # None == None, which is the absence of identity, not a match.
+          and sampler_state.get("req_id") is not None
+          and sampler_state.get("req_id") == extra.get("req_id")
+          and sampler_state.get("uuid") is not None
+          and sampler_state.get("uuid") == extra.get("uuid")
+      )
+      if not confirmed:
+        raise RuntimeError(
+            "abort not positively confirmed by the sampler sub-state"
+            f" {sampler_state!r}; reconcile as needs-restart, not aborted"
+        )
+      with self._serving_transition_lock:
+
+        def mark_ready() -> None:
+          # CL4 deliberately permits an abort to OPEN a round: cancellation
+          # may reach a destination before pre_weight_sync did. In that case
+          # the worker is still READY, and a positively confirmed no-op
+          # rollback is a valid aborted terminal. SYNCING needs the normal
+          # transition back to READY; every other state remains fail-closed.
+          if self.state == WorkerState.SYNCING:
+            self.state = WorkerState.READY
+          elif self.state != WorkerState.READY:
+            raise RuntimeError(
+                f"abort_weight_sync finished in state {self.state}; the"
+                " worker is not serving and must reconcile as needs-restart"
+            )
+
+        # Only here: every path above leaves the sampler's state unconfirmed,
+        # and admitting requests over an unconfirmed rollback is exactly what
+        # the fail-closed terminal exists to prevent.
+        if not self.manager.reopen_admission(before_open=mark_ready):
+          raise RuntimeError(
+              "abort_weight_sync could not reopen admission; the worker must"
+              " reconcile as needs-restart"
+          )
+        if self.state != WorkerState.READY:
+          raise RuntimeError(
+              f"abort_weight_sync finished in state {self.state}; the worker"
+              " is not serving and must reconcile as needs-restart"
+          )
+        self._round_tracker.complete(sync_request, "aborted")
+      return res
+
+  async def get_weight_sync_status(self, **kwargs) -> Any:
+    """The AUTHORITATIVE round report (this worker's tracker, not the
+    sampler's internal sub-state)."""
+    return self._round_tracker.report()
