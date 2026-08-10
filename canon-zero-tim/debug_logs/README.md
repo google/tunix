@@ -949,3 +949,39 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      - This sparse boundary is not established as a one-ULP effect: the same action-mask diagnostic reports `logp_diff_max=0.10390`, `prob_diff_max=0.07350`, and sampler-IS `weight_max=1.0858`.
 3. **Core Conclusion**:
    - Across both the 1.7B and 8B scales under flag-on conditions, the Tunix canonical training adapter (`Arm C`) and the native vLLM prefill engine (`Arm B`) achieve **0 differing bytes** on full production batches.
+
+---
+
+## 37. Phase 38 Attempt `p38b4`: 64-Chip GSM8K Full Bit-Exact Decode-Prefill-Trainer Alignment Milestone
+
+- `debug_logs/p38_p38b4_gsm8k_align.raw.log` (SHA-256: `f0fd4f75459324b6226d0f7fc29dab48d68ef728632a768cb76cffa77675d70b`)
+- Target Commit: `1d36e894e40eded7092437ef3120e83838111646` (*Scale up Head Pod resource requests to 32 CPU / 200Gi RAM to avoid crowded nodes*)
+
+### Execution & Diagnostic Summary:
+1. **Infrastructure & Cluster Stability**:
+   - Resolved GKE `optimize-utilization-scheduler` node crowding by setting Head Pod requests to 32 CPU / 200Gi RAM, scheduling cleanly onto dedicated host `gke-mlperf-v5p-cpu-np-b188bf3f-vhvj`.
+   - Purged 453 legacy failed/evicted pods from default namespace to release node disk pressure.
+   - All 16 TPU workers (64 chips, physical slice `a3b26dc1`) initialized smoothly and completed the 180s quiet period.
+2. **Rollout Execution (Qwen3-1.7B, DP16xTP4, 256 trajectories)**:
+   - Full 256 GSM8K trajectories generated with throughput up to **1,645.7 tokens/s**.
+   - `N_action = 189,825` action tokens (759,300 total action bytes).
+   - Rollout metrics: `solve_ratio = 0.352`, `reward_mean = 0.322`, `reward_max = 1.000`.
+3. **Three-Arm Pre-Backward Alignment Breakthrough (100% BIT-EXACT TRIPLE IDENTITY)**:
+   - `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=189825 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]`
+   - **`S_decode_vs_S_prefill` (Arm A serving decode vs Arm B native prefill)**:
+     - Differing elements: **0 / 189,825 (0.0%)**
+     - Differing bytes: **0 / 759,300 (0.0%)**
+     - Max absolute difference: **0.0**
+   - **`S_prefill_vs_T_old` (Arm B native prefill vs Arm C canonical adapter)**:
+     - Differing elements: **0 / 189,825 (0.0%)**
+     - Differing bytes: **0 / 759,300 (0.0%)**
+     - Max absolute difference: **0.0**
+   - **Three-Arm Hash Identity**:
+     - `hashes.S_decode`: `6f064fff5a2fd8ba96e2629bf30d0d1ba091f9fbbd2bd09ecc1821c6e751ba61`
+     - `hashes.S_prefill`: `6f064fff5a2fd8ba96e2629bf30d0d1ba091f9fbbd2bd09ecc1821c6e751ba61`
+     - `hashes.T_old`: `6f064fff5a2fd8ba96e2629bf30d0d1ba091f9fbbd2bd09ecc1821c6e751ba61`
+   - **Mathematical Metric Verification**:
+     - `sampler-trainer: logp_diff=(0.00000, 0.00000) prob_diff=(0.00000, 0.00000) pearson=1.00000`
+4. **Conclusion**:
+   - Across the entire 256-trajectory batch, decode generation (`Arm A`), rescore prefill (`Arm B`), and learner training adapter forward (`Arm C`) have achieved **absolute bitwise mathematical equivalence** with 0 differing bytes across all 189,825 action tokens.
+
