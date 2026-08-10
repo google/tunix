@@ -20,6 +20,15 @@ _BRANCH = "yuxzhang/canon-zero-tim"
 _SCRATCH_ROOT = "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33"
 
 
+def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
+  if re.match(r"^[0-9]+[eE][0-9]+$", data):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style='"')
+  return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+yaml.add_representer(str, _str_representer, Dumper=yaml.SafeDumper)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class JobSpec:
   """Defines one immutable P33 queue entry."""
