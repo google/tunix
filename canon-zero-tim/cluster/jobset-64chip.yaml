@@ -118,7 +118,6 @@ spec:
                 requests:
                   cpu: '8'
                   memory: 32Gi
-                  ephemeral-storage: 20Gi
                 limits: {cpu: '24', memory: 200G}
               command:
               - bash
