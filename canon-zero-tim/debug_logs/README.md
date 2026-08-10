@@ -877,3 +877,32 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Per `P36_PROXY_XLA_HANDOFF.md` Section 57:
      *"Proxy rejects the argument or exits -> Delivery contract failure -> Fix the argument form; do not report a numerical FAIL."*
    - The flag is an XLA/JAX flag rather than a top-level Pathways proxy binary gflag. The corrected P36 contract delivers it through the `pathways-proxy` container's `XLA_FLAGS` environment and rejects any raw command-line occurrence. This corrected contract is locally gated but does not have a target numerical verdict yet.
+
+---
+
+## 34. Phase 36 Attempt `envon1`: Pathways Proxy XLA Environment Delivery & Way-Count Verification
+
+- `debug_logs/p36_envon1_waycount.raw.log` (SHA-256: `87dbec3807675e8800751f384b150e79f4ac27a45607b4ae0e65f0a75b8efe4d`)
+- Target Commit: `73f4b125be1722f2a2ead1d6c3d10e376d824f18` (*Deliver the P36 XLA flag through the proxy environment*)
+
+### Execution & Diagnostic Summary:
+1. **Delivery Succeeded**:
+   - The `pathways-proxy` container booted cleanly with `STARTUP: env: XLA_FLAGS=--xla_allow_excess_precision=false`.
+   - IFRT proxy server and resource manager started with status `OK`.
+2. **Way-Count Diagnostic Results on 64 TPU Chips (`5859bae2` instance group)**:
+   - **Width 2**:
+     - `depth=8`: replicated `0/262144` (SAME), stock-ar `320/262144` (DIFFERS), f4-fixed `320/262144` (DIFFERS).
+     - `depth=15`: replicated `0/262144` (SAME), stock-ar `0/262144` (SAME), f4-fixed `0/262144` (SAME).
+   - **Width 4**:
+     - `depth=8`: replicated `0/262144` (SAME), stock-ar `8123/262144` (DIFFERS), f4-fixed `0/262144` (SAME).
+     - `depth=15`: replicated `0/262144` (SAME), stock-ar `7696/262144` (DIFFERS), f4-fixed `0/262144` (SAME).
+   - **Width 8**:
+     - `depth=8`: replicated `0/262144` (SAME), stock-ar `20205/262144` (DIFFERS), f4-fixed `0/262144` (SAME).
+     - `depth=15`: replicated `390/262144` (DIFFERS), stock-ar `19006/262144` (DIFFERS), f4-fixed `0/262144` (SAME).
+3. **Canonical Qwen Operator Admission**:
+   - `[canonical-op] depth=8 differing_bytes=0/2097152 gradient_finite=1 gradient_nonzero=150869290 SAME`
+   - `[canonical-op] VERDICT: PASS`
+4. **Registered Verdict**:
+   - Per `P36_PROXY_XLA_HANDOFF.md` Section 55:
+     *"Replicated drift materially decreases but remains nonzero -> The flag is a strong carrier candidate."*
+   - Replicated drift is bitwise zero for Width 2 and Width 4 (depth 8 & 15) and Width 8 (depth 8), with f4-fixed bitwise zero across all Width 4 and Width 8 configurations.
