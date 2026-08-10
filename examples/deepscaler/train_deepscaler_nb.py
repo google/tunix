@@ -70,6 +70,7 @@ with cm:
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
   from tunix.utils import compat
+  from tunix.utils import mesh as mesh_lib
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
@@ -220,9 +221,6 @@ ROLLOUT_ENGINE = os.getenv(
     "ROLLOUT_ENGINE", "sglang_jax"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
-# mesh = jax.make_mesh(
-#     *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
-# )
 mesh = None
 
 trainer_devices = math.prod(TRAINER_MESH[0])
@@ -236,33 +234,19 @@ if trainer_devices + rollout_devices > jax.device_count():  # pyrefly: ignore[un
 
 
 if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
-  rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]  # pyrefly: ignore[bad-argument-type, bad-index]
+  mesh_devices = mesh_lib.allocate_named_mesh_device_slices(
+    [("rollout", rollout_devices), ("trainer", trainer_devices)]
   )
-
-  rollout_mesh = jax.sharding.Mesh(
-      rollout_device_list,
-      axis_names=ROLLOUT_MESH[1],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+  rollout_mesh = mesh_lib.create_mesh(
+    tuple(ROLLOUT_MESH[0]),
+    tuple(ROLLOUT_MESH[1]),
+    devices=mesh_devices["rollout"],
   )
-  # rollout_mesh = jax.make_mesh(
-  #     *ROLLOUT_MESH,
-  #     devices=jax.devices()[:rollout_devices],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-  # )
-  print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
-  trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
-      TRAINER_MESH[0], jax.devices()[-trainer_devices:]  # pyrefly: ignore[bad-argument-type, unsupported-operation]
-  )
-  # trainer_mesh = jax.make_mesh(
-  #     *TRAINER_MESH,
-  #     devices=jax.devices()[-trainer_devices:],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
-  # )
-  trainer_mesh = jax.sharding.Mesh(
-      trainer_devices_list,
-      axis_names=TRAINER_MESH[1],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
+  print(f"YY rollout_devices={mesh_devices['rollout']} {rollout_mesh.devices=}")
+  trainer_mesh = mesh_lib.create_mesh(
+    tuple(TRAINER_MESH[0]),
+    tuple(TRAINER_MESH[1]),
+    devices=mesh_devices["trainer"],
   )
 else:
   rollout_mesh = mesh

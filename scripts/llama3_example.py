@@ -24,6 +24,7 @@ from tunix.generate import sampler
 from tunix.models.llama3 import model
 from tunix.models.llama3 import params
 from tunix.tests import test_common as tc
+from tunix.utils import mesh as mesh_lib
 
 
 MODEL_VERSION = "meta-llama/Llama-3.2-1B-Instruct"
@@ -34,11 +35,7 @@ MODEL_CP_PATH = os.path.join(temp_dir, "models", MODEL_VERSION)
 
 all_files = tc.download_from_huggingface(repo_id=MODEL_VERSION, model_path=MODEL_CP_PATH)
 
-mesh = jax.make_mesh(
-    (1, len(jax.devices())),
-    ("fsdp", "tp"),
-    axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
-)
+mesh = mesh_lib.create_mesh((1, len(jax.devices())), ("fsdp", "tp"))
 config = (
     model.ModelConfig.llama3p2_1b()
 )  # pick corresponding config based on model version

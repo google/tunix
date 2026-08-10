@@ -34,6 +34,7 @@ from tunix.models.gemma3 import params as params_lib
 from tunix.processors import image_processor as image_processor_lib
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
+from tunix.utils import mesh as mesh_lib
 
 
 INPUT_TEMPLATE = (
@@ -411,10 +412,7 @@ def main(argv):
   else:
     raise ValueError(f"Unsupported number of TPUs: {num_tpus}")
 
-  mesh = [mesh_counts, ("fsdp", "tp")]
-  mesh = jax.make_mesh(
-      *mesh, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh[0])
-  )
+  mesh = mesh_lib.create_mesh(mesh_counts, ("fsdp", "tp"))
 
   # Model config.
   model_config = model_lib.ModelConfig.gemma3_4b_pt(text_only=False)

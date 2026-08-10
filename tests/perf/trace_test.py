@@ -205,6 +205,26 @@ class TracerTest(parameterized.TestCase):
     )
 
   @mock.patch.object(time, "perf_counter", autospec=True)
+  def test_export_synchronizes_pending_device_spans(self, mock_perf_counter):
+    mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0]
+    waitlist = mock_array()
+    export_mock = mock.Mock(return_value={"ok": (1.0, None)})
+
+    tracer = PerfTracer(devices=["tpu0"], export_fn=export_mock)
+
+    with tracer.span("x", devices=["tpu0"]) as device_span:
+      device_span.device_end(waitlist)
+
+    self.assertEqual(tracer.export(), {"ok": (1.0, None)})
+
+    waitlist.block_until_ready.assert_called_once()
+    export_mock.assert_called_once()
+
+    query = export_mock.call_args.args[0]
+    device_timeline = query._timelines["tpu0"]
+    self.assertTrue(device_timeline.root.inner[0].ended)
+
+  @mock.patch.object(time, "perf_counter", autospec=True)
   def test_span_group_ok(self, mock_perf_counter):
     mock_perf_counter.side_effect = [
         0.0,

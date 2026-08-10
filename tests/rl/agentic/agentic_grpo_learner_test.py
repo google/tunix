@@ -44,9 +44,11 @@ from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic import agentic_grpo_learner
+from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
+from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
@@ -852,6 +854,335 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         learner._process_results(trajectories)
 
     self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
+
+  @mock.patch.object(agentic_utils, "tokenize_and_generate_masks")
+  def test_vllm_tokens_survive_collection_filtering_and_batching(
+      self, mock_tokenize_and_generate_masks
+  ):
+    class MockEnv(BaseTaskEnv):
+
+      def __init__(
+          self,
+          *,
+          prompt_text: str,
+          scripted_steps: list[tuple[str, float, bool]],
+          policy_version: int,
+          group_id: str,
+          max_steps: int,
+      ):
+        super().__init__(
+            task={"policy_version": policy_version, "prompts": prompt_text},
+            max_steps=max_steps,
+            group_id=group_id,
+        )
+        self._prompt_text = prompt_text
+        self._scripted_steps = list(scripted_steps)
+
+      def _initial_observation(self) -> Any:
+        return self._prompt_text
+
+      def _step_impl(self, action: Any) -> EnvStepResult:
+        del action
+        observation, reward, done = self._scripted_steps.pop(0)
+        return EnvStepResult(
+            observation=observation,
+            reward=reward,
+            done=done,
+            info={},
+        )
+
+    class MockAgent(ConversationAgentBase):
+
+      def __init__(self):
+        super().__init__(system_prompt="")
+
+      def _observation_to_messages(self, observation, reward, done, info):
+        del reward, done, info
+        self._messages.append({"role": "user", "content": observation})
+        step = self.get_current_step()
+        if step is not None:
+          step.observation = observation
+
+      def update_from_model(self, response, **kwargs):
+        del kwargs
+        step = Step(
+            model_response=response,
+            action=Action(action=[response]),
+        )
+        self._trajectory.steps.append(step)
+        self._messages.append({"role": "assistant", "content": response})
+        return step
+
+    class PassthroughChatParser:
+
+      def update_assistant_end_tokens(self, tokens):
+        return np.asarray(tokens, dtype=np.int32), 0
+
+    def make_rollout_output(
+        *,
+        text: str,
+        tokens: list[int],
+        prompt_tokens: np.ndarray,
+        logprobs: list[float],
+    ) -> base_rollout.RolloutOutput:
+      return base_rollout.RolloutOutput(
+          text=[text],
+          logits=[jnp.zeros(len(tokens), dtype=jnp.float32)],
+          tokens=[np.asarray(tokens, dtype=np.int32)],
+          left_padded_prompt_tokens=np.asarray([prompt_tokens], dtype=np.int32),
+          logprobs=[np.asarray(logprobs, dtype=np.float32)],
+      )
+
+    def collect_token_data(
+        *,
+        prompt_text: str,
+        prompt_tokens: np.ndarray,
+        rollout_outputs: list[base_rollout.RolloutOutput],
+        scripted_steps: list[tuple[str, float, bool]],
+        group_id: str,
+        policy_version: int,
+        max_steps: int,
+        overlong_filter: bool,
+        use_base_task_env: bool = True,
+    ) -> dict[str, Any]:
+      if use_base_task_env:
+        env = MockEnv(
+            prompt_text=prompt_text,
+            scripted_steps=scripted_steps,
+            policy_version=policy_version,
+            group_id=group_id,
+            max_steps=max_steps,
+        )
+      else:
+        env = mock.create_autospec(BaseTaskEnv, instance=True)
+        env.max_steps = max_steps
+        env.task = {"policy_version": policy_version, "prompts": prompt_text}
+        env.extra_kwargs = {"group_id": group_id}
+        env.reset.return_value = (prompt_text, {})
+        pending_steps = list(scripted_steps)
+
+        def step(action):
+          del action
+          observation, reward, done = pending_steps.pop(0)
+          return observation, reward, done, {}
+
+        env.step.side_effect = step
+        env.close.return_value = None
+
+      agent = MockAgent()
+      pending_outputs = list(rollout_outputs)
+
+      def model_call(chat_completions, runtime_env, max_generation_steps=None):
+        del chat_completions, runtime_env, max_generation_steps
+        return pending_outputs.pop(0)
+
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=agent,
+          env=env,
+          model_call=model_call,
+          tokenizer=mock.Mock(),
+          chat_parser=PassthroughChatParser(),
+          max_response_length=64,
+          overlong_filter=overlong_filter,
+      )
+      token_data = asyncio.run(engine.collect(mode="Token"))
+      self.assertEqual(
+          token_data["prompt_tokens"].tolist(), prompt_tokens.tolist()
+      )
+      return token_data
+
+    prompt_tokens_1 = np.array([11, 12, 13, 14, 15, 16], dtype=np.int32)
+    prompt_tokens_2 = np.array([21, 22, 23, 24, 25, 26], dtype=np.int32)
+    generated_tokens_1 = np.array([31, 32, 2], dtype=np.int32)
+    generated_tokens_2 = np.array([41, 42, 43, 2], dtype=np.int32)
+    generated_tokens_3 = np.array([51, 52, 2], dtype=np.int32)
+    env_tokens_success = np.array([101, 102], dtype=np.int32)
+    env_tokens_filtered = np.array([201], dtype=np.int32)
+
+    mock_tokenize_and_generate_masks.side_effect = [
+        (prompt_tokens_1.tolist(), [1] * len(prompt_tokens_1)),
+        (env_tokens_success.tolist(), [1, 1]),
+        (prompt_tokens_2.tolist(), [1] * len(prompt_tokens_2)),
+        (env_tokens_filtered.tolist(), [1]),
+    ]
+
+    success_token_data = collect_token_data(
+        prompt_text="success prompt",
+        prompt_tokens=prompt_tokens_1,
+        rollout_outputs=[
+            make_rollout_output(
+                text="assistant turn one",
+                tokens=generated_tokens_1.tolist(),
+                prompt_tokens=prompt_tokens_1,
+                logprobs=[-0.1, -0.2, -0.3],
+            ),
+            make_rollout_output(
+                text="assistant turn two",
+                tokens=generated_tokens_2.tolist(),
+                prompt_tokens=prompt_tokens_1,
+                logprobs=[-0.4, -0.5, -0.6, -0.7],
+            ),
+        ],
+        scripted_steps=[("env turn one", 1.0, False), ("final env turn", 2.0, True)],
+        group_id="group-1",
+        policy_version=7,
+        max_steps=4,
+        overlong_filter=False,
+    )
+    filtered_token_data = collect_token_data(
+        prompt_text="filtered prompt",
+        prompt_tokens=prompt_tokens_2,
+        rollout_outputs=[
+            make_rollout_output(
+                text="assistant filtered turn",
+                tokens=generated_tokens_3.tolist(),
+                prompt_tokens=prompt_tokens_2,
+                logprobs=[-1.1, -1.2, -1.3],
+            ),
+        ],
+        scripted_steps=[("filtered env turn", 1.5, False)],
+        group_id="group-1",
+        policy_version=7,
+        max_steps=1,
+        overlong_filter=True,
+        use_base_task_env=False,
+    )
+
+    expected_success_tokens = np.concatenate(
+        [generated_tokens_1, env_tokens_success, generated_tokens_2], axis=0
+    )
+    expected_success_logprobs = np.array(
+        [-0.1, -0.2, -0.3, 0.0, 0.0, -0.4, -0.5, -0.6, -0.7],
+        dtype=np.float32,
+    )
+    expected_filtered_tokens = np.concatenate(
+        [generated_tokens_3, env_tokens_filtered], axis=0
+    )
+    expected_filtered_logprobs = np.array(
+        [-1.1, -1.2, -1.3, 0.0], dtype=np.float32
+    )
+
+    np.testing.assert_array_equal(
+        success_token_data["conversation_tokens"], expected_success_tokens
+    )
+    np.testing.assert_array_equal(
+        success_token_data["conversation_masks"],
+        np.ones_like(expected_success_tokens, dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        success_token_data["old_logprobs"], expected_success_logprobs
+    )
+    self.assertEqual(success_token_data["status"], "SUCCEEDED")
+
+    np.testing.assert_array_equal(
+        filtered_token_data["conversation_tokens"], expected_filtered_tokens
+    )
+    np.testing.assert_array_equal(
+        filtered_token_data["conversation_masks"],
+        np.zeros_like(expected_filtered_tokens, dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        filtered_token_data["old_logprobs"], expected_filtered_logprobs
+    )
+    self.assertEqual(filtered_token_data["status"], "MAX_STEPS_REACHED")
+
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=6,
+            max_tokens_to_generate=12,
+            return_logprobs=True,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        algo_config=agentic_grpo_learner.GRPOConfig(
+            beta=0.0,
+            force_compute_kl=False,
+            num_generations=2,
+            num_iterations=1,
+            max_response_length=12,
+            use_rollout_logps=True,
+        ),
+        chat_parser=MockChatParser(),
+    )
+
+    trajectories = [
+        types.SimpleNamespace(traj=success_token_data),
+        types.SimpleNamespace(traj=filtered_token_data),
+    ]
+
+    with mock.patch.object(
+        rl_cluster,
+        "get_actor_per_token_logps",
+        return_value=jnp.zeros((2, 12), dtype=jnp.float32),
+        autospec=True,
+        ):
+      results = learner._process_results(trajectories, expected_step=1)
+
+    self.assertLen(results, 1)
+    train_example = results[0]
+
+    np.testing.assert_array_equal(train_example.prompt_ids[0], prompt_tokens_1)
+    np.testing.assert_array_equal(train_example.prompt_ids[1], prompt_tokens_2)
+    np.testing.assert_array_equal(
+        train_example.completion_ids[0],
+        np.array([31, 32, 2, 101, 102, 41, 42, 43, 2, 0, 0, 0], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        train_example.completion_ids[1],
+        np.array([51, 52, 2, 201, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        train_example.completion_mask[0],
+        np.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        train_example.completion_mask[1],
+        np.zeros(12, dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        train_example.old_per_token_logps[0],
+        np.array(
+            [-0.1, -0.2, -0.3, 0.0, 0.0, -0.4, -0.5, -0.6, -0.7, 0.0, 0.0, 0.0],
+            dtype=np.float32,
+        ),
+    )
+    np.testing.assert_allclose(
+        train_example.old_per_token_logps[1],
+        np.array(
+            [-1.1, -1.2, -1.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            dtype=np.float32,
+        ),
+    )
 
   def test_process_results_zero_advantage_group(self):
     class MockTraj:

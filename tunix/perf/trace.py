@@ -183,6 +183,7 @@ class PerfTracer(NoopTracer):
 
   def export(self) -> MetricsT:
     if self._export_fn is not None:
+      self.synchronize()
       query = PerfSpanQuery(self._get_timelines(), self._main_thread_id)
       return self._export_fn(query)
     else:
@@ -257,9 +258,13 @@ class Timeline:
 
   def span_group_begin(self, name: str, begin: float) -> SpanGroup:
     if self._last_span and not self._last_span.ended:
-      logging.warning(
-          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
-          f" group stack: {self._stack_debug()}"
+      logging.debug(
+          "%s: span group %r overlaps active span %r; continuing without "
+          "treating it as an error. current group stack: %s",
+          self.id,
+          name,
+          self._last_span.name,
+          self._stack_debug(),
       )
     inner = SpanGroup(name, self.stack[-1])
     inner.begin = begin
@@ -271,9 +276,12 @@ class Timeline:
     if len(self.stack) == 1:
       raise ValueError(f"{self.id}: no more span groups to end.")
     if self._last_span and not self._last_span.ended:
-      logging.warning(
-          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
-          f" group stack: {self._stack_debug()}"
+      logging.debug(
+          "%s: ending a span group while active span %r is still open. "
+          "current group stack: %s",
+          self.id,
+          self._last_span.name,
+          self._stack_debug(),
       )
     inner = self.stack.pop()
     inner.end = end

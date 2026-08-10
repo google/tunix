@@ -8,6 +8,7 @@ import fsspec
 
 import transformers
 from tunix.generate import mappings
+from tunix.utils import mesh as mesh_lib
 
 Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
@@ -209,7 +210,10 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))  # pyrefly: ignore[bad-argument-type]
+    self.mesh = mesh_lib.create_mesh(
+        tuple(mesh_config[0]),
+        tuple(mesh_config[1]),
+    )
     self.tokenizer = None
     self.model = None
     self.sampler = None

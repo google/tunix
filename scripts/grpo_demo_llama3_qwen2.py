@@ -31,7 +31,6 @@ import re
 from absl import logging
 from flax import nnx
 import jax
-from jax._src import mesh_utils
 import optax
 from orbax import checkpoint as ocp
 import qwix
@@ -57,6 +56,7 @@ from tunix.sft import profiler
 from tunix.sft import utils
 from tunix.tests import test_common as tc
 from tunix.utils import script_utils
+from tunix.utils import mesh as mesh_lib
 
 if os.getenv("JAX_PLATFORMS", None) == "proxy":
   import pathwaysutils
@@ -403,41 +403,6 @@ if ENABLE_LORA:
       args.cluster_setup != "disaggregated-3-way"
   ), "LoRA is not supported in disaggregated-3-way setup."
 
-# vLLM mesh has issue to start from non-zero device index
-ROLLOUT_DEVICE_START_IDX = 0
-ROLLOUT_DEVICE_END_IDX = ROLLOUT_TPU_TO_USE
-
-
-if args.cluster_setup == "colocated":
-  REF_DEVICE_START_IDX = ROLLOUT_DEVICE_START_IDX
-  REF_DEVICE_END_IDX = ROLLOUT_DEVICE_END_IDX
-
-  TRAINER_DEVICE_START_IDX = ROLLOUT_DEVICE_START_IDX
-  TRAINER_DEVICE_END_IDX = ROLLOUT_DEVICE_END_IDX
-
-elif args.cluster_setup == "disaggregated-2-way":
-  TRAINER_DEVICE_START_IDX = ROLLOUT_DEVICE_END_IDX
-  TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
-
-  REF_DEVICE_START_IDX = TRAINER_DEVICE_START_IDX
-  REF_DEVICE_END_IDX = TRAINER_DEVICE_END_IDX
-
-elif args.cluster_setup == "disaggregated-3-way":
-  REF_DEVICE_START_IDX = ROLLOUT_DEVICE_END_IDX
-  REF_DEVICE_END_IDX = REF_DEVICE_START_IDX + REF_TPU_TO_USE
-
-  TRAINER_DEVICE_START_IDX = REF_DEVICE_END_IDX
-  TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
-
-else:
-  raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
-
-print(
-    f"{ROLLOUT_DEVICE_START_IDX=}, {ROLLOUT_DEVICE_END_IDX=},"
-    f" {REF_DEVICE_START_IDX=}, {REF_DEVICE_END_IDX=},"
-    f" {TRAINER_DEVICE_START_IDX=}, {TRAINER_DEVICE_END_IDX=}"
-)
-
 # Trainer sharding
 assert TRAINER_TPU_TO_USE >= args.trainer_fsdp, (
     f"TRAINER_TPU_TO_USE {TRAINER_TPU_TO_USE} must be >= trainer_fsdp"
@@ -527,6 +492,50 @@ else:
 ROLLOUT_MESH = [(rollout_dp, rollout_tp), ("fsdp", "tp")]
 print(
     f"Trainer mesh: {MESH}, Ref mesh: {REF_MESH}, Rollout mesh: {ROLLOUT_MESH}"
+)
+
+# vLLM rollout setup expects the rollout mesh on the first allocated device
+# block, so allocate devices in rollout-first order.
+if args.cluster_setup == "colocated":
+  rollout_assigned_devices = mesh_lib.allocate_devices(
+      ROLLOUT_TPU_TO_USE, devices=jax.devices()
+  )
+  reference_assigned_devices = rollout_assigned_devices
+  trainer_assigned_devices = rollout_assigned_devices
+elif args.cluster_setup == "disaggregated-2-way":
+  rollout_assigned_devices, next_state = mesh_lib.allocate_devices(
+      ROLLOUT_TPU_TO_USE,
+      devices=jax.devices(),
+      return_state=True,
+  )
+  trainer_assigned_devices = mesh_lib.allocate_devices(
+      TRAINER_TPU_TO_USE,
+      allocation_state=next_state,
+  )
+  reference_assigned_devices = trainer_assigned_devices
+elif args.cluster_setup == "disaggregated-3-way":
+  rollout_assigned_devices, next_state = mesh_lib.allocate_devices(
+      ROLLOUT_TPU_TO_USE,
+      devices=jax.devices(),
+      return_state=True,
+  )
+  reference_assigned_devices, next_state = mesh_lib.allocate_devices(
+      REF_TPU_TO_USE,
+      allocation_state=next_state,
+      return_state=True,
+  )
+  trainer_assigned_devices = mesh_lib.allocate_devices(
+      TRAINER_TPU_TO_USE,
+      allocation_state=next_state,
+  )
+else:
+  raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
+
+print(
+    "Allocated device counts: "
+    f"rollout={len(rollout_assigned_devices)}, "
+    f"reference={len(reference_assigned_devices)}, "
+    f"trainer={len(trainer_assigned_devices)}"
 )
 
 # ====== GRPO ======
@@ -708,14 +717,12 @@ def get_trainer_model(ckpt_path, model_mesh, ref_model_config):
   )
 
 
-def get_model(
-    device_start_idx: int, device_end_idx: int, mesh: list[tuple[int]]
-):
+def get_model(devices, mesh: list[tuple[int]]):
   ckpt_path = os.path.join(NNX_CKPT_DIR)
-  model_mesh = jax.make_mesh(
-      *mesh,
-      devices=jax.devices()[device_start_idx:device_end_idx],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(mesh[0]),
+  model_mesh = mesh_lib.create_mesh(
+    tuple(mesh[0]),
+    tuple(mesh[1]),
+    devices=devices,
   )
   ref_model_config = MODEL_CONFIG[HF_MODEL_VERSION]()
   model = get_trainer_model(ckpt_path, model_mesh, ref_model_config)
@@ -755,7 +762,7 @@ def get_lora_model(base_model, model_mesh=None):
 
 # Reference model
 ref_model, ref_mesh, model_config = get_model(
-    REF_DEVICE_START_IDX, REF_DEVICE_END_IDX, REF_MESH
+  reference_assigned_devices, REF_MESH
 )
 
 if DO_MODEL_DISPLAY:
@@ -768,7 +775,7 @@ if ENABLE_LORA:
   training_mesh = ref_mesh
 else:
   training_model, training_mesh, _ = get_model(
-      TRAINER_DEVICE_START_IDX, TRAINER_DEVICE_END_IDX, MESH
+      trainer_assigned_devices, MESH
   )
 
 if DO_MODEL_DISPLAY:
@@ -776,16 +783,10 @@ if DO_MODEL_DISPLAY:
 
 show_hbm_usage("After creating the reference lora model")
 
-rollout_device_arrays = mesh_utils.create_device_mesh(
-    ROLLOUT_MESH[0],
-    devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
-    allow_split_physical_axes=True,
-)
-
-rollout_mesh = jax.sharding.Mesh(
-    rollout_device_arrays,
-    ROLLOUT_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+rollout_mesh = mesh_lib.create_mesh(
+  tuple(ROLLOUT_MESH[0]),
+  tuple(ROLLOUT_MESH[1]),
+  devices=rollout_assigned_devices,
 )
 
 match_format = re.compile(

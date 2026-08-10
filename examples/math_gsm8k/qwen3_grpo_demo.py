@@ -78,6 +78,7 @@ import tensorflow_datasets as tfds
 # For OSS usage
 # import tensorflow_datasets.text.gsm8k
 from transformers import AutoTokenizer
+from tunix.utils import mesh as mesh_lib
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WORKDIR = os.getcwd()
@@ -258,13 +259,9 @@ if math.prod(SHARED_MESH_SHAPE) != jax.device_count():
       f"Got mesh={SHARED_MESH_SHAPE}, devices={jax.device_count()}."
   )
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
-)
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+shared_mesh = mesh_lib.create_mesh(
+  SHARED_MESH_SHAPE,
+  SHARED_MESH_AXIS_NAMES,
 )
 print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 

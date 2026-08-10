@@ -27,6 +27,7 @@ from transformers import AutoTokenizer
 from tunix.generate import sampler as sampler_lib
 from tunix.models.gemma3 import model as gemma3_model_lib
 from tunix.models.gemma3 import params as gemma3_params_lib
+from tunix.utils import mesh as mesh_lib
 
 
 def load_gemma3_model(mesh):
@@ -246,11 +247,7 @@ def convert_jax_weight_to_torch(
 def main(test_args):
   devices = jax.devices()
   print(f"Running on devices: {devices}")
-  mesh = mesh = jax.make_mesh(
-      (1, len(devices)),
-      ("fsdp", "tp"),
-      axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
-  )
+  mesh = mesh_lib.create_mesh((1, len(devices)), ("fsdp", "tp"))
   hf_name, tunix_model_loader, tunix_tokenizer_loader = SUPPORTED_MODELS[
       test_args.model_name
   ]

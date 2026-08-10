@@ -38,6 +38,7 @@ if ENV == 'oss':
 import jax
 from jax import numpy as jnp
 import optax
+from tunix.utils import mesh as mesh_lib
 from orbax import checkpoint as ocp
 
 # %%
@@ -290,9 +291,7 @@ MODEL_CONFIG = {
 
 def get_ref_model():
   """Loads the reference model, from CNS in g3 or Kaggle in OSS."""
-  mesh = jax.make_mesh(
-      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
-  )
+  mesh = mesh_lib.create_mesh(*MESH)
 
   if ENV == 'g3':
     model_config = MODEL_CONFIG[MODEL_VERSION]()
