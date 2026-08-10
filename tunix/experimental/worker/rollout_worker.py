@@ -14,10 +14,12 @@
 
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
+import asyncio
 import dataclasses
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import weight_sync_coordinator
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
@@ -51,8 +53,6 @@ TrajectoryOrError = Union[
 
 WorkerState = datatypes.WorkerState
 
-WorkerState = datatypes.WorkerState
-
 
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
@@ -80,6 +80,14 @@ class RolloutWorker(abstract_worker.Worker):
           "RolloutWorker requires valid tokenizer and chat_parser arguments"
           " (none can be None)."
       )
+    # The AUTHORITATIVE round tracker: the coordinator reconciles failed
+    # phase RPCs against THIS, not the sampler's internal sub-state. Its
+    # terminal "committed" is composite: publish + admission reopened +
+    # worker READY. The phase lock makes admit->manager->complete atomic --
+    # a timed-out old post interleaving with abort/retry could otherwise
+    # record a published round as aborted.
+    self._round_tracker = weight_sync_coordinator.WorkerRoundTracker()
+    self._phase_lock = asyncio.Lock()
     self.manager = manager_lib.RolloutManager(
         config=config,
         sampler=sampler,
@@ -208,22 +216,123 @@ class RolloutWorker(abstract_worker.Worker):
     async for res in self.manager.as_completed_stream():
       yield self._to_rollout_response(res)
 
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Builds/binds the sampler's transport synchronizer. No downtime."""
+    return await self.manager.bind_weight_sync(**kwargs)
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Transport metadata, one entry per physical host. No downtime."""
+    return await self.manager.get_weight_sync_metadata(**kwargs)
+
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Prepares the worker for an upcoming weight synchronization step."""
-    self.state = WorkerState.SYNCING
-    try:
-      return await self.manager.pre_weight_sync(sync_request, **kwargs)
-    finally:
-      self.state = WorkerState.READY
+    """Quiesces the worker; it stays SYNCING until post/abort completes.
+
+    Restoring READY in a finally here (the previous behavior) reported a
+    drained, cache-less worker as healthy while it could not serve.
+    """
+    async with self._phase_lock:
+      if not self._round_tracker.admit(sync_request, "prepared"):
+        return None
+      self.state = WorkerState.SYNCING
+      res = await self.manager.pre_weight_sync(sync_request, **kwargs)
+      self._round_tracker.complete(sync_request, "prepared")
+      return res
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Synchronizes the worker's internal model weights."""
-    self.state = WorkerState.SYNCING
-    try:
-      return await self.manager.weight_sync(sync_request, **kwargs)
-    finally:
-      self.state = WorkerState.READY
+    """Applies received bytes into the STAGING copy only. Still SYNCING."""
+    async with self._phase_lock:
+      if not self._round_tracker.admit(sync_request, "h2d_done"):
+        return None
+      if self.state != WorkerState.SYNCING:
+        raise RuntimeError(
+            f"weight_sync in state {self.state}; pre_weight_sync must run first"
+        )
+      res = await self.manager.weight_sync(sync_request, **kwargs)
+      self._round_tracker.complete(sync_request, "h2d_done")
+      return res
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Finalizes policy weight update and resumes workers."""
-    return await self.manager.post_weight_sync(sync_request, **kwargs)
+    """COMPOSITE terminal: "committed" is recorded only after the sampler
+
+    published, admission reopened, AND this worker is READY.
+    """
+    async with self._phase_lock:
+      if not self._round_tracker.admit(sync_request, "committed"):
+        return None
+      # Phase ORDER, not just phase identity: publishing a round whose H2D
+      # never completed would publish stale staging and then record it as
+      # committed.
+      report = self._round_tracker.report()
+      if report.get("phase") != "h2d_done":
+        raise RuntimeError(
+            f"post_weight_sync with round phase {report.get('phase')!r};"
+            " weight_sync (H2D) must complete first"
+        )
+      res = await self.manager.post_weight_sync(sync_request, **kwargs)
+      if self.state == WorkerState.SYNCING:  # a concurrent stop() wins
+        self.state = WorkerState.READY
+      if self.state != WorkerState.READY:
+        # NOT a normal return: the publish is not serving. The tracker
+        # stays at h2d_done, so the coordinator reconciles not-committed.
+        raise RuntimeError(
+            f"post_weight_sync finished in state {self.state}; publish is"
+            " not serving"
+        )
+      # Inside the composite terminal, not before it: admission reopens only
+      # once the publish is known to be serving.
+      self.manager.reopen_admission()
+      self._round_tracker.complete(sync_request, "committed")
+      return res
+
+  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Rolls back to the previous weights; idempotent from READY; never
+
+    resurrects a STOPPED worker.
+    """
+    async with self._phase_lock:
+      if not self._round_tracker.admit(sync_request, "aborted"):
+        return None
+      res = await self.manager.abort_weight_sync(sync_request, **kwargs)
+      # FAIL-CLOSED terminal reconciliation: "aborted" is recorded only
+      # when the sampler's own sub-state POSITIVELY confirms the rollback
+      # for THIS round. An already-published round, an unknown report
+      # format, a mismatched round key, or any future phase name all fall
+      # through to needs-restart -- an abort that cannot be confirmed must
+      # never be recorded as one.
+      sampler_state = await self.manager.get_weight_sync_round(**kwargs)
+      # No escape hatch for None. A sampler whose status endpoint answers
+      # nothing has told us nothing, and "nothing" is the one answer that
+      # must never be read as a confirmed rollback.
+      extra = getattr(sync_request, "extra_config", None) or {}
+      confirmed = (
+          isinstance(sampler_state, dict)
+          and sampler_state.get("phase")
+          in ("aborted", "rollback_complete", "idle")
+          and sampler_state.get("req_id") == extra.get("req_id")
+          and sampler_state.get("uuid") == extra.get("uuid")
+      )
+      if not confirmed:
+        raise RuntimeError(
+            "abort not positively confirmed by the sampler sub-state"
+            f" {sampler_state!r}; reconcile as needs-restart, not aborted"
+        )
+      if self.state == WorkerState.SYNCING:
+        self.state = WorkerState.READY
+      if self.state != WorkerState.READY:
+        raise RuntimeError(
+            f"abort_weight_sync finished in state {self.state}; the worker"
+            " is not serving and must reconcile as needs-restart"
+        )
+      # Only here: every path above leaves the sampler's state unconfirmed,
+      # and admitting requests over an unconfirmed rollback is exactly what
+      # the fail-closed terminal exists to prevent.
+      self.manager.reopen_admission()
+      self._round_tracker.complete(sync_request, "aborted")
+      return res
+
+  async def get_weight_sync_round(self, **kwargs) -> Any:
+    """The AUTHORITATIVE round report (this worker's tracker, not the
+
+    sampler's internal sub-state).
+    """
+    return self._round_tracker.report()

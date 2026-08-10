@@ -208,3 +208,41 @@ class Sampler(Protocol):
   async def get_load_info(self, **kwargs) -> LoadInfo | Any:
     """Returns the current load information for this sampler."""
     ...
+
+
+@runtime_checkable
+class WeightSyncCapableSampler(Protocol):
+  """OPTIONAL Raiden weight-sync capability layered on top of `Sampler`.
+
+  Kept out of `Sampler` deliberately: a `runtime_checkable` isinstance check
+  tests member PRESENCE only, so folding these three in would make every
+  sampler that predates Raiden weight sync fail the `Sampler` check and stop
+  constructing. A sampler that drives rounds satisfies both protocols; this
+  one is checked only when a round actually needs the capability, never on
+  the sampling path.
+  """
+
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Builds the transport synchronizer and binds its ports if absent.
+
+    Idempotent and called every round: on an already-bound sampler it keeps
+    the synchronizer and ports; rebinding the INACTIVE buffer set (2x
+    ping-pong publish) is allowed, moving ports is not.
+    """
+    raise NotImplementedError(
+        "this sampler does not implement Raiden weight sync"
+    )
+
+  async def abort_weight_sync(
+      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+  ) -> Any:
+    """Rolls back to serving the previous weights. Safe at any phase."""
+    raise NotImplementedError(
+        "this sampler does not implement Raiden weight sync"
+    )
+
+  async def get_weight_sync_round(self, **kwargs) -> Any:
+    """The round report the coordinator reconciles failed RPCs against."""
+    raise NotImplementedError(
+        "this sampler does not implement Raiden weight sync"
+    )
