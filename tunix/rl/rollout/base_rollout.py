@@ -36,8 +36,10 @@ class CacheConfig:
   num_layers: int
   num_kv_heads: int
   head_dim: int
-  # dtype: Any = jnp.float32
-  kv_packing: int = 2
+  max_num_sequences: int = 0
+  num_cpu_pages: int = 4096 * 32
+  num_hbm_pages: int = 256 * 32
+  page_size: int = 8
 
 
 @dataclasses.dataclass

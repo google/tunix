@@ -31,6 +31,17 @@ from tunix.rl import reshard
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 
+@dataclasses.dataclass(frozen=True)
+class CacheConfig:
+  """Serving & execution config (decoupled from ModelConfig)."""
+  # Paged memory allocation
+  page_size: int = 128 		 
+  max_num_seqs: int = 32
+  max_prompt_length: int = 4096
+  max_tokens_to_generate: int = 1024
+  hbm_cache_max_bytes: int = 20 * 1024 **3 # 20 GiB
+  # Host-RAM Prefix Cache
+  host_cache_max_bytes: int = 300 * 1024**3  # 300 GiB
 
 class VanillaRollout(base_rollout.BaseRollout):
   """Vanilla rollout worker with continuous sampling support."""
@@ -39,7 +50,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       self,
       model: nnx.Module,
       tokenizer: Any,
-      cache_config_or_size: base_rollout.CacheConfig,
+      cache_config: CacheConfig,
       use_continuous_sampling: bool = True,
       server_mode: bool = False,
   ):
@@ -53,7 +64,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       self._continuous_sampler = continuous_sampler.VanillaSampler(
           model,
           tokenizer,
-          base_rollout.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+          cache_config,
       )
       self._driver = None
       if self.server_mode:

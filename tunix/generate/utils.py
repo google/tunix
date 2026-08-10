@@ -30,6 +30,8 @@ from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
+def cdiv(a: int | jax.Array, b: int | jax.Array) -> int | jax.Array:
+  return (a + b - 1) // b
 
 def compute_attention_masks(
     time_step: int, seq_len: int, input_mask: jax.Array
