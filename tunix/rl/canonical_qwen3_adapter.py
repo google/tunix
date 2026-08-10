@@ -29,6 +29,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import importlib
+import json
 import os
 import time
 from typing import Any, Mapping, Sequence
@@ -46,6 +47,98 @@ from tunix.rl import deepswe_contract
 
 class FunctionalMappingError(ValueError):
   """Raised when a trainer-to-engine weight map is not a bijection."""
+
+
+class P35ReplayStageProbeComplete(RuntimeError):
+  """Stops the default-off P35.3c probe without a numerical verdict."""
+
+
+_P35_REPLAY_STAGE_PROBE_ENV = "CANON_P35_REPLAY_STAGE_PROBE"
+_P35_REPLAY_STAGE_REPORT_ENV = "CANON_P35_REPLAY_STAGE_REPORT"
+_P35_REPLAY_STAGE_NAMES = (
+    "model",
+    "logits",
+    "sample",
+    "logprobs",
+    "target_gathers",
+    "record_outputs",
+)
+
+
+def _p35_replay_stage_probe_enabled() -> bool:
+  value = os.environ.get(_P35_REPLAY_STAGE_PROBE_ENV, "0")
+  if value not in ("0", "1"):
+    raise FunctionalMappingError(
+        f"{_P35_REPLAY_STAGE_PROBE_ENV} must be exactly 0 or 1"
+    )
+  return value == "1"
+
+
+def _p35_stage_shape(value: Any) -> list[list[int]]:
+  """Returns static leaf shapes without fetching device values."""
+  return [
+      [int(dimension) for dimension in leaf.shape]
+      for leaf in jax.tree.leaves(value)
+      if hasattr(leaf, "shape")
+  ]
+
+
+def _p35_wait_for_stage(
+    value: Any,
+    *,
+    replay_label: str,
+    record_index: int,
+    record_count: int,
+    stage: str,
+) -> None:
+  """Makes one async boundary observable for the default-off stage probe."""
+  if not _p35_replay_stage_probe_enabled():
+    return
+  if stage not in _P35_REPLAY_STAGE_NAMES:
+    raise FunctionalMappingError(f"unknown P35.3c replay stage: {stage}")
+  ordinal = _P35_REPLAY_STAGE_NAMES.index(stage) + 1
+  report_path = os.environ.get(_P35_REPLAY_STAGE_REPORT_ENV, "")
+  if not report_path:
+    raise FunctionalMappingError(
+        f"{_P35_REPLAY_STAGE_PROBE_ENV}=1 requires "
+        f"{_P35_REPLAY_STAGE_REPORT_ENV}"
+    )
+  if ordinal == 1:
+    with open(report_path, "x", encoding="utf-8") as stream:
+      stream.flush()
+      os.fsync(stream.fileno())
+  elif not os.path.exists(report_path):
+    raise FunctionalMappingError(
+        "P35.3c stage report disappeared after the first stage"
+    )
+  print(
+      "[CANON_P35.3C] STAGE_BEGIN "
+      f"replay={replay_label} record={record_index + 1}/{record_count} "
+      f"stage={stage} ordinal={ordinal}/{len(_P35_REPLAY_STAGE_NAMES)}",
+      flush=True,
+  )
+  jax.block_until_ready(value)
+  event = {
+      "schema_version": 1,
+      "event": "ready",
+      "replay": replay_label,
+      "record_index": record_index + 1,
+      "record_count": record_count,
+      "stage": stage,
+      "ordinal": ordinal,
+      "stage_count": len(_P35_REPLAY_STAGE_NAMES),
+      "leaf_shapes": _p35_stage_shape(value),
+  }
+  with open(report_path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(event, sort_keys=True) + "\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+  print(
+      "[CANON_P35.3C] STAGE_READY "
+      f"replay={replay_label} record={record_index + 1}/{record_count} "
+      f"stage={stage} ordinal={ordinal}/{len(_P35_REPLAY_STAGE_NAMES)}",
+      flush=True,
+  )
 
 
 @jax.jit
@@ -1650,6 +1743,11 @@ class Qwen3EngineForwardAdapter:
     logical_logits_bytes = (
         self._bucket * self._vocab_size * np.dtype(np.float32).itemsize
     )
+    stage_probe = _p35_replay_stage_probe_enabled()
+    if stage_probe and replay_label != "R0_live_first":
+      raise FunctionalMappingError(
+          "P35.3c stage probe admits only the first live replay arm"
+      )
     print(
         "[CANON_P35.3] CAPTURED_REPLAY_BEGIN "
         f"replay={replay_label} records={len(records)} "
@@ -1860,15 +1958,43 @@ class Qwen3EngineForwardAdapter:
             bool(self._runner.is_first_rank),
             bool(self._runner.is_last_rank),
         )
+      _p35_wait_for_stage(
+          (caches, hidden),
+          replay_label=replay_label,
+          record_index=record_index,
+          record_count=len(records),
+          stage="model",
+      )
       logits = self._runner.compute_logits_fn(
           engine_leaves, hidden, None
       ).astype(jnp.float32)
+      _p35_wait_for_stage(
+          logits,
+          replay_label=replay_label,
+          record_index=record_index,
+          record_count=len(records),
+          stage="logits",
+      )
       _, processed_logits = self._sample(
           jax.random.PRNGKey(0), self._runner.mesh, logits, sampling_metadata
+      )
+      _p35_wait_for_stage(
+          processed_logits,
+          replay_label=replay_label,
+          record_index=record_index,
+          record_count=len(records),
+          stage="sample",
       )
       target_ids_device = self._engine_array(jnp.asarray(target_ids, jnp.int32))
       all_logps = self._processed_target_logprobs(
           processed_logits, target_ids_device
+      )
+      _p35_wait_for_stage(
+          all_logps,
+          replay_label=replay_label,
+          record_index=record_index,
+          record_count=len(records),
+          stage="logprobs",
       )
       raw_target_all = jnp.take_along_axis(
           logits, target_ids_device[:, None], axis=-1
@@ -1876,6 +2002,13 @@ class Qwen3EngineForwardAdapter:
       processed_target_all = jnp.take_along_axis(
           processed_logits, target_ids_device[:, None], axis=-1
       )[:, 0]
+      _p35_wait_for_stage(
+          (raw_target_all, processed_target_all),
+          replay_label=replay_label,
+          record_index=record_index,
+          record_count=len(records),
+          stage="target_gathers",
+      )
       if scatter_rows:
         ranks = jnp.asarray(scatter_rows, jnp.int32)
         slots = jnp.asarray(scatter_slots, jnp.int32)
@@ -1897,6 +2030,20 @@ class Qwen3EngineForwardAdapter:
               hidden.dtype,
           )
         hidden_rows = hidden_rows.at[ranks, slots].set(hidden[predictors])
+
+      _p35_wait_for_stage(
+          (
+              replay_logps,
+              raw_targets,
+              processed_targets,
+              log_normalizers,
+              hidden_rows if hidden_rows is not None else (),
+          ),
+          replay_label=replay_label,
+          record_index=record_index,
+          record_count=len(records),
+          stage="record_outputs",
+      )
 
       jax.block_until_ready((
           caches,
@@ -1922,6 +2069,16 @@ class Qwen3EngineForwardAdapter:
           f"replay={replay_label} record={record_index + 1}/{len(records)}",
           flush=True,
       )
+      if stage_probe:
+        print(
+            "[CANON_P35.3C] STAGE_PROBE_COMPLETE "
+            f"replay={replay_label} record={record_index + 1}/{len(records)} "
+            "last_stage=record_outputs NO_NUMERICAL_VERDICT",
+            flush=True,
+        )
+        raise P35ReplayStageProbeComplete(
+            "P35.3c stopped after the first record without a numerical verdict"
+        )
 
     print(
         "[CANON_P35.3] CAPTURED_REPLAY_COMPLETE "

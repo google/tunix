@@ -13,7 +13,7 @@ if grep -Fq "P35 first target admits only one local-M chunk" \
   exit 1
 fi
 python3 -c "import ast,pathlib; files=('tunix/rl/alignment.py','tests/rl/alignment_test.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
-python3 -c "import ast,pathlib; files=('canon-zero-tim/tests/p35_envelope/classify_envelope.py','canon-zero-tim/tests/p35_envelope/test_classify_envelope.py','canon-zero-tim/tests/p35_envelope/classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/test_classify_exact_replay.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('canon-zero-tim/tests/p35_envelope/classify_envelope.py','canon-zero-tim/tests/p35_envelope/test_classify_envelope.py','canon-zero-tim/tests/p35_envelope/classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/test_classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/classify_stage_probe.py','canon-zero-tim/tests/p35_envelope/test_classify_stage_probe.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
   canon-zero-tim/cluster/steps/00_env.sh \
@@ -339,4 +339,69 @@ PY
 
 validate_p35_exact_postflight
 
-echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 p35_postflight=1"
+validate_p35_stage_probe_postflight() (
+  set -euo pipefail
+  local state base_source stage_source base_pre stage_output driver
+  state="$(mktemp -d)"
+  trap 'rm -r "$state"' EXIT
+  base_source="$state/base_source.json"
+  stage_source="$state/stage_source.jsonl"
+  base_pre="$state/p35_envelope.pre_replay.json"
+  stage_output="$state/p35_replay_stages.jsonl"
+  driver="$state/driver.log"
+  python3 - "$base_source" "$stage_source" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+def load(name, path):
+  spec = importlib.util.spec_from_file_location(name, pathlib.Path(path))
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = module
+  spec.loader.exec_module(module)
+  return module
+
+base = load("p35_stage_base", "canon-zero-tim/tests/p35_envelope/test_classify_envelope.py")
+stage = load("p35_stage_fixture", "canon-zero-tim/tests/p35_envelope/test_classify_stage_probe.py")
+pathlib.Path(sys.argv[1]).write_text(json.dumps(base._report(False, True)) + "\n")
+pathlib.Path(sys.argv[2]).write_text(
+    "".join(json.dumps(event) + "\n" for event in stage._events())
+)
+PY
+  export CANON_STATE="$state"
+  export CANON_PKG="$ROOT"
+  export CANON_RUN_CWD="$WORKTREE"
+  export CANON_P35_ENVELOPE=1
+  export CANON_P35_ENVELOPE_REPORT="$state/p35_envelope.json"
+  export CANON_P35_PRE_REPLAY_REPORT="$base_pre"
+  export CANON_P35_METADATA_DIR="$state/metadata"
+  export CANON_P35_CLASSIFICATION="$state/p35_envelope.classification.json"
+  export CANON_P35_EXACT_REPLAY=1
+  export CANON_P35_EXACT_REPLAY_REPORT="$state/p35_exact_replay.json"
+  export CANON_P35_EXACT_REPLAY_CLASSIFICATION="$state/p35_exact_replay.classification.json"
+  export CANON_P35_REPLAY_STAGE_PROBE=1
+  export CANON_P35_REPLAY_STAGE_REPORT="$stage_output"
+  export CANON_P35_REPLAY_STAGE_CLASSIFICATION="$state/p35_replay_stages.classification.json"
+  export CANON_RUN_LOG="$state/run.log"
+  : > "$state/env.sh"
+
+  export CANON_RUN_CMD="cp '$base_source' '$base_pre'; head -n 5 '$stage_source' > '$stage_output'; printf '%s\n' 'CANON_FIXED_AR=1 fixed-order tree' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather' '[CANON_P35] BASE_REPORT_COMPLETE path=$base_pre REPLAY_PENDING' '[CANON_P35.3C] STAGE_BEGIN stage=model' '[CANON_P35.3C] STAGE_READY stage=model' '[CANON_P35.3C] STAGE_BEGIN stage=logits' '[CANON_P35.3C] STAGE_READY stage=logits' '[CANON_P35.3C] STAGE_BEGIN stage=sample' '[CANON_P35.3C] STAGE_READY stage=sample' '[CANON_P35.3C] STAGE_BEGIN stage=logprobs' '[CANON_P35.3C] STAGE_READY stage=logprobs' '[CANON_P35.3C] STAGE_BEGIN stage=target_gathers' '[CANON_P35.3C] STAGE_READY stage=target_gathers' '[CANON_P35.3C] STAGE_PROBE_COMPLETE NO_NUMERICAL_VERDICT'; exit 1"
+  if bash "$ROOT/cluster/steps/90_run.sh" >"$driver" 2>&1; then
+    echo "[P35.ENVELOPE] stage postflight accepted a missing stage" >&2
+    exit 1
+  fi
+  python3 -c "import json; s=json.load(open('$CANON_P35_REPLAY_STAGE_CLASSIFICATION')); assert s['measurement_verdict']=='INCONCLUSIVE'; assert s['last_ready_stage']=='target_gathers'; assert s['first_missing_stage']=='record_outputs'"
+  rm -f "$base_pre" "$stage_output" "$CANON_P35_CLASSIFICATION" \
+    "$CANON_P35_REPLAY_STAGE_CLASSIFICATION" "$CANON_RUN_LOG" "$driver"
+
+  export CANON_RUN_CMD="cp '$base_source' '$base_pre'; cp '$stage_source' '$stage_output'; printf '%s\n' 'CANON_FIXED_AR=1 fixed-order tree' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather' '[CANON_P35] BASE_REPORT_COMPLETE path=$base_pre REPLAY_PENDING' '[CANON_P35.3C] STAGE_BEGIN stage=model' '[CANON_P35.3C] STAGE_READY stage=model' '[CANON_P35.3C] STAGE_BEGIN stage=logits' '[CANON_P35.3C] STAGE_READY stage=logits' '[CANON_P35.3C] STAGE_BEGIN stage=sample' '[CANON_P35.3C] STAGE_READY stage=sample' '[CANON_P35.3C] STAGE_BEGIN stage=logprobs' '[CANON_P35.3C] STAGE_READY stage=logprobs' '[CANON_P35.3C] STAGE_BEGIN stage=target_gathers' '[CANON_P35.3C] STAGE_READY stage=target_gathers' '[CANON_P35.3C] STAGE_BEGIN stage=record_outputs' '[CANON_P35.3C] STAGE_READY stage=record_outputs' '[CANON_P35.3C] STAGE_PROBE_COMPLETE NO_NUMERICAL_VERDICT'; exit 1"
+  bash "$ROOT/cluster/steps/90_run.sh" >"$driver"
+  python3 -c "import json; s=json.load(open('$CANON_P35_REPLAY_STAGE_CLASSIFICATION')); assert s['measurement_verdict']=='COMPLETE'; assert s['numerical_verdict'] is False"
+  grep -q '\[run\] P35.3c first-record stage probe accepted; NO_NUMERICAL_VERDICT' "$driver"
+  echo "[P35.ENVELOPE] STAGE_POSTFLIGHT_PASS missing_stage_rejected=1 numerical_verdict=0"
+)
+
+validate_p35_stage_probe_postflight
+
+echo "[P33.WORKLOAD] CPU_GATE PASS workloads=2 p35_postflight=1 p35_stage_probe=1"

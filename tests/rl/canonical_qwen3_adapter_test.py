@@ -19,10 +19,13 @@ import contextlib
 import dataclasses
 from flax import nnx
 import hashlib
+import io
 import jax
 import jax.numpy as jnp
+import json
 import numpy as np
 import os
+import tempfile
 import types
 from unittest import mock
 
@@ -40,8 +43,11 @@ class _ModelConfig:
   max_model_len = 1024
   max_logprobs = 1
 
+  def __init__(self, vocab_size=8):
+    self._vocab_size = vocab_size
+
   def get_vocab_size(self):
-    return 8
+    return self._vocab_size
 
   def get_total_num_kv_heads(self):
     return 1
@@ -77,8 +83,9 @@ class _AttentionMetadata:
 
 class _ForwardRunner(_Runner):
 
-  def __init__(self, state, mesh):
+  def __init__(self, state, mesh, *, vocab_size=8):
     super().__init__(state, mesh)
+    self.model_config = _ModelConfig(vocab_size)
     cache_sharding = jax.sharding.NamedSharding(
         mesh, jax.sharding.PartitionSpec(None, None, "model", None, None)
     )
@@ -167,7 +174,7 @@ class _ForwardRunner(_Runner):
 
     def compute_logits_fn(leaves, hidden, lora_metadata):
       del lora_metadata
-      vocab = jnp.arange(8, dtype=jnp.float32)
+      vocab = jnp.arange(vocab_size, dtype=jnp.float32)
       bias = jnp.sum(leaves[0].astype(jnp.float32))
       return hidden * (vocab[None, :] + 1) + bias * vocab[None, :] / 100
 
@@ -2436,6 +2443,134 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             "R0_live_vs_R1_mapped"
         ].values()
     ))
+
+    with tempfile.TemporaryDirectory() as stage_dir:
+      stage_report = os.path.join(stage_dir, "p35_replay_stages.jsonl")
+      stage_env = dict(env)
+      stage_env.update({
+          "CANON_P35_REPLAY_STAGE_PROBE": "1",
+          "CANON_P35_REPLAY_STAGE_REPORT": stage_report,
+      })
+      output = io.StringIO()
+      with mock.patch.dict(os.environ, stage_env, clear=False):
+        with contextlib.redirect_stdout(output):
+          with self.assertRaises(
+              canonical_qwen3_adapter.P35ReplayStageProbeComplete
+          ):
+            adapter.p35_exact_input_replay(
+                source,
+                records,
+                full_prompt_tokens=jnp.asarray([[0, 1, 2]], jnp.int32),
+                full_completion_tokens=jnp.asarray([[3, 4, 0]], jnp.int32),
+                full_prompt_mask=jnp.asarray([[False, True, True]]),
+                full_completion_mask=jnp.asarray([[True, True, False]]),
+                selected_row_indices=np.asarray([0], np.int64),
+                pad_id=0,
+                eos_id=7,
+                temperature=1.0,
+            )
+      with open(stage_report, encoding="utf-8") as stream:
+        events = [json.loads(line) for line in stream]
+      expected_stages = list(canonical_qwen3_adapter._P35_REPLAY_STAGE_NAMES)
+      self.assertEqual([event["stage"] for event in events], expected_stages)
+      self.assertTrue(
+          all(event["replay"] == "R0_live_first" for event in events)
+      )
+      self.assertTrue(all(event["record_index"] == 1 for event in events))
+      self.assertEqual(
+          output.getvalue().count("[CANON_P35.3C] STAGE_BEGIN"), 6
+      )
+      self.assertEqual(
+          output.getvalue().count("[CANON_P35.3C] STAGE_READY"), 6
+      )
+      self.assertEqual(
+          output.getvalue().count("[CANON_P35.3C] STAGE_PROBE_COMPLETE"), 1
+      )
+      self.assertNotIn(
+          "[CANON_P35.3] CAPTURED_REPLAY_COMPLETE", output.getvalue()
+      )
+
+  def test_p35_stage_probe_full_vocab_array_shape(self):
+    names = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    model_devices = tuple(jax.devices())
+    mesh = jax.make_mesh(
+        (1, 1, 1, 1, len(model_devices), 1),
+        names,
+        devices=model_devices,
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    vocab_size = 151936
+    runner = _ForwardRunner(self.target, mesh, vocab_size=vocab_size)
+    sampler = _Sampler(runner, self.mapping)
+    sampler.args["tensor_parallel_size"] = len(model_devices)
+    source = _state({"trainer": {
+        "w": jnp.full((2, 3), -7, jnp.bfloat16),
+        "n": jnp.full((2,), -9, jnp.bfloat16),
+    }})
+    block_tables = np.zeros((2, 512), np.int32)
+    input_ids = np.zeros((256,), np.int32)
+    input_ids[0] = 1
+    positions = np.zeros_like(input_ids)
+    records = ({
+        "arm": "B",
+        "meta": {"md_padded_num_reqs": 2},
+        "arrays": {
+            "input_ids": input_ids,
+            "input_positions": positions,
+            "md_input_positions": positions.copy(),
+            "md_block_tables": block_tables.reshape(-1),
+            "md_seq_lens": np.asarray([1, 0], np.int32),
+            "md_query_start_loc": np.asarray([0, 1, 1], np.int32),
+            "md_request_distribution": np.asarray([0, 0, 1], np.int32),
+        },
+    },)
+    with tempfile.TemporaryDirectory() as stage_dir:
+      stage_report = os.path.join(stage_dir, "p35_replay_stages.jsonl")
+      env = {
+          "CANON_RPA_VJP2": "1",
+          "CANON_VJP2_MAX_SEQS": "1",
+          "CANON_LOGPROB_M": "256",
+          "MIN_TOKEN_BUCKET": "256",
+          "CANON_P35_EXACT_REPLAY": "1",
+          "CANON_P35_REPLAY_STAGE_PROBE": "1",
+          "CANON_P35_REPLAY_STAGE_REPORT": stage_report,
+      }
+      output = io.StringIO()
+      with mock.patch.dict(os.environ, env, clear=False):
+        adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
+            sampler=sampler
+        )
+        with contextlib.redirect_stdout(output):
+          with self.assertRaises(
+              canonical_qwen3_adapter.P35ReplayStageProbeComplete
+          ):
+            adapter.p35_exact_input_replay(
+                source,
+                records,
+                full_prompt_tokens=jnp.asarray([[0, 1]], jnp.int32),
+                full_completion_tokens=jnp.asarray([[2, 0]], jnp.int32),
+                full_prompt_mask=jnp.asarray([[False, True]]),
+                full_completion_mask=jnp.asarray([[True, False]]),
+                selected_row_indices=np.asarray([0], np.int64),
+                pad_id=0,
+                eos_id=7,
+                temperature=1.0,
+            )
+      with open(stage_report, encoding="utf-8") as stream:
+        events = [json.loads(line) for line in stream]
+    self.assertEqual(
+        [event["stage"] for event in events],
+        list(canonical_qwen3_adapter._P35_REPLAY_STAGE_NAMES),
+    )
+    self.assertIn("logical_logits_shape=(256, 151936)", output.getvalue())
+    self.assertIn("logical_logits_bytes=155582464", output.getvalue())
 
   def test_long_sequence_uses_cache_carried_fixed_m_chunks(self):
     names = (

@@ -123,6 +123,23 @@ if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
     done
     echo "[env] P35.3 exact-input replay enabled"
   fi
+  case "${CANON_P35_REPLAY_STAGE_PROBE:-0}" in
+    0) ;;
+    1)
+      [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] || {
+        echo "[env] P35.3c stage probe requires exact replay" >&2; fail=1;
+      }
+      for k in CANON_P35_REPLAY_STAGE_REPORT \
+               CANON_P35_REPLAY_STAGE_CLASSIFICATION; do
+        req "$k"
+      done
+      echo "[env] P35.3c first-record stage probe enabled; no numerical verdict"
+      ;;
+    *)
+      echo "[env] CANON_P35_REPLAY_STAGE_PROBE must be 0 or 1" >&2
+      fail=1
+      ;;
+  esac
 fi
 if [ -n "${CANON_RPA_VJP:-}" ] && [ "${CANON_RPA_VJP:-}" = "1" ]; then
   echo "[env] NOTE: CANON_RPA_VJP=1 is set alongside VJP2.  VJP2 wins in the engine, but if"

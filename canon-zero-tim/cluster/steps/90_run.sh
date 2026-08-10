@@ -71,6 +71,21 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
         fi
         mkdir -p "$(dirname "$report_path")"
       done
+      if [ "${CANON_P35_REPLAY_STAGE_PROBE:-0}" = "1" ]; then
+        for report_key in CANON_P35_REPLAY_STAGE_REPORT \
+                          CANON_P35_REPLAY_STAGE_CLASSIFICATION; do
+          report_path="${!report_key:-}"
+          if [ -z "$report_path" ]; then
+            echo "[run] FATAL: P35.3c lacks $report_key" >&2
+            exit 1
+          fi
+          if [ -e "$report_path" ]; then
+            echo "[run] FATAL: P35.3c evidence path already exists: $report_key=$report_path" >&2
+            exit 1
+          fi
+          mkdir -p "$(dirname "$report_path")"
+        done
+      fi
     fi
   fi
 fi
@@ -89,10 +104,13 @@ n_lp=$(grep -ac 'CANON_LOGPROB_M on' "$LOG" || true)
 n_wandb=$(grep -ac '\[CANON_P33_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_wandb_p34=$(grep -ac '\[CANON_P34_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_eval_off=$(grep -ac '\[CANON_P33_EVAL\] DISABLED workload=frozenlake' "$LOG" || true)
-n_p35_stop=$(grep -ac '\[CANON_P35\] REPORT_COMPLETE .*STOP_BEFORE_BACKWARD' "$LOG" || true)
-n_p35_base=$(grep -ac '\[CANON_P35\] BASE_REPORT_COMPLETE .*REPLAY_PENDING' "$LOG" || true)
-n_p35_replay=$(grep -ac '\[CANON_P35.3\] REPLAY_COMPLETE' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay"
+n_p35_stop=$(grep -ac '^\[CANON_P35\] REPORT_COMPLETE .*STOP_BEFORE_BACKWARD' "$LOG" || true)
+n_p35_base=$(grep -ac '^\[CANON_P35\] BASE_REPORT_COMPLETE .*REPLAY_PENDING' "$LOG" || true)
+n_p35_replay=$(grep -ac '^\[CANON_P35.3\] REPLAY_COMPLETE' "$LOG" || true)
+n_p35_stage_begin=$(grep -ac '^\[CANON_P35.3C\] STAGE_BEGIN' "$LOG" || true)
+n_p35_stage_ready=$(grep -ac '^\[CANON_P35.3C\] STAGE_READY' "$LOG" || true)
+n_p35_stage_complete=$(grep -ac '^\[CANON_P35.3C\] STAGE_PROBE_COMPLETE .*NO_NUMERICAL_VERDICT' "$LOG" || true)
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete"
 if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
    [ -s "${CANON_P35_PRE_REPLAY_REPORT:-}" ]; then
   p35_base_sha="$(sha256sum "$CANON_P35_PRE_REPLAY_REPORT" | awk '{print $1}')"
@@ -116,55 +134,104 @@ if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && \
   exit 1
 fi
 if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
-  if [ "$rc" -ne 1 ]; then
-    echo "[run] FATAL: P35 producer must terminate with its expected diagnostic exit=1; got $rc" >&2
-    exit 1
-  fi
-  if [ "$n_p35_stop" -ne 1 ]; then
-    echo "[run] FATAL: P35 did not stop exactly once before backward" >&2
-    exit 1
-  fi
-  if [ ! -s "$CANON_P35_ENVELOPE_REPORT" ]; then
-    echo "[run] FATAL: P35 stop marker exists without a report" >&2
-    exit 1
-  fi
-  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tests/p35_envelope/classify_envelope.py" \
-      --report "$CANON_P35_ENVELOPE_REPORT" \
-      --output "$CANON_P35_CLASSIFICATION" || exit 1
-  if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ]; then
-    if [ "$n_p35_base" -ne 1 ]; then
-      echo "[run] FATAL: P35.3 did not emit exactly one pre-replay marker" >&2
+  if [ "${CANON_P35_REPLAY_STAGE_PROBE:-0}" = "1" ]; then
+    if [ "$rc" -ne 1 ]; then
+      echo "[run] FATAL: P35.3c must terminate with diagnostic exit=1; got $rc" >&2
+      exit 1
+    fi
+    if [ "$n_p35_base" -ne 1 ] || [ "$n_p35_stop" -ne 0 ] || [ "$n_p35_replay" -ne 0 ]; then
+      echo "[run] FATAL: P35.3c marker contract drifted: base=$n_p35_base stop=$n_p35_stop replay=$n_p35_replay" >&2
       exit 1
     fi
     if [ ! -s "$CANON_P35_PRE_REPLAY_REPORT" ]; then
-      echo "[run] FATAL: P35.3 pre-replay marker exists without a report" >&2
-      exit 1
-    fi
-    if [ "$n_p35_replay" -ne 1 ]; then
-      echo "[run] FATAL: P35.3 did not emit exactly one replay marker" >&2
-      exit 1
-    fi
-    if [ ! -s "$CANON_P35_EXACT_REPLAY_REPORT" ]; then
-      echo "[run] FATAL: P35.3 marker exists without a replay report" >&2
+      echo "[run] FATAL: P35.3c missing preliminary evidence: $CANON_P35_PRE_REPLAY_REPORT" >&2
       exit 1
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p35_envelope/classify_exact_replay.py" \
-        --report "$CANON_P35_EXACT_REPLAY_REPORT" \
-        --output "$CANON_P35_EXACT_REPLAY_CLASSIFICATION" || exit 1
+      python3 "$CANON_PKG/tests/p35_envelope/classify_envelope.py" \
+        --report "$CANON_P35_PRE_REPLAY_REPORT" \
+        --output "$CANON_P35_CLASSIFICATION" || exit 1
+    stage_class_rc=1
+    if [ -e "$CANON_P35_REPLAY_STAGE_REPORT" ]; then
+      if JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tests/p35_envelope/classify_stage_probe.py" \
+          --report "$CANON_P35_REPLAY_STAGE_REPORT" \
+          --output "$CANON_P35_REPLAY_STAGE_CLASSIFICATION"; then
+        stage_class_rc=0
+      else
+        stage_class_rc=$?
+      fi
+    fi
     for evidence_path in \
       "$CANON_P35_PRE_REPLAY_REPORT" \
-      "$CANON_P35_ENVELOPE_REPORT" \
       "$CANON_P35_CLASSIFICATION" \
-      "$CANON_P35_EXACT_REPLAY_REPORT" \
-      "$CANON_P35_EXACT_REPLAY_CLASSIFICATION"; do
-      evidence_sha="$(sha256sum "$evidence_path" | awk '{print $1}')"
-      echo "[CANON_P35.3] EVIDENCE path=$evidence_path sha256=$evidence_sha"
+      "$CANON_P35_REPLAY_STAGE_REPORT" \
+      "$CANON_P35_REPLAY_STAGE_CLASSIFICATION"; do
+      if [ -e "$evidence_path" ]; then
+        evidence_sha="$(sha256sum "$evidence_path" | awk '{print $1}')"
+        echo "[CANON_P35.3C] EVIDENCE path=$evidence_path sha256=$evidence_sha"
+      fi
     done
+    if [ "$n_p35_stage_begin" -ne 6 ] || \
+       [ "$n_p35_stage_ready" -ne 6 ] || \
+       [ "$n_p35_stage_complete" -ne 1 ] || \
+       [ "$stage_class_rc" -ne 0 ]; then
+      echo "[run] FATAL: P35.3c incomplete stages: begin=$n_p35_stage_begin ready=$n_p35_stage_ready complete=$n_p35_stage_complete classifier_rc=$stage_class_rc" >&2
+      exit 1
+    fi
+    echo "[run] P35.3c first-record stage probe accepted; NO_NUMERICAL_VERDICT"
+    rc=0
+  else
+    if [ "$rc" -ne 1 ]; then
+      echo "[run] FATAL: P35 producer must terminate with its expected diagnostic exit=1; got $rc" >&2
+      exit 1
+    fi
+    if [ "$n_p35_stop" -ne 1 ]; then
+      echo "[run] FATAL: P35 did not stop exactly once before backward" >&2
+      exit 1
+    fi
+    if [ ! -s "$CANON_P35_ENVELOPE_REPORT" ]; then
+      echo "[run] FATAL: P35 stop marker exists without a report" >&2
+      exit 1
+    fi
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tests/p35_envelope/classify_envelope.py" \
+        --report "$CANON_P35_ENVELOPE_REPORT" \
+        --output "$CANON_P35_CLASSIFICATION" || exit 1
+    if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ]; then
+      if [ "$n_p35_base" -ne 1 ]; then
+        echo "[run] FATAL: P35.3 did not emit exactly one pre-replay marker" >&2
+        exit 1
+      fi
+      if [ ! -s "$CANON_P35_PRE_REPLAY_REPORT" ]; then
+        echo "[run] FATAL: P35.3 pre-replay marker exists without a report" >&2
+        exit 1
+      fi
+      if [ "$n_p35_replay" -ne 1 ]; then
+        echo "[run] FATAL: P35.3 did not emit exactly one replay marker" >&2
+        exit 1
+      fi
+      if [ ! -s "$CANON_P35_EXACT_REPLAY_REPORT" ]; then
+        echo "[run] FATAL: P35.3 marker exists without a replay report" >&2
+        exit 1
+      fi
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tests/p35_envelope/classify_exact_replay.py" \
+          --report "$CANON_P35_EXACT_REPLAY_REPORT" \
+          --output "$CANON_P35_EXACT_REPLAY_CLASSIFICATION" || exit 1
+      for evidence_path in \
+        "$CANON_P35_PRE_REPLAY_REPORT" \
+        "$CANON_P35_ENVELOPE_REPORT" \
+        "$CANON_P35_CLASSIFICATION" \
+        "$CANON_P35_EXACT_REPLAY_REPORT" \
+        "$CANON_P35_EXACT_REPLAY_CLASSIFICATION"; do
+        evidence_sha="$(sha256sum "$evidence_path" | awk '{print $1}')"
+        echo "[CANON_P35.3] EVIDENCE path=$evidence_path sha256=$evidence_sha"
+      done
+    fi
+    echo "[run] P35 expected diagnostic exit=1 accepted after COMPLETE classification"
+    rc=0
   fi
-  echo "[run] P35 expected diagnostic exit=1 accepted after COMPLETE classification"
-  rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   classification="$CANON_STATE/p34_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

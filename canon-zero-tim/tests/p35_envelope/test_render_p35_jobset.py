@@ -67,6 +67,103 @@ class RenderP35JobSetTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "drifted"):
       renderer.validate(document, source_commit="1" * 40, run_id="r20")
 
+  def test_renders_fail_closed_stage_probe(self):
+    document = renderer.render(
+        base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        source_commit="1" * 40,
+        run_id="r31",
+        stage_probe=True,
+    )
+    env = renderer.p33._env_values(document)
+    self.assertEqual(env["CANON_P35_REPLAY_STAGE_PROBE"], "1")
+    self.assertTrue(
+        env["CANON_P35_REPLAY_STAGE_REPORT"].endswith(
+            "/p35_replay_stages.jsonl"
+        )
+    )
+    self.assertTrue(
+        env["CANON_P35_REPLAY_STAGE_CLASSIFICATION"].endswith(
+            "/p35_replay_stages.classification.json"
+        )
+    )
+
+  def test_negative_control_rejects_unattested_stage_probe(self):
+    document = renderer.render(
+        base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        source_commit="1" * 40,
+        run_id="r31",
+        stage_probe=True,
+    )
+    env = renderer._main_env(document)
+    next(
+        item
+        for item in env
+        if item["name"] == "CANON_P35_REPLAY_STAGE_REPORT"
+    )["value"] = ""
+    with self.assertRaisesRegex(ValueError, "drifted"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          run_id="r31",
+          stage_probe=True,
+      )
+
+  def test_stage_probe_passes_preflight_and_requires_exact_replay(self):
+    document = renderer.render(
+        base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        source_commit="1" * 40,
+        run_id="r31",
+        stage_probe=True,
+    )
+    rendered_env = renderer.p33._env_values(document)
+    with tempfile.TemporaryDirectory() as state:
+      runtime_env = os.environ.copy()
+      runtime_env.update(rendered_env)
+      runtime_env.update({
+          "CANON_PKG": str(ROOT / "canon-zero-tim"),
+          "CANON_STATE": state,
+          "CANON_P35_ENVELOPE_REPORT": f"{state}/p35.json",
+          "CANON_P35_PRE_REPLAY_REPORT": f"{state}/p35.pre.json",
+          "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
+          "CANON_P35_CLASSIFICATION": f"{state}/p35.classification.json",
+          "CANON_P35_EXACT_REPLAY_REPORT": f"{state}/replay.json",
+          "CANON_P35_EXACT_REPLAY_CLASSIFICATION": (
+              f"{state}/replay.classification.json"
+          ),
+          "CANON_P35_REPLAY_STAGE_REPORT": f"{state}/stages.jsonl",
+          "CANON_P35_REPLAY_STAGE_CLASSIFICATION": (
+              f"{state}/stages.classification.json"
+          ),
+          "CANON_RUN_LOG": f"{state}/run.log",
+          "CANON_PRE_ALIGN_REPORT": f"{state}/pre_alignment.jsonl",
+          "CANON_ALIGN_REPORT": f"{state}/alignment.jsonl",
+          "CANON_UPDATE_REPORT": f"{state}/updates.jsonl",
+          "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+      })
+      preflight = ROOT / "canon-zero-tim/cluster/steps/00_env.sh"
+      accepted = subprocess.run(
+          ["bash", str(preflight)],
+          cwd=ROOT,
+          env=runtime_env,
+          check=False,
+          capture_output=True,
+          text=True,
+      )
+      self.assertEqual(accepted.returncode, 0, accepted.stderr)
+      self.assertIn("first-record stage probe enabled", accepted.stdout)
+
+      runtime_env["CANON_P35_EXACT_REPLAY"] = "0"
+      rejected = subprocess.run(
+          ["bash", str(preflight)],
+          cwd=ROOT,
+          env=runtime_env,
+          check=False,
+          capture_output=True,
+          text=True,
+      )
+      self.assertNotEqual(rejected.returncode, 0)
+      self.assertIn("requires exact replay", rejected.stderr)
+
   def test_rendered_command_passes_cluster_preflight_and_64_fails(self):
     document = renderer.render(
         base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",

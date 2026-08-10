@@ -57,7 +57,11 @@ def _main_env(document: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def render(
-    *, base_path: Path, source_commit: str, run_id: str
+    *,
+    base_path: Path,
+    source_commit: str,
+    run_id: str,
+    stage_probe: bool = False,
 ) -> dict[str, Any]:
   """Returns one source-pinned P35 JobSet with isolated evidence paths."""
   document = p33.render_jobset(
@@ -65,29 +69,49 @@ def render(
   )
   env_values = p33._env_values(document)
   state = env_values["CANON_STATE"]
+  p35_values = {
+      "CANON_P35_ENVELOPE": "1",
+      "CANON_P35_ENVELOPE_REPORT": f"{state}/p35_envelope.json",
+      "CANON_P35_PRE_REPLAY_REPORT": (
+          f"{state}/p35_envelope.pre_replay.json"
+      ),
+      "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
+      "CANON_P35_CLASSIFICATION": f"{state}/p35_envelope.classification.json",
+      "CANON_P35_EXACT_REPLAY": "1",
+      "CANON_P35_EXACT_REPLAY_REPORT": f"{state}/p35_exact_replay.json",
+      "CANON_P35_EXACT_REPLAY_CLASSIFICATION": (
+          f"{state}/p35_exact_replay.classification.json"
+      ),
+      "CANON_P35_REPLAY_STAGE_PROBE": "1" if stage_probe else "0",
+  }
+  if stage_probe:
+    p35_values.update({
+        "CANON_P35_REPLAY_STAGE_REPORT": f"{state}/p35_replay_stages.jsonl",
+        "CANON_P35_REPLAY_STAGE_CLASSIFICATION": (
+            f"{state}/p35_replay_stages.classification.json"
+        ),
+    })
   p33._set_named_env(
       _main_env(document),
-      {
-          "CANON_P35_ENVELOPE": "1",
-          "CANON_P35_ENVELOPE_REPORT": f"{state}/p35_envelope.json",
-          "CANON_P35_PRE_REPLAY_REPORT": (
-              f"{state}/p35_envelope.pre_replay.json"
-          ),
-          "CANON_P35_METADATA_DIR": f"{state}/p35_metadata",
-          "CANON_P35_CLASSIFICATION": f"{state}/p35_envelope.classification.json",
-          "CANON_P35_EXACT_REPLAY": "1",
-          "CANON_P35_EXACT_REPLAY_REPORT": f"{state}/p35_exact_replay.json",
-          "CANON_P35_EXACT_REPLAY_CLASSIFICATION": (
-              f"{state}/p35_exact_replay.classification.json"
-          ),
-      },
+      p35_values,
       remove=(),
   )
-  validate(document, source_commit=source_commit, run_id=run_id)
+  validate(
+      document,
+      source_commit=source_commit,
+      run_id=run_id,
+      stage_probe=stage_probe,
+  )
   return document
 
 
-def validate(document: dict[str, Any], *, source_commit: str, run_id: str) -> None:
+def validate(
+    document: dict[str, Any],
+    *,
+    source_commit: str,
+    run_id: str,
+    stage_probe: bool = False,
+) -> None:
   """Rejects a P35 manifest that could train or overwrite evidence."""
   p33.validate_jobset(document, SPEC, source_commit, run_id)
   env = p33._env_values(document)
@@ -105,11 +129,19 @@ def validate(document: dict[str, Any], *, source_commit: str, run_id: str) -> No
       "CANON_P35_EXACT_REPLAY_CLASSIFICATION": (
           f"{state}/p35_exact_replay.classification.json"
       ),
+      "CANON_P35_REPLAY_STAGE_PROBE": "1" if stage_probe else "0",
       "CANON_P33_RUN_STAGE": "envelope-short",
       "CANON_P33_NO_COMMIT": "1",
       "CANON_PRE_ALIGN_GATE": "1",
       "CANON_RUN_CMD": shlex.join(_command()),
   }
+  if stage_probe:
+    expected.update({
+        "CANON_P35_REPLAY_STAGE_REPORT": f"{state}/p35_replay_stages.jsonl",
+        "CANON_P35_REPLAY_STAGE_CLASSIFICATION": (
+            f"{state}/p35_replay_stages.classification.json"
+        ),
+    })
   wrong = {key: env.get(key) for key, value in expected.items() if env.get(key) != value}
   if wrong:
     raise ValueError(f"generated P35 environment drifted: {wrong}")
@@ -124,6 +156,11 @@ def main() -> int:
   parser.add_argument("--run-id", required=True)
   parser.add_argument("--output", required=True, type=Path)
   parser.add_argument(
+      "--stage-probe",
+      action="store_true",
+      help="stop after the first replay record with ordered readiness evidence",
+  )
+  parser.add_argument(
       "--base",
       type=Path,
       default=Path(__file__).with_name("jobset-64chip.yaml"),
@@ -135,6 +172,7 @@ def main() -> int:
       base_path=args.base,
       source_commit=args.source_commit,
       run_id=args.run_id,
+      stage_probe=args.stage_probe,
   )
   args.output.parent.mkdir(parents=True, exist_ok=True)
   args.output.write_text(
