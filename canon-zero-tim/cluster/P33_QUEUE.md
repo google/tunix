@@ -185,3 +185,28 @@ inconclusive before changing code.
 Do not reapply the JobSet. Leaving all three P33 admission variables at their profile defaults of
 `0` restores the fail-closed non-production path. Source rollback is an additive revert of the
 renderer/classifier CL; preserve all target logs and do not alter `main`.
+
+## Preregistered launch contract: first flag-on full campaigns (2026-08-10)
+
+User-approved launch of both full workloads under the verified proxy-XLA regime. Source must be
+pinned at or after the commit that records this contract; both JobSets render from
+`render_p33_jobsets.py` with fresh run ids and launch as strict Attempt 0 (`maxRestarts=0`,
+head `backoffLimit=0`). The step-1 and step-10 report groups are the promotion readouts of the
+old ladder, embedded in one launch; a red gate stops the run by itself with base evidence
+already persisted.
+
+| | `gsm8k-full` | `frozenlake-full` |
+|---|---|---|
+| Command contract | renderer spec, unchanged | renderer spec, unchanged (`max_steps=450`) |
+| Trajectories/step | 32 prompts x 8 gen = 256 (16 per DP rank) | same |
+| Expected reports | `200 x 16 = 3200` | `450 x 16 = 7200` |
+| Step-1 readout | 16/16 reports: all boundaries 0 bytes incl. `T_old_vs_T_current` (first flag-on check of the production value-and-grad primal); `w=r=w*r=1`; clip/TIS 0; finite nonzero gradient; commit=sync=1 | same |
+| Step-10 readout | commits/syncs exactly `1..10`; 10 distinct policy hashes; zero red reports | same |
+| Completion claim ceiling | stable training loop + reward/solve trend; **not convergence** | same |
+| Artifacts | W&B (`zero-tim-gsm8k-dp16-tp4`), alignment JSONL, raw log, classifier verdict; evidence-only, no checkpoint | same W&B via profile env; **`CKPT_DIR = None` is hardcoded (train_frozenlake_qwen3.py:580): no model artifact exists at any step count.** Success may not be described as producing a model |
+| Wall-clock expectation (UNVERIFIED, from r17/r19 extrapolation) | first step +~40 min JIT; warm 3-5 min/step; ~10-17 h total | warm 8-10 min/step; **~2.5-3 days total** |
+| On red | gate stops the run; archive raw log + alignment JSONL + classification before any code change; classify infra failures INCONCLUSIVE, not numerical red |
+
+Both slices may run in parallel on the 256-chip pool. `JOBSET_ATTEMPT` must be 0 in any log used
+as evidence; the proxy `STARTUP: env: XLA_FLAGS=--xla_allow_excess_precision=false` line must be
+present in both runs or every downstream number is VOID.
