@@ -859,3 +859,21 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - The failure occurred during Device $\to$ Host array conversion (`np.asarray(prompt_tokens)`) where `prompt_tokens` was an on-device array transferred synchronously across Pathways.
 3. **Next Steps**:
    - Ensure all input tokens/masks passed to `_p35_run_captured_records` are converted to NumPy arrays on host prior to device placement or kept on device throughout execution without eager D2H sync.
+
+---
+
+## 33. Phase 36 Attempt `flagon1`: Pathways Proxy XLA Flag Delivery Contract Gate
+
+- `debug_logs/p36_flagon1/pathways_proxy.raw.log` (SHA-256: `3437545986c0a6959b9a4540ba40998b40d5d79afe0d3318a43284b6fa7e2970`)
+- Target Commit: `54734dacf2dd469b83b9c7dd4d22080a2b0e9db6` (*Add a Pathways proxy XLA flag gate*)
+
+### Execution & Diagnostic Summary:
+1. **Delivery Contract Failure**:
+   - The `pathways-proxy` container rejected the direct command-line argument `--xla_allow_excess_precision=false`:
+     ```text
+     ERROR: Unknown command line flag 'xla_allow_excess_precision'
+     ```
+2. **Registered Handoff Decision**:
+   - Per `P36_PROXY_XLA_HANDOFF.md` Section 57:
+     *"Proxy rejects the argument or exits -> Delivery contract failure -> Fix the argument form; do not report a numerical FAIL."*
+   - The flag is an XLA/JAX flag rather than a top-level Pathways proxy binary gflag. It must be delivered through the environment variable (`XLA_FLAGS`) or appropriate flag prefix rather than a raw command-line flag.
