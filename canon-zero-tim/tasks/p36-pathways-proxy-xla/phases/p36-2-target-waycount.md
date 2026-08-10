@@ -14,8 +14,9 @@
 ## Execution
 
 1. Publish the reviewed P36 source without changing the pinned proxy image.
-2. Render one `flag-on` JobSet with a unique run ID and record its SHA-256.
-3. Confirm live Pod YAML contains exactly one proxy flag and the expected proxy image digest.
+2. Render one `envon1` JobSet with a unique run ID and record its SHA-256.
+3. Confirm live Pod YAML contains no raw excess-precision proxy argument, exactly one proxy
+   `XLA_FLAGS=--xla_allow_excess_precision=false` entry, and the expected proxy image digest.
 4. Run Attempt 0 in `gate-only`; do not load a model or initialize W&B.
 5. Archive the complete T1 log, live Pod YAML, proxy/RM/worker logs and Kubernetes events.
 6. Validate the expected way-count row count before reading any magnitude.
@@ -33,4 +34,5 @@
 
 ## Result
 
-Pending target execution.
+Attempt `flagon1` was inconclusive: the proxy rejected the raw command-line argument before any
+way-count row ran. The corrected `envon1` attempt is pending target execution.

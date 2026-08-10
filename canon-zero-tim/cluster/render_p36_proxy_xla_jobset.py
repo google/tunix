@@ -26,6 +26,7 @@ MODULE_SPEC.loader.exec_module(p33)
 
 PROXY_XLA_FLAG = "--xla_allow_excess_precision=false"
 PROXY_XLA_PREFIX = "--xla_allow_excess_precision="
+PROXY_XLA_ENV = "XLA_FLAGS"
 PROXY_IMAGE = (
     "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/"
     "proxy_server@sha256:7bdf61492b723c970b597812a90335a87358d279f92770d3ca11fc86ad15e312"
@@ -51,14 +52,22 @@ def _proxy(document: Mapping[str, Any]) -> dict[str, Any]:
   )
 
 
-def _ensure_proxy_flag(args: list[str]) -> None:
-  matches = [arg for arg in args if arg.startswith(PROXY_XLA_PREFIX)]
-  if not matches:
-    args.append(PROXY_XLA_FLAG)
-    return
-  if matches != [PROXY_XLA_FLAG]:
+def _ensure_proxy_xla_env(proxy: dict[str, Any]) -> None:
+  raw_flags = [
+      arg for arg in proxy.get("args", []) if arg.startswith(PROXY_XLA_PREFIX)
+  ]
+  if raw_flags:
     raise ValueError(
-        "base Pathways proxy has a conflicting or duplicate excess-precision flag"
+        "base Pathways proxy contains an unsupported raw excess-precision argument"
+    )
+  env = proxy.setdefault("env", [])
+  matches = [entry for entry in env if entry.get("name") == PROXY_XLA_ENV]
+  if not matches:
+    env.append({"name": PROXY_XLA_ENV, "value": PROXY_XLA_FLAG})
+    return
+  if matches != [{"name": PROXY_XLA_ENV, "value": PROXY_XLA_FLAG}]:
+    raise ValueError(
+        "base Pathways proxy has a conflicting or duplicate XLA_FLAGS entry"
     )
 
 
@@ -93,7 +102,7 @@ def render(
   head = p33._head_pod(document)
   proxy = p33._container(head["initContainers"], "pathways-proxy")
   manager = p33._container(head["initContainers"], "pathways-rm")
-  _ensure_proxy_flag(proxy["args"])
+  _ensure_proxy_xla_env(proxy)
   p33._replace_arg(
       proxy["args"],
       "--gcs_scratch_location=",
@@ -192,12 +201,19 @@ def validate(
   proxy = _proxy(document)
   if proxy.get("image") != PROXY_IMAGE:
     raise ValueError("P36 Pathways proxy image drifted from the pinned baseline")
-  proxy_flags = [
+  raw_proxy_flags = [
       arg for arg in proxy["args"] if arg.startswith(PROXY_XLA_PREFIX)
   ]
-  if proxy_flags != [PROXY_XLA_FLAG]:
+  if raw_proxy_flags:
     raise ValueError(
-        "Pathways proxy must receive exactly one false excess-precision flag"
+        "Pathways proxy must not receive a raw excess-precision command-line argument"
+    )
+  proxy_xla_env = [
+      entry for entry in proxy.get("env", []) if entry.get("name") == PROXY_XLA_ENV
+  ]
+  if proxy_xla_env != [{"name": PROXY_XLA_ENV, "value": PROXY_XLA_FLAG}]:
+    raise ValueError(
+        "Pathways proxy must receive exactly one false flag through XLA_FLAGS"
     )
 
   head = p33._head_pod(document)
@@ -205,15 +221,22 @@ def validate(
   worker = p33._container(
       p33._worker_pod(document)["containers"], "pathways-worker"
   )
-  misplaced_flags = [
-      (container["name"], arg)
+  misplaced_args = [
+      (container["name"], "arg", arg)
       for container in (manager, worker)
       for arg in container["args"]
       if arg.startswith(PROXY_XLA_PREFIX)
   ]
-  if misplaced_flags:
+  misplaced_env = [
+      (container["name"], "env", entry.get("value"))
+      for container in (manager, worker)
+      for entry in container.get("env", [])
+      if entry.get("name") == PROXY_XLA_ENV
+  ]
+  if misplaced_args or misplaced_env:
     raise ValueError(
-        f"excess-precision flag must be delivered only to the proxy: {misplaced_flags}"
+        "excess-precision configuration must be delivered only through the "
+        f"proxy XLA_FLAGS environment: {misplaced_args + misplaced_env}"
     )
   scratch_args = []
   for container_name in ("pathways-proxy", "pathways-rm"):

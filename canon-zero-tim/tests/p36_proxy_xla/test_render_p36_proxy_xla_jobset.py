@@ -36,7 +36,7 @@ def _document():
 
 class RenderP36ProxyXlaJobSetTest(unittest.TestCase):
 
-  def test_renders_attempt_zero_gate_only_with_proxy_flag(self):
+  def test_renders_attempt_zero_gate_only_with_proxy_environment(self):
     document = _document()
     env = renderer.p33._env_values(document)
     proxy = renderer._proxy(document)
@@ -51,31 +51,45 @@ class RenderP36ProxyXlaJobSetTest(unittest.TestCase):
     self.assertEqual(env["CANON_WAYCOUNT_DEPTHS"], "8,15")
     self.assertEqual(env["CANON_GCS_CACHE_BUCKET"], "")
     self.assertNotIn("CANON_P32_RC_STAGE", env)
+    self.assertFalse(any(
+        arg.startswith(renderer.PROXY_XLA_PREFIX) for arg in proxy["args"]
+    ))
     self.assertEqual(
         [
-            arg
-            for arg in proxy["args"]
-            if arg.startswith(renderer.PROXY_XLA_PREFIX)
+            entry
+            for entry in proxy["env"]
+            if entry["name"] == renderer.PROXY_XLA_ENV
         ],
-        [renderer.PROXY_XLA_FLAG],
+        [{"name": renderer.PROXY_XLA_ENV, "value": renderer.PROXY_XLA_FLAG}],
     )
 
-  def test_negative_controls_reject_missing_duplicate_and_true_flag(self):
+  def test_negative_controls_reject_missing_duplicate_and_true_environment(self):
     for case in ("missing", "duplicate", "true"):
       with self.subTest(case=case):
         document = copy.deepcopy(_document())
         proxy = renderer._proxy(document)
-        index = proxy["args"].index(renderer.PROXY_XLA_FLAG)
+        matches = [
+            entry
+            for entry in proxy["env"]
+            if entry["name"] == renderer.PROXY_XLA_ENV
+        ]
+        self.assertEqual(len(matches), 1)
         if case == "missing":
-          proxy["args"].pop(index)
+          proxy["env"].remove(matches[0])
         elif case == "duplicate":
-          proxy["args"].append(renderer.PROXY_XLA_FLAG)
+          proxy["env"].append(copy.deepcopy(matches[0]))
         else:
-          proxy["args"][index] = "--xla_allow_excess_precision=true"
-        with self.assertRaisesRegex(ValueError, "exactly one false"):
+          matches[0]["value"] = "--xla_allow_excess_precision=true"
+        with self.assertRaisesRegex(ValueError, "through XLA_FLAGS"):
           renderer.validate(
               document, source_commit=SOURCE_COMMIT, run_id=RUN_ID
           )
+
+  def test_negative_control_rejects_raw_proxy_argument(self):
+    document = _document()
+    renderer._proxy(document)["args"].append(renderer.PROXY_XLA_FLAG)
+    with self.assertRaisesRegex(ValueError, "must not receive a raw"):
+      renderer.validate(document, source_commit=SOURCE_COMMIT, run_id=RUN_ID)
 
   def test_negative_control_rejects_training_mode(self):
     document = _document()
@@ -86,14 +100,17 @@ class RenderP36ProxyXlaJobSetTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "environment drifted"):
       renderer.validate(document, source_commit=SOURCE_COMMIT, run_id=RUN_ID)
 
-  def test_negative_control_rejects_flag_on_resource_manager(self):
+  def test_negative_control_rejects_environment_on_resource_manager(self):
     document = _document()
     head = renderer.p33._head_pod(document)
     manager = renderer.p33._container(
         head["initContainers"], "pathways-rm"
     )
-    manager["args"].append(renderer.PROXY_XLA_FLAG)
-    with self.assertRaisesRegex(ValueError, "only to the proxy"):
+    manager["env"].append({
+        "name": renderer.PROXY_XLA_ENV,
+        "value": renderer.PROXY_XLA_FLAG,
+    })
+    with self.assertRaisesRegex(ValueError, "only through the proxy"):
       renderer.validate(document, source_commit=SOURCE_COMMIT, run_id=RUN_ID)
 
   def test_cli_refuses_to_overwrite_rendered_manifest(self):

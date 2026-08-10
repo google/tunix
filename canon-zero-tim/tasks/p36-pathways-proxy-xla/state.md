@@ -6,8 +6,14 @@
 - Task directory: `canon-zero-tim/tasks/p36-pathways-proxy-xla/`
 - Directory state: tracked
 - Current phase: P36.2 target 64-chip way-count measurement (`phases/p36-2-target-waycount.md`)
-- Last verified fact: P36.1 local gate passed 6/6, P35 renderer regression passed 7/7, and the P33 renderer passed 6/6 in the pinned image.
-- Next action: Publish the reviewed source, render a source-pinned P36 JobSet, and launch it as Attempt 0 on the authorized 64-chip cluster.
-- Blockers: This host has no `kubectl` binary or configured GKE context; target execution must be performed by the authorized cluster operator.
-- Key artifacts: `cluster/P36_PROXY_XLA_HANDOFF.md`
-- Updated: 2026-08-10 UTC after the P36.1 local gate
+- Last verified fact: Target Attempt `flagon1` rejected the raw XLA flag before running a probe;
+  the corrected proxy-`XLA_FLAGS` renderer passes 7/7 local fail-closed tests.
+- Next action: Review and publish the corrected source, render a new source-pinned `envon1`
+  JobSet, and run the attempt-zero 64-chip gate.
+- Blockers: The corrected source is not committed or published. This host has no `kubectl` binary
+  or configured GKE context; target execution must be performed by the authorized cluster operator.
+- Key artifacts: `cluster/P36_PROXY_XLA_HANDOFF.md`,
+  `debug_logs/p36_flagon1/pathways_proxy.raw.log`,
+  `phases/p36-1a-onehost-sensitivity.md`,
+  `artifacts/p36_onehost_excess_{off,on}.raw.log`
+- Updated: 2026-08-10 UTC after correcting the rejected raw-argument contract

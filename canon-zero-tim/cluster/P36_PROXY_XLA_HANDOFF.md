@@ -20,12 +20,42 @@ training, initialize W&B, or change declared model dtypes.
 bash canon-zero-tim/tests/p36_proxy_xla/run_cpu.sh
 ```
 
-The renderer must reject missing, duplicate and `true` proxy flag controls. A successful local
-gate proves manifest delivery and fail-closed behavior only. It is not a numerical result.
+The renderer must reject missing, duplicate and `true` proxy-environment controls, a raw proxy
+argument, and placement on the resource manager or worker. A successful local gate proves YAML
+delivery and fail-closed behavior only. It is not a numerical result.
 
-Reviewed local result: PASS, 6/6. The adjacent P35 renderer passed 7/7 and the P33 renderer passed
-6/6 in the pinned frozenlake image. This host has no `kubectl` binary or configured GKE context,
-so no target JobSet was created by the implementation host.
+The initial 6/6 local gate validated a raw-argument contract that the target proxy subsequently
+rejected. That historical result is preserved in P36.1 but is superseded. The corrected
+proxy-`XLA_FLAGS` contract passes 7/7 locally; the adjacent P35 renderer passes 7/7. This host has
+no `kubectl` binary or configured GKE context, so no corrected target JobSet was created here.
+
+## Delivery correction after `flagon1`
+
+Target Attempt `flagon1` ended before numerical execution:
+
+```text
+ERROR: Unknown command line flag 'xla_allow_excess_precision'
+```
+
+The corrected manifest must contain:
+
+```yaml
+env:
+- name: XLA_FLAGS
+  value: --xla_allow_excess_precision=false
+```
+
+in `pathways-proxy` only. Its `args` list must contain no
+`--xla_allow_excess_precision=...` item. This is a new delivery attempt, not a retry or a rewrite
+of `flagon1`.
+
+## Direct-attached sensitivity control
+
+A paired four-device v5p run used the same frozen image and probe in both arms. Adding
+`--xla_allow_excess_precision=false` reduced differing bytes by 88.04% to 93.80% across depths
+4 through 24. The ON arm retained a 2.71% to 3.22% differing-byte fraction, so the flag is a
+strong carrier in this generic probe but not its only carrier. This does not replace the P36.2
+Pathways measurement and does not predict a bitwise target result.
 
 ## Target render
 
@@ -34,13 +64,15 @@ Render only from a published 40-character source commit:
 ```bash
 python3 canon-zero-tim/cluster/render_p36_proxy_xla_jobset.py \
   --source-commit <published-40-character-sha> \
-  --run-id flagon1 \
-  --output /tmp/p36-proxy-xla-flagon1.yaml
+  --run-id envon1 \
+  --output /tmp/p36-proxy-xla-envon1.yaml
 ```
 
-Before applying it, inspect the rendered proxy args and record the manifest SHA-256. The JobSet
-must be Attempt 0. Archive the head log, `p36_waycount.raw.log`, live Pod YAML, proxy log,
-resource-manager log, worker logs and Kubernetes events before deleting the JobSet.
+Before applying it, inspect the rendered proxy args and env and record the manifest SHA-256. The
+JobSet must be Attempt 0. Archive the head log, `p36_waycount.raw.log`, live Pod YAML, proxy log,
+resource-manager log, worker logs and Kubernetes events before deleting the JobSet. Proxy startup
+without the previous unknown-flag error proves acceptance only; the complete way-count table is
+required to show that the remote compiler consumed a load-bearing setting.
 
 ## Registered target verdict
 

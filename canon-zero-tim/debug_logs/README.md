@@ -876,4 +876,4 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 2. **Registered Handoff Decision**:
    - Per `P36_PROXY_XLA_HANDOFF.md` Section 57:
      *"Proxy rejects the argument or exits -> Delivery contract failure -> Fix the argument form; do not report a numerical FAIL."*
-   - The flag is an XLA/JAX flag rather than a top-level Pathways proxy binary gflag. It must be delivered through the environment variable (`XLA_FLAGS`) or appropriate flag prefix rather than a raw command-line flag.
+   - The flag is an XLA/JAX flag rather than a top-level Pathways proxy binary gflag. The corrected P36 contract delivers it through the `pathways-proxy` container's `XLA_FLAGS` environment and rejects any raw command-line occurrence. This corrected contract is locally gated but does not have a target numerical verdict yet.

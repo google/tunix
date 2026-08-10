@@ -24,11 +24,16 @@ import yaml
 document = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 head = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
 proxy = next(item for item in head["initContainers"] if item["name"] == "pathways-proxy")
-flags = [arg for arg in proxy["args"] if arg.startswith("--xla_allow_excess_precision=")]
-assert flags == ["--xla_allow_excess_precision=false"], flags
+raw_flags = [arg for arg in proxy["args"] if arg.startswith("--xla_allow_excess_precision=")]
+assert raw_flags == [], raw_flags
+proxy_env = [entry for entry in proxy["env"] if entry["name"] == "XLA_FLAGS"]
+assert proxy_env == [{
+    "name": "XLA_FLAGS",
+    "value": "--xla_allow_excess_precision=false",
+}], proxy_env
 main = next(item for item in head["containers"] if item["name"] == "jax-tpu")
 env = {entry["name"]: entry.get("value") for entry in main["env"]}
 assert env["CANON_MODE"] == "gate-only", env["CANON_MODE"]
 assert env["CANON_GCS_CACHE_BUCKET"] == "", env["CANON_GCS_CACHE_BUCKET"]
-print("[P36.PROXY_XLA] LOCAL_GATE_PASS flag_count=1 mode=gate-only cache=isolated")
+print("[P36.PROXY_XLA] LOCAL_GATE_PASS env_count=1 raw_arg_count=0 mode=gate-only cache=isolated")
 PY

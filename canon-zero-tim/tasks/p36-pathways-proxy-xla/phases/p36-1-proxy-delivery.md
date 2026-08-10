@@ -1,6 +1,6 @@
 # P36.1 — Pathways proxy flag delivery
 
-- Status: passed
+- Status: failed on target; superseded by P36.1b
 
 ## Finding
 
@@ -30,3 +30,9 @@ GCS compilation cache. Missing, duplicate, `true` and wrong-container flag contr
 The adjacent P35 renderer gate passed 7/7. The P33 renderer gate passed 6/6 in the pinned
 frozenlake image; the host Python environment lacks `metrax`, so the host-only import attempt was
 not used as evidence.
+
+That result proved only the initially specified manifest contract. Target Attempt `flagon1`
+subsequently proved that contract wrong: the pinned proxy exited with
+`Unknown command line flag 'xla_allow_excess_precision'`. No numerical row was produced. The raw
+argument path is therefore failed and preserved here as superseded evidence, not reported as a
+numerical failure.
