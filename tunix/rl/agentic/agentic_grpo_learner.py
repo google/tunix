@@ -1010,6 +1010,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           s_prefill=s_prefill,
           t_old=trainer_per_token_logps,
           action_mask=completion_mask,
+          completion_valid_mask=completion_valid_mask,
+          prompt_mask=prompt_mask,
           tokens=completion_ids,
           policy_version=policy_versions,
           temperature=rollout_config.temperature,
@@ -1313,11 +1315,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"P35 diagnostic complete before backward: {output}"
         )
       if alignment.precheck_enabled():
-        alignment.check_pre_backward(
+        precheck_record = alignment.check_pre_backward(
             combined_batch,
             step=int(expected_step),
             fail_closed=True,
         )
+        alignment.stop_after_exact_precheck(precheck_record)
     return [combined_batch]
 
 

@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKTREE="$(cd "$ROOT/.." && pwd)"
 cd "$WORKTREE"
 
-python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','tunix/rl/envelope_probe.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/cluster/render_p35_jobset.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','canon-zero-tim/tests/p35_envelope/probe_memory_space_attestation.py','canon-zero-tim/tests/p35_envelope/test_render_p35_jobset.py','tests/rl/canonical_qwen3_adapter_test.py','tests/rl/envelope_probe_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','tunix/rl/envelope_probe.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/cluster/render_p35_jobset.py','canon-zero-tim/cluster/render_p38_aval_jobset.py','canon-zero-tim/tests/t1_tpu/probe_logprob_aval.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','canon-zero-tim/tests/p35_envelope/probe_memory_space_attestation.py','canon-zero-tim/tests/p35_envelope/test_render_p35_jobset.py','canon-zero-tim/tests/p38_aval/test_render_p38_aval_jobset.py','canon-zero-tim/tests/t1_tpu/test_probe_logprob_aval.py','tests/rl/canonical_qwen3_adapter_test.py','tests/rl/envelope_probe_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 if grep -Fq "P35 first target admits only one local-M chunk" \
   tunix/rl/agentic/agentic_grpo_learner.py; then
   echo "[P35.ENVELOPE] learner retained the rejected single-chunk gate" >&2
@@ -19,6 +19,7 @@ bash -n \
   canon-zero-tim/cluster/steps/00_env.sh \
   canon-zero-tim/cluster/steps/86_validate_workload.sh \
   canon-zero-tim/cluster/steps/90_run.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_aval_onehost.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env \
   canon-zero-tim/cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env \
   canon-zero-tim/tests/p33_workloads/run_exact_image.sh \
@@ -55,6 +56,17 @@ JAX_PLATFORMS=cpu python3 -m unittest discover \
 python3 -m unittest discover \
   -s canon-zero-tim/tests/p35_envelope \
   -p 'test_*.py'
+python3 -m unittest discover \
+  -s canon-zero-tim/tests/p38_aval \
+  -p 'test_*.py'
+PYTHONPATH=canon-zero-tim/tests/t1_tpu \
+python3 -m unittest discover \
+  -s canon-zero-tim/tests/t1_tpu \
+  -p 'test_probe_logprob_aval.py'
+PYTHONPATH=canon-zero-tim/tests/t1_tpu \
+python3 -m unittest discover \
+  -s canon-zero-tim/tests/t1_tpu \
+  -p 'test_unified_runner.py'
 JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl \
   -p canonical_qwen3_adapter_test.py \
@@ -161,6 +173,31 @@ validate_p35_preflight() (
 )
 
 validate_p35_preflight
+
+validate_p38_aval_preflight() (
+  set -euo pipefail
+  local state
+  state="$(mktemp -d)"
+  trap 'rm -r "$state"' EXIT
+  export CANON_PKG="$ROOT"
+  export CANON_STATE="$state"
+  export CANON_MODE=gate-only
+  export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp16-tp4-admission.env
+  export CANON_RUN_P38_AVAL=1
+  export CANON_P38_AVAL_REPORT="$state/p38_aval.result.json"
+  bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
+  grep -q 'export CANON_RUN_P38_AVAL=1' "$state/env.sh"
+  grep -q 'export CANON_P38_AVAL_REPORT=' "$state/env.sh"
+
+  export CANON_RUN_P38_AVAL=invalid
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.AVAL] preflight accepted an invalid switch" >&2
+    exit 1
+  fi
+  echo "[P38.AVAL] PREFLIGHT_PASS enabled=accepted invalid=rejected"
+)
+
+validate_p38_aval_preflight
 
 validate_frozenlake_eval_postflight() (
   set -euo pipefail

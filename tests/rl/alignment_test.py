@@ -92,6 +92,8 @@ class AlignmentTest(absltest.TestCase):
         s_prefill=values.copy(),
         t_old=values.copy(),
         action_mask=mask,
+        completion_valid_mask=mask,
+        prompt_mask=np.ones((rows, 2), dtype=np.bool_),
         tokens=ids,
         policy_version=np.zeros((rows,), dtype=np.int32),
         temperature=0.7,
@@ -214,6 +216,38 @@ class AlignmentTest(absltest.TestCase):
       ):
         alignment.check_pre_backward(self._wrapped(), step=0)
 
+  def test_p38_precheck_only_stops_after_exact_record(self):
+    record = {"verdict": "PASS", "step": 4, "N_action": 7}
+    stdout = io.StringIO()
+    with mock.patch.dict(
+        os.environ,
+        {alignment.PRECHECK_ONLY_ENV: "1"},
+        clear=False,
+    ), contextlib.redirect_stdout(stdout), self.assertRaisesRegex(
+        alignment.PreAlignmentProbeComplete, "before backward"
+    ):
+      alignment.stop_after_exact_precheck(record)
+    self.assertIn(
+        "[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=4 N_action=7",
+        stdout.getvalue(),
+    )
+
+  def test_p38_precheck_only_is_default_off_and_rejects_bad_values(self):
+    with mock.patch.dict(
+        os.environ,
+        {alignment.PRECHECK_ONLY_ENV: "0"},
+        clear=False,
+    ):
+      alignment.stop_after_exact_precheck({"verdict": "PASS"})
+    with mock.patch.dict(
+        os.environ,
+        {alignment.PRECHECK_ONLY_ENV: "yes"},
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, alignment.PRECHECK_ONLY_ENV
+    ):
+      alignment.stop_after_exact_precheck({"verdict": "PASS"})
+
   def test_one_ulp_drift_fails_closed(self):
     wrapped = self._wrapped()
     drift = wrapped.t_old.copy()
@@ -249,6 +283,8 @@ class AlignmentTest(absltest.TestCase):
           s_prefill=wrapped.s_prefill,
           t_old=wrapped.t_old,
           action_mask=wrapped.action_mask,
+          completion_valid_mask=wrapped.completion_valid_mask,
+          prompt_mask=wrapped.prompt_mask,
           tokens=ids,
           policy_version=wrapped.policy_version,
           temperature=0.7,
@@ -419,6 +455,67 @@ class AlignmentTest(absltest.TestCase):
     self.assertEqual(mismatch["coordinate"], [1, 2])
     self.assertEqual(mismatch["token_id"], int(wrapped.tokens[1, 2]))
     self.assertGreater(mismatch["abs_delta"], 0.1)
+
+  def test_pre_backward_mismatch_includes_multiturn_chunk_context(self):
+    ids = np.arange(6, dtype=np.int32).reshape(1, 6)
+    action_mask = np.asarray(
+        [[True, True, False, False, True, True]], dtype=np.bool_
+    )
+    completion_valid_mask = np.ones_like(action_mask)
+    prompt_mask = np.ones((1, 255), dtype=np.bool_)
+    values = np.arange(6, dtype=np.float32).reshape(1, 6) / 8
+    example = _Example(
+        completion_ids=jnp.asarray(ids),
+        completion_mask=jnp.asarray(action_mask),
+        advantages=jnp.ones((1,), dtype=jnp.float32),
+        is_update_step=None,
+    )
+    wrapped = alignment.wrap_train_example(
+        example,
+        s_decode=values,
+        s_prefill=values.copy(),
+        t_old=values.copy(),
+        action_mask=action_mask,
+        completion_valid_mask=completion_valid_mask,
+        prompt_mask=prompt_mask,
+        tokens=ids,
+        policy_version=np.zeros((1,), dtype=np.int32),
+        temperature=0.7,
+        top_k=0,
+        top_p=1.0,
+        s_prefill_source=_real_rescore,
+    )
+    drift = wrapped.s_prefill.copy()
+    drift[0, 4] = drift[0, 4] + np.float32(0.1039)
+    wrapped = wrapped.replace(s_prefill=drift)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ):
+      result = alignment.check_pre_backward(
+          wrapped, step=0, fail_closed=False
+      )
+
+    mismatch = result["boundaries"]["S_decode_vs_S_prefill"][
+        "first_mismatch"
+    ]
+    self.assertEqual(mismatch["coordinate"], [0, 4])
+    self.assertEqual(mismatch["prompt_length"], 255)
+    self.assertEqual(mismatch["completion_valid_length"], 6)
+    self.assertEqual(mismatch["logical_kv_prefix_length"], 259)
+    self.assertEqual(mismatch["completion_chunk_index"], 0)
+    self.assertEqual(mismatch["sequence_chunk_index"], 1)
+    self.assertEqual(mismatch["offset_in_sequence_chunk"], 3)
+    self.assertEqual(mismatch["distance_to_next_sequence_chunk"], 253)
+    self.assertEqual(mismatch["turn_index"], 1)
+    self.assertTrue(mismatch["action_run_start"])
+    self.assertFalse(mismatch["action_run_end"])
+    self.assertEqual(mismatch["offset_in_action_run"], 0)
+    self.assertTrue(mismatch["previous_token_is_environment"])
 
   def test_mismatch_details_are_bounded_and_marked_truncated(self):
     left = np.zeros((1, 1025), dtype=np.float32)

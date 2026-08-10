@@ -94,6 +94,26 @@ case "${XLA_FLAGS:-}" in
   *) echo "[env] MISSING: XLA_FLAGS lacks --xla_allow_excess_precision=false" >&2; fail=1;;
 esac
 
+case "${CANON_RUN_P38_AVAL:-0}" in
+  0) ;;
+  1)
+    req CANON_P38_AVAL_REPORT
+    [ "${CANON_MODE:-}" = "gate-only" ] || {
+      echo "[env] P38 aval probe requires CANON_MODE=gate-only" >&2
+      fail=1
+    }
+    [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] || {
+      echo "[env] P38 aval probe requires the DP16 topology profile" >&2
+      fail=1
+    }
+    echo "[env] P38 model-free aval probe enabled"
+    ;;
+  *)
+    echo "[env] CANON_RUN_P38_AVAL must be 0 or 1" >&2
+    fail=1
+    ;;
+esac
+
 if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
   for k in CANON_P35_ENVELOPE_REPORT CANON_P35_METADATA_DIR \
            CANON_P35_CLASSIFICATION CANON_DP_SIZE CANON_LOGPROB_M; do

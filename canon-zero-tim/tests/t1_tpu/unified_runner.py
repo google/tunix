@@ -55,6 +55,11 @@ PROBES = (
 )
 
 T2_PROBE = Probe("T2", "same-session DP gradient/update admission", "probe_dp_update")
+P38_AVAL_PROBE = Probe(
+    "P38A",
+    "model-free sampling and logprob aval discriminator",
+    "probe_logprob_aval",
+)
 
 OVERLAY_CHECKS = (
     ("tpu_inference.layers.jax.linear", "P22XK_MATMUL_ACTIVE", True),
@@ -72,15 +77,26 @@ def _tainted_marker(after: str, remaining: Sequence[Probe]) -> str:
 
 def _configured_probes(environ: Mapping[str, str] | None = None) -> tuple[Probe, ...]:
     env = os.environ if environ is None else environ
-    value = env.get("CANON_RUN_T2_DP", "0").strip()
-    if value not in ("0", "1"):
-        raise ValueError(f"CANON_RUN_T2_DP must be 0 or 1, got {value!r}")
-    if value == "0":
-        return PROBES
+    t2_value = env.get("CANON_RUN_T2_DP", "0").strip()
+    p38_value = env.get("CANON_RUN_P38_AVAL", "0").strip()
+    for name, value in (
+        ("CANON_RUN_T2_DP", t2_value),
+        ("CANON_RUN_P38_AVAL", p38_value),
+    ):
+        if value not in ("0", "1"):
+            raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+    probes = PROBES
+    if p38_value == "1":
+        insertion = next(
+            index + 1 for index, probe in enumerate(probes) if probe.name == "P1b"
+        )
+        probes = probes[:insertion] + (P38_AVAL_PROBE,) + probes[insertion:]
+    if t2_value == "0":
+        return probes
     insertion = next(
-        index + 1 for index, probe in enumerate(PROBES) if probe.name == "P1b"
+        index + 1 for index, probe in enumerate(probes) if probe.name == "P1b"
     )
-    return PROBES[:insertion] + (T2_PROBE,) + PROBES[insertion:]
+    return probes[:insertion] + (T2_PROBE,) + probes[insertion:]
 
 
 def _verify_overlay(

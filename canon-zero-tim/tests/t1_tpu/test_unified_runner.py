@@ -121,6 +121,25 @@ class UnifiedRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be 0 or 1"):
             target._configured_probes({"CANON_RUN_T2_DP": "yes"})
 
+    def test_p38_aval_probe_is_default_off_and_explicitly_inserted(self):
+        default = target._configured_probes({})
+        enabled = target._configured_probes({"CANON_RUN_P38_AVAL": "1"})
+        self.assertNotIn("P38A", [probe.name for probe in default])
+        names = [probe.name for probe in enabled]
+        self.assertEqual(names[names.index("P1b") + 1], "P38A")
+
+    def test_p38_and_t2_have_deterministic_order(self):
+        probes = target._configured_probes({
+            "CANON_RUN_T2_DP": "1",
+            "CANON_RUN_P38_AVAL": "1",
+        })
+        names = [probe.name for probe in probes]
+        self.assertEqual(names[names.index("P1b") + 1 : names.index("P1b") + 3], ["T2", "P38A"])
+
+    def test_invalid_p38_switch_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "CANON_RUN_P38_AVAL"):
+            target._configured_probes({"CANON_RUN_P38_AVAL": "yes"})
+
 
 if __name__ == "__main__":
     unittest.main()

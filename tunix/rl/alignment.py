@@ -39,11 +39,16 @@ TRAIN_ENV = "CANON_ALIGNMENT_TRAIN"
 REPORT_ENV = "CANON_ALIGN_REPORT"
 PRE_GATE_ENV = "CANON_PRE_ALIGN_GATE"
 PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
+PRECHECK_ONLY_ENV = "CANON_P38_PRECHECK_ONLY"
 _MAX_MISMATCH_DETAILS = 1024
 
 
 class AlignmentGateError(RuntimeError):
   """Raised when an alignment run is incomplete or numerically red."""
+
+
+class PreAlignmentProbeComplete(RuntimeError):
+  """Raised after an exact P38 precheck to stop before backward."""
 
 
 @flax.struct.dataclass(frozen=True)
@@ -55,6 +60,8 @@ class ObservedTrainExample:
   s_prefill: Any
   t_old: Any
   action_mask: Any
+  completion_valid_mask: Any
+  prompt_mask: Any
   tokens: Any
   policy_version: Any
   sampling_values: Any
@@ -89,6 +96,34 @@ def precheck_enabled() -> bool:
   return os.environ.get(PRE_GATE_ENV, "") == "1"
 
 
+def precheck_only_enabled() -> bool:
+  """Return the fail-closed P38 diagnostic stop policy."""
+  value = os.environ.get(PRECHECK_ONLY_ENV, "")
+  if value not in ("", "0", "1"):
+    raise AlignmentGateError(
+        f"{PRECHECK_ONLY_ENV} must be exactly 0 or 1, got {value!r}"
+    )
+  return value == "1"
+
+
+def stop_after_exact_precheck(record: dict[str, Any]) -> None:
+  """Stop a P38 diagnostic after its durable exact record."""
+  if not precheck_only_enabled():
+    return
+  if record.get("verdict") != "PASS":
+    raise AlignmentGateError(
+        "P38 precheck-only stop requires a passing pre-backward record"
+    )
+  print(
+      "[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD "
+      f"step={record.get('step')} N_action={record.get('N_action')}",
+      flush=True,
+  )
+  raise PreAlignmentProbeComplete(
+      "P38 precheck-only diagnostic completed before backward"
+  )
+
+
 def execution_mode() -> str:
   """Return the single admitted alignment execution mode.
 
@@ -119,6 +154,8 @@ def wrap_train_example(
     s_prefill: Any,
     t_old: Any,
     action_mask: Any,
+    completion_valid_mask: Any | None = None,
+    prompt_mask: Any | None = None,
     tokens: Any,
     policy_version: Any,
     temperature: float,
@@ -136,19 +173,37 @@ def wrap_train_example(
   sp = np.asarray(s_prefill)
   to = np.asarray(t_old)
   mask = np.asarray(action_mask)
-  tok = np.asarray(tokens)
   expected = tuple(np.shape(train_example.completion_ids))
+  completion_valid = np.asarray(
+      action_mask if completion_valid_mask is None else completion_valid_mask,
+      dtype=np.bool_,
+  )
+  if prompt_mask is None:
+    prompt_valid = np.zeros((expected[0], 0), dtype=np.bool_)
+  else:
+    prompt_valid = np.asarray(prompt_mask, dtype=np.bool_)
+  tok = np.asarray(tokens)
   for name, value in (
       ("S_decode", sd),
       ("S_prefill", sp),
       ("T_old", to),
       ("action_mask", mask),
+      ("completion_valid_mask", completion_valid),
       ("tokens", tok),
   ):
     if tuple(value.shape) != expected:
       raise AlignmentGateError(
           f"{name} shape {value.shape} != completion shape {expected}"
       )
+  if prompt_valid.ndim != 2 or prompt_valid.shape[0] != expected[0]:
+    raise AlignmentGateError(
+        "prompt_mask must be rank two and batch-aligned with completions: "
+        f"{prompt_valid.shape} vs {expected}"
+    )
+  if np.any(mask.astype(np.bool_) & ~completion_valid):
+    raise AlignmentGateError(
+        "action_mask must be a subset of completion_valid_mask"
+    )
   if np.shares_memory(sd, sp) or s_decode is s_prefill:
     raise AlignmentGateError(
         "S_prefill aliases S_decode; the decode-vs-rescore gate would be vacuous"
@@ -159,6 +214,8 @@ def wrap_train_example(
       s_prefill=sp.copy(),
       t_old=to.copy(),
       action_mask=mask.astype(np.bool_, copy=True),
+      completion_valid_mask=completion_valid.copy(),
+      prompt_mask=prompt_valid.copy(),
       tokens=tok.copy(),
       policy_version=np.asarray(policy_version).copy(),
       sampling_values=np.repeat(
@@ -359,6 +416,92 @@ def _attach_tokens(
     difference["first_mismatch"] = difference["mismatches"][0]
 
 
+def _attach_sequence_context(
+    difference: dict[str, Any],
+    *,
+    prompt_mask: Any,
+    completion_valid_mask: Any,
+    action_mask: Any,
+    chunk_size: int = 256,
+) -> None:
+  """Attach logical turn, chunk, and KV coordinates to mismatch records."""
+  prompt = np.asarray(prompt_mask, dtype=np.bool_)
+  valid = np.asarray(completion_valid_mask, dtype=np.bool_)
+  action = np.asarray(action_mask, dtype=np.bool_)
+  if (
+      prompt.ndim != 2
+      or valid.ndim != 2
+      or action.shape != valid.shape
+      or prompt.shape[0] != valid.shape[0]
+      or chunk_size <= 0
+  ):
+    return
+
+  prompt_lengths = prompt.sum(axis=1, dtype=np.int64)
+  valid_lengths = valid.sum(axis=1, dtype=np.int64)
+  action_starts = action & np.concatenate(
+      (np.ones((action.shape[0], 1), dtype=np.bool_), ~action[:, :-1]),
+      axis=1,
+  )
+  turn_indices = np.cumsum(action_starts, axis=1, dtype=np.int64) - 1
+
+  for detail in difference.get("mismatches", []):
+    coordinate = tuple(detail.get("coordinate", ()))
+    if len(coordinate) != 2:
+      continue
+    row, position = coordinate
+    if (
+        row < 0
+        or row >= valid.shape[0]
+        or position < 0
+        or position >= valid.shape[1]
+    ):
+      continue
+    prompt_length = int(prompt_lengths[row])
+    logical_position = prompt_length + position
+    current_action_start = bool(action_starts[row, position])
+    previous_starts = np.flatnonzero(action_starts[row, : position + 1])
+    action_run_start = (
+        int(previous_starts[-1]) if previous_starts.size else None
+    )
+    detail.update({
+        "prompt_length": prompt_length,
+        "completion_valid_length": int(valid_lengths[row]),
+        "logical_kv_prefix_length": logical_position,
+        "completion_chunk_index": int(position // chunk_size),
+        "sequence_chunk_index": int(logical_position // chunk_size),
+        "offset_in_sequence_chunk": int(logical_position % chunk_size),
+        "distance_to_next_sequence_chunk": int(
+            (-logical_position) % chunk_size
+        ),
+        "turn_index": (
+            int(turn_indices[row, position])
+            if action[row, position] and turn_indices[row, position] >= 0
+            else None
+        ),
+        "action_run_start": current_action_start,
+        "action_run_end": bool(
+            action[row, position]
+            and (
+                position + 1 >= action.shape[1]
+                or not action[row, position + 1]
+            )
+        ),
+        "offset_in_action_run": (
+            int(position - action_run_start)
+            if action[row, position] and action_run_start is not None
+            else None
+        ),
+        "previous_token_is_environment": bool(
+            position > 0
+            and valid[row, position - 1]
+            and not action[row, position - 1]
+        ),
+    })
+  if difference.get("mismatches"):
+    difference["first_mismatch"] = difference["mismatches"][0]
+
+
 def _max_abs_mismatch(a: Any, b: Any, mask: Any) -> dict[str, Any] | None:
   """Returns an exact record for the largest numerical masked mismatch."""
   aa = np.asarray(a)
@@ -430,6 +573,12 @@ def check_pre_backward(
   ):
     difference = _masked_bitwise_difference(a, b, mask)
     _attach_tokens(difference, sidecar.tokens, mask.shape)
+    _attach_sequence_context(
+        difference,
+        prompt_mask=sidecar.prompt_mask,
+        completion_valid_mask=sidecar.completion_valid_mask,
+        action_mask=sidecar.action_mask,
+    )
     max_abs = None
     max_abs_mismatch = _max_abs_mismatch(a, b, mask)
     if max_abs_mismatch is not None:
@@ -437,6 +586,14 @@ def check_pre_backward(
       token_array = np.asarray(sidecar.tokens)
       if token_array.shape == mask.shape and len(coordinate) == token_array.ndim:
         max_abs_mismatch["token_id"] = int(token_array[coordinate])
+      max_abs_wrapper = {"mismatches": [max_abs_mismatch]}
+      _attach_sequence_context(
+          max_abs_wrapper,
+          prompt_mask=sidecar.prompt_mask,
+          completion_valid_mask=sidecar.completion_valid_mask,
+          action_mask=sidecar.action_mask,
+      )
+      max_abs_mismatch = max_abs_wrapper["mismatches"][0]
     if a.shape == b.shape == mask.shape and n_action:
       max_abs = _json_number(
           np.max(

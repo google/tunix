@@ -13,7 +13,10 @@ while A-B is red.
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
 | P38.1 | Durable mismatch coordinates, exact bits, bounded stdout JSON, and corrected units | P33 CPU suite plus injected one-bit, invalid-shape, truncation, and failed-run artifact controls | complete |
-| P38.2 | One flag-on production-boundary reproduction | A-B coordinates and bit patterns survive in raw logs; B-C remains a hard gate | pending |
+| P38.1b | One-host production-tail construction gate | One real-Qwen DP1xTP4 precheck-only record plus a same-input tail control; no Pathways claim | complete |
+| P38.2a | Model-free tail aval and sharding discriminator | The actual sampling transform and canonical scorer execute at the registered compact/local/global shapes, emit complete shape/sharding evidence, and detect a one-bit negative control | active |
+| P38.2b | Flag-on GSM8K production-boundary reproduction | A-B coordinates, exact bits, raw/processed-target decomposition, and logical sequence metadata survive in raw logs; B-C remains a hard gate | pending |
+| P38.2c | Flag-on FrozenLake production-boundary reproduction | The same fields plus turn, chunk, and logical-KV coordinates survive for the multi-turn workload; B-C remains a hard gate | pending |
 | P38.3 | Same-source proxy flag ON/OFF pair | Fresh proxies, isolated caches, matching token hashes, and pre-registered A-B verdicts | pending |
 | P38.4 | One diagnostic backward with optimizer forcibly skipped | B-C and T-old/T-current stay hard; model and optimizer arrays do not change | pending |
 | P38.5 | Carrier-specific numerical repair | A-B returns to zero under the source-pinned flag-on regime | pending |
@@ -32,3 +35,17 @@ while A-B is red.
 - Decision: The final full campaigns may be single launches. Their existing step-0 hard gates
   determine whether training continues, so separate one-update and three-update cluster jobs are
   not required after the carrier is repaired.
+- Confirmed: r35 printed `runner_sampling_adapter_same_object=True`; a new
+  shared Python function object would repeat an existing mechanism. P38.1b
+  instead tests the production boundary and the tail inputs/compiled envelope.
+- Decision: a green one-host result is a construction gate only. P38.2 remains
+  the first admissible target reproduction.
+- Correction: GSM8K and FrozenLake no longer share one pre-registered carrier.
+  r35 measured `logp_diff_max<5e-6` for GSM8K but `0.10390` for FrozenLake.
+  A tail-aval result may explain the former without explaining the latter.
+- Correction: do not require one ULP or uniformly distributed mismatches. Those
+  are observations to measure, not prerequisites to assume.
+- Decision: do not implement F1b until P38.2a reports the actual global avals,
+  shard layouts, processed-target values, target logprobs, and implied
+  normalizers. A shared Python callable already exists; only equal compilation
+  signatures can support a one-executable claim.
