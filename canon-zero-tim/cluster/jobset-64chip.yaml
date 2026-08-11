@@ -279,7 +279,7 @@ spec:
                 - name: XLA_PYTHON_CLIENT_MEM_FRACTION
                   value: '0.9'
                 - name: ENABLE_PATHWAYS_PERSISTENCE
-                  value: '0'
+                  value: '1'
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp
