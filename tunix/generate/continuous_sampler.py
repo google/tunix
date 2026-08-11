@@ -152,15 +152,13 @@ class _SamplingState:
 
 
 class VanillaSampler:
-  """Continuous Batching Sampler with three-cache architecture and static metadata arrays."""
-
   def __init__(
       self,
       transformer: nnx.Module,
       tokenizer: Any,
       cache_config: Any,
   ):
-    self.transformer = transformer
+    # self.transformer = transformer
     self.tokenizer = tokenizer
     self.cache_config = cache_config
 
@@ -302,8 +300,7 @@ class VanillaSampler:
     max_seq_len = sampling_config.max_generation_steps + sampling_config.max_prompt_length
     
     page_size = self.cache_config.page_size
-    max_num_seqs = getattr(self.cache_config, "max_num_seqs", getattr(self.cache_config, "max_num_sequences", 32))
-    max_seqs = max_num_seqs
+    max_num_seqs = self.cache_config.max_num_seqs
     
     num_kv_heads = self.transformer.config.num_kv_heads
     head_dim = self.transformer.config.head_dim
@@ -332,7 +329,7 @@ class VanillaSampler:
     else:
       dp_axis = None
       tp_axis = None
-
+    
     hbm_pm_config = page_manager_lib.PageManagerConfig(
         page_size=page_size,
         max_seq_len=max_seq_len,
@@ -348,7 +345,7 @@ class VanillaSampler:
         tp_size=tp_size,
     )
     hbm_cache = hbm_pm_config.init()
-
+    
     cpu_device = jax.devices("cpu")[0] if jax.devices("cpu") else None
     cpu_pm_config = dataclasses.replace(
       hbm_pm_config,
@@ -359,21 +356,18 @@ class VanillaSampler:
       tp_size=1,
       device=cpu_device
     ) 
-    cpu_cache = cpu_pm_config.init()
-
-
-    offloaded_cache = cpu_cache
+    offloaded_cache = cpu_pm_config.init()
 
     eos_ids = tuple(sampling_config.eos_tokens) if sampling_config.eos_tokens is not None else None
     
     if sampling_config.include_logprobs:
-      logprobs_buffer=jnp.zeros((max_seqs, max_seq_len))
+      logprobs_buffer=jnp.zeros((max_num_seqs, max_seq_len))
     else:
       logprobs_buffer = None
 
     if sampling_config.include_logits:
       vocab_size = self.transformer.config.vocab_size
-      logits_buffer=jnp.zeros((max_seqs, max_seq_len, vocab_size))
+      logits_buffer=jnp.zeros((max_num_seqs, max_seq_len, vocab_size))
     else:
       logits_buffer = None
 
@@ -388,17 +382,18 @@ class VanillaSampler:
       utils.check_sampling_mode_conflict(sampling_mode, 'top_p')  # pyrefly: ignore[bad-argument-type]
       sampling_parameters['top_p'] = sampling_config.top_p
       sampling_parameters['top_k'] = sampling_config.top_k
+    
 
     return _SamplingState(
         max_prompt_length=sampling_config.max_prompt_length,
         max_generation_steps=sampling_config.max_generation_steps,
-        decoding_steps=jnp.zeros((max_seqs,), dtype=jnp.int32),
-        offloaded_decoding_steps=jnp.zeros((max_seqs,), dtype=jnp.int32),
+        decoding_steps=jnp.zeros((max_num_seqs,), dtype=jnp.int32),
+        offloaded_decoding_steps=jnp.zeros((max_num_seqs,), dtype=jnp.int32),
         distribution=jnp.array([0, 0, 0], dtype=jnp.int32),
         hbm_cache=hbm_cache,
         offloaded_cache=offloaded_cache,
-        done=jnp.zeros((max_seqs,), dtype=jnp.bool_),
-        insertion_timestamps=jnp.zeros((max_seqs,), dtype=jnp.float32),
+        done=jnp.zeros((max_num_seqs,), dtype=jnp.bool_),
+        insertion_timestamps=jnp.zeros((max_num_seqs,), dtype=jnp.float32),
         logits_buffer=logits_buffer,
         logprobs_buffer=logprobs_buffer,
         forbidden_token_ids=sampling_config.forbidden_tokens,
@@ -701,7 +696,6 @@ class VanillaSampler:
         seq_lens=sampling_state.hbm_cache.seq_lens[slot_perm],
     )
 
-    # reordered_ids = sampling_state.hbm_request_ids[slot_perm]
     reordered_ids = [sampling_state.hbm_request_ids[int(i)] for i in jax.device_get(slot_perm)[:num_remaining]]
 
     return dataclasses.replace(
@@ -745,7 +739,7 @@ class VanillaSampler:
     active_seq_lens = jnp.where(
         is_decode,
         1,
-        cache.seq_lens, # Prefill
+        cache.seq_lens,
     )
 
     token_start_idxs = jnp.where(
@@ -753,7 +747,10 @@ class VanillaSampler:
         cache.seq_lens - 1,
         0,
     )
-
+    
+    # TODO: Replace static_token_capacity with max_tokens.
+    # We should priortize decode sequences and fill in
+    # remaining space with chunked prefill.
     max_seqs = int(cache.batch_size)
     static_token_capacity = int(
          max_prompt_length * max_seqs
@@ -876,7 +873,7 @@ class VanillaSampler:
 
     num_tpu = len(sampling_state.hbm_request_ids)
     if num_tpu == 0:
-      return {}
+      return sampling_state, {}
     
     hbm_cache = sampling_state.hbm_cache
 

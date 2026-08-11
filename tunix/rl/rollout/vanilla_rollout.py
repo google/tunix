@@ -35,13 +35,13 @@ from tunix.rl.rollout import base_rollout
 class CacheConfig:
   """Serving & execution config (decoupled from ModelConfig)."""
   # Paged memory allocation
-  page_size: int = 128 		 
+  page_size: int = 8 
   max_num_seqs: int = 32
-  max_prompt_length: int = 4096
-  max_tokens_to_generate: int = 1024
-  hbm_cache_max_bytes: int = 20 * 1024 **3 # 20 GiB
+  max_prompt_length: int = 200 
+  max_tokens_to_generate: int = 500 
+  hbm_cache_max_bytes: int = 5 * 1024 **3 # 20 GiB
   # Host-RAM Prefix Cache
-  host_cache_max_bytes: int = 300 * 1024**3  # 300 GiB
+  host_cache_max_bytes: int = 10 * 1024**3  # 40 GiB
 
 class VanillaRollout(base_rollout.BaseRollout):
   """Vanilla rollout worker with continuous sampling support."""
@@ -157,7 +157,6 @@ class VanillaRollout(base_rollout.BaseRollout):
       completed.update(outputs)
       print(f"Completions: {len(completed)} / {len(prompts)}")
     
-    print("DONE :)")
     del sampling_state
 
     results = [completed[f"sync_{i}"] for i in range(len(prompts))]

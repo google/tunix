@@ -26,8 +26,8 @@ from jax.sharding import PartitionSpec as P
 from tunix.generate import utils
 
 def _get_dtype_packing(dtype):
-  bits = jax._src.dtypes.bit_width(dtype)
-  return 32 // bits
+  n_bytes = jnp.dtype(dtype).itemsize
+  return 4 // n_bytes 
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -79,14 +79,21 @@ class PageManagerConfig:
   tp_axis: str | None = None
   dp_size: int = 1
   tp_size: int = 1
-  device: jax.Device | None = None
+  device: any = None
 
   @property
-  def num_pages(self) -> int:
-    # max_bytes is the budget per TP group
-    bytes_per_page = self.page_size * self.num_kv_heads * self.head_dim * 2 * self.num_layers * jnp.dtype(self.dtype).itemsize
-    num_pages_per_tp = self.max_bytes // bytes_per_page
-    return num_pages_per_tp
+  def num_pages_per_layer_block(self) -> int:
+    # TODO: This assumes tokens do not share kv values
+    d_size = jnp.dtype(self.dtype).itemsize
+    kv_page_size_bytes = 2 * self.page_size * self.num_kv_heads * self.head_dim * self.num_layers * d_size
+    token_page_size_bytes = 4 * self.page_size
+
+    bytes_per_global_page = kv_page_size_bytes + token_page_size_bytes
+  
+    max_pages_per_block = self.max_bytes // bytes_per_global_page
+    pages_per_block = (max_pages_per_block // self.dp_size) * self.dp_size
+
+    return int(pages_per_block)
 
   @property
   def max_num_pages_per_seq(self) -> int:
@@ -97,20 +104,19 @@ class PageManagerConfig:
     kv_packing = _get_dtype_packing(self.dtype)
 
     blocks: dict[str, jax.Array] = {}
-
     token_block = jax.lax.empty(
-        (self.num_pages, self.page_size), dtype=jnp.int32
+        (self.num_pages_per_layer_block, self.page_size), dtype=jnp.int32
     )
     if self.dp_axis is not None:
       token_block = utils.shard(token_block, (self.dp_axis, None))
-    if device is not None:
-      token_block = jax.device_put(token_block, device)
+    if self.device is not None:
+      token_block = jax.device_put(token_block, self.device)
     blocks["token_buffer"] = token_block
-
+    
     for i in range(self.num_layers):
       layer_block = jax.lax.empty(
           (
-              self.num_pages,
+              self.num_pages_per_layer_block,
               self.page_size,
               2 * self.num_kv_heads // kv_packing,
               kv_packing,
@@ -120,13 +126,13 @@ class PageManagerConfig:
       )
       if self.dp_axis is not None or self.tp_axis is not None:
         layer_block = utils.shard(layer_block, (self.dp_axis, None, self.tp_axis, None, None))
-      if device is not None:
-        layer_block = jax.device_put(layer_block, device)
+      if self.device is not None:
+        layer_block = jax.device_put(layer_block, self.device)
       blocks[f"layer_{i}"] = layer_block
 
     page_indices = jnp.zeros((self.max_num_seqs, self.max_num_pages_per_seq), dtype=jnp.int32)
-    available_page_indices = jnp.arange(self.num_pages, dtype=jnp.int32)
-    num_available_pages = jnp.array(self.num_pages, dtype=jnp.int32)
+    available_page_indices = jnp.arange(self.num_pages_per_layer_block, dtype=jnp.int32)
+    num_available_pages = jnp.array(self.num_pages_per_layer_block, dtype=jnp.int32)
     seq_lens = jnp.zeros((self.max_num_seqs,), dtype=jnp.int32)
 
     if self.device is not None:
@@ -335,27 +341,6 @@ class PageManager:
           pages=new_pages,
     )
 
-  def get_token_at(self, pos: int | jax.Array, key: str = "token_buffer") -> jax.Array:
-    """Directly looks up token IDs at sequence position `pos` using page_indices."""
-    seq_idxs = jnp.arange(self.batch_size)
-    local_page_col = (pos // self.page_size) 
-    page_offset = pos % self.page_size
-    phys_page_ids = self.page_indices[seq_idxs, local_page_col]
-    return self.pages[key][phys_page_ids, page_offset]
-
-  def get_slice(self, start: int | jax.Array, length: int, key: str = "token_buffer") -> jax.Array:
-    """Directly looks up a slice of token IDs [batch_size, length] starting at `start`."""
-    seq_grid = jnp.arange(self.batch_size)[:, None]
-    pos_grid = start + jnp.arange(length)[None, :]
-
-    local_page_cols = (pos_grid // self.page_size)
-    page_offsets = pos_grid % self.page_size
-    safe_cols = jnp.clip(
-        local_page_cols, 0, self.max_num_pages_per_seq - 1
-    )
-    phys_page_ids = self.page_indices[seq_grid, safe_cols]
-    return self.pages[key][phys_page_ids, page_offsets]
-
   def to_array(
       self,
       total_num_tokens: int,
@@ -409,7 +394,7 @@ def batch_copy_pages(
     dst_tensor = dst_cache.pages.get("token_buffer", jnp.zeros_like(src_tensor))
 
     src_slice = src_tensor[src_idxs]
-    src_slice = put_on_target_device(src_slice, dst_tensor)
+    src_slice = _put_on_target_device(src_slice, dst_tensor)
     
     dst_cache.pages["token_buffer"] = dst_tensor.at[dst_idxs].set(src_slice)
     return dst_cache
@@ -418,7 +403,7 @@ def batch_copy_pages(
     dst_tensor = dst_cache.pages.get(key, jnp.zeros_like(src_tensor))
 
     src_slice = src_tensor[src_idxs]
-    src_slice = put_on_target_device(src_slice, dst_tensor)
+    src_slice = _put_on_target_device(src_slice, dst_tensor)
 
     dst_cache.pages[key] = dst_tensor.at[dst_idxs].set(src_slice)
 
@@ -431,7 +416,7 @@ def _remove_dp_spec(spec: P) -> P:
     new_spec = tuple(None if axis in dp_axis else axis for axis in spec)
     return P(*new_spec)
 
-def put_on_target_device(tensor: jax.Array, target_tensor: jax.Array) -> jax.Array:
+def _put_on_target_device(tensor: jax.Array, target_tensor: jax.Array) -> jax.Array:
   """Safely places tensor on the same device/mesh as target_tensor."""
   if hasattr(target_tensor, "sharding") and target_tensor.sharding is not None:
     sharding = target_tensor.sharding
