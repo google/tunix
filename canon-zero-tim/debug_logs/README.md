@@ -1019,3 +1019,29 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      - `S_decode_vs_S_prefill`: **40 / 195,784 differing bytes (25 / 48,946 differing action elements, 99.95% element agreement)**.
      - Every localized mismatch has logical KV prefix at least 1791; the earliest is at sequence-chunk offset 255. This is evidence for a depth/chunk threshold, not proof of a floating-point reduction-tree, attention-tile, page-layout, or multi-turn cause.
      - Fail-closed gate (`CANON_PRE_ALIGN_GATE=1`) successfully intercepted the run prior to backprop, generating `pre_alignment.jsonl` evidence.
+
+---
+
+## 39. Phase 39.1 Attempt `p39d4`: 256-Chip DeepSWE Stage 1 Backward-No-Commit Diagnostics (Qwen3-32B DP16xTP8)
+
+- `debug_logs/p39_p39d4_deepswe_stage1_bwd.raw.log` (SHA-256: `808c3fd95249a8829c148f5c552393ff4ab856c905f918a5b09e0d39fa7152e5`)
+- Target Commit: `882246ffd3197680e3affb618c4aaab4dfb3dd1e` (*Safely guard optional kubernetes import in DeepSWE runner*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes, topology `4x8x8`)
+
+### Execution & Diagnostic Summary:
+
+1. **Hardware & Slice Provisioning (64 / 64 Nodes 100% Running)**:
+   - All 64 TPU worker nodes successfully provisioned and reached `1/1 Running` state on the 256-chip cluster.
+   - Head pod scheduled on dedicated `deepswe-cpu-pool` node.
+
+2. **Overlay Verification & Canonical Toolchain**:
+   - All 6 canonical overlay patches (`attn_iface_patched.py`, `linear_p22xk.py`, `embed_patched.py`, `tpu_runner_p21_l30.py`, `qwen3_p22xk.py`, `qwen2_p22xk.py`) passed SHA-256 byte identity verification.
+   - Entrypoint initialization steps (`00_env.sh`, `10_sync_repo.sh`, `30_install_canon.sh`, `40_overlay_engine.sh`, `50_verify_overlay.sh`, `60_wait_workers.sh`) completed successfully.
+
+3. **Offline Replay Environment Dependency Diagnostic**:
+   - `ModuleNotFoundError: No module named 'r2egym'` triggered in `examples/deepswe/swe_agent.py:326` during `train_deepswe_nb.py` module initialization.
+   - **Root Cause Analysis**:
+     - `swe_agent.py` contains an unconditional top-level import: `from r2egym.agenthub.action import Action as SWEAction` with a hard `raise` in the except block.
+     - For `backward-no-commit` offline evaluation (replaying from `--gold_whitelist`), interactive R2E-Gym simulation environments are not instantiated.
+     - `swe_env.py` already includes a safe fallback for `r2egym`, but `swe_agent.py` and `r2egym_runtime_patch.py` require equivalent fallback handling when `r2egym` is absent from the container image.
