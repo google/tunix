@@ -71,6 +71,7 @@ spec:
             labels:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
+            priorityClassName: very-high
             nodeSelector:
               cloud.google.com/gke-nodepool: cpu-np
             hostNetwork: true
@@ -210,6 +211,7 @@ spec:
             labels:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
+            priorityClassName: very-high
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
               cloud.google.com/gke-tpu-topology: 4x8x8
