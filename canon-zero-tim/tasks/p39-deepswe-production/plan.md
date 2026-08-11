@@ -9,8 +9,8 @@ training run is not a numerical probe.
 
 ## Sources
 
-- Production-candidate integration base: `yuxzhang/canon-zero-tim` at
-  `0fe5f6609df06895d93cbf2e54cada22ad7f2697`. P39 was developed from
+- Production-candidate hardening base: `yuxzhang/canon-zero-tim` at
+  `5ee6dbfb5601cf1d1f864ccf6859764ba1f321fe`. P39 was developed from
   `697a29ab4b27015297af8e3dbb37c49db3560445`; the intervening remote change
   touched only `cluster/jobset-64chip.yaml`.
 - Workload implementation reference: `yuxzhang/deepswe-quality-fix` at
@@ -73,7 +73,10 @@ bucket remain rejected.
 4. Pin the quality-fix-derived algorithm fields in the renderer and validate
    them in the real DeepSWE entry point.
 5. Pass static and pinned exact-image gates.
-6. Target `backward-no-commit`, then separately approve promotion. Target
+6. After the shared P38 changes, harden ambiguous SHA serialization, require
+   one exact rollout/trainer weight attestation per update, and rerun the
+   complete local gate from the new base.
+7. Target `backward-no-commit`, then separately approve promotion. Target
    status remains `TARGET NOT RUN` until a raw 4x8x8 Attempt 0 artifact passes.
 
 ## Rollback

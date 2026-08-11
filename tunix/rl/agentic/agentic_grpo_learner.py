@@ -42,6 +42,7 @@ from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import alignment
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
+from tunix.rl import deepswe_contract
 from tunix.rl import envelope_probe
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -983,6 +984,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise alignment.AlignmentGateError(
             "alignment batch is missing S_decode or trainer T_old"
         )
+      if os.environ.get("CANON_P34_DEEPSWE", "") == "1":
+        try:
+          deepswe_contract.persist_weight_attestation(
+              self.rl_cluster.attest_actor_anchor_matches_engine(),
+              step=int(expected_step),
+              report_path=os.environ.get("CANON_P34_WEIGHT_REPORT", ""),
+          )
+        except (RuntimeError, ValueError) as exc:
+          raise alignment.AlignmentGateError(
+              "P34 requires exact rollout/trainer weights before A/B/C"
+          ) from exc
       rescore_source = self.rl_cluster.rollout.get_prefill_rescore_logps
       if envelope_probe.enabled():
         s_prefill = self.rl_cluster.get_prefill_rescore_logps(

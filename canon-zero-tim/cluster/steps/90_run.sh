@@ -27,6 +27,9 @@ fi
 LOG="${CANON_RUN_LOG:-$CANON_STATE/run.log}"
 if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
   report_keys=(CANON_RUN_LOG CANON_PRE_ALIGN_REPORT CANON_ALIGN_REPORT CANON_UPDATE_REPORT)
+  if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
+    report_keys+=(CANON_P34_WEIGHT_REPORT)
+  fi
   for report_key in "${report_keys[@]}"; do
     report_path="${!report_key:-}"
     if [ -z "$report_path" ]; then
@@ -101,6 +104,12 @@ if [ "$rc" -ne 0 ] && [ -s "${CANON_PRE_ALIGN_REPORT:-}" ]; then
   pre_align_rows="$(wc -l < "$CANON_PRE_ALIGN_REPORT" | tr -d '[:space:]')"
   echo "[CANON_PRE_ALIGN_ARTIFACT] path=$CANON_PRE_ALIGN_REPORT rows=$pre_align_rows sha256=$pre_align_sha"
   sed 's/^/[CANON_PRE_ALIGN_ARTIFACT_JSON] /' "$CANON_PRE_ALIGN_REPORT"
+fi
+if [ "$rc" -ne 0 ] && [ -s "${CANON_P34_WEIGHT_REPORT:-}" ]; then
+  weight_sha="$(sha256sum "$CANON_P34_WEIGHT_REPORT" | awk '{print $1}')"
+  weight_rows="$(wc -l < "$CANON_P34_WEIGHT_REPORT" | tr -d '[:space:]')"
+  echo "[P34.WEIGHT_ARTIFACT] path=$CANON_P34_WEIGHT_REPORT rows=$weight_rows sha256=$weight_sha"
+  sed 's/^/[P34.WEIGHT_ARTIFACT_JSON] /' "$CANON_P34_WEIGHT_REPORT"
 fi
 # grep -a: progress-bar control characters make grep treat the log as binary and drop every
 # match silently, which reads exactly like "the intervention never fired".
@@ -244,6 +253,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
       --stage "$CANON_P34_RUN_STAGE" \
       --run-log "$LOG" \
+      --weight-report "$CANON_P34_WEIGHT_REPORT" \
       --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
       --update-report "$CANON_UPDATE_REPORT" \
       --alignment-report "$CANON_ALIGN_REPORT" \

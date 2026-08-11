@@ -26,6 +26,30 @@ _STAGE_STEPS = {
 }
 
 
+class _QuotedString(str):
+  """A scalar that must remain a YAML string through Kubernetes parsing."""
+
+
+class _P34Dumper(yaml.SafeDumper):
+  """Safe dumper with an explicit representation for ambiguous strings."""
+
+
+def _represent_quoted_string(
+    dumper: yaml.SafeDumper, value: _QuotedString
+) -> yaml.ScalarNode:
+  return dumper.represent_scalar(
+      "tag:yaml.org,2002:str", str(value), style='"'
+  )
+
+
+_P34Dumper.add_representer(_QuotedString, _represent_quoted_string)
+
+
+def dump_jobset(document: Mapping[str, Any]) -> str:
+  """Serializes a rendered JobSet without ambiguous SHA-like scalars."""
+  return yaml.dump(document, Dumper=_P34Dumper, sort_keys=False)
+
+
 def _head(document: Mapping[str, Any]) -> dict[str, Any]:
   jobs = document["spec"]["replicatedJobs"]
   if [job["name"] for job in jobs] != ["pathways-head", "pathways-worker"]:
@@ -206,7 +230,9 @@ def render(
   document["metadata"].setdefault("labels", {}).update({
       "canon.zero-tim/phase": "p34",
       "canon.zero-tim/stage": stage,
-      "canon.zero-tim/source": source_commit[:8],
+      # A prefix such as 022893e2 is accepted as a number by some YAML 1.1
+      # consumers.  Force an explicit string tag in the serialized manifest.
+      "canon.zero-tim/source": _QuotedString(source_commit[:8]),
   })
   document["spec"]["failurePolicy"]["maxRestarts"] = 0
   document["spec"]["failurePolicy"]["restartStrategy"] = "Recreate"
@@ -260,6 +286,7 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       "CANON_RUN_CMD": shlex.join(_command(stage, run_root=run_root, whitelist=whitelist)),
       "CANON_RUN_LOG": f"{run_root}/run.log",
       "CANON_PRE_ALIGN_GATE": "1",
+      "CANON_P34_WEIGHT_REPORT": f"{run_root}/weight_attestation.jsonl",
       "CANON_PRE_ALIGN_REPORT": f"{run_root}/pre_alignment.jsonl",
       "CANON_ALIGN_REPORT": f"{run_root}/alignment.jsonl",
       "CANON_UPDATE_REPORT": f"{run_root}/updates.jsonl",
@@ -373,6 +400,10 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
     raise ValueError("P34 command introduced FSDP or importance correction")
   if env.get("CANON_P34_WHITELIST") not in command:
     raise ValueError("P34 command does not consume the pinned whitelist path")
+  if not env.get("CANON_P34_WEIGHT_REPORT", "").endswith(
+      "/weight_attestation.jsonl"
+  ):
+    raise ValueError("P34 weight attestation report path is missing")
   if not _SHA256.fullmatch(env.get("CANON_P34_WHITELIST_SHA256", "")):
     raise ValueError("P34 whitelist digest is missing or malformed")
 
@@ -407,7 +438,7 @@ def main() -> None:
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
   )
-  args.output.write_text(yaml.safe_dump(document, sort_keys=False))
+  args.output.write_text(dump_jobset(document))
   print(f"P34_JOBSET_RENDER_PASS output={args.output}")
 
 

@@ -18,9 +18,15 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
+import os
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+
+
+WEIGHT_ATTESTATION_SCHEMA = "canon.p34.deepswe.weight-attestation.v1"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -280,6 +286,9 @@ def validate_environment(values: Mapping[str, str]) -> None:
   flags = values.get("XLA_FLAGS", "")
   if "--xla_allow_excess_precision=false" not in flags:
     raise ValueError("P34 XLA_FLAGS lost the excess-precision contract")
+  weight_report = values.get("CANON_P34_WEIGHT_REPORT", "")
+  if not weight_report or not os.path.isabs(weight_report):
+    raise ValueError("P34 weight attestation report path is missing")
   P34_WORKLOAD.validate()
   requested_max_steps(values)
 
@@ -369,3 +378,81 @@ def require_weight_sync(trainer_fingerprint: str, rollout_fingerprint: str) -> N
   """Rejects rollout when its installed policy differs from the trainer."""
   if not trainer_fingerprint or trainer_fingerprint != rollout_fingerprint:
     raise ValueError("P34 rollout/trainer weight fingerprints differ")
+
+
+def validate_weight_attestation(
+    attestation: Mapping[str, Any], *, step: int
+) -> dict[str, Any]:
+  """Validates an exact trainer-anchor versus live-engine comparison."""
+  mapped_leaves = attestation.get("mapped_leaves")
+  live_leaves = attestation.get("live_leaves")
+  total_elements = attestation.get("total_elements")
+  mismatches = tuple(int(value) for value in attestation.get("mismatch_indices", ()))
+  mesh_shape = {
+      str(name): int(size)
+      for name, size in attestation.get("mesh_shape", ())
+  }
+  mesh_device_ids = tuple(
+      int(value) for value in attestation.get("mesh_device_ids", ())
+  )
+  checks = {
+      "step_nonnegative": isinstance(step, int) and step >= 0,
+      "equal": attestation.get("equal") is True,
+      "leaf_counts": (
+          isinstance(mapped_leaves, int)
+          and mapped_leaves > 0
+          and live_leaves == mapped_leaves
+      ),
+      "total_elements": isinstance(total_elements, int) and total_elements > 0,
+      "mismatch_indices": not mismatches,
+      "mesh_shape": mesh_shape == {"dp": 16, "tp": 8},
+      "mesh_device_ids": (
+          len(mesh_device_ids) == 128
+          and len(set(mesh_device_ids)) == len(mesh_device_ids)
+      ),
+  }
+  failed = sorted(name for name, passed in checks.items() if not passed)
+  if failed:
+    raise ValueError(
+        "P34 rollout/trainer exact weight attestation failed: "
+        + ", ".join(failed)
+    )
+  return {
+      "schema": WEIGHT_ATTESTATION_SCHEMA,
+      "step": step,
+      "verdict": "PASS",
+      "equal": True,
+      "mapped_leaves": mapped_leaves,
+      "live_leaves": live_leaves,
+      "total_elements": total_elements,
+      "mismatch_indices": list(mismatches),
+      "mesh_shape": mesh_shape,
+      "mesh_device_ids": list(mesh_device_ids),
+      "normalized_memory_leaves": int(
+          attestation.get("normalized_memory_leaves", 0)
+      ),
+  }
+
+
+def persist_weight_attestation(
+    attestation: Mapping[str, Any], *, step: int, report_path: str
+) -> dict[str, Any]:
+  """Persists and prints one admitted cross-role weight record."""
+  if not report_path or not os.path.isabs(report_path):
+    raise ValueError("P34 weight attestation requires an absolute report path")
+  record = validate_weight_attestation(attestation, step=step)
+  path = Path(report_path)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  payload = json.dumps(record, sort_keys=True, separators=(",", ":"))
+  with path.open("a", encoding="utf-8") as report_file:
+    report_file.write(payload + "\n")
+    report_file.flush()
+    os.fsync(report_file.fileno())
+  print(f"[P34.WEIGHTS_JSON] {payload}", flush=True)
+  print(
+      "[P34.WEIGHTS] EXACT "
+      f"step={step} leaves={record['mapped_leaves']} "
+      f"elements={record['total_elements']} devices=128",
+      flush=True,
+  )
+  return record

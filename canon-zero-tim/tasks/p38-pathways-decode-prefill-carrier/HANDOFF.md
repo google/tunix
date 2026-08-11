@@ -1,11 +1,18 @@
 # P38 target handoff
 
+Scope: this handoff covers only the GSM8K/FrozenLake P38 workstream. For the
+parallel Qwen3-32B DeepSWE workstream, read
+`../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
+P39 evidence cannot promote P38.
+
 ## Purpose
 
 P38.2 separates two observed flag-on `S_decode_vs_S_prefill` signatures. GSM8K is a tail-aval
 candidate; FrozenLake contains a `0.10390` maximum difference and requires upstream/multi-turn
-localization. Both are pre-backward diagnostics. Neither may commit an optimizer update or be
-described as a full-training run.
+localization. The original strict probes are pre-backward diagnostics. The
+later P38.2d amendment separately admits GSM8K full training under a bounded
+A/B reporting policy; FrozenLake remains strict and no-commit. A P38.2d GSM8K
+run is `alignment-degraded`, not a zero-TIM completion claim.
 
 ## Proven locally
 

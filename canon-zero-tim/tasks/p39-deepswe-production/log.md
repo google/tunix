@@ -29,3 +29,29 @@
 
 No cloud action, commit, push, PR, credential change or production-default
 change was performed.
+
+## 2026-08-11
+
+- Fast-forwarded the isolated P39 worktree from `c9df5852` to the published
+  `5ee6dbfb` base without rewriting history or touching the P38 worktree.
+- Split the active operator routing: P38 remains the 64-chip GSM8K/FrozenLake
+  ledger and P39 remains the 4x8x8 DeepSWE ledger. Replaced the stale P33
+  directory-wide apply example with two explicit admitted manifests.
+- Added explicit YAML-string serialization and a toxic-prefix control.
+  Rendering source `022893e200000000000000000000000000000000`
+  printed `canon.zero-tim/source: "022893e2"`; parse-back returned
+  `type=str`.
+- Added a pre-rescore P34 exact weight gate using the existing device-side
+  mapped-trainer versus live-engine comparison. Each update fsyncs one
+  `weight_attestation.jsonl` row; stale paths, missing rows, duplicate rows
+  and one mismatching leaf are rejected.
+- Static result: `P34_STATIC_PASS suites=7`.
+- Pinned-image result: `P34_EXACT_IMAGE_CPU_PASS unit_cases=54
+  pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b`.
+- Adjacent P33 regressions remained green:
+  `P33.WORKLOAD CPU_GATE PASS workloads=2 p35_postflight=1
+  p35_stage_probe=1` and
+  `P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5
+  overlays=2`.
+- No cloud action, commit, push, PR, credential change, precision change,
+  production-default change or target numerical verdict occurred.

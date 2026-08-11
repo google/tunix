@@ -112,11 +112,15 @@ Any prepared token bucket above 4096 or a request capacity above 256 is a contra
 runtime JAX cache miss for a larger backbone shape is also a failure; do not hide it by enabling
 `SKIP_JAX_PRECOMPILE`.
 
-If access to the target cluster is already configured, perform an API-schema dry run before the
-real apply. This contacts the API server but creates no JobSet:
+If access to the target cluster is already configured, perform API-schema dry
+runs for only the two manifests admitted by the active P38.2d handoff. This
+contacts the API server but creates no JobSet:
 
 ```bash
-kubectl apply --dry-run=server -f "$OUT"
+FL_NO_COMMIT="$OUT/jobset-p33-frozenlake-backward-no-commit.yaml"
+GSM_FULL="$OUT/jobset-p33-gsm8k-full.yaml"
+kubectl apply --dry-run=server -f "$FL_NO_COMMIT"
+kubectl apply --dry-run=server -f "$GSM_FULL"
 ```
 
 Any renderer, unit-gate or server-dry-run failure stops the queue. Do not edit a generated YAML to
@@ -129,8 +133,16 @@ handoff has named the allowed manifests. Never apply the whole directory merely 
 manifests rendered successfully.
 
 ```bash
-kubectl apply -f "$OUT"
+FL_NO_COMMIT="${FL_NO_COMMIT:-$OUT/jobset-p33-frozenlake-backward-no-commit.yaml}"
+GSM_FULL="${GSM_FULL:-$OUT/jobset-p33-gsm8k-full.yaml}"
+test -f "$FL_NO_COMMIT"
+test -f "$GSM_FULL"
+kubectl apply -f "$FL_NO_COMMIT"
+kubectl apply -f "$GSM_FULL"
 ```
+
+Do not apply the output directory. In particular, P38.2d does not admit
+`jobset-p33-frozenlake-full.yaml`.
 
 List the exact generated names and follow each head Job independently:
 

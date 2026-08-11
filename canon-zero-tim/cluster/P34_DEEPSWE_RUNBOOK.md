@@ -74,6 +74,10 @@ unless the entire backward-no-commit contract completes.
   passing A-B/B-C record before backward. A red record stops before gradient
   computation and optimizer commit.
 - A missing evidence row is `INCONCLUSIVE`, never PASS.
+- Before every A/B/C comparison, all mapped trainer-anchor leaves must be
+  bitwise equal to the live rollout-engine leaves. The run emits and persists
+  exactly one `weight_attestation.jsonl` record per update; a missing,
+  duplicate, or non-exact record stops promotion.
 
 Before interpreting any numerical row, the target log must contain exactly:
 
@@ -96,7 +100,7 @@ bash canon-zero-tim/tests/p34_deepswe/run_exact_image.sh
 The required terminal marker is:
 
 ```text
-P34_EXACT_IMAGE_CPU_PASS unit_cases=45 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b
+P34_EXACT_IMAGE_CPU_PASS unit_cases=54 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b
 ```
 
 ## Rollback

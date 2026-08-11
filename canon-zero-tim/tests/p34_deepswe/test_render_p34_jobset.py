@@ -94,6 +94,11 @@ class RenderP34JobSetTest(unittest.TestCase):
     self.assertEqual(env["CANON_LOGPROB_M"], "256")
     self.assertEqual(env["CANON_VJP2_MAX_SEQS"], "1")
     self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
+    self.assertTrue(
+        env["CANON_P34_WEIGHT_REPORT"].endswith(
+            "/weight_attestation.jsonl"
+        )
+    )
     self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
     self.assertEqual(env["CANON_P34_WHITELIST_SHA256"], "3" * 64)
     command = env["CANON_RUN_CMD"]
@@ -164,6 +169,16 @@ class RenderP34JobSetTest(unittest.TestCase):
       _render(source_commit="abc")
     with self.assertRaisesRegex(ValueError, "run_id"):
       _render(run_id="UPPER")
+
+  def test_numeric_exponent_sha_prefix_is_quoted(self):
+    source_commit = "022893e2" + "0" * 32
+    document = _render(source_commit=source_commit)
+    manifest = renderer.dump_jobset(document)
+    self.assertIn('canon.zero-tim/source: "022893e2"', manifest)
+    parsed = yaml.safe_load(manifest)
+    label = parsed["metadata"]["labels"]["canon.zero-tim/source"]
+    self.assertIsInstance(label, str)
+    self.assertEqual(label, source_commit[:8])
 
 
 if __name__ == "__main__":

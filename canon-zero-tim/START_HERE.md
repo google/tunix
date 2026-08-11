@@ -8,10 +8,27 @@ You have this package and no context. This page gets you to a useful action in f
 
 Rollout engines and training code disagree about logprobs — the same weights and tokens give
 different numbers, and that difference is what corrupts the importance ratio in RL. This
-package makes them **bit-identical** and ships the gates that prove it.
+package contains the canonical interventions and the gates that test whether a
+named workload is **bit-identical**. Some target workloads remain red or
+unrun; never promote a local package pass into a production numerical claim.
 
 It is packaging of work already done, not a new result. What is signed and what is not is in
 `EVIDENCE.md`; read that before repeating any claim from here.
+
+## Active handoff router (2026-08-10)
+
+The current work is deliberately split into two evidence ledgers. Do not mix
+their manifests, artifacts, or promotion claims:
+
+| Workstream | Read first | Target allocation |
+|---|---|---|
+| P38 GSM8K/FrozenLake alignment | `tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md` | 64-chip Pathways |
+| P39 Qwen3-32B DeepSWE | `tasks/p39-deepswe-production/HANDOFF.md` | one 4x8x8 (256-device) Pathways slice |
+
+The DeepSWE workload behavior is referenced from
+`yuxzhang/deepswe-quality-fix@023978b976dd6d94e7a42948c3f3a68e34d73744`,
+but every target JobSet must fetch an exact published commit from
+`yuxzhang/canon-zero-tim`.
 
 ---
 

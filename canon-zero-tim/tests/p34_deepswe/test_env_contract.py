@@ -113,6 +113,13 @@ class P34EnvironmentContractTest(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("neutral importance paths", result.stdout)
 
+  def test_missing_weight_report_is_rejected(self):
+    result, _ = self._run_env(
+        override_profile="unset CANON_P34_WEIGHT_REPORT"
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("CANON_P34_WEIGHT_REPORT", result.stdout)
+
 
 if __name__ == "__main__":
   unittest.main()

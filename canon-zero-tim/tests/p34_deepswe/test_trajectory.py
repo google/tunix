@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -21,6 +23,19 @@ SPEC.loader.exec_module(deepswe_contract)
 
 
 class DeepSWETrajectoryTest(unittest.TestCase):
+
+  @staticmethod
+  def _weight_attestation():
+    return {
+        "equal": True,
+        "mapped_leaves": 706,
+        "live_leaves": 706,
+        "total_elements": 1_000_000,
+        "mismatch_indices": (),
+        "normalized_memory_leaves": 706,
+        "mesh_shape": (("dp", 16), ("tp", 8)),
+        "mesh_device_ids": tuple(range(128)),
+    }
 
   def test_environment_tokens_remain_context_but_not_actions(self):
     valid = np.array([[1, 1, 1, 1, 0], [1, 1, 1, 0, 0]], dtype=np.bool_)
@@ -63,6 +78,22 @@ class DeepSWETrajectoryTest(unittest.TestCase):
     deepswe_contract.require_weight_sync("abc", "abc")
     with self.assertRaisesRegex(ValueError, "fingerprints differ"):
       deepswe_contract.require_weight_sync("abc", "def")
+
+  def test_exact_cross_role_weights_are_persisted(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "weights.jsonl"
+      record = deepswe_contract.persist_weight_attestation(
+          self._weight_attestation(), step=0, report_path=str(path)
+      )
+      self.assertEqual(record["verdict"], "PASS")
+      self.assertEqual(json.loads(path.read_text()), record)
+
+  def test_one_weight_mismatch_is_rejected(self):
+    attestation = self._weight_attestation()
+    attestation["equal"] = False
+    attestation["mismatch_indices"] = (8,)
+    with self.assertRaisesRegex(ValueError, "equal, mismatch_indices"):
+      deepswe_contract.validate_weight_attestation(attestation, step=0)
 
 
 if __name__ == "__main__":

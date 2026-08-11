@@ -52,7 +52,23 @@ def _pre_alignment():
   }
 
 
+def _weight_attestation(step=0):
+  return {
+      "schema": "canon.p34.deepswe.weight-attestation.v1",
+      "step": step,
+      "verdict": "PASS",
+      "equal": True,
+      "mapped_leaves": 706,
+      "live_leaves": 706,
+      "total_elements": 1_000_000,
+      "mismatch_indices": [],
+      "mesh_shape": {"dp": 16, "tp": 8},
+      "mesh_device_ids": list(range(128)),
+  }
+
+
 def _log(updates: int):
+  weight_attestations = max(1, updates)
   return "\n".join((
       "[entrypoint] JOBSET_ATTEMPT 0 (first attempt)",
       "[P34.PATHWAYS] initialized_once=1 before_jax=1",
@@ -68,6 +84,7 @@ def _log(updates: int):
       "CANON_FIXED_AR=1 fixed-order tree",
       "CANON_FIXED_AR_EMBED=1 fixed-order embed gather",
       "CANON_LOGPROB_M on",
+      *(["[P34.WEIGHTS] EXACT"] * weight_attestations),
       *(["[P28.G6] weight_sync_committed count=1"] * updates),
   ))
 
@@ -91,6 +108,7 @@ class ClassifierTest(unittest.TestCase):
     } for step in (1, 2, 3)]
     report = classifier.classify(
         log_text=_log(3),
+        weight_attestations=[_weight_attestation(step) for step in range(3)],
         pre_alignment=[_pre_alignment() for _ in range(3)],
         alignment=[_alignment() for _ in range(12)],
         updates=updates,
@@ -116,6 +134,7 @@ class ClassifierTest(unittest.TestCase):
     }
     report = classifier.classify(
         log_text=_log(1),
+        weight_attestations=[_weight_attestation()],
         pre_alignment=[_pre_alignment()],
         alignment=records,
         updates=[update],
@@ -139,6 +158,7 @@ class ClassifierTest(unittest.TestCase):
     }
     report = classifier.classify(
         log_text=_log(0).replace("ATTEMPT 0", "ATTEMPT 1"),
+        weight_attestations=[_weight_attestation()],
         pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
@@ -167,6 +187,7 @@ class ClassifierTest(unittest.TestCase):
     )
     report = classifier.classify(
         log_text=log_text,
+        weight_attestations=[_weight_attestation()],
         pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
@@ -192,6 +213,7 @@ class ClassifierTest(unittest.TestCase):
     log_text = _log(1).replace("'num_reqs': 64", "'num_reqs': 1024")
     report = classifier.classify(
         log_text=log_text,
+        weight_attestations=[_weight_attestation()],
         pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
@@ -215,6 +237,7 @@ class ClassifierTest(unittest.TestCase):
     }
     report = classifier.classify(
         log_text=_log(0),
+        weight_attestations=[_weight_attestation()],
         pre_alignment=[_pre_alignment()],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
@@ -242,6 +265,7 @@ class ClassifierTest(unittest.TestCase):
     }
     report = classifier.classify(
         log_text=_log(0),
+        weight_attestations=[_weight_attestation()],
         pre_alignment=[pre_alignment],
         alignment=[_alignment() for _ in range(4)],
         updates=[update],
@@ -249,6 +273,33 @@ class ClassifierTest(unittest.TestCase):
     )
     self.assertEqual(report["verdict"], "FAIL")
     self.assertIn("pre_backward_boundaries_exact", report["failed"])
+
+  def test_weight_mismatch_is_rejected(self):
+    weight = _weight_attestation()
+    weight["equal"] = False
+    weight["mismatch_indices"] = [8]
+    update = {
+        "verdict": "PASS",
+        "commits": 0,
+        "gradient_activity": [True] * 4,
+        "gradient_finite": True,
+        "gradient_deterministic": True,
+        "dp_replicas_exact": True,
+        "dp_reduction_transactions": 4,
+        "dp_reduction_rounds_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 16,
+        "optimizer_memory_kinds_before": ["pinned_host"],
+    }
+    report = classifier.classify(
+        log_text=_log(0),
+        weight_attestations=[weight],
+        pre_alignment=[_pre_alignment()],
+        alignment=[_alignment() for _ in range(4)],
+        updates=[update],
+        stage="backward-no-commit",
+    )
+    self.assertEqual(report["verdict"], "FAIL")
+    self.assertIn("weight_attestation_exact", report["failed"])
 
 
 if __name__ == "__main__":

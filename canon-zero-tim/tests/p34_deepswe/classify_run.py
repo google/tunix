@@ -69,6 +69,7 @@ def _scheduler_measurements(
 def classify(
     *,
     log_text: str,
+    weight_attestations: list[dict[str, Any]],
     pre_alignment: list[dict[str, Any]],
     alignment: list[dict[str, Any]],
     updates: list[dict[str, Any]],
@@ -107,6 +108,29 @@ def classify(
       "scheduler_bucket_exact": scheduler_buckets == [[4096]],
       "scheduler_precompile_exact": scheduler_precompiles
       == [{"num_tokens": 4096, "num_reqs": 64}],
+      "weight_attestation_marker_count": log_text.count(
+          "[P34.WEIGHTS] EXACT"
+      )
+      == expected_updates,
+      "weight_attestation_count": len(weight_attestations)
+      == expected_updates,
+      "weight_attestation_exact": all(
+          record.get("schema")
+          == "canon.p34.deepswe.weight-attestation.v1"
+          and record.get("step") == index
+          and record.get("verdict") == "PASS"
+          and record.get("equal") is True
+          and isinstance(record.get("mapped_leaves"), int)
+          and record["mapped_leaves"] > 0
+          and record.get("live_leaves") == record["mapped_leaves"]
+          and isinstance(record.get("total_elements"), int)
+          and record["total_elements"] > 0
+          and record.get("mismatch_indices") == []
+          and record.get("mesh_shape") == {"dp": 16, "tp": 8}
+          and len(record.get("mesh_device_ids", [])) == 128
+          and len(set(record.get("mesh_device_ids", []))) == 128
+          for index, record in enumerate(weight_attestations)
+      ),
       "pre_alignment_count": len(pre_alignment) == expected_updates,
       "pre_alignment_pass": all(
           record.get("verdict") == "PASS" for record in pre_alignment
@@ -181,6 +205,7 @@ def classify(
       "stage": stage,
       "verdict": "PASS" if not failed else "FAIL",
       "expected_updates": expected_updates,
+      "expected_weight_attestation_records": expected_updates,
       "expected_pre_alignment_records": expected_updates,
       "expected_alignment_records": expected_alignment,
       "scheduler_buckets": scheduler_buckets,
@@ -194,6 +219,7 @@ def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--stage", required=True, choices=tuple(_STAGE_UPDATES))
   parser.add_argument("--run-log", type=Path, required=True)
+  parser.add_argument("--weight-report", type=Path, required=True)
   parser.add_argument("--pre-alignment-report", type=Path, required=True)
   parser.add_argument("--alignment-report", type=Path, required=True)
   parser.add_argument("--update-report", type=Path, required=True)
@@ -201,6 +227,7 @@ def main() -> None:
   args = parser.parse_args()
   report = classify(
       log_text=args.run_log.read_text(errors="replace"),
+      weight_attestations=_json_records(args.weight_report),
       pre_alignment=_json_records(args.pre_alignment_report),
       alignment=_json_records(args.alignment_report),
       updates=_json_records(args.update_report),

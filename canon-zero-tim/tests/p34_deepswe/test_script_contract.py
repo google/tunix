@@ -38,6 +38,23 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     self.assertIn("jnp.array_equal(first, second)", adapter)
     self.assertIn("deterministic_repeat=(p34_workload and p33_no_commit)", learner)
 
+  def test_cross_role_weights_are_checked_before_rescore(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
+    ).read_text()
+    weight_gate = learner.index("persist_weight_attestation(")
+    rescore = learner.index(
+        "rescore_source = self.rl_cluster.rollout.get_prefill_rescore_logps"
+    )
+    self.assertLess(weight_gate, rescore)
+    self.assertIn("attest_actor_anchor_matches_engine()", learner)
+
+  def test_weight_evidence_is_fail_closed_and_classified(self):
+    runner = (ROOT / "canon-zero-tim/cluster/steps/90_run.sh").read_text()
+    self.assertIn("report_keys+=(CANON_P34_WEIGHT_REPORT)", runner)
+    self.assertIn("[P34.WEIGHT_ARTIFACT_JSON]", runner)
+    self.assertIn('--weight-report "$CANON_P34_WEIGHT_REPORT"', runner)
+
 
 if __name__ == "__main__":
   unittest.main()
