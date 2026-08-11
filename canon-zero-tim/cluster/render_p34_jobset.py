@@ -18,6 +18,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DIGEST_IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
 _RUN_ID = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,14}[a-z0-9])?")
 DEFAULT_SOURCE_BRANCH = "yuxzhang/canon-zero-tim"
+_PRIORITY_CLASS = "very-high"
 _STAGE_STEPS = {
     "backward-no-commit": 1,
     "one-update": 1,
@@ -346,6 +347,17 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
     raise ValueError("P34 requires 64 single-attempt four-chip worker pods")
   if worker["template"]["spec"]["restartPolicy"] != "Never":
     raise ValueError("P34 workers must not retry in place")
+  priorities = {
+      "pathways-head": head.get("priorityClassName"),
+      "pathways-worker": worker["template"]["spec"].get(
+          "priorityClassName"
+      ),
+  }
+  if any(value != _PRIORITY_CLASS for value in priorities.values()):
+    raise ValueError(
+        "P34 Pathways Pod priority class drifted: "
+        f"expected {_PRIORITY_CLASS!r}, got {priorities}"
+    )
   if main["image"] != client_image or not _DIGEST_IMAGE.fullmatch(main["image"]):
     raise ValueError("P34 client image is not digest-pinned")
   expected = {

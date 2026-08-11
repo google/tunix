@@ -86,6 +86,26 @@ class RenderP34JobSetTest(unittest.TestCase):
     worker = jobs[1]["template"]["spec"]
     self.assertEqual((worker["backoffLimit"], worker["completions"], worker["parallelism"]), (0, 64, 64))
     self.assertEqual(worker["template"]["spec"]["restartPolicy"], "Never")
+    self.assertEqual(renderer._head(document)["priorityClassName"], "very-high")
+    self.assertEqual(
+        worker["template"]["spec"]["priorityClassName"], "very-high"
+    )
+
+  def test_rejects_missing_or_mismatched_priority_class(self):
+    for role, bad_value in (("head", None), ("worker", "low")):
+      with self.subTest(role=role):
+        base = _base()
+        pod = (
+            renderer._head(base)
+            if role == "head"
+            else renderer._worker(base)["template"]["spec"]
+        )
+        if bad_value is None:
+          pod.pop("priorityClassName")
+        else:
+          pod["priorityClassName"] = bad_value
+        with self.assertRaisesRegex(ValueError, "priority class drifted"):
+          _render(base=base)
 
   def test_rendered_environment_and_command_match_signed_recipe(self):
     document = _render()

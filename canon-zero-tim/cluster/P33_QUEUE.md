@@ -36,6 +36,8 @@ writes output. Each JobSet has:
   checkpointing remains disabled;
 - every other entry: `maxRestarts: 0`; all entries retain head/worker
   `backoffLimit: 0`;
+- Pathways head and worker Pods both use `priorityClassName: very-high`; the
+  renderer rejects either field if it is missing or changed;
 - one exact 40-character source commit assertion;
 - no inherited autoscaling device ids;
 - a unique JobSet name, Pathways GCS scratch, state directory, run log, pre-alignment JSONL,
@@ -88,6 +90,25 @@ Expected render terminal marker:
 ```
 
 ## Validate without allocating resources
+
+Before rendering or applying on each target cluster, verify the cluster-scoped
+PriorityClass exists with the signed scheduling policy. This is a read-only
+check; the workload never creates or changes a PriorityClass:
+
+```bash
+kubectl get priorityclass very-high \
+  -o jsonpath='{.metadata.name}{" value="}{.value}{" policy="}{.preemptionPolicy}{"\n"}'
+```
+
+The required result is exactly:
+
+```text
+very-high value=1000 policy=PreemptLowerPriority
+```
+
+Missing or different output stops the launch. Priority reduces preemption by
+lower-priority workloads; it does not provide checkpointing or protect against
+node maintenance, OOM, or an IFRT session failure.
 
 The local unit gate verifies exact command parity with `tunix.rl.dp_workloads`, three unique
 scratch/state identities, the workload-specific retry policy, dynamic worker

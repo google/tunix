@@ -19,6 +19,7 @@ _RUN_ID_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,14}[a-z0-9])?")
 _BRANCH = "yuxzhang/canon-zero-tim"
 _SCRATCH_ROOT = "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33"
 _GSM8K_FULL_MAX_RESTARTS = 3
+_PRIORITY_CLASS = "very-high"
 
 
 def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
@@ -402,6 +403,15 @@ def validate_jobset(
   worker_job = document["spec"]["replicatedJobs"][1]
   if worker_job["template"]["spec"].get("backoffLimit") != 0:
     raise ValueError("P33 worker Job must not retry a failed training attempt")
+  priorities = {
+      "pathways-head": _head_pod(document).get("priorityClassName"),
+      "pathways-worker": _worker_pod(document).get("priorityClassName"),
+  }
+  if any(value != _PRIORITY_CLASS for value in priorities.values()):
+    raise ValueError(
+        "P33 Pathways Pod priority class drifted: "
+        f"expected {_PRIORITY_CLASS!r}, got {priorities}"
+    )
 
   env = _env_values(document)
   expected = {

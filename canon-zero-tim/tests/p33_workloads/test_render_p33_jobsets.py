@@ -61,8 +61,10 @@ class RenderP33JobSetsTest(unittest.TestCase):
       scratches = []
       states = []
       wandb_names = []
+      workloads = set()
       for document in documents:
         labels = document["metadata"]["labels"]
+        workloads.add(labels["canon.zero-tim/workload"])
         expected_max_restarts = (
             3
             if labels["canon.zero-tim/workload"] == "gsm8k"
@@ -113,6 +115,11 @@ class RenderP33JobSetsTest(unittest.TestCase):
         head = document["spec"]["replicatedJobs"][0]["template"]["spec"][
             "template"
         ]["spec"]
+        worker = document["spec"]["replicatedJobs"][1]["template"]["spec"][
+            "template"
+        ]["spec"]
+        self.assertEqual(head["priorityClassName"], "very-high")
+        self.assertEqual(worker["priorityClassName"], "very-high")
         scratches.append(tuple(
             arg
             for container in head["initContainers"]
@@ -123,6 +130,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertEqual(len(set(wandb_names)), 5)
       self.assertEqual(len(set(scratches)), 5)
       self.assertTrue(all(len(values) == 2 for values in scratches))
+      self.assertEqual(workloads, {"gsm8k", "frozenlake"})
 
   def test_rendered_commands_equal_frozen_workload_commands(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -334,6 +342,23 @@ class RenderP33JobSetsTest(unittest.TestCase):
       renderer.validate_jobset(
           document, spec, _SOURCE_COMMIT, _RUN_ID
       )
+
+  def test_rejects_missing_or_mismatched_priority_class(self):
+    spec = renderer._SPECS[0]
+    for role, bad_value in (("head", None), ("worker", "low")):
+      with self.subTest(role=role):
+        base = renderer.load_base(_BASE_PATH)
+        pod = (
+            renderer._head_pod(base)
+            if role == "head"
+            else renderer._worker_pod(base)
+        )
+        if bad_value is None:
+          pod.pop("priorityClassName")
+        else:
+          pod["priorityClassName"] = bad_value
+        with self.assertRaisesRegex(ValueError, "priority class drifted"):
+          renderer.render_jobset(base, spec, _SOURCE_COMMIT, _RUN_ID)
 
 
 if __name__ == "__main__":

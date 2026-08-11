@@ -21,12 +21,26 @@ committed, pushed, read back at the exact SHA, and the 256-device experiment is 
 - Gold whitelist on the mounted PVC, plus its lowercase SHA-256 digest.
 - CPU and TPU node-pool names and the model/output PVC name.
 - A new 1-16 character lowercase run id for every manifest.
+- A cluster-scoped `very-high` PriorityClass with value `1000` and
+  `PreemptLowerPriority`; both Pathways head and worker Pods use it.
 
 The Kubernetes `HF_TOKEN` and `WANDB_API_KEY` secret references are inherited from the reviewed
 base manifest. The renderer never accepts secret values and `00_env.sh` never writes either token
 to the resolved environment file.
 
 ## Render one immutable stage
+
+First perform the read-only priority preflight on the DeepSWE cluster:
+
+```bash
+kubectl get priorityclass very-high \
+  -o jsonpath='{.metadata.name}{" value="}{.value}{" policy="}{.preemptionPolicy}{"\n"}'
+```
+
+The required result is exactly
+`very-high value=1000 policy=PreemptLowerPriority`. Missing or different output
+stops the launch; this runbook does not create or mutate cluster scheduling
+policy.
 
 ```bash
 python3 canon-zero-tim/cluster/render_p34_jobset.py \
@@ -83,6 +97,9 @@ unless the entire backward-no-commit contract completes.
   path. This is defense in depth for non-DeepSWE contexts, not the supply
   route.
 - JobSet restart count, head backoff, worker backoff, and pod restart are all zero.
+- Pathways head and worker Pods both retain `priorityClassName: very-high`; the
+  renderer rejects missing or mismatched values. Priority does not replace the
+  separate IFRT readiness/session admission gate.
 - The Pathways 4x8x8 slice is divided by physical coordinates into two host-complete 2x8x8 roles.
 - Each role is logical DP16xTP8; parameters are replicated over DP and sharded only over TP.
 - `CANON_LOGPROB_M=256`, `MIN_TOKEN_BUCKET=4096`, and `CANON_VJP2_MAX_SEQS=1` are distinct signed
