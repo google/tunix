@@ -17,6 +17,7 @@
 import asyncio
 from absl.testing import absltest
 from flax import nnx
+import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.generate import sampler as generate_sampler_lib
@@ -59,6 +60,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
     self.assertEqual(response.request_id, "req_01")
     self.assertIsNotNone(response.text)
+    self.assertGreater(response.prompt_token_ids.size, 0)
 
   def test_sampling_request_with_logprobs(self):
     req = base_sampler_lib.SamplingRequest(
@@ -101,6 +103,8 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     self.assertEqual(responses[1].request_id, "req_b")
     self.assertIsNotNone(responses[0].text)
     self.assertIsNotNone(responses[1].text)
+    self.assertGreater(responses[0].prompt_token_ids.size, 0)
+    self.assertGreater(responses[1].prompt_token_ids.size, 0)
 
   def test_construct_with_integer_cache_size(self):
     sampler_adapter_direct = vanilla_sampler_adapter.VanillaSamplerAdapter(
@@ -121,6 +125,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
     self.assertEqual(response.request_id, "req_direct")
     self.assertIsNotNone(response.text)
+    self.assertEqual(response.prompt_token_ids.dtype, np.int32)
 
   def test_uninitialized_sampler_raises(self):
     uninit_sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(

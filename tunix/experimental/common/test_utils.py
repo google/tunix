@@ -175,27 +175,38 @@ class MockBaseSamplerImpl(sampler_lib.VanillaSamplerAdapter):
     delay = kwargs.get("delay_seconds", self.default_delay)
     await asyncio.sleep(delay)
 
-    req_id_str = "default"
-    if (
-        hasattr(sampling_requests, "request_id")
-        and sampling_requests.request_id
-    ):
-      req_id_str = str(sampling_requests.request_id)
-    turn = self._turn_counters.get(req_id_str, 0)
-    self._turn_counters[req_id_str] = turn + 1
+    is_sequence = isinstance(sampling_requests, (list, tuple))
+    requests = list(sampling_requests) if is_sequence else [sampling_requests]
+    responses = []
+    for req in requests:
+      request_kwargs = dict(kwargs)
+      request_kwargs.update(getattr(req, "metadata", {}) or {})
+      req_id_str = "default"
+      if hasattr(req, "request_id") and req.request_id:
+        req_id_str = str(req.request_id)
+      prompt = getattr(req, "prompt", req)
+      turn = self._turn_counters.get(req_id_str, 0)
+      self._turn_counters[req_id_str] = turn + 1
 
-    min_turns = kwargs.get("min_turns", 1)
-    if turn >= min_turns or kwargs.get("force_finish", False):
-      ans = kwargs.get("answer", f"result_for_{req_id_str}")
-      txt = f"FINAL_ANSWER: [{self.sampler_name}] {ans}"
-    else:
-      txt = f"TOOL_CALL: search(query='turn {turn} for {req_id_str}')"
-    tokens = np.array([101, 102], dtype=np.int32)
-    return base_sampler_lib.SamplingResponse(
-        text=txt,
-        token_ids=tokens,
-        logprobs=np.zeros_like(tokens, dtype=np.float32),
-    )
+      min_turns = request_kwargs.get("min_turns", 1)
+      if turn >= min_turns or request_kwargs.get("force_finish", False):
+        ans = request_kwargs.get("answer", f"result_for_{req_id_str}")
+        txt = f"FINAL_ANSWER: [{self.sampler_name}] {ans}"
+      else:
+        txt = f"TOOL_CALL: search(query='turn {turn} for {req_id_str}')"
+      tokens = np.array([101, 102], dtype=np.int32)
+      responses.append(
+          base_sampler_lib.SamplingResponse(
+              request_id=req_id_str,
+              text=txt,
+              prompt_token_ids=np.asarray(
+                  self.tokenizer.encode(str(prompt)), dtype=np.int32
+              ),
+              token_ids=tokens,
+              logprobs=np.zeros_like(tokens, dtype=np.float32),
+          )
+      )
+    return responses if is_sequence else responses[0]
 
   async def migrate_kv_cache(
       self,

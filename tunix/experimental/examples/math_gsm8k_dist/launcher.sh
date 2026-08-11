@@ -431,9 +431,6 @@ ORCHESTRATOR_CMD=(
 if [[ -n "$INFERENCE_ADDR" ]]; then
   ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
 fi
-if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
-  ORCHESTRATOR_CMD+=(--sync_lora_weights)
-fi
 print_command "Orchestrator command" PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}"
 PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1 || {
   exit_code="$?"

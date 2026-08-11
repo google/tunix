@@ -15,6 +15,7 @@
 """Vanilla Sampler adapter using Tunix JAX Sampler."""
 
 import abc
+import numbers
 from typing import Any, List, Sequence
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
@@ -112,6 +113,19 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
           f"VanillaSamplerAdapter [{self.server_id}] requires a sampler"
           " instance or transformer + tokenizer."
       )
+
+  def _unpadded_prompt_tokens(self, padded_tokens: Any) -> np.ndarray:
+    """Returns sampler-tokenized prompt ids without backend left padding."""
+    arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
+    pad_id = getattr(self.tokenizer, "pad_token_id", None)
+    if pad_id is None:
+      pad_id = getattr(self.tokenizer, "eos_token_id", None)
+    if not isinstance(pad_id, numbers.Integral):
+      return arr
+    non_pad = np.flatnonzero(arr != pad_id)
+    if non_pad.size == 0:
+      return np.zeros(0, dtype=np.int32)
+    return arr[non_pad[0] :]
 
   # --- Lifecycle & Topology ---
   async def start(self, **kwargs) -> str | None | Any:
@@ -259,12 +273,16 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
           if toks is not None
           else np.zeros(0, dtype=np.int32)
       )
+      prompt_token_ids = self._unpadded_prompt_tokens(
+          sampler_output.padded_prompt_tokens[i]
+      )
       log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
 
       responses.append(
           base_sampler_lib.SamplingResponse(
               request_id=req_id,
               text=txt,
+              prompt_token_ids=prompt_token_ids,
               token_ids=tok_ids,
               logprobs=log_ps,
               finish_reason="stop",

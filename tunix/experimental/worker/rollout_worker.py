@@ -90,7 +90,7 @@ class RolloutWorker(abstract_worker.Worker):
     )
 
   @property
-  def sampler(self) -> Any:
+  def sampler(self) -> sampler_lib.Sampler:
     return self.manager.sampler
 
   def get_worker_id(self) -> str:
@@ -100,7 +100,7 @@ class RolloutWorker(abstract_worker.Worker):
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
         worker_id=self.worker_id,
-        roles=frozenset({"rollout", "sampling", "weight_sync"}),
+        roles=frozenset({"rollout"}),
         resources={
             "sampler": type(self.sampler).__name__,
             "policy_version": self._policy_version,
@@ -109,9 +109,7 @@ class RolloutWorker(abstract_worker.Worker):
 
   def initialize(self) -> datatypes.Response:
     self.state = WorkerState.INITIALIZING
-    initialize = getattr(self.sampler, "initialize", None)
-    if callable(initialize):
-      initialize()
+    self.sampler.initialize()
     try:
       return datatypes.Response(
           metadata={
@@ -170,29 +168,28 @@ class RolloutWorker(abstract_worker.Worker):
         queue_depth=self.manager._completed_queue.qsize(),  # pylint: disable=protected-access
     )
 
-  def _encode_prompt(self, prompt: str) -> np.ndarray:
-    try:
-      token_ids = self.manager.tokenizer.encode(
-          prompt, add_special_tokens=False
-      )
-    except TypeError:
-      token_ids = self.manager.tokenizer.encode(prompt)
-    return np.asarray(token_ids, dtype=np.int32)
-
-  def _left_padded_prompt_tokens(self, prompts: Sequence[str]) -> np.ndarray:
-    encoded = [self._encode_prompt(prompt) for prompt in prompts]
+  def _left_pad_prompt_token_ids(
+      self, prompt_token_ids: Sequence[np.ndarray]
+  ) -> np.ndarray:
     pad_id = getattr(self.manager.tokenizer, "pad_token_id", None)
     if pad_id is None:
       pad_id = getattr(self.manager.tokenizer, "eos_token_id", 0) or 0
     configured_len = (
         getattr(self.config, "max_prompt_length", 0) if self.config else 0
     )
-    max_len = max([1, configured_len] + [len(ids) for ids in encoded])
-    padded = np.full((len(prompts), max_len), pad_id, dtype=np.int32)
-    for i, ids in enumerate(encoded):
+    max_len = max([1, configured_len] + [len(ids) for ids in prompt_token_ids])
+    padded = np.full((len(prompt_token_ids), max_len), pad_id, dtype=np.int32)
+    for i, ids in enumerate(prompt_token_ids):
       if ids.size:
         padded[i, -min(ids.size, max_len) :] = ids[-max_len:]
     return padded
+
+  def _as_sampling_response_list(
+      self, responses: Any
+  ) -> list[sampler_lib.SamplingResponse]:
+    if isinstance(responses, (list, tuple)):
+      return list(responses)
+    return [responses]
 
   async def sample_prompts(
       self,
@@ -239,15 +236,26 @@ class RolloutWorker(abstract_worker.Worker):
         )
         for i, prompt in enumerate(prompt_list)
     ]
-    responses = await self.sampler.sample(requests)
-    if not isinstance(responses, (list, tuple)):
-      responses = [responses]
+    responses = self._as_sampling_response_list(
+        await self.sampler.sample(requests)
+    )
+    if len(responses) != len(prompt_list):
+      raise RuntimeError(
+          f"Sampler returned {len(responses)} responses for"
+          f" {len(prompt_list)} prompts."
+      )
+    prompt_token_ids = [
+        np.asarray(response.prompt_token_ids, dtype=np.int32).reshape(-1)
+        for response in responses
+    ]
 
     return base_rollout.RolloutOutput(
         text=[response.text for response in responses],
         logits=None,
         tokens=[response.token_ids for response in responses],
-        left_padded_prompt_tokens=self._left_padded_prompt_tokens(prompt_list),
+        left_padded_prompt_tokens=self._left_pad_prompt_token_ids(
+            prompt_token_ids
+        ),
         logprobs=(
             [response.logprobs for response in responses]
             if return_logprobs
@@ -297,6 +305,7 @@ class RolloutWorker(abstract_worker.Worker):
       self,
       request: datatypes.RolloutRequest,
       text: str,
+      prompt_tokens: Any,
       token_ids: Any,
       logprobs: Any | None,
   ) -> datatypes.RolloutResponse:
@@ -307,15 +316,24 @@ class RolloutWorker(abstract_worker.Worker):
         if logprobs is not None
         else None
     )
-    if completion_logps is not None and completion_logps.shape != completion_tokens.shape:
+    if (
+        completion_logps is not None
+        and completion_logps.shape != completion_tokens.shape
+    ):
       completion_logps = None
+    prompt_token_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
+    if prompt_token_arr.size == 0:
+      raise RuntimeError(
+          "Sampler response is missing prompt_token_ids for "
+          f"{request.request_id or request.traj_id}."
+      )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
     return datatypes.RolloutResponse(
         request_id=request.request_id or request.traj_id,
         prompt_id=request.prompt_id,
         status="COMPLETED",
-        prompt_tokens=self._encode_prompt(str(request.prompt)),
+        prompt_tokens=prompt_token_arr,
         segments=[
             datatypes.TokenSegment(
                 source="assistant",
@@ -335,16 +353,43 @@ class RolloutWorker(abstract_worker.Worker):
       **generation_kwargs,
   ) -> list[datatypes.RolloutResponse]:
     """Runs RolloutRequest batches through the direct string sampler."""
-    prompts = [str(req.prompt) for req in requests]
-    sample_kwargs = dict(requests[0].generation_kwargs) if requests else {}
-    sample_kwargs.update(generation_kwargs)
-    output = await self.sample_prompts(prompts, **sample_kwargs)
+    config = self.config or base_rollout.RolloutConfig()
+    sampling_requests = []
+    for req in requests:
+      sample_kwargs = dict(req.generation_kwargs)
+      sample_kwargs.update(generation_kwargs)
+      sampling_requests.append(
+          sampler_lib.SamplingRequest(
+              request_id=req.request_id or req.traj_id,
+              prompt=req.prompt,
+              metadata=sample_kwargs,
+              sampling_params=sampler_lib.SamplingParams(
+                  max_tokens=sample_kwargs.get(
+                      "max_generation_steps", config.max_tokens_to_generate
+                  ),
+                  temperature=sample_kwargs.get("temperature", config.temperature),
+                  top_p=sample_kwargs.get("top_p", config.top_p),
+                  top_k=sample_kwargs.get("top_k", config.top_k),
+                  seed=sample_kwargs.get("seed", config.seed),
+                  return_logprobs=sample_kwargs.get("return_logprobs", True),
+              ),
+          )
+      )
+    responses = self._as_sampling_response_list(
+        await self.sampler.sample(sampling_requests)
+    )
+    if len(responses) != len(requests):
+      raise RuntimeError(
+          f"Sampler returned {len(responses)} responses for"
+          f" {len(requests)} rollout requests."
+      )
     return [
         self._sampling_to_rollout_response(
             request=req,
-            text=output.text[i],
-            token_ids=output.tokens[i],
-            logprobs=output.logprobs[i] if output.logprobs is not None else None,
+            text=responses[i].text,
+            prompt_tokens=responses[i].prompt_token_ids,
+            token_ids=responses[i].token_ids,
+            logprobs=responses[i].logprobs,
         )
         for i, req in enumerate(requests)
     ]

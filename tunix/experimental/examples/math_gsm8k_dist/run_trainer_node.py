@@ -315,13 +315,9 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.compile(*args, **kwargs)
 
-  def prepare_weight_sync(self, **kwargs) -> None:
+  def prepare_weight_sync(self, **kwargs) -> Any:
     with self._mesh:
-      self._trainer.prepare_weight_sync(**kwargs)
-
-  def get_lora_weights(self) -> Any:
-    with self._mesh:
-      return self._trainer.get_lora_weights()
+      return self._trainer.prepare_weight_sync(**kwargs)
 
   def close(self) -> None:
     with self._mesh:

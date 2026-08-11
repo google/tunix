@@ -176,6 +176,15 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_sync_weights_requires_weight_sync_metadata(self):
+    async def _run():
+      self.mock_actor.prepare_weight_sync.return_value = datatypes.Response()
+
+      with self.assertRaisesRegex(RuntimeError, "WeightSyncMetadata"):
+        await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+
+    asyncio.run(_run())
+
   def test_balancer_prefix_routing(self):
 
     async def _run():

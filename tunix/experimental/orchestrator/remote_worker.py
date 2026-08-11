@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import logging
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -137,8 +136,6 @@ class RemoteActorWorker(abstract_worker.Worker):
   async def asubmit(
       self, method_name: str, *args: Any, **kwargs: Any
   ) -> Any:
-    if method_name == "prepare_weight_sync":
-      return await self._prepare_weight_sync(*args, **kwargs)
     if (
         method_name == "per_token_logps"
         and datatypes.Role.REFERENCE.value in self._roles
@@ -161,22 +158,6 @@ class RemoteActorWorker(abstract_worker.Worker):
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> Any:
     return await self._handle.poll_responses(timeout_s=timeout_s)
-
-  async def _prepare_weight_sync(self, *args: Any, **kwargs: Any) -> Any:
-    metadata = await self._handle.asubmit(
-        "prepare_weight_sync", *args, **kwargs
-    )
-    if isinstance(metadata, datatypes.WeightSyncMetadata):
-      return metadata
-    weights = await self._handle.asubmit("get_lora_weights")
-    policy_version = getattr(metadata, "new_policy_version", None)
-    if policy_version is None and isinstance(metadata, datatypes.Response):
-      policy_version = int(metadata.metadata.get("policy_version", 0)) + 1
-    return SimpleNamespace(
-        weights=weights,
-        metadata=metadata,
-        new_policy_version=int(policy_version or 1),
-    )
 
   def _require_logps_config(self) -> tuple[int, int, int, int]:
     pad_id = self._pad_id

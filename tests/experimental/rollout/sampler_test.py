@@ -25,6 +25,7 @@ def _sample_response() -> base_sampler_lib.SamplingResponse:
   return base_sampler_lib.SamplingResponse(
       request_id="sample-req-1",
       text="Hello from Tunix sampler!",
+      prompt_token_ids=np.array([1, 2], dtype=np.int32),
       token_ids=np.array([101, 102, 103], dtype=np.int32),
       logprobs=np.array([-0.1, -0.2, -0.05], dtype=np.float32),
       finish_reason="stop",
@@ -104,6 +105,9 @@ class SamplerTest(absltest.TestCase):
     self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNone(restored.error)
     np.testing.assert_array_equal(restored.token_ids, original.token_ids)
+    np.testing.assert_array_equal(
+        restored.prompt_token_ids, original.prompt_token_ids
+    )
     np.testing.assert_allclose(restored.logprobs, original.logprobs)
     np.testing.assert_array_equal(
         restored.routed_experts, original.routed_experts

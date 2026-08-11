@@ -341,6 +341,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if trainer is None:
       return 0
     sync_metadata = await self._invoke_worker(trainer, "prepare_weight_sync")
+    if not isinstance(sync_metadata, datatypes.WeightSyncMetadata):
+      raise RuntimeError(
+          "prepare_weight_sync must return WeightSyncMetadata; got "
+          f"{type(sync_metadata).__name__}."
+      )
     tasks = [
         self._invoke_worker(w, "weight_sync", metadata=sync_metadata)
         for w in self._rollout_workers

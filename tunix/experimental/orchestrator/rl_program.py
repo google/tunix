@@ -27,13 +27,16 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 
+RewardFn = Callable[[datatypes.TrajectoryItem], float]
+
 
 class RLProgram(Protocol):
   """Standard contract for RL training programs running on ClusterOrchestrator."""
+
   def run(
       self,
       engine: rl_engine_interface.AbstractRLEngine | None = None,
-      train_dataset: Iterable[Any] | None = None,
+      train_dataset: Iterable[Sequence[datatypes.RolloutRequest]] | None = None,
       num_steps: int | None = None,
       **kwargs: Any,
   ) -> Any:
@@ -67,13 +70,8 @@ class RLStepResult:
   train_result: Any
 
 
-def _default_reward(item: Any) -> float:
-  if hasattr(item, "env_reward"):
-    return float(getattr(item, "env_reward", 0.0))
-  traj = getattr(item, "traj", None)
-  if traj is not None:
-    return float(getattr(traj, "reward", 0.0) or 0.0)
-  return 0.0
+def _default_reward(item: datatypes.TrajectoryItem) -> float:
+  return float(getattr(item.traj, "reward", 0.0) or 0.0)
 
 
 class SyncRLProgram:
@@ -83,7 +81,7 @@ class SyncRLProgram:
       self,
       algo: algorithm_adapter.AlgorithmAdapter,
       engine: rl_engine_interface.AbstractRLEngine | None = None,
-      reward_fns: Sequence[Callable[..., Any]] | None = None,
+      reward_fns: Sequence[RewardFn] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
@@ -99,6 +97,7 @@ class SyncRLProgram:
     self.on_step_end = on_step_end
     self.sync_weights = sync_weights
     self.policy_version = 0
+    # Debug/observability hook for examples and tests; not training state.
     self.last_step_result: RLStepResult | None = None
 
   @property
@@ -118,7 +117,7 @@ class SyncRLProgram:
 
   def step_once(
       self,
-      prompts: Sequence[Any],
+      prompts: Sequence[datatypes.RolloutRequest],
       engine: rl_engine_interface.AbstractRLEngine | None = None,
       **kwargs: Any,
   ) -> Any:
@@ -134,7 +133,11 @@ class SyncRLProgram:
     # 2. Evaluate rewards
     rewards = []
     for item in rollouts:
-      r = sum(fn(item) for fn in self.reward_fns) if self.reward_fns else _default_reward(item)
+      r = (
+          sum(fn(item) for fn in self.reward_fns)
+          if self.reward_fns
+          else _default_reward(item)
+      )
       rewards.append(float(r))
 
     # 3. Create RLTrainerPayloads via AlgorithmAdapter
@@ -170,10 +173,12 @@ class SyncRLProgram:
       new_version = _sync_or_async(
           active_engine.sync_weights(role=datatypes.Role.ACTOR)
       )
-      if isinstance(new_version, int) and new_version > current_step:
-        self.policy_version = new_version
-      else:
-        self.policy_version = current_step + 1
+      if not isinstance(new_version, int) or new_version <= current_step:
+        raise RuntimeError(
+            "sync_weights must return a monotonically increasing int policy "
+            f"version; got {new_version!r} at step {current_step}."
+        )
+      self.policy_version = new_version
     else:
       self.policy_version = current_step + 1
 
@@ -194,7 +199,7 @@ class SyncRLProgram:
 
   def eval_step_once(
       self,
-      prompts: Sequence[Any],
+      prompts: Sequence[datatypes.RolloutRequest],
       engine: rl_engine_interface.AbstractRLEngine | None = None,
       **kwargs: Any,
   ) -> list[datatypes.RLTrainerPayload]:
@@ -202,7 +207,11 @@ class SyncRLProgram:
     active_engine = self._resolve_engine(engine)
     rollouts = _sync_or_async(active_engine.generate(prompts=prompts, **kwargs))
     rewards = [
-        sum(fn(item) for fn in self.reward_fns) if self.reward_fns else _default_reward(item)
+        (
+            sum(fn(item) for fn in self.reward_fns)
+            if self.reward_fns
+            else _default_reward(item)
+        )
         for item in rollouts
     ]
     return self.algo.create_trainer_payloads(rollouts, rewards=rewards)
@@ -210,7 +219,7 @@ class SyncRLProgram:
   def run(
       self,
       engine: rl_engine_interface.AbstractRLEngine | None = None,
-      train_dataset: Iterable[Sequence[Any]] | None = None,
+      train_dataset: Iterable[Sequence[datatypes.RolloutRequest]] | None = None,
       num_steps: int | None = None,
       **kwargs: Any,
   ) -> None:

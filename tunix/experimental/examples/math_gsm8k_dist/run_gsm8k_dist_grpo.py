@@ -129,7 +129,6 @@ def _parse_args() -> argparse.Namespace:
       help="synthetic proves the distributed chain without relying on quality.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
-  parser.add_argument("--sync_lora_weights", action="store_true")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   return parser.parse_args()
 
@@ -327,7 +326,9 @@ def _build_step_requests(
   return requests
 
 
-def _iter_request_batches(args: argparse.Namespace) -> Iterator[list[Any]]:
+def _iter_request_batches(
+    args: argparse.Namespace,
+) -> Iterator[list[datatypes.RolloutRequest]]:
   top_k = None if args.top_k < 0 else args.top_k
   for step in range(args.max_steps):
     yield _build_step_requests(
@@ -404,7 +405,7 @@ def main() -> None:
           max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
-      sync_weights=args.sync_lora_weights,
+      sync_weights=False,
       on_step_begin=lambda step: logging.info("GRPO step %d starting.", step),
       on_step_end=lambda step, result: logging.info(
           "GRPO advanced to policy_version=%d train_result=%s.", step, result

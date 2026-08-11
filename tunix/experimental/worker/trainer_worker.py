@@ -250,29 +250,21 @@ class TrainerWorker(abstract_worker.Worker):
     """Restore state from latest checkpoint and return the metadata pytree."""
     return self._trainer.restore_checkpoint(**kwargs)
 
-  def prepare_weight_sync(self, **kwargs) -> datatypes.Response:
-    """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
+  def prepare_weight_sync(self, **kwargs) -> Any:
+    """Stages weights for transfer and returns coordinates/metadata."""
     self._ensure_ready()
     self.state = WorkerState.SYNCING
     try:
-      self._trainer.prepare_weight_sync(**kwargs)
+      metadata = self._trainer.prepare_weight_sync(**kwargs)
       self.state = WorkerState.READY
       self._last_error = None
+      if metadata is not None:
+        return metadata
       return self._response(weight_sync_ready=True)
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
-
-  def get_lora_weights(self) -> Any:
-    """Returns staged LoRA weights for rollout workers to consume."""
-    self._ensure_ready()
-    get_lora_weights = getattr(self._trainer, "get_lora_weights", None)
-    if not callable(get_lora_weights):
-      raise AttributeError(
-          f"{type(self._trainer).__name__} does not expose get_lora_weights()."
-      )
-    return get_lora_weights()
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
