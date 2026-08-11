@@ -1121,3 +1121,27 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - `split_4x8x8_role_devices` intercepted with `ValueError: P34 physical half split crosses host boundaries: processes=[0]`.
    - **Root Cause**:
      - The client process connected to the IFRT proxy server at `localhost:29000` but observed only 1 CPU device (`CpuDevice(id=0)`), rather than the 256 TPU devices on the 4x8x8 slice.
+
+---
+
+## 43. Phase 38.3 Attempt `p38e5`: 64-Chip GSM8K Full Training & Step 0 Optimizer Completion (Qwen3-1.7B DP16xTP4)
+
+- `debug_logs/p38_p38e5_gsm8k_full.raw.log` (SHA-256: `ecf859858dcfbd387060c830fc74a5e3b7649df2bb26a72646cc5cf094b00b09`)
+- Target Commit: `036e845a599814d70c66d5562e631fe8330e7e93` (*Document Phase 38 FrozenLake mismatch capsule in README Section 40*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes, physical slice `671bae94`)
+
+### Execution & Diagnostic Summary:
+
+1. **Step 0 Full Training & Schedule-Aware Optimizer Transaction (PASS)**:
+   - 256 rollout prompts decoded and processed across 16 DP ranks.
+   - All 16 microsteps passed with exact bitwise equality:
+     - `verdict=PASS`, 0 differing tokens across `S_decode_vs_S_prefill`, `S_prefill_vs_T_old`, and `T_old_vs_T_current`.
+     - `replicas_exact=1` on all 16 DP replica gradient pullbacks.
+   - Optimizer transaction committed: 310 parameter arrays (6.88 GB) offloaded to pinned host memory (`[P30.G1] OPT_STATE after_commit memory_kind=pinned_host`).
+
+2. **Step 1 Pre-Backward Alignment Gate Interception**:
+   - `S_prefill_vs_T_old`: **0 differing tokens out of 195,167 action tokens (100% Bitwise Equal)**. Zero learner-rollout weight synchronization drift.
+   - `S_decode_vs_S_prefill`: **85 differing tokens out of 195,167 action tokens (99.96% element agreement)** across multi-turn long completions.
+   - Fail-closed gate (`CANON_PRE_ALIGN_GATE=1`) intercepted execution prior to backward pass:
+     - Pre-alignment evidence: `pre_alignment.jsonl` (SHA-256: `5e8b98c392aae52fbe444deabfb1c6c3b9e517768cd545619b624837c2df75be`).
