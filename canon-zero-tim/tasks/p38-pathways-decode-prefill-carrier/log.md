@@ -259,3 +259,16 @@
   admission measurements, not local PASS claims.
 - Status: working tree is ready for review. No commit, push, cloud lifecycle
   action, precision change, prefix-cache change, or training launch occurred.
+
+## 2026-08-11 UTC — P38.2e/P38.2f publication
+
+- Type: source publication after explicit user continuation.
+- Commits: `4933c57f` schedule-aware transaction, `33391d2c` bounded
+  mismatch capsule, and `1ff24684` phase/handoff record.
+- Remote: fast-forwarded `yuxzhang/canon-zero-tim` from `1a9310f3` to
+  `1ff24684`; main was not checked out or modified.
+- Verification before publication: complete P33 CPU gate, exact-image gate,
+  diff/syntax/English-executable/credential scans all passed.
+- Next: target operator pulls `1ff24684`, runs GSM8K full plus FrozenLake
+  backward-no-commit only, and verifies the recovered capsule before another
+  FrozenLake run.
