@@ -12,7 +12,7 @@ def main() -> None:
     raise RuntimeError("canonical DeepSWE entrypoint requires CANON_P34_DEEPSWE=1")
   if os.environ.get("CANON_PATHWAYS_INITIALIZED", ""):
     raise RuntimeError("Pathways was initialized before the canonical entrypoint")
-  if os.environ.get("JAX_PLATFORMS", "") == "proxy":
+  if "proxy" in os.environ.get("JAX_PLATFORMS", "").split(","):
     import pathwaysutils
 
     pathwaysutils.initialize()
