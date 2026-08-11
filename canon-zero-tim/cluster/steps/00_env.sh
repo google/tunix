@@ -237,6 +237,8 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P34_DISABLE_SAMPLER_IS CANON_P34_DISABLE_TIS \
            CANON_PRE_ALIGN_GATE \
            CANON_P39_64CHIP_PILOT CANON_P39_PILOT_ADMITTED \
+           CANON_P43_DEEPSWE_DEBUG CANON_P43_DEBUG_ADMITTED \
+           CANON_P43_ROLLOUT_ONLY \
            CANON_OPT_STATE_RESIDENT CANON_P30_OPT_STATE_OFFLOAD \
            CANON_DEEPSWE_ALIGNMENT_WARN_ONLY \
            CANON_TRAIN_DP_SHARDING FL_SHARED_MESH \
@@ -250,50 +252,107 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P34_MAX_NUM_SEQS CANON_P34_MAX_BATCHED_TOKENS; do
     positive_int "$k"
   done
-  case "${CANON_P39_64CHIP_PILOT:-}" in
-    0)
-      p34_expected_dp=16
-      p34_expected_devices=128
-      p34_expected_local_trajectories=4
-      p34_expected_global_m=4096
-      p34_expected_max_seqs=4
-      p34_expected_mesh=16,8
-      [ "${CANON_P39_PILOT_ADMITTED:-}" = "0" ] || {
-        echo "[env] production P34 requires CANON_P39_PILOT_ADMITTED=0" >&2
-        fail=1
-      }
-      ;;
-    1)
-      p34_expected_dp=4
-      p34_expected_devices=32
-      p34_expected_local_trajectories=16
-      p34_expected_global_m=1024
-      p34_expected_max_seqs=16
-      p34_expected_mesh=4,8
-      [ "${CANON_P39_PILOT_ADMITTED:-}" = "1" ] || {
-        echo "[env] P39 pilot requires CANON_P39_PILOT_ADMITTED=1" >&2
-        fail=1
-      }
-      [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
-        echo "[env] P39 pilot requires device-resident optimizer state" >&2
-        fail=1
-      }
-      [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
-        echo "[env] P39 pilot requires the preregistered alignment warning policy" >&2
-        fail=1
-      }
-      ;;
+  case "${CANON_P43_DEEPSWE_DEBUG:-}" in
+    0) ;;
+    1) ;;
     *)
-      echo "[env] CANON_P39_64CHIP_PILOT must be exactly 0 or 1" >&2
+      echo "[env] CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1" >&2
       fail=1
-      p34_expected_dp=0
-      p34_expected_devices=0
-      p34_expected_local_trajectories=0
-      p34_expected_global_m=0
-      p34_expected_max_seqs=0
-      p34_expected_mesh=invalid
       ;;
   esac
+  if [ "${CANON_P43_DEEPSWE_DEBUG:-}" = "1" ]; then
+    [ "${CANON_P39_64CHIP_PILOT:-}:${CANON_P39_PILOT_ADMITTED:-}" = "0:0" ] || {
+      echo "[env] P43 debug cannot overlap the P39 pilot" >&2
+      fail=1
+    }
+    [ "${CANON_P43_DEBUG_ADMITTED:-}" = "1" ] || {
+      echo "[env] P43 debug requires CANON_P43_DEBUG_ADMITTED=1" >&2
+      fail=1
+    }
+    p34_expected_dp=4
+    p34_expected_devices=32
+    p34_expected_prompts=4
+    p34_expected_generations=4
+    p34_expected_global_trajectories=16
+    p34_expected_local_trajectories=4
+    p34_expected_global_m=1024
+    p34_expected_max_seqs=4
+    p34_expected_mesh=4,8
+    [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
+      echo "[env] P43 debug requires device-resident optimizer state" >&2
+      fail=1
+    }
+    [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
+      echo "[env] P43 debug requires the preregistered alignment warning policy" >&2
+      fail=1
+    }
+    case "${CANON_P43_DEBUG_DIR:-}" in
+      /*) ;;
+      *) echo "[env] P43 debug artifact directory must be absolute" >&2; fail=1 ;;
+    esac
+  else
+    [ "${CANON_P43_DEBUG_ADMITTED:-}" = "0" ] || {
+      echo "[env] non-P43 runs require CANON_P43_DEBUG_ADMITTED=0" >&2
+      fail=1
+    }
+    [ "${CANON_P43_ROLLOUT_ONLY:-}" = "0" ] || {
+      echo "[env] non-P43 runs require CANON_P43_ROLLOUT_ONLY=0" >&2
+      fail=1
+    }
+    case "${CANON_P39_64CHIP_PILOT:-}" in
+      0)
+        p34_expected_dp=16
+        p34_expected_devices=128
+        p34_expected_prompts=8
+        p34_expected_generations=8
+        p34_expected_global_trajectories=64
+        p34_expected_local_trajectories=4
+        p34_expected_global_m=4096
+        p34_expected_max_seqs=4
+        p34_expected_mesh=16,8
+        [ "${CANON_P39_PILOT_ADMITTED:-}" = "0" ] || {
+          echo "[env] production P34 requires CANON_P39_PILOT_ADMITTED=0" >&2
+          fail=1
+        }
+        ;;
+      1)
+        p34_expected_dp=4
+        p34_expected_devices=32
+        p34_expected_prompts=8
+        p34_expected_generations=8
+        p34_expected_global_trajectories=64
+        p34_expected_local_trajectories=16
+        p34_expected_global_m=1024
+        p34_expected_max_seqs=16
+        p34_expected_mesh=4,8
+        [ "${CANON_P39_PILOT_ADMITTED:-}" = "1" ] || {
+          echo "[env] P39 pilot requires CANON_P39_PILOT_ADMITTED=1" >&2
+          fail=1
+        }
+        [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
+          echo "[env] P39 pilot requires device-resident optimizer state" >&2
+          fail=1
+        }
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
+          echo "[env] P39 pilot requires the preregistered alignment warning policy" >&2
+          fail=1
+        }
+        ;;
+      *)
+        echo "[env] CANON_P39_64CHIP_PILOT must be exactly 0 or 1" >&2
+        fail=1
+        p34_expected_dp=0
+        p34_expected_devices=0
+        p34_expected_prompts=0
+        p34_expected_generations=0
+        p34_expected_global_trajectories=0
+        p34_expected_local_trajectories=0
+        p34_expected_global_m=0
+        p34_expected_max_seqs=0
+        p34_expected_mesh=invalid
+        ;;
+    esac
+  fi
   [ "${CANON_DP_SIZE:-}" = "$p34_expected_dp" ] && \
   [ "${CANON_TP_SIZE:-}" = "8" ] && \
   [ "${CANON_TOTAL_DEVICES:-}" = "$p34_expected_devices" ] || {
@@ -303,9 +362,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   [ "$((CANON_DP_SIZE * CANON_TP_SIZE))" -eq "$CANON_TOTAL_DEVICES" ] || {
     echo "[env] P34 arithmetic FAIL: dp*tp != role devices" >&2; fail=1;
   }
-  [ "${CANON_GLOBAL_PROMPTS:-}" = "8" ] && \
-  [ "${CANON_NUM_GENERATIONS:-}" = "8" ] && \
-  [ "${CANON_GLOBAL_TRAJECTORIES:-}" = "64" ] && \
+  [ "${CANON_GLOBAL_PROMPTS:-}" = "$p34_expected_prompts" ] && \
+  [ "${CANON_NUM_GENERATIONS:-}" = "$p34_expected_generations" ] && \
+  [ "${CANON_GLOBAL_TRAJECTORIES:-}" = "$p34_expected_global_trajectories" ] && \
   [ "${CANON_LOCAL_TRAJECTORIES:-}" = "$p34_expected_local_trajectories" ] || {
     echo "[env] P34 trajectory geometry does not match the selected contract" >&2
     fail=1
@@ -365,6 +424,10 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     echo "[env] P34 whitelist SHA256 OK: $CANON_P34_WHITELIST_SHA256"
   fi
   case "${CANON_P34_RUN_STAGE:-}" in
+    rollout-only)
+      [ "${CANON_P34_NO_COMMIT:-}" = "1" ] || {
+        echo "[env] P43 rollout-only requires no-commit=1" >&2; fail=1;
+      } ;;
     backward-no-commit)
       [ "${CANON_P34_NO_COMMIT:-}" = "1" ] || {
         echo "[env] P34 backward-no-commit requires no-commit=1" >&2; fail=1;
@@ -383,6 +446,18 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         fail=1
         ;;
     esac
+  fi
+  if [ "${CANON_P43_DEEPSWE_DEBUG:-}" = "1" ]; then
+    case "${CANON_P34_RUN_STAGE:-}:${CANON_P43_ROLLOUT_ONLY:-}" in
+      rollout-only:1|one-update:0|three-update:0) ;;
+      *)
+        echo "[env] P43 admits rollout-only, one-update, or three-update with exact rollout flag" >&2
+        fail=1
+        ;;
+    esac
+  elif [ "${CANON_P34_RUN_STAGE:-}" = "rollout-only" ]; then
+    echo "[env] rollout-only is admitted only for P43 debug" >&2
+    fail=1
   fi
   p34_admitted=0
   [ "${CANON_MODE:-}" = "run" ] && p34_admitted=1

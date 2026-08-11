@@ -1986,6 +1986,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
         )
 
+      if (
+          os.environ.get("CANON_P43_DEEPSWE_DEBUG", "") == "1"
+          and os.environ.get("CANON_P43_ROLLOUT_ONLY", "") == "1"
+      ):
+        print(
+            "[P43.ROLLOUT_ONLY] PASS trajectories=16 backward=0 "
+            "optimizer_commits=0",
+            flush=True,
+        )
+        prompt_queue.put(None)
+        _ = producer_future.result()
+        self.rl_cluster.close()
+        return
+
       # Capture the rollout-policy step before the segmented trainer mutates
       # actor_trainer.train_steps. Rollout weights are synchronized only after
       # the evaluation block, so this remains the authoritative eval step.

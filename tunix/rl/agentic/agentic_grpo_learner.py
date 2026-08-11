@@ -43,6 +43,7 @@ from tunix.rl import alignment
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
 from tunix.rl import deepswe_contract
+from tunix.rl import deepswe_debug
 from tunix.rl import envelope_probe
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -756,6 +757,51 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     logging.debug("Advantages computed: %s", advantages)
 
+    if deepswe_debug.enabled() and mode == rl_cluster_lib.Mode.TRAIN:
+      if expected_step is None:
+        raise ValueError("P43 debug artifacts require an expected step")
+      workload = deepswe_contract.active_workload(os.environ)
+      if workload.contract_name != "p43-64chip-debug":
+        raise ValueError("P43 debug artifacts require the P43 workload")
+      debug_metrics = deepswe_debug.persist_batch(
+          trajectories,
+          rewards,
+          advantages,
+          expected_step=int(expected_step),
+          output_dir=os.environ.get("CANON_P43_DEBUG_DIR", ""),
+          model_id=workload.model_id,
+      )
+      self.rl_cluster.buffer_metrics_async(
+          {
+              "deepswe/trajectory_solve_ratio": (
+                  debug_metrics["trajectory_solve_ratio"], np.mean
+              ),
+              "deepswe/complete_trajectory_ratio": (
+                  debug_metrics["complete_trajectories"] / 16, np.mean
+              ),
+              "deepswe/all_solved_prompt_ratio": (
+                  debug_metrics["all_solved_prompt_groups"] / 4, np.mean
+              ),
+              "deepswe/all_failed_prompt_ratio": (
+                  debug_metrics["all_failed_prompt_groups"] / 4, np.mean
+              ),
+              "deepswe/mixed_prompt_ratio": (
+                  debug_metrics["mixed_prompt_groups"] / 4, np.mean
+              ),
+              "deepswe/incomplete_prompt_ratio": (
+                  debug_metrics["incomplete_prompt_groups"] / 4, np.mean
+              ),
+              "deepswe/effective_prompt_ratio": (
+                  debug_metrics["effective_prompt_groups"] / 4, np.mean
+              ),
+              "deepswe/nonzero_advantage_ratio": (
+                  debug_metrics["nonzero_advantage_ratio"], np.mean
+              ),
+          },
+          mode=mode,
+          step=expected_step,
+      )
+
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
     # Log completion lengths, rewards and env time.
@@ -958,6 +1004,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         sampler_is_weights=sampler_is_weights,
         completion_valid_mask=completion_valid_mask,
     )
+    if (
+        deepswe_debug.enabled()
+        and os.environ.get("CANON_P43_ROLLOUT_ONLY", "") == "1"
+    ):
+      return [combined_batch]
     if alignment.enabled():
       if not self.algo_config.use_rollout_logps:
         raise alignment.AlignmentGateError(

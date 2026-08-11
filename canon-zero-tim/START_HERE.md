@@ -15,15 +15,16 @@ unrun; never promote a local package pass into a production numerical claim.
 It is packaging of work already done, not a new result. What is signed and what is not is in
 `EVIDENCE.md`; read that before repeating any claim from here.
 
-## Active handoff router (2026-08-10)
+## Active handoff router (2026-08-11)
 
-The current work is deliberately split into two evidence ledgers. Do not mix
+The current work is deliberately split into three evidence ledgers. Do not mix
 their manifests, artifacts, or promotion claims:
 
 | Workstream | Read first | Target allocation |
 |---|---|---|
 | P38 GSM8K/FrozenLake alignment | `tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md` | 64-chip Pathways |
 | P39 Qwen3-32B DeepSWE | `tasks/p39-deepswe-production/HANDOFF.md` | one 4x8x8 (256-device) Pathways slice |
+| P43 Qwen3-8B DeepSWE debug | `tasks/p43-deepswe-64-debug/HANDOFF.md` | one 4x4x4 (64-device) Pathways slice |
 
 The DeepSWE workload behavior is referenced from
 `yuxzhang/deepswe-quality-fix@023978b976dd6d94e7a42948c3f3a68e34d73744`,
@@ -53,6 +54,7 @@ but every target JobSet must fetch an exact published commit from
 | P33 FrozenLake and GSM8K production workloads | **R18 BOUNDARY 1 PASS; BOUNDARY 2 FAIL** — action-only serving decode and prefill are bitwise exact, while trainer-old is red. Do not rerun unchanged; use `cluster/P35_ENVELOPE_HANDOFF.md` to separate packing/metadata from wrapper/program context. |
 | P35 three-arm envelope discriminator | **MULTI-CHUNK REPAIR PUBLISHED; TARGET NOT RUN** — r24 confirmed the response-256 Splash repair but exposed a diagnostic-only one-chunk assumption before B. The repaired producer reconstructs complete multi-chunk B metadata; no 64-chip carrier verdict exists yet. |
 | P34 Qwen3-32B DeepSWE DP16×TP8 per role | **LOCAL PASS, TARGET NOT RUN** — role split, canonical M256 adapter, fixed DP16 reducer, renderer and classifier exist; no 4×8×8 workload artifact. |
+| P43 Qwen3-8B DeepSWE DP4×TP8 per role | **LOCAL + EXACT-IMAGE CPU PASS, TARGET NOT RUN** — rollout-only/one/three-update renderers, durable real-trajectory artifacts, grouped solve metrics, and a fail-closed classifier exist; no 4×4×4 workload artifact yet. |
 
 **Do not spend another 64-chip run repeating the bounded P32 admission.** Its model-init,
 backward and three-update systems gates have already passed, but they used a dense synthetic

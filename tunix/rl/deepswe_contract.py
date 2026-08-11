@@ -80,16 +80,23 @@ class DeepSWEWorkload:
 
   def validate(self) -> None:
     """Rejects any silent change to the first DeepSWE campaign."""
-    if self.model_id != "Qwen/Qwen3-32B":
-      raise ValueError("P34 requires Qwen/Qwen3-32B")
-    if (self.global_prompts, self.generations) != (8, 8):
-      raise ValueError("P34 requires 8 prompts and 8 generations")
     expected_topology = {
-        "p34-production": (16, 8, 128, 4, 4096, 4, 32768, 50, 1000),
-        "p39-64chip-pilot": (4, 8, 32, 16, 1024, 16, 4096, 5, 3),
+        "p34-production": (
+            "Qwen/Qwen3-32B", 8, 8, 16, 8, 128, 4, 4096, 4, 32768, 50,
+            1000,
+        ),
+        "p39-64chip-pilot": (
+            "Qwen/Qwen3-32B", 8, 8, 4, 8, 32, 16, 1024, 16, 4096, 5, 3,
+        ),
+        "p43-64chip-debug": (
+            "Qwen/Qwen3-8B", 4, 4, 4, 8, 32, 4, 1024, 4, 4096, 5, 3,
+        ),
     }
     try:
       (
+          expected_model,
+          expected_prompts,
+          expected_generations,
           expected_dp,
           expected_tp,
           expected_devices,
@@ -104,12 +111,26 @@ class DeepSWEWorkload:
       raise ValueError(
           f"unknown DeepSWE contract {self.contract_name!r}"
       ) from exc
+    if self.model_id != expected_model:
+      raise ValueError(
+          f"{self.contract_name} requires {expected_model}"
+      )
+    if (self.global_prompts, self.generations) != (
+        expected_prompts,
+        expected_generations,
+    ):
+      raise ValueError(
+          f"{self.contract_name} requires {expected_prompts} prompts and "
+          f"{expected_generations} generations"
+      )
+    expected_global_trajectories = expected_prompts * expected_generations
     if (
-        self.global_trajectories != 64
+        self.global_trajectories != expected_global_trajectories
         or self.local_trajectories != expected_local_trajectories
     ):
       raise ValueError(
-          f"{self.contract_name} requires 64 global and "
+          f"{self.contract_name} requires {expected_global_trajectories} "
+          "global and "
           f"{expected_local_trajectories} local trajectories"
       )
     if (self.dp_size, self.tp_size, self.devices_per_role) != (
@@ -213,17 +234,40 @@ P39_PILOT_WORKLOAD = DeepSWEWorkload(
     global_m=1024,
     max_num_seqs_per_dp=16,
 )
+P43_DEBUG_WORKLOAD = DeepSWEWorkload(
+    contract_name="p43-64chip-debug",
+    model_id="Qwen/Qwen3-8B",
+    global_prompts=4,
+    generations=4,
+    max_response_length=4096,
+    max_turns=5,
+    max_steps=3,
+    dp_size=4,
+    devices_per_role=32,
+    global_m=1024,
+    max_num_seqs_per_dp=4,
+)
 
 
 def active_workload(
     values: Mapping[str, str] | None = None,
 ) -> DeepSWEWorkload:
-  """Returns the exact production or bounded pilot DeepSWE contract."""
+  """Returns the exact production, pilot, or debug DeepSWE contract."""
   environ = os.environ if values is None else values
-  raw = environ.get("CANON_P39_64CHIP_PILOT", "0")
-  if raw not in ("0", "1"):
+  pilot_raw = environ.get("CANON_P39_64CHIP_PILOT", "0")
+  debug_raw = environ.get("CANON_P43_DEEPSWE_DEBUG", "0")
+  if pilot_raw not in ("0", "1"):
     raise ValueError("CANON_P39_64CHIP_PILOT must be exactly 0 or 1")
-  workload = P39_PILOT_WORKLOAD if raw == "1" else P34_WORKLOAD
+  if debug_raw not in ("0", "1"):
+    raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
+  if pilot_raw == "1" and debug_raw == "1":
+    raise ValueError("P39 pilot and P43 debug modes are mutually exclusive")
+  if debug_raw == "1":
+    workload = P43_DEBUG_WORKLOAD
+  elif pilot_raw == "1":
+    workload = P39_PILOT_WORKLOAD
+  else:
+    workload = P34_WORKLOAD
   workload.validate()
   return workload
 
@@ -391,6 +435,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
   """Validates the exact P34 profile without accepting implicit defaults."""
   workload = active_workload(values)
   pilot = workload.contract_name == "p39-64chip-pilot"
+  debug = workload.contract_name == "p43-64chip-debug"
   expected = {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_TOPOLOGY_ADMITTED": "1",
@@ -418,15 +463,24 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "WANDB_MODE": "online",
       "CANON_P39_64CHIP_PILOT": "1" if pilot else "0",
       "CANON_P39_PILOT_ADMITTED": "1" if pilot else "0",
+      "CANON_P43_DEEPSWE_DEBUG": "1" if debug else "0",
+      "CANON_P43_DEBUG_ADMITTED": "1" if debug else "0",
+      "CANON_P43_ROLLOUT_ONLY": (
+          "1"
+          if debug and values.get("CANON_P34_RUN_STAGE") == "rollout-only"
+          else "0"
+      ),
       "CANON_DP_SIZE": str(workload.dp_size),
       "CANON_TP_SIZE": str(workload.tp_size),
       "CANON_TOTAL_DEVICES": str(workload.devices_per_role),
       "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_GLOBAL_PROMPTS": str(workload.global_prompts),
+      "CANON_NUM_GENERATIONS": str(workload.generations),
       "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
       "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
       "FL_SHARED_MESH": f"{workload.dp_size},{workload.tp_size}",
   }
-  if pilot:
+  if pilot or debug:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
@@ -451,6 +505,10 @@ def validate_environment(values: Mapping[str, str]) -> None:
   weight_report = values.get("CANON_P34_WEIGHT_REPORT", "")
   if not weight_report or not os.path.isabs(weight_report):
     raise ValueError("P34 weight attestation report path is missing")
+  if debug:
+    debug_dir = values.get("CANON_P43_DEBUG_DIR", "")
+    if not debug_dir or not os.path.isabs(debug_dir):
+      raise ValueError("P43 debug artifact directory is missing")
   workload.validate()
   requested_max_steps(values)
 
@@ -460,7 +518,11 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
   workload = active_workload(values)
   stage = values.get("CANON_P34_RUN_STAGE", "")
   no_commit = values.get("CANON_P34_NO_COMMIT", "0")
-  if stage == "backward-no-commit":
+  if stage == "rollout-only":
+    if workload.contract_name != "p43-64chip-debug":
+      raise ValueError("rollout-only is admitted only for P43 debug")
+    expected_no_commit, steps = "1", 1
+  elif stage == "backward-no-commit":
     expected_no_commit, steps = "1", 1
   elif stage == "one-update":
     expected_no_commit, steps = "0", 1
@@ -481,6 +543,15 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
   ):
     raise ValueError(
         "P39 64-chip pilot admits only one-update or three-update"
+    )
+  if workload.contract_name == "p43-64chip-debug" and stage not in (
+      "rollout-only",
+      "one-update",
+      "three-update",
+  ):
+    raise ValueError(
+        "P43 64-chip debug admits only rollout-only, one-update, or "
+        "three-update"
     )
   return steps
 

@@ -598,8 +598,12 @@ P34_DEEPSWE = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
 if P34_DEEPSWE:
   deepswe_contract.validate_environment(os.environ)
   p34 = deepswe_contract.active_workload(os.environ)
+  expected_model_version = p34.model_id.removeprefix("Qwen/")
   exact = {
-      "model_version": MODEL_VERSION in ("Qwen3-32B", p34.model_id),
+      "model_version": MODEL_VERSION in (
+          expected_model_version,
+          p34.model_id,
+      ),
       "batch_size": BATCH_SIZE == p34.global_prompts,
       "mini_batch_size": MINI_BATCH_SIZE == p34.global_prompts,
       "train_micro_batch_size": TRAIN_MICRO_BATCH_SIZE == p34.global_prompts,
@@ -657,7 +661,8 @@ if P34_DEEPSWE:
   if failures:
     raise ValueError(f"P34 signed DeepSWE CLI mismatch: {failures}")
   print(
-      "[P34.CLI] PASS model=Qwen3-32B prompts=8 generations=8 "
+      f"[P34.CLI] PASS model={expected_model_version} "
+      f"prompts={p34.global_prompts} generations={p34.generations} "
       f"prompt={p34.max_prompt_length} "
       f"response={p34.max_response_length} turns={p34.max_turns} "
       f"scheduler_per_dp={p34.max_num_seqs_per_dp}/"
@@ -694,7 +699,6 @@ else:
       "R2E-Gym/R2E-Gym-Subset",
       split="train",
       cache_dir=DATASET_CACHE,
-      trust_remote_code=True,
   )
 
 
@@ -904,7 +908,10 @@ train_shape = tuple(d for _, d in train_dims)
 if P34_DEEPSWE:
   split_roles = (
       deepswe_contract.split_4x4x4_role_devices
-      if p34.contract_name == "p39-64chip-pilot"
+      if p34.contract_name in (
+          "p39-64chip-pilot",
+          "p43-64chip-debug",
+      )
       else deepswe_contract.split_4x8x8_role_devices
   )
   rollout_role, trainer_role, placement_report = split_roles(devices)
@@ -1111,7 +1118,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
-        trajectory_mini_batch_size=(64 if P34_DEEPSWE else None),
+        trajectory_mini_batch_size=(
+            p34.global_trajectories if P34_DEEPSWE else None
+        ),
         train_trajectory_micro_batch_size=(
             p34.local_trajectories if P34_DEEPSWE else None
         ),
