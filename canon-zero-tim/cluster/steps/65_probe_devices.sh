@@ -43,7 +43,7 @@ while :; do
   # backend state, so retrying inside a single process would report the stale
   # CPU fallback forever.
   set +e
-  OUT="$(JAX_PLATFORMS="proxy,cpu" JAX_BACKEND_TARGET="localhost:29000" python3 - <<'PY' 2>&1
+  OUT="$(JAX_PLATFORMS="proxy,cpu" JAX_BACKEND_TARGET="grpc://localhost:29000" python3 - <<'PY' 2>&1
 import pathwaysutils
 pathwaysutils.initialize()
 import jax
