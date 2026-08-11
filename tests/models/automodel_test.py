@@ -142,50 +142,25 @@ class AutoModelTest(parameterized.TestCase):
   def test_from_pretrained_maxtext(self, mock_download):
 
     m_maxtext = types.ModuleType("maxtext")
-    m_maxtext_configs = types.ModuleType("maxtext.configs")
-    m_maxtext_configs_pyconfig = types.ModuleType("maxtext.configs.pyconfig")
-    m_maxtext_configs_types = types.ModuleType("maxtext.configs.types")
-    m_maxtext_utils = types.ModuleType("maxtext.utils")
-    m_maxtext_utils_model_creation_utils = types.ModuleType(
-        "maxtext.utils.model_creation_utils"
-    )
+    m_pyconfig = mock.MagicMock()
+    m_model_creation_utils = mock.MagicMock()
 
-    with mock.patch.dict(
-        "sys.modules",
-        {
-            "maxtext": m_maxtext,
-            "maxtext.configs": m_maxtext_configs,
-            "maxtext.configs.pyconfig": m_maxtext_configs_pyconfig,
-            "maxtext.configs.types": m_maxtext_configs_types,
-            "maxtext.utils": m_maxtext_utils,
-            "maxtext.utils.model_creation_utils": (
-                m_maxtext_utils_model_creation_utils
-            ),
-        },
-    ):
-      setattr(
-          m_maxtext_utils,
-          "model_creation_utils",
-          m_maxtext_utils_model_creation_utils,
-      )
-      setattr(m_maxtext_configs, "pyconfig", m_maxtext_configs_pyconfig)
-      setattr(m_maxtext_configs, "types", m_maxtext_configs_types)
-      setattr(m_maxtext, "configs", m_maxtext_configs)
-      setattr(m_maxtext, "utils", m_maxtext_utils)
+    class MockMaxTextConfig:
+      model_fields = {
+          "skip_jax_distributed_system": True,
+          "hf_access_token": "mock",
+      }
 
+    m_maxtext.MaxTextConfig = MockMaxTextConfig
+    m_maxtext.pyconfig = m_pyconfig
+    m_maxtext.model_creation_utils = m_model_creation_utils
+
+    with mock.patch.dict("sys.modules", {"maxtext": m_maxtext}):
       mock_config = mock.MagicMock()
-      m_maxtext_configs_pyconfig.initialize = mock.MagicMock(
+      m_pyconfig.initialize = mock.MagicMock(
           return_value=mock_config
       )
-      m_maxtext_utils_model_creation_utils.from_pretrained = mock.MagicMock()
-
-      class MockMaxTextConfig:
-        model_fields = {
-            "skip_jax_distributed_system": True,
-            "hf_access_token": "mock",
-        }
-
-      m_maxtext_configs_types.MaxTextConfig = MockMaxTextConfig
+      m_model_creation_utils.from_pretrained = mock.MagicMock()
 
       mock_mesh = mock.MagicMock()
       with mock.patch.dict(os.environ, {"HF_TOKEN": "mock_token"}):
@@ -198,9 +173,9 @@ class AutoModelTest(parameterized.TestCase):
             skip_jax_distributed_system=False,
         )
 
-      m_maxtext_configs_pyconfig.initialize.assert_called_once()
+      m_pyconfig.initialize.assert_called_once()
 
-      called_argv = m_maxtext_configs_pyconfig.initialize.call_args[0][0]
+      called_argv = m_pyconfig.initialize.call_args[0][0]
 
       self.assertIn("model_name=qwen2.5-0.5b", called_argv)
       has_load_params = any(
@@ -216,7 +191,7 @@ class AutoModelTest(parameterized.TestCase):
       for arg in called_argv:
         self.assertNotIn("tunix_fake_arg_that_should_be_dropped", arg)
 
-      m_maxtext_utils_model_creation_utils.from_pretrained.assert_called_once_with(
+      m_model_creation_utils.from_pretrained.assert_called_once_with(
           mock_config, mesh=mock_mesh, wrap_with_tunix_adapter=True
       )
 
