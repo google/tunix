@@ -3476,11 +3476,12 @@ class Qwen3EngineForwardAdapter:
     if segmented is None:
       segmented = build_p28_segmented_engine_forward(self._runner)
       self._p32_d3b_segmented_engine = segmented
+      phase = "P34" if p34 else "P33"
       print(
-          f"[P34.DP{contract.dp_size}] segmented_engine_ready "
+          f"[{phase}.DP{contract.dp_size}] segmented_engine_ready "
           f"data={contract.dp_size} tp={self._tp_size} "
           f"groups={contract.local_trajectories} local_M=256 "
-          f"global_M={contract.global_m}",
+          f"global_M={self._bucket}",
           flush=True,
       )
 

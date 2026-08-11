@@ -620,7 +620,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
   def test_p32_dp16_segmented_transaction_streams_sixteen_groups(self):
     adapter, runner = self._make_p32_group_adapter(sequence_bucket=256)
     adapter._max_model_len = 6144  # pylint: disable=protected-access
-    adapter._p32_d3b_segmented_engine = object()  # pylint: disable=protected-access
     adapter.map_engine_cotangents_to_trainer_state = types.MethodType(
         lambda self, state, cotangents: tuple(cotangents), adapter
     )
@@ -740,7 +739,9 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         "CANON_P32_DP_REDUCTION_ADMITTED": "1",
             "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
             "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_ENABLE_EVAL": "0",
             "CANON_P33_DISABLE_EVAL": "1",
+            "CANON_P31_ENABLE_EVAL": "0",
             "CANON_WANDB_ONLINE_REQUIRED": "1",
           "CANON_P31_MONOTONIC_METRICS": "1",
           "CANON_WANDB_PROJECT": "zero-tim-frozenlake-dp16-tp4",
@@ -776,6 +777,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           "CANON_ALIGNMENT_TRAIN": "1",
           "CANON_PRE_ALIGN_GATE": "1",
           "CANON_P33_SHORT_ALIGNMENT": "0",
+          "CANON_OPT_STATE_RESIDENT": "0",
           "CANON_P30_OPT_STATE_OFFLOAD": "1",
         "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
         "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
@@ -785,6 +787,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         "FL_SHARED_MESH": "16,4",
         "XLA_FLAGS": "--xla_allow_excess_precision=false",
     }
+    stdout = io.StringIO()
     with (
         mock.patch.dict(os.environ, env, clear=False),
         mock.patch.object(
@@ -792,6 +795,12 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             "map_trainer_state_to_engine_leaves",
             return_value=mapped,
         ),
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "build_p28_segmented_engine_forward",
+            return_value=object(),
+        ),
+        contextlib.redirect_stdout(stdout),
     ):
       result = adapter.segmented_dp_grpo_value_and_grad(
           trainer_state=(jnp.asarray([1.0]),),
@@ -803,6 +812,11 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           deterministic_repeat=True,
       )
 
+    self.assertIn(
+        "[P33.DP16] segmented_engine_ready data=16 tp=4 groups=16 "
+        "local_M=256 global_M=4096",
+        stdout.getvalue(),
+    )
     self.assertIsNone(result["gradients"])
     self.assertEqual(result["gradient_microbatches"], 16)
     self.assertEqual([item[0] for item in streamed], list(range(16)))
