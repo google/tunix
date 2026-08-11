@@ -725,3 +725,28 @@
   diff. Stock runtime behavior is unchanged.
 - Next: obtain explicit source-publication approval, then separate resource
   approval for one stock-only Attempt-0 D1 run. Do not run U or a repair arm.
+
+## 2026-08-11 UTC — P38.2g4 D0 published
+
+- Type: source publication receipt; no TPU/cloud experiment, backward,
+  optimizer commit, or training launch.
+- The P38-only commit was first created locally as `6eb94ac8`. It was replayed
+  in an isolated clean worktree onto the then-current remote source, producing
+  `8148a4e7`; focused, exact-image, and full frozen-image gates passed there.
+- The first push was rejected by normal non-fast-forward protection because a
+  concurrent evidence-only commit advanced the target branch. No remote state
+  was overwritten. After fetching `90f6577f`, the P38 commit rebased without
+  conflict and focused gates passed again.
+- Push result: `origin/yuxzhang/canon-zero-tim` advanced from `90f6577f` to
+  `b89435ca7d64faa65c00b5a85152f71fdfc60167`. `git ls-remote` verified that
+  exact remote hash.
+- The concurrent commit added only FrozenLake/DeepSWE raw logs and did not
+  overlap the P38 implementation. The original dirty worktree's P42,
+  FrozenLake learner, and evaluation edits were not staged or modified.
+- Authentication read only `GITHUB_USER` and `GITHUB_TOKEN` from the repository
+  root `.env` through a temporary askpass helper. W&B and HF variables were not
+  read or changed; the helper was securely removed after verification.
+- Claim ceiling remains local construction only. D1 stock target capture and
+  all numerical/root-cause claims remain NOT RUN.
+- Next: with separate 64-chip approval, fetch and verify `b89435ca`, render a
+  fresh stock-only Attempt-0 D1 manifest, and archive all required evidence.

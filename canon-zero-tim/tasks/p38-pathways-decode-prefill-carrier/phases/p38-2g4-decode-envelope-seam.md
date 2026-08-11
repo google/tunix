@@ -1,6 +1,6 @@
 # P38.2g4: decode-envelope seam localization
 
-- Status: active; D0 is locally complete and D1 is not run.
+- Status: active; D0 is published at `b89435ca` and D1 is not run.
 
 ## Objective
 
@@ -172,6 +172,6 @@ runner overlay SHA-256 is
 `fe81622996a1c73bbd17187ee603e6a191165202da40d07b5e428fe41b5db516`.
 
 This is a construction result only. Docker had no `/dev/vfio`, and no target
-TPU, Pathways, backward, optimizer, repair, commit, push, or cloud launch was
-performed. D1 remains blocked on source review, explicit publication approval,
-and separate resource approval.
+TPU, Pathways, backward, optimizer, repair, or cloud launch was performed. The
+implementation was subsequently published as `b89435ca`. D1 remains blocked
+on separate resource approval.

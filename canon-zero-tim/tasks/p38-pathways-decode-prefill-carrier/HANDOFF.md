@@ -505,7 +505,7 @@ the next phase only after these artifacts pass transport, exact join, and
 whole-vector reproduction. E1-E5 and all repair claims remain blocked until
 E0 is exact.
 
-## P38.2g4 current handoff: local gate complete; do not launch yet
+## P38.2g4 current handoff: source published; resource launch still separate
 
 The current active plan is
 `phases/p38-2g4-decode-envelope-seam.md`. It does not claim that RoPE, cache
@@ -529,9 +529,10 @@ exact-image Qwen3-1.7B and Qwen3-8B 14/14 each with all 29 manifest entries,
 and the full frozen-image P33 CPU gate all pass. The installed runner SHA-256
 is `fe81622996a1c73bbd17187ee603e6a191165202da40d07b5e428fe41b5db516`.
 Docker had no TPU device, so this proves construction and image compatibility,
-not target behavior. The work is still uncommitted and unpublished. Do not
-render or apply a target manifest until the user separately approves source
-publication and the target resource use.
+not target behavior. The implementation is published at
+`b89435ca7d64faa65c00b5a85152f71fdfc60167`. The external operator may fetch
+and verify that source, but must not apply a target manifest until the user
+separately approves the 64-chip resource use.
 
 After publication and resource approval, run stock only on Attempt 0 with
 prefix cache disabled, backward disabled, and zero optimizer commits. Do not

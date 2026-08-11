@@ -6,10 +6,9 @@
 - Definition of done: One source-pinned flag-on run reports `S_decode_vs_S_prefill=0`,
   `S_prefill_vs_T_old=0`, and `T_old_vs_T_current=0` before a full workload is allowed to commit.
 - Task directory: `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`
-- Directory state: tracked. P38.2g2 admission hardening is published at
-  `bbc1d329`; the current evidence head on `origin/yuxzhang/canon-zero-tim` is
-  `b7b20e261433977bc57bd83452fd6ac1c4680cdd`. Main was not checked out or
-  modified.
+- Directory state: tracked. P38.2g4 D0 is published at
+  `b89435ca7d64faa65c00b5a85152f71fdfc60167` on
+  `origin/yuxzhang/canon-zero-tim`. Main was not checked out or modified.
 - Current phases: two independent tracks are deliberately active. P38.2d has
   added and locally gated the user-requested GSM8K-full warning-only alignment
   override so the time-sensitive convergence campaign cannot be stopped by an
@@ -91,9 +90,9 @@
   SHA `dae4e75d...` and is an exact duplicate of the older P38e1 capsule, not
   the logged p38s1 (`2dffb993...`) or p38u1 (`245a0c9b...`) artifact. The
   earlier stock-capture PASS wording is withdrawn.
-- Next action for the strict track: review the locally complete P38.2g4 D0
-  diff. After explicit publication approval and separate resource
-  approval, render one fresh stock-only Attempt-0 diagnostic. Preserve the
+- Next action for the strict track: after separate resource approval, pull and
+  verify `b89435ca`, then render one fresh stock-only Attempt-0 diagnostic.
+  Preserve the
   complete terminal head log through outer postflight and recover both the real
   run-specific capsule and serving tar. Do not rerun U. P38.2g3 E0 remains
   blocked until the official stock capture passes an exact request/token-
@@ -129,7 +128,7 @@
   Qwen3-1.7B/Qwen3-8B overlay gates 14/14 each PASS, serving classifier 25/25,
   renderer 5/5, and postflight stock/U
   PATHTRACE negative controls PASS.
-- Updated: 2026-08-11 UTC when P38.2g4 D0 completed locally
+- Updated: 2026-08-11 UTC when P38.2g4 D0 was published
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,
