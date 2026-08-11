@@ -1,0 +1,160 @@
+[entrypoint] start 2026-08-11T08:04:49Z  mode=run  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-p34-backward-p39da-pathways-head-0-0-chn8j
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P34 whitelist SHA256 OK: 9a482f1c88e87b9078f564d8d587fe6b3b7918bfc0545f1a43c5976d28d3cd1f
+[env] P34 contract OK: DP16xTP8 per role, local M256, global M4096
+[env] profile=qwen3-32b-dp16-tp8-deepswe model_dir=qwen32b
+[env] resolved configuration written to /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/env.sh (123 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=03284b021e752b08ebc659b68fcaaef43c6657f7
+[sync] describe=03284b02 Set ENABLE_PATHWAYS_PERSISTENCE=1 across pathways workers
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] tpu_inference=/usr/local/lib/python3.12/site-packages/tpu_inference
+[probe] SAME      layers/common/attention_interface.py
+[probe] SAME      layers/jax/embed.py
+[probe] SAME      layers/jax/linear.py
+[probe] SAME      models/jax/qwen2.py
+[probe] SAME      models/jax/qwen3.py
+[probe] SAME      runner/tpu_runner.py
+[probe] SUMMARY same=6 drift=0 missing=0
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] new form already present (upstream) -- not patching
+[rope]   35:from tpu_inference.layers.jax.rope_interface import (apply_rope,
+[rope]   66:        self.rope_theta = get_rope_theta(config, default=1000000.0)
+[rope]   67:        self.rope_scaling = get_rope_scaling(config)
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 28_sync_cache.sh
+[entrypoint] <-- 28_sync_cache.sh ok
+[entrypoint] --> 30_install_canon.sh
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen32b)
+[4/4] verifying against MANIFEST.sha256
+      all 29 files match (qwen32b)
+
+Installed to: /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/canon   (model=qwen32b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/canon:$PYTHONPATH
+  CANON_SHIM_ROOT=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/canon          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+[install] runtime deps OK numpy=2.3.5 numba=0.62.1
+[install] installed to /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/canon (29 files)
+[entrypoint] <-- 30_install_canon.sh ok
+[entrypoint] --> 35_install_r2egym.sh
+[r2egym] cloning R2E-Gym at pinned 0d94c4eb9431cd195c55a7ea3abd54006c9a1735
+[r2egym] applying vendored patch sha256=a9ef3683f5fdb236aae90d4d3290482066d40ad307b20fb2617ce70fa876ca70
+[r2egym] pip install -e checkout plus kubernetes for pod control
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+[r2egym] VERIFY import ok: /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/r2egym-src/src/r2egym/__init__.py
+[r2egym] versions: Name: kubernetes Version: 36.0.3 
+[r2egym] installed at pinned 0d94c4eb9431cd195c55a7ea3abd54006c9a1735
+[entrypoint] <-- 35_install_r2egym.sh ok
+[entrypoint] --> 40_overlay_engine.sh
+[overlay] attn_iface_patched.py        -> layers/common/attention_interface.py
+[overlay] linear_p22xk.py              -> layers/jax/linear.py
+[overlay] embed_patched.py             -> layers/jax/embed.py
+[overlay] tpu_runner_p21_l30.py        -> runner/tpu_runner.py
+[overlay] qwen3_p22xk.py               -> models/jax/qwen3.py
+[overlay] qwen2_p22xk.py               -> models/jax/qwen2.py
+[overlay] PYTHONPATH and CANON_SHIM_ROOT recorded; originals in /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/stock_backup
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] A. byte identity of overlay targets
+[verify]   OK   attn_iface_patched.py        804d33649b85
+[verify]   OK   linear_p22xk.py              8bc00bff932c
+[verify]   OK   embed_patched.py             4a0540323c75
+[verify]   OK   tpu_runner_p21_l30.py        adacdaeeda7a
+[verify]   OK   qwen3_p22xk.py               be9b90f0aa05
+[verify]   OK   qwen2_p22xk.py               d89eeb6914ef
+[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
+[verify] Section B promotion checks will run inside Step 70 single Pathways session.
+
+[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
+[verify] This does NOT yet prove it executes on the hot path; 90_run.sh checks the
+[verify] [PATHTRACE] tally for that.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 60_wait_workers.sh
+[wait] 180s quiet period for worker boot/registration (configured per-role device expectation: 128)...
+[wait] quiet period completed. Device assertion runs in step 65 (when the profile opts in) or step 70; this step alone proves nothing.
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 65_probe_devices.sh
+I0811 08:08:33.317460     413 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0811 08:08:33.317580     413 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0811 08:08:33.317675     413 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
+[probe] PASS attempt=1 devices=256 expected=256
+[entrypoint] <-- 65_probe_devices.sh ok
+[entrypoint] --> 90_run.sh
+[run] cmd: python3 -u examples/deepswe/canonical_entrypoint.py --model_version=Qwen3-32B --models_base_dir=/mnt/disks/linchai_data/models --batch_size=8 --mini_batch_size=8 --train_fraction=1.0 --num_epochs=1 --enable_remat=True --remat_policy=decoder --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 --rollout_micro_batch_size=1 --num_generations=8 --num_iterations=1 --beta=0.0 --epsilon=0.2 --epsilon_high=0.28 --off_policy_steps=0 --max_prompt_length=4096 --max_response_length=32768 --max_turns=50 --per_turn_timeout_secs=300 --episode_timeout_secs=5400 --step_timeout_secs=1800 --reward_timeout_secs=1800 --max_steps=1 --temperature=0.7 --top_k=0 --top_p=1.0 --loss_agg_mode=sequence-mean-token-scale --advantage_estimator=rloo --use_rollout_logps --learning_rate=1e-6 --b1=0.9 --b2=0.99 --weight_decay=0.01 --max_grad_norm=1.0 --eval_every_n_steps=10 --rollout_mesh_dp=16 --rollout_mesh_tp=8 --train_mesh_dp=16 --train_mesh_tp=8 --rollout_split_fraction=0.5 --rollout_vllm_max_num_seqs=4 --max_num_batched_tokens=256 --max_concurrency=64 --vllm_utilization=0.6 --optimizer_offload=True --gold_whitelist=/mnt/disks/linchai_data/deepswe_eval_outputs/raw_trajectories_qwen3_128_retry_2_20260708_193753.jsonl --metric_logger_dir=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/metrics --ckpt_dir=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/checkpoints --save_interval_steps=8 --max_to_keep=8
+[run] log: /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/run.log
+[P34.PATHWAYS] initialized_once=1 before_jax=1
+INFO 08-11 08:08:41 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+INFO 08-11 08:08:41 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-11 08:08:41 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-11 08:08:41 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+WARNING 08-11 08:08:41 [tpu_platform.py:408] Pin memory is not supported on TPU.
+✅ tunix pathways-utils, r2egym are successfully mapped.
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/r2egym-src/src/r2egym/swesmith/constants.py:460: SyntaxWarning: invalid escape sequence '\/'
+  "sed -i '/^git+https:\/\/github.com\/Project-MONAI\//d' requirements-dev.txt",
+Using Kubernetes node selector: cloud.google.com/gke-nodepool=deepswe-cpu-pool
+Warning: Kubernetes config loading failed: Invalid kube-config file. No configuration found.
+2026-08-11 08:08:43,663 - root - INFO - Applied bounded R2E-Gym Kubernetes patch at /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/r2egym-src/src/r2egym/agenthub/runtime/docker.py
+[P34.R2E] BOUNDED_KUBERNETES_PATCH_PASS path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-backward-p39da/r2egym-src/src/r2egym/agenthub/runtime/docker.py
+Looking for local model at: /mnt/disks/linchai_data/models/Qwen3-32B...
+✅ Found existing local model at /mnt/disks/linchai_data/models/Qwen3-32B
+kv_cache_size (Capped): 36992
+vllm_max_batched_tokens: 256
+[P34.CLI] PASS model=Qwen3-32B prompts=8 generations=8 prompt=4096 response=32768 turns=50 scheduler_per_dp=4/256
+Loading Dataset...
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'R2E-Gym/R2E-Gym-Subset' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+2026-08-11 08:08:44,069 - datasets.load - ERROR - `trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'R2E-Gym/R2E-Gym-Subset' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+Generating train split:   0%|          | 0/4578 [00:00<?, ? examples/s]Generating train split:  13%|█▎        | 573/4578 [00:00<00:02, 1452.85 examples/s]Generating train split:  25%|██▌       | 1146/4578 [00:01<00:03, 1001.97 examples/s]Generating train split:  38%|███▊      | 1718/4578 [00:01<00:02, 958.66 examples/s] Generating train split:  50%|█████     | 2290/4578 [00:02<00:01, 1196.32 examples/s]Generating train split:  63%|██████▎   | 2862/4578 [00:02<00:01, 1290.35 examples/s]Generating train split:  75%|███████▌  | 3434/4578 [00:03<00:01, 926.78 examples/s] Generating train split:  88%|████████▊ | 4006/4578 [00:04<00:00, 599.44 examples/s]Generating train split: 100%|██████████| 4578/4578 [00:06<00:00, 515.51 examples/s]Generating train split: 100%|██████████| 4578/4578 [00:06<00:00, 709.84 examples/s]
+Map:   0%|          | 0/4578 [00:00<?, ? examples/s]Map:   4%|▎         | 166/4578 [00:00<00:02, 1597.09 examples/s]Map:   9%|▊         | 394/4578 [00:00<00:02, 1538.77 examples/s]Map:  13%|█▎        | 596/4578 [00:00<00:02, 1435.07 examples/s]Map:  16%|█▋        | 746/4578 [00:00<00:03, 1254.19 examples/s]Map:  19%|█▉        | 879/4578 [00:00<00:03, 1116.41 examples/s]Map:  22%|██▏       | 1000/4578 [00:01<00:10, 356.92 examples/s]Map:  25%|██▍       | 1143/4578 [00:01<00:07, 468.33 examples/s]Map:  28%|██▊       | 1280/4578 [00:01<00:05, 584.85 examples/s]Map:  32%|███▏      | 1443/4578 [00:01<00:04, 744.12 examples/s]Map:  36%|███▌      | 1638/4578 [00:02<00:03, 962.40 examples/s]Map:  40%|████      | 1832/4578 [00:02<00:02, 1161.73 examples/s]Map:  44%|████▎     | 2000/4578 [00:03<00:06, 414.49 examples/s] Map:  49%|████▉     | 2235/4578 [00:03<00:03, 598.18 examples/s]Map:  54%|█████▍    | 2484/4578 [00:03<00:02, 823.13 examples/s]Map:  60%|██████    | 2752/4578 [00:03<00:01, 1093.21 examples/s]Map:  66%|██████▌   | 3000/4578 [00:03<00:01, 866.37 examples/s] Map:  70%|██████▉   | 3189/4578 [00:03<00:01, 1006.43 examples/s]Map:  74%|███████▍  | 3409/4578 [00:04<00:01, 1029.30 examples/s]Map:  78%|███████▊  | 3576/4578 [00:04<00:00, 1042.86 examples/s]Map:  82%|████████▏ | 3741/4578 [00:04<00:00, 961.41 examples/s] Map:  84%|████████▍ | 3865/4578 [00:04<00:00, 845.86 examples/s]Map:  87%|████████▋ | 3971/4578 [00:04<00:00, 796.49 examples/s]Map:  89%|████████▉ | 4069/4578 [00:07<00:02, 171.75 examples/s]Map:  91%|█████████ | 4168/4578 [00:07<00:01, 213.73 examples/s]Map:  94%|█████████▎| 4282/4578 [00:07<00:01, 277.02 examples/s]Map:  96%|█████████▌| 4393/4578 [00:07<00:00, 350.59 examples/s]Map:  99%|█████████▉| 4521/4578 [00:07<00:00, 454.57 examples/s]Map: 100%|██████████| 4578/4578 [00:08<00:00, 535.05 examples/s]
+Filter:   0%|          | 0/4578 [00:00<?, ? examples/s]Filter:  22%|██▏       | 1000/4578 [00:00<00:00, 3970.00 examples/s]Filter:  44%|████▎     | 2000/4578 [00:00<00:00, 3792.32 examples/s]Filter:  66%|██████▌   | 3000/4578 [00:00<00:00, 4985.47 examples/s]Filter:  87%|████████▋ | 4000/4578 [00:01<00:00, 3093.97 examples/s]Filter: 100%|██████████| 4578/4578 [00:01<00:00, 2564.93 examples/s]Filter: 100%|██████████| 4578/4578 [00:01<00:00, 3040.49 examples/s]
+[P34.DATASET] GOLD_FILTER_PASS rows=4578->28 images=28
+2026-08-11 08:09:02,057 - absl - INFO - Attempting to import: tunix.models.qwen3.model
+2026-08-11 08:09:02,057 - absl - INFO - Attempting to call: qwen3_32b() on object of type <class 'type'>
+I0811 08:09:02.076205     724 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0811 08:09:02.076243     724 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0811 08:09:02.076252     724 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0811 08:09:02.077430     724 grpc_client_session.cc:264]   Established channel.
+I0811 08:09:02.077447     724 grpc_client_session.cc:269]   Created stub.
+I0811 08:09:02.086299     724 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
