@@ -363,6 +363,23 @@ class _TiedSegmentedRunner:
 
 class CanonicalQwen3AdapterTest(absltest.TestCase):
 
+  def test_p41_segmented_loss_geometry_is_bounded(self):
+    geometry = canonical_qwen3_adapter._segmented_loss_geometry({  # pylint: disable=protected-access
+        "CANON_P41_OPTIMIZER_BENCH": "1",
+        "CANON_GSM8K_L3": "1",
+        "CANON_GSM8K_UPDATE_CANARY": "1",
+    })
+    self.assertEqual(geometry, (2, (256, 64)))
+
+  def test_p41_segmented_loss_geometry_rejects_missing_canary(self):
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "bounded GSM8K L3",
+    ):
+      canonical_qwen3_adapter._segmented_loss_geometry({  # pylint: disable=protected-access
+          "CANON_P41_OPTIMIZER_BENCH": "1",
+      })
+
   def test_bitwise_array_equality_detects_signed_zero_and_one_bit(self):
     positive_zero = jnp.asarray([0.0, 1.0], jnp.float32)
     self.assertTrue(
@@ -1672,6 +1689,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     adapter._transpose_keys = None  # pylint: disable=protected-access
     adapter._hook_fns = None  # pylint: disable=protected-access
     adapter._tp_size = 1  # pylint: disable=protected-access
+    adapter._dp_axis = "data"  # pylint: disable=protected-access
     adapter._set_forward_context = (  # pylint: disable=protected-access
         lambda *_: contextlib.nullcontext()
     )
@@ -1936,6 +1954,17 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     self.assertIsNone(streamed_result["gradients"])
     self.assertEqual(streamed_result["gradient_microbatches"], 4)
     self.assertEqual([index for index, _ in streamed], [0, 1, 2, 3])
+    self.assertEqual(
+        streamed_result["dp_reduction_visibility"],
+        "SINGLE_REPLICA_IDENTITY",
+    )
+    self.assertEqual(streamed_result["dp_axis"], "data")
+    self.assertTrue(streamed_result["replica_equality"])
+    self.assertEqual(streamed_result["dp_reduction_transactions"], 0)
+    self.assertEqual(
+        streamed_result["dp_reduction_rounds_per_transaction"], 0
+    )
+    self.assertEqual(streamed_result["dp_rank_pullbacks_per_transaction"], 1)
     averaged = jax.tree.map(
         lambda *values: sum(values) / 4.0,
         *(gradient for _, gradient in streamed),

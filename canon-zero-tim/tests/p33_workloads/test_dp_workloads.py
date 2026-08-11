@@ -59,6 +59,7 @@ def _environment(name: str) -> dict[str, str]:
       "CANON_ALIGNMENT_TRAIN": "1",
       "CANON_PRE_ALIGN_GATE": "1",
       "CANON_P33_SHORT_ALIGNMENT": "0",
+      "CANON_OPT_STATE_RESIDENT": "0",
       "CANON_P30_OPT_STATE_OFFLOAD": "1",
       "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
       "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
@@ -71,7 +72,10 @@ def _environment(name: str) -> dict[str, str]:
       ),
   }
   if name == "frozenlake":
+    environ["CANON_P33_ENABLE_EVAL"] = "0"
     environ["CANON_P33_DISABLE_EVAL"] = "1"
+    environ["CANON_P31_ENABLE_EVAL"] = "0"
+    environ["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"] = "0"
   if name == "gsm8k":
     environ["CANON_GSM8K_GRAD_PROBE"] = "0"
   return environ
@@ -240,10 +244,45 @@ class DPWorkloadsTest(unittest.TestCase):
     workload = dp_workloads.get_workload("frozenlake")
     environ = _environment("frozenlake")
     del environ["CANON_P33_DISABLE_EVAL"]
-    with self.assertRaisesRegex(ValueError, "environment mismatch"):
+    with self.assertRaisesRegex(ValueError, "CANON_P33_DISABLE_EVAL"):
       dp_workloads.validate_environment(
           workload, environ, require_reduction_admission=False
       )
+
+  def test_frozenlake_full_admits_explicit_evaluation(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    environ = _environment("frozenlake")
+    environ.update({
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "FL_SHARED_MESH": "16,4",
+        "CANON_P33_ENABLE_EVAL": "1",
+        "CANON_P33_DISABLE_EVAL": "0",
+        "CANON_P31_ENABLE_EVAL": "1",
+    })
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+
+  def test_frozenlake_evaluation_rejects_diagnostic_stage(self):
+    environ = _environment("frozenlake")
+    environ.update({
+        "CANON_P33_ENABLE_EVAL": "1",
+        "CANON_P33_DISABLE_EVAL": "0",
+        "CANON_P31_ENABLE_EVAL": "1",
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+    })
+    with self.assertRaisesRegex(ValueError, "committed full training"):
+      dp_workloads.frozenlake_evaluation_enabled(environ)
+
+  def test_frozenlake_evaluation_rejects_mismatched_learner_flag(self):
+    environ = _environment("frozenlake")
+    environ["CANON_P33_ENABLE_EVAL"] = "1"
+    environ["CANON_P33_DISABLE_EVAL"] = "0"
+    with self.assertRaisesRegex(ValueError, "must match"):
+      dp_workloads.frozenlake_evaluation_enabled(environ)
 
   def test_bounded_run_stage_commands(self):
     workload = dp_workloads.get_workload("gsm8k")
@@ -260,6 +299,33 @@ class DPWorkloadsTest(unittest.TestCase):
         _environment("gsm8k"),
         require_reduction_admission=False,
     )
+
+  def test_contract_accepts_explicit_device_resident_optimizer(self):
+    workload = dp_workloads.get_workload("gsm8k")
+    environ = _environment("gsm8k")
+    environ["CANON_OPT_STATE_RESIDENT"] = "1"
+    environ["CANON_P30_OPT_STATE_OFFLOAD"] = "0"
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=False
+    )
+    self.assertEqual(
+        dp_workloads.canonical_optimizer_placement(
+            environ, require_explicit=True
+        ),
+        "device-resident",
+    )
+
+  def test_contract_rejects_ambiguous_optimizer_placement(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    for resident, offload in (("1", "1"), ("0", "0")):
+      with self.subTest(resident=resident, offload=offload):
+        environ = _environment("frozenlake")
+        environ["CANON_OPT_STATE_RESIDENT"] = resident
+        environ["CANON_P30_OPT_STATE_OFFLOAD"] = offload
+        with self.assertRaisesRegex(ValueError, "optimizer"):
+          dp_workloads.validate_environment(
+              workload, environ, require_reduction_admission=False
+          )
 
   def test_launch_rejects_unadmitted_reduction(self):
     workload = dp_workloads.get_workload("gsm8k")

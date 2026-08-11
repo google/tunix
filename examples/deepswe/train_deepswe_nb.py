@@ -597,7 +597,7 @@ USE_ROLLOUT_LOGPS = args.use_rollout_logps
 P34_DEEPSWE = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
 if P34_DEEPSWE:
   deepswe_contract.validate_environment(os.environ)
-  p34 = deepswe_contract.P34_WORKLOAD
+  p34 = deepswe_contract.active_workload(os.environ)
   exact = {
       "model_version": MODEL_VERSION in ("Qwen3-32B", p34.model_id),
       "batch_size": BATCH_SIZE == p34.global_prompts,
@@ -658,7 +658,10 @@ if P34_DEEPSWE:
     raise ValueError(f"P34 signed DeepSWE CLI mismatch: {failures}")
   print(
       "[P34.CLI] PASS model=Qwen3-32B prompts=8 generations=8 "
-      "prompt=4096 response=32768 turns=50 scheduler_per_dp=4/256",
+      f"prompt={p34.max_prompt_length} "
+      f"response={p34.max_response_length} turns={p34.max_turns} "
+      f"scheduler_per_dp={p34.max_num_seqs_per_dp}/"
+      f"{p34.max_num_batched_tokens_per_dp}",
       flush=True,
   )
 
@@ -831,18 +834,22 @@ rollout_fsdp = args.rollout_mesh_fsdp
 rollout_dp = args.rollout_mesh_dp
 rollout_tp = args.rollout_mesh_tp
 if P34_DEEPSWE:
+  p34 = deepswe_contract.active_workload(os.environ)
   if rollout_fsdp is not None or args.train_mesh_fsdp is not None:
     raise ValueError("P34 forbids FSDP; parameters must be replicated over dp")
   if args.train_mesh_sp is not None:
     raise ValueError("P34 does not admit sequence-parallel trainer state")
   if (rollout_dp, rollout_tp, args.train_mesh_dp, args.train_mesh_tp) != (
-      16,
-      8,
-      16,
-      8,
+      p34.dp_size,
+      p34.tp_size,
+      p34.dp_size,
+      p34.tp_size,
   ):
-    raise ValueError("P34 requires rollout and trainer DP16xTP8")
-  rollout_dims = [("dp", 16), ("tp", 8)]
+    raise ValueError(
+        f"{p34.contract_name} requires rollout and trainer "
+        f"DP{p34.dp_size}xTP{p34.tp_size}"
+    )
+  rollout_dims = [("dp", p34.dp_size), ("tp", p34.tp_size)]
 elif rollout_fsdp is not None or rollout_tp is not None:
   rollout_dims = []
   if rollout_fsdp is not None:
@@ -865,7 +872,7 @@ train_dp = args.train_mesh_dp
 train_sp = args.train_mesh_sp
 train_tp = args.train_mesh_tp
 if P34_DEEPSWE:
-  train_dims = [("dp", 16), ("tp", 8)]
+  train_dims = [("dp", p34.dp_size), ("tp", p34.tp_size)]
 elif any(v is not None for v in (train_fsdp, train_sp, train_tp)):
   train_dims = []
   train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
@@ -895,9 +902,12 @@ train_axis_names = tuple(name for name, _ in train_dims)
 train_shape = tuple(d for _, d in train_dims)
 
 if P34_DEEPSWE:
-  rollout_role, trainer_role, placement_report = (
-      deepswe_contract.split_4x8x8_role_devices(devices)
+  split_roles = (
+      deepswe_contract.split_4x4x4_role_devices
+      if p34.contract_name == "p39-64chip-pilot"
+      else deepswe_contract.split_4x8x8_role_devices
   )
+  rollout_role, trainer_role, placement_report = split_roles(devices)
   rollout_devices = np.asarray(rollout_role, dtype=object).reshape(
       rollout_shape
   )
@@ -1102,8 +1112,10 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         trajectory_mini_batch_size=(64 if P34_DEEPSWE else None),
-        train_trajectory_micro_batch_size=(4 if P34_DEEPSWE else None),
-        optimizer_offload=(True if P34_DEEPSWE else OPTIMIZER_OFFLOAD),
+        train_trajectory_micro_batch_size=(
+            p34.local_trajectories if P34_DEEPSWE else None
+        ),
+        optimizer_offload=OPTIMIZER_OFFLOAD,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,

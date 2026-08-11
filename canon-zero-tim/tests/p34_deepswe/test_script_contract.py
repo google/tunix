@@ -22,12 +22,19 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     self.assertIn('"--max_num_batched_tokens"', text)
     self.assertIn("args = parser.parse_args()", text)
     self.assertIn('"enable_prefix_caching": not P34_DEEPSWE', text)
-    self.assertIn("scheduler_per_dp=4/256", text)
+    self.assertIn("scheduler_per_dp={p34.max_num_seqs_per_dp}/", text)
 
   def test_p34_uses_dp_axes_and_replicated_parameters(self):
     text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
-    self.assertIn('rollout_dims = [("dp", 16), ("tp", 8)]', text)
-    self.assertIn('train_dims = [("dp", 16), ("tp", 8)]', text)
+    self.assertIn(
+        'rollout_dims = [("dp", p34.dp_size), ("tp", p34.tp_size)]',
+        text,
+    )
+    self.assertIn(
+        'train_dims = [("dp", p34.dp_size), ("tp", p34.tp_size)]',
+        text,
+    )
+    self.assertIn("deepswe_contract.active_workload(os.environ)", text)
     self.assertIn("configure_replicated_parameter_sharding", text)
     self.assertIn("P34 forbids FSDP", text)
 

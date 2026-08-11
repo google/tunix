@@ -20,13 +20,17 @@ sys.modules[_MODULE_SPEC.name] = classifier
 _MODULE_SPEC.loader.exec_module(classifier)
 
 
-def _policy(enabled: bool) -> dict:
+def _policy(enabled: bool, workload: str = "gsm8k") -> dict:
   return {
-      "id": classifier._WARNING_POLICY_ID,
+      "id": (
+          classifier._FROZENLAKE_WARNING_POLICY_ID
+          if workload == "frozenlake"
+          else classifier._WARNING_POLICY_ID
+      ),
       "enabled": enabled,
       "warning_only": enabled,
       "bounded_ab_only": False,
-      "workload": "gsm8k" if enabled else "",
+      "workload": workload if enabled else "",
       "stage": "full" if enabled else "",
       "max_abs_limit": None if enabled else 1.0e-4,
       "byte_fraction_limit": None if enabled else 4.0e-3,
@@ -52,6 +56,7 @@ def _alignment(
     optimizer_skipped: bool,
     warning_policy: bool = False,
     warned: bool = False,
+    policy_workload: str = "gsm8k",
 ) -> dict:
   record = {
       "verdict": "PASS",
@@ -59,7 +64,7 @@ def _alignment(
       "blocking_reds": [],
       "reported_reds": [],
       "warning_reds": [],
-      "admission_policy": _policy(warning_policy),
+      "admission_policy": _policy(warning_policy, policy_workload),
       "execution_mode": "train",
       "step": step,
       "N_action": 4,
@@ -105,7 +110,11 @@ def _alignment(
 
 
 def _pre_alignment(
-    step: int, *, warning_policy: bool = False, warned: bool = False
+    step: int,
+    *,
+    warning_policy: bool = False,
+    warned: bool = False,
+    policy_workload: str = "gsm8k",
 ) -> dict:
   record = {
       "verdict": "PASS",
@@ -113,7 +122,7 @@ def _pre_alignment(
       "blocking_reds": [],
       "reported_reds": [],
       "warning_reds": [],
-      "admission_policy": _policy(warning_policy),
+      "admission_policy": _policy(warning_policy, policy_workload),
       "step": step,
       "N_action": 4,
       "boundaries": {
@@ -131,9 +140,14 @@ def _pre_alignment(
   return record
 
 
-def _update(index: int) -> dict:
+def _update(
+    index: int, *, placement: str = "pinned-host-offload"
+) -> dict:
   effective_lr = 0.0 if index == 0 else 4.0e-9
   parameter_changed = 0 if index == 0 else 1
+  memory_kind = (
+      "device" if placement == "device-resident" else "pinned_host"
+  )
   return {
       "verdict": "PASS",
       "dp_axis": "data",
@@ -144,8 +158,9 @@ def _update(index: int) -> dict:
       "gradient_activity": [True] * 16,
       "alignment_hashes": [{"T_current": "a"}] * 16,
       "micro_gradient_norms": [1.0] * 16,
-      "optimizer_memory_kinds_before": ["pinned_host"],
-      "optimizer_memory_kinds_after": ["pinned_host"],
+      "optimizer_placement": placement,
+      "optimizer_memory_kinds_before": [memory_kind],
+      "optimizer_memory_kinds_after": [memory_kind],
       "accumulator_changed_paths": [],
       "reference_changed_paths": [],
       "commit_gradient_norm": 1.0,
@@ -294,11 +309,27 @@ class ClassifyP33RunTest(unittest.TestCase):
       )
       self._write_jsonl(updates, (_update(index) for index in range(450)))
       self._write_jsonl(
-          pre_alignments, (_pre_alignment(index) for index in range(450))
+          pre_alignments,
+          (
+              _pre_alignment(
+                  index,
+                  warning_policy=True,
+                  policy_workload="frozenlake",
+              )
+              for index in range(450)
+          ),
       )
       self._write_jsonl(
           alignments,
-          (_alignment(index, optimizer_skipped=False) for index in range(7200)),
+          (
+              _alignment(
+                  index,
+                  optimizer_skipped=False,
+                  warning_policy=True,
+                  policy_workload="frozenlake",
+              )
+              for index in range(7200)
+          ),
       )
       record = classifier.classify(
           workload="frozenlake",
@@ -308,9 +339,80 @@ class ClassifyP33RunTest(unittest.TestCase):
           update_report=updates,
           alignment_report=alignments,
       )
-      self.assertEqual(record["verdict"], "PASS")
+      self.assertEqual(record["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
       self.assertEqual(record["observed_updates"], 450)
       self.assertEqual(record["observed_alignments"], 7200)
+
+  def test_full_frozenlake_evaluation_inventory_positive(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      run_log = root / "run.log"
+      updates = root / "updates.jsonl"
+      pre_alignments = root / "pre_alignment.jsonl"
+      alignments = root / "alignment.jsonl"
+      eval_rows = "".join(
+          "[CANON_FROZENLAKE_P31] eval_reward_inventory "
+          f"step={step} prompts=100 generations=8 rewards=800 "
+          "expected=800 verdict=PASS\n"
+          for step in range(0, 450, 10)
+      )
+      eval_summaries = "".join(
+          "[CANON_FROZENLAKE_P42_JSON] "
+          + json.dumps({
+              "n": 800,
+              "policy_step": step,
+              "reward": 0.5,
+              "solve": 0.25,
+              "wall_seconds": 2.0,
+          }, sort_keys=True, separators=(",", ":"))
+          + "\n"
+          for step in range(0, 450, 10)
+      )
+      run_log.write_text(
+          "[CANON_P33_WANDB] ONLINE_RUN_PASS\n"
+          "[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 "
+          "held_out_rows=100 generations=8\n"
+          + eval_rows
+          + eval_summaries
+          + "[CANON_P31_METRICS] monotonic_direct last_step=449 "
+          "events=450 regressions=0\n"
+          + "[CANON_P33_DP16] update_step_committed\n" * 450,
+          encoding="utf-8",
+      )
+      self._write_jsonl(updates, (_update(index) for index in range(450)))
+      self._write_jsonl(
+          pre_alignments,
+          (
+              _pre_alignment(
+                  index,
+                  warning_policy=True,
+                  policy_workload="frozenlake",
+              )
+              for index in range(450)
+          ),
+      )
+      self._write_jsonl(
+          alignments,
+          (
+              _alignment(
+                  index,
+                  optimizer_skipped=False,
+                  warning_policy=True,
+                  policy_workload="frozenlake",
+              )
+              for index in range(7200)
+          ),
+      )
+      record = classifier.classify(
+          workload="frozenlake",
+          stage="full",
+          run_log=run_log,
+          pre_alignment_report=pre_alignments,
+          update_report=updates,
+          alignment_report=alignments,
+      )
+      self.assertEqual(record["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+      self.assertTrue(record["evaluation_enabled"])
 
   def test_backward_no_commit_positive(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -338,6 +440,7 @@ class ClassifyP33RunTest(unittest.TestCase):
           "alignment_hashes": [{"T_current": "a"}] * 16,
           "micro_gradient_norms": [1.0] * 16,
           "optimizer_memory_kinds_before": ["pinned_host"],
+          "optimizer_placement": "pinned-host-offload",
           "model_changed_paths": [],
           "optimizer_changed_paths": [],
           "accumulator_changed_paths": [],
@@ -385,6 +488,7 @@ class ClassifyP33RunTest(unittest.TestCase):
           "alignment_hashes": [{"T_current": "a"}] * 16,
           "micro_gradient_norms": [1.0] * 16,
           "optimizer_memory_kinds_before": ["pinned_host"],
+          "optimizer_placement": "pinned-host-offload",
           "model_changed_paths": [],
           "optimizer_changed_paths": [],
           "accumulator_changed_paths": [],
@@ -441,6 +545,69 @@ class ClassifyP33RunTest(unittest.TestCase):
           "pre_alignment[0].S_decode_vs_S_prefill.strict_drift",
           result["reasons"],
       )
+
+  def test_one_update_accepts_device_resident_optimizer(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      run_log = root / "run.log"
+      updates = root / "updates.jsonl"
+      pre_alignments = root / "pre_alignment.jsonl"
+      alignments = root / "alignment.jsonl"
+      run_log.write_text(
+          "[CANON_P33_WANDB] ONLINE_RUN_PASS\n"
+          "[CANON_P31_METRICS] monotonic_direct last_step=0 events=1 regressions=0\n"
+          "[CANON_P33_DP16] update_step_committed\n",
+          encoding="utf-8",
+      )
+      self._write_jsonl(
+          updates, [_update(0, placement="device-resident")]
+      )
+      self._write_jsonl(pre_alignments, [_pre_alignment(0)])
+      self._write_jsonl(
+          alignments,
+          (_alignment(index, optimizer_skipped=False) for index in range(16)),
+      )
+      result = classifier.classify(
+          workload="gsm8k",
+          stage="one-update",
+          run_log=run_log,
+          pre_alignment_report=pre_alignments,
+          update_report=updates,
+          alignment_report=alignments,
+      )
+      self.assertEqual(result["verdict"], "PASS")
+
+  def test_negative_control_rejects_unattested_optimizer_placement(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      run_log = root / "run.log"
+      updates = root / "updates.jsonl"
+      pre_alignments = root / "pre_alignment.jsonl"
+      alignments = root / "alignment.jsonl"
+      run_log.write_text(
+          "[CANON_P33_WANDB] ONLINE_RUN_PASS\n"
+          "[CANON_P31_METRICS] monotonic_direct last_step=0 events=1 regressions=0\n"
+          "[CANON_P33_DP16] update_step_committed\n",
+          encoding="utf-8",
+      )
+      update = _update(0)
+      del update["optimizer_placement"]
+      self._write_jsonl(updates, [update])
+      self._write_jsonl(pre_alignments, [_pre_alignment(0)])
+      self._write_jsonl(
+          alignments,
+          (_alignment(index, optimizer_skipped=False) for index in range(16)),
+      )
+      result = classifier.classify(
+          workload="gsm8k",
+          stage="one-update",
+          run_log=run_log,
+          pre_alignment_report=pre_alignments,
+          update_report=updates,
+          alignment_report=alignments,
+      )
+      self.assertEqual(result["verdict"], "FAIL")
+      self.assertIn("update[0].optimizer_placement", result["reasons"])
 
   def test_negative_control_rejects_parameter_change_at_zero_lr(self):
     with tempfile.TemporaryDirectory() as tmp:

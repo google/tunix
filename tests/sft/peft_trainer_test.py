@@ -88,6 +88,70 @@ global_counter = 0
 
 class PeftTrainerTest(parameterized.TestCase):
 
+  def test_p41_precomputed_transaction_has_one_microbatch(self):
+    expected = peft_trainer._precomputed_expected_microbatches({  # pylint: disable=protected-access
+        "CANON_P41_OPTIMIZER_BENCH": "1",
+        "CANON_GSM8K_L3": "1",
+        "CANON_GSM8K_UPDATE_CANARY": "1",
+    })
+    self.assertEqual(expected, 1)
+
+  def test_p41_precomputed_transaction_rejects_missing_canary(self):
+    with self.assertRaisesRegex(ValueError, "bounded GSM8K L3"):
+      peft_trainer._precomputed_expected_microbatches({  # pylint: disable=protected-access
+          "CANON_P41_OPTIMIZER_BENCH": "1",
+      })
+
+  def test_p41_single_precomputed_microbatch_allocates_and_commits(self):
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_GSM8K_L3": "1",
+        "CANON_GSM8K_UPDATE_CANARY": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0",
+        "CANON_P41_OPTIMIZER_BENCH": "1",
+    }
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=1,
+        checkpoint_root_directory=None,
+    )
+    with mock.patch.dict(os.environ, env, clear=False):
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+      self.assertGreater(len(jax.tree.leaves(trainer.grad_accumulator.grads)), 0)
+      before = jax.tree.map(
+          lambda value: np.asarray(value).copy(),
+          nnx.state(trainer.model, nnx.Param),
+      )
+      gradient = jax.tree.map(
+          lambda value: type(value)(jnp.ones_like(value[...], jnp.float32)),
+          nnx.state(trainer.model, nnx.Param),
+          is_leaf=lambda value: isinstance(value, nnx.VariableState),
+      )
+      norms = trainer.apply_precomputed_gradient_microbatches((gradient,))
+
+    self.assertLen(norms, 1)
+    self.assertGreater(float(norms[0]), 0.0)
+    self.assertEqual(trainer.iter_steps, 1)
+    self.assertEqual(trainer.train_steps, 1)
+    for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
+      np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
+    after = nnx.state(trainer.model, nnx.Param)
+    self.assertTrue(any(
+        not np.array_equal(old, np.asarray(new))
+        for old, new in zip(
+            jax.tree.leaves(before), jax.tree.leaves(after), strict=True
+        )
+    ))
+
   def setUp(self):
     super().setUp()
     try:
@@ -1298,6 +1362,20 @@ class PeftTrainerTest(parameterized.TestCase):
       self.assertEqual(
           offload_trainer.optimizer_state_memory_kinds(), ("pinned_host",)
       )
+      device_evidence = device_trainer.consume_precomputed_commit_evidence()
+      offload_evidence = offload_trainer.consume_precomputed_commit_evidence()
+      device_timing = device_evidence["optimizer_timing"]
+      offload_timing = offload_evidence["optimizer_timing"]
+      self.assertEqual(
+          device_timing["optimizer_logical_bytes"],
+          offload_timing["optimizer_logical_bytes"],
+      )
+      self.assertEqual(device_timing["optimizer_h2d_seconds"], 0.0)
+      self.assertEqual(device_timing["optimizer_d2h_seconds"], 0.0)
+      self.assertGreaterEqual(offload_timing["optimizer_h2d_seconds"], 0.0)
+      self.assertGreaterEqual(offload_timing["optimizer_d2h_seconds"], 0.0)
+      self.assertGreater(device_timing["adam_commit_seconds"], 0.0)
+      self.assertGreater(offload_timing["adam_commit_seconds"], 0.0)
       for actual, expected in zip(device_norms, offload_norms, strict=True):
         np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
       for device_value, offload_value in zip(

@@ -33,6 +33,7 @@ WEIGHT_ATTESTATION_SCHEMA = "canon.p34.deepswe.weight-attestation.v1"
 class DeepSWEWorkload:
   """The signed first-campaign DeepSWE geometry and algorithm."""
 
+  contract_name: str = "p34-production"
   model_id: str = "Qwen/Qwen3-32B"
   global_prompts: int = 8
   generations: int = 8
@@ -83,24 +84,64 @@ class DeepSWEWorkload:
       raise ValueError("P34 requires Qwen/Qwen3-32B")
     if (self.global_prompts, self.generations) != (8, 8):
       raise ValueError("P34 requires 8 prompts and 8 generations")
-    if self.global_trajectories != 64 or self.local_trajectories != 4:
-      raise ValueError("P34 requires 64 global and 4 local trajectories")
-    if (self.dp_size, self.tp_size, self.devices_per_role) != (16, 8, 128):
-      raise ValueError("P34 primary topology is DP16xTP8 per 128-device role")
+    expected_topology = {
+        "p34-production": (16, 8, 128, 4, 4096, 4, 32768, 50, 1000),
+        "p39-64chip-pilot": (4, 8, 32, 16, 1024, 16, 4096, 5, 3),
+    }
+    try:
+      (
+          expected_dp,
+          expected_tp,
+          expected_devices,
+          expected_local_trajectories,
+          expected_global_m,
+          expected_max_num_seqs,
+          expected_response,
+          expected_turns,
+          expected_steps,
+      ) = expected_topology[self.contract_name]
+    except KeyError as exc:
+      raise ValueError(
+          f"unknown DeepSWE contract {self.contract_name!r}"
+      ) from exc
+    if (
+        self.global_trajectories != 64
+        or self.local_trajectories != expected_local_trajectories
+    ):
+      raise ValueError(
+          f"{self.contract_name} requires 64 global and "
+          f"{expected_local_trajectories} local trajectories"
+      )
+    if (self.dp_size, self.tp_size, self.devices_per_role) != (
+        expected_dp,
+        expected_tp,
+        expected_devices,
+    ):
+      raise ValueError(
+          f"{self.contract_name} requires DP{expected_dp}xTP{expected_tp} "
+          f"per {expected_devices}-device role"
+      )
     if self.dp_size * self.tp_size != self.devices_per_role:
       raise ValueError("P34 role topology arithmetic changed")
-    if (self.local_m, self.global_m) != (256, 4096):
-      raise ValueError("P34 requires local M256 and global M4096")
+    if (self.local_m, self.global_m) != (256, expected_global_m):
+      raise ValueError(
+          f"{self.contract_name} requires local M256 and global "
+          f"M{expected_global_m}"
+      )
     if self.dp_size * self.local_m != self.global_m:
       raise ValueError("P34 global M must equal dp_size * local M")
     if (self.max_prompt_length, self.max_response_length, self.max_turns) != (
         4096,
-        32768,
-        50,
+        expected_response,
+        expected_turns,
     ):
-      raise ValueError("P34 signed context/response/turn limits changed")
-    if self.max_steps != 1000 or self.temperature != 0.7:
-      raise ValueError("P34 signed optimization campaign changed")
+      raise ValueError(
+          f"{self.contract_name} signed context/response/turn limits changed"
+      )
+    if self.max_steps != expected_steps or self.temperature != 0.7:
+      raise ValueError(
+          f"{self.contract_name} signed optimization campaign changed"
+      )
     if (
         self.per_turn_timeout_secs,
         self.episode_timeout_secs,
@@ -139,8 +180,10 @@ class DeepSWEWorkload:
     if (
         self.max_num_seqs_per_dp,
         self.max_num_batched_tokens_per_dp,
-    ) != (4, 256):
-      raise ValueError("P34 per-DP rollout scheduler capacity changed")
+    ) != (expected_max_num_seqs, 256):
+      raise ValueError(
+          f"{self.contract_name} per-DP rollout scheduler capacity changed"
+      )
     if self.max_num_seqs_per_dp * self.dp_size != self.global_trajectories:
       raise ValueError("P34 global scheduler request capacity changed")
     if self.max_num_batched_tokens_per_dp * self.dp_size != self.global_m:
@@ -160,6 +203,29 @@ class DeepSWEWorkload:
 
 
 P34_WORKLOAD = DeepSWEWorkload()
+P39_PILOT_WORKLOAD = DeepSWEWorkload(
+    contract_name="p39-64chip-pilot",
+    max_response_length=4096,
+    max_turns=5,
+    max_steps=3,
+    dp_size=4,
+    devices_per_role=32,
+    global_m=1024,
+    max_num_seqs_per_dp=16,
+)
+
+
+def active_workload(
+    values: Mapping[str, str] | None = None,
+) -> DeepSWEWorkload:
+  """Returns the exact production or bounded pilot DeepSWE contract."""
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P39_64CHIP_PILOT", "0")
+  if raw not in ("0", "1"):
+    raise ValueError("CANON_P39_64CHIP_PILOT must be exactly 0 or 1")
+  workload = P39_PILOT_WORKLOAD if raw == "1" else P34_WORKLOAD
+  workload.validate()
+  return workload
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -248,8 +314,83 @@ def split_4x8x8_role_devices(
   return rollout, trainer, report
 
 
+def split_4x4x4_role_devices(
+    devices: Sequence[Any],
+) -> tuple[tuple[Any, ...], tuple[Any, ...], dict[str, Any]]:
+  """Splits one 4x4x4 slice into two host-complete 2x4x4 role halves."""
+  if len(devices) != 64:
+    raise ValueError(f"P39 pilot requires 64 devices, got {len(devices)}")
+  placements = tuple(_as_device_placement(device) for device in devices)
+  ids = tuple(item.device_id for item in placements)
+  coords = tuple(item.coords for item in placements)
+  if len(set(ids)) != 64 or len(set(coords)) != 64:
+    raise ValueError("P39 pilot devices must have unique ids and coordinates")
+  extents = tuple(len({coord[axis] for coord in coords}) for axis in range(3))
+  if extents != (4, 4, 4):
+    raise ValueError(
+        f"P39 pilot expected a 4x4x4 slice, got extents={extents}"
+    )
+  by_id = {
+      placement.device_id: device
+      for placement, device in zip(placements, devices)
+  }
+  rollout_placements = tuple(item for item in placements if item.coords[0] < 2)
+  trainer_placements = tuple(item for item in placements if item.coords[0] >= 2)
+  if len(rollout_placements) != 32 or len(trainer_placements) != 32:
+    raise ValueError("P39 pilot role halves must each contain 32 devices")
+  role_by_process: dict[int, set[str]] = {}
+  for name, role in (
+      ("rollout", rollout_placements),
+      ("trainer", trainer_placements),
+  ):
+    for item in role:
+      role_by_process.setdefault(item.process_index, set()).add(name)
+  split_processes = sorted(
+      process for process, names in role_by_process.items() if len(names) != 1
+  )
+  if split_processes:
+    raise ValueError(
+        "P39 pilot physical half split crosses host boundaries: "
+        f"processes={split_processes[:8]}"
+    )
+
+  def order_key(item):
+    core = item.coords[3] if len(item.coords) == 4 else 0
+    return (item.coords[1], item.coords[2], item.coords[0], core)
+
+  rollout_placements = tuple(sorted(rollout_placements, key=order_key))
+  trainer_placements = tuple(sorted(trainer_placements, key=order_key))
+  rollout = tuple(by_id[item.device_id] for item in rollout_placements)
+  trainer = tuple(by_id[item.device_id] for item in trainer_placements)
+  report = {
+      "devices": 64,
+      "slice_extents": extents,
+      "rollout_devices": 32,
+      "trainer_devices": 32,
+      "rollout_processes": len(
+          {item.process_index for item in rollout_placements}
+      ),
+      "trainer_processes": len(
+          {item.process_index for item in trainer_placements}
+      ),
+      "disjoint": not bool(
+          set(item.device_id for item in rollout_placements)
+          & set(item.device_id for item in trainer_placements)
+      ),
+      "exhaustive": len(set(ids)) == len(rollout) + len(trainer),
+      "host_complete": True,
+      "rollout_ids": tuple(item.device_id for item in rollout_placements),
+      "trainer_ids": tuple(item.device_id for item in trainer_placements),
+  }
+  if not report["disjoint"] or not report["exhaustive"]:
+    raise AssertionError("P39 pilot role halves are not disjoint and exhaustive")
+  return rollout, trainer, report
+
+
 def validate_environment(values: Mapping[str, str]) -> None:
   """Validates the exact P34 profile without accepting implicit defaults."""
+  workload = active_workload(values)
+  pilot = workload.contract_name == "p39-64chip-pilot"
   expected = {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_TOPOLOGY_ADMITTED": "1",
@@ -264,18 +405,39 @@ def validate_environment(values: Mapping[str, str]) -> None:
       # VJPs would differentiate inactive capacity rather than the call.
       "CANON_VJP2_MAX_SEQS": "1",
       "CANON_LOGPROB_M": "256",
-      "MIN_TOKEN_BUCKET": "4096",
+      "MIN_TOKEN_BUCKET": str(workload.global_m),
       "CANON_P34_ABCPROD": "256",
       "CANON_QWEN3_TP_SIZE": "8",
       "CANON_P34_PREFIX_CACHE": "0",
-      "CANON_P34_MAX_NUM_SEQS": "4",
+      "CANON_P34_MAX_NUM_SEQS": str(workload.max_num_seqs_per_dp),
       "CANON_P34_MAX_BATCHED_TOKENS": "256",
       "CANON_P34_STRICT_CLI": "1",
       "CANON_P34_DISABLE_SAMPLER_IS": "1",
       "CANON_P34_DISABLE_TIS": "1",
       "CANON_PRE_ALIGN_GATE": "1",
       "WANDB_MODE": "online",
+      "CANON_P39_64CHIP_PILOT": "1" if pilot else "0",
+      "CANON_P39_PILOT_ADMITTED": "1" if pilot else "0",
+      "CANON_DP_SIZE": str(workload.dp_size),
+      "CANON_TP_SIZE": str(workload.tp_size),
+      "CANON_TOTAL_DEVICES": str(workload.devices_per_role),
+      "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
+      "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
+      "FL_SHARED_MESH": f"{workload.dp_size},{workload.tp_size}",
   }
+  if pilot:
+    expected.update({
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+    })
+  else:
+    expected.update({
+        "CANON_OPT_STATE_RESIDENT": "0",
+        "CANON_P30_OPT_STATE_OFFLOAD": "1",
+        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
+    })
   wrong = {
       key: values.get(key)
       for key, expected_value in expected.items()
@@ -289,12 +451,13 @@ def validate_environment(values: Mapping[str, str]) -> None:
   weight_report = values.get("CANON_P34_WEIGHT_REPORT", "")
   if not weight_report or not os.path.isabs(weight_report):
     raise ValueError("P34 weight attestation report path is missing")
-  P34_WORKLOAD.validate()
+  workload.validate()
   requested_max_steps(values)
 
 
 def requested_max_steps(values: Mapping[str, str]) -> int:
   """Returns the fail-closed P34 promotion-stage update budget."""
+  workload = active_workload(values)
   stage = values.get("CANON_P34_RUN_STAGE", "")
   no_commit = values.get("CANON_P34_NO_COMMIT", "0")
   if stage == "backward-no-commit":
@@ -304,13 +467,20 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
   elif stage == "three-update":
     expected_no_commit, steps = "0", 3
   elif stage == "full":
-    expected_no_commit, steps = "0", P34_WORKLOAD.max_steps
+    expected_no_commit, steps = "0", workload.max_steps
   else:
     raise ValueError(f"unknown P34 run stage: {stage!r}")
   if no_commit != expected_no_commit:
     raise ValueError(
         "P34 stage/no-commit mismatch: "
         f"stage={stage!r} expected CANON_P34_NO_COMMIT={expected_no_commit}"
+      )
+  if workload.contract_name == "p39-64chip-pilot" and stage not in (
+      "one-update",
+      "three-update",
+  ):
+    raise ValueError(
+        "P39 64-chip pilot admits only one-update or three-update"
     )
   return steps
 
@@ -384,6 +554,7 @@ def validate_weight_attestation(
     attestation: Mapping[str, Any], *, step: int
 ) -> dict[str, Any]:
   """Validates an exact trainer-anchor versus live-engine comparison."""
+  workload = active_workload(os.environ)
   mapped_leaves = attestation.get("mapped_leaves")
   live_leaves = attestation.get("live_leaves")
   total_elements = attestation.get("total_elements")
@@ -405,9 +576,10 @@ def validate_weight_attestation(
       ),
       "total_elements": isinstance(total_elements, int) and total_elements > 0,
       "mismatch_indices": not mismatches,
-      "mesh_shape": mesh_shape == {"dp": 16, "tp": 8},
+      "mesh_shape": mesh_shape
+      == {"dp": workload.dp_size, "tp": workload.tp_size},
       "mesh_device_ids": (
-          len(mesh_device_ids) == 128
+          len(mesh_device_ids) == workload.devices_per_role
           and len(set(mesh_device_ids)) == len(mesh_device_ids)
       ),
   }
@@ -452,7 +624,8 @@ def persist_weight_attestation(
   print(
       "[P34.WEIGHTS] EXACT "
       f"step={step} leaves={record['mapped_leaves']} "
-      f"elements={record['total_elements']} devices=128",
+      f"elements={record['total_elements']} "
+      f"devices={len(record['mesh_device_ids'])}",
       flush=True,
   )
   return record

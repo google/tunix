@@ -566,11 +566,57 @@ class AlignmentTest(absltest.TestCase):
     ):
       alignment.check_pre_backward(nonfinite, step=0)
 
+  def test_frozenlake_full_warning_policy_is_scoped_and_finite_only(self):
+    wrapped = self._wrapped().replace(
+        s_decode=self._wrapped().s_decode - np.float32(0.3)
+    )
+    common = {
+        alignment.GATE_ONLY_ENV: "0",
+        alignment.UPDATE_CANARY_ENV: "0",
+        alignment.TRAIN_ENV: "1",
+        alignment.PRE_GATE_ENV: "1",
+        alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
+        alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "0",
+        alignment.FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV: "1",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+    }
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            **common,
+            "CANON_P32_WORKLOAD": "frozenlake",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ):
+      record = alignment.check_pre_backward(wrapped, step=0)
+    self.assertEqual(record["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEmpty(record["blocking_reds"])
+    self.assertEqual(
+        record["admission_policy"]["id"],
+        "frozenlake-full-alignment-warning-v1",
+    )
+
     with mock.patch.dict(
         os.environ,
         {
             **common,
-            alignment.GSM8K_AB_REPORT_ONLY_ENV: "1",
+            "CANON_P32_WORKLOAD": "frozenlake",
+            "CANON_P33_RUN_STAGE": "backward-no-commit",
+            "CANON_P33_NO_COMMIT": "1",
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "committed FrozenLake full training"
+    ):
+      alignment.gsm8k_ab_report_policy()
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            **common,
+            alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "1",
             "CANON_P32_WORKLOAD": "gsm8k",
         },
         clear=False,

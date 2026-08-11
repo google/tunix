@@ -20,6 +20,10 @@ The operator source is never the workload-reference branch. After publication,
 use the exact 40-character `git rev-parse HEAD` from a clean
 `yuxzhang/canon-zero-tim` worktree.
 
+The P39.2 pilot changes are currently workspace-local. The final publication
+SHA is therefore intentionally absent from this handoff. Do not launch from
+the working branch or substitute the stale hardening-base SHA.
+
 ## What changed
 
 1. The P34-only no-sampler/TIS policy is now an explicit alignment contract;
@@ -54,17 +58,28 @@ local pass does not promote target status.
 
 ## First target command
 
-Render `backward-no-commit` exactly as documented in
-`cluster/P34_DEEPSWE_RUNBOOK.md`. Do not use `full` as a probe. The target run
-must be Attempt 0, have zero retries, produce exactly one pre-alignment record,
-one exact cross-role weight-attestation record, four post-backward alignment
-records, deterministic repeated full gradients, and zero optimizer commits.
+The next target is the bounded 64-chip pilot specified in
+`phases/p39-2-64chip-tp8-resident-pilot.md` and operated through
+`../../cluster/P39_DEEPSWE_64CHIP_PILOT_RUNBOOK.md`. Its CPU gate and the P34
+static regression gate pass locally; the target remains NOT RUN. It uses one
+4x4x4 slice split into two 32-device roles, each DP4xTP8, and tests
+device-resident optimizer state. This is a new systems contract; do not bypass
+the existing DP16xTP8 preflight or relabel the pilot as P34 green.
+
+After the pilot classifies resident capacity, render the 4x8x8 DP16xTP8 target
+exactly as documented in `cluster/P34_DEEPSWE_RUNBOOK.md`. Use resident
+optimizer only if the pilot leaves the pre-registered HBM margin; otherwise
+retain pinned-host offload. The 256-chip target must still independently prove
+DP16 collective and replica behavior.
 
 ## Stop conditions
 
-- Any pre-backward A-B or B-C differing byte.
+- Any nonfinite, shape, topology, metadata, cross-role weight, gradient,
+  optimizer-transaction, replica, HBM, IFRT, or W&B failure.
+- Finite alignment differences remain warnings only in the explicitly admitted
+  P39 64-chip pilot and must remain visible in evidence. They do not promote a
+  zero-TIM claim.
 - Missing, duplicate, or non-exact rollout/trainer weight attestation.
-- Any C-old/C-current differing byte.
 - Missing report, measurement count, proxy XLA flag, scheduler bucket,
   Pathways marker, W&B online marker or fixed reducer marker.
 - Infrastructure disconnect: classify `INCONCLUSIVE`; do not read later rows.

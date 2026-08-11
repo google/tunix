@@ -55,3 +55,49 @@ change was performed.
   overlays=2`.
 - No cloud action, commit, push, PR, credential change, precision change,
   production-default change or target numerical verdict occurred.
+
+## 2026-08-11 UTC — P39.2: register a 64-chip TP8 resident pilot
+
+- Type: decision
+- Fact: The existing P34 target is one 4x8x8 slice split into two DP16xTP8 128-device roles with pinned-host optimizer offload. A 64-chip split pilot necessarily uses two DP4xTP8 32-device roles and is not covered by that contract.
+- Action: Registered a default-off bounded pilot that validates rollout TP8, trainer TP8, DP4 reduction, cross-role weights, and device-resident optimizer capacity before any 256-chip promotion.
+- Command: omitted; this checkpoint records plan-only work.
+- Result: No code, cloud resource, training process, credential, commit, or branch was changed.
+- Files/artifacts: `phases/p39-2-64chip-tp8-resident-pilot.md`; `plan.md`; `state.md`; `HANDOFF.md`
+- Rollback: Ignore the pilot profile and retain the existing DP16xTP8/offload P34 contract.
+- Next: Implement the pilot profile, renderer, arithmetic, and CPU negative controls.
+
+## 2026-08-11 UTC — P39.2: implement the bounded 64-chip TP8 pilot
+
+- Type: implementation and local evidence
+- Action: Added a default-off DeepSWE pilot profile and renderer for one
+  4x4x4 slice. It creates two disjoint 32-device roles, each DP4xTP8, and
+  rejects DP16 geometry, FSDP, optimizer offload, floating client images,
+  retries, missing online W&B, and unbounded full training.
+- Action: Registered pilot arithmetic separately from P34: 64 global
+  trajectories, 16 per DP rank, 16 fixed-order gradient groups, local M256,
+  global M1024, 16 requests per rank, and 64 global requests.
+- Action: Wired `90_run.sh` to select the dedicated P39 classifier whenever
+  `CANON_P39_64CHIP_PILOT=1`. P34 production runs continue to use the P34
+  classifier.
+- Action: Added one-update and three-update classifier contracts for exact
+  cross-role weights, nonzero backward, DP4 reduction/replica equality,
+  device-resident optimizer state, zero P30 host transfers, HBM telemetry,
+  IFRT health, and online W&B. Pathways may report either the trainer role or
+  the full proxy inventory, but fewer than 32 devices rejects.
+- Action: Wrote the launch and evidence procedure in
+  `../../cluster/P39_DEEPSWE_64CHIP_PILOT_RUNBOOK.md`.
+- Command: `bash canon-zero-tim/tests/p39_deepswe_pilot/run_cpu.sh`
+- Result: PASS; 15 tests and terminal marker
+  `P39_DEEPSWE_PILOT_CPU_PASS`.
+- Command: `bash canon-zero-tim/tests/p34_deepswe/run_static.sh`
+- Result: PASS; terminal marker `P34_STATIC_PASS suites=10`, confirming the
+  existing DP16xTP8/offload production contract was not loosened.
+- Boundary: No 4x4x4 target, rollout, model initialization, backward, optimizer
+  commit, HBM measurement, W&B run, cloud action, commit, push, or 256-chip
+  promotion occurred.
+- Rollback: Do not render the pilot. The P34 DP16xTP8 profile remains
+  pinned-host offload.
+- Next: Publish after approval, rerun both gates at the publication SHA, then
+  operate the one-update pilot. A PASS admits the three-update confirmation,
+  not a 256-chip launch.

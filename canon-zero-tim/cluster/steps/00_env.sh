@@ -224,6 +224,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P34_MAX_BATCHED_TOKENS CANON_P34_STRICT_CLI \
            CANON_P34_DISABLE_SAMPLER_IS CANON_P34_DISABLE_TIS \
            CANON_PRE_ALIGN_GATE \
+           CANON_P39_64CHIP_PILOT CANON_P39_PILOT_ADMITTED \
+           CANON_OPT_STATE_RESIDENT CANON_P30_OPT_STATE_OFFLOAD \
+           CANON_DEEPSWE_ALIGNMENT_WARN_ONLY \
            CANON_TRAIN_DP_SHARDING FL_SHARED_MESH \
            CANON_P34_WHITELIST CANON_P34_WHITELIST_SHA256; do
     req "$k"
@@ -235,9 +238,55 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P34_MAX_NUM_SEQS CANON_P34_MAX_BATCHED_TOKENS; do
     positive_int "$k"
   done
-  [ "${CANON_DP_SIZE:-}" = "16" ] && [ "${CANON_TP_SIZE:-}" = "8" ] && \
-  [ "${CANON_TOTAL_DEVICES:-}" = "128" ] || {
-    echo "[env] P34 requires DP16xTP8 on each 128-device role" >&2; fail=1;
+  case "${CANON_P39_64CHIP_PILOT:-}" in
+    0)
+      p34_expected_dp=16
+      p34_expected_devices=128
+      p34_expected_local_trajectories=4
+      p34_expected_global_m=4096
+      p34_expected_max_seqs=4
+      p34_expected_mesh=16,8
+      [ "${CANON_P39_PILOT_ADMITTED:-}" = "0" ] || {
+        echo "[env] production P34 requires CANON_P39_PILOT_ADMITTED=0" >&2
+        fail=1
+      }
+      ;;
+    1)
+      p34_expected_dp=4
+      p34_expected_devices=32
+      p34_expected_local_trajectories=16
+      p34_expected_global_m=1024
+      p34_expected_max_seqs=16
+      p34_expected_mesh=4,8
+      [ "${CANON_P39_PILOT_ADMITTED:-}" = "1" ] || {
+        echo "[env] P39 pilot requires CANON_P39_PILOT_ADMITTED=1" >&2
+        fail=1
+      }
+      [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
+        echo "[env] P39 pilot requires device-resident optimizer state" >&2
+        fail=1
+      }
+      [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
+        echo "[env] P39 pilot requires the preregistered alignment warning policy" >&2
+        fail=1
+      }
+      ;;
+    *)
+      echo "[env] CANON_P39_64CHIP_PILOT must be exactly 0 or 1" >&2
+      fail=1
+      p34_expected_dp=0
+      p34_expected_devices=0
+      p34_expected_local_trajectories=0
+      p34_expected_global_m=0
+      p34_expected_max_seqs=0
+      p34_expected_mesh=invalid
+      ;;
+  esac
+  [ "${CANON_DP_SIZE:-}" = "$p34_expected_dp" ] && \
+  [ "${CANON_TP_SIZE:-}" = "8" ] && \
+  [ "${CANON_TOTAL_DEVICES:-}" = "$p34_expected_devices" ] || {
+    echo "[env] P34 role topology does not match the selected contract" >&2
+    fail=1
   }
   [ "$((CANON_DP_SIZE * CANON_TP_SIZE))" -eq "$CANON_TOTAL_DEVICES" ] || {
     echo "[env] P34 arithmetic FAIL: dp*tp != role devices" >&2; fail=1;
@@ -245,8 +294,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   [ "${CANON_GLOBAL_PROMPTS:-}" = "8" ] && \
   [ "${CANON_NUM_GENERATIONS:-}" = "8" ] && \
   [ "${CANON_GLOBAL_TRAJECTORIES:-}" = "64" ] && \
-  [ "${CANON_LOCAL_TRAJECTORIES:-}" = "4" ] || {
-    echo "[env] P34 requires 8x8=64 trajectories and four per DP rank" >&2; fail=1;
+  [ "${CANON_LOCAL_TRAJECTORIES:-}" = "$p34_expected_local_trajectories" ] || {
+    echo "[env] P34 trajectory geometry does not match the selected contract" >&2
+    fail=1
   }
   [ "$((CANON_DP_SIZE * CANON_LOCAL_TRAJECTORIES))" -eq \
       "$CANON_GLOBAL_TRAJECTORIES" ] || {
@@ -255,8 +305,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   [ "${CANON_LOGPROB_M:-}" = "256" ] && \
   [ "${CANON_TARGET_M:-}" = "256" ] && \
   [ "${CANON_P34_ABCPROD:-}" = "256" ] && \
-  [ "${MIN_TOKEN_BUCKET:-}" = "4096" ] || {
-    echo "[env] P34 requires local M256 and global M4096" >&2; fail=1;
+  [ "${MIN_TOKEN_BUCKET:-}" = "$p34_expected_global_m" ] || {
+    echo "[env] P34 local/global M does not match the selected contract" >&2
+    fail=1
   }
   [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
     echo "[env] P34 bucket FAIL: global M != dp*local M" >&2; fail=1;
@@ -265,7 +316,7 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     echo "[env] P34 grouped model_fn requires CANON_VJP2_MAX_SEQS=1" >&2; fail=1;
   }
   [ "${CANON_P34_PREFIX_CACHE:-}" = "0" ] && \
-  [ "${CANON_P34_MAX_NUM_SEQS:-}" = "4" ] && \
+  [ "${CANON_P34_MAX_NUM_SEQS:-}" = "$p34_expected_max_seqs" ] && \
   [ "${CANON_P34_MAX_BATCHED_TOKENS:-}" = "256" ] || {
     echo "[env] P34 rollout scheduler contract changed" >&2; fail=1;
   }
@@ -278,8 +329,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     echo "[env] P34 global scheduler token capacity changed" >&2; fail=1;
   }
   [ "${CANON_TRAIN_DP_SHARDING:-}" = "replicated-params" ] && \
-  [ "${FL_SHARED_MESH:-}" = "16,8" ] || {
-    echo "[env] P34 requires DP-replicated parameters on a 16,8 mesh" >&2; fail=1;
+  [ "${FL_SHARED_MESH:-}" = "$p34_expected_mesh" ] || {
+    echo "[env] P34 requires DP-replicated parameters on the selected mesh" >&2
+    fail=1
   }
   [ "${CANON_P34_STRICT_CLI:-}" = "1" ] && \
   [ "${CANON_P34_DISABLE_SAMPLER_IS:-}" = "1" ] && \
@@ -311,6 +363,15 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       } ;;
     *) echo "[env] invalid CANON_P34_RUN_STAGE" >&2; fail=1 ;;
   esac
+  if [ "${CANON_P39_64CHIP_PILOT:-}" = "1" ]; then
+    case "${CANON_P34_RUN_STAGE:-}" in
+      one-update|three-update) ;;
+      *)
+        echo "[env] P39 pilot admits only one-update or three-update" >&2
+        fail=1
+        ;;
+    esac
+  fi
   p34_admitted=0
   [ "${CANON_MODE:-}" = "run" ] && p34_admitted=1
   for k in CANON_P34_TOPOLOGY_ADMITTED CANON_P34_TP8_ADMITTED \
@@ -339,7 +400,7 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       echo "[env] P34 requires WANDB_MODE=online" >&2; fail=1;
     }
   fi
-  echo "[env] P34 contract OK: DP16xTP8 per role, local M256, global M4096"
+  echo "[env] P34 contract OK: DP${CANON_DP_SIZE}xTP${CANON_TP_SIZE} per role, local M256, global M${MIN_TOKEN_BUCKET}"
 fi
 
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
@@ -410,7 +471,7 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
              CANON_P28_SEGMENTED_FORWARD CANON_P28_SEGMENTED_TRAIN \
              CANON_P28_G6_UPDATE CANON_P29_FULL_TRAIN \
              CANON_ALIGNMENT_GATE CANON_ALIGNMENT_TRAIN \
-             CANON_P30_OPT_STATE_OFFLOAD CANON_P30_SPARSE_GRAD_ASSEMBLY \
+             CANON_P30_SPARSE_GRAD_ASSEMBLY \
              CANON_P30_REUSE_SEGMENTED_ENGINE \
              CANON_P30_RELEASE_CAPTURED_STATE \
              CANON_P30_RESHARD_ACCUMULATOR; do
@@ -420,6 +481,15 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         fail=1
       }
     done
+    req CANON_OPT_STATE_RESIDENT
+    req CANON_P30_OPT_STATE_OFFLOAD
+    case "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" in
+      0:1|1:0) ;;
+      *)
+        echo "[env] admitted P33 training requires exactly one optimizer placement: resident or offload" >&2
+        fail=1
+        ;;
+    esac
     if [ "${CANON_P34_DEEPSWE:-0}" != "1" ]; then
       req CANON_PRE_ALIGN_GATE
       [ "${CANON_PRE_ALIGN_GATE:-0}" = "1" ] || {
@@ -432,11 +502,31 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       *) echo "[env] admitted P33 training has invalid workload" >&2; fail=1 ;;
     esac
     if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; then
+      req CANON_P33_ENABLE_EVAL
       req CANON_P33_DISABLE_EVAL
-      [ "${CANON_P33_DISABLE_EVAL:-0}" = "1" ] || {
-        echo "[env] admitted P33 FrozenLake requires periodic evaluation disabled" >&2
+      req CANON_P31_ENABLE_EVAL
+      case "${CANON_P33_ENABLE_EVAL:-}:${CANON_P33_DISABLE_EVAL:-}:${CANON_P31_ENABLE_EVAL:-}" in
+        0:1:0) ;;
+        1:0:1)
+          [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+          [ "${CANON_P33_NO_COMMIT:-}" = "0" ] || {
+            echo "[env] FrozenLake evaluation requires committed full training" >&2
+            fail=1
+          } ;;
+        *)
+          echo "[env] FrozenLake evaluation selection is inconsistent" >&2
+          fail=1 ;;
+      esac
+      case "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" in
+        0|1) ;;
+        *) echo "[env] CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY must be 0 or 1" >&2; fail=1 ;;
+      esac
+      if [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ] && \
+         { [ "${CANON_P33_RUN_STAGE:-}" != "full" ] || \
+           [ "${CANON_P33_NO_COMMIT:-}" != "0" ]; }; then
+        echo "[env] FrozenLake warning-only policy requires committed full training" >&2
         fail=1
-      }
+      fi
     fi
     [ "${CANON_P30_FUSED_PAIR_ACCUMULATION:-}" = "0" ] || {
       echo "[env] P33 rank-reduced groups require fused pair accumulation off" >&2
@@ -652,9 +742,11 @@ if [ "${CANON_MODE:-}" = "workload-contract-only" ]; then
     *) echo "[env] invalid CANON_P32_WORKLOAD=${CANON_P32_WORKLOAD:-unset}" >&2; fail=1 ;;
   esac
   if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; then
+    req CANON_P33_ENABLE_EVAL
     req CANON_P33_DISABLE_EVAL
-    [ "${CANON_P33_DISABLE_EVAL:-0}" = "1" ] || {
-      echo "[env] P33 FrozenLake contract requires periodic evaluation disabled" >&2
+    req CANON_P31_ENABLE_EVAL
+    [ "${CANON_P33_ENABLE_EVAL:-0}:${CANON_P33_DISABLE_EVAL:-0}:${CANON_P31_ENABLE_EVAL:-0}" = "0:1:0" ] || {
+      echo "[env] contract-only FrozenLake must keep evaluation disabled" >&2
       fail=1
     }
   fi

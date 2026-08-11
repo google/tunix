@@ -51,13 +51,13 @@ class RenderP33JobSetsTest(unittest.TestCase):
         run_id=_RUN_ID,
     )
 
-  def test_renders_five_isolated_strict_jobsets(self):
+  def test_renders_six_isolated_strict_jobsets(self):
     with tempfile.TemporaryDirectory() as tmp:
       outputs = self._render(Path(tmp))
-      self.assertEqual(len(outputs), 5)
+      self.assertEqual(len(outputs), 6)
       documents = [yaml.safe_load(path.read_text()) for path in outputs]
       names = [document["metadata"]["name"] for document in documents]
-      self.assertEqual(len(set(names)), 5)
+      self.assertEqual(len(set(names)), 6)
       scratches = []
       states = []
       wandb_names = []
@@ -94,6 +94,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P32_DP_REDUCTION_ADMITTED"], "1")
         self.assertEqual(env["CANON_P33_WORKLOAD_LAUNCH_ADMITTED"], "1")
         self.assertEqual(env["CANON_P33_SHARED_MESH"], "16,4")
+        self.assertEqual(env["CANON_OPT_STATE_RESIDENT"], "0")
         self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
         self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
         if (
@@ -126,40 +127,46 @@ class RenderP33JobSetsTest(unittest.TestCase):
             for arg in container["args"]
             if arg.startswith("--gcs_scratch_location=")
         ))
-      self.assertEqual(len(set(states)), 5)
-      self.assertEqual(len(set(wandb_names)), 5)
-      self.assertEqual(len(set(scratches)), 5)
+      self.assertEqual(len(set(states)), 6)
+      self.assertEqual(len(set(wandb_names)), 6)
+      self.assertEqual(len(set(scratches)), 6)
       self.assertTrue(all(len(values) == 2 for values in scratches))
       self.assertEqual(workloads, {"gsm8k", "frozenlake"})
 
   def test_rendered_commands_equal_frozen_workload_commands(self):
     with tempfile.TemporaryDirectory() as tmp:
       outputs = self._render(Path(tmp))
-      by_stage = {}
+      by_key = {}
       for path in outputs:
         document = yaml.safe_load(path.read_text())
         env = _main_env(document)
-        profile = env["CANON_PROFILE_FILE"]
-        workload_name = "gsm8k" if "gsm8k" in profile else "frozenlake"
-        by_stage[(workload_name, env["CANON_P33_RUN_STAGE"])] = env
-      for workload_name, stage in (
-          ("gsm8k", "alignment-short"),
-          ("frozenlake", "alignment-short"),
-          ("frozenlake", "backward-no-commit"),
-          ("gsm8k", "full"),
-          ("frozenlake", "full"),
-      ):
-        expected = shlex.join(
-            dp_workloads.get_workload(workload_name).command(run_stage=stage)
+        key = next(
+            spec.key
+            for spec in renderer._SPECS
+            if path.name == spec.filename
         )
-        self.assertEqual(by_stage[(workload_name, stage)]["CANON_RUN_CMD"], expected)
+        by_key[key] = env
+      for key in (
+          "gsm8k-alignment-short",
+          "frozenlake-alignment-short",
+          "frozenlake-backward-no-commit",
+          "gsm8k-full",
+          "frozenlake-full",
+      ):
+        spec = next(item for item in renderer._SPECS if item.key == key)
+        expected = shlex.join(
+            dp_workloads.get_workload(spec.workload).command(
+                run_stage=spec.stage
+            )
+        )
+        self.assertEqual(by_key[key]["CANON_RUN_CMD"], expected)
 
-      frozenlake_command = by_stage[("frozenlake", "full")]["CANON_RUN_CMD"]
+      frozenlake_command = by_key["frozenlake-full"]["CANON_RUN_CMD"]
       self.assertIn("--vllm_max_num_seqs=16", frozenlake_command)
       self.assertIn("--vllm_max_num_batched_tokens=256", frozenlake_command)
       self.assertNotIn("--vllm_max_num_seqs=256", frozenlake_command)
       self.assertNotIn("--vllm_max_num_batched_tokens=4096", frozenlake_command)
-      gsm8k_command = by_stage[("gsm8k", "full")]["CANON_RUN_CMD"]
+      gsm8k_command = by_key["gsm8k-full"]["CANON_RUN_CMD"]
       self.assertIn("--rollout_vllm_max_num_seqs=16", gsm8k_command)
       self.assertIn(
           "--rollout_vllm_max_num_batched_tokens=256", gsm8k_command
@@ -168,38 +175,44 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertNotIn(
           "--rollout_vllm_max_num_batched_tokens=4096", gsm8k_command
       )
-      gsm8k_short = by_stage[("gsm8k", "alignment-short")]
+      gsm8k_short = by_key["gsm8k-alignment-short"]
       self.assertEqual(gsm8k_short["CANON_P33_SHORT_ALIGNMENT"], "1")
       self.assertEqual(gsm8k_short["CANON_P33_NO_COMMIT"], "1")
       self.assertIn("--max_steps=1", gsm8k_short["CANON_RUN_CMD"])
       self.assertIn("--max_response_length=1024", gsm8k_short["CANON_RUN_CMD"])
-      short_env = by_stage[("frozenlake", "alignment-short")]
+      short_env = by_key["frozenlake-alignment-short"]
       self.assertEqual(short_env["CANON_P33_SHORT_ALIGNMENT"], "1")
       self.assertIn("--max_response_length=512", short_env["CANON_RUN_CMD"])
       self.assertIn("--env_max_steps=2", short_env["CANON_RUN_CMD"])
-      self.assertEqual(by_stage[("frozenlake", "full")]["CANON_P33_SHORT_ALIGNMENT"], "0")
+      self.assertEqual(by_key["frozenlake-full"]["CANON_P33_SHORT_ALIGNMENT"], "0")
       self.assertEqual(
-          by_stage[("gsm8k", "full")]["CANON_GSM8K_AB_REPORT_ONLY"],
+          by_key["gsm8k-full"]["CANON_GSM8K_AB_REPORT_ONLY"],
           "0",
       )
       self.assertEqual(
-          by_stage[("gsm8k", "full")]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
+          by_key["gsm8k-full"]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
           "1",
       )
-      for workload_name, stage in (
-          ("gsm8k", "alignment-short"),
-          ("frozenlake", "alignment-short"),
-          ("frozenlake", "backward-no-commit"),
-          ("frozenlake", "full"),
+      for key in (
+          "gsm8k-alignment-short",
+          "frozenlake-alignment-short",
+          "frozenlake-backward-no-commit",
+          "frozenlake-full",
       ):
         self.assertEqual(
-            by_stage[(workload_name, stage)]["CANON_GSM8K_AB_REPORT_ONLY"],
+            by_key[key]["CANON_GSM8K_AB_REPORT_ONLY"],
             "0",
         )
         self.assertEqual(
-            by_stage[(workload_name, stage)]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
+            by_key[key]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
             "0",
         )
+      eval_env = by_key["frozenlake-full-eval"]
+      self.assertEqual(eval_env["CANON_P33_ENABLE_EVAL"], "1")
+      self.assertEqual(eval_env["CANON_P33_DISABLE_EVAL"], "0")
+      self.assertEqual(eval_env["CANON_P31_ENABLE_EVAL"], "1")
+      self.assertIn("--num_test_batches=4", eval_env["CANON_RUN_CMD"])
+      self.assertIn("--eval_every_n_steps=10", eval_env["CANON_RUN_CMD"])
 
   def test_rejects_warning_policy_outside_gsm8k_full(self):
     base = renderer.load_base(_BASE_PATH)
@@ -222,12 +235,38 @@ class RenderP33JobSetsTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "environment drifted"):
       renderer.validate_jobset(document, spec, _SOURCE_COMMIT, _RUN_ID)
 
-  def test_frozenlake_jobs_disable_periodic_evaluation(self):
+  def test_rejects_unreviewed_resident_optimizer_render(self):
+    base = renderer.load_base(_BASE_PATH)
+    spec = renderer._SPECS[0]
+    document = renderer.render_jobset(base, spec, _SOURCE_COMMIT, _RUN_ID)
+    pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    main = next(
+        item for item in pod["containers"] if item["name"] == "jax-tpu"
+    )
+    resident = next(
+        item
+        for item in main["env"]
+        if item["name"] == "CANON_OPT_STATE_RESIDENT"
+    )
+    resident["value"] = "1"
+    with self.assertRaisesRegex(ValueError, "environment drifted"):
+      renderer.validate_jobset(document, spec, _SOURCE_COMMIT, _RUN_ID)
+
+  def test_frozenlake_jobs_select_exactly_one_evaluation_mode(self):
     with tempfile.TemporaryDirectory() as tmp:
       for path in self._render(Path(tmp)):
         env = _main_env(yaml.safe_load(path.read_text()))
         if "frozenlake" in env["CANON_PROFILE_FILE"]:
-          self.assertEqual(env["CANON_P33_DISABLE_EVAL"], "1")
+          self.assertIn(
+              (
+                  env["CANON_P33_ENABLE_EVAL"],
+                  env["CANON_P33_DISABLE_EVAL"],
+                  env["CANON_P31_ENABLE_EVAL"],
+              ),
+              (("0", "1", "0"), ("1", "0", "1")),
+          )
 
   def test_rejects_invalid_source_commit_and_run_id(self):
     base = renderer.load_base(_BASE_PATH)

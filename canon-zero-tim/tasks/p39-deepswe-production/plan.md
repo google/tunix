@@ -78,6 +78,16 @@ bucket remain rejected.
    complete local gate from the new base.
 7. Target `backward-no-commit`, then separately approve promotion. Target
    status remains `TARGET NOT RUN` until a raw 4x8x8 Attempt 0 artifact passes.
+8. Before the 4x8x8 launch, add a separate 64-chip integration and capacity
+   pilot: split one 4x4x4 slice into 32 rollout and 32 trainer devices, use
+   DP4xTP8 per role, and exercise device-resident optimizer state for up to
+   three updates. The detailed contract is in
+   `phases/p39-2-64chip-tp8-resident-pilot.md`.
+9. Promote to the existing 4x8x8 DP16xTP8 production geometry only after the
+   pilot classifies optimizer capacity. Resident mode requires the pilot's HBM
+   margin gate; otherwise the 256-chip run retains pinned-host offload. The
+   256-chip run must independently revalidate DP16 collective and replica
+   behavior.
 
 ## Rollback
 

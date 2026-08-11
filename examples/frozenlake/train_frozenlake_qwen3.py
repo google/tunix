@@ -202,12 +202,16 @@ if CANON_P32_WORKLOAD:
   )
   if not CANON_L3:
     raise ValueError("canonical DP16 FrozenLake requires CANON_FROZENLAKE_L3=1")
-  if not CANON_P33_DISABLE_EVAL:
-    raise ValueError(
-        "canonical DP16 FrozenLake requires CANON_P33_DISABLE_EVAL=1"
-    )
+  CANON_P33_ENABLE_EVAL = dp_workloads.frozenlake_evaluation_enabled(
+      os.environ
+  )
+else:
+  CANON_P33_ENABLE_EVAL = False
+CANON_OPTIMIZER_PLACEMENT = dp_workloads.canonical_optimizer_placement(
+    os.environ, require_explicit=CANON_P32_WORKLOAD
+)
 CANON_P30_OPT_STATE_OFFLOAD = (
-    os.getenv("CANON_P30_OPT_STATE_OFFLOAD", "") == "1"
+    CANON_OPTIMIZER_PLACEMENT == "pinned-host-offload"
 )
 prelearner_modes = {
     "contract-only": CANON_CONTRACT_ONLY,
@@ -718,12 +722,7 @@ else:
       fraction=TRAIN_FRACTION,
       num_epochs=NUM_EPOCHS,
   )
-  if CANON_P32_WORKLOAD:
-    # Periodic held-out rollouts are intentionally excluded from the P33 full
-    # campaign. The raw test split was checked above, but it is not tokenized
-    # or passed to the learner.
-    test_dataset = None
-  else:
+  if not CANON_P32_WORKLOAD or CANON_P33_ENABLE_EVAL:
     test_dataset, _ = data_lib.post_init_dataset(
         test_dataset,
         tokenizer,
@@ -731,6 +730,9 @@ else:
         num_batches=NUM_TEST_BATCHES,
         max_prompt_length=MAX_PROMPT_LENGTH,
     )
+  else:
+    # Keep the existing default-off P33 arm independent of evaluation cost.
+    test_dataset = None
 
 show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
@@ -918,7 +920,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
             TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
         ),
         compute_logps_micro_batch_size=MINI_BATCH_SIZE,
-        optimizer_offload=(CANON_P30_OPT_STATE_OFFLOAD or CANON_P32_WORKLOAD),
+        optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
         data_sharding_axis=("dp",) if CANON_P32_WORKLOAD else ("fsdp",),
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
@@ -1086,13 +1088,21 @@ grpo_trainer = GRPOLearner(
 show_hbm_usage("after GRPOLearner creation")
 
 if CANON_P32_WORKLOAD:
-  if P32_WORKLOAD.periodic_evaluation:
-    raise ValueError("canonical DP16 FrozenLake workload must disable evaluation")
-  training_eval_dataset = None
-  print(
-      "[CANON_P33_EVAL] DISABLED workload=frozenlake",
-      flush=True,
-  )
+  if CANON_P33_ENABLE_EVAL:
+    if test_dataset is None:
+      raise ValueError("canonical FrozenLake evaluation dataset is missing")
+    training_eval_dataset = test_dataset
+    print(
+        "[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 "
+        "held_out_rows=100 generations=8",
+        flush=True,
+    )
+  else:
+    training_eval_dataset = None
+    print(
+        "[CANON_P33_EVAL] DISABLED workload=frozenlake",
+        flush=True,
+    )
 elif (
     CANON_P31_CONVERGENCE
     and os.getenv("CANON_P31_ENABLE_EVAL", "") == "1"

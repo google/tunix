@@ -42,6 +42,19 @@ class SamplerIsContractTest(unittest.TestCase):
         '"sampler_is": None if CANON_P32_WORKLOAD else "token",', source
     )
 
+  def test_p41_benchmark_only_uses_serial_engine_seed(self):
+    source = (
+        _REPO_ROOT / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn("if CANON_P41_OPTIMIZER_BENCH:", source)
+    self.assertIn(
+        'vllm_rollout_dict["rollout_vllm_kwargs"]["seed"] = SEED', source
+    )
+    self.assertIn(
+        'P41 optimizer benchmark requires max_concurrency=1', source
+    )
+    self.assertNotIn('"seed": SEED,', source)
+
 
 if __name__ == "__main__":
   unittest.main()

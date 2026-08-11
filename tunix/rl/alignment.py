@@ -44,8 +44,14 @@ P38_MISMATCH_CAPSULE_ENV = "CANON_P38_MISMATCH_CAPSULE"
 P38_MISMATCH_CAPSULE_MAX_ROWS_ENV = "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"
 GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
 GSM8K_ALIGNMENT_WARN_ONLY_ENV = "CANON_GSM8K_ALIGNMENT_WARN_ONLY"
+FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV = "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"
+DEEPSWE_ALIGNMENT_WARN_ONLY_ENV = "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"
 _GSM8K_AB_POLICY_ID = "gsm8k-full-ab-report-v1"
 _GSM8K_ALIGNMENT_WARNING_POLICY_ID = "gsm8k-full-alignment-warning-v2"
+_FROZENLAKE_ALIGNMENT_WARNING_POLICY_ID = (
+    "frozenlake-full-alignment-warning-v1"
+)
+_DEEPSWE_ALIGNMENT_WARNING_POLICY_ID = "deepswe-pilot-alignment-warning-v1"
 _GSM8K_AB_MAX_ABS = 1.0e-4
 _GSM8K_AB_MAX_BYTE_FRACTION = 4.0e-3
 _MAX_MISMATCH_DETAILS = 1024
@@ -156,7 +162,7 @@ def execution_mode() -> str:
 
 
 def gsm8k_ab_report_policy() -> dict[str, Any]:
-  """Returns the narrow, preregistered GSM8K full-run alignment policy."""
+  """Returns the narrow, preregistered full-run alignment policy."""
   raw = os.environ.get(GSM8K_AB_REPORT_ONLY_ENV, "")
   if raw not in ("", "0", "1"):
     raise AlignmentGateError(
@@ -170,16 +176,73 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     )
   bounded_ab = raw == "1"
   warning_only = warn_raw == "1"
+  frozenlake_warn_raw = os.environ.get(
+      FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV, ""
+  )
+  if frozenlake_warn_raw not in ("", "0", "1"):
+    raise AlignmentGateError(
+        f"{FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV} must be exactly 0 or 1, "
+        f"got {frozenlake_warn_raw!r}"
+    )
+  frozenlake_warning_only = frozenlake_warn_raw == "1"
+  deepswe_warn_raw = os.environ.get(DEEPSWE_ALIGNMENT_WARN_ONLY_ENV, "")
+  if deepswe_warn_raw not in ("", "0", "1"):
+    raise AlignmentGateError(
+        f"{DEEPSWE_ALIGNMENT_WARN_ONLY_ENV} must be exactly 0 or 1, "
+        f"got {deepswe_warn_raw!r}"
+    )
+  deepswe_warning_only = deepswe_warn_raw == "1"
+  warning_policies = sum(
+      (warning_only, frozenlake_warning_only, deepswe_warning_only)
+  )
+  if warning_policies > 1:
+    raise AlignmentGateError(
+        "GSM8K, FrozenLake, and DeepSWE warning-only policies are mutually "
+        "exclusive"
+    )
   if bounded_ab and warning_only:
     raise AlignmentGateError(
         f"{GSM8K_AB_REPORT_ONLY_ENV} and "
         f"{GSM8K_ALIGNMENT_WARN_ONLY_ENV} are mutually exclusive"
     )
-  enabled_policy = bounded_ab or warning_only
+  enabled_policy = (
+      bounded_ab
+      or warning_only
+      or frozenlake_warning_only
+      or deepswe_warning_only
+  )
   workload = os.environ.get("CANON_P32_WORKLOAD", "")
   stage = os.environ.get("CANON_P33_RUN_STAGE", "")
   no_commit = os.environ.get("CANON_P33_NO_COMMIT", "")
-  if enabled_policy:
+  if deepswe_warning_only:
+    p34_stage = os.environ.get("CANON_P34_RUN_STAGE", "")
+    admitted = (
+        os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+        and os.environ.get("CANON_P39_64CHIP_PILOT", "") == "1"
+        and p34_stage in ("one-update", "three-update")
+        and os.environ.get("CANON_P34_NO_COMMIT", "") == "0"
+        and execution_mode() == "train"
+    )
+    if not admitted:
+      raise AlignmentGateError(
+          "DeepSWE warning policy is admitted only for the committed P39 "
+          "64-chip pilot"
+      )
+    workload = "deepswe"
+    stage = p34_stage
+  elif frozenlake_warning_only:
+    admitted = (
+        workload == "frozenlake"
+        and stage == "full"
+        and no_commit == "0"
+        and execution_mode() == "train"
+    )
+    if not admitted:
+      raise AlignmentGateError(
+          "FrozenLake alignment warning policy is admitted only for committed "
+          "FrozenLake full training"
+      )
+  elif enabled_policy:
     admitted = (
         workload == "gsm8k"
         and stage == "full"
@@ -193,22 +256,35 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
       )
   return {
       "id": (
+          _DEEPSWE_ALIGNMENT_WARNING_POLICY_ID
+          if deepswe_warning_only
+          else _FROZENLAKE_ALIGNMENT_WARNING_POLICY_ID
+          if frozenlake_warning_only
+          else
           _GSM8K_ALIGNMENT_WARNING_POLICY_ID
           if warning_only
           else _GSM8K_AB_POLICY_ID
       ),
       "enabled": enabled_policy,
-      "warning_only": warning_only,
+      "warning_only": (
+          warning_only or frozenlake_warning_only or deepswe_warning_only
+      ),
       "bounded_ab_only": bounded_ab,
       "workload": workload,
       "stage": stage,
-      "max_abs_limit": None if warning_only else _GSM8K_AB_MAX_ABS,
+      "max_abs_limit": (
+          None
+          if warning_only or frozenlake_warning_only or deepswe_warning_only
+          else _GSM8K_AB_MAX_ABS
+      ),
       "byte_fraction_limit": (
-          None if warning_only else _GSM8K_AB_MAX_BYTE_FRACTION
+          None
+          if warning_only or frozenlake_warning_only or deepswe_warning_only
+          else _GSM8K_AB_MAX_BYTE_FRACTION
       ),
       "claim_level": (
           "convergence-only"
-          if warning_only
+          if warning_only or frozenlake_warning_only or deepswe_warning_only
           else "alignment-degraded"
           if enabled_policy
           else "strict-zero-tim"

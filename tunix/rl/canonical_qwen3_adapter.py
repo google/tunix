@@ -54,6 +54,25 @@ class P35ReplayStageProbeComplete(RuntimeError):
   """Stops the default-off P35.3c probe without a numerical verdict."""
 
 
+def _segmented_loss_geometry(environ) -> tuple[int, tuple[int, int]]:
+  """Returns the fail-closed batch geometry for segmented GRPO loss."""
+  p41_optimizer_bench = environ.get("CANON_P41_OPTIMIZER_BENCH", "") == "1"
+  if p41_optimizer_bench:
+    if (
+        environ.get("CANON_GSM8K_L3", "") != "1"
+        or environ.get("CANON_GSM8K_UPDATE_CANARY", "") != "1"
+        or environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+        or environ.get("CANON_P34_DEEPSWE", "") == "1"
+    ):
+      raise FunctionalMappingError(
+          "P41 segmented loss requires the bounded GSM8K L3 update canary"
+      )
+    return 2, (256, 64)
+  if environ.get("CANON_P31_CONVERGENCE", "") == "1":
+    return 32, (4096, 2048)
+  return 8, (2048, 64)
+
+
 _P35_REPLAY_STAGE_PROBE_ENV = "CANON_P35_REPLAY_STAGE_PROBE"
 _P35_REPLAY_STAGE_REPORT_ENV = "CANON_P35_REPLAY_STAGE_REPORT"
 _P35_REPLAY_STAGE_NAMES = (
@@ -316,10 +335,14 @@ def _canonical_topology_contract() -> tuple[int, int, int, int]:
       raise FunctionalMappingError(
           "P32 topology values must be integers"
       ) from exc
-    expected_tp = 8 if os.environ.get("CANON_P34_DEEPSWE", "") == "1" else 4
-    if (data_size, tp_size) != (16, expected_tp):
+    p34 = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+    expected_tp = 8 if p34 else 4
+    expected_dp = (
+        deepswe_contract.active_workload(os.environ).dp_size if p34 else 16
+    )
+    if (data_size, tp_size) != (expected_dp, expected_tp):
       raise FunctionalMappingError(
-          f"canonical training admits exactly DP16xTP{expected_tp}; got "
+          f"canonical training admits exactly DP{expected_dp}xTP{expected_tp}; got "
           f"DP{data_size}xTP{tp_size}"
       )
     if local_m != 256 or target_m != local_m:
@@ -3310,7 +3333,7 @@ class Qwen3EngineForwardAdapter:
       gradient_microbatch_sink=None,
       deterministic_repeat=False,
   ):
-    """Runs rank-local DP16 reverse and one fixed reduction per group.
+    """Runs rank-local DP reverse and one fixed reduction per group.
 
     Each rank-major group contains one trajectory from every DP rank. The
     cotangent is isolated rank by rank, then staged on a physically partitioned
@@ -3329,13 +3352,17 @@ class Qwen3EngineForwardAdapter:
       )
     p34 = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
     expected_tp = 8 if p34 else 4
+    expected_dp = (
+        deepswe_contract.active_workload(os.environ).dp_size if p34 else 16
+    )
     if (
         os.environ.get("CANON_P32_TRAIN_ADMITTED", "") != "1"
-        or self._data_size != 16
+        or self._data_size != expected_dp
         or self._tp_size != expected_tp
     ):
       raise FunctionalMappingError(
-          f"grouped reverse requires the admitted DP16xTP{expected_tp} contract"
+          "grouped reverse requires the admitted "
+          f"DP{expected_dp}xTP{expected_tp} contract"
       )
     if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") != "1":
       raise FunctionalMappingError(
@@ -3351,7 +3378,7 @@ class Qwen3EngineForwardAdapter:
       )
     if p34:
       deepswe_contract.validate_environment(os.environ)
-      workload = deepswe_contract.P34_WORKLOAD
+      workload = deepswe_contract.active_workload(os.environ)
       contract = workload
       reverse_groups = contract.rank_major_rows()
     else:
@@ -3450,9 +3477,10 @@ class Qwen3EngineForwardAdapter:
       segmented = build_p28_segmented_engine_forward(self._runner)
       self._p32_d3b_segmented_engine = segmented
       print(
-          "[P34.DP16] segmented_engine_ready "
-          f"data=16 tp={self._tp_size} groups={contract.local_trajectories} "
-          "local_M=256 global_M=4096",
+          f"[P34.DP{contract.dp_size}] segmented_engine_ready "
+          f"data={contract.dp_size} tp={self._tp_size} "
+          f"groups={contract.local_trajectories} local_M=256 "
+          f"global_M={contract.global_m}",
           flush=True,
       )
 
@@ -3474,7 +3502,7 @@ class Qwen3EngineForwardAdapter:
       forward["logps"].block_until_ready()
       forwards.append(forward)
       print(
-          "[P32.DP16] forward_group_done "
+          f"[P32.DP{contract.dp_size}] forward_group_done "
           f"group={index + 1}/{contract.local_trajectories} "
           f"rows={reverse_groups[index]} "
           f"n_real={spec['host_n_real']}",
@@ -3552,7 +3580,7 @@ class Qwen3EngineForwardAdapter:
               dp_axis=self._dp_axis,
           )
           print(
-              f"[{'P34' if p34 else 'P33'}.DP16] "
+              f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] "
               f"gradient_reducer_ready dp_axis={self._dp_axis} "
               f"dp_size={contract.dp_size}",
               flush=True,
@@ -3625,7 +3653,7 @@ class Qwen3EngineForwardAdapter:
           )
       reports.append(report)
       print(
-          f"[{'P34' if p34 else 'P33'}.DP16] reverse_group_done "
+          f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] reverse_group_done "
           f"group={index + 1}/{contract.local_trajectories} "
           f"rows={reverse_groups[index]} "
           f"rank_pullbacks={report['dp_reduction']['rank_contributions']} "
@@ -3739,7 +3767,6 @@ class Qwen3EngineForwardAdapter:
       )
     g5c_only = os.environ.get("CANON_P28_G5C_ONLY", "") == "1"
     g6_update = os.environ.get("CANON_P28_G6_UPDATE", "") == "1"
-    p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
     if g5c_only == g6_update:
       raise FunctionalMappingError(
           "P28 complete loss requires exactly one of "
@@ -3788,8 +3815,9 @@ class Qwen3EngineForwardAdapter:
       )
     if prompts.shape[0] != completions.shape[0]:
       raise FunctionalMappingError("P28 G5c prompt/completion batch mismatch")
-    expected_trajectories = 32 if p31_convergence else 8
-    expected_widths = (4096, 2048) if p31_convergence else (2048, 64)
+    expected_trajectories, expected_widths = _segmented_loss_geometry(
+        os.environ
+    )
     if int(prompts.shape[0]) != expected_trajectories:
       raise FunctionalMappingError(
           "segmented loss trajectory contract changed: "
@@ -4038,6 +4066,12 @@ class Qwen3EngineForwardAdapter:
         "gradient_microbatches": emitted_microbatches,
         "reports": tuple(reports),
         "forward_counts": tuple(result["counts"] for result in forwards),
+        "dp_reduction_visibility": "SINGLE_REPLICA_IDENTITY",
+        "dp_axis": self._dp_axis,
+        "replica_equality": True,
+        "dp_reduction_transactions": 0,
+        "dp_reduction_rounds_per_transaction": 0,
+        "dp_rank_pullbacks_per_transaction": 1,
     }
 
   def run_p28_segmented_forward_gate(self, lengths=(128, 160, 256)):

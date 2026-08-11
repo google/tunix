@@ -230,6 +230,28 @@ class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
 
 class AgenticGrpoLearnerTest(parameterized.TestCase):
 
+  def test_p41_optimizer_benchmark_has_bounded_geometry(self):
+    geometry = agentic_rl_learner._segmented_update_geometry({  # pylint: disable=protected-access
+        "CANON_P41_OPTIMIZER_BENCH": "1",
+        "CANON_GSM8K_L3": "1",
+        "CANON_GSM8K_UPDATE_CANARY": "1",
+    })
+    self.assertEqual(geometry, (2, 2, "[P41.OPTIMIZER]", False))
+
+  @parameterized.parameters(
+      ({},),
+      ({"CANON_GSM8K_L3": "1"},),
+      ({
+          "CANON_GSM8K_L3": "1",
+          "CANON_GSM8K_UPDATE_CANARY": "1",
+          "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+      },),
+  )
+  def test_p41_optimizer_benchmark_rejects_ambiguous_context(self, additions):
+    environ = {"CANON_P41_OPTIMIZER_BENCH": "1", **additions}
+    with self.assertRaisesRegex(ValueError, "bounded GSM8K L3"):
+      agentic_rl_learner._segmented_update_geometry(environ)  # pylint: disable=protected-access
+
   def test_p33_zero_lr_commit_accepts_optimizer_only_mutation(self):
     class TinyModel(nnx.Module):
 
@@ -284,6 +306,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             eval_every_n_steps=100,
             max_steps=1,
             gradient_accumulation_steps=16,
+            optimizer_offload=True,
             checkpoint_root_directory=None,
         ),
         custom_checkpoint_metadata_fn=lambda: {},
@@ -315,6 +338,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P31_CONVERGENCE": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_OPT_STATE_RESIDENT": "0",
+        "CANON_P30_OPT_STATE_OFFLOAD": "1",
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P33_RUN_STAGE": "one-update",
         "CANON_P29_FULL_TRAIN": "0",
@@ -409,6 +434,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             eval_every_n_steps=100,
             max_steps=1,
             gradient_accumulation_steps=16,
+            optimizer_offload=True,
             checkpoint_root_directory=None,
         ),
         custom_checkpoint_metadata_fn=lambda: {},
@@ -445,6 +471,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     env = {
         "CANON_P31_CONVERGENCE": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_OPT_STATE_RESIDENT": "0",
+        "CANON_P30_OPT_STATE_OFFLOAD": "1",
         "CANON_P33_NO_COMMIT": "1",
         "CANON_P29_FULL_TRAIN": "1",
     }

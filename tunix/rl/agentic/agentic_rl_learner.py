@@ -57,6 +57,61 @@ from tunix.sft import utils as sft_utils
 ArrayLike = typing.ArrayLike
 
 
+def _frozenlake_evaluation_metrics(
+    rewards: Any, *, wall_seconds: float, policy_step: int
+) -> dict[str, float | int]:
+  """Returns finite, complete held-out evaluation summary metrics."""
+  values = np.asarray(rewards, dtype=np.float32).reshape(-1)
+  if values.size == 0 or not np.all(np.isfinite(values)):
+    raise ValueError("FrozenLake evaluation rewards must be nonempty and finite")
+  if not np.isfinite(wall_seconds) or wall_seconds < 0.0:
+    raise ValueError(
+        "FrozenLake evaluation wall time must be finite and nonnegative"
+    )
+  if policy_step < 0:
+    raise ValueError("FrozenLake evaluation policy step must be nonnegative")
+  return {
+      "reward": float(values.mean()),
+      "solve": float((values > 0.1).mean()),
+      "n": int(values.size),
+      "wall_seconds": float(wall_seconds),
+      "policy_step": int(policy_step),
+  }
+
+
+def _segmented_update_geometry(environ) -> tuple[int, int, str, bool]:
+  """Returns the fail-closed trajectory contract for one segmented update."""
+  p33_workload = environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+  p34_workload = environ.get("CANON_P34_DEEPSWE", "") == "1"
+  p41_optimizer_bench = environ.get("CANON_P41_OPTIMIZER_BENCH", "") == "1"
+  if p41_optimizer_bench and (
+      environ.get("CANON_GSM8K_L3", "") != "1"
+      or environ.get("CANON_GSM8K_UPDATE_CANARY", "") != "1"
+      or p33_workload
+      or p34_workload
+  ):
+    raise ValueError(
+        "P41 optimizer benchmark requires the bounded GSM8K L3 update "
+        "canary and cannot overlap P33 or P34"
+    )
+  p31_convergence = environ.get("CANON_P31_CONVERGENCE", "") == "1"
+  if p34_workload:
+    workload = deepswe_contract.active_workload(environ)
+    return (
+        workload.global_trajectories,
+        workload.local_trajectories,
+        f"[CANON_P34_DP{workload.dp_size}]",
+        True,
+    )
+  if p33_workload:
+    return 256, 16, "[CANON_P33_DP16]", True
+  if p41_optimizer_bench:
+    return 2, 2, "[P41.OPTIMIZER]", False
+  if p31_convergence:
+    return 32, 2, "[CANON_FROZENLAKE_P31]", False
+  return 8, 2, "[CANON_FROZENLAKE_P27]", False
+
+
 def _eval_schedule_step(
     *,
     segmented_update: bool,
@@ -460,6 +515,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     p34_workload = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
     canonical_workload = p33_workload or p34_workload
+    (
+        expected_trajectories,
+        expected_trajectory_micro,
+        marker_prefix,
+        geometry_is_canonical,
+    ) = _segmented_update_geometry(os.environ)
+    if geometry_is_canonical != canonical_workload:
+      raise alignment.AlignmentGateError(
+          "segmented update geometry classification is inconsistent"
+      )
     p33_no_commit = (
         canonical_workload
         and (
@@ -487,11 +552,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "P28 G6 requires the four-boundary ObservedTrainExample"
       )
     actor_trainer = self.rl_cluster.actor_trainer
+    resident_requested = (
+        os.environ.get("CANON_OPT_STATE_RESIDENT", "0") == "1"
+    )
+    if resident_requested and actor_trainer.config.optimizer_offload:
+      raise alignment.AlignmentGateError(
+          "optimizer resident and offload modes are mutually exclusive"
+      )
+    if p33_workload:
+      optimizer_placement = dp_workloads.canonical_optimizer_placement(
+          os.environ, require_explicit=True
+      )
+    elif actor_trainer.config.optimizer_offload:
+      optimizer_placement = "pinned-host-offload"
+    elif resident_requested:
+      optimizer_placement = "device-resident"
+    else:
+      optimizer_placement = "device-unattested"
     full_train = os.environ.get("CANON_P29_FULL_TRAIN", "") == "1"
     num_trajectories = int(train_example.completion_ids.shape[0])
     if p34_workload:
       deepswe_contract.validate_environment(os.environ)
-      workload = deepswe_contract.P34_WORKLOAD
+      workload = deepswe_contract.active_workload(os.environ)
       trajectory_micro = workload.local_trajectories
     elif p33_workload:
       workload = dp_workloads.active_workload()
@@ -504,34 +586,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       trajectory_micro = workload.local_trajectories
     else:
-      trajectory_micro = int(
-          os.environ.get("CANON_P27_TRAJECTORY_MICRO", "2")
-      )
+      trajectory_micro = expected_trajectory_micro
     if num_trajectories % trajectory_micro:
       raise alignment.AlignmentGateError(
           "segmented update trajectory cadence changed: "
           f"trajectories={num_trajectories} micro={trajectory_micro}"
       )
     expected_microbatches = num_trajectories // trajectory_micro
-    expected_trajectories = (
-        workload.global_trajectories
-        if canonical_workload
-        else 32 if p31_convergence else 8
-    )
+    if canonical_workload:
+      expected_trajectories = workload.global_trajectories
     if num_trajectories != expected_trajectories:
       raise alignment.AlignmentGateError(
           "segmented update trajectory contract changed: "
           f"{num_trajectories} != {expected_trajectories}"
       )
-    marker_prefix = (
-        "[CANON_P34_DP16]"
-        if p34_workload
-        else "[CANON_P33_DP16]"
-        if p33_workload
-        else "[CANON_FROZENLAKE_P31]"
-        if p31_convergence
-        else "[CANON_FROZENLAKE_P27]"
-    )
     _, trainer_state = nnx.split(actor_trainer.model)
     adapter = canonical_forward.require_registered()
     sharding_profile_enabled = (
@@ -599,14 +667,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     optimizer_memory_kinds_before = (
         actor_trainer.optimizer_state_memory_kinds()
     )
-    if actor_trainer.config.optimizer_offload:
-      if optimizer_memory_kinds_before != ("pinned_host",):
+    expected_optimizer_memory_kind = (
+        "pinned_host"
+        if optimizer_placement == "pinned-host-offload"
+        else "device"
+    )
+    if optimizer_placement != "device-unattested":
+      if optimizer_memory_kinds_before != (expected_optimizer_memory_kind,):
         raise alignment.AlignmentGateError(
-            "P30 optimizer state must be pinned-host before reverse: "
+            "optimizer state placement before reverse is invalid: "
             f"{optimizer_memory_kinds_before!r}"
         )
       print(
-          "[P30.G1] OPT_STATE before_reverse memory_kind=pinned_host",
+          "[P41.OPTIMIZER] before_reverse "
+          f"placement={optimizer_placement} "
+          f"memory_kind={expected_optimizer_memory_kind}",
           flush=True,
       )
     micro_norms = []
@@ -722,7 +797,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "P34 repeated backward-no-commit gradients are not array-exact"
         )
       print(
-          "[CANON_P34_DP16] deterministic_repeat array_exact=1 repeats=2",
+          f"[CANON_P34_DP{workload.dp_size}] "
+          "deterministic_repeat array_exact=1 repeats=2",
           flush=True,
       )
     hbm_after_accumulation = memory_snapshot()
@@ -851,7 +927,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "optimizer_memory_kinds_before": list(
               optimizer_memory_kinds_before
           ),
-      }
+            "optimizer_placement": optimizer_placement,
+            "state_fingerprints_before": before,
+            "state_fingerprints_after": after_no_commit,
+        }
       report_path = os.environ.get("CANON_UPDATE_REPORT", "")
       if not report_path:
         raise alignment.AlignmentGateError("CANON_UPDATE_REPORT is required")
@@ -926,12 +1005,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     optimizer_memory_kinds_after = (
         actor_trainer.optimizer_state_memory_kinds()
     )
-    if actor_trainer.config.optimizer_offload and (
-        optimizer_memory_kinds_after != ("pinned_host",)
+    if optimizer_placement != "device-unattested" and (
+        optimizer_memory_kinds_after != (expected_optimizer_memory_kind,)
     ):
       raise alignment.AlignmentGateError(
-          "P30 optimizer state must return to pinned host after commit: "
+          "optimizer state placement after commit is invalid: "
           f"{optimizer_memory_kinds_after!r}"
+      )
+    if optimizer_placement != "device-unattested":
+      print(
+          "[P41.OPTIMIZER] after_commit "
+          f"placement={optimizer_placement} "
+          f"memory_kind={expected_optimizer_memory_kind}",
+          flush=True,
       )
     print(
         f"{marker_prefix} update_step_committed "
@@ -996,6 +1082,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else "unregistered_schedule_no_change"
     )
     update_record = {
+        "contract_name": (
+            workload.contract_name
+            if p34_workload
+            else workload.name
+            if p33_workload
+            else "legacy-segmented"
+        ),
+        "dp_size": workload.dp_size if canonical_workload else 1,
+        "tp_size": workload.tp_size if canonical_workload else 1,
+        "global_m": workload.global_m if canonical_workload else 256,
         "verdict": (
           "PASS"
             if optimizer_transaction_valid
@@ -1050,6 +1146,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "optimizer_memory_kinds_after": list(
             optimizer_memory_kinds_after
         ),
+        "optimizer_placement": optimizer_placement,
+        "state_fingerprints_before": before,
+        "state_fingerprints_after": after,
     }
     update_path = os.environ.get("CANON_UPDATE_REPORT", "")
     if not update_path:
@@ -1909,26 +2008,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       p28_g6_update = os.environ.get("CANON_P28_G6_UPDATE", "") == "1"
       if p28_g6_update:
+        (
+            expected_total,
+            expected_trajectory_micro,
+            marker_prefix,
+            canonical_workload,
+        ) = _segmented_update_geometry(os.environ)
         p33_workload = (
             os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
         )
         p34_workload = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
-        canonical_workload = p33_workload or p34_workload
-        p31_convergence = (
-            os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
-        )
-        expected_total = (
-            64
-            if p34_workload
-            else 256
-            if p33_workload
-            else 32
-            if p31_convergence
-            else 8
-        )
-        expected_trajectory_micro = (
-            4 if p34_workload else 16 if p33_workload else 2
-        )
         expected_grad_acc = expected_total // expected_trajectory_micro
         if (
             is_packed
@@ -1939,17 +2028,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               "segmented update geometry changed: expected unpacked "
               f"{expected_total}->{expected_grad_acc}x"
               f"{expected_trajectory_micro} with "
-              f"grad_acc={expected_grad_acc}"
+              f"grad_acc={expected_grad_acc}; got "
+              f"is_packed={is_packed}, "
+              f"trajectory_micro_batch_size={trajectory_micro_batch_size}, "
+              f"grad_acc_steps={grad_acc_steps}"
           )
-        marker_prefix = (
-            "[CANON_P34_DP16]"
-            if p34_workload
-            else "[CANON_P33_DP16]"
-            if p33_workload
-            else "[CANON_FROZENLAKE_P31]"
-            if p31_convergence
-            else "[CANON_FROZENLAKE_P27]"
-        )
         print(
             f"{marker_prefix} trajectory_microbatch "
             f"total={expected_total} size={expected_trajectory_micro} "
@@ -2052,6 +2135,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self._last_eval_train_step = current_train_step
           self._eval_iter_steps = 0
           eval_orchestrator = self._build_orchestrator()
+          eval_started = time.perf_counter()
 
           async def _eval_runner_async(current_eval_orchestrator):
             eval_examples = []
@@ -2092,6 +2176,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 f"generations={self._num_generations()} "
                 f"rewards={actual_eval_rewards} "
                 f"expected={expected_eval_rewards} verdict=PASS",
+                flush=True,
+            )
+            with self._rewards_window_lock:
+              eval_rewards_for_metrics = np.asarray(
+                  self._eval_rewards_window, dtype=np.float32
+              )
+            eval_metrics = _frozenlake_evaluation_metrics(
+                eval_rewards_for_metrics,
+                wall_seconds=time.perf_counter() - eval_started,
+                policy_step=current_train_step,
+            )
+            self.rl_cluster.buffer_metrics_async(
+                {
+                    f"frozenlake_eval/{name}": (value, np.mean)
+                    for name, value in eval_metrics.items()
+                },
+                mode=rl_cluster_lib.Mode.EVAL,
+                step=current_train_step,
+            )
+            print(
+                "[CANON_FROZENLAKE_P42_JSON] "
+                + json.dumps(eval_metrics, sort_keys=True, separators=(",", ":")),
                 flush=True,
             )
           self._eval_iter_steps += 1

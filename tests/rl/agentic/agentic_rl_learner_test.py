@@ -34,6 +34,21 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 class AgenticRLLearnerTest(parameterized.TestCase):
 
+  def test_frozenlake_evaluation_metrics_are_finite_and_complete(self):
+    metrics = agentic_rl_learner._frozenlake_evaluation_metrics(
+        [0.0, 0.2, 1.0], wall_seconds=2.5, policy_step=10
+    )
+    self.assertEqual(metrics["n"], 3)
+    self.assertAlmostEqual(metrics["solve"], 2.0 / 3.0)
+    self.assertEqual(metrics["wall_seconds"], 2.5)
+    self.assertEqual(metrics["policy_step"], 10)
+
+  def test_frozenlake_evaluation_metrics_reject_nonfinite_rewards(self):
+    with self.assertRaisesRegex(ValueError, "nonempty and finite"):
+      agentic_rl_learner._frozenlake_evaluation_metrics(
+          [0.0, float("nan")], wall_seconds=1.0, policy_step=0
+      )
+
   def test_p31_segmented_eval_uses_preupdate_step_exactly_once(self):
     self.assertEqual(
         agentic_rl_learner._eval_schedule_step(

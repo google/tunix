@@ -28,6 +28,9 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STEP = ROOT / "cluster" / "steps" / "65_probe_devices.sh"
 PROFILE = ROOT / "cluster" / "profiles" / "qwen3-32b-dp16-tp8-deepswe.env"
+PILOT_PROFILE = (
+    ROOT / "cluster" / "profiles" / "qwen3-32b-dp4-tp8-deepswe-pilot.env"
+)
 ENTRYPOINT = ROOT / "cluster" / "entrypoint.sh"
 
 
@@ -48,9 +51,14 @@ class DeviceProbeContractTest(unittest.TestCase):
     self.assertIn("export CANON_EXPECTED_SLICE_DEVICES=256", text)
     self.assertIn("export CANON_TOTAL_DEVICES=128", text)
 
+  def test_pilot_profile_opts_in_with_64_device_slice(self):
+    text = PILOT_PROFILE.read_text()
+    self.assertIn("export CANON_EXPECTED_SLICE_DEVICES=64", text)
+    self.assertIn("export CANON_TOTAL_DEVICES=32", text)
+
   def test_no_other_profile_opts_in(self):
     for profile in sorted((ROOT / "cluster" / "profiles").glob("*.env")):
-      if profile.name == PROFILE.name:
+      if profile.name in (PROFILE.name, PILOT_PROFILE.name):
         continue
       self.assertNotIn(
           "CANON_EXPECTED_SLICE_DEVICES",

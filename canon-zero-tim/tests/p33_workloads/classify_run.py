@@ -24,6 +24,11 @@ _PRE_BOUNDARIES = {
 }
 _EXACT_KEYS = {"w_all_exactly_1", "r_all_exactly_1", "wr_all_exactly_1"}
 _WARNING_POLICY_ID = "gsm8k-full-alignment-warning-v2"
+_FROZENLAKE_WARNING_POLICY_ID = "frozenlake-full-alignment-warning-v1"
+_OPTIMIZER_MEMORY_KIND = {
+    "pinned-host-offload": ["pinned_host"],
+    "device-resident": ["device"],
+}
 
 
 def _json_lines(path: Path) -> list[dict[str, Any]]:
@@ -69,7 +74,7 @@ def _require(condition: bool, reason: str, reasons: list[str]) -> None:
 
 
 def _warning_policy_expected(workload: str, stage: str) -> bool:
-  return workload == "gsm8k" and stage == "full"
+  return workload in ("gsm8k", "frozenlake") and stage == "full"
 
 
 def _validate_warning_policy(
@@ -84,7 +89,12 @@ def _validate_warning_policy(
     _require(policy.get("enabled") in (None, False), f"{prefix}.policy", reasons)
     return
   _require(
-      policy.get("id") == _WARNING_POLICY_ID,
+      policy.get("id")
+      == (
+          _FROZENLAKE_WARNING_POLICY_ID
+          if policy.get("workload") == "frozenlake"
+          else _WARNING_POLICY_ID
+      ),
       f"{prefix}.policy_id",
       reasons,
   )
@@ -94,7 +104,11 @@ def _validate_warning_policy(
       f"{prefix}.policy_warning_only",
       reasons,
   )
-  _require(policy.get("workload") == "gsm8k", f"{prefix}.policy_workload", reasons)
+  _require(
+      policy.get("workload") in ("gsm8k", "frozenlake"),
+      f"{prefix}.policy_workload",
+      reasons,
+  )
   _require(policy.get("stage") == "full", f"{prefix}.policy_stage", reasons)
   _require(
       policy.get("max_abs_limit") is None,
@@ -331,11 +345,81 @@ def classify(
       reasons,
   )
   eval_count = log_text.count("[CANON_P33_EVAL] DISABLED workload=frozenlake")
-  _require(
-      eval_count == (1 if workload == "frozenlake" else 0),
-      f"eval_disabled_count={eval_count}",
-      reasons,
+  eval_enabled_count = log_text.count(
+      "[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 "
+      "held_out_rows=100 generations=8"
   )
+  if workload == "frozenlake":
+    _require(
+        eval_count + eval_enabled_count == 1,
+        "frozenlake_eval_selection_count="
+        f"{eval_count + eval_enabled_count}",
+        reasons,
+    )
+    if eval_enabled_count == 1:
+      eval_inventory = [
+          tuple(int(value) for value in match)
+          for match in re.findall(
+              r"\[CANON_FROZENLAKE_P31\] eval_reward_inventory "
+              r"step=(\d+) prompts=(\d+) generations=(\d+) "
+              r"rewards=(\d+) expected=(\d+) verdict=PASS",
+              log_text,
+          )
+      ]
+      expected_eval_steps = list(range(0, expected_updates, 10))
+      _require(
+          [row[0] for row in eval_inventory] == expected_eval_steps,
+          f"eval_steps={eval_inventory} expected={expected_eval_steps}",
+          reasons,
+      )
+      _require(
+          all(
+              prompts == 100
+              and generations == 8
+              and rewards == expected == 800
+              for _, prompts, generations, rewards, expected in eval_inventory
+          ),
+          f"eval_inventory={eval_inventory}",
+          reasons,
+      )
+      eval_summaries = []
+      for line in log_text.splitlines():
+        if not line.startswith("[CANON_FROZENLAKE_P42_JSON] "):
+          continue
+        try:
+          eval_summaries.append(json.loads(line.split(" ", 1)[1]))
+        except (json.JSONDecodeError, TypeError):
+          reasons.append("invalid_frozenlake_eval_summary_json")
+      _require(
+          [record.get("policy_step") for record in eval_summaries]
+          == expected_eval_steps,
+          "eval_summary_steps="
+          f"{[record.get('policy_step') for record in eval_summaries]} "
+          f"expected={expected_eval_steps}",
+          reasons,
+      )
+      _require(
+          all(
+              record.get("n") == 800
+              and isinstance(record.get("reward"), (int, float))
+              and math.isfinite(float(record["reward"]))
+              and isinstance(record.get("solve"), (int, float))
+              and math.isfinite(float(record["solve"]))
+              and 0.0 <= record["solve"] <= 1.0
+              and isinstance(record.get("wall_seconds"), (int, float))
+              and math.isfinite(float(record["wall_seconds"]))
+              and record["wall_seconds"] >= 0.0
+              for record in eval_summaries
+          ),
+          f"eval_summaries={eval_summaries}",
+          reasons,
+      )
+  else:
+    _require(
+        eval_count == 0 and eval_enabled_count == 0,
+        "non_frozenlake_eval_marker",
+        reasons,
+    )
   metric_markers = [
       (int(last_step), int(events), int(regressions))
       for last_step, events, regressions in re.findall(
@@ -410,8 +494,15 @@ def classify(
         f"{prefix}.micro_gradient_norms",
         reasons,
     )
+    placement = record.get("optimizer_placement")
     _require(
-        record.get("optimizer_memory_kinds_before") == ["pinned_host"],
+        placement in _OPTIMIZER_MEMORY_KIND,
+        f"{prefix}.optimizer_placement",
+        reasons,
+    )
+    expected_optimizer_kind = _OPTIMIZER_MEMORY_KIND.get(placement)
+    _require(
+        record.get("optimizer_memory_kinds_before") == expected_optimizer_kind,
         f"{prefix}.optimizer_before",
         reasons,
     )
@@ -436,7 +527,7 @@ def classify(
       _require(record.get("train_steps_before") == index, f"{prefix}.step_before", reasons)
       _require(record.get("train_steps_after") == index + 1, f"{prefix}.step_after", reasons)
       _require(
-          record.get("optimizer_memory_kinds_after") == ["pinned_host"],
+          record.get("optimizer_memory_kinds_after") == expected_optimizer_kind,
           f"{prefix}.optimizer_after",
           reasons,
       )
@@ -562,6 +653,7 @@ def classify(
       "expected_pre_alignments": expected_updates,
       "observed_pre_alignments": pre_alignment_count,
       "alignment_warning_policy_enabled": policy_expected,
+      "evaluation_enabled": eval_enabled_count == 1,
       "pre_alignment_warning_records": pre_warning_count,
       "alignment_warning_records": alignment_warning_count,
       "claim_level": (

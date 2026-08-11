@@ -42,6 +42,7 @@ class JobSpec:
   no_commit: bool
   job_prefix: str
   command: tuple[str, ...]
+  enable_evaluation: bool = False
 
   @property
   def filename(self) -> str:
@@ -64,9 +65,9 @@ def _common_args(*, max_steps: int, prompt: int, response: int) -> tuple[str, ..
 
 
 def _frozenlake_command(
-    max_steps: int, *, short_alignment: bool = False
+    max_steps: int, *, short_alignment: bool = False, enable_evaluation: bool = False
 ) -> tuple[str, ...]:
-  return (
+  command = (
     "python3",
     "-u",
     "examples/frozenlake/train_frozenlake_qwen3.py",
@@ -92,6 +93,9 @@ def _frozenlake_command(
     "--top_k=0",
     "--top_p=1.0",
   )
+  if enable_evaluation:
+    command += ("--num_test_batches=4", "--eval_every_n_steps=10")
+  return command
 
 
 def _gsm8k_command(max_steps: int) -> tuple[str, ...]:
@@ -154,6 +158,16 @@ _SPECS = (
         no_commit=False,
         job_prefix="canon-p33-fl-full",
         command=_frozenlake_command(450),
+    ),
+    JobSpec(
+        key="frozenlake-full-eval",
+        workload="frozenlake",
+        stage="full",
+        profile="cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env",
+        no_commit=False,
+        job_prefix="canon-p42-fl-eval",
+        command=_frozenlake_command(450, enable_evaluation=True),
+        enable_evaluation=True,
     ),
 )
 
@@ -304,10 +318,16 @@ def render_jobset(
           "CANON_P33_SHARED_MESH": "16,4",
           "CANON_P33_RUN_STAGE": spec.stage,
           "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
+          "CANON_OPT_STATE_RESIDENT": "0",
           "CANON_GSM8K_AB_REPORT_ONLY": "0",
           "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
               "1"
               if spec.workload == "gsm8k" and spec.stage == "full"
+              else "0"
+          ),
+          "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
+              "1"
+              if spec.workload == "frozenlake" and spec.stage == "full"
               else "0"
           ),
           "CANON_P33_SHORT_ALIGNMENT": (
@@ -338,7 +358,13 @@ def render_jobset(
   )
   if spec.workload == "frozenlake":
     _set_named_env(
-        main["env"], {"CANON_P33_DISABLE_EVAL": "1"}, remove=()
+        main["env"],
+        {
+            "CANON_P33_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
+            "CANON_P33_DISABLE_EVAL": "0" if spec.enable_evaluation else "1",
+            "CANON_P31_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
+        },
+        remove=(),
     )
 
   worker = _container(_worker_pod(document)["containers"], "pathways-worker")
@@ -424,10 +450,16 @@ def validate_jobset(
       "CANON_P33_SHARED_MESH": "16,4",
       "CANON_P33_RUN_STAGE": spec.stage,
       "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
+      "CANON_OPT_STATE_RESIDENT": "0",
       "CANON_GSM8K_AB_REPORT_ONLY": "0",
       "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
           "1"
           if spec.workload == "gsm8k" and spec.stage == "full"
+          else "0"
+      ),
+      "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
+          "1"
+          if spec.workload == "frozenlake" and spec.stage == "full"
           else "0"
       ),
       "CANON_P33_SHORT_ALIGNMENT": (
@@ -458,8 +490,25 @@ def validate_jobset(
     raise ValueError("autoscaled P33 JobSet must not inherit old device ids")
   if env.get("CANON_EXPECT_TRAIN_MESH_IDS") != "":
     raise ValueError("autoscaled P33 JobSet must discover its train mesh ids")
-  if spec.workload == "frozenlake" and env.get("CANON_P33_DISABLE_EVAL") != "1":
-    raise ValueError("FrozenLake P33 JobSet must disable periodic evaluation")
+  if spec.workload == "frozenlake":
+    expected_eval = {
+        "CANON_P33_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
+        "CANON_P33_DISABLE_EVAL": "0" if spec.enable_evaluation else "1",
+        "CANON_P31_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
+    }
+    wrong_eval = {
+        key: env.get(key)
+        for key, value in expected_eval.items()
+        if env.get(key) != value
+    }
+    if wrong_eval:
+      raise ValueError(f"FrozenLake evaluation contract drifted: {wrong_eval}")
+    has_eval_args = (
+        "--num_test_batches=4" in env["CANON_RUN_CMD"]
+        and "--eval_every_n_steps=10" in env["CANON_RUN_CMD"]
+    )
+    if has_eval_args != spec.enable_evaluation:
+      raise ValueError("FrozenLake evaluation command drifted")
   if env.get("CANON_P38_MISMATCH_CAPSULE_MAX_ROWS") != "2":
     raise ValueError("P38 mismatch capsule must retain its two-row bound")
   main = _container(_head_pod(document)["containers"], "jax-tpu")

@@ -326,6 +326,43 @@ def _state_memory_kinds(state: Any) -> tuple[str, ...]:
   return tuple(sorted(kinds))
 
 
+def _state_logical_bytes(state: Any) -> int:
+  """Returns logical bytes across JAX array leaves in a state tree."""
+  return sum(
+      int(value.size * value.dtype.itemsize)
+      for value in jax.tree.leaves(state)
+      if isinstance(value, jax.Array)
+  )
+
+
+def _precomputed_expected_microbatches(environ) -> int:
+  """Returns the fail-closed segmented optimizer transaction length."""
+  p41_optimizer_bench = environ.get("CANON_P41_OPTIMIZER_BENCH", "") == "1"
+  if p41_optimizer_bench:
+    if (
+        environ.get("CANON_GSM8K_L3", "") != "1"
+        or environ.get("CANON_GSM8K_UPDATE_CANARY", "") != "1"
+    ):
+      raise ValueError(
+          "P41 optimizer transaction requires the bounded GSM8K L3 canary"
+      )
+    return 1
+  if (
+      environ.get("CANON_P31_CONVERGENCE", "") == "1"
+      or environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+  ):
+    return 16
+  return 4
+
+
+def _requires_precomputed_gradient_accumulator(environ) -> bool:
+  """Returns whether the explicit segmented update path needs its accumulator."""
+  return (
+      environ.get("CANON_P28_SEGMENTED_TRAIN", "") == "1"
+      and environ.get("CANON_P28_G6_UPDATE", "") == "1"
+  )
+
+
 class PeftTrainer:
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -380,9 +417,10 @@ class PeftTrainer:
     # jnp.float32.
     if self.config.optimizer_state_dtype is not None:
       _cast_opt_state_floats(self.optimizer, self.config.optimizer_state_dtype)
-    # Depth-1 non-packing fast path never reads the accumulator; skip its
-    # model-sized grad-tree allocation there.
-    _uses_cond_path = not (
+    # The ordinary depth-1 non-packing path never reads the accumulator.  The
+    # explicit segmented update transaction always does, including P41's
+    # single-microbatch benchmark, so it must retain the model-shaped tree.
+    _uses_cond_path = _requires_precomputed_gradient_accumulator(os.environ) or not (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
         and self.config.max_seq_token_per_tpu is None
     )
@@ -721,9 +759,7 @@ class PeftTrainer:
     This method is deliberately unavailable outside the fully attested G6
     update canary.  It never invokes ``loss_fn`` or ``value_and_grad``.
     """
-    expected_microbatches = (
-        16 if os.environ.get("CANON_P31_CONVERGENCE", "") == "1" else 4
-    )
+    expected_microbatches = _precomputed_expected_microbatches(os.environ)
     if len(gradient_microbatches) != expected_microbatches:
       raise ValueError(
           "segmented update gradient count changed: "
@@ -764,7 +800,7 @@ class PeftTrainer:
           f"canary contract; invalid keys={missing}"
       )
     steps = self.config.get_with_default("gradient_accumulation_steps", 1)
-    expected_steps = 16 if p31_convergence or p33_workload else 4
+    expected_steps = _precomputed_expected_microbatches(os.environ)
     if steps != expected_steps:
       raise ValueError(
           "segmented update accumulation changed: "
@@ -887,11 +923,15 @@ class PeftTrainer:
     """Commits after all streamed microbatches and resets the accumulator."""
     # A failed transaction must never leave evidence from an earlier commit.
     self._last_precomputed_commit_evidence = None
+    optimizer_transaction_start = time.perf_counter()
+    optimizer_state = nnx.state(
+        self.optimizer, nnx.optimizer.OptState
+    )
+    optimizer_logical_bytes = _state_logical_bytes(optimizer_state)
+    optimizer_h2d_seconds = 0.0
+    optimizer_d2h_seconds = 0.0
     self._validate_precomputed_gradient_contract()
-    expected_microsteps = 16 if (
-        os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
-        or os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
-    ) else 4
+    expected_microsteps = _precomputed_expected_microbatches(os.environ)
     if self._p28_precomputed_microstep != expected_microsteps:
       raise ValueError(
           "segmented update commit cadence mismatch: "
@@ -899,11 +939,14 @@ class PeftTrainer:
       )
     effective_learning_rate = self.effective_learning_rate(self._train_steps)
     if self.config.optimizer_offload:
+      transfer_start = time.perf_counter()
       self._put_optimizer_state_on_memory_kind("device")
+      optimizer_h2d_seconds = time.perf_counter() - transfer_start
       print(
           "[P30.G1] OPT_STATE before_commit memory_kind=device",
           flush=True,
       )
+    adam_commit_start = time.perf_counter()
     if self._jitted_precomputed_gradient_commit_impl is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
       donate_argnames = ("optimizer", "grad_accumulator")
@@ -930,6 +973,7 @@ class PeftTrainer:
     norm, raw_evidence = self._jitted_precomputed_gradient_commit_fn()
     norm.block_until_ready()
     host_evidence = jax.device_get(raw_evidence)
+    adam_commit_seconds = time.perf_counter() - adam_commit_start
 
     def _sum_counts(name: str) -> int:
       return sum(int(np.asarray(value)) for value in host_evidence[name])
@@ -961,11 +1005,22 @@ class PeftTrainer:
         "parameter_delta_finite": _all_true("parameter_delta_finite"),
     }
     if self.config.optimizer_offload:
+      transfer_start = time.perf_counter()
       self._put_optimizer_state_on_memory_kind("pinned_host")
+      optimizer_d2h_seconds = time.perf_counter() - transfer_start
       print(
           "[P30.G1] OPT_STATE after_commit memory_kind=pinned_host",
           flush=True,
       )
+    self._last_precomputed_commit_evidence["optimizer_timing"] = {
+        "optimizer_logical_bytes": optimizer_logical_bytes,
+        "optimizer_h2d_seconds": optimizer_h2d_seconds,
+        "adam_commit_seconds": adam_commit_seconds,
+        "optimizer_d2h_seconds": optimizer_d2h_seconds,
+        "optimizer_transaction_seconds": (
+            time.perf_counter() - optimizer_transaction_start
+        ),
+    }
     if os.environ.get("CANON_P30_RESHARD_ACCUMULATOR", "") == "1":
       active_mesh = jax.sharding.get_mesh()
       if active_mesh.empty:

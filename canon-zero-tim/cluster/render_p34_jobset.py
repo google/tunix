@@ -242,9 +242,10 @@ def render(
   head["nodeSelector"] = {"cloud.google.com/gke-nodepool": cpu_nodepool}
   head_job = document["spec"]["replicatedJobs"][0]["template"]["spec"]
   head_job["backoffLimit"] = 0
-  proxy = _container(head["containers"], "pathways-proxy")
+  service_containers = head.get("initContainers", []) + head["containers"]
+  proxy = _container(service_containers, "pathways-proxy")
   ensure_proxy_xla_env(proxy)
-  manager = _container(head["containers"], "pathways-rm")
+  manager = _container(service_containers, "pathways-rm")
   main = _container(head["containers"], "jax-tpu")
   main["image"] = client_image
   scratch = f"gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p34/{name}"

@@ -303,6 +303,74 @@ def requested_max_steps(
   return steps
 
 
+def canonical_optimizer_placement(
+    environ: Mapping[str, str] | None = None,
+    *,
+    require_explicit: bool = False,
+) -> str:
+  """Returns the attested optimizer placement for a canonical workload."""
+  values = os.environ if environ is None else environ
+  resident = values.get("CANON_OPT_STATE_RESIDENT")
+  offload = values.get("CANON_P30_OPT_STATE_OFFLOAD")
+  if resident is None and not require_explicit:
+    resident = "0"
+  if offload is None and not require_explicit:
+    offload = "0"
+  if resident not in ("0", "1"):
+    raise ValueError("CANON_OPT_STATE_RESIDENT must be exactly 0 or 1")
+  if offload not in ("0", "1"):
+    raise ValueError("CANON_P30_OPT_STATE_OFFLOAD must be exactly 0 or 1")
+  if resident == "1" and offload == "1":
+    raise ValueError("optimizer resident and offload modes are mutually exclusive")
+  if require_explicit and resident == "0" and offload == "0":
+    raise ValueError(
+        "canonical optimizer placement must explicitly select resident or offload"
+    )
+  if resident == "1":
+    return "device-resident"
+  if offload == "1":
+    return "pinned-host-offload"
+  return "device-unattested"
+
+
+def frozenlake_evaluation_enabled(
+    environ: Mapping[str, str] | None = None,
+    *,
+    require_full_training: bool = True,
+) -> bool:
+  """Returns the explicit canonical FrozenLake evaluation selection."""
+  values = os.environ if environ is None else environ
+  enabled = values.get("CANON_P33_ENABLE_EVAL")
+  disabled = values.get("CANON_P33_DISABLE_EVAL")
+  learner_enabled = values.get("CANON_P31_ENABLE_EVAL")
+  for name, value in (
+      ("CANON_P33_ENABLE_EVAL", enabled),
+      ("CANON_P33_DISABLE_EVAL", disabled),
+      ("CANON_P31_ENABLE_EVAL", learner_enabled),
+  ):
+    if value not in ("0", "1"):
+      raise ValueError(f"{name} must be exactly 0 or 1")
+  if (enabled, disabled) not in (("0", "1"), ("1", "0")):
+    raise ValueError(
+        "canonical FrozenLake requires exactly one evaluation selection"
+    )
+  if learner_enabled != enabled:
+    raise ValueError(
+        "CANON_P31_ENABLE_EVAL must match CANON_P33_ENABLE_EVAL"
+    )
+  if enabled == "1" and require_full_training:
+    if (
+        values.get("CANON_P32_WORKLOAD") != "frozenlake"
+        or values.get("CANON_P33_RUN_STAGE") != "full"
+        or values.get("CANON_P33_NO_COMMIT") != "0"
+    ):
+      raise ValueError(
+          "canonical FrozenLake evaluation is admitted only for committed "
+          "full training"
+      )
+  return enabled == "1"
+
+
 def validate_environment(
     workload: DPWorkloadSpec,
     environ: Mapping[str, str] | None = None,
@@ -340,13 +408,21 @@ def validate_environment(
       "CANON_ALIGNMENT_UPDATE_CANARY": "0",
       "CANON_ALIGNMENT_TRAIN": "1",
       "CANON_PRE_ALIGN_GATE": "1",
-      "CANON_P30_OPT_STATE_OFFLOAD": "1",
       "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
       "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
       "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
       "CANON_P30_RELEASE_CAPTURED_STATE": "1",
       "CANON_P30_RESHARD_ACCUMULATOR": "1",
   }
+  optimizer_placement = canonical_optimizer_placement(
+      values, require_explicit=True
+  )
+  expected["CANON_OPT_STATE_RESIDENT"] = (
+      "1" if optimizer_placement == "device-resident" else "0"
+  )
+  expected["CANON_P30_OPT_STATE_OFFLOAD"] = (
+      "1" if optimizer_placement == "pinned-host-offload" else "0"
+  )
   expected["FL_SHARED_MESH"] = (
       "16,4" if require_reduction_admission else "1,4"
   )
@@ -356,7 +432,10 @@ def validate_environment(
       else "0"
   )
   if workload.name == "frozenlake":
-    expected["CANON_P33_DISABLE_EVAL"] = "1"
+    evaluation_enabled = frozenlake_evaluation_enabled(values)
+    expected["CANON_P33_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
+    expected["CANON_P33_DISABLE_EVAL"] = "0" if evaluation_enabled else "1"
+    expected["CANON_P31_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
   if workload.name == "gsm8k":
     expected["CANON_GSM8K_GRAD_PROBE"] = "0"
   wrong = {

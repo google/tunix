@@ -51,6 +51,9 @@ JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl \
   -p alignment_test.py
 JAX_PLATFORMS=cpu python3 -m unittest discover \
+  -s tests/rl/agentic \
+  -p agentic_rl_learner_test.py
+JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl/rollout \
   -p vllm_rollout_canonical_test.py
 JAX_PLATFORMS=cpu python3 -m unittest discover \

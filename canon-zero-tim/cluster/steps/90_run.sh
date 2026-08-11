@@ -170,6 +170,7 @@ n_lp=$(grep -ac 'CANON_LOGPROB_M on' "$LOG" || true)
 n_wandb=$(grep -ac '\[CANON_P33_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_wandb_p34=$(grep -ac '\[CANON_P34_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_eval_off=$(grep -ac '\[CANON_P33_EVAL\] DISABLED workload=frozenlake' "$LOG" || true)
+n_eval_on=$(grep -ac '\[CANON_P33_EVAL\] ENABLED workload=frozenlake cadence=10 held_out_rows=100 generations=8' "$LOG" || true)
 n_p35_stop=$(grep -ac '^\[CANON_P35\] REPORT_COMPLETE .*STOP_BEFORE_BACKWARD' "$LOG" || true)
 n_p35_base=$(grep -ac '^\[CANON_P35\] BASE_REPORT_COMPLETE .*REPLAY_PENDING' "$LOG" || true)
 n_p35_replay=$(grep -ac '^\[CANON_P35.3\] REPLAY_COMPLETE' "$LOG" || true)
@@ -178,7 +179,7 @@ n_p35_stage_ready=$(grep -ac '^\[CANON_P35.3C\] STAGE_READY' "$LOG" || true)
 n_p35_stage_complete=$(grep -ac '^\[CANON_P35.3C\] STAGE_PROBE_COMPLETE .*NO_NUMERICAL_VERDICT' "$LOG" || true)
 n_p38_precheck=$(grep -ac '^\[CANON_P38\] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD' "$LOG" || true)
 n_p38_kv_unified=$(grep -ac 'KV_UNIFIED_two_pass' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_kv_unified=$n_p38_kv_unified"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_kv_unified=$n_p38_kv_unified"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "${CANON_KV_UNIFIED:-0}" = "1" ] && [ "$n_p38_kv_unified" -le 0 ]; then
     echo "[run] FATAL: P38 U arm did not execute KV_UNIFIED_two_pass" >&2
@@ -206,10 +207,16 @@ if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && [ "$n_wandb" -ne 1 ]; then
   fi
 fi
 if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && \
-   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] && \
-   [ "$n_eval_off" -ne 1 ]; then
-  echo "[run] FATAL: admitted P33 FrozenLake did not attest evaluation disabled exactly once" >&2
-  exit 1
+   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; then
+  if [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ]; then
+    if [ "$n_eval_on" -ne 1 ] || [ "$n_eval_off" -ne 0 ]; then
+      echo "[run] FATAL: admitted FrozenLake evaluation marker contract failed" >&2
+      exit 1
+    fi
+  elif [ "$n_eval_off" -ne 1 ] || [ "$n_eval_on" -ne 0 ]; then
+    echo "[run] FATAL: admitted P33 FrozenLake did not attest evaluation disabled exactly once" >&2
+    exit 1
+  fi
 fi
 if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
   if [ "${CANON_P35_REPLAY_STAGE_PROBE:-0}" = "1" ]; then
@@ -320,16 +327,29 @@ elif [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
   echo "[run] P38 serving expected precheck exit=1 accepted; backward=0 optimizer_commits=0"
   rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
-  classification="$CANON_STATE/p34_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
-  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
-      --stage "$CANON_P34_RUN_STAGE" \
-      --run-log "$LOG" \
-      --weight-report "$CANON_P34_WEIGHT_REPORT" \
-      --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
-      --update-report "$CANON_UPDATE_REPORT" \
-      --alignment-report "$CANON_ALIGN_REPORT" \
-      --output "$classification" || exit 1
+  if [ "${CANON_P39_64CHIP_PILOT:-0}" = "1" ]; then
+    classification="$CANON_STATE/p39_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tests/p39_deepswe_pilot/classify_run.py" \
+        --stage "$CANON_P34_RUN_STAGE" \
+        --run-log "$LOG" \
+        --weight-report "$CANON_P34_WEIGHT_REPORT" \
+        --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
+        --update-report "$CANON_UPDATE_REPORT" \
+        --alignment-report "$CANON_ALIGN_REPORT" \
+        --output "$classification" || exit 1
+  else
+    classification="$CANON_STATE/p34_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
+        --stage "$CANON_P34_RUN_STAGE" \
+        --run-log "$LOG" \
+        --weight-report "$CANON_P34_WEIGHT_REPORT" \
+        --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
+        --update-report "$CANON_UPDATE_REPORT" \
+        --alignment-report "$CANON_ALIGN_REPORT" \
+        --output "$classification" || exit 1
+  fi
 elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
   classification="$CANON_STATE/p33_${CANON_P32_WORKLOAD}_${CANON_P33_RUN_STAGE}.classification.json"
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

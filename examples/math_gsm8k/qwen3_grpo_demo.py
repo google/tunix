@@ -175,6 +175,9 @@ CANON_GSM8K_TRAIN = os.getenv("CANON_GSM8K_TRAIN", "") == "1"
 CANON_GSM8K_UPDATE_CANARY = (
     os.getenv("CANON_GSM8K_UPDATE_CANARY", "") == "1"
 )
+CANON_P41_OPTIMIZER_BENCH = (
+    os.getenv("CANON_P41_OPTIMIZER_BENCH", "") == "1"
+)
 if CANON_GSM8K_L3 and CANON_GSM8K_TRAIN:
   raise ValueError(
       "CANON_GSM8K_L3 and CANON_GSM8K_TRAIN are mutually exclusive"
@@ -196,6 +199,12 @@ if CANON_P32_WORKLOAD:
   dp_workloads.validate_environment(
       P32_WORKLOAD, require_reduction_admission=True
   )
+CANON_OPTIMIZER_PLACEMENT = dp_workloads.canonical_optimizer_placement(
+    os.environ, require_explicit=CANON_P32_WORKLOAD
+)
+CANON_P30_OPT_STATE_OFFLOAD = (
+    CANON_OPTIMIZER_PLACEMENT == "pinned-host-offload"
+)
 
 
 # ====== Recipe Defaults ======
@@ -261,6 +270,8 @@ EVAL_TOP_K = 1
 MAX_CONCURRENCY = args.max_concurrency or (
     NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
 )
+if CANON_P41_OPTIMIZER_BENCH and MAX_CONCURRENCY != 1:
+  raise ValueError("P41 optimizer benchmark requires max_concurrency=1")
 
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
 USE_LORA = False
@@ -664,6 +675,7 @@ wandb_config.update({
     "kl_loss_mode": KL_LOSS_MODE,
     "train_temperature": TRAIN_TEMPERATURE,
     "canonical_gsm8k_train": CANON_GSM8K_TRAIN,
+    "canonical_optimizer_placement": CANON_OPTIMIZER_PLACEMENT,
     "max_prompt_length": MAX_PROMPT_LENGTH,
     "max_response_length": MAX_RESPONSE_LENGTH,
 })
@@ -950,6 +962,12 @@ def main() -> None:
   }
   if jax.default_backend() == "tpu":
     vllm_rollout_dict["rollout_vllm_tpu_backend_type"] = "jax"
+  if CANON_P41_OPTIMIZER_BENCH:
+    vllm_rollout_dict["rollout_vllm_kwargs"]["seed"] = SEED
+    print(
+        f"[P41.OPTIMIZER] engine_seed={SEED} rollout_schedule=serial",
+        flush=True,
+    )
 
   if ROLLOUT_ENGINE == "vllm":
     train_rollout_config = base_rollout.RolloutConfig(
@@ -990,7 +1008,7 @@ def main() -> None:
           ),
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
           data_sharding_axis=("dp",) if CANON_P32_WORKLOAD else ("fsdp",),
-          optimizer_offload=CANON_P32_WORKLOAD,
+          optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
               CHECKPOINT_ROOT if ENABLE_CHECKPOINTING else None
