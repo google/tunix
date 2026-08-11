@@ -35,12 +35,24 @@ import vllm  # pytype: disable=import-error
 faulthandler.register(signal.SIGINT, all_threads=True)
 
 Dataset = datasets_lib.Dataset
+def str2bool(v):
+  if isinstance(v, bool):
+    return v
+  if v.lower() in ("yes", "true", "t", "y", "1"):
+    return True
+  elif v.lower() in ("no", "false", "f", "n", "0"):
+    return False
+  else:
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
 # ==========================================
 # 0. Argument Parsing
 # ==========================================
 parser = argparse.ArgumentParser(
     description="DeepSWE Training with Multi-turn Agentic Framework"
 )
+parser.add_argument("--scan_layers", type=str2bool, default=False)
 
 # General Config
 parser.add_argument("--models_base_dir", type=str, default="models")
@@ -315,6 +327,22 @@ def patch_kubernetes_runtime():
     print(
         "[Monkeypatch] Successfully patched DockerRuntime._start_kubernetes_pod"
     )
+
+    original_run = DockerRuntime.run
+
+    def patched_run(self, cmd, *args, **kwargs):
+      if isinstance(cmd, str) and cmd.startswith("chmod +x"):
+        path = cmd.split()[-1]
+        new_cmd = f"sh -c 'i=1; while [ $i -le 10 ]; do if [ -f {path} ]; then chmod +x {path} && exit 0; fi; sleep 0.5; i=$((i+1)); done; exit 1'"
+        print(f"[Monkeypatch] Intercepted chmod +x: replacing '{cmd}' with '{new_cmd}'")
+        return original_run(self, new_cmd, *args, **kwargs)
+      return original_run(self, cmd, *args, **kwargs)
+
+    DockerRuntime.run = patched_run
+    print(
+        "[Monkeypatch] Successfully patched DockerRuntime.run to handle chmod"
+        " +x race condition"
+    )
   except Exception as e:
     print(f"[Monkeypatch] Failed to patch DockerRuntime: {e}")
 
@@ -580,7 +608,49 @@ tokenizer = AutoTokenizer.from_pretrained(
     tokenizer_path, local_files_only=local_files_only, trust_remote_code=True
 )
 
-chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
+class NativeChatTemplateParser:
+
+  def __init__(self, tokenizer):
+    self.tokenizer = tokenizer
+
+  def parse(
+      self,
+      messages: list[dict[str, str]],
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    del is_first_msg  # Unused.
+    has_user = any(m["role"] == "user" for m in messages)
+    if has_user:
+      return self.tokenizer.apply_chat_template(
+          messages, tokenize=False, add_generation_prompt=add_generation_prompt
+      )
+
+    role = messages[0]["role"]
+    if role == "system":
+      temp_msgs = [messages[0], {"role": "user", "content": "DUMMY_QUERY"}]
+      rendered = self.tokenizer.apply_chat_template(
+          temp_msgs, tokenize=False, add_generation_prompt=False
+      )
+      return rendered.split("<|im_start|>user\nDUMMY_QUERY")[0]
+    elif role == "assistant":
+      temp_msgs = [{"role": "user", "content": "DUMMY_QUERY"}, messages[0]]
+      rendered = self.tokenizer.apply_chat_template(
+          temp_msgs, tokenize=False, add_generation_prompt=False
+      )
+      parts = rendered.split("<|im_start|>assistant\n")
+      return "<|im_start|>assistant\n" + parts[1]
+    else:
+      return self.tokenizer.apply_chat_template(
+          messages, tokenize=False, add_generation_prompt=add_generation_prompt
+      )
+
+  @property
+  def assistant_token(self) -> str:
+    return "<|im_start|>assistant\n<think>\n"
+
+
+chat_parser = NativeChatTemplateParser(tokenizer)
 
 print("Loading Dataset...")
 
@@ -780,7 +850,7 @@ if MODEL_SOURCE == "maxtext":
       model_path=MODEL_PATH,
       enable_checkpointing=True,
       allow_split_physical_axes=True,
-      scan_layers=True,
+      scan_layers=args.scan_layers,
       checkpoint_storage_concurrent_gb=args.checkpoint_storage_concurrent_gb,
   )
 else:
@@ -1063,11 +1133,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "verbose": True,
     },
     algo_config=grpo_config,
-    # Disabling the custom chat parser is required to fallback to the tokenizer's
-    # native ChatML template. Qwen 3.5 depends on specific <think> and </think> tags
-    # to trigger its reasoning blocks; the default parser would strip these tags,
-    # causing the model to output unstructured gibberish.
-    chat_parser=None,
+    chat_parser=chat_parser,
 )
 
 
