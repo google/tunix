@@ -450,16 +450,12 @@ class AutoModel:
         model_id_or_path, model_download_path, model_source
     )
 
-    # Case 1: MaxText models
     if model_source == ModelSource.MAXTEXT:
-      try:
-        import maxtext.configs.pyconfig as pyconfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-        from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-        from maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-      except ImportError:
-        from maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
-        from maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
-        from maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
+      import maxtext  # pylint: disable=g-import-not-at-top
+
+      MaxTextConfig = maxtext.MaxTextConfig
+      pyconfig = maxtext.pyconfig
+      maxtext_model_creation_utils = maxtext.model_creation_utils
 
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       argv = [
