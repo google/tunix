@@ -416,8 +416,8 @@ jobs:
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
-        # Install MaxText if not present
-        python3 -c "import maxtext" 2>/dev/null || python3 -m pip install git+https://github.com/AI-Hypercomputer/maxtext.git --no-deps
+        # Install MaxText with TPU dependencies if not present
+        python3 -c "import maxtext" 2>/dev/null || python3 -m pip install "maxtext[tpu] @ git+https://github.com/AI-Hypercomputer/maxtext.git"
 
         pkill -9 -f "vllm" || true
         sleep 5
