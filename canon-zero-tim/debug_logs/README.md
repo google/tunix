@@ -1051,6 +1051,8 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 ## 40. Phase 38.2e Attempt `p38e1`: 64-Chip FrozenLake Multi-Turn 36-Layer BWD Diagnostics & Mismatch Capsule Persistence
 
 - `debug_logs/p38_p38e1_frozenlake_bwd.raw.log` (SHA-256: `d8509d2bd8cf60c995880fcf78d499893978e5296e032f380a71fc0c5c7054df`)
+- `debug_logs/p38_p38e1_frozenlake_mismatch_capsule.npz` (SHA-256: `dae4e75d3b4689f2607047edd74ea1e48ffaf97a853cec74a204caafc3dc626b`)
+- `debug_logs/p38_p38e1_frozenlake_pre_alignment.jsonl` (SHA-256: `02a34c42548c0ae2c2f0775299480bc6d547125497cc16b858c2193aef497eb9`)
 - Target Commit: `e9cfe298bf02572f5d6108108f4dfc17f2195ce4` (*Re-establish pre-backward alignment gate in P33 agentic learner*)
 - Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
 - Hardware: 64 TPU v5p chips (16 worker nodes, physical slice `671bae94`)
