@@ -31,6 +31,7 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+import numpy as np
 from orbax import checkpoint as ocp
 from tunix.models.gemma4 import model as model_lib
 
@@ -231,16 +232,104 @@ def map_from_upstream_checkpoint(params: Mapping[str, Any]) -> dict[str, Any]:
   """
   new_params: dict[tuple[str | int, ...], Any] = {}
 
-  for key_path, value in flax.traverse_util.flatten_dict(params).items():
+  flat_input = flax.traverse_util.flatten_dict(params)
+  destacked: dict[tuple[str | int, ...], Any] = {}
+  needs_destack = False
+  for key_path in flat_input:
+    joined = '/'.join(str(s) for s in key_path)
+    if 'stacked_layers' in joined and 'attention_type_' in joined:
+      needs_destack = True
+      break
+
+  if needs_destack:
+    logging.info('Detected stacked_layers in checkpoint, applying destacking.')
+    # Detect number of attention types.
+    attn_type_ids: set[int] = set()
+    for key_path in flat_input:
+      joined = '/'.join(str(s) for s in key_path)
+      m = re.search(r'stacked_layers/attention_type_(\d+)', joined)
+      if m:
+        attn_type_ids.add(int(m.group(1)))
+    num_attn_types = max(attn_type_ids) + 1 if attn_type_ids else 1
+
+    for key_path, value in flat_input.items():
+      # Normalize to flat parts list.
+      parts_raw = list(
+          itertools.chain.from_iterable(
+              str(segment).split('/') for segment in key_path
+          )
+      )
+      # Strip container prefixes.
+      while parts_raw and parts_raw[0] in ('donated_carry', 'params', 'target'):
+        parts_raw = parts_raw[1:]
+
+      joined_raw = '/'.join(parts_raw)
+      m = re.search(
+          r'(?:transformer/)?stacked_layers/attention_type_(\d+)(/(.+))?$',
+          joined_raw,
+      )
+      if m:
+        attn_type_idx = int(m.group(1))
+        remainder = m.group(3)  # sub_path/param after attention_type_N/
+
+        if remainder is None:
+          # Bare key like attention_type_N_skip_scale — try underscore split.
+          suffix = joined_raw.split(f'attention_type_{attn_type_idx}')[-1]
+          if suffix.startswith('_'):
+            remainder = suffix[1:]  # e.g. "skip_scale"
+
+        if remainder is None:
+          logging.warning('Skipping stacked key with no sub-path: %r', key_path)
+          continue
+
+        # Destack: first dim is layers_per_type.
+        arr = np.asarray(value) if not hasattr(value, 'shape') else value
+        layers_per_type = arr.shape[0]
+        for stack_idx in range(layers_per_type):
+          layer_id = stack_idx * num_attn_types + attn_type_idx
+          new_key = ('transformer', f'layer_{layer_id}', *remainder.split('/'))
+          destacked[new_key] = arr[stack_idx]
+      else:
+        # Non-stacked key — pass through as-is.
+        destacked[key_path] = value
+
+    # Replace params with destacked version.
+    params = flax.traverse_util.unflatten_dict(destacked)
+    flat_input = flax.traverse_util.flatten_dict(params)
+
+  for key_path, value in flat_input.items():
     # Normalize semi-flat or nested key_path to a flat list of components.
     parts = list(
         itertools.chain.from_iterable(
-            segment.split('/') for segment in key_path
+            str(segment).split('/') for segment in key_path
         )
     )
 
+    while parts and parts[0] in ('donated_carry', 'params', 'target'):
+      parts = parts[1:]
+
+    # Skip optimizer state and step if present in checkpoint dictionary.
+    if parts and parts[0] in ('opt_state', 'step', 'opt_state_dict'):
+      continue
+
     if parts and parts[0] == 'transformer':
       parts = parts[1:]
+
+    # Apply AudioEncoder prefix mapping if present
+    if parts and parts[0] == 'AudioEncoder':
+      idx = 1
+      if len(parts) > idx and parts[idx] == 'encoder':
+        idx += 1
+      parts = ['audio_encoder'] + parts[idx:]
+
+    # Apply PatchInputVariablePoolingEncoder prefix mapping (31B Vision)
+    if parts and parts[0].startswith('PatchInputVariablePoolingEncoder'):
+      idx = 1
+      if len(parts) > idx and parts[idx] == '_model':
+        idx += 1
+      if len(parts) > idx and parts[idx] == 'vit':
+        idx += 1
+      parts = ['vision_encoder'] + parts[idx:]
 
     if parts and parts[0] == 'vision_encoder':
       param_name = parts[-1]
@@ -284,17 +373,32 @@ def map_from_upstream_checkpoint(params: Mapping[str, Any]) -> dict[str, Any]:
 
     if parts and parts[0] == 'audio_encoder':
       if parts[1] == 'conformer':
-        match = re.search(r'stacked_layers_(\d+)', parts[2])
-        if not match:
-          raise ValueError(
-              'audio_encoder/conformer should only have children with keys'
-              f' stacked_layers_<layer-index>. Got {"/".join(parts)}'
-          )
-        layer_idx = int(match.group(1))
-        new_params[
-            ('audio_encoder', 'conformer_layers', layer_idx, *parts[3:])
-        ] = value
-        continue
+        if parts[2] == 'stacked_layers':
+          num_layers = value.shape[0]
+          sub_components = parts[3:-1]
+          param_name = parts[-1]
+          for i in range(num_layers):
+            new_params[(
+                'audio_encoder',
+                'conformer_layers',
+                i,
+                *sub_components,
+                param_name,
+            )] = value[i]
+          continue
+        else:
+          match = re.search(r'stacked_layers_(\d+)', parts[2])
+          if not match:
+            raise ValueError(
+                'audio_encoder/conformer should only have children with keys'
+                ' stacked_layers_<layer-index> or stacked_layers. Got'
+                f' {"/".join(parts)}'
+            )
+          layer_idx = int(match.group(1))
+          new_params[
+              ('audio_encoder', 'conformer_layers', layer_idx, *parts[3:])
+          ] = value
+          continue
       else:
         # everything else maps exactly
         new_params[tuple(parts)] = value

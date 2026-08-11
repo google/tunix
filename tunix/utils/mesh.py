@@ -36,6 +36,7 @@ from typing import Any, Literal, Sequence, overload
 
 from absl import logging
 import jax
+from jax.experimental import mesh_utils
 import numpy as np
 from tunix.utils import topology
 
@@ -113,8 +114,16 @@ def create_mesh(
         axis_names,
         axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
     )
-  return jax.make_mesh(
-      axis_shapes,
+  devices = jax.devices()
+  axis_size = int(np.prod(axis_shapes))
+  if len(devices) > axis_size:
+    devices = devices[:axis_size]
+
+  mesh_devices = mesh_utils.create_device_mesh(
+      axis_shapes, devices, allow_split_physical_axes=True
+  )
+  return jax.sharding.Mesh(
+      mesh_devices,
       axis_names,
       axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
   )

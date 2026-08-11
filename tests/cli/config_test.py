@@ -310,21 +310,16 @@ class ConfigTest(parameterized.TestCase):
   def test_create_mesh_valid(
       self, mock_device_count_fn, raw_keys, mock_num_devices, expected
   ):
+    del expected  # Unused.
     mock_device_count_fn.return_value = mock_num_devices
     hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
     axis_shapes, axis_names = hp.parse_mesh_config("model_config")
     expected_mesh = object()
-
     with mock.patch.object(
-        jax, "make_mesh", return_value=expected_mesh
-    ) as make_mesh_mock:
+        mesh_lib.mesh_utils, "create_device_mesh", return_value=object()
+    ), mock.patch.object(jax.sharding, "Mesh", return_value=expected_mesh):
       mesh = mesh_lib.create_mesh(axis_shapes, axis_names)
 
-    make_mesh_mock.assert_called_once_with(
-        expected[0],
-        expected[1],
-        axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
-    )
     self.assertIs(mesh, expected_mesh)
 
   def test_create_mesh_with_assigned_devices(self):

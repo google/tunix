@@ -20,6 +20,7 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import qwix
 from tunix.models.gemma4 import model as model_lib
 
@@ -91,7 +92,7 @@ class ModelTest(absltest.TestCase):
 
     logits, _ = model(tokens, positions=positions, attention_mask=attn_mask)
     self.assertEqual(logits.shape, (2, 32, config.num_embed))
-    print(f"{logits.shape=}")
+    print(f'{logits.shape=}')
 
   def test_forward_pass_moe(self):
     config = model_lib.ModelConfig.gemma4_26b_a4b()
@@ -381,7 +382,7 @@ class ModelTest(absltest.TestCase):
         output_length=5,
         use_clipped_linears=True,
     )
-    config.use_bidirectional_attention = "vision"
+    config.use_bidirectional_attention = 'vision'
 
     rngs = nnx.Rngs(0)
     model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
@@ -438,7 +439,7 @@ class ModelTest(absltest.TestCase):
         output_length=5,
         use_clipped_linears=True,
     )
-    config.use_bidirectional_attention = "vision"
+    config.use_bidirectional_attention = 'vision'
 
     rngs = nnx.Rngs(0)
     model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
@@ -607,6 +608,41 @@ class ModelTest(absltest.TestCase):
     )
     self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
 
+  def test_gemma4_31b_kv_head_replication_sharding(self):
+    devices = np.array(jax.devices()[:1] * 128).reshape((8, 2, 8))
+    mesh = jax.sharding.Mesh(devices, ('fsdp', 'sp', 'tp'))
 
-if __name__ == "__main__":
+    config = model_lib.ModelConfig.gemma4_31b()
+    with mesh:
+      abs_model = nnx.eval_shape(
+          lambda: model_lib.Gemma4(config, rngs=nnx.Rngs(0), text_only=True)
+      )
+
+    # Check partition specs of local (16 KV heads) vs global (4 KV heads) layers
+    state = nnx.state(abs_model)
+    pspecs = nnx.get_partition_spec(state)
+
+    # Layer 0 is LOCAL (16 heads -> sharded on TP)
+    self.assertEqual(
+        pspecs.layers[0].attn.kv_einsum.w,
+        jax.sharding.PartitionSpec(None, 'tp', 'fsdp', None),
+    )
+
+    # Layer 5 is GLOBAL (4 KV heads -> replicated on TP)
+    self.assertEqual(
+        pspecs.layers[5].attn.k_einsum.w,
+        jax.sharding.PartitionSpec(None, 'fsdp', None),
+    )
+
+    # Ensure get_named_sharding evaluates cleanly on full state and assigns
+    # replicated PartitionSpec (None, 'fsdp', None) to the (4, 5376, 512)
+    # global K weight.
+    named_shardings = nnx.to_pure_dict(nnx.get_named_sharding(state, mesh))
+    global_k_sharding = named_shardings['layers'][5]['attn']['k_einsum']['w']
+    self.assertEqual(
+        global_k_sharding.spec, jax.sharding.PartitionSpec(None, 'fsdp', None)
+    )
+
+
+if __name__ == '__main__':
   absltest.main()

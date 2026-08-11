@@ -90,6 +90,11 @@ class CheckpointManager:
         options
     )
     if root_directory:
+      try:
+        ocp_pathways.register_type_handlers()
+        logging.info('Registered Pathways type handlers in CheckpointManager.')
+      except (TypeError, ValueError, RuntimeError, AttributeError) as e:
+        logging.warning('Could not register Pathways type handlers: %s', e)
       self._checkpointer = ocp.training.Checkpointer(
           root_directory,
           context=self._context,

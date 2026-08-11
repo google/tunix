@@ -62,7 +62,15 @@ def create_datasets(
   Returns:
     A tuple of train and eval data iterators.
   """
-  if dataset_name == "mtnt/en-fr":
+  if (
+      dataset_name.startswith("arrayrecord:")
+      or dataset_name.endswith(".arrayrecord")
+      or dataset_name.startswith("/GOOGLE_INTERNAL_STOAGE_PATH/")
+  ):
+    ar_path = dataset_name.removeprefix("arrayrecord:")
+    train_ds = grain.ArrayRecordDataSource(ar_path)
+    eval_ds = train_ds
+  elif dataset_name == "mtnt/en-fr":
     import tensorflow_datasets.translate.mtnt
 
     train_ds, eval_ds = tfds.data_source(
@@ -131,9 +139,38 @@ class _Tokenize(grain.MapTransform):
     self._tokenizer = tokenizer
     self._input_template = input_template
 
-  def map(self, element: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+  def map(self, element: Any) -> tuple[np.ndarray, np.ndarray]:
     """Tokenize the input."""
-    if "src" in element.keys():  ## MTNT dataset
+    if isinstance(element, bytes):
+      # ArrayRecord path: parse tf.train.Example
+      import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
+      parsed = tf.train.Example.FromString(element)
+
+      # Extract text features
+      features = parsed.features.feature
+      if "input_texts" in features:
+        src_text = features["input_texts"].bytes_list.value[0].decode("utf-8")
+        dst_text = features["output_texts"].bytes_list.value[0].decode("utf-8")
+      elif "inputs" in features:
+        src_text = features["inputs"].bytes_list.value[0].decode("utf-8")
+        dst_text = features["targets"].bytes_list.value[0].decode("utf-8")
+      else:
+        raise ValueError(
+            f"Unknown features in tf.Example: {list(features.keys())}. Expected"
+            " 'input_texts'/'output_texts' or 'inputs'/'targets'."
+        )
+
+      src_tokens = self._tokenizer.tokenize(
+          src_text,
+          prefix=self._input_template["prefix"],
+          suffix=self._input_template["suffix"],
+          add_eos=False,
+      )
+      dst_tokens = self._tokenizer.tokenize(dst_text, add_eos=True)
+      return src_tokens, dst_tokens
+
+    elif isinstance(element, dict) and "src" in element.keys():  ## MTNT dataset
       src_tokens = self._tokenizer.tokenize(
           element["src"].decode(),
           prefix=self._input_template["prefix"],

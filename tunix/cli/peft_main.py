@@ -20,6 +20,7 @@ from absl import flags
 from absl import logging
 from flax import nnx
 import jax
+from orbax.checkpoint import pathways as ocp_pathways
 from tunix.cli import config
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import translation_dataset as data_lib
@@ -94,6 +95,11 @@ def _setup_jax_pathways(pathways_bns: str):
   flags.FLAGS.pathways_ifrt = True
   jax.config.update('jax_xla_backend', 'pathways')
   jax.config.update('jax_backend_target', pathways_bns)
+  try:
+    ocp_pathways.register_type_handlers()
+    logging.info('Registered Pathways type handlers in _setup_jax_pathways.')
+  except (TypeError, ValueError, RuntimeError, AttributeError) as e:
+    logging.warning('Could not register Pathways type handlers: %s', e)
 
 
 def main(argv, **kwargs):

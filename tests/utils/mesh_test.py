@@ -1296,22 +1296,24 @@ class MeshUtilsTest(absltest.TestCase):
         },
     )
 
+  @mock.patch.object(jax, "devices")
   @mock.patch.object(jax, "device_count")
   def test_create_mesh_uses_jax_make_mesh_without_assigned_devices(
-      self, mock_device_count_fn
+      self, mock_device_count_fn, mock_devices_fn
   ):
     mock_device_count_fn.return_value = 4
+    mock_devices_fn.return_value = [0, 1, 2, 3]
     expected_mesh = object()
 
     with mock.patch.object(
-        jax, "make_mesh", return_value=expected_mesh
-    ) as make_mesh_mock:
+        mesh.mesh_utils, "create_device_mesh", return_value=mock.MagicMock()
+    ) as create_device_mesh_mock, mock.patch.object(
+        jax.sharding, "Mesh", return_value=expected_mesh
+    ):
       created_mesh = mesh.create_mesh((2, 2), ("x", "y"))
 
-    make_mesh_mock.assert_called_once_with(
-        (2, 2),
-        ("x", "y"),
-        axis_types=(jax.sharding.AxisType.Auto,) * 2,
+    create_device_mesh_mock.assert_called_once_with(
+        (2, 2), [0, 1, 2, 3], allow_split_physical_axes=True
     )
     self.assertIs(created_mesh, expected_mesh)
 
