@@ -35,7 +35,14 @@ def ensure_huggingface_hub_compat() -> bool:
 def apply_repoenv_kubernetes_poll_patch() -> str:
   """Replaces an unbounded pod watch with bounded direct status polling."""
   ensure_huggingface_hub_compat()
-  from r2egym.agenthub.runtime import docker as docker_mod
+  try:
+    from r2egym.agenthub.runtime import docker as docker_mod
+  except ImportError:
+    logging.warning(
+        "r2egym is not importable; skipping the RepoEnv Kubernetes poll"
+        " patch. Interactive SWE environments cannot start in this process."
+    )
+    return ""
 
   if getattr(docker_mod, "_tunix_repoenv_poll_patch_applied", False):
     return str(getattr(docker_mod, "__file__", ""))

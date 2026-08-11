@@ -62,6 +62,13 @@ unless the entire backward-no-commit contract completes.
 
 ## Fail-closed facts
 
+- `r2egym` is optional for offline gold-whitelist replay and absent from the
+  backward-no-commit container (p39d4 died at import time before this was a
+  contract). `swe_agent` imports without it and its interactive action parser
+  fails closed at use; `apply_repoenv_kubernetes_poll_patch` logs a skip and
+  returns an empty path. Interactive stages still require the r2egym checkout
+  synced at `<workdir>/r2egym` (mapped onto `sys.path` by `train_deepswe_nb`)
+  or the package installed in the image.
 - JobSet restart count, head backoff, worker backoff, and pod restart are all zero.
 - The Pathways 4x8x8 slice is divided by physical coordinates into two host-complete 2x8x8 roles.
 - Each role is logical DP16xTP8; parameters are replicated over DP and sharded only over TP.

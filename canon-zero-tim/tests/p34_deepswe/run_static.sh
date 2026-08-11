@@ -16,4 +16,6 @@ PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
   canon-zero-tim/tests/p34_deepswe/test_classify_run.py
 PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
   canon-zero-tim/tests/p34_deepswe/test_scheduler_contract.py
-echo "P34_STATIC_PASS suites=7"
+JAX_PLATFORMS=cpu PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
+  canon-zero-tim/tests/p34_deepswe/test_r2egym_optional.py
+echo "P34_STATIC_PASS suites=8"

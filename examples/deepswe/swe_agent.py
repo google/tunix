@@ -325,15 +325,29 @@ from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 try:
   from r2egym.agenthub.action import Action as SWEAction  # pytype: disable=import-error
 except ImportError:
-  logging.error(
-      "Failed to load SWEAction. Please ensure 'r2egym' is installed properly."
-  )
-  raise  # This halts execution and preserves the original traceback
+  # Offline gold-whitelist replay never parses interactive SWE actions, and
+  # the backward-no-commit container does not ship r2egym.  Keep this module
+  # importable and fail closed at the parser call sites instead.
+  SWEAction = None
+
+
+def _require_swe_action() -> Any:
+  """Returns the r2egym action class or fails closed with the exact remedy."""
+  if SWEAction is None:
+    raise ImportError(
+        "r2egym is required to parse interactive SWE actions. Install it or "
+        "sync the r2egym checkout into the workdir mapping used by "
+        "train_deepswe_nb; offline gold-whitelist replay must never reach "
+        "this parser."
+    )
+  return SWEAction
+
 
 TOKEN_WARNING_THRESHOLD = 28000
 
 
 def parse_oai_response(response: Any):
+  swe_action = _require_swe_action()
   thought = response.choices[0].message.content
   if not thought:
     thought = ""
@@ -342,9 +356,9 @@ def parse_oai_response(response: Any):
     parameters = json.loads(
         response.choices[0].message.tool_calls[0].function.arguments
     )
-    action = SWEAction(function_name, parameters)
+    action = swe_action(function_name, parameters)
   except Exception:
-    action = SWEAction(function_name="", parameters={})
+    action = swe_action(function_name="", parameters={})
   return thought, action
 
 
@@ -372,7 +386,7 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   action = action.strip()
 
   # convert action to Action object
-  action = SWEAction.from_string(action)
+  action = _require_swe_action().from_string(action)
 
   return thought, action
 
