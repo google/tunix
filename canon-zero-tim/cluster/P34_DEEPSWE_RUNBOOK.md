@@ -14,6 +14,13 @@ that would otherwise depend on a Python default.
 This runbook renders manifests only. Do not apply a manifest until the implementation branch is
 committed, pushed, read back at the exact SHA, and the 256-device experiment is approved.
 
+The optional P39 64-chip resident-optimizer pilot is not a prerequisite for a
+256-chip run that retains pinned-host optimizer offload. When a complete 4x8x8
+slice is available, the operator may defer that pilot and exercise the actual
+DP16xTP8 production topology directly. This does not promote resident optimizer
+state: Qwen3-32B must keep `CANON_P30_OPT_STATE_OFFLOAD=1` until a separate
+capacity experiment passes its HBM gate.
+
 ## Required operator inputs
 
 - Exact 40-character source commit on `yuxzhang/canon-zero-tim`.
@@ -62,7 +69,7 @@ Allowed stages are `backward-no-commit`, `one-update`, `three-update`, and `full
 run id and output path for each one. `full` is exactly 1000 updates; the renderer does not accept
 an arbitrary budget.
 
-## Admission order
+## Available stage modes
 
 1. `backward-no-commit`: initializes topology/model/rollout, checks all four forward boundaries,
    computes each DP16 group twice, requires full-array gradient equality, and commits no state.
@@ -70,20 +77,35 @@ an arbitrary budget.
 3. `three-update`: requires commits and synchronized rollout weights at steps 1, 2, and 3.
 4. `full`: starts only after a separately reviewed promotion decision.
 
+The list above is an evidence ladder, not a requirement to reserve four
+separate slices. A resource-constrained convergence campaign may use one
+reviewed `full` manifest because the same topology, cross-role weight,
+pre-alignment, backward, optimizer-transaction, replica, IFRT, and W&B checks
+run inside its first update and continue running afterward. The checked-in
+production profile is currently strict: every finite A-B or B-C mismatch still
+stops before backward. A convergence-first run that must continue through a
+finite alignment residual therefore requires a separate, default-off,
+reviewed DeepSWE warning-only admission before rendering `full`; do not edit
+the resolved environment or rendered YAML by hand. Nonfinite values and every
+non-alignment gate remain hard failures in that mode.
+
 The first stage combines P34.5 forward evidence and P34.6 backward evidence in one allocation.
 Raw forward markers remain useful if backward fails, but the stage classifier does not report PASS
 unless the entire backward-no-commit contract completes.
 
 ## Fail-closed facts
 
-- Step 65 gates the Pathways session: the workload does not start until a
-  fresh-process probe sees exactly `CANON_EXPECTED_SLICE_DEVICES` (256, the
-  whole slice before the role split) from the proxy, retrying inside a
-  bounded window so late worker registration self-heals (p39d7 died on a
-  session cancelled during an incomplete registration window). On probe
-  timeout, archive the `pathways-proxy` and `pathways-rm` container logs
-  BEFORE deleting the JobSet, then check for stale JobSets/clients holding
-  the slice.
+- Do not re-enable the retired Step 65 fresh-process JAX device probe. Its
+  temporary client disconnected after discovery and could cancel the shared
+  Pathways session, killing otherwise healthy workers. The production profile
+  intentionally leaves `CANON_EXPECTED_SLICE_DEVICES` unset. The real training
+  process performs the authoritative fail-closed admission instead:
+  `split_4x8x8_role_devices` requires exactly 256 unique devices, physical
+  extents `(4, 8, 8)`, two disjoint and exhaustive 128-device role halves, and
+  no host split across roles before either mesh is constructed. On that check
+  failing, archive the `jax-tpu`, `pathways-proxy`, and `pathways-rm` logs
+  before deleting the JobSet, then check for incomplete registration or stale
+  clients holding the slice.
 - R2E-Gym is provisioned by `cluster/steps/35_install_r2egym.sh`: a pinned
   checkout (`CANON_R2EGYM_COMMIT`) with the vendored
   `patches/r2egym/r2egym.patch` applied, pip-installed in the pod together

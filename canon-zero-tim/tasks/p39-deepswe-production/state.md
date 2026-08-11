@@ -2,9 +2,10 @@
 
 Updated: 2026-08-11 UTC
 
-Current phase: **P39.2 locally complete — the 64-chip separated DP4xTP8
-device-resident optimizer pilot is implemented, but target NOT RUN.** No target
-run has been launched and no resident-optimizer claim exists for Qwen3-32B.
+Current phase: **P39.3 launch decision recorded — use the available 4x8x8
+slice for the first production-topology run and defer the optional 64-chip
+resident-optimizer pilot.** No target run has been launched and no
+resident-optimizer claim exists for Qwen3-32B.
 
 | Ledger | Status | Detail |
 |---|---|---|
@@ -16,13 +17,16 @@ run has been launched and no resident-optimizer claim exists for Qwen3-32B.
 | Direct TPU | TARGET NOT RUN | no operator or full-model claim from this change |
 | Pathways/GKE | TARGET NOT RUN | 4x8x8 P34 has never run |
 | Real DeepSWE recipe | TARGET NOT RUN | no backward, optimizer commit or convergence claim |
-| P39 64-chip pilot implementation | LOCAL PASS | separate DP4xTP8 profile and renderer, one/three-update stages, resident-only optimizer contract, dedicated classifier and 15-test CPU gate |
-| P39 64-chip pilot target | TARGET NOT RUN | no 4x4x4 rollout, backward, commit, HBM, IFRT or W&B evidence |
+| P39 64-chip pilot implementation | PUBLISHED / LOCAL PASS | published at `7328cde7`; separate DP4xTP8 profile and renderer, one/three-update stages, resident-only optimizer contract, dedicated classifier and 15-test CPU gate |
+| P39 64-chip pilot target | DEFERRED / NOT RUN | the available 4x8x8 slice makes this capacity pilot optional; no resident-optimizer evidence exists |
+| P34 256-chip launch selection | SELECTED / NOT RUN | direct 4x8x8 DP16xTP8 with pinned-host optimizer offload; production warning-only admission is not yet implemented |
 
-Next action: publish only after approval, rerun the P39 and P34 local gates at
-the exact publication SHA, and execute the one-update 4x4x4 pilot through
-`../../cluster/P39_DEEPSWE_64CHIP_PILOT_RUNBOOK.md`. The three-update stage is
-admitted only after the one-update classifier passes.
+Next action: implement and review the default-off DeepSWE production
+warning-only admission if the objective is uninterrupted convergence, rerun
+the P34 local and exact-image gates at the resulting publication SHA, then
+render one 4x8x8 DP16xTP8 JobSet with pinned-host optimizer offload. If the
+objective is strict diagnosis instead, use the existing
+`backward-no-commit` stage without changing the alignment policy.
 
 ## First hard boundary
 

@@ -9,6 +9,7 @@ Read `plan.md`, then `state.md`, then `log.md`.
 
 ## Current revision
 
+- Published operator revision: `7328cde7d821ae9e04c4aad6947ebb1496503bf0`
 - Hardening base: `5ee6dbfb5601cf1d1f864ccf6859764ba1f321fe`
 - Implementation started from: `697a29ab4b27015297af8e3dbb37c49db3560445`
 - Working branch: `codex/p39-deepswe-production-contract-0810`
@@ -20,9 +21,11 @@ The operator source is never the workload-reference branch. After publication,
 use the exact 40-character `git rev-parse HEAD` from a clean
 `yuxzhang/canon-zero-tim` worktree.
 
-The P39.2 pilot changes are currently workspace-local. The final publication
-SHA is therefore intentionally absent from this handoff. Do not launch from
-the working branch or substitute the stale hardening-base SHA.
+The P39.2 pilot and the P34 production launch gates are published at the
+operator revision above. Always fetch `yuxzhang/canon-zero-tim`, verify the
+exact 40-character SHA from a clean worktree, and render from that immutable
+revision or a later explicitly reviewed publication. Do not substitute the
+hardening-base SHA.
 
 ## What changed
 
@@ -56,29 +59,47 @@ changes. It must be rerun from the final publication SHA because shared
 alignment and agentic-learner code changed after the original P39 gate. A
 local pass does not promote target status.
 
-## First target command
+## Current target decision
 
-The next target is the bounded 64-chip pilot specified in
-`phases/p39-2-64chip-tp8-resident-pilot.md` and operated through
-`../../cluster/P39_DEEPSWE_64CHIP_PILOT_RUNBOOK.md`. Its CPU gate and the P34
-static regression gate pass locally; the target remains NOT RUN. It uses one
-4x4x4 slice split into two 32-device roles, each DP4xTP8, and tests
-device-resident optimizer state. This is a new systems contract; do not bypass
-the existing DP16xTP8 preflight or relabel the pilot as P34 green.
+The operator now has a complete 4x8x8 slice. The P39 64-chip pilot is therefore
+deferred, not passed, and is no longer a prerequisite for the first 256-chip
+run. Its only unique claim would be Qwen3-32B device-resident optimizer
+capacity. Because that claim is absent, the direct 256-chip run must retain
+pinned-host optimizer offload.
 
-After the pilot classifies resident capacity, render the 4x8x8 DP16xTP8 target
-exactly as documented in `cluster/P34_DEEPSWE_RUNBOOK.md`. Use resident
-optimizer only if the pilot leaves the pre-registered HBM margin; otherwise
-retain pinned-host offload. The 256-chip target must still independently prove
-DP16 collective and replica behavior.
+The selected production geometry is one 4x8x8 slice split by the real training
+process into two host-complete 128-device roles. Rollout and trainer are each
+DP16xTP8. This is one Pathways JobSet and one client session, not two
+independent clusters. The in-process split rejects any device count other than
+256, any physical extent other than 4x8x8, overlapping roles, incomplete
+coverage, or a host divided between roles.
+
+Before launch, choose the objective explicitly:
+
+1. Strict numerical diagnosis: use the checked-in `backward-no-commit` stage.
+   Any finite alignment mismatch remains fail-closed.
+2. Continuous convergence campaign: first implement and review a default-off
+   DeepSWE production warning-only admission, then render one `full` JobSet.
+   Only finite alignment residuals may become visible warnings. Nonfinite,
+   topology, metadata, cross-role weight, gradient, optimizer-transaction,
+   replica, HBM, IFRT, and W&B failures must still stop the run. The result is
+   `alignment-degraded`, never a zero-TIM promotion.
+
+The current production profile has
+`CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=0`; therefore it is not yet admitted for the
+continuous option. Do not hand-edit that value in a rendered manifest. The
+exact rendering and evidence procedure remains
+`../../cluster/P34_DEEPSWE_RUNBOOK.md`.
 
 ## Stop conditions
 
 - Any nonfinite, shape, topology, metadata, cross-role weight, gradient,
   optimizer-transaction, replica, HBM, IFRT, or W&B failure.
 - Finite alignment differences remain warnings only in the explicitly admitted
-  P39 64-chip pilot and must remain visible in evidence. They do not promote a
-  zero-TIM claim.
+  P39 64-chip pilot. The current P34 production profile remains strict until a
+  separate default-off production warning-only contract is implemented and
+  reviewed. Any admitted warning must remain visible in evidence and cannot
+  promote a zero-TIM claim.
 - Missing, duplicate, or non-exact rollout/trainer weight attestation.
 - Missing report, measurement count, proxy XLA flag, scheduler bucket,
   Pathways marker, W&B online marker or fixed reducer marker.
@@ -97,5 +118,7 @@ DP16 collective and replica behavior.
 
 ## Rollback
 
-Do not apply the rendered JobSet or keep all P34 admissions at zero. Preserve
-all failed evidence.
+Do not apply the rendered JobSet or keep all P34 admissions at zero. Leave
+`CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=0` to retain strict alignment behavior and
+`CANON_P30_OPT_STATE_OFFLOAD=1` to retain the signed Qwen3-32B optimizer
+placement. Preserve all failed evidence.

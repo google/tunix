@@ -101,3 +101,35 @@ change was performed.
 - Next: Publish after approval, rerun both gates at the publication SHA, then
   operate the one-update pilot. A PASS admits the three-update confirmation,
   not a 256-chip launch.
+
+## 2026-08-11 UTC — P39.3: defer the 64-chip pilot and select the 256-chip topology
+
+- Type: operator decision and handoff correction
+- Fact: A complete 4x8x8 slice is now available. The published P39.2 pilot is
+  a DP4xTP8 device-resident capacity experiment; it does not validate the
+  production DP16xTP8 topology and is unnecessary when the 256-chip run keeps
+  pinned-host optimizer offload.
+- Fact: The P34 runbook still described the retired Step 65 temporary JAX
+  client as the active 256-device gate. Commit `6fbe8fdc` disabled that probe
+  because disconnecting it could cancel the shared Pathways session. The real
+  training process already fails closed on device count, 4x8x8 extents,
+  disjoint/exhaustive role halves, and host-complete placement.
+- Decision: Defer, but do not promote, the 64-chip pilot. Select the direct
+  4x8x8 DP16xTP8 production geometry with optimizer offload. Continuous full
+  training still requires a separately reviewed, default-off production
+  warning-only alignment admission; the checked-in production profile remains
+  strict.
+- Commands: `git pull --ff-only origin yuxzhang/canon-zero-tim`; `bash
+  canon-zero-tim/tests/p34_deepswe/run_static.sh`; `bash
+  canon-zero-tim/tests/p34_deepswe/run_trajectory_cpu.sh`; `bash
+  canon-zero-tim/tests/p34_deepswe/run_update_cpu.sh`; `bash
+  canon-zero-tim/tests/p39_deepswe_pilot/run_cpu.sh`.
+- Result: branch already current at `7328cde7`; P34 static, trajectory, and
+  update gates passed; P39 pilot CPU gate passed 15 tests. No target or cloud
+  action occurred.
+- Rollback: Retain strict production alignment, pinned-host optimizer offload,
+  and do not render or apply a P34 JobSet. The 64-chip pilot remains available
+  as a future optional capacity experiment.
+- Next: implement the production warning-only contract or deliberately choose
+  strict `backward-no-commit`, then rerun exact-image validation at the final
+  publication SHA.
