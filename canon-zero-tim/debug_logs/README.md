@@ -985,3 +985,38 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 4. **Conclusion**:
    - Across the entire 256-trajectory batch, decode generation (`Arm A`), rescore prefill (`Arm B`), and learner training adapter forward (`Arm C`) have achieved **absolute bitwise mathematical equivalence** with 0 differing bytes across all 189,825 action tokens.
 
+---
+
+## 38. Phase 38.2d Attempt `p38d5`: 64-Chip GSM8K Step 0 Full Optimization & FrozenLake 36-Layer BWD Diagnostics
+
+- `debug_logs/p38_p38d5_gsm8k_full.raw.log` (SHA-256: `b63e0d8105869141f53a671116f874b92f16f6e5087af8d44184070f0862ab24`)
+- `debug_logs/p38_p38d5_frozenlake_bwd.raw.log` (SHA-256: `332debd6e2012b2c7d84e1bfc71b142f7ed843f00abfdec4f3a5869f4bf503be`)
+- Target Commit: `2e3e834ce9ff1c9b68ec28a8d16eb71c89f55e09` (*Re-establish pre-backward alignment gate in P33 agentic learner*)
+- W&B Run (GSM8K): https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/0q80a0ve
+
+### Execution & Diagnostic Summary:
+
+1. **GSM8K Full Training Breakthrough (Qwen3-1.7B, 64 TPU Chips, Physical Slice `36489269`)**:
+   - **Four-Boundary Bitwise Exact Alignment (16 / 16 Microsteps 100% Passed)**:
+     - All 16 microsteps passed four-boundary verification with **0 differing bytes** (`S_decode_vs_S_prefill = 0`, `S_prefill_vs_T_old = 0`, `T_old_vs_T_current = 0`).
+     - `w_all_exactly_1: True`, `r_all_exactly_1: True`, `wr_all_exactly_1: True`, `clip = 0`, `tis = 0`.
+   - **DP16 Exact Replica Gradient Reduction**:
+     - Global all-reduce across all 16 DP ranks completed with **100% bitwise exact replica gradient equality (`replicas_exact=1`)** and 1.72B nonzero gradient elements per microstep.
+   - **Optimizer State Commit & Pinned Host Offloading**:
+     - `commit_gradient_norm = 1.45809`, `segmented_loss = 0.00003`, `alignment_max_differing_bytes = 0`.
+     - `[P30.G1] OPT_STATE before_commit memory_kind=device` -> `after_commit memory_kind=pinned_host`.
+     - W&B run live synchronized: [`zero-tim-gsm8k-dp16-tp4 (Run 0q80a0ve)`](https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/0q80a0ve).
+   - **Post-Update Snapshot Fingerprint Root Cause**:
+     - The post-update snapshot gate (`_canon_fingerprint_state`) samples tensors with $\le 1\text{M}$ elements to prevent HBM exhaustion (which for Qwen3-1.7B selects only LayerNorm scale weights initialized to 1.0).
+     - Under Step 0's tiny loss ($3\times 10^{-5}$) and small learning rate, the Adam update on LayerNorm weights was below the bfloat16 representation threshold, leaving LayerNorm SHA-256 unchanged while Adam momentum states ($\mu, \nu$) updated across all 12 sampled leaves (`optimizer_changed = 12`).
+     - The strict check `mutation_ok = bool(changed["model"]) and bool(changed["optimizer"])` raised `AlignmentGateError` due to `changed["model"] = 0` on the sampled subset.
+
+2. **FrozenLake 36-Layer BWD Diagnostics (Qwen3-8B, 64 TPU Chips, Physical Slice `aff204e7`)**:
+   - **Rollout vs Learner Weight Synchronization (100% Bitwise Identical)**:
+     - `S_prefill_vs_T_old`: **0 / 187,844 differing bytes (0 / 48,946 differing action elements, 100% BITWISE EQUAL)**.
+     - Confirms zero weight synchronization drift between vLLM serving engine and JAX Learner.
+   - **Multi-Turn Long-Context Decode vs Prefill Floating-Point Associativity**:
+     - `S_decode_vs_S_prefill`: **40 / 187,844 differing bytes (25 / 48,946 differing action elements, 99.95% agreement)**.
+     - Divergence arises from floating-point reduction tree differences in long multi-turn context (2,000+ tokens across 4 environment turns) between single-token decode kernel and chunked prefill kernel.
+     - Fail-closed gate (`CANON_PRE_ALIGN_GATE=1`) successfully intercepted the run prior to backprop, generating `pre_alignment.jsonl` evidence.
+
