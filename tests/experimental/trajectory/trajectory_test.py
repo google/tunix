@@ -336,6 +336,38 @@ class TrajectoryTest(parameterized.TestCase):
     self.assertFalse(hasattr(meta, "steps"))
     self.assertFalse(hasattr(meta, "subagent_trajectories"))
 
+  def test_embedded_subagent_trajectories_serialization(self) -> None:
+    """Verifies trajectories containing embedded subagent_trajectories serialize and deserialize."""
+    sub_traj = trajectory.Trajectory(
+        trajectory_id="embedded_sub_1",
+        agent=trajectory.Agent(name="sub_agent", version="1.0"),
+        steps=[
+            trajectory.Step(
+                step_id=1,
+                source=trajectory.Source.AGENT,
+                message="Subagent action",
+            )
+        ],
+    )
+
+    parent_traj = trajectory.Trajectory(
+        trajectory_id="parent_traj_1",
+        agent=trajectory.Agent(name="parent_agent", version="2.0"),
+        steps=[
+            trajectory.Step(
+                step_id=1,
+                source=trajectory.Source.USER,
+                message="Parent request",
+            )
+        ],
+        subagent_trajectories=[sub_traj],
+    )
+
+    json_dict = parent_traj.to_json_dict()
+    reconstructed = trajectory.Trajectory.from_json_dict(json_dict)
+
+    self.assertEqual(reconstructed, parent_traj)
+
 
 if __name__ == "__main__":
   absltest.main()
