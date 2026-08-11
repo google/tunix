@@ -22,85 +22,111 @@ _MODULE_SPEC.loader.exec_module(classifier)
 
 def _policy(enabled: bool) -> dict:
   return {
-      "id": classifier._AB_POLICY_ID,
+      "id": classifier._WARNING_POLICY_ID,
       "enabled": enabled,
+      "warning_only": enabled,
+      "bounded_ab_only": False,
       "workload": "gsm8k" if enabled else "",
       "stage": "full" if enabled else "",
-      "max_abs_limit": classifier._AB_MAX_ABS,
-      "byte_fraction_limit": classifier._AB_MAX_BYTE_FRACTION,
-      "claim_level": "alignment-degraded" if enabled else "strict-zero-tim",
+      "max_abs_limit": None if enabled else 1.0e-4,
+      "byte_fraction_limit": None if enabled else 4.0e-3,
+      "claim_level": "convergence-only" if enabled else "strict-zero-tim",
+  }
+
+
+def _boundary(*, drift: bool = False) -> dict:
+  return {
+      "valid": True,
+      "finite": True,
+      "differing_bytes": 4 if drift else 0,
+      "differing_elements": 1 if drift else 0,
+      "byte_fraction": 0.25 if drift else 0.0,
+      "element_fraction": 0.5 if drift else 0.0,
+      "max_abs": 3.0 if drift else 0.0,
   }
 
 
 def _alignment(
-    step: int, *, optimizer_skipped: bool, ab_policy: bool = False,
-    degraded: bool = False
+    step: int,
+    *,
+    optimizer_skipped: bool,
+    warning_policy: bool = False,
+    warned: bool = False,
 ) -> dict:
   record = {
       "verdict": "PASS",
       "reds": [],
       "blocking_reds": [],
       "reported_reds": [],
-      "admission_policy": _policy(ab_policy),
+      "warning_reds": [],
+      "admission_policy": _policy(warning_policy),
       "execution_mode": "train",
       "step": step,
       "N_action": 4,
       "boundaries": {
-          name: {"differing_bytes": 0}
+          name: _boundary()
           for name in classifier._BOUNDARIES
       },
       "exact": {name: True for name in classifier._EXACT_KEYS},
+      "ratio_finite": True,
+      "ratio_stats": {
+          name: {"min": 1.0, "max": 1.0} for name in ("w", "r", "wr")
+      },
       "clip_hits": 0,
       "tis_hits": 0,
       "optimizer_skipped": optimizer_skipped,
       "gradient": {"finite": True, "nonzero": True, "norm": 1.0},
   }
-  if degraded:
-    record["verdict"] = "PASS_WITH_REPORTED_DRIFT"
+  if warned:
+    record["verdict"] = "PASS_WITH_ALIGNMENT_WARNINGS"
     record["reds"] = [
         "S_decode_vs_S_prefill",
+        "S_prefill_vs_T_old",
+        "T_old_vs_T_current",
         "w_all_exactly_1",
+        "r_all_exactly_1",
         "wr_all_exactly_1",
+        "clip_hits=3",
+        "tis_hits=2",
     ]
-    record["reported_reds"] = list(record["reds"])
-    record["boundaries"]["S_decode_vs_S_prefill"] = {
-        "valid": True,
-        "finite": True,
-        "differing_bytes": 1,
-        "byte_fraction": 1.0e-6,
-        "max_abs": 1.0e-6,
+    record["warning_reds"] = list(record["reds"])
+    record["boundaries"] = {
+        name: _boundary(drift=True) for name in classifier._BOUNDARIES
     }
-    record["exact"]["w_all_exactly_1"] = False
-    record["exact"]["wr_all_exactly_1"] = False
+    record["exact"] = {name: False for name in classifier._EXACT_KEYS}
+    record["clip_hits"] = 3
+    record["tis_hits"] = 2
+    record["ratio_stats"] = {
+        "w": {"min": 0.1, "max": 20.0},
+        "r": {"min": 0.2, "max": 5.0},
+        "wr": {"min": 0.02, "max": 100.0},
+    }
   return record
 
 
 def _pre_alignment(
-    step: int, *, ab_policy: bool = False, degraded: bool = False
+    step: int, *, warning_policy: bool = False, warned: bool = False
 ) -> dict:
   record = {
       "verdict": "PASS",
       "reds": [],
       "blocking_reds": [],
       "reported_reds": [],
-      "admission_policy": _policy(ab_policy),
+      "warning_reds": [],
+      "admission_policy": _policy(warning_policy),
       "step": step,
       "N_action": 4,
       "boundaries": {
-          name: {"differing_bytes": 0}
+          name: _boundary()
           for name in classifier._PRE_BOUNDARIES
       },
   }
-  if degraded:
-    record["verdict"] = "PASS_WITH_REPORTED_DRIFT"
-    record["reds"] = ["S_decode_vs_S_prefill"]
-    record["reported_reds"] = ["S_decode_vs_S_prefill"]
-    record["boundaries"]["S_decode_vs_S_prefill"] = {
-        "valid": True,
-        "finite": True,
-        "differing_bytes": 1,
-        "byte_fraction": 1.0e-6,
-        "max_abs": 1.0e-6,
+  if warned:
+    record["verdict"] = "PASS_WITH_ALIGNMENT_WARNINGS"
+    record["reds"] = list(classifier._PRE_BOUNDARIES)
+    record["warning_reds"] = list(record["reds"])
+    record["boundaries"] = {
+        name: _boundary(drift=True) for name in classifier._PRE_BOUNDARIES
     }
   return record
 
@@ -164,12 +190,12 @@ class ClassifyP33RunTest(unittest.TestCase):
       self._write_jsonl(updates, (_update(index) for index in range(200)))
       self._write_jsonl(
           pre_alignments,
-          (_pre_alignment(index, ab_policy=True) for index in range(200)),
+          (_pre_alignment(index, warning_policy=True) for index in range(200)),
       )
       self._write_jsonl(
           alignments,
           (
-              _alignment(index, optimizer_skipped=False, ab_policy=True)
+              _alignment(index, optimizer_skipped=False, warning_policy=True)
               for index in range(3200)
           ),
       )
@@ -181,11 +207,11 @@ class ClassifyP33RunTest(unittest.TestCase):
           update_report=updates,
           alignment_report=alignments,
       )
-      self.assertEqual(record["verdict"], "PASS_WITH_AB_REPORT_POLICY")
+      self.assertEqual(record["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
       self.assertEqual(record["observed_updates"], 200)
       self.assertEqual(record["observed_alignments"], 3200)
 
-  def test_full_gsm8k_accepts_only_bounded_reported_ab_drift(self):
+  def test_full_gsm8k_accepts_finite_alignment_warnings(self):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp)
       run_log = root / "run.log"
@@ -200,16 +226,16 @@ class ClassifyP33RunTest(unittest.TestCase):
       )
       self._write_jsonl(updates, (_update(index) for index in range(200)))
       pre_rows = [
-          _pre_alignment(index, ab_policy=True) for index in range(200)
+          _pre_alignment(index, warning_policy=True) for index in range(200)
       ]
-      pre_rows[0] = _pre_alignment(0, ab_policy=True, degraded=True)
+      pre_rows[0] = _pre_alignment(0, warning_policy=True, warned=True)
       self._write_jsonl(pre_alignments, pre_rows)
       alignment_rows = [
-          _alignment(index, optimizer_skipped=False, ab_policy=True)
+          _alignment(index, optimizer_skipped=False, warning_policy=True)
           for index in range(3200)
       ]
       alignment_rows[0] = _alignment(
-          0, optimizer_skipped=False, ab_policy=True, degraded=True
+          0, optimizer_skipped=False, warning_policy=True, warned=True
       )
       self._write_jsonl(alignments, alignment_rows)
       record = classifier.classify(
@@ -220,27 +246,27 @@ class ClassifyP33RunTest(unittest.TestCase):
           update_report=updates,
           alignment_report=alignments,
       )
-      self.assertEqual(record["verdict"], "PASS_WITH_AB_REPORT_POLICY")
-      self.assertEqual(record["pre_alignment_reported_drift_records"], 1)
-      self.assertEqual(record["alignment_reported_drift_records"], 1)
-      self.assertEqual(record["claim_level"], "alignment-degraded")
+      self.assertEqual(record["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+      self.assertEqual(record["pre_alignment_warning_records"], 1)
+      self.assertEqual(record["alignment_warning_records"], 1)
+      self.assertEqual(record["claim_level"], "convergence-only")
 
-  def test_reported_ab_policy_rejects_budget_overrun_and_frozenlake(self):
-    over_budget = _pre_alignment(0, ab_policy=True, degraded=True)
-    over_budget["boundaries"]["S_decode_vs_S_prefill"]["max_abs"] = 1.0e-2
+  def test_warning_policy_rejects_nonfinite_and_frozenlake_scope(self):
+    nonfinite = _pre_alignment(0, warning_policy=True, warned=True)
+    nonfinite["boundaries"]["S_decode_vs_S_prefill"]["finite"] = False
     reasons = []
     classifier._validate_pre_alignment_records(
-        [over_budget],
+        [nonfinite],
         expected_count=1,
         workload="gsm8k",
         stage="full",
         reasons=reasons,
     )
     self.assertIn(
-        "pre_alignment[0].S_decode_vs_S_prefill.max_abs", reasons
+        "pre_alignment[0].S_decode_vs_S_prefill.finite", reasons
     )
 
-    frozenlake = _pre_alignment(0, ab_policy=True, degraded=True)
+    frozenlake = _pre_alignment(0, warning_policy=True, warned=True)
     reasons = []
     classifier._validate_pre_alignment_records(
         [frozenlake],
@@ -249,7 +275,8 @@ class ClassifyP33RunTest(unittest.TestCase):
         stage="backward-no-commit",
         reasons=reasons,
     )
-    self.assertIn("pre_alignment[0].unexpected_degraded", reasons)
+    self.assertIn("pre_alignment[0].policy", reasons)
+    self.assertIn("pre_alignment[0].verdict", reasons)
 
   def test_full_frozenlake_positive(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -411,7 +438,7 @@ class ClassifyP33RunTest(unittest.TestCase):
       )
       self.assertEqual(result["verdict"], "FAIL")
       self.assertIn(
-          "pre_alignment[0].S_decode_vs_S_prefill.differing_bytes",
+          "pre_alignment[0].S_decode_vs_S_prefill.strict_drift",
           result["reasons"],
       )
 
@@ -451,7 +478,7 @@ class ClassifyP33RunTest(unittest.TestCase):
           "update[0].zero_lr_model_unchanged", result["reasons"]
       )
 
-  def test_negative_control_rejects_one_changed_boundary(self):
+  def test_warning_policy_negative_control_rejects_nonfinite_boundary(self):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp)
       run_log = root / "run.log"
@@ -466,10 +493,14 @@ class ClassifyP33RunTest(unittest.TestCase):
       )
       self._write_jsonl(updates, (_update(index) for index in range(200)))
       self._write_jsonl(
-          pre_alignments, (_pre_alignment(index) for index in range(200))
+          pre_alignments,
+          (_pre_alignment(index, warning_policy=True) for index in range(200)),
       )
-      rows = [_alignment(index, optimizer_skipped=False) for index in range(3200)]
-      rows[17]["boundaries"]["T_old_vs_T_current"]["differing_bytes"] = 1
+      rows = [
+          _alignment(index, optimizer_skipped=False, warning_policy=True)
+          for index in range(3200)
+      ]
+      rows[17]["boundaries"]["T_old_vs_T_current"]["finite"] = False
       self._write_jsonl(alignments, rows)
       record = classifier.classify(
           workload="gsm8k",
@@ -481,7 +512,7 @@ class ClassifyP33RunTest(unittest.TestCase):
       )
       self.assertEqual(record["verdict"], "FAIL")
       self.assertIn(
-          "alignment[17].T_old_vs_T_current.differing_bytes",
+          "alignment[17].T_old_vs_T_current.finite",
           record["reasons"],
       )
 

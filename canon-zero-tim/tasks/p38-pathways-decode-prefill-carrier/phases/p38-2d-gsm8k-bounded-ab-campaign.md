@@ -74,3 +74,64 @@ out-of-budget A/B observations.
 Set `CANON_GSM8K_AB_REPORT_ONLY=0` or revert this phase commit. The original
 strict gate is then restored without changing precision, loss, optimizer, W&B,
 or credential configuration. Preserve all reports from a degraded campaign.
+
+## 2026-08-11 amendment: all GSM8K alignment gates warning-only
+
+The earlier bounded A-B policy is insufficient for the next run: P38e5 update
+1 observed 85 of 195,167 action elements red
+(`element_fraction=4.35524448293e-4`) with `max_abs=0.10378456115722656`, so
+the existing `max_abs <= 1e-4` policy blocks before update 2. The user has
+explicitly authorized a convergence-only campaign where alignment checks do
+not terminate training.
+
+Add a separate default-off flag:
+
+```text
+CANON_GSM8K_ALIGNMENT_WARN_ONLY=1
+```
+
+It is admitted only for committed `gsm8k` `full` training. Every alignment red
+is preserved in per-step JSON/stdout and W&B metrics but is placed in
+`warning_reds`, never `blocking_reds`, and never raises `AlignmentGateError`.
+This includes decode/prefill, prefill/T-old, T-old/T-current, ratio exactness,
+clip/TIS exactness, and terminal alignment classification. There is no
+max-abs, differing-element, or differing-byte threshold in this mode.
+
+This flag does not catch or downgrade invalid shapes, NaN/Inf in values, loss
+or gradients, reducer/replica disagreement, optimizer transaction failure,
+backend disconnect, OOM, or other runtime exceptions. Those remain fatal.
+The distinction is operational: bitwise disagreement may be accepted for a
+convergence experiment; corrupted or non-executable training may not.
+
+Required evidence for every update:
+
+- full alignment record and hashes;
+- differing elements/bytes, element/byte fractions, `max_abs`, and bounded
+  mismatch coordinates;
+- ratio min/max, clip and TIS hit counts;
+- finite loss and gradient norm;
+- DP reducer/replica verdict;
+- optimizer transaction/parameter mutation verdict; and
+- W&B online step, reward, loss, alignment-warning, and throughput metrics.
+
+The terminal classifier is
+`PASS_WITH_ALIGNMENT_WARNINGS` only if the requested training updates complete
+and all non-alignment runtime/transaction gates pass. It must never emit
+`PASS`, `zero-TIM`, or `alignment-degraded`; its claim level is
+`convergence-only`.
+
+### Negative controls
+
+- the flag is rejected for FrozenLake, DeepSWE, no-commit, short, canary, and
+  diagnostic profiles;
+- injected A-B, B-C, and T-old/T-current differences continue past the
+  alignment gate and appear in warnings;
+- an invalid shape, nonfinite loss/gradient, reducer mismatch, or failed
+  optimizer transaction still exits nonzero; and
+- disabling the flag restores the original strict alignment behavior.
+
+### Rollback
+
+Leave `CANON_GSM8K_ALIGNMENT_WARN_ONLY` unset or set it to `0`. The earlier
+strict/bounded behavior is restored without changing loss, precision,
+optimizer, reducer, W&B credentials, or FrozenLake behavior.

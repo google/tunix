@@ -451,3 +451,134 @@
   numerical effect of U are NOT RUN.
 - Rollback: leave `CANON_P38_SERVING_CAPTURE_DIR` and `CANON_KV_UNIFIED`
   unset; stock branches remain selected.
+
+## 2026-08-11 UTC — P38.2g2 publication reconciled and page-topology phase preregistered
+
+- Type: correction and handoff.
+- Fact: local HEAD and `origin/yuxzhang/canon-zero-tim` are both `763b60b1`;
+  the P38.2g2 implementation is published and the worktree is clean. Earlier
+  state/HANDOFF text saying dirty and unpublished was stale.
+- Fact: existing logs establish a real-serving history/envelope dependency,
+  but no artifact yet measures physical-page fragmentation as the isolated
+  variable. `row % 16` also does not establish a local scheduler slot.
+- Hypothesis: physical page topology, padding-row boundary leakage, or cache
+  content corruption is the remaining production decode carrier.
+- Action: added `phases/p38-2g3-page-topology-discriminator.md`; kept P38.2g2
+  as the sole active phase and preregistered exact request joins, explicit
+  row/DP/slot mapping, page-content equivalence, padding poison control, and a
+  separate same-source flag-OFF diagnostic.
+- Command: `git status --short --branch && git log -6 --oneline --decorate`.
+- Result: publication reconciliation PASS; no TPU/cloud experiment and no
+  runtime source change. Static review reopened local admission before target
+  launch because scheduled-request, mapping-consistency, and U-PATHTRACE gates
+  are incomplete.
+- Files/artifacts: `state.md`, `plan.md`, `HANDOFF.md`, and
+  `phases/p38-2g3-page-topology-discriminator.md`.
+- Rollback: revert only this planning checkpoint and phase document; published
+  default-off runtime code at `763b60b1` is unchanged.
+- Next: harden P38.2g2 locally and rerun its focused tests plus the complete
+  pinned-image P33 CPU gate before asking the target operator to launch stock.
+
+## 2026-08-11 UTC — P38.2g3 reproduction and poison controls strengthened
+
+- Type: phase-plan refinement; no runtime or experiment change.
+- Fact: table sanitization becoming exact does not alone prove that padding
+  page data was consumed; it can also alter a control-flow or validity path.
+- Action: made E0 require bitwise equality over the complete captured action
+  vector and both A/B hashes; promoted padding poison to explicit E4; moved the
+  same-source flag diagnostic to E5; required per-write-event page hashes; and
+  preregistered the bounded additional state captured if E0 fails.
+- Decision: padding leakage is causal only when E3 is exact and changing only
+  a proven padding-only sentinel's finite contents changes output. Pool
+  dose-response remains an optional amplifier only when the source capture has
+  too few affected requests.
+- Files/artifacts:
+  `phases/p38-2g3-page-topology-discriminator.md`, `plan.md`, and `HANDOFF.md`.
+- Rollback: revert only this planning refinement; published default-off runtime
+  code at `763b60b1` is unchanged.
+- Next: implement the P38.2g2 local admission hardening already recorded in
+  `state.md`; do not implement E1-E5 before an exact target E0 exists.
+
+## 2026-08-11 UTC — GSM8K full warning-only alignment override authorized
+
+- Type: user decision and phase amendment; runtime not yet changed.
+- Fact: P38e5 update 1 has 85/195167 differing action elements,
+  `element_fraction=4.35524448293e-4`, `byte_fraction=1.89581230433e-4`, and
+  `max_abs=0.10378456115722656`. The existing bounded report policy rejects it
+  because its max-abs limit is `1e-4`.
+- Decision: add a default-off, committed-GSM8K-full-only flag that converts all
+  alignment failures into stdout/JSON/W&B warnings and prevents
+  `AlignmentGateError` from stopping training. No alignment magnitude or
+  density threshold applies in that mode.
+- Boundary: invalid/nonfinite numerics, loss/gradient health, DP reducer and
+  replica equality, optimizer transaction health, infrastructure errors, and
+  ordinary runtime failures remain fatal. FrozenLake and the zero-TIM
+  root-cause ladder remain strict.
+- Claim ceiling: `PASS_WITH_ALIGNMENT_WARNINGS`,
+  `claim_level=convergence-only`; never zero-TIM.
+- Files/artifacts: `phases/p38-2d-gsm8k-bounded-ab-campaign.md`, `plan.md`,
+  `state.md`, and `HANDOFF.md`; source evidence in
+  `../../debug_logs/p38_p38e5_gsm8k_full.raw.log`.
+- Rollback: leave `CANON_GSM8K_ALIGNMENT_WARN_ONLY` unset. No runtime code was
+  changed by this checkpoint.
+- Next: implement the flag, its fail-closed scope, warning classifier, W&B
+  metrics, and negative controls; run focused tests and the full P33 CPU gate
+  before publication/launch.
+
+## 2026-08-11 UTC — GSM8K warning-only alignment implementation locally gated
+
+- Type: default-off runtime policy implementation; no TPU/cloud experiment,
+  source commit, push, or training launch.
+- Added `CANON_GSM8K_ALIGNMENT_WARN_ONLY=1`, mutually exclusive with the
+  legacy bounded A/B policy and admitted only for committed GSM8K full
+  training. The renderer enables it only for `gsm8k-full`.
+- Finite, shape-valid A-B, B-C, and old/current differences plus non-unit
+  `w/r/w*r` and clip/TIS observations enter `warning_reds`, emit explicit
+  warning lines, persist in JSONL, and do not raise `AlignmentGateError`.
+- Invalid shape, NaN/Inf, nonfinite ratio or gradient, reducer/replica errors,
+  optimizer transaction errors, missing evidence, and runtime/infrastructure
+  failures remain hard.
+- Added ratio min/max and boundary byte/element fractions to W&B, plus
+  `zero_tim/alignment_warning`, warning count, and a truthful strict-gate
+  metric. The terminal classifier is
+  `PASS_WITH_ALIGNMENT_WARNINGS`, `claim_level=convergence-only`.
+- Negative controls cover wrong workload, mutually enabled policies,
+  nonfinite values, strict-mode drift, reducer/update evidence, and classifier
+  scope.
+- Verification commands:
+  `sudo docker run --rm -v "$PWD:/workspace:ro" -w /workspace -e
+  JAX_PLATFORMS=cpu tunix_frozenlake_image:vllm-tpu0.25.0 bash
+  canon-zero-tim/tests/p33_workloads/run_cpu.sh` and
+  `bash canon-zero-tim/tests/p33_workloads/run_exact_image.sh`.
+- Results: complete frozen-image P33 CPU gate PASS (67 workload tests, 28
+  alignment tests, all adjacent suites/negative controls), focused classifier
+  11/11 PASS, exact-image Qwen3-1.7B 10/10 PASS, and Qwen3-8B 10/10 PASS.
+- Concurrent source movement: after those gates, the tracked branch advanced
+  from base `763b60b1` to `bf0c5734` in seven DeepSWE admission files that do
+  not overlap this diff. Rebase and rerun are still required before push.
+- Rollback: set `CANON_GSM8K_ALIGNMENT_WARN_ONLY=0`; strict behavior returns
+  without changing loss, precision, optimizer, prefix cache, FrozenLake, or
+  credentials.
+- Next: obtain explicit commit/push approval, commit the local work, rebase on
+  `bf0c5734`, rerun the frozen-image gates, push, and only then render a fresh
+  source-pinned GSM8K full manifest. Target training is NOT RUN.
+
+## 2026-08-11 UTC — warning-only policy rebased on DeepSWE admission
+
+- Type: publication preparation under explicit user commit/push approval; no
+  TPU/cloud experiment or training launch.
+- Rebased `Admit warning-only GSM8K convergence runs` directly onto
+  `bf0c5734 Gate the Pathways session behind a bounded device admission probe`.
+  The rebased local commit is `81f20e78`; main was not checked out or modified.
+- Post-rebase verification: complete frozen-image P33 CPU gate PASS (67
+  workload tests, 28 alignment tests, adjacent negative controls), exact-image
+  Qwen3-1.7B and Qwen3-8B gates 10/10 each PASS, and DeepSWE P34 static gate
+  PASS with `suites=10`, including the new 256-device admission probe.
+- Proven: the GSM8K warning-only policy and the DeepSWE device admission patch
+  coexist without a local regression. Not proven: any target training result,
+  zero-TIM restoration, FrozenLake repair, or DeepSWE target admission.
+- Rollback: set `CANON_GSM8K_ALIGNMENT_WARN_ONLY=0`; the strict alignment gate
+  returns. The DeepSWE admission probe remains fail-closed and independent.
+- Next: publish to `yuxzhang/canon-zero-tim`, verify the remote hash, then
+  render a fresh source-pinned GSM8K full JobSet. Keep FrozenLake and DeepSWE
+  strict.

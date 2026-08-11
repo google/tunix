@@ -43,7 +43,9 @@ PRECHECK_ONLY_ENV = "CANON_P38_PRECHECK_ONLY"
 P38_MISMATCH_CAPSULE_ENV = "CANON_P38_MISMATCH_CAPSULE"
 P38_MISMATCH_CAPSULE_MAX_ROWS_ENV = "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"
 GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
+GSM8K_ALIGNMENT_WARN_ONLY_ENV = "CANON_GSM8K_ALIGNMENT_WARN_ONLY"
 _GSM8K_AB_POLICY_ID = "gsm8k-full-ab-report-v1"
+_GSM8K_ALIGNMENT_WARNING_POLICY_ID = "gsm8k-full-alignment-warning-v2"
 _GSM8K_AB_MAX_ABS = 1.0e-4
 _GSM8K_AB_MAX_BYTE_FRACTION = 4.0e-3
 _MAX_MISMATCH_DETAILS = 1024
@@ -154,13 +156,26 @@ def execution_mode() -> str:
 
 
 def gsm8k_ab_report_policy() -> dict[str, Any]:
-  """Returns the narrow, preregistered GSM8K full-run A/B policy."""
+  """Returns the narrow, preregistered GSM8K full-run alignment policy."""
   raw = os.environ.get(GSM8K_AB_REPORT_ONLY_ENV, "")
   if raw not in ("", "0", "1"):
     raise AlignmentGateError(
         f"{GSM8K_AB_REPORT_ONLY_ENV} must be exactly 0 or 1, got {raw!r}"
     )
-  enabled_policy = raw == "1"
+  warn_raw = os.environ.get(GSM8K_ALIGNMENT_WARN_ONLY_ENV, "")
+  if warn_raw not in ("", "0", "1"):
+    raise AlignmentGateError(
+        f"{GSM8K_ALIGNMENT_WARN_ONLY_ENV} must be exactly 0 or 1, "
+        f"got {warn_raw!r}"
+    )
+  bounded_ab = raw == "1"
+  warning_only = warn_raw == "1"
+  if bounded_ab and warning_only:
+    raise AlignmentGateError(
+        f"{GSM8K_AB_REPORT_ONLY_ENV} and "
+        f"{GSM8K_ALIGNMENT_WARN_ONLY_ENV} are mutually exclusive"
+    )
+  enabled_policy = bounded_ab or warning_only
   workload = os.environ.get("CANON_P32_WORKLOAD", "")
   stage = os.environ.get("CANON_P33_RUN_STAGE", "")
   no_commit = os.environ.get("CANON_P33_NO_COMMIT", "")
@@ -173,18 +188,30 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     )
     if not admitted:
       raise AlignmentGateError(
-          f"{GSM8K_AB_REPORT_ONLY_ENV}=1 is admitted only for committed "
-          "GSM8K full training"
+          "GSM8K alignment reporting is admitted only for committed GSM8K "
+          "full training"
       )
   return {
-      "id": _GSM8K_AB_POLICY_ID,
+      "id": (
+          _GSM8K_ALIGNMENT_WARNING_POLICY_ID
+          if warning_only
+          else _GSM8K_AB_POLICY_ID
+      ),
       "enabled": enabled_policy,
+      "warning_only": warning_only,
+      "bounded_ab_only": bounded_ab,
       "workload": workload,
       "stage": stage,
-      "max_abs_limit": _GSM8K_AB_MAX_ABS,
-      "byte_fraction_limit": _GSM8K_AB_MAX_BYTE_FRACTION,
+      "max_abs_limit": None if warning_only else _GSM8K_AB_MAX_ABS,
+      "byte_fraction_limit": (
+          None if warning_only else _GSM8K_AB_MAX_BYTE_FRACTION
+      ),
       "claim_level": (
-          "alignment-degraded" if enabled_policy else "strict-zero-tim"
+          "convergence-only"
+          if warning_only
+          else "alignment-degraded"
+          if enabled_policy
+          else "strict-zero-tim"
       ),
   }
 
@@ -209,6 +236,7 @@ def _ab_drift_is_reportable(
   """Returns whether an A/B drift is inside the preregistered report budget."""
   return bool(
       policy["enabled"]
+      and not policy.get("warning_only", False)
       and difference.get("valid") is True
       and difference.get("differing_bytes", 0) > 0
       and finite
@@ -779,6 +807,7 @@ def check_pre_backward(
   policy = gsm8k_ab_report_policy()
   blocking_reds: list[str] = []
   reported_reds: list[str] = []
+  warning_reds: list[str] = []
   if n_action == 0:
     blocking_reds.append("N_action=0")
   boundaries = {}
@@ -827,7 +856,9 @@ def check_pre_backward(
     if difference["valid"] is not True or not finite:
       blocking_reds.append(name)
     elif difference["differing_bytes"] != 0:
-      if name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
+      if policy["warning_only"]:
+        warning_reds.append(name)
+      elif name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
           difference, max_abs=max_abs, finite=finite, policy=policy
       ):
         reported_reds.append(name)
@@ -836,17 +867,20 @@ def check_pre_backward(
   verdict = (
       "FAIL"
       if blocking_reds
+      else "PASS_WITH_ALIGNMENT_WARNINGS"
+      if warning_reds
       else "PASS_WITH_REPORTED_DRIFT"
       if reported_reds
       else "PASS"
   )
-  reds = blocking_reds + reported_reds
+  reds = blocking_reds + warning_reds + reported_reds
   record = {
       "timestamp": time.time(),
       "step": int(step),
       "verdict": verdict,
       "reds": reds,
       "blocking_reds": blocking_reds,
+      "warning_reds": warning_reds,
       "reported_reds": reported_reds,
       "admission_policy": policy,
       "N_action": n_action,
@@ -898,6 +932,12 @@ def check_pre_backward(
       f"bounds={[(name, value['differing_bytes']) for name, value in boundaries.items()]}",
       flush=True,
   )
+  if warning_reds:
+    print(
+        "[CANON_ALIGN_WARNING] boundary=pre_backward "
+        f"step={step} warnings={warning_reds}",
+        flush=True,
+    )
   if blocking_reds and fail_closed:
     raise AlignmentGateError(
         "pre-backward alignment gate RED: "
@@ -935,6 +975,7 @@ def check_batch(
   policy = gsm8k_ab_report_policy()
   blocking_reds: list[str] = []
   reported_reds: list[str] = []
+  warning_reds: list[str] = []
   if n_action == 0:
     blocking_reds.append("N_action=0")
   canonical_c = None
@@ -978,16 +1019,33 @@ def check_batch(
     if difference["valid"] is not True or not finite:
       blocking_reds.append(name)
     elif difference["differing_bytes"] != 0:
-      if name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
+      if policy["warning_only"]:
+        warning_reds.append(name)
+      elif name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
           difference, max_abs=max_abs, finite=finite, policy=policy
       ):
         reported_reds.append(name)
       else:
         blocking_reds.append(name)
 
-  w = np.exp(to.astype(np.float64) - sd.astype(np.float64))
-  r = np.exp(tc.astype(np.float64) - to.astype(np.float64))
-  wr = w * r
+  with np.errstate(over="ignore", invalid="ignore"):
+    w = np.exp(to.astype(np.float64) - sd.astype(np.float64))
+    r = np.exp(tc.astype(np.float64) - to.astype(np.float64))
+    wr = w * r
+  ratio_finite = bool(
+      np.all(np.isfinite(w[mask]))
+      and np.all(np.isfinite(r[mask]))
+      and np.all(np.isfinite(wr[mask]))
+  )
+  ratio_stats = {}
+  for ratio_name, ratio_values in (("w", w), ("r", r), ("wr", wr)):
+    selected = ratio_values[mask]
+    ratio_stats[ratio_name] = {
+        "min": float(np.min(selected)) if selected.size and ratio_finite else None,
+        "max": float(np.max(selected)) if selected.size and ratio_finite else None,
+    }
+  if not ratio_finite:
+    blocking_reds.append("ratio_nonfinite")
   exact = {
       "w_all_exactly_1": bool(np.all(w[mask] == 1.0)),
       "r_all_exactly_1": bool(np.all(r[mask] == 1.0)),
@@ -997,7 +1055,9 @@ def check_batch(
   for key, ok in exact.items():
     if ok:
       continue
-    if ab_reported and key in ("w_all_exactly_1", "wr_all_exactly_1"):
+    if policy["warning_only"]:
+      warning_reds.append(key)
+    elif ab_reported and key in ("w_all_exactly_1", "wr_all_exactly_1"):
       reported_reds.append(key)
     else:
       blocking_reds.append(key)
@@ -1007,9 +1067,11 @@ def check_batch(
   clip_hits = int(np.sum((wr[mask] < 0.8) | (wr[mask] > 1.28)))
   tis_hits = int(np.sum(w[mask] > 2.0))
   if clip_hits:
-    blocking_reds.append(f"clip_hits={clip_hits}")
+    target = warning_reds if policy["warning_only"] else blocking_reds
+    target.append(f"clip_hits={clip_hits}")
   if tis_hits:
-    blocking_reds.append(f"tis_hits={tis_hits}")
+    target = warning_reds if policy["warning_only"] else blocking_reds
+    target.append(f"tis_hits={tis_hits}")
 
   grad_norm = float(np.asarray(gradient_norm))
   gradient = {
@@ -1036,11 +1098,13 @@ def check_batch(
   verdict = (
       "FAIL"
       if blocking_reds
+      else "PASS_WITH_ALIGNMENT_WARNINGS"
+      if warning_reds
       else "PASS_WITH_REPORTED_DRIFT"
       if reported_reds
       else "PASS"
   )
-  reds = blocking_reds + reported_reds
+  reds = blocking_reds + warning_reds + reported_reds
   record = {
       "timestamp": time.time(),
       "step": int(step),
@@ -1048,11 +1112,14 @@ def check_batch(
       "verdict": verdict,
       "reds": reds,
       "blocking_reds": blocking_reds,
+      "warning_reds": warning_reds,
       "reported_reds": reported_reds,
       "admission_policy": policy,
       "N_action": n_action,
       "boundaries": boundaries,
       "exact": exact,
+      "ratio_finite": ratio_finite,
+      "ratio_stats": ratio_stats,
       "clip_hits": clip_hits,
       "tis_hits": tis_hits,
       "optimizer_skipped": skipped,
@@ -1108,6 +1175,12 @@ def check_batch(
       f"w/r/wr={exact} clip={clip_hits} tis={tis_hits} grad_norm={grad_norm:.6g}",
       flush=True,
   )
+  if warning_reds:
+    print(
+        "[CANON_ALIGN_WARNING] boundary=post_backward "
+        f"step={step} warnings={warning_reds}",
+        flush=True,
+    )
   if blocking_reds and fail_closed:
     raise AlignmentGateError(
         "alignment gate RED mode="

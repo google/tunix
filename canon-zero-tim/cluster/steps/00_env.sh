@@ -462,6 +462,15 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       0|1) ;;
       *) echo "[env] CANON_GSM8K_AB_REPORT_ONLY must be 0 or 1" >&2; fail=1 ;;
     esac
+    case "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" in
+      0|1) ;;
+      *) echo "[env] CANON_GSM8K_ALIGNMENT_WARN_ONLY must be 0 or 1" >&2; fail=1 ;;
+    esac
+    if [ "${CANON_GSM8K_AB_REPORT_ONLY:-0}" = "1" ] && \
+       [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" = "1" ]; then
+      echo "[env] GSM8K bounded and warning-only policies are mutually exclusive" >&2
+      fail=1
+    fi
   case "${CANON_P33_RUN_STAGE:-}" in
     envelope-short)
       [ "${CANON_P33_NO_COMMIT:-}" = "1" ] || {
@@ -490,6 +499,16 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         fail=1
       }
       echo "[env] GSM8K full A/B policy: bounded drift is report-only; zero-TIM claim disabled"
+    fi
+    if [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" = "1" ]; then
+      [ "${CANON_P32_WORKLOAD:-}" = "gsm8k" ] && \
+      [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+      [ "${CANON_P33_NO_COMMIT:-}" = "0" ] && \
+      [ "${CANON_ALIGNMENT_TRAIN:-}" = "1" ] || {
+        echo "[env] alignment warning-only policy is admitted only for committed GSM8K full training" >&2
+        fail=1
+      }
+      echo "[env] GSM8K full alignment policy: finite numerical drift is warning-only; claim=convergence-only"
     fi
     for k in CANON_WANDB_ONLINE_REQUIRED CANON_P31_MONOTONIC_METRICS \
              CANON_WANDB_PROJECT CANON_WANDB_GROUP CANON_WANDB_RUN_NAME \

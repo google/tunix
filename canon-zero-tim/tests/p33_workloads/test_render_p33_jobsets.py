@@ -172,6 +172,10 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertEqual(by_stage[("frozenlake", "full")]["CANON_P33_SHORT_ALIGNMENT"], "0")
       self.assertEqual(
           by_stage[("gsm8k", "full")]["CANON_GSM8K_AB_REPORT_ONLY"],
+          "0",
+      )
+      self.assertEqual(
+          by_stage[("gsm8k", "full")]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
           "1",
       )
       for workload_name, stage in (
@@ -184,8 +188,12 @@ class RenderP33JobSetsTest(unittest.TestCase):
             by_stage[(workload_name, stage)]["CANON_GSM8K_AB_REPORT_ONLY"],
             "0",
         )
+        self.assertEqual(
+            by_stage[(workload_name, stage)]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
+            "0",
+        )
 
-  def test_rejects_report_policy_outside_gsm8k_full(self):
+  def test_rejects_warning_policy_outside_gsm8k_full(self):
     base = renderer.load_base(_BASE_PATH)
     spec = next(
         item for item in renderer._SPECS
@@ -200,7 +208,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
     )
     policy = next(
         item for item in main["env"]
-        if item["name"] == "CANON_GSM8K_AB_REPORT_ONLY"
+        if item["name"] == "CANON_GSM8K_ALIGNMENT_WARN_ONLY"
     )
     policy["value"] = "1"
     with self.assertRaisesRegex(ValueError, "environment drifted"):

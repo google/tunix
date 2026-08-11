@@ -2,11 +2,11 @@
 
 ## Outcome
 
-Preserve the bitwise zero-TIM contract. First make every red A-B observation durable and
-localizable, then reproduce it without backward, run a matched proxy-flag causal pair, and use a
-strict no-commit backward only to measure the remaining T-current boundary. Do not introduce a
-tolerance, recompute old logprobs as a release fix, change precision, or commit optimizer state
-while A-B is red.
+Preserve the bitwise zero-TIM contract as the release objective. In parallel,
+run one explicitly degraded GSM8K convergence campaign under a default-off,
+GSM8K-full-only warning override: alignment failures remain fully observable
+but do not stop that campaign. The result cannot satisfy the zero-TIM
+definition of done. FrozenLake and every root-cause/repair gate remain strict.
 
 ## Phases
 
@@ -21,11 +21,12 @@ while A-B is red.
 | P38.4 | One diagnostic backward with optimizer forcibly skipped | B-C and T-old/T-current stay hard; model and optimizer arrays do not change | pending |
 | P38.5 | Carrier-specific numerical repair | A-B returns to zero under the source-pinned flag-on regime | pending |
 | P38.6 | GSM8K and FrozenLake full campaigns | All step-0 boundaries are zero and the unchanged hard gates automatically admit training | pending |
-| P38.2d | User-approved bounded GSM8K full campaign plus strict FrozenLake capsule capture | Renderer, preflight, runtime gate, classifier, and negative controls enforce the workload-specific policy | ready; target not run |
+| P38.2d | User-approved GSM8K full convergence campaign with all alignment gates warning-only | Explicit GSM8K-full-only flag prevents `AlignmentGateError`, preserves complete warning/W&B evidence, and leaves runtime numerical/transaction safety hard | committed and post-rebase gated; push and target run pending |
 | P38.2e | Schedule-aware GSM8K optimizer transaction | LR-zero and positive-LR commit controls plus target update-0 evidence | ready for independent parallel target run |
 | P38.2f | FrozenLake KV-threshold mismatch capsule | Attempt 0 reproduces the hard pre-backward red, and two bounded rows survive pod deletion and pass transport/array SHA checks | complete; rows 191/199 verified at `036e845a` |
 | P38.2g | FrozenLake single-row causal replay | Stock multi-turn replay reproduces the red before single-turn, MIXED-only KV-unified, and all-distribution KV-unified counterfactuals are interpreted | one-host target row 191 complete: local serving envelope not reproduced; R2/R3 stay gated; move shadow arms to Pathways |
-| P38.2g2 | Source-pinned Pathways serving capture and combined KV arm | Real continue-decode metadata is durable and stock is reproduced before the default-off all-cache-read arm is interpreted | locally gated; target not run |
+| P38.2g2 | Source-pinned Pathways serving capture and combined KV arm | Real continue-decode metadata is durable and stock is reproduced before the default-off all-cache-read arm is interpreted | active; published, local hardening reopened, target not run |
+| P38.2g3 | Exact-state physical-page and padding-boundary discriminator | The complete production action vector is first reproduced exactly, then real, relocated, contiguous, padding-sanitized, and padding-poison arms are compared with temporal page-content equivalence checks | pending; blocked on P38.2g2 stock capture |
 | P38.2h | Candidate target backward-no-commit | The selected candidate first makes all forward boundaries exact, then passes actual-model gradient/DP-reducer gates with zero optimizer commits | pending; forbidden before P38.2g selects a candidate |
 
 ## Decisions
@@ -97,3 +98,40 @@ while A-B is red.
   skips the fused write and forces all-cache reads. A write-only `W` arm is not
   constructible from the public v3 API and must not be claimed. P38.2g2 starts
   with a real continue-decode capture and the combined historical `U` arm.
+- Correction (2026-08-11): the logs establish a real-serving history/envelope
+  dependency, but they do not yet establish a dirty or fragmented page pool as
+  the cause. GSM8K update 0 to update 1 changes weights, sampled tokens,
+  scheduler membership, and cache allocation together. Treat physical page
+  topology and padding-boundary leakage as leading hypotheses, not confirmed
+  facts.
+- Correction (2026-08-11): `global_row % 16 == 15` must not be named
+  `local_slot == 15` without an explicit row/request/DP mapping. The next
+  capture emits `global_row`, `dp_rank`, and `local_slot` independently; modulo
+  arithmetic is not an admitted semantic join.
+- Decision: P38.2g2 stock capture is the next target experiment, but only after
+  local admission hardening. A stock/U comparison from unrelated stochastic
+  trajectories is candidate screening, not a causal proof. P38.2g3 requires an
+  exact request/token-history join and page-content equivalence before
+  interpreting physical page IDs.
+- Decision: the same-source proxy flag-OFF arm remains a separate diagnostic.
+  It reads A-B before the expected downstream B-C regression and cannot restore
+  a release claim by itself.
+- Amendment (2026-08-11): the user explicitly requires a flag under which all
+  alignment failures in committed GSM8K full training are warnings and never
+  stop training. This supersedes the earlier bounded A-B-only policy for the
+  next GSM8K campaign. It does not change FrozenLake, DeepSWE, diagnostic jobs,
+  or the zero-TIM release criteria.
+- Boundary: warning-only covers alignment assertions and their downstream
+  claim-level checks, including A-B, B-C, T-old/T-current, ratio, clip/TIS
+  exactness, and alignment classifier redness. Invalid shapes, nonfinite model
+  inputs/outputs/loss/gradients, reducer or replica failure, optimizer
+  transaction failure, infrastructure failure, and ordinary Python/JAX errors
+  remain fatal because continuing would corrupt or fail training rather than
+  merely relax alignment.
+- Implementation (2026-08-11): `CANON_GSM8K_ALIGNMENT_WARN_ONLY=1` is
+  default-off, mutually exclusive with the legacy bounded policy, and admitted
+  only for committed GSM8K full training. Runtime records use
+  `PASS_WITH_ALIGNMENT_WARNINGS`, `warning_reds`, complete boundary/ratio
+  evidence, and W&B warning/fraction/range metrics. The terminal classifier
+  has `claim_level=convergence-only`. Frozen-image CPU and exact-image gates
+  pass locally; no target run has been made.

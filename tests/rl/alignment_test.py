@@ -481,6 +481,104 @@ class AlignmentTest(absltest.TestCase):
     ):
       alignment.check_pre_backward(wrapped, step=0)
 
+  def test_gsm8k_full_warning_policy_never_blocks_finite_alignment_drift(self):
+    wrapped = self._wrapped()
+    wrapped = wrapped.replace(
+        s_decode=wrapped.s_decode - np.float32(3.0),
+        s_prefill=wrapped.s_prefill + np.float32(0.5),
+        t_old=wrapped.t_old + np.float32(0.25),
+    )
+    t_current = wrapped.t_old - np.float32(0.75)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.GATE_ONLY_ENV: "0",
+            alignment.UPDATE_CANARY_ENV: "0",
+            alignment.TRAIN_ENV: "1",
+            alignment.PRE_GATE_ENV: "1",
+            alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
+            alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "1",
+            "CANON_P32_WORKLOAD": "gsm8k",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+            alignment.REPORT_ENV: os.path.join(tmpdir, "post.jsonl"),
+        },
+        clear=False,
+    ):
+      pre = alignment.check_pre_backward(wrapped, step=0)
+      post = alignment.check_batch(
+          wrapped,
+          t_current=t_current,
+          gradient_norm=np.asarray(1.0, np.float32),
+          optimizer_skipped=np.asarray(0, np.int32),
+          step=0,
+      )
+    self.assertEqual(pre["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEmpty(pre["blocking_reds"])
+    self.assertSameElements(
+        pre["warning_reds"],
+        ("S_decode_vs_S_prefill", "S_prefill_vs_T_old"),
+    )
+    self.assertEqual(post["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEmpty(post["blocking_reds"])
+    self.assertIn("T_old_vs_T_current", post["warning_reds"])
+    self.assertIn("w_all_exactly_1", post["warning_reds"])
+    self.assertIn("r_all_exactly_1", post["warning_reds"])
+    self.assertIn("wr_all_exactly_1", post["warning_reds"])
+    self.assertGreater(post["clip_hits"], 0)
+    self.assertGreater(post["tis_hits"], 0)
+    self.assertTrue(post["ratio_finite"])
+    self.assertEqual(post["admission_policy"]["claim_level"], "convergence-only")
+
+  def test_gsm8k_warning_policy_keeps_scope_and_nonfinite_fail_closed(self):
+    wrapped = self._wrapped()
+    common = {
+        alignment.GATE_ONLY_ENV: "0",
+        alignment.UPDATE_CANARY_ENV: "0",
+        alignment.TRAIN_ENV: "1",
+        alignment.PRE_GATE_ENV: "1",
+        alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
+        alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "1",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+    }
+    with mock.patch.dict(
+        os.environ,
+        {**common, "CANON_P32_WORKLOAD": "frozenlake"},
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "only for committed GSM8K"
+    ):
+      alignment.check_pre_backward(wrapped, step=0)
+
+    nonfinite = wrapped.replace(s_decode=np.full_like(wrapped.s_decode, np.nan))
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            **common,
+            "CANON_P32_WORKLOAD": "gsm8k",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "S_decode_vs_S_prefill"
+    ):
+      alignment.check_pre_backward(nonfinite, step=0)
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            **common,
+            alignment.GSM8K_AB_REPORT_ONLY_ENV: "1",
+            "CANON_P32_WORKLOAD": "gsm8k",
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "mutually exclusive"
+    ):
+      alignment.check_pre_backward(wrapped, step=0)
+
   def test_execution_mode_rejects_multiple_modes(self):
     with mock.patch.dict(
         os.environ,

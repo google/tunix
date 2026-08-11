@@ -228,8 +228,13 @@ class Trainer(peft_trainer.PeftTrainer):
           )
         boundaries = record["boundaries"]
         exact = record["exact"]
+        warning_count = len(record.get("warning_reds", ()))
         scalars = {
-            "zero_tim/hard_gate_pass": 1.0,
+            "zero_tim/hard_gate_pass": float(
+                record["verdict"] == "PASS"
+            ),
+            "zero_tim/alignment_warning": float(warning_count > 0),
+            "zero_tim/alignment_warning_count": float(warning_count),
             "zero_tim/n_action": float(record["N_action"]),
             "zero_tim/s_decode_vs_s_prefill_bytes": float(
                 boundaries["S_decode_vs_S_prefill"]["differing_bytes"]
@@ -254,6 +259,12 @@ class Trainer(peft_trainer.PeftTrainer):
             "zero_tim/wr_exact": float(exact["wr_all_exactly_1"]),
             "zero_tim/clip_hits": float(record["clip_hits"]),
             "zero_tim/tis_hits": float(record["tis_hits"]),
+            "zero_tim/w_min": float(record["ratio_stats"]["w"]["min"]),
+            "zero_tim/w_max": float(record["ratio_stats"]["w"]["max"]),
+            "zero_tim/r_min": float(record["ratio_stats"]["r"]["min"]),
+            "zero_tim/r_max": float(record["ratio_stats"]["r"]["max"]),
+            "zero_tim/wr_min": float(record["ratio_stats"]["wr"]["min"]),
+            "zero_tim/wr_max": float(record["ratio_stats"]["wr"]["max"]),
             "zero_tim/gradient_nonzero": float(record["gradient"]["nonzero"]),
             "zero_tim/first_order_kl": float(
                 record["kl_protocol"]["first_order_-mean_delta"]
@@ -262,6 +273,21 @@ class Trainer(peft_trainer.PeftTrainer):
                 record["kl_protocol"]["second_order_half_mean_delta2"]
             ),
         }
+        for boundary_name, metric_prefix in (
+            ("S_decode_vs_S_prefill", "s_decode_vs_s_prefill"),
+            ("S_prefill_vs_T_old", "s_prefill_vs_t_old"),
+            ("T_old_vs_T_current", "t_old_vs_t_current"),
+        ):
+          boundary = boundaries[boundary_name]
+          scalars[f"zero_tim/{metric_prefix}_elements"] = float(
+              boundary["differing_elements"]
+          )
+          scalars[f"zero_tim/{metric_prefix}_element_fraction"] = float(
+              boundary["element_fraction"]
+          )
+          scalars[f"zero_tim/{metric_prefix}_byte_fraction"] = float(
+              boundary["byte_fraction"]
+          )
         for metric_name, value in scalars.items():
           entry = self._buffered_train_metrics.additional_metrics.get(
               metric_name

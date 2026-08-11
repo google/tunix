@@ -6,17 +6,19 @@
 - Definition of done: One source-pinned flag-on run reports `S_decode_vs_S_prefill=0`,
   `S_prefill_vs_T_old=0`, and `T_old_vs_T_current=0` before a full workload is allowed to commit.
 - Task directory: `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`
-- Directory state: publication state is current through local base `05db7fd8`;
-  the remote branch has advanced independently. The current dirty worktree
-  contains uncommitted P38.2g replay work, the P38.2g2 serving-capture/U
-  implementation, and a separately approved GSM8K retry-policy change. No
-  commit or push occurred in this phase.
-- Current phase: P38.2g2 source-pinned Pathways serving capture is the sole
-  active phase. P38.2e GSM8K full is ready for an independent parallel target
-  run but does not advance the FrozenLake causal ladder. The generated GSM8K
-  full JobSet now has the user-approved operational retry budget of three;
-  checkpointing remains disabled and every retry starts from update 0. All
-  other P33 entries retain zero restarts.
+- Directory state: tracked. The warning-only implementation is committed at
+  local HEAD `81f20e78`, rebased directly on the DeepSWE device-admission
+  commit `bf0c5734`, and is one commit ahead of
+  `origin/yuxzhang/canon-zero-tim`. All post-rebase regression gates pass.
+  Main was not checked out or modified. Publication is the only remaining
+  local action.
+- Current phases: two independent tracks are deliberately active. P38.2d has
+  added and locally gated the user-requested GSM8K-full warning-only alignment
+  override so the time-sensitive convergence campaign cannot be stopped by an
+  alignment gate.
+  P38.2g2 remains the strict zero-TIM root-cause track; its target launch is
+  held for one local admission hardening pass. P38.2g3 is pending on stock
+  P38.2g2 capture.
 - Last verified fact: P38e1 source row 191 completed on real Qwen3-8B DP1xTP4
   with exact weights, deterministic repeats, an effective negative control,
   no backward, and zero optimizer commits. R0 and R1 were exact at every
@@ -42,7 +44,7 @@
   equal at every observed stage, but both were red against REF at every scored
   action at both depths; the shallow difference was larger. This admits the
   measurement path but does not reproduce the production KV-1791 onset. The
-  complete exact-image P33 CPU gate is also green (67 workload tests, 26
+  complete exact-image P33 CPU gate is also green (67 workload tests, 28
   alignment tests, all adjacent suites and negative controls). P38.2g adds 11
   schedule/capsule tests, 5 classifier controls, and one four-device fake-model
   adapter integration test; all pass. Qwen3-1.7B and Qwen3-8B overlay gates
@@ -56,16 +58,18 @@
   numerical change; it was a clean negative in its four-chip/short-context
   domain, not a successful repair that was later dropped. It may be retested
   only as a default-off causal arm in the new domain.
-- Next action: review and explicitly authorize publication of the locally
-  gated P38.2g2 code. The target operator then renders the dedicated stock/U
-  manifests, dry-runs both, and applies stock only. Stock must emit exactly
-  one complete serving record, a verified stdout archive, the known hard A/B
-  red, Attempt 0, and zero commits before U is applied. The pinned v3 API
-  cannot express a clean write-only `W` arm, so do not report one.
-- Blockers: the capsule lacks original serving block tables, page allocation,
-  and per-call request distributions. A mask-derived one-host result cannot by
-  itself promote a production repair. The target schedule-aware update verdict
-  also still requires the external 64-chip operator.
+- Next action: push the rebased and locally gated
+  `CANON_GSM8K_ALIGNMENT_WARN_ONLY=1` implementation under the user's explicit
+  approval, then render a fresh source-pinned GSM8K full JobSet. The flag is scoped to
+  committed GSM8K full; finite alignment mismatch is durable warning/W&B
+  evidence, while structural-invalid and nonfinite data plus loss, gradient,
+  reducer, replica, and optimizer-transaction failures remain hard. The
+  strict P38.2g2 capture hardening continues independently.
+- Blockers: current evidence proves a real-serving history/envelope dependency,
+  not physical-page causality. The existing capture records physical page IDs
+  but not enough page-content equivalence evidence for a fragmented-versus-
+  contiguous verdict. The external 64-chip operator is required after local
+  hardening. The pinned v3 API cannot express a clean write-only `W` arm.
 - Key artifacts: `../../debug_logs/p33_r35_gsm8k_full.raw.log`,
   `../../debug_logs/p33_r35_frozenlake_full.raw.log`, `plan.md`,
   `phases/p38-1-evidence-hardening.md`, `HANDOFF.md`
@@ -78,10 +82,17 @@
   `artifacts/p38_2g_onehost_synthetic_0811.md`,
   `artifacts/p38_2g_onehost_target_row191_0811.md`,
   `artifacts/p38_2g2_local_gate_0811.md`,
-  `phases/p38-2g2-pathways-serving-envelope.md`
-- Updated: 2026-08-11 05:42 UTC
+  `phases/p38-2g2-pathways-serving-envelope.md`,
+  `phases/p38-2g3-page-topology-discriminator.md`
+- Local warning-policy gates after rebasing on `bf0c5734`: frozen-image P33 CPU
+  gate PASS (67 workload tests, 28 alignment tests, adjacent regressions and
+  negative controls), exact-image Qwen3-1.7B/Qwen3-8B overlay gates 10/10 each
+  PASS, and DeepSWE P34 static gate PASS (`suites=10`, including the new
+  bounded device-admission probe).
+- Updated: 2026-08-11 UTC
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
-  `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset and discard
-  the uncommitted P38 work to return to the local base. The loss, precision,
-  prefix cache, production default attention branch, and optimizer schedule
-  are unchanged.
+  `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
+  mechanisms are default-off; loss, precision, prefix cache, stock attention,
+  and optimizer behavior remain unchanged. Leave
+  `CANON_GSM8K_ALIGNMENT_WARN_ONLY=0` to restore the strict GSM8K alignment
+  gate.

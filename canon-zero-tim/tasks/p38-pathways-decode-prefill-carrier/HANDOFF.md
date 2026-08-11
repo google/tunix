@@ -10,13 +10,13 @@ P39 evidence cannot promote P38.
 P38.2 separates two observed flag-on `S_decode_vs_S_prefill` signatures. GSM8K is a tail-aval
 candidate; FrozenLake contains a `0.10390` maximum difference and requires upstream/multi-turn
 localization. The original strict probes are pre-backward diagnostics. The
-later P38.2d amendment separately admits GSM8K full training under a bounded
-A/B reporting policy; FrozenLake remains strict and no-commit. A P38.2d GSM8K
-run is `alignment-degraded`, not a zero-TIM completion claim.
+later P38.2d amendment separately admits GSM8K full training under an all-
+alignment warning-only policy; FrozenLake remains strict and no-commit. A
+P38.2d GSM8K run is `convergence-only`, not a zero-TIM completion claim.
 
 ## Proven locally
 
-- The alignment test suite passes 26/26 in `tunix_frozenlake_image:vllm-tpu0.25.0`.
+- The alignment test suite passes 28/28 in `tunix_frozenlake_image:vllm-tpu0.25.0`.
 - The complete P33 CPU gate passes, including a deliberately failed workload whose pre-alignment
   JSON and SHA survive in stdout.
 - The existing hard gate is unchanged: any nonzero pre-backward boundary still exits nonzero.
@@ -163,24 +163,28 @@ No tolerance, report-only committing mode, old-logprob recomputation, precision 
 optimizer commit is authorized by this handoff.
 
 The paragraph above records the original strict handoff. It is superseded only
-by the user-approved P38.2d amendment in
-`phases/p38-2d-gsm8k-bounded-ab-campaign.md`: committed report-only behavior is
-limited to bounded `S_decode_vs_S_prefill` drift in GSM8K full. It does not
-apply to FrozenLake, B/C, old/current, gradients, DP reduction, or optimizer
-integrity, and it disables a zero-TIM completion claim for that campaign. Old
-logprob recomputation and precision changes remain forbidden.
+by the 2026-08-11 amendment in
+`phases/p38-2d-gsm8k-bounded-ab-campaign.md`: committed GSM8K full may set
+`CANON_GSM8K_ALIGNMENT_WARN_ONLY=1`. All finite numerical alignment mismatch,
+including B/C, old/current, ratio exactness, and clip/TIS observations, remains
+visible but cannot terminate that campaign. The claim ceiling is
+`convergence-only`. FrozenLake, invalid shapes, NaN/Inf, gradients, DP
+reduction, replica equality, optimizer integrity, and runtime failures remain
+hard. Old-logprob recomputation and precision changes remain forbidden.
 
 ## P38.2d operator handoff
 
 After pulling the source commit, render the P33 queue with a fresh run id. The
-renderer must show `CANON_GSM8K_AB_REPORT_ONLY=1` only in `gsm8k-full`; every
-other YAML must show `0`. Apply only the FrozenLake backward-no-commit and
-GSM8K full manifests. Do not apply FrozenLake full.
+renderer must show `CANON_GSM8K_ALIGNMENT_WARN_ONLY=1` only in `gsm8k-full`,
+`CANON_GSM8K_AB_REPORT_ONLY=0`, and both flags `0` in every other YAML. Apply
+only the FrozenLake backward-no-commit and GSM8K full manifests. Do not apply
+FrozenLake full.
 
 The GSM8K classifier may exit successfully as
-`PASS_WITH_AB_REPORT_POLICY`. This means the run completed under a downgraded
-admission policy, not that A=B=C was proven. Archive the raw log and all
-alignment/update JSONL before deleting either JobSet.
+`PASS_WITH_ALIGNMENT_WARNINGS`. This means the requested convergence run
+completed under a warning-only alignment policy, not that A=B=C was proven.
+Archive the raw log and all alignment/update JSONL before deleting either
+JobSet.
 
 The refreshed FrozenLake backward-no-commit manifest must contain
 `CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=2` and a run-isolated
@@ -316,9 +320,10 @@ Keep prefix cache disabled, backward disabled, optimizer commits zero, and the
 precision/fixed-M/fixed-reduction configuration unchanged. Rollback is leaving
 the new capture and counterfactual environment variables unset.
 
-## P38.2g2 local handoff: implementation gated, target not run
+## P38.2g2 local handoff: published, target not run
 
-The current dirty worktree now contains the implementation described above:
+Commit `763b60b1` on `yuxzhang/canon-zero-tim` contains the implementation
+described above. The local worktree was clean when this handoff was reconciled:
 
 - patch 09 captures the actual donated-cache `continue_decode` call, including
   request IDs, full current token histories, physical page IDs, scheduler and
@@ -339,8 +344,41 @@ four renderer controls, four archive-transport controls, and the complete
 P33 CPU suite. A shell postflight also proves exact precheck stop is accepted
 while a red stop is rejected. No Pathways/TPU target result exists.
 
-Do not tell an operator to pull this worktree until the user explicitly
-approves commit and push. After publication, follow the exact commands in
-`phases/p38-2g2-pathways-serving-envelope.md`: render both, dry-run both,
-apply stock only, archive/classify it, and apply U only if stock reproduced the
-known red with complete capture evidence. Never apply the output directory.
+Do not launch it yet. A static post-publication review found four admission
+gaps that must be closed locally first: live-but-unscheduled requests can be
+indexed through `num_scheduled_tokens`; row/DP/slot semantics are not emitted
+explicitly; classifier checks field presence but not full internal mapping
+consistency; and the runtime gate does not hard-require zero U PATHTRACE hits
+for stock plus a positive hit for U. After those focused tests and the full P33
+CPU gate pass, follow the exact stock-first commands in
+`phases/p38-2g2-pathways-serving-envelope.md`. Never apply the output
+directory.
+
+The next pending phase is
+`phases/p38-2g3-page-topology-discriminator.md`. It treats fragmented physical
+pages and padding-boundary leakage as hypotheses, not established facts. The
+first stock record must join the actual A-B mismatch by request/token history.
+Only then may real, relocated, contiguous, or padding-sanitized page-table arms
+be interpreted, and every topology arm must prove logical page-content
+equivalence at each registered write event. E0 must reproduce the entire
+captured action vector, not only known mismatch coordinates. The padding arm
+has a dedicated poison control: the same padding-only sentinel table is run
+with zero and finite poison contents after proving that no valid row references
+the sentinel. If E0 is not exact, stop all counterfactuals and use the bounded
+recapture-state list in the phase document.
+
+## Time-sensitive GSM8K convergence exception
+
+The next GSM8K full campaign is a separate, explicitly degraded track. The
+locally gated implementation uses `CANON_GSM8K_ALIGNMENT_WARN_ONLY=1` exactly
+as registered in `phases/p38-2d-gsm8k-bounded-ab-campaign.md`. With that flag,
+all alignment reds become durable warnings and cannot throw
+`AlignmentGateError`; there is no A-B/B-C/T-current mismatch threshold. The
+run remains fatal on invalid/nonfinite numerics, reducer/replica failure,
+optimizer transaction failure, infrastructure errors, and ordinary runtime
+exceptions.
+
+Only committed GSM8K full may set the flag. Its terminal result is
+`PASS_WITH_ALIGNMENT_WARNINGS`, `claim_level=convergence-only`. It is not
+zero-TIM evidence and does not relax FrozenLake, DeepSWE, or P38.2g2/P38.2g3.
+Commit, push, and target launch remain pending explicit approval.

@@ -303,7 +303,8 @@ def render_jobset(
           "CANON_P33_SHARED_MESH": "16,4",
           "CANON_P33_RUN_STAGE": spec.stage,
           "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
-          "CANON_GSM8K_AB_REPORT_ONLY": (
+          "CANON_GSM8K_AB_REPORT_ONLY": "0",
+          "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
               "1"
               if spec.workload == "gsm8k" and spec.stage == "full"
               else "0"
@@ -413,7 +414,8 @@ def validate_jobset(
       "CANON_P33_SHARED_MESH": "16,4",
       "CANON_P33_RUN_STAGE": spec.stage,
       "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
-      "CANON_GSM8K_AB_REPORT_ONLY": (
+      "CANON_GSM8K_AB_REPORT_ONLY": "0",
+      "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
           "1"
           if spec.workload == "gsm8k" and spec.stage == "full"
           else "0"
