@@ -469,6 +469,17 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         echo "[env] only alignment-short may enable CANON_P33_SHORT_ALIGNMENT" >&2
         fail=1
       fi
+      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] && \
+         [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
+        req CANON_P38_MISMATCH_CAPSULE
+        [ "${CANON_P38_MISMATCH_CAPSULE_MAX_ROWS:-}" = "2" ] || {
+          echo "[env] FrozenLake replay capsule must retain exactly two rows" >&2
+          fail=1
+        }
+      elif [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
+        echo "[env] mismatch capsule is admitted only for FrozenLake backward-no-commit" >&2
+        fail=1
+      fi
     fi
     [ "${CANON_WANDB_ONLINE_REQUIRED:-0}" = "1" ] || {
       echo "[env] admitted P33 training requires online W&B" >&2

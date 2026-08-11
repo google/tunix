@@ -84,6 +84,19 @@ class RenderP33JobSetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P33_SHARED_MESH"], "16,4")
         self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
         self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
+        labels = document["metadata"]["labels"]
+        if (
+            labels["canon.zero-tim/workload"] == "frozenlake"
+            and labels["canon.zero-tim/stage"] == "backward-no-commit"
+        ):
+          self.assertTrue(
+              env["CANON_P38_MISMATCH_CAPSULE"].endswith(
+                  "p38_frozenlake_mismatch_capsule.npz"
+              )
+          )
+        else:
+          self.assertEqual(env["CANON_P38_MISMATCH_CAPSULE"], "")
+        self.assertEqual(env["CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"], "2")
         self.assertEqual(env["CANON_P32_EXPECT_MODEL_MESH_IDS"], "")
         self.assertNotIn("CANON_P32_RC_STAGE", env)
         states.append(env["CANON_STATE"])

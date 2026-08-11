@@ -30,6 +30,9 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
   if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     report_keys+=(CANON_P34_WEIGHT_REPORT)
   fi
+  if [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
+    report_keys+=(CANON_P38_MISMATCH_CAPSULE)
+  fi
   for report_key in "${report_keys[@]}"; do
     report_path="${!report_key:-}"
     if [ -z "$report_path" ]; then
@@ -110,6 +113,12 @@ if [ "$rc" -ne 0 ] && [ -s "${CANON_P34_WEIGHT_REPORT:-}" ]; then
   weight_rows="$(wc -l < "$CANON_P34_WEIGHT_REPORT" | tr -d '[:space:]')"
   echo "[P34.WEIGHT_ARTIFACT] path=$CANON_P34_WEIGHT_REPORT rows=$weight_rows sha256=$weight_sha"
   sed 's/^/[P34.WEIGHT_ARTIFACT_JSON] /' "$CANON_P34_WEIGHT_REPORT"
+fi
+if [ "$rc" -ne 0 ] && [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
+  capsule_sha="$(sha256sum "$CANON_P38_MISMATCH_CAPSULE" | awk '{print $1}')"
+  capsule_bytes="$(wc -c < "$CANON_P38_MISMATCH_CAPSULE" | tr -d '[:space:]')"
+  echo "[CANON_P38_CAPSULE_ARTIFACT] path=$CANON_P38_MISMATCH_CAPSULE bytes=$capsule_bytes sha256=$capsule_sha encoding=base64"
+  base64 "$CANON_P38_MISMATCH_CAPSULE" | sed 's/^/[CANON_P38_CAPSULE_B64] /'
 fi
 # grep -a: progress-bar control characters make grep treat the log as binary and drop every
 # match silently, which reads exactly like "the intervention never fired".

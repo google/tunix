@@ -13,6 +13,7 @@ if grep -Fq "P35 first target admits only one local-M chunk" \
   exit 1
 fi
 python3 -c "import ast,pathlib; files=('tunix/rl/alignment.py','tests/rl/alignment_test.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 python3 -c "import ast,pathlib; files=('canon-zero-tim/tests/p35_envelope/classify_envelope.py','canon-zero-tim/tests/p35_envelope/test_classify_envelope.py','canon-zero-tim/tests/p35_envelope/classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/test_classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/classify_stage_probe.py','canon-zero-tim/tests/p35_envelope/test_classify_stage_probe.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
@@ -59,6 +60,7 @@ python3 -m unittest discover \
 python3 -m unittest discover \
   -s canon-zero-tim/tests/p38_aval \
   -p 'test_*.py'
+python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py
 PYTHONPATH=canon-zero-tim/tests/t1_tpu \
 python3 -m unittest discover \
   -s canon-zero-tim/tests/t1_tpu \

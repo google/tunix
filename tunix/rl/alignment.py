@@ -40,6 +40,8 @@ REPORT_ENV = "CANON_ALIGN_REPORT"
 PRE_GATE_ENV = "CANON_PRE_ALIGN_GATE"
 PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
 PRECHECK_ONLY_ENV = "CANON_P38_PRECHECK_ONLY"
+P38_MISMATCH_CAPSULE_ENV = "CANON_P38_MISMATCH_CAPSULE"
+P38_MISMATCH_CAPSULE_MAX_ROWS_ENV = "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"
 GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
 _GSM8K_AB_POLICY_ID = "gsm8k-full-ab-report-v1"
 _GSM8K_AB_MAX_ABS = 1.0e-4
@@ -612,6 +614,146 @@ def _report_sha256(path: str) -> str:
   return digest.hexdigest()
 
 
+def _p38_capsule_rows(record: dict[str, Any], max_rows: int) -> list[int]:
+  """Returns the first unique sequence rows represented by red boundaries."""
+  rows = []
+  for boundary in record.get("boundaries", {}).values():
+    for mismatch in boundary.get("mismatches", []):
+      row = mismatch.get("sequence_row")
+      if isinstance(row, int) and row not in rows:
+        rows.append(row)
+        if len(rows) == max_rows:
+          return rows
+  return rows
+
+
+def _persist_p38_mismatch_capsule(
+    sidecar: ObservedTrainExample,
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+  """Persists a bounded, replayable pre-backward mismatch capsule."""
+  path = os.environ.get(P38_MISMATCH_CAPSULE_ENV, "")
+  if not path or not record.get("blocking_reds"):
+    return None
+  if not path.endswith(".npz"):
+    raise AlignmentGateError(
+        f"{P38_MISMATCH_CAPSULE_ENV} must end in .npz"
+    )
+  try:
+    max_rows = int(
+        os.environ.get(P38_MISMATCH_CAPSULE_MAX_ROWS_ENV, "2")
+    )
+  except ValueError as exc:
+    raise AlignmentGateError(
+        f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be an integer"
+    ) from exc
+  if max_rows < 1 or max_rows > 8:
+    raise AlignmentGateError(
+        f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be in [1, 8]"
+    )
+  rows = _p38_capsule_rows(record, max_rows)
+  if not rows:
+    raise AlignmentGateError(
+        "P38 mismatch capsule requested but no red sequence rows were localized"
+    )
+  prompt_ids = getattr(sidecar.train_example, "prompt_ids", None)
+  if prompt_ids is None:
+    raise AlignmentGateError(
+        "P38 mismatch capsule requires train_example.prompt_ids"
+    )
+  row_arrays = {
+      "prompt_ids": np.asarray(prompt_ids),
+      "prompt_mask": np.asarray(sidecar.prompt_mask, dtype=np.bool_),
+      "completion_ids": np.asarray(sidecar.tokens),
+      "completion_valid_mask": np.asarray(
+          sidecar.completion_valid_mask, dtype=np.bool_
+      ),
+      "action_mask": np.asarray(sidecar.action_mask, dtype=np.bool_),
+      "s_decode": np.asarray(sidecar.s_decode),
+      "s_prefill": np.asarray(sidecar.s_prefill),
+      "t_old": np.asarray(sidecar.t_old),
+      "policy_version": np.asarray(sidecar.policy_version),
+      "sampling_values": np.asarray(sidecar.sampling_values),
+  }
+  batch_rows = np.asarray(sidecar.tokens).shape[0]
+  invalid = {
+      name: value.shape
+      for name, value in row_arrays.items()
+      if value.ndim == 0 or value.shape[0] != batch_rows
+  }
+  if invalid:
+    raise AlignmentGateError(
+        f"P38 mismatch capsule contains non-batch-aligned arrays: {invalid}"
+    )
+  selected = np.asarray(rows, dtype=np.int32)
+  captured = {
+      name: np.ascontiguousarray(value[selected])
+      for name, value in row_arrays.items()
+  }
+  record_json = json.dumps(
+      record, sort_keys=True, separators=(",", ":"), allow_nan=False
+  )
+  metadata = {
+      "schema": "p38-frozenlake-mismatch-capsule-v1",
+      "step": int(record["step"]),
+      "selected_rows": rows,
+      "source": sidecar.source_name,
+      "record_sha256": hashlib.sha256(record_json.encode()).hexdigest(),
+      "boundaries": {
+          name: {
+              "differing_bytes": value.get("differing_bytes"),
+              "differing_elements": value.get("differing_elements"),
+              "max_abs": value.get("max_abs"),
+          }
+          for name, value in record.get("boundaries", {}).items()
+      },
+      "arrays": {
+          name: {
+              "shape": list(value.shape),
+              "dtype": str(value.dtype),
+              "sha256": _hash(value),
+          }
+          for name, value in captured.items()
+      },
+  }
+  metadata_json = json.dumps(
+      metadata, sort_keys=True, separators=(",", ":"), allow_nan=False
+  )
+  os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+  if os.path.exists(path):
+    raise AlignmentGateError(
+        f"P38 mismatch capsule path already exists: {path}"
+    )
+  temporary = f"{path}.tmp"
+  try:
+    with open(temporary, "xb") as capsule_file:
+      np.savez_compressed(
+          capsule_file,
+          selected_rows=selected,
+          metadata_json=np.frombuffer(metadata_json.encode(), dtype=np.uint8),
+          **captured,
+      )
+      capsule_file.flush()
+      os.fsync(capsule_file.fileno())
+    os.replace(temporary, path)
+  finally:
+    if os.path.exists(temporary):
+      os.unlink(temporary)
+  result = {
+      "path": path,
+      "sha256": _report_sha256(path),
+      "selected_rows": rows,
+      "logical_bytes": sum(value.nbytes for value in captured.values()),
+  }
+  print(
+      "[CANON_P38_CAPSULE] "
+      f"path={path} sha256={result['sha256']} rows={rows} "
+      f"logical_bytes={result['logical_bytes']}",
+      flush=True,
+  )
+  return result
+
+
 def _masked_bytes_differ(a: Any, b: Any, mask: Any) -> tuple[int, dict | None]:
   """Compatibility wrapper for callers that only consume the legacy fields."""
   result = _masked_bitwise_difference(a, b, mask)
@@ -733,6 +875,9 @@ def check_pre_backward(
       PRE_REPORT_ENV,
       "/mnt/disks/tunix-data/frozenlake/logs/pre_alignment_report.jsonl",
   )
+  capsule = _persist_p38_mismatch_capsule(sidecar, record)
+  if capsule is not None:
+    record["mismatch_capsule"] = capsule
   os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
   with open(report_path, "a", encoding="utf-8") as report_file:
     report_file.write(json.dumps(record, sort_keys=True) + "\n")

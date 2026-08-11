@@ -313,6 +313,13 @@ def render_jobset(
           "CANON_PRE_ALIGN_REPORT": f"{state}/pre_alignment.jsonl",
           "CANON_ALIGN_REPORT": f"{state}/alignment.jsonl",
           "CANON_UPDATE_REPORT": f"{state}/updates.jsonl",
+          "CANON_P38_MISMATCH_CAPSULE": (
+              f"{state}/p38_frozenlake_mismatch_capsule.npz"
+              if spec.workload == "frozenlake"
+              and spec.stage == "backward-no-commit"
+              else ""
+          ),
+          "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "2",
           "CANON_WANDB_RUN_NAME": name,
           "MIN_TOKEN_BUCKET": "4096",
           "CANON_WAYCOUNT_WIDTHS": "2,4,8",
@@ -368,6 +375,7 @@ def validate_jobset(
 ) -> None:
   """Rejects a generated manifest whose launch or isolation contract drifted."""
   name = _job_name(spec, source_commit, run_id)
+  state = f"/tmp/canon-state/{name}"
   if document.get("apiVersion") != "jobset.x-k8s.io/v1alpha2":
     raise ValueError("P33 manifests require the reviewed JobSet API version")
   if document.get("metadata", {}).get("name") != name:
@@ -404,6 +412,13 @@ def validate_jobset(
       "CANON_RUN_CMD": shlex.join(spec.command),
       "CANON_WANDB_RUN_NAME": name,
       "MIN_TOKEN_BUCKET": "4096",
+      "CANON_P38_MISMATCH_CAPSULE": (
+          f"{state}/p38_frozenlake_mismatch_capsule.npz"
+          if spec.workload == "frozenlake"
+          and spec.stage == "backward-no-commit"
+          else ""
+      ),
+      "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "2",
   }
   wrong = {
       key: env.get(key)
@@ -420,6 +435,8 @@ def validate_jobset(
     raise ValueError("autoscaled P33 JobSet must discover its train mesh ids")
   if spec.workload == "frozenlake" and env.get("CANON_P33_DISABLE_EVAL") != "1":
     raise ValueError("FrozenLake P33 JobSet must disable periodic evaluation")
+  if env.get("CANON_P38_MISMATCH_CAPSULE_MAX_ROWS") != "2":
+    raise ValueError("P38 mismatch capsule must retain its two-row bound")
   main = _container(_head_pod(document)["containers"], "jax-tpu")
   secret_refs = {
       entry["name"]: entry.get("valueFrom", {}).get("secretKeyRef", {})

@@ -37,6 +37,7 @@ class _Example:
   completion_mask: object
   advantages: object
   is_update_step: object
+  prompt_ids: object | None = None
 
 
 def _real_rescore():
@@ -85,6 +86,7 @@ class AlignmentTest(absltest.TestCase):
         completion_mask=jnp.asarray(mask),
         advantages=jnp.ones((rows,), dtype=jnp.float32),
         is_update_step=None,
+        prompt_ids=jnp.arange(rows * 2, dtype=jnp.int32).reshape(rows, 2),
     )
     return alignment.wrap_train_example(
         example,
@@ -576,6 +578,7 @@ class AlignmentTest(absltest.TestCase):
         completion_mask=jnp.asarray(action_mask),
         advantages=jnp.ones((1,), dtype=jnp.float32),
         is_update_step=None,
+        prompt_ids=jnp.arange(255, dtype=jnp.int32).reshape(1, 255),
     )
     wrapped = alignment.wrap_train_example(
         example,
@@ -703,6 +706,63 @@ class AlignmentTest(absltest.TestCase):
         result["masked_hashes"]["S_decode"],
         result["masked_hashes"]["S_prefill"],
     )
+
+  def test_p38_mismatch_capsule_persists_bounded_replay_inputs(self):
+    wrapped = self._wrapped(rows=3)
+    drift = wrapped.s_prefill.copy()
+    drift[2, 1] = drift[2, 1] + np.float32(0.125)
+    drift[1, 0] = drift[1, 0] + np.float32(0.25)
+    wrapped = wrapped.replace(s_prefill=drift)
+    stdout = io.StringIO()
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+            alignment.P38_MISMATCH_CAPSULE_ENV: os.path.join(
+                tmpdir, "capsule.npz"
+            ),
+            alignment.P38_MISMATCH_CAPSULE_MAX_ROWS_ENV: "1",
+        },
+        clear=False,
+    ), contextlib.redirect_stdout(stdout):
+      result = alignment.check_pre_backward(
+          wrapped, step=4, fail_closed=False
+      )
+
+      capsule_path = os.path.join(tmpdir, "capsule.npz")
+      with np.load(capsule_path, allow_pickle=False) as capsule:
+        self.assertEqual(capsule["selected_rows"].tolist(), [1])
+        self.assertEqual(capsule["prompt_ids"].shape, (1, 2))
+        self.assertEqual(capsule["completion_ids"].shape, (1, 3))
+        self.assertEqual(capsule["s_decode"].shape, (1, 3))
+        metadata = json.loads(capsule["metadata_json"].tobytes())
+      self.assertEqual(metadata["schema"], "p38-frozenlake-mismatch-capsule-v1")
+      self.assertEqual(metadata["selected_rows"], [1])
+      self.assertEqual(result["mismatch_capsule"]["selected_rows"], [1])
+      self.assertIn("[CANON_P38_CAPSULE]", stdout.getvalue())
+
+  def test_p38_mismatch_capsule_rejects_collision(self):
+    wrapped = self._wrapped(rows=1)
+    drift = wrapped.s_prefill.copy()
+    drift[0, 0] = drift[0, 0] + np.float32(0.125)
+    wrapped = wrapped.replace(s_prefill=drift)
+    with tempfile.TemporaryDirectory() as tmpdir:
+      capsule_path = os.path.join(tmpdir, "capsule.npz")
+      with open(capsule_path, "wb") as capsule_file:
+        capsule_file.write(b"occupied")
+      with mock.patch.dict(
+          os.environ,
+          {
+              alignment.PRE_GATE_ENV: "1",
+              alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+              alignment.P38_MISMATCH_CAPSULE_ENV: capsule_path,
+          },
+          clear=False,
+      ), self.assertRaisesRegex(
+          alignment.AlignmentGateError, "already exists"
+      ):
+        alignment.check_pre_backward(wrapped, step=0, fail_closed=False)
 
 
 if __name__ == "__main__":
