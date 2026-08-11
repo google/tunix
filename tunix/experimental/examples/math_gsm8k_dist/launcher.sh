@@ -397,6 +397,8 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     --model_dir="$MODEL_DIR"
     --tokenizer_path="$TOKENIZER_PATH"
     --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --max_prompt_length="$MAX_PROMPT_LENGTH"
+    --max_response_length="$MAX_RESPONSE_LENGTH"
   )
   print_command "Inference command" PYTHONUNBUFFERED=1 "${INFERENCE_CMD[@]}"
   PYTHONUNBUFFERED=1 "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1 &

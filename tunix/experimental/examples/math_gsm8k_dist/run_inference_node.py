@@ -61,6 +61,9 @@ def _parse_args() -> argparse.Namespace:
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
+  parser.add_argument("--max_prompt_length", type=int, default=512)
+  parser.add_argument("--max_response_length", type=int, default=128)
+  parser.add_argument("--temperature", type=float, default=1.0)
   return parser.parse_args()
 
 
@@ -264,6 +267,9 @@ def main() -> None:
       pad_id=pad_id,
       eos_id=eos_id,
       chunk_size=args.compute_logps_micro_batch_size,
+      max_prompt_length=args.max_prompt_length,
+      max_response_length=args.max_response_length,
+      temperature=args.temperature,
   )
   server = remote_execution.GrpcRemoteExecutionServer(worker_service)
   logging.info("Serving reference inference worker on port %d.", args.port)
