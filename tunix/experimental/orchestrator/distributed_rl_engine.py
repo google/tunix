@@ -32,20 +32,6 @@ from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
 
-_GENERATION_KWARGS = frozenset({
-    "max_generation_steps",
-    "temperature",
-    "top_p",
-    "top_k",
-    "seed",
-    "return_logprobs",
-})
-
-
-def _split_generation_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
-  return {k: v for k, v in kwargs.items() if k in _GENERATION_KWARGS}
-
-
 # TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   """Converts a worker rollout response to an TrajectoryItem."""
@@ -219,13 +205,26 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return completed
 
   async def generate(
-      self, prompts: Sequence[Any], **kwargs: Any
+      self,
+      prompts: Sequence[Any],
+      generation_args: datatypes.GenerationArgs | None = None,
+      metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Blocking rollout generation: load-balances prompts across workers and awaits completion."""
     if not self._rollout_workers:
       raise ValueError("DistributedRLEngine has no registered rollout workers.")
+    if kwargs:
+      raise TypeError(
+          "Unexpected generate kwargs: "
+          f"{sorted(kwargs)}. Use generation_args=GenerationArgs(...) for "
+          "sampling parameters."
+      )
 
-    generation_kwargs = _split_generation_kwargs(kwargs)
+    generation_kwargs = (
+        generation_args.as_kwargs() if generation_args is not None else {}
+    )
+    route_metadata = dict(metadata or {})
     worker_to_prompts: dict[Any, list[Any]] = collections.defaultdict(list)
     worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
         collections.defaultdict(list)
@@ -240,8 +239,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         worker_to_requests[worker].append(p)
         continue
 
-      metadata = dict(kwargs.get("metadata", {}))
-      route_key = metadata.get("prefix_hash") or metadata.get("prompt_id")
+      route_key = route_metadata.get("prefix_hash") or route_metadata.get(
+          "prompt_id"
+      )
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
       )
@@ -259,7 +259,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if w_prompts:
         tasks.append(
             self._invoke_worker(
-                worker, "generate", prompts=w_prompts, **kwargs
+                worker, "generate", prompts=w_prompts, **generation_kwargs
             )
         )
 

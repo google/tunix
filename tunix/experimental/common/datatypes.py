@@ -207,6 +207,25 @@ class WorkerInfo:
 ##### Rollout DTOs #####
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class GenerationArgs:
+  """Typed generation arguments used by the orchestrator generate API."""
+
+  max_generation_steps: int | None = None
+  temperature: float | None = None
+  top_p: float | None = None
+  top_k: int | None = None
+  seed: int | None = None
+  return_logprobs: bool | None = None
+
+  def as_kwargs(self) -> dict[str, Any]:
+    return {
+        field.name: getattr(self, field.name)
+        for field in dataclasses.fields(self)
+        if getattr(self, field.name) is not None
+    }
+
+
 @dataclasses.dataclass(kw_only=True)
 class RolloutRequest(Request):
   """Request to generate a rollout from a given prompt.

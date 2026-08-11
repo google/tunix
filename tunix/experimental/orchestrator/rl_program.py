@@ -15,7 +15,7 @@
 """Synchronous RL Program (rl_program.py) coordinating Engine, Algo, and Assembler."""
 
 import asyncio
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import dataclasses
 import inspect
 from typing import Any, Protocol
@@ -119,6 +119,8 @@ class SyncRLProgram:
       self,
       prompts: Sequence[datatypes.RolloutRequest],
       engine: rl_engine_interface.AbstractRLEngine | None = None,
+      generation_args: datatypes.GenerationArgs | None = None,
+      metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> Any:
     """Executes a single end-to-end RL training step."""
@@ -128,7 +130,14 @@ class SyncRLProgram:
       self.on_step_begin(current_step)
 
     # 1. Generate rollouts
-    rollouts = _sync_or_async(active_engine.generate(prompts=prompts, **kwargs))
+    generate_kwargs = dict(kwargs)
+    if generation_args is not None:
+      generate_kwargs["generation_args"] = generation_args
+    if metadata is not None:
+      generate_kwargs["metadata"] = metadata
+    rollouts = _sync_or_async(
+        active_engine.generate(prompts=prompts, **generate_kwargs)
+    )
 
     # 2. Evaluate rewards
     rewards = []
@@ -201,11 +210,20 @@ class SyncRLProgram:
       self,
       prompts: Sequence[datatypes.RolloutRequest],
       engine: rl_engine_interface.AbstractRLEngine | None = None,
+      generation_args: datatypes.GenerationArgs | None = None,
+      metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[datatypes.RLTrainerPayload]:
     """Executes evaluation step without updating weights."""
     active_engine = self._resolve_engine(engine)
-    rollouts = _sync_or_async(active_engine.generate(prompts=prompts, **kwargs))
+    generate_kwargs = dict(kwargs)
+    if generation_args is not None:
+      generate_kwargs["generation_args"] = generation_args
+    if metadata is not None:
+      generate_kwargs["metadata"] = metadata
+    rollouts = _sync_or_async(
+        active_engine.generate(prompts=prompts, **generate_kwargs)
+    )
     rewards = [
         (
             sum(fn(item) for fn in self.reward_fns)

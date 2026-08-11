@@ -24,7 +24,6 @@ custom objects with token arrays). Supports:
 
 from typing import Any, Generic, Protocol, Sequence, TypeVar
 import numpy as np
-from jax import numpy as jnp
 from tunix.experimental.common import datatypes
 from tunix.rl import common as rl_common
 
@@ -370,13 +369,13 @@ class GRPOTrainExampleAssembler:
         old_logps.append(np.zeros(self.max_response_length, dtype=np.float32))
 
     return rl_common.TrainExample(
-        prompt_ids=jnp.stack(prompt_ids),
-        prompt_mask=jnp.stack(prompt_mask),
-        completion_ids=jnp.stack(completion_ids),
-        completion_mask=jnp.stack(completion_mask),
-        advantages=jnp.stack(advantages),
-        ref_per_token_logps=jnp.stack(ref_logps) if has_ref_logps else None,
-        old_per_token_logps=jnp.stack(old_logps) if has_old_logps else None,
+        prompt_ids=np.stack(prompt_ids),
+        prompt_mask=np.stack(prompt_mask),
+        completion_ids=np.stack(completion_ids),
+        completion_mask=np.stack(completion_mask),
+        advantages=np.stack(advantages),
+        ref_per_token_logps=np.stack(ref_logps) if has_ref_logps else None,
+        old_per_token_logps=np.stack(old_logps) if has_old_logps else None,
     )
 
 
