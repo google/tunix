@@ -6,6 +6,7 @@ from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 
 class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
+  """Contract tests for InMemoryTrajectoryStore's TrajectoryReader implementation."""
 
   def _create_reader(
       self,
@@ -23,10 +24,12 @@ class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
       for meta, steps in initial_data:
         for step in steps:
           mem_store.add_step(step, meta)
+      mem_store.flush()
     return mem_store
 
 
 class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
+  """Contract tests for InMemoryTrajectoryStore's TrajectoryWriter implementation."""
 
   def _create_reader_and_writer(
       self,

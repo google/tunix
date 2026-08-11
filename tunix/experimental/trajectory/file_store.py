@@ -1,5 +1,6 @@
 """File-based implementation for Trajectory Store."""
 
+import collections
 import functools
 import re
 from typing import Final
@@ -58,6 +59,13 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     """
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
+    # Tracks the hash of the last written metadata per trajectory ID. The
+    # trajectory directory is created and metadata.json is written on the first
+    # step of a trajectory; subsequent calls rewrite metadata.json only when
+    # metadata content changes.
+    self._metadata_hash_by_trajectory_id: dict[str, int] = (
+        collections.defaultdict(int)
+    )
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:
@@ -174,10 +182,17 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       )
 
     traj_dir = self.get_trajectory_dir(traj_id)
-    traj_dir.mkdir(parents=True, exist_ok=True)
+    # Ensure the trajectory directory already exists.
+    if traj_id not in self._metadata_hash_by_trajectory_id:
+      traj_dir.mkdir(parents=True, exist_ok=True)
 
-    meta_path = self.get_trajectory_metadata_path(traj_id)
-    meta_path.write_text(_dump_json(metadata))
+    meta_json = _dump_json(metadata)
+    meta_hash = hash(meta_json)
+    # Only write metadata.json if metadata content has changed.
+    if meta_hash != self._metadata_hash_by_trajectory_id[traj_id]:
+      meta_path = self.get_trajectory_metadata_path(traj_id)
+      meta_path.write_text(meta_json)
+      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
 
     step_path = self.get_step_path(traj_id, step.step_id)
     step_path.write_text(_dump_json(step))

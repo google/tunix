@@ -51,9 +51,27 @@ STEP_2_2: Final[trajectory_lib.Step] = trajectory_lib.Step(
     message="Second step in traj 2",
     timestamp=TEST_TIMESTAMP,
 )
+STEP_2_3: Final[trajectory_lib.Step] = trajectory_lib.Step(
+    step_id=3,
+    source=trajectory_lib.Source.USER,
+    message="Third step in traj 2",
+    timestamp=TEST_TIMESTAMP,
+)
+STEP_2_4: Final[trajectory_lib.Step] = trajectory_lib.Step(
+    step_id=4,
+    source=trajectory_lib.Source.AGENT,
+    message="Fourth step in traj 2",
+    timestamp=TEST_TIMESTAMP,
+)
+STEP_2_5: Final[trajectory_lib.Step] = trajectory_lib.Step(
+    step_id=5,
+    source=trajectory_lib.Source.AGENT,
+    message="Fifth step in traj 2",
+    timestamp=TEST_TIMESTAMP,
+)
 TRAJECTORY_2: Final[trajectory_lib.Trajectory] = trajectory_lib.Trajectory(
     **METADATA_2.model_dump(),
-    steps=[STEP_2_1, STEP_2_2],
+    steps=[STEP_2_1, STEP_2_2, STEP_2_3, STEP_2_4, STEP_2_5],
 )
 
 
@@ -89,7 +107,10 @@ class TrajectoryReaderTestCase(
     self.reader = self._create_reader(
         initial_data=[
             (METADATA_1, [STEP_1_1]),
-            (METADATA_2, [STEP_2_1, STEP_2_2]),
+            (
+                METADATA_2,
+                [STEP_2_1, STEP_2_2, STEP_2_3, STEP_2_4, STEP_2_5],
+            ),
         ],
     )
 
@@ -98,10 +119,28 @@ class TrajectoryReaderTestCase(
     metas = self.reader.get_trajectories_metadata()
     self.assertCountEqual(metas, [METADATA_1, METADATA_2])
 
-  def test_get_trajectories(self) -> None:
+  def test_get_trajectories_metadata_empty(self) -> None:
+    """Tests that metadata retrieval on an empty store returns an empty list."""
+    empty_reader = self._create_reader(initial_data=None)
+    self.assertEmpty(empty_reader.get_trajectories_metadata())
+
+  @parameterized.named_parameters(
+      ("empty_list", [], []),
+      ("single_trajectory", [TRAJECTORY_ID_1], [TRAJECTORY_1]),
+      (
+          "multiple_trajectories",
+          [TRAJECTORY_ID_1, TRAJECTORY_ID_2],
+          [TRAJECTORY_1, TRAJECTORY_2],
+      ),
+  )
+  def test_get_trajectories(
+      self,
+      trajectory_ids: list[str],
+      expected_trajs: list[trajectory_lib.Trajectory],
+  ) -> None:
     """Tests that full trajectories are retrieved by their IDs."""
-    trajs = self.reader.get_trajectories([TRAJECTORY_ID_1, TRAJECTORY_ID_2])
-    self.assertCountEqual(trajs, [TRAJECTORY_1, TRAJECTORY_2])
+    trajs = self.reader.get_trajectories(trajectory_ids)
+    self.assertCountEqual(trajs, expected_trajs)
 
   def test_get_trajectories_not_found(self) -> None:
     """Tests that loading a non-existent trajectory ID raises TrajectoryNotFoundError."""
@@ -143,6 +182,9 @@ class TrajectoryWriterTestCase(
     """Tests that sequential steps are correctly appended to a trajectory."""
     self.writer.add_step(STEP_2_1, METADATA_2)
     self.writer.add_step(STEP_2_2, METADATA_2)
+    self.writer.add_step(STEP_2_3, METADATA_2)
+    self.writer.add_step(STEP_2_4, METADATA_2)
+    self.writer.add_step(STEP_2_5, METADATA_2)
     self.writer.flush()
 
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_2])
@@ -177,7 +219,27 @@ class TrajectoryWriterTestCase(
     self.assertEqual(traj_2, expected_traj_2_partial)
 
     self.writer.add_step(STEP_2_2, METADATA_2)
+    self.writer.add_step(STEP_2_3, METADATA_2)
+    self.writer.add_step(STEP_2_4, METADATA_2)
+    self.writer.add_step(STEP_2_5, METADATA_2)
     self.writer.flush()
 
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_1, TRAJECTORY_ID_2])
     self.assertCountEqual(trajs, [TRAJECTORY_1, TRAJECTORY_2])
+
+  def test_flush_empty(self) -> None:
+    """Tests that calling flush on an empty store does not raise an error."""
+    self.writer.flush()
+    self.assertEmpty(self.reader.get_trajectories_metadata())
+
+  def test_flush_idempotent(self) -> None:
+    """Tests that multiple consecutive calls to flush are safe and idempotent."""
+    self.writer.add_step(STEP_1_1, METADATA_1)
+    self.writer.flush()
+    self.writer.flush()
+
+    metas = self.reader.get_trajectories_metadata()
+    self.assertEqual(metas, [METADATA_1])
+
+    trajs = self.reader.get_trajectories([TRAJECTORY_ID_1])
+    self.assertEqual(trajs, [TRAJECTORY_1])
