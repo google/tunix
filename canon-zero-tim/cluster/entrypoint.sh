@@ -89,6 +89,7 @@ if [ "$MODE" = "probe-only" ]; then
 fi
 
 step 30_install_canon.sh
+step 35_install_r2egym.sh
 step 40_overlay_engine.sh
 step 50_verify_overlay.sh
 

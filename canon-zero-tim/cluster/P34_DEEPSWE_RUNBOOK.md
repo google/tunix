@@ -62,13 +62,18 @@ unless the entire backward-no-commit contract completes.
 
 ## Fail-closed facts
 
-- `r2egym` is optional for offline gold-whitelist replay and absent from the
-  backward-no-commit container (p39d4 died at import time before this was a
-  contract). `swe_agent` imports without it and its interactive action parser
-  fails closed at use; `apply_repoenv_kubernetes_poll_patch` logs a skip and
-  returns an empty path. Interactive stages still require the r2egym checkout
-  synced at `<workdir>/r2egym` (mapped onto `sys.path` by `train_deepswe_nb`)
-  or the package installed in the image.
+- R2E-Gym is provisioned by `cluster/steps/35_install_r2egym.sh`: a pinned
+  checkout (`CANON_R2EGYM_COMMIT`) with the vendored
+  `patches/r2egym/r2egym.patch` applied, pip-installed in the pod together
+  with `kubernetes`. The DeepSWE profile enables it; GSM8K/FrozenLake
+  profiles skip the step entirely. Any drift -- wrong commit, missing patch,
+  surviving source pins -- fails closed. The reference MLPerf launch cloned
+  the floating upstream HEAD at runtime; the pin replaces that.
+- Independently of provisioning, `swe_agent` imports without r2egym (parser
+  fails closed at use with the exact remedy) and
+  `apply_repoenv_kubernetes_poll_patch` logs a skip and returns an empty
+  path. This is defense in depth for non-DeepSWE contexts, not the supply
+  route.
 - JobSet restart count, head backoff, worker backoff, and pod restart are all zero.
 - The Pathways 4x8x8 slice is divided by physical coordinates into two host-complete 2x8x8 roles.
 - Each role is logical DP16xTP8; parameters are replicated over DP and sharded only over TP.
