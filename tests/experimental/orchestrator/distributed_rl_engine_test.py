@@ -90,6 +90,32 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_generate_routes_rollout_requests(self):
+    async def _run():
+      request = datatypes.RolloutRequest(
+          request_id="r1",
+          prompt="p1",
+          prompt_id="prompt_1",
+          generation_kwargs={"max_generation_steps": 8},
+      )
+      resp = datatypes.RolloutResponse(
+          request_id="r1",
+          prompt_id="prompt_1",
+          status="COMPLETED",
+          env_reward=1.0,
+      )
+      self.mock_rollout_1.generate.return_value = [resp]
+
+      results = await self.engine.generate([request])
+
+      self.assertLen(results, 1)
+      self.mock_rollout_1.generate.assert_called_once()
+      self.assertEqual(
+          self.mock_rollout_1.generate.call_args.kwargs["requests"], [request]
+      )
+
+    asyncio.run(_run())
+
   def test_poll_rollouts_aggregates_worker_responses(self):
     async def _run():
       resp1 = datatypes.RolloutResponse(

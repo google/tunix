@@ -336,7 +336,9 @@ class RolloutWorker(abstract_worker.Worker):
   ) -> list[datatypes.RolloutResponse]:
     """Runs RolloutRequest batches through the direct string sampler."""
     prompts = [str(req.prompt) for req in requests]
-    output = await self.sample_prompts(prompts, **generation_kwargs)
+    sample_kwargs = dict(requests[0].generation_kwargs) if requests else {}
+    sample_kwargs.update(generation_kwargs)
+    output = await self.sample_prompts(prompts, **sample_kwargs)
     return [
         self._sampling_to_rollout_response(
             request=req,
@@ -366,18 +368,18 @@ class RolloutWorker(abstract_worker.Worker):
         and all(isinstance(req, str) for req in requests)
     ):
       return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
-    # if isinstance(requests, datatypes.RolloutRequest):
-    #   return (
-    #       await self._generate_rollout_requests_direct(
-    #           [requests], **generation_kwargs
-    #       )
-    #   )[0]
-    # if isinstance(requests, (list, tuple)) and all(
-    #     isinstance(req, datatypes.RolloutRequest) for req in requests
-    # ):
-    #   return await self._generate_rollout_requests_direct(
-    #       list(requests), **generation_kwargs
-    #   )
+    if isinstance(requests, datatypes.RolloutRequest):
+      return (
+          await self._generate_rollout_requests_direct(
+              [requests], **generation_kwargs
+          )
+      )[0]
+    if isinstance(requests, (list, tuple)) and all(
+        isinstance(req, datatypes.RolloutRequest) for req in requests
+    ):
+      return await self._generate_rollout_requests_direct(
+          list(requests), **generation_kwargs
+      )
 
     cb = None
     if on_complete is not None:

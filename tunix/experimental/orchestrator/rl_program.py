@@ -32,7 +32,7 @@ class RLProgram(Protocol):
   """Standard contract for RL training programs running on ClusterOrchestrator."""
   def run(
       self,
-      engine: rl_engine_interface.AbstractRLEngine,
+      engine: rl_engine_interface.AbstractRLEngine | None = None,
       train_dataset: Iterable[Any] | None = None,
       num_steps: int | None = None,
       **kwargs: Any,
@@ -81,8 +81,8 @@ class SyncRLProgram:
 
   def __init__(
       self,
-      engine: rl_engine_interface.AbstractRLEngine,
       algo: algorithm_adapter.AlgorithmAdapter,
+      engine: rl_engine_interface.AbstractRLEngine | None = None,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       on_step_begin: Callable[[int], None] | None = None,
@@ -105,18 +105,31 @@ class SyncRLProgram:
   def step(self) -> int:
     return self.policy_version
 
+  def _resolve_engine(
+      self, engine: rl_engine_interface.AbstractRLEngine | None = None
+  ) -> rl_engine_interface.AbstractRLEngine:
+    active_engine = engine or self.engine
+    if active_engine is None:
+      raise ValueError(
+          "SyncRLProgram requires an engine either at construction time or via "
+          "ClusterOrchestrator.run_program(engine=...)."
+      )
+    return active_engine
+
   def step_once(
       self,
       prompts: Sequence[Any],
+      engine: rl_engine_interface.AbstractRLEngine | None = None,
       **kwargs: Any,
   ) -> Any:
     """Executes a single end-to-end RL training step."""
+    active_engine = self._resolve_engine(engine)
     current_step = self.policy_version
     if self.on_step_begin:
       self.on_step_begin(current_step)
 
     # 1. Generate rollouts
-    rollouts = _sync_or_async(self.engine.generate(prompts=prompts, **kwargs))
+    rollouts = _sync_or_async(active_engine.generate(prompts=prompts, **kwargs))
 
     # 2. Evaluate rewards
     rewards = []
@@ -127,7 +140,9 @@ class SyncRLProgram:
     # 3. Create RLTrainerPayloads via AlgorithmAdapter
     ref_logps = None
     if getattr(self.algo, "requires_reference_kl", False):
-      ref_logps = _sync_or_async(self.engine.per_token_logps(datatypes.Role.REFERENCE, items=rollouts))
+      ref_logps = _sync_or_async(
+          active_engine.per_token_logps(datatypes.Role.REFERENCE, items=rollouts)
+      )
     trainer_payloads = self.algo.create_trainer_payloads(
         rollouts, rewards=rewards, ref_logps=ref_logps
     )
@@ -142,7 +157,7 @@ class SyncRLProgram:
     for index, batch in enumerate(microbatches):
       is_last = index == len(microbatches) - 1
       step_result = _sync_or_async(
-          self.engine.train_step(
+          active_engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=len(microbatches) > 1,
@@ -153,7 +168,7 @@ class SyncRLProgram:
     # 6. Sync weights to rollout replicas
     if self.sync_weights:
       new_version = _sync_or_async(
-          self.engine.sync_weights(role=datatypes.Role.ACTOR)
+          active_engine.sync_weights(role=datatypes.Role.ACTOR)
       )
       if isinstance(new_version, int) and new_version > current_step:
         self.policy_version = new_version
@@ -180,10 +195,12 @@ class SyncRLProgram:
   def eval_step_once(
       self,
       prompts: Sequence[Any],
+      engine: rl_engine_interface.AbstractRLEngine | None = None,
       **kwargs: Any,
   ) -> list[datatypes.RLTrainerPayload]:
     """Executes evaluation step without updating weights."""
-    rollouts = _sync_or_async(self.engine.generate(prompts=prompts, **kwargs))
+    active_engine = self._resolve_engine(engine)
+    rollouts = _sync_or_async(active_engine.generate(prompts=prompts, **kwargs))
     rewards = [
         sum(fn(item) for fn in self.reward_fns) if self.reward_fns else _default_reward(item)
         for item in rollouts
@@ -192,13 +209,17 @@ class SyncRLProgram:
 
   def run(
       self,
-      train_dataset: Iterable[Sequence[Any]],
+      engine: rl_engine_interface.AbstractRLEngine | None = None,
+      train_dataset: Iterable[Sequence[Any]] | None = None,
       num_steps: int | None = None,
       **kwargs: Any,
   ) -> None:
     """Runs the RL program training loop over the dataset."""
+    active_engine = self._resolve_engine(engine)
+    if train_dataset is None:
+      raise ValueError("SyncRLProgram.run requires a train_dataset.")
     for idx, prompt_batch in enumerate(train_dataset):
       if num_steps is not None and idx >= num_steps:
         break
       logging.info("RLProgram starting step %d", self.step)
-      self.step_once(prompts=prompt_batch, **kwargs)
+      self.step_once(prompts=prompt_batch, engine=active_engine, **kwargs)

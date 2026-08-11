@@ -107,6 +107,23 @@ class RLProgramTest(absltest.TestCase):
     self.assertIsNotNone(program.last_step_result)
     self.assertEqual(program.last_step_result.policy_version, 1)
 
+  def test_run_accepts_orchestrator_supplied_engine(self):
+    program = rl_program.SyncRLProgram(
+        algo=self.mock_algo,
+        assembler=self.assembler,
+        sync_weights=False,
+    )
+
+    program.run(
+        train_dataset=[["prompt1"]],
+        num_steps=1,
+        engine=self.mock_engine,
+    )
+
+    self.mock_engine.generate.assert_called_once_with(prompts=["prompt1"])
+    self.mock_engine.train_step.assert_called_once()
+    self.assertEqual(program.step, 1)
+
   def test_eval_step_once_flow(self):
     program = rl_program.SyncRLProgram(
         engine=self.mock_engine,

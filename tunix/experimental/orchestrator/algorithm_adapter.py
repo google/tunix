@@ -92,6 +92,7 @@ class GRPOAdapter(AlgorithmAdapter):
     )
     self.clip_epsilon = clip_epsilon
     self.beta_kl = beta_kl
+    self.requires_reference_kl = beta_kl != 0.0
 
   def compute_advantages(
       self,

@@ -12,22 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU orchestrator for a minimal distributed GSM8K-style GRPO chain demo.
+"""CPU control-plane for a minimal Orchestrator V2 GSM8K GRPO demo.
 
-This script intentionally drives the training loop through RLOrchestrator:
-  1. lifecycle handshake with trainer and rollout workers,
-  2. remote-only OrchestratorRLEngine over gRPC worker proxies,
-  3. rollout generation on the rollout worker,
-  4. TrainExample assembly through the GRPO algorithm adapter,
-  5. trainer-side GRPO loss configuration and actor update,
-  6. optional LoRA weight sync back to the rollout worker.
+The TPU worker processes host the expensive pieces:
+  1. a TrainerWorker backed by experimental PeftTrainer V2,
+  2. a vLLM RolloutWorker,
+  3. optionally an InferenceWorker for frozen reference log-probs.
 
-It is a plumbing demo, not a full-quality GSM8K training recipe.
+This process only owns Orchestrator V2 control flow. It registers remote worker
+handles with ClusterOrchestrator, configures the GRPO loss on the trainer worker,
+and executes SyncRLProgram through ClusterOrchestrator.run_program().
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
+import functools
 import logging
 import os
 import re
@@ -38,7 +39,6 @@ from typing import Any
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax  # pylint: disable=g-import-not-at-top
-import numpy as np  # pylint: disable=g-import-not-at-top
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -47,15 +47,13 @@ REPO_ROOT = os.path.abspath(
 if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
+from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
-from tunix.experimental.orchestrator import grpo_loop  # pylint: disable=g-import-not-at-top
-from tunix.experimental.orchestrator import grpc_worker_proxies  # pylint: disable=g-import-not-at-top
-from tunix.experimental.orchestrator import orchestrator_rl_engine  # pylint: disable=g-import-not-at-top
-from tunix.experimental.orchestrator import rl_orchestrator  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import remote_worker  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
-from tunix.rl import rl_cluster as rl_cluster_lib  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
-from tunix.rl.rollout import base_rollout  # pylint: disable=g-import-not-at-top
 
 
 PROMPT_TEMPLATE = """Solve the following math problem.
@@ -67,22 +65,39 @@ Problem: {question}
 """
 
 DEMO_TASKS = (
-    ("Natalia sold clips to 48 friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?", "72"),
-    ("Weng earns $12 an hour for babysitting. Yesterday, she babysat for 3 hours. How much did she earn?", "36"),
-    ("A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts of fiber does it take?", "3"),
-    ("Betty is saving money for a wallet which costs $100. She has $15 saved. How much more does she need?", "85"),
+    (
+        "Natalia sold clips to 48 friends in April, and then she sold half as "
+        "many clips in May. How many clips did Natalia sell altogether in "
+        "April and May?",
+        "72",
+    ),
+    (
+        "Weng earns $12 an hour for babysitting. Yesterday, she babysat for 3 "
+        "hours. How much did she earn?",
+        "36",
+    ),
+    (
+        "A robe takes 2 bolts of blue fiber and half that much white fiber. "
+        "How many bolts of fiber does it take?",
+        "3",
+    ),
+    (
+        "Betty is saving money for a wallet which costs $100. She has $15 "
+        "saved. How much more does she need?",
+        "85",
+    ),
 )
 
 
 def _parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(
-      description="Minimal distributed Qwen3 GRPO chain demo on remote workers."
+      description="Minimal Orchestrator V2 Qwen3 GSM8K GRPO demo."
   )
   parser.add_argument(
       "--batch_size",
       type=int,
       default=2,
-      help="Number of prompt groups per step; trajectories=batch_size*num_generations.",
+      help="Number of prompt groups per step.",
   )
   parser.add_argument("--num_generations", type=int, default=2)
   parser.add_argument("--max_steps", type=int, default=1)
@@ -96,8 +111,8 @@ def _parse_args() -> argparse.Namespace:
       type=str,
       default="",
       help=(
-          "Optional reference/reward InferenceWorker address. Required when "
-          "--beta is non-zero or force reference KL scoring is enabled."
+          "Optional reference InferenceWorker address. Required when --beta is "
+          "non-zero because KL scoring needs a reference worker."
       ),
   )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
@@ -111,7 +126,7 @@ def _parse_args() -> argparse.Namespace:
       "--reward_mode",
       choices=("synthetic", "exact"),
       default="synthetic",
-      help="synthetic proves the distributed chain without relying on model quality.",
+      help="synthetic proves the distributed chain without relying on quality.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--sync_lora_weights", action="store_true")
@@ -130,8 +145,7 @@ def _build_prompt_groups(batch_size: int) -> tuple[list[str], list[str]]:
   gold_answers = []
   for i in range(batch_size):
     question, answer = DEMO_TASKS[i % len(DEMO_TASKS)]
-    prompt = PROMPT_TEMPLATE.format(question=question)
-    prompts.append(prompt)
+    prompts.append(PROMPT_TEMPLATE.format(question=question))
     gold_answers.append(answer)
   return prompts, gold_answers
 
@@ -146,114 +160,193 @@ def _extract_answer(text: str) -> str | None:
   return numeric[-1].replace(",", "") if numeric else None
 
 
-def _compute_rewards(
-    prompts: list[str],
-    completions: list[str],
-    gold_answers: list[str],
+def _make_reward_fn(mode: str, num_generations: int):
+  """Creates the per-trajectory reward function used by SyncRLProgram."""
+
+  def reward_fn(item: datatypes.TrajectoryItem) -> float:
+    metadata = dict(item.metadata or {})
+    if mode == "synthetic":
+      pair_index = int(metadata.get("pair_index", item.pair_index))
+      return pair_index / max(num_generations - 1, 1)
+
+    text = str(metadata.get("text", ""))
+    gold_answer = metadata.get("gold_answer")
+    return 1.0 if gold_answer and _extract_answer(text) == gold_answer else 0.0
+
+  return reward_fn
+
+
+def _grpo_model_input(
+    train_example: Any,
     *,
-    mode: str,
-    **kwargs,
-) -> np.ndarray:
-  del prompts
-  if mode == "synthetic":
-    num_generations = int(kwargs["num_generations"])
-    per_group = np.linspace(0.0, 1.0, num_generations, dtype=np.float32)
-    return np.tile(per_group, len(completions) // num_generations)
+    algo_config: Any,
+    pad_id: int,
+    eos_id: int,
+    compute_logps_chunk_size: int,
+) -> dict[str, Any]:
+  """Maps a TrainExample microbatch to algo_core.grpo_loss_fn kwargs."""
+  return {
+      "train_example": train_example,
+      "algo_config": algo_config,
+      "pad_id": pad_id,
+      "eos_id": eos_id,
+      "compute_logps_chunk_size": compute_logps_chunk_size,
+  }
 
-  rewards = []
-  for completion, gold in zip(completions, gold_answers):
-    rewards.append(1.0 if _extract_answer(completion) == gold else 0.0)
-  return np.asarray(rewards, dtype=np.float32)
 
-
-def _build_cluster_config(args: argparse.Namespace) -> Any:
-  top_k = None if args.top_k < 0 else args.top_k
-  rollout_config = base_rollout.RolloutConfig(
-      max_prompt_length=args.max_prompt_length,
-      max_tokens_to_generate=args.max_response_length,
-      temperature=args.temperature,
-      top_p=args.top_p,
-      top_k=top_k,
-      return_logprobs=True,
+def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  algo = algorithm_adapter.GRPOAdapter(
+      group_size=args.num_generations,
+      mini_batch_size=args.batch_size,
+      max_packed_len=args.max_prompt_length + args.max_response_length,
+      clip_epsilon=args.epsilon,
+      beta_kl=args.beta,
   )
+  return algo
+
+
+def _build_grpo_config(args: argparse.Namespace) -> Any:
   return SimpleNamespace(
-      training_config=SimpleNamespace(
-          train_micro_batch_size=args.train_micro_batch_size,
-          compute_logps_micro_batch_size=args.train_micro_batch_size,
+      beta=args.beta,
+      epsilon=args.epsilon,
+      loss_algo="grpo",
+      loss_agg_mode="sequence-mean-token-mean",
+      temperature=args.temperature,
+      kl_loss_mode="mse_kl",
+      kl_clamp_value=None,
+  )
+
+
+def _configure_trainer_loss(
+    trainer_handle: remote_execution.ActorHandle,
+    *,
+    algo: algorithm_adapter.GRPOAdapter,
+    grpo_config: Any,
+    pad_id: int,
+    eos_id: int,
+) -> None:
+  logging.info("Configuring trainer-side GRPO loss via TrainerWorker RPC.")
+  trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+  trainer_handle.submit(
+      "with_gen_model_input_fn",
+      functools.partial(
+          _grpo_model_input,
+          algo_config=grpo_config,
+          pad_id=pad_id,
+          eos_id=eos_id,
           compute_logps_chunk_size=0,
       ),
-      rollout_config={
-          rl_cluster_lib.Mode.TRAIN: rollout_config,
-          rl_cluster_lib.Mode.EVAL: rollout_config,
-      },
   )
 
 
-def _build_orchestrator(
+def _register_workers(
     args: argparse.Namespace,
-    tokenizer: Any,
+    *,
+    cluster: orchestrator.ClusterOrchestrator,
     trainer_handle: remote_execution.ActorHandle,
     rollout_handle: remote_execution.ActorHandle,
     inference_handle: remote_execution.ActorHandle | None,
     pad_id: int,
     eos_id: int,
-) -> rl_orchestrator.RLOrchestrator:
-  cluster_config = _build_cluster_config(args)
-  trainer_proxy = grpc_worker_proxies.GrpcTrainerWorkerProxy(trainer_handle)
-  rollout_proxy = grpc_worker_proxies.GrpcRolloutWorkerProxy(
-      rollout_handle, cluster_config
+) -> None:
+  """Registers gRPC-backed workers in the Orchestrator V2 registry."""
+  cluster.register_worker(
+      remote_worker.RemoteActorWorker(
+          worker_id="trainer-0",
+          roles=[datatypes.Role.ACTOR],
+          handle=trainer_handle,
+          resources={"address": args.trainer_addr},
+      )
   )
-  inference_proxy = (
-      grpc_worker_proxies.GrpcInferenceWorkerProxy(inference_handle)
-      if inference_handle is not None
-      else None
+  cluster.register_worker(
+      remote_worker.RemoteActorWorker(
+          worker_id="rollout-0",
+          roles=[datatypes.Role.ROLLOUT],
+          handle=rollout_handle,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          max_prompt_length=args.max_prompt_length,
+          max_response_length=args.max_response_length,
+          temperature=args.temperature,
+          resources={"address": args.rollout_addr},
+      )
   )
-  weight_sync_proxy = grpc_worker_proxies.GrpcWeightSyncProxy(
-      trainer_handle,
-      rollout_handle,
-      sync_lora_weights=args.sync_lora_weights,
-  )
-  cluster = orchestrator_rl_engine.OrchestratorRLEngine(
-      trainer_worker=trainer_proxy,
-      rollout_worker=rollout_proxy,
-      inference_worker=inference_proxy,
-      weight_sync=weight_sync_proxy,
-      cluster_config=cluster_config,
-      actor_trainer=grpc_worker_proxies.RemoteActorTrainerProxy(trainer_handle),
-      tokenizer=tokenizer,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
-  grpo_config = agentic_grpo_learner.GRPOConfig(
-      num_generations=args.num_generations,
-      num_iterations=1,
-      beta=args.beta,
-      kl_loss_mode="mse_kl",
-      epsilon=args.epsilon,
-      max_response_length=args.max_response_length,
-      use_rollout_logps=True,
-  )
-  grpo_config.temperature = args.temperature
-  return rl_orchestrator.RLOrchestrator(
-      cluster, algorithm_adapter.GRPOAdapter(grpo_config)
-  )
+  if inference_handle is not None:
+    cluster.register_worker(
+        remote_worker.RemoteActorWorker(
+            worker_id="reference-0",
+            roles=[datatypes.Role.REFERENCE],
+            handle=inference_handle,
+            pad_id=pad_id,
+            eos_id=eos_id,
+            max_prompt_length=args.max_prompt_length,
+            max_response_length=args.max_response_length,
+            temperature=args.temperature,
+            resources={"address": args.inference_addr},
+        )
+    )
 
 
-def _log_lifecycle(name: str, handle: remote_execution.ActorHandle) -> None:
-  init_resp = handle.submit("initialize")
-  start_resp = handle.submit("start")
-  info = handle.submit("info")
-  heartbeat = handle.submit("heartbeat")
-  logging.info("%s initialize: %s", name, getattr(init_resp, "metadata", init_resp))
-  logging.info("%s start: %s", name, getattr(start_resp, "metadata", start_resp))
-  logging.info("%s info: %s", name, info)
-  logging.info("%s heartbeat: %s", name, heartbeat)
+def _build_step_requests(
+    *,
+    step: int,
+    batch_size: int,
+    num_generations: int,
+    max_response_length: int,
+    temperature: float,
+    top_p: float,
+    top_k: int | None,
+) -> list[datatypes.RolloutRequest]:
+  prompts, gold_answers = _build_prompt_groups(batch_size)
+  requests = []
+  for prompt_idx, (prompt, gold_answer) in enumerate(zip(prompts, gold_answers)):
+    prompt_id = f"step_{step}_prompt_{prompt_idx}"
+    for generation_idx in range(num_generations):
+      requests.append(
+          datatypes.RolloutRequest(
+              request_id=f"{prompt_id}_gen_{generation_idx}",
+              prompt=prompt,
+              prompt_id=prompt_id,
+              group_offset_id=str(generation_idx),
+              target_policy_version=step,
+              generation_kwargs={
+                  "max_generation_steps": max_response_length,
+                  "temperature": temperature,
+                  "top_p": top_p,
+                  "top_k": top_k,
+                  "return_logprobs": True,
+              },
+              metadata={
+                  "group_id": prompt_id,
+                  "pair_index": generation_idx,
+                  "gold_answer": gold_answer,
+                  "prefix_hash": prompt_id,
+              },
+          )
+      )
+  return requests
+
+
+def _iter_request_batches(args: argparse.Namespace) -> Iterator[list[Any]]:
+  top_k = None if args.top_k < 0 else args.top_k
+  for step in range(args.max_steps):
+    yield _build_step_requests(
+        step=step,
+        batch_size=args.batch_size,
+        num_generations=args.num_generations,
+        max_response_length=args.max_response_length,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=top_k,
+    )
 
 
 def main() -> None:
   args = _parse_args()
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
+  if args.train_micro_batch_size <= 0:
+    raise ValueError("train_micro_batch_size must be positive.")
   if args.beta != 0.0 and not args.inference_addr:
     raise ValueError(
         "--inference_addr is required when --beta is non-zero because "
@@ -261,9 +354,9 @@ def main() -> None:
     )
 
   logging.basicConfig(
-      level=logging.INFO, format="%(asctime)s - [Orchestrator] %(message)s"
+      level=logging.INFO, format="%(asctime)s - [OrchestratorV2] %(message)s"
   )
-  logging.info("Orchestrator JAX backend: %s", jax.default_backend())
+  logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
   tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -280,76 +373,73 @@ def main() -> None:
       else None
   )
 
-  _log_lifecycle("trainer", trainer_handle)
-  _log_lifecycle("rollout", rollout_handle)
-  if inference_handle is not None:
-    _log_lifecycle("inference", inference_handle)
-  orchestrator = _build_orchestrator(
-      args,
-      tokenizer,
+  algo = _build_algo(args)
+  grpo_config = _build_grpo_config(args)
+  _configure_trainer_loss(
       trainer_handle,
-      rollout_handle,
-      inference_handle,
-      pad_id,
-      eos_id,
-  )
-  logging.info("Creating formal GRPO loop on top of RLOrchestrator.")
-  loop = grpo_loop.GRPOLoop(
-      orchestrator,
-      reward_fn=_compute_rewards,
-      tokenizer=tokenizer,
-      num_generations=args.num_generations,
-      max_prompt_length=args.max_prompt_length,
-      max_response_length=args.max_response_length,
-      train_micro_batch_size=args.train_micro_batch_size,
+      algo=algo,
+      grpo_config=grpo_config,
       pad_id=pad_id,
       eos_id=eos_id,
-      sync_weights=True,
   )
-  logging.info("Trainer-side GRPO objective configured.")
 
-  for step in range(args.max_steps):
-    prompt_groups, gold_answers = _build_prompt_groups(args.batch_size)
-    logging.info(
-        "Step %d: requesting %d prompt groups / %d trajectories.",
-        step,
-        len(prompt_groups),
-        len(prompt_groups) * args.num_generations,
+  cluster = orchestrator.ClusterOrchestrator()
+  _register_workers(
+      args,
+      cluster=cluster,
+      trainer_handle=trainer_handle,
+      rollout_handle=rollout_handle,
+      inference_handle=inference_handle,
+      pad_id=pad_id,
+      eos_id=eos_id,
+  )
+  logging.info("Registered Orchestrator V2 workers: %s", cluster.registry.infos())
+
+  program = rl_program.SyncRLProgram(
+      algo=algo,
+      reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
+      assembler=batch_assembly.GRPOTrainExampleAssembler(
+          batch_size=args.train_micro_batch_size,
+          max_prompt_length=args.max_prompt_length,
+          max_response_length=args.max_response_length,
+          pad_id=pad_id,
+      ),
+      sync_weights=args.sync_lora_weights,
+      on_step_begin=lambda step: logging.info("GRPO step %d starting.", step),
+      on_step_end=lambda step, result: logging.info(
+          "GRPO advanced to policy_version=%d train_result=%s.", step, result
+      ),
+  )
+
+  try:
+    logging.info("Bringing up remote workers through ClusterOrchestrator.")
+    cluster.bring_up_workers(dummy_data=None)
+    logging.info("Running SyncRLProgram through ClusterOrchestrator.run_program.")
+    cluster.run_program(
+        program=program,
+        train_dataset=_iter_request_batches(args),
+        num_steps=args.max_steps,
+        bring_up=False,
     )
-    result = loop.train_step(
-        prompt_groups,
-        reward_kwargs={
-            "gold_answers": gold_answers,
-            "mode": args.reward_mode,
-            "num_generations": args.num_generations,
-        },
-        step=step,
-        eval_ds=None,
-        skip_jit=False,
-    )
+  finally:
+    if args.stop_workers_on_exit:
+      cluster.shutdown()
+    else:
+      cluster.monitor.close()
+
+  result = program.last_step_result
+  if result is not None:
     logging.info(
-        "Step %d: reward_mean=%.3f reward_std=%.3f chunks=%d.",
+        "Final step summary: step=%d policy_version=%d rollouts=%d "
+        "microbatches=%d reward_mean=%.3f reward_std=%.3f.",
         result.step,
+        result.policy_version,
+        result.num_rollouts,
+        result.num_microbatches,
         result.reward_mean,
         result.reward_std,
-        result.num_chunks,
     )
-    logging.info(
-        "Step %d: trainer update finished at train_step=%s.",
-        result.step,
-        result.train_step,
-    )
-    logging.info(
-        "Step %d: distributed train+sync chain completed at global_step=%d.",
-        result.step,
-        result.global_step,
-    )
-
-  if args.stop_workers_on_exit:
-    rollout_handle.submit("stop")
-    trainer_handle.submit("stop")
-
-  logging.info("Distributed GRPO chain demo finished successfully.")
+  logging.info("Distributed GSM8K GRPO Orchestrator V2 demo finished.")
 
 
 if __name__ == "__main__":
