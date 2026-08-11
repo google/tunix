@@ -19,7 +19,11 @@ from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from kubernetes import client, config as k8s_config
+try:
+  from kubernetes import client, config as k8s_config
+except ImportError:
+  client = None
+  k8s_config = None
 import numpy as np
 import optax
 from orbax import checkpoint as ocp
@@ -428,9 +432,10 @@ print(
 
 # Kubernetes Setup
 try:
-  k8s_config.load_kube_config()
-  k8s_client = client.CoreV1Api()
-  # k8s_client.list_namespace(timeout_seconds=5)
+  if k8s_config is not None:
+    k8s_config.load_kube_config()
+    k8s_client = client.CoreV1Api()
+    # k8s_client.list_namespace(timeout_seconds=5)
 except Exception as e:
   print(f"Warning: Kubernetes config loading failed: {e}")
 
