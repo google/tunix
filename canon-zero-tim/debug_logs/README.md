@@ -1045,3 +1045,31 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      - `swe_agent.py` contains an unconditional top-level import: `from r2egym.agenthub.action import Action as SWEAction` with a hard `raise` in the except block.
      - For `backward-no-commit` offline evaluation (replaying from `--gold_whitelist`), interactive R2E-Gym simulation environments are not instantiated.
      - `swe_env.py` already includes a safe fallback for `r2egym`, but `swe_agent.py` and `r2egym_runtime_patch.py` require equivalent fallback handling when `r2egym` is absent from the container image.
+
+---
+
+## 40. Phase 38.2e Attempt `p38e1`: 64-Chip FrozenLake Multi-Turn 36-Layer BWD Diagnostics & Mismatch Capsule Persistence
+
+- `debug_logs/p38_p38e1_frozenlake_bwd.raw.log` (SHA-256: `d8509d2bd8cf60c995880fcf78d499893978e5296e032f380a71fc0c5c7054df`)
+- Target Commit: `e9cfe298bf02572f5d6108108f4dfc17f2195ce4` (*Re-establish pre-backward alignment gate in P33 agentic learner*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes, physical slice `671bae94`)
+
+### Execution & Diagnostic Summary:
+
+1. **Hardware & Cluster Execution (16 / 16 Nodes 100% Running)**:
+   - All 16 TPU worker nodes (`gke-tpu-671bae94-...`) and head pod executed across all 36 transformer layers of Qwen3-8B with DP16xTP4 topology.
+   - Pallas VJP matmul/rmsnorm/swiglu kernels and fixed-order reduction trees (`Fixed-order tree tp=4`) verified on the hot execution path.
+
+2. **Rollout vs Learner Weight Synchronization (100% Bitwise Identical)**:
+   - `S_prefill_vs_T_old`: **0 / 196,008 differing bytes (0 / 49,002 differing action tokens, 100% Bitwise Equal)**.
+   - Confirms absolute zero weight synchronization drift between vLLM serving engine and JAX Learner model state.
+
+3. **Multi-Turn Long-Context Decode vs Prefill Boundary**:
+   - `S_decode_vs_S_prefill`: **27 / 49,002 differing action tokens (99.95% element agreement)** across the 256-trajectory batch.
+   - Fail-closed gate (`CANON_PRE_ALIGN_GATE=1`) successfully intercepted the run prior to backprop, generating pre-alignment evidence:
+     - `pre_alignment.jsonl` (SHA-256: `02a34c42548c0ae2c2f0775299480bc6d547125497cc16b858c2193aef497eb9`).
+
+4. **Bounded Mismatch Capsule Persistence**:
+   - Persisted mismatch rows `[191, 199]` into `.npz` capsule container (`dae4e75d3b4689f2607047edd74ea1e48ffaf97a853cec74a204caafc3dc626b`, 114,720 logical bytes).
+   - Capsule contains prompt token IDs, completion token IDs, action mask, decode logits, prefill logits, learner logits, policy version, sampling parameters, and array-level SHA-256 digests for bitwise offline reproduction.
