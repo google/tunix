@@ -1145,3 +1145,27 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - `S_decode_vs_S_prefill`: **85 differing tokens out of 195,167 action tokens (99.96% element agreement)** across multi-turn long completions.
    - Fail-closed gate (`CANON_PRE_ALIGN_GATE=1`) intercepted execution prior to backward pass:
      - Pre-alignment evidence: `pre_alignment.jsonl` (SHA-256: `5e8b98c392aae52fbe444deabfb1c6c3b9e517768cd545619b624837c2df75be`).
+
+---
+
+## 44. Phase 38.2g2 Attempt `p38s2`: FrozenLake Stock Mismatch Capture & Evidence Preservation (Qwen3-8B DP16xTP4)
+
+- `debug_logs/p38_p38s2_frozenlake_stock.raw.log` (SHA-256: `bc97bff79b18e570b02300b3fbe9adea46a208efe31f84ead6a831aa31ca6ae9`)
+- `debug_logs/p38_p38s2_frozenlake_mismatch_capsule.npz` (SHA-256: `2187a6d443da572e03752721bd7093de4a832f81243ace7d7046fd27718e7193`)
+- `debug_logs/p38_p38s2_frozenlake_pre_alignment.jsonl` (SHA-256: `12f3eea488cd5d269332b83e17b7b0dffeac5fef463dadc8393357723362f379`)
+- `debug_logs/p38_p38s2_frozenlake_classification.json`
+- Target Commit: `6fbe8fdc387ec42a8a18357f87f2ff0d35a9f5d3`
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes, physical slice `f01911ab`)
+
+### Execution & Diagnostic Summary:
+
+1. **Rollout & Mathematical Alignment Verification**:
+   - 256 rollout samples completed on Attempt 0 (`JOBSET_ATTEMPT 0`).
+   - `S_prefill_vs_T_old` (Training Forward vs Prefill Rescore): **0 differing tokens out of 46,059 action tokens (100% Bitwise Exact, `max_abs=0.0`)**.
+   - `S_decode_vs_S_prefill` (Native Continue-Decode vs Prefill): **27 differing tokens out of 46,059 action tokens (47 differing bytes, `max_abs=0.3426399230957031`)** occurring in long multi-turn trajectories (rows 215, 223, 239, 247, 255).
+
+2. **Durable Mismatch Capsule & Evidence Persistence**:
+   - Mismatch Capsule: `p38_frozenlake_mismatch_capsule.npz` (SHA-256: `2187a6d443da572e03752721bd7093de4a832f81243ace7d7046fd27718e7193`, selected rows `[215, 223]`).
+   - Alignment Evidence: `pre_alignment.jsonl` (SHA-256: `12f3eea488cd5d269332b83e17b7b0dffeac5fef463dadc8393357723362f379`).
+   - Gate Verdict: Fail-closed `AlignmentGateError` intercepted backward pass to preserve clean baseline.
