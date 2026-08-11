@@ -582,3 +582,22 @@
 - Next: publish to `yuxzhang/canon-zero-tim`, verify the remote hash, then
   render a fresh source-pinned GSM8K full JobSet. Keep FrozenLake and DeepSWE
   strict.
+
+## 2026-08-11 UTC — warning-only policy published
+
+- Type: source publication; no TPU/cloud experiment or training launch.
+- Command: `git push origin HEAD:yuxzhang/canon-zero-tim` using an ephemeral
+  askpass that read only `GITHUB_USER` and `GITHUB_TOKEN` from the repository
+  root `.env`. The helper was deleted immediately after the push; W&B and HF
+  variables were neither read nor changed.
+- Result: remote advanced from `bf0c5734` to `c4871ef7`. This preserves the
+  DeepSWE bounded device-admission parent and adds the locally gated GSM8K
+  warning-only convergence policy. Main was not checked out or modified.
+- Claim ceiling remains `convergence-only`; this publication does not make any
+  alignment boundary green and is not a zero-TIM completion claim.
+- Rollback: set `CANON_GSM8K_ALIGNMENT_WARN_ONLY=0` for strict runtime behavior,
+  or revert `c4871ef7` in a separate reviewed change. Do not remove the
+  independent DeepSWE admission parent.
+- Next: render and launch only the source-pinned GSM8K full JobSet for the
+  time-sensitive convergence run. FrozenLake and DeepSWE remain strict and
+  proceed through their diagnostic/admission ladders.

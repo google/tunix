@@ -6,12 +6,10 @@
 - Definition of done: One source-pinned flag-on run reports `S_decode_vs_S_prefill=0`,
   `S_prefill_vs_T_old=0`, and `T_old_vs_T_current=0` before a full workload is allowed to commit.
 - Task directory: `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`
-- Directory state: tracked. The warning-only implementation is committed at
-  local HEAD `81f20e78`, rebased directly on the DeepSWE device-admission
-  commit `bf0c5734`, and is one commit ahead of
-  `origin/yuxzhang/canon-zero-tim`. All post-rebase regression gates pass.
-  Main was not checked out or modified. Publication is the only remaining
-  local action.
+- Directory state: tracked. The warning-only implementation was rebased
+  directly on the DeepSWE device-admission commit `bf0c5734` and published as
+  `c4871ef7` to `origin/yuxzhang/canon-zero-tim`. All post-rebase regression
+  gates pass. Main was not checked out or modified.
 - Current phases: two independent tracks are deliberately active. P38.2d has
   added and locally gated the user-requested GSM8K-full warning-only alignment
   override so the time-sensitive convergence campaign cannot be stopped by an
@@ -58,9 +56,8 @@
   numerical change; it was a clean negative in its four-chip/short-context
   domain, not a successful repair that was later dropped. It may be retested
   only as a default-off causal arm in the new domain.
-- Next action: push the rebased and locally gated
-  `CANON_GSM8K_ALIGNMENT_WARN_ONLY=1` implementation under the user's explicit
-  approval, then render a fresh source-pinned GSM8K full JobSet. The flag is scoped to
+- Next action: render a fresh source-pinned GSM8K full JobSet from published
+  commit `c4871ef7`. The flag is scoped to
   committed GSM8K full; finite alignment mismatch is durable warning/W&B
   evidence, while structural-invalid and nonfinite data plus loss, gradient,
   reducer, replica, and optimizer-transaction failures remain hard. The
