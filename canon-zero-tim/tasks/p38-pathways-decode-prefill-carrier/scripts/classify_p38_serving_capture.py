@@ -69,6 +69,40 @@ def _token_history_sha256(value: Any) -> str:
   return hashlib.sha256(array.tobytes()).hexdigest()
 
 
+def _parse_prefix_bounds(value: str) -> tuple[int, ...]:
+  parts = value.split(",")
+  _require(len(parts) >= 2 and all(part.strip() for part in parts),
+           "prefix bounds must contain at least two integers")
+  try:
+    bounds = tuple(int(part) for part in parts)
+  except ValueError as error:
+    raise CaptureError("prefix bounds must contain integers") from error
+  _require(all(left < right for left, right in zip(bounds, bounds[1:])),
+           "prefix bounds must be strictly increasing")
+  return bounds
+
+
+def _validate_implementation_identity(meta: dict[str, Any], seq: int) -> None:
+  identity = meta.get("implementation_identity")
+  _require(isinstance(identity, dict),
+           f"sequence {seq} has no implementation identity")
+  runner_class = identity.get("runner_class", {})
+  _require(runner_class.get("module") and runner_class.get("qualname"),
+           f"sequence {seq} has an invalid runner-class identity")
+  for name in ("continue_decode", "model_fn", "compute_logits_fn", "sample_fn"):
+    item = identity.get(name)
+    _require(isinstance(item, dict) and item.get("chain"),
+             f"sequence {seq} has no {name} identity")
+    for link in item["chain"]:
+      _require(link.get("type_module") and link.get("type_name"),
+               f"sequence {seq} has an invalid {name} wrapper identity")
+    source_sha = item.get("source_sha256")
+    if source_sha is not None:
+      _require(len(source_sha) == 64 and all(
+          character in "0123456789abcdef" for character in source_sha),
+          f"sequence {seq} has an invalid {name} source SHA")
+
+
 def _primary_block_ids(value: Any) -> list[int]:
   """Returns the single Qwen KV group's physical page list."""
   _require(isinstance(value, list) and value, "request has invalid physical page IDs")
@@ -180,7 +214,7 @@ def _validate_request_mapping(
 
 def _join_mismatch_capsule(
     requests: list[dict[str, Any]], capsule: dict[str, Any], seq: int
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
   arrays = capsule["arrays"]
   selected_rows = np.asarray(arrays["selected_rows"]).reshape(-1)
   candidates = []
@@ -196,7 +230,9 @@ def _join_mismatch_capsule(
       captured = np.asarray(item["token_ids"], dtype=np.int64)
       if captured.size <= full_history.size and np.array_equal(captured, full_history[:captured.size]):
         candidates.append((item, int(source_row), full_history[:captured.size]))
-  _require(len(candidates) == 1, f"sequence {seq} mismatch token-history join expected one candidate, found {len(candidates)}")
+  if not candidates:
+    return None
+  _require(len(candidates) == 1, f"sequence {seq} mismatch token-history join expected at most one candidate, found {len(candidates)}")
   item, source_row, matching_prefix = candidates[0]
   prefix_sha = _token_history_sha256(matching_prefix)
   _require(prefix_sha == item["token_history_sha256"], f"sequence {seq} mismatch join hash mismatch")
@@ -219,6 +255,17 @@ def _load_stage(directory: Path, seq: int, stage: str) -> tuple[dict[str, Any], 
   _require(record.get("stage") == stage, f"bad stage for sequence {seq}: {record.get('stage')!r}")
   _require(record.get("seq") == seq, f"bad sequence number in {stage} record")
   _require(record.get("npz_sha256") == _sha256(npz_path), f"NPZ SHA mismatch for {stage} sequence {seq}")
+  storage = record.get("storage_guard", {})
+  _require(int(storage.get("multiplier", 0)) >= 5,
+           f"missing five-times storage guard for {stage} sequence {seq}")
+  _require(int(storage.get("payload_bytes", 0)) > 0,
+           f"invalid payload estimate for {stage} sequence {seq}")
+  _require(int(storage.get("estimated_total_bytes", 0)) >= int(
+      storage["payload_bytes"]),
+      f"invalid total-size estimate for {stage} sequence {seq}")
+  _require(int(storage.get("free_bytes", -1)) >= int(
+      storage.get("required_free_bytes", 0)) > 0,
+      f"free-space guard failed for {stage} sequence {seq}")
   with np.load(npz_path, allow_pickle=False) as archive:
     arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
   _require(sorted(arrays) == sorted(record.get("arrays", [])), f"array inventory mismatch for {stage} sequence {seq}")
@@ -229,10 +276,16 @@ def classify(
     directory: Path,
     expected_records: int,
     mismatch_capsule: Path | None,
+    prefix_bounds: tuple[int, ...],
     *,
     require_mismatch_join: bool = True,
 ) -> dict[str, Any]:
   _require(expected_records > 0, "expected_records must be positive")
+  _require(len(prefix_bounds) == expected_records + 1,
+           "prefix-bound count must equal expected records plus one")
+  _require(all(left < right for left, right in zip(
+      prefix_bounds, prefix_bounds[1:])),
+      "prefix bounds must be strictly increasing")
   _require(directory.is_dir(), f"capture directory does not exist: {directory}")
   pre_files = sorted(directory.glob("p38_serving_*_pre.json"))
   post_files = sorted(directory.glob("p38_serving_*_post.json"))
@@ -247,6 +300,10 @@ def classify(
       "required mismatch capsule is absent",
   )
   summaries = []
+  captured_strata: set[int] = set()
+  successful_joins = 0
+  implementation_identity = None
+  source_commit = None
   for seq in range(expected_records):
     pre, pre_arrays = _load_stage(directory, seq, "pre")
     post, post_arrays = _load_stage(directory, seq, "post")
@@ -258,6 +315,22 @@ def classify(
     )
 
     meta = pre.get("meta", {})
+    _validate_implementation_identity(meta, seq)
+    current_identity = json.dumps(
+        meta["implementation_identity"], sort_keys=True, separators=(",", ":")
+    )
+    if implementation_identity is None:
+      implementation_identity = current_identity
+    _require(current_identity == implementation_identity,
+             f"sequence {seq} implementation identity drifted")
+    current_source = meta.get("env", {}).get("CANON_EXPECT_COMMIT")
+    _require(isinstance(current_source, str) and len(current_source) == 40 and
+             all(character in "0123456789abcdef" for character in current_source),
+             f"sequence {seq} source commit identity is invalid")
+    if source_commit is None:
+      source_commit = current_source
+    _require(current_source == source_commit,
+             f"sequence {seq} source commit identity drifted")
     requests = _validate_request_mapping(meta, pre_arrays, seq)
     _require(meta.get("continue_decode_enabled") is True, f"sequence {seq} did not capture continue-decode")
     _require(meta.get("caller_update_kv_cache") is True, f"sequence {seq} has an invalid caller cache-update contract")
@@ -271,7 +344,36 @@ def classify(
     _require(all(item.get("token_ids") for item in requests), f"sequence {seq} has a request without token history")
     _require(meta.get("kv_caches_spec"), f"sequence {seq} has no KV-cache specification")
     _require(meta.get("block_size", 0) > 0, f"sequence {seq} has an invalid page size")
-    _require(meta.get("observed_max_prefix", -1) >= meta.get("capture_min_prefix", 0), f"sequence {seq} violates the prefix filter")
+    _require(meta.get("capture_prefix_bounds") == list(prefix_bounds),
+             f"sequence {seq} prefix bounds drifted")
+    stratum_index = int(meta.get("capture_stratum_index", -1))
+    _require(0 <= stratum_index < expected_records,
+             f"sequence {seq} has an invalid capture stratum")
+    _require(stratum_index not in captured_strata,
+             f"sequence {seq} duplicates capture stratum {stratum_index}")
+    captured_strata.add(stratum_index)
+    expected_stratum = [
+        prefix_bounds[stratum_index], prefix_bounds[stratum_index + 1]
+    ]
+    _require(meta.get("capture_stratum") == expected_stratum,
+             f"sequence {seq} capture stratum bounds drifted")
+    observed_min_prefix = int(meta.get("observed_min_prefix", -1))
+    observed_prefix = int(meta.get("observed_max_prefix", -1))
+    _require(0 <= observed_min_prefix <= observed_prefix,
+             f"sequence {seq} observed prefix range is invalid")
+    anchor_request_id = meta.get("capture_anchor_request_id")
+    anchor_prefix = int(meta.get("capture_anchor_prefix", -1))
+    anchors = [
+        item for item in requests if item.get("request_id") == anchor_request_id
+    ]
+    _require(len(anchors) == 1,
+             f"sequence {seq} capture anchor request is invalid")
+    _require(int(anchors[0].get("num_computed_tokens", -1)) == anchor_prefix,
+             f"sequence {seq} capture anchor prefix mapping drifted")
+    _require(expected_stratum[0] <= anchor_prefix < expected_stratum[1],
+             f"sequence {seq} anchor prefix is outside its capture stratum")
+    _require(meta.get("capture_min_prefix") == prefix_bounds[0],
+             f"sequence {seq} minimum prefix drifted")
     _require(all(meta.get("rpa_block_tuples", {}).get(name) for name in ("CANON_RPA_D", "CANON_RPA_P", "CANON_RPA_M")), f"sequence {seq} is missing a pinned RPA block tuple")
 
     post_meta = post.get("meta", {})
@@ -284,24 +386,33 @@ def classify(
 
     mismatch_join = None
     if capsule is not None:
-      try:
-        mismatch_join = _join_mismatch_capsule(requests, capsule, seq)
-      except CaptureError:
-        if require_mismatch_join:
-          raise
+      mismatch_join = _join_mismatch_capsule(requests, capsule, seq)
+      successful_joins += int(mismatch_join is not None)
     summaries.append({
         "seq": seq,
         "requests": len(requests),
         "actual_steps": actual_steps,
-        "observed_max_prefix": int(meta["observed_max_prefix"]),
+        "observed_max_prefix": observed_prefix,
+        "observed_min_prefix": observed_min_prefix,
+        "capture_anchor_request_id": anchor_request_id,
+        "capture_anchor_prefix": anchor_prefix,
+        "capture_stratum_index": stratum_index,
+        "capture_stratum": expected_stratum,
         "kv_unified": bool(meta.get("kv_unified")),
         "mismatch_join": mismatch_join,
     })
 
+  _require(captured_strata == set(range(expected_records)),
+           "capture strata are incomplete")
+  _require(not require_mismatch_join or successful_joins > 0,
+           "no serving record joins the mismatch capsule")
   return {
       "schema_version": 1,
       "verdict": "PASS",
       "scope": "p38-serving-capture",
+      "prefix_bounds": list(prefix_bounds),
+      "successful_mismatch_joins": successful_joins,
+      "source_commit": source_commit,
       "records": summaries,
   }
 
@@ -311,6 +422,7 @@ def main() -> None:
   parser.add_argument("--directory", required=True, type=Path)
   parser.add_argument("--expected-records", required=True, type=int)
   parser.add_argument("--mismatch-capsule", required=True, type=Path)
+  parser.add_argument("--prefix-bounds", required=True)
   parser.add_argument("--require-mismatch-join", action="store_true")
   parser.add_argument("--output", type=Path)
   args = parser.parse_args()
@@ -319,6 +431,7 @@ def main() -> None:
         args.directory,
         args.expected_records,
         args.mismatch_capsule,
+        _parse_prefix_bounds(args.prefix_bounds),
         require_mismatch_join=args.require_mismatch_join,
     )
   except CaptureError as error:

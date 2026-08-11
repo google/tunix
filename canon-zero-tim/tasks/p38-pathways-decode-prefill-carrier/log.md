@@ -693,3 +693,35 @@
   blocked until the stock archive passes exact join and whole-vector replay.
 - Rollback: documentation-only. Restore these files from version control if
   the correction itself must be reverted; runtime behavior is unchanged.
+
+## 2026-08-11 UTC — P38.2g4 stratified serving capture locally admitted
+
+- Type: default-off diagnostic hardening; no TPU numerical run, Pathways job,
+  backward, optimizer commit, source commit, push, or cloud launch.
+- Replaced the obsolete single `min_prefix=1788` trigger with four bounded
+  intervals from 1536 through 2560. Selection is request anchored: a call is
+  admitted only when one concrete scheduled request lies in an unfilled
+  interval, and its request ID and exact prefix are recorded.
+- Added stable source/callable identity, anchor mapping, four-stratum
+  completeness, five-times storage margin, and exact mismatch-capsule join
+  checks. Zero joins and ambiguous joins fail closed.
+- A fixture audit found and removed a false positive: the shell fixture had
+  claimed an anchor prefix near 1700 while its request history contained only
+  three tokens. It now carries a consistent long token history, page table,
+  sequence length, and anchor for every interval.
+- Focused results: classifier 25/25 PASS, renderer 5/5 PASS, shell postflight
+  PASS, Python compilation PASS, shell syntax PASS, and patch reconstruction
+  plus compilation PASS.
+- Full results: exact-image Qwen3-1.7B and Qwen3-8B each match all 29 manifest
+  entries and pass 14/14 tests. The complete frozen-image P33 CPU gate passes
+  78 workload tests, 29 alignment tests, and all adjacent suites.
+- Reconstructed runner SHA-256:
+  `fe81622996a1c73bbd17187ee603e6a191165202da40d07b5e428fe41b5db516`.
+- Claim ceiling: local construction and image compatibility only. Docker had
+  no TPU device; D1 target capture, E0 replay, seam localization, page/cache
+  causality, repair, backward, and optimizer behavior remain NOT RUN.
+- Artifact: `artifacts/p38_2g4_local_gate_0811.md`.
+- Rollback: leave capture variables unset or discard this uncommitted P38.2g4
+  diff. Stock runtime behavior is unchanged.
+- Next: obtain explicit source-publication approval, then separate resource
+  approval for one stock-only Attempt-0 D1 run. Do not run U or a repair arm.

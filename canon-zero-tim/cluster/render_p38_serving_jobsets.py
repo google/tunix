@@ -19,8 +19,8 @@ p33 = importlib.util.module_from_spec(_P33_SPEC)
 sys.modules[_P33_SPEC.name] = p33
 _P33_SPEC.loader.exec_module(p33)
 
-_CAPTURE_MIN_PREFIX = 1788
-_CAPTURE_RECORDS = 1
+_CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)
+_CAPTURE_RECORDS = len(_CAPTURE_PREFIX_BOUNDS) - 1
 
 
 def _spec(*, unified: bool) -> Any:
@@ -51,7 +51,13 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
       "CANON_P38_PRECHECK_ONLY": "1",
       "CANON_P38_SERVING_CAPTURE_DIR": f"{state}/p38_serving_capture",
       "CANON_P38_SERVING_CAPTURE_MAX_CALLS": str(_CAPTURE_RECORDS),
-      "CANON_P38_SERVING_CAPTURE_MIN_PREFIX": str(_CAPTURE_MIN_PREFIX),
+      "CANON_P38_SERVING_CAPTURE_MIN_PREFIX": str(
+          _CAPTURE_PREFIX_BOUNDS[0]
+      ),
+      "CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS": ",".join(
+          str(value) for value in _CAPTURE_PREFIX_BOUNDS
+      ),
+      "CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER": "5",
       "CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS": str(_CAPTURE_RECORDS),
       "CANON_P38_SERVING_CAPTURE_CLASSIFICATION": (
           f"{state}/p38_serving_capture.classification.json"

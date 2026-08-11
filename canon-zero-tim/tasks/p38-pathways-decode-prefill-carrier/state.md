@@ -19,16 +19,24 @@
   runs now exist, but both logs stop at the child alignment traceback before
   the serving classifier/archive and final postflight. P38.2g2 therefore
   remains inconclusive at the serving-envelope layer. P38.2g3 is pending on a
-  complete stock-only P38.2g2 capture.
-- Latest local gate: the real `continue_decode` capture now excludes
+  complete stock-only capture and exact E0 reproduction. P38.2g4 is active and
+  hardens that capture before another expensive target run: four bounded
+  prefix strata replace the brittle single `min_prefix=1788` trigger, callable
+  identity is attested, and first-divergence localization is preregistered
+  without naming RoPE or page state as the cause.
+- Latest local gate: P38.2g4 D0 is complete locally. The real
+  `continue_decode` capture now excludes
   live-but-unscheduled requests without compacting their physical scheduler
-  slots, emits and validates request/DP/slot/global/attention/selector/page
-  mappings, and requires an exact request/token-history join to the durable
-  mismatch capsule for stock. Runtime postflight requires zero
-  `KV_UNIFIED_two_pass` hits for stock and a positive hit for U. Classifier
-  controls pass 18/18, renderer controls 5/5, exact-image Qwen3-1.7B and
-  Qwen3-8B overlays pass 13/13 each, and the complete frozen-image P33 CPU
-  gate passes (67 workload tests, 28 alignment tests, all adjacent suites).
+  slots, selects one concrete scheduled request per prefix stratum, emits and
+  validates the anchor request/prefix plus request/DP/slot/global/attention/
+  selector/page mappings, and requires an exact request/token-history join to
+  the durable mismatch capsule for stock. Source commit and callable identity
+  must remain stable across all four records. Classifier controls pass 25/25,
+  renderer controls 5/5, shell postflight passes, exact-image Qwen3-1.7B and
+  Qwen3-8B overlays pass 14/14 each with all 29 manifest entries matching, and
+  the complete frozen-image P33 CPU gate passes (78 workload tests, 29
+  alignment tests, all adjacent suites). The installed runner SHA-256 is
+  `fe81622996a1c73bbd17187ee603e6a191165202da40d07b5e428fe41b5db516`.
 - Last verified fact: P38e1 source row 191 completed on real Qwen3-8B DP1xTP4
   with exact weights, deterministic repeats, an effective negative control,
   no backward, and zero optimizer commits. R0 and R1 were exact at every
@@ -83,12 +91,13 @@
   SHA `dae4e75d...` and is an exact duplicate of the older P38e1 capsule, not
   the logged p38s1 (`2dffb993...`) or p38u1 (`245a0c9b...`) artifact. The
   earlier stock-capture PASS wording is withdrawn.
-- Next action for the strict track: fetch and verify
-  `b7b20e261433977bc57bd83452fd6ac1c4680cdd`, render a fresh P38 serving pair,
-  and apply stock only. Preserve the complete terminal head log through outer
-  postflight and recover both the real run-specific capsule and serving tar.
-  Do not rerun U. P38.2g3 E0 remains blocked until the official stock capture
-  passes exact request/token-history join and whole-vector reproduction.
+- Next action for the strict track: review the locally complete P38.2g4 D0
+  diff. After explicit publication approval and separate resource
+  approval, render one fresh stock-only Attempt-0 diagnostic. Preserve the
+  complete terminal head log through outer postflight and recover both the real
+  run-specific capsule and serving tar. Do not rerun U. P38.2g3 E0 remains
+  blocked until the official stock capture passes an exact request/token-
+  history join and whole-vector reproduction.
   The independent GSM8K convergence campaign remains governed by its
   published warning-only policy.
 - Blockers: the decisive serving block-table/page-state archive is missing.
@@ -112,14 +121,15 @@
   `artifacts/p38_2g_onehost_synthetic_0811.md`,
   `artifacts/p38_2g_onehost_target_row191_0811.md`,
   `artifacts/p38_2g2_local_gate_0811.md`,
+  `artifacts/p38_2g4_local_gate_0811.md`,
   `phases/p38-2g2-pathways-serving-envelope.md`,
   `phases/p38-2g3-page-topology-discriminator.md`
-- Current local gates: frozen-image P33 CPU
-  gate PASS (67 workload tests, 28 alignment tests, adjacent regressions and
-  negative controls), exact-image Qwen3-1.7B/Qwen3-8B overlay gates 13/13 each
-  PASS, serving classifier 18/18, renderer 5/5, and postflight stock/U
+- Current local gates: frozen-image P33 CPU gate PASS (78 workload tests, 29
+  alignment tests, adjacent regressions and negative controls), exact-image
+  Qwen3-1.7B/Qwen3-8B overlay gates 14/14 each PASS, serving classifier 25/25,
+  renderer 5/5, and postflight stock/U
   PATHTRACE negative controls PASS.
-- Updated: 2026-08-11 UTC after p38s1/p38u1 evidence reconciliation
+- Updated: 2026-08-11 UTC when P38.2g4 D0 completed locally
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,

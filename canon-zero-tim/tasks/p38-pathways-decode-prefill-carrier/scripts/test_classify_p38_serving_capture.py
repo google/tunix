@@ -20,8 +20,17 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def _write_stage(directory: Path, stage: str, arrays: dict[str, np.ndarray], meta: dict) -> None:
-  base = directory / f"p38_serving_0000_{stage}"
+PREFIX_BOUNDS = (0, 4, 8, 12, 16)
+
+
+def _write_stage(
+    directory: Path,
+    stage: str,
+    arrays: dict[str, np.ndarray],
+    meta: dict,
+    seq: int = 0,
+) -> None:
+  base = directory / f"p38_serving_{seq:04d}_{stage}"
   npz_path = Path(str(base) + ".npz")
   json_path = Path(str(base) + ".json")
   with npz_path.open("xb") as stream:
@@ -29,11 +38,18 @@ def _write_stage(directory: Path, stage: str, arrays: dict[str, np.ndarray], met
   record = {
       "schema_version": 2,
       "stage": stage,
-      "seq": 0,
+      "seq": seq,
       "arrays": sorted(arrays),
       "describe": {},
       "meta": meta,
       "npz_sha256": hashlib.sha256(npz_path.read_bytes()).hexdigest(),
+      "storage_guard": {
+          "payload_bytes": 1,
+          "estimated_total_bytes": 4,
+          "free_bytes": 100,
+          "required_free_bytes": 20,
+          "multiplier": 5,
+      },
   }
   json_path.write_text(json.dumps(record), encoding="utf-8")
 
@@ -88,8 +104,33 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
       "max_attention_rows_per_dp": 4,
       "kv_caches_spec": [{"shape": [16, 256, 2, 1, 128]}],
       "block_size": 256,
-      "observed_max_prefix": 1791,
-      "capture_min_prefix": 1788,
+      "observed_max_prefix": 2,
+      "observed_min_prefix": 2,
+      "capture_min_prefix": 0,
+      "capture_prefix_bounds": list(PREFIX_BOUNDS),
+      "capture_stratum_index": 0,
+      "capture_stratum": [0, 4],
+      "capture_anchor_request_id": "request-0",
+      "capture_anchor_prefix": 2,
+      "implementation_identity": {
+          "runner_class": {"module": "runner", "qualname": "Runner"},
+          **{
+              name: {
+                  "chain": [{
+                      "type_module": "builtins",
+                      "type_name": "function",
+                      "module": "fixture",
+                      "qualname": name,
+                  }],
+                  "source_file": None,
+                  "source_sha256": None,
+              }
+              for name in (
+                  "continue_decode", "model_fn", "compute_logits_fn", "sample_fn"
+              )
+          },
+      },
+      "env": {"CANON_EXPECT_COMMIT": "1" * 40},
       "rpa_block_tuples": {
           "CANON_RPA_D": "128,512,128,512",
           "CANON_RPA_P": "128,512,128,512",
@@ -100,17 +141,42 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
   _write_stage(directory, "post", post, {
       "actual_steps": 1,
       "completed_records": 1,
-      "expected_max_records": 1,
+      "expected_max_records": 4,
   })
+  for seq, observed_prefix in enumerate((5, 9, 13), start=1):
+    pre_meta = json.loads(
+        (directory / "p38_serving_0000_pre.json").read_text()
+    )["meta"]
+    token_ids = [101, 102, *range(103, 103 + observed_prefix - 1)]
+    pre_meta["observed_max_prefix"] = observed_prefix
+    pre_meta["capture_anchor_prefix"] = observed_prefix
+    pre_meta["requests"][0]["num_computed_tokens"] = observed_prefix
+    pre_meta["requests"][0]["expected_seq_len"] = observed_prefix + 1
+    pre_meta["requests"][0]["num_tokens"] = observed_prefix + 1
+    pre_meta["requests"][0]["token_ids"] = token_ids
+    pre_meta["requests"][0]["token_history_sha256"] = (
+        MODULE._token_history_sha256(token_ids)
+    )
+    pre_meta["capture_stratum_index"] = seq
+    pre_meta["capture_stratum"] = [PREFIX_BOUNDS[seq], PREFIX_BOUNDS[seq + 1]]
+    record_pre = {name: np.array(value, copy=True) for name, value in pre.items()}
+    record_pre["input_positions"][1] = observed_prefix
+    record_pre["md_seq_lens"][1] = observed_prefix + 1
+    _write_stage(directory, "pre", record_pre, pre_meta, seq)
+    _write_stage(directory, "post", post, {
+        "actual_steps": 1,
+        "completed_records": seq + 1,
+        "expected_max_records": 4,
+    }, seq)
   capsule_arrays = {
       "prompt_ids": np.array([[101, 102]], dtype=np.int32),
       "prompt_mask": np.array([[True, True]]),
-      "completion_ids": np.array([[103, 104]], dtype=np.int32),
-      "completion_valid_mask": np.array([[True, True]]),
-      "action_mask": np.array([[True, True]]),
-      "s_decode": np.array([[0.0, 0.1]], dtype=np.float32),
-      "s_prefill": np.array([[0.0, 0.2]], dtype=np.float32),
-      "t_old": np.array([[0.0, 0.2]], dtype=np.float32),
+      "completion_ids": np.arange(103, 115, dtype=np.int32)[None, :],
+      "completion_valid_mask": np.ones((1, 12), dtype=np.bool_),
+      "action_mask": np.ones((1, 12), dtype=np.bool_),
+      "s_decode": np.arange(12, dtype=np.float32)[None, :],
+      "s_prefill": np.arange(12, dtype=np.float32)[None, :],
+      "t_old": np.arange(12, dtype=np.float32)[None, :],
   }
   metadata = {
       "schema": "p38-frozenlake-mismatch-capsule-v1",
@@ -135,10 +201,18 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
   return holder
 
 
-def _classify(holder: tempfile.TemporaryDirectory, expected_records: int = 1):
+def _classify(holder: tempfile.TemporaryDirectory, expected_records: int = 4):
   directory = Path(holder.name)
+  bounds = (
+      PREFIX_BOUNDS
+      if expected_records == 4
+      else tuple(range(expected_records + 1))
+  )
   return MODULE.classify(
-      directory, expected_records, directory / "mismatch.npz"
+      directory,
+      expected_records,
+      directory / "mismatch.npz",
+      bounds,
   )
 
 
@@ -168,6 +242,16 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     with self.assertRaisesRegex(MODULE.CaptureError, "SHA mismatch"):
       _classify(holder)
 
+  def test_rejects_missing_five_times_storage_guard(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0000_pre.json")
+    record = json.loads(path.read_text())
+    record["storage_guard"]["multiplier"] = 4
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "five-times storage guard"):
+      _classify(holder)
+
   def test_rejects_non_continue_decode_record(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)
@@ -176,6 +260,70 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     record["meta"]["continue_decode_enabled"] = False
     path.write_text(json.dumps(record))
     with self.assertRaisesRegex(MODULE.CaptureError, "did not capture continue-decode"):
+      _classify(holder)
+
+  def test_rejects_missing_implementation_identity(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0000_pre.json")
+    record = json.loads(path.read_text())
+    record["meta"].pop("implementation_identity")
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "no implementation identity"):
+      _classify(holder)
+
+  def test_rejects_duplicate_capture_stratum(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0001_pre.json")
+    record = json.loads(path.read_text())
+    record["meta"]["capture_stratum_index"] = 0
+    record["meta"]["capture_stratum"] = [0, 4]
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "duplicates capture stratum"):
+      _classify(holder)
+
+  def test_rejects_prefix_outside_capture_stratum(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0000_pre.json")
+    record = json.loads(path.read_text())
+    record["meta"]["capture_stratum_index"] = 3
+    record["meta"]["capture_stratum"] = [12, 16]
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "outside its capture stratum"):
+      _classify(holder)
+
+  def test_rejects_prefix_bound_drift(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0000_pre.json")
+    record = json.loads(path.read_text())
+    record["meta"]["capture_prefix_bounds"] = [1536, 1792, 2048]
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "prefix bounds drifted"):
+      _classify(holder)
+
+  def test_rejects_source_commit_identity_drift(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0001_pre.json")
+    record = json.loads(path.read_text())
+    record["meta"]["env"]["CANON_EXPECT_COMMIT"] = "2" * 40
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "source commit identity drifted"):
+      _classify(holder)
+
+  def test_rejects_callable_identity_drift(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0001_pre.json")
+    record = json.loads(path.read_text())
+    record["meta"]["implementation_identity"]["model_fn"]["chain"][0][
+        "qualname"
+    ] = "other_model_fn"
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "implementation identity drifted"):
       _classify(holder)
 
   def test_accepts_unified_output_contract(self):
@@ -251,8 +399,8 @@ class ClassifyServingCaptureTest(unittest.TestCase):
   def test_rejects_record_count_mismatch(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)
-    with self.assertRaisesRegex(MODULE.CaptureError, "expected 2 pre records"):
-      _classify(holder, 2)
+    with self.assertRaisesRegex(MODULE.CaptureError, "expected 5 pre records"):
+      _classify(holder, 5)
 
   def test_rejects_unscheduled_request(self):
     holder = _valid_directory()
@@ -287,14 +435,17 @@ class ClassifyServingCaptureTest(unittest.TestCase):
   def test_rejects_missing_mismatch_join(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)
-    path = Path(holder.name, "p38_serving_0000_pre.json")
-    record = json.loads(path.read_text())
-    record["meta"]["requests"][0]["token_ids"] = [999, 998, 997]
-    record["meta"]["requests"][0]["token_history_sha256"] = (
-        MODULE._token_history_sha256([999, 998, 997])
-    )
-    path.write_text(json.dumps(record))
-    with self.assertRaisesRegex(MODULE.CaptureError, "found 0"):
+    for seq in range(4):
+      path = Path(holder.name, f"p38_serving_{seq:04d}_pre.json")
+      record = json.loads(path.read_text())
+      original = record["meta"]["requests"][0]["token_ids"]
+      replacement = list(range(999, 999 + len(original)))
+      record["meta"]["requests"][0]["token_ids"] = replacement
+      record["meta"]["requests"][0]["token_history_sha256"] = (
+          MODULE._token_history_sha256(replacement)
+      )
+      path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "no serving record joins"):
       _classify(holder)
 
   def test_rejects_missing_required_mismatch_capsule(self):
@@ -303,7 +454,7 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     capsule = Path(holder.name, "mismatch.npz")
     capsule.unlink()
     with self.assertRaisesRegex(MODULE.CaptureError, "capsule is absent"):
-      MODULE.classify(Path(holder.name), 1, capsule)
+      MODULE.classify(Path(holder.name), 4, capsule, PREFIX_BOUNDS)
 
   def test_allows_missing_capsule_when_join_is_not_required(self):
     holder = _valid_directory()
@@ -312,8 +463,9 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     capsule.unlink()
     report = MODULE.classify(
         Path(holder.name),
-        1,
+        4,
         capsule,
+        PREFIX_BOUNDS,
         require_mismatch_join=False,
     )
     self.assertEqual(report["verdict"], "PASS")
@@ -331,8 +483,9 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     path.write_text(json.dumps(record))
     report = MODULE.classify(
         Path(holder.name),
-        1,
+        4,
         Path(holder.name, "mismatch.npz"),
+        PREFIX_BOUNDS,
         require_mismatch_join=False,
     )
     self.assertEqual(report["verdict"], "PASS")

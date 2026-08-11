@@ -1,6 +1,6 @@
 --- tpu_runner_p21_l30.py
 +++ tpu_runner_p38_serving_capture.py
-@@ -932,6 +932,19 @@
+@@ -932,6 +932,54 @@
  _P18_SEQ = {"n": 0}
  _P35_METADATA_DIR = os.environ.get("CANON_P35_METADATA_DIR", "")
  _P35_METADATA_SEQ = {"n": 0}
@@ -10,17 +10,52 @@
 +    os.environ.get("CANON_P38_SERVING_CAPTURE_MAX_CALLS", "1") or "1")
 +_P38_SERVING_CAPTURE_MIN_PREFIX = int(
 +    os.environ.get("CANON_P38_SERVING_CAPTURE_MIN_PREFIX", "0") or "0")
++_P38_SERVING_CAPTURE_PREFIX_BOUNDS_TEXT = os.environ.get(
++    "CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS", "")
++_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER = int(os.environ.get(
++    "CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER", "5") or "5")
++try:
++    _P38_SERVING_CAPTURE_PREFIX_PARTS = (
++        _P38_SERVING_CAPTURE_PREFIX_BOUNDS_TEXT.split(",")
++        if _P38_SERVING_CAPTURE_PREFIX_BOUNDS_TEXT else [])
++    if any(not part.strip() for part in _P38_SERVING_CAPTURE_PREFIX_PARTS):
++        raise ValueError("empty prefix bound")
++    _P38_SERVING_CAPTURE_PREFIX_BOUNDS = tuple(
++        int(part) for part in _P38_SERVING_CAPTURE_PREFIX_PARTS)
++except ValueError as error:
++    raise RuntimeError(
++        "CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS must contain integers") from error
 +_P38_SERVING_CAPTURE_SEQ = {"n": 0}
++_P38_SERVING_CAPTURED_STRATA = set()
 +
 +if _P38_SERVING_CAPTURE_DIR and _P38_SERVING_CAPTURE_MAX_CALLS < 1:
 +    raise RuntimeError(
 +        "CANON_P38_SERVING_CAPTURE_MAX_CALLS must be positive when capture is enabled")
 +if _P38_SERVING_CAPTURE_MIN_PREFIX < 0:
 +    raise RuntimeError("CANON_P38_SERVING_CAPTURE_MIN_PREFIX must be non-negative")
++if _P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER < 5:
++    raise RuntimeError(
++        "P38 serving capture free-space multiplier must be at least five")
++if _P38_SERVING_CAPTURE_DIR:
++    if len(_P38_SERVING_CAPTURE_PREFIX_BOUNDS) < 2:
++        raise RuntimeError(
++            "P38 serving capture requires at least two prefix bounds")
++    if any(left >= right for left, right in zip(
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS,
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS[1:])):
++        raise RuntimeError(
++            "P38 serving capture prefix bounds must be strictly increasing")
++    if _P38_SERVING_CAPTURE_PREFIX_BOUNDS[0] != _P38_SERVING_CAPTURE_MIN_PREFIX:
++        raise RuntimeError(
++            "P38 serving capture minimum prefix and first bound differ")
++    if _P38_SERVING_CAPTURE_MAX_CALLS != len(
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS) - 1:
++        raise RuntimeError(
++            "P38 serving capture call budget must equal the stratum count")
  
  
  def _p18_leaf(x):
-@@ -1015,6 +1028,354 @@
+@@ -1015,6 +1063,461 @@
      )
  
  
@@ -39,11 +74,61 @@
 +    return str(value)
 +
 +
++def _p38_callable_identity(value):
++    """Describe a callable without unstable memory-address representations."""
++    import hashlib as _hashlib
++    from pathlib import Path as _Path
++
++    current = value
++    chain = []
++    seen = set()
++    for _ in range(8):
++        if id(current) in seen:
++            break
++        seen.add(id(current))
++        chain.append({
++            "type_module": type(current).__module__,
++            "type_name": type(current).__qualname__,
++            "module": getattr(current, "__module__", None),
++            "qualname": getattr(current, "__qualname__", None),
++        })
++        next_value = getattr(current, "__wrapped__", None)
++        if next_value is None and hasattr(current, "func"):
++            next_value = getattr(current, "func")
++        if next_value is None or next_value is current:
++            break
++        current = next_value
++
++    code = getattr(current, "__code__", None)
++    source_file = getattr(code, "co_filename", None)
++    source_sha256 = None
++    if source_file:
++        source_path = _Path(source_file)
++        if source_path.is_file():
++            source_sha256 = _hashlib.sha256(source_path.read_bytes()).hexdigest()
++    return {
++        "chain": chain,
++        "source_file": source_file,
++        "source_sha256": source_sha256,
++    }
++
++
++def _p38_capture_stratum(max_prefix):
++    """Return the configured half-open prefix stratum for one decode call."""
++    for index, (lower, upper) in enumerate(zip(
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS,
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS[1:])):
++        if lower <= max_prefix < upper:
++            return index, lower, upper
++    return None
++
++
 +def _p38_serving_dump(stage, seq, payload, meta):
 +    """Persist one bounded serving record without overwriting prior evidence."""
 +    import hashlib as _hashlib
 +    import json as _json
 +    from pathlib import Path as _Path
++    import shutil as _shutil
 +
 +    if stage not in ("pre", "post"):
 +        raise RuntimeError(f"unsupported P38 serving stage: {stage!r}")
@@ -73,6 +158,23 @@
 +        elif value is not None:
 +            describe[key] = _p38_jsonable(value)
 +
++    payload_bytes = sum(int(np.asarray(value).nbytes) for value in arrays.values())
++    estimated_total_bytes = payload_bytes * _P38_SERVING_CAPTURE_MAX_CALLS
++    required_free_bytes = (
++        estimated_total_bytes * _P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER)
++    free_bytes = int(_shutil.disk_usage(directory).free)
++    if free_bytes < required_free_bytes:
++        raise RuntimeError(
++            "P38 serving capture lacks the required free-space margin: "
++            f"free={free_bytes} required={required_free_bytes}")
++    storage_guard = {
++        "payload_bytes": payload_bytes,
++        "estimated_total_bytes": estimated_total_bytes,
++        "free_bytes": free_bytes,
++        "required_free_bytes": required_free_bytes,
++        "multiplier": _P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER,
++    }
++
 +    with npz_path.open("xb") as stream:
 +        np.savez(stream, **arrays)
 +    npz_sha256 = _hashlib.sha256(npz_path.read_bytes()).hexdigest()
@@ -83,6 +185,7 @@
 +        "arrays": sorted(arrays),
 +        "describe": describe,
 +        "meta": _p38_jsonable(meta),
++        "storage_guard": storage_guard,
 +        "npz_sha256": npz_sha256,
 +    }
 +    with json_path.open("x", encoding="utf-8") as stream:
@@ -97,6 +200,7 @@
 +            "npz_sha256": npz_sha256,
 +            "json_sha256": json_sha256,
 +            "base": str(base),
++            "storage_guard": storage_guard,
 +        }, sort_keys=True),
 +        flush=True,
 +    )
@@ -260,14 +364,13 @@
 +
 +def _p38_serving_begin(runner, scheduler_output, req_ids_dp, input_ids,
 +                       input_positions, active_mask, attn_metadata,
-+                       sampling_metadata, tokens_indices_selector,
++                       sampling_metadata, sample_fn, tokens_indices_selector,
 +                       max_decode_steps,
 +                       padded_num_scheduled_tokens_per_dp_rank):
 +    """Write the pre-dispatch record and return its sequence number."""
 +    if not _P38_SERVING_CAPTURE_DIR:
 +        return None
-+    seq = _P38_SERVING_CAPTURE_SEQ["n"]
-+    if seq >= _P38_SERVING_CAPTURE_MAX_CALLS:
++    if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
 +        return None
 +
 +    positions_host, active_host = jax.device_get(
@@ -275,10 +378,35 @@
 +    positions_host = np.asarray(positions_host)
 +    active_host = np.asarray(active_host, dtype=np.bool_)
 +    active_positions = positions_host[active_host]
++    min_prefix = int(active_positions.min()) if active_positions.size else -1
 +    max_prefix = int(active_positions.max()) if active_positions.size else -1
-+    if max_prefix < _P38_SERVING_CAPTURE_MIN_PREFIX:
++    candidate_strata = []
++    for index, (lower, upper) in enumerate(zip(
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS,
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS[1:])):
++        if index in _P38_SERVING_CAPTURED_STRATA:
++            continue
++        if np.any((active_positions >= lower) & (active_positions < upper)):
++            candidate_strata.append((index, lower, upper))
++    if not candidate_strata:
 +        return None
++    stratum_index, stratum_lower, stratum_upper = candidate_strata[0]
++    request_meta = _p38_serving_request_meta(
++        runner, scheduler_output, req_ids_dp, tokens_indices_selector,
++        padded_num_scheduled_tokens_per_dp_rank, positions_host,
++        active_host, attn_metadata.block_tables, attn_metadata.seq_lens,
++        attn_metadata.query_start_loc)
++    anchor_candidates = [
++        item for item in request_meta["requests"]
++        if stratum_lower <= int(item["num_computed_tokens"]) < stratum_upper
++    ]
++    if not anchor_candidates:
++        raise RuntimeError(
++            "P38 capture stratum has no mapped scheduled request")
++    anchor = anchor_candidates[0]
 +
++    seq = _P38_SERVING_CAPTURE_SEQ["n"]
++    _P38_SERVING_CAPTURED_STRATA.add(stratum_index)
 +    _P38_SERVING_CAPTURE_SEQ["n"] += 1
 +    sampling_leaves, sampling_tree = jax.tree_util.tree_flatten(
 +        sampling_metadata)
@@ -310,14 +438,28 @@
 +
 +    meta = {
 +        **_p18_contract_meta(runner.mesh),
-+        **_p38_serving_request_meta(
-+            runner, scheduler_output, req_ids_dp, tokens_indices_selector,
-+            padded_num_scheduled_tokens_per_dp_rank, positions_host,
-+            active_host, attn_metadata.block_tables, attn_metadata.seq_lens,
-+            attn_metadata.query_start_loc),
++        **request_meta,
 +        "capture_max_calls": _P38_SERVING_CAPTURE_MAX_CALLS,
 +        "capture_min_prefix": _P38_SERVING_CAPTURE_MIN_PREFIX,
++        "capture_prefix_bounds": list(_P38_SERVING_CAPTURE_PREFIX_BOUNDS),
++        "capture_stratum_index": stratum_index,
++        "capture_stratum": [stratum_lower, stratum_upper],
++        "capture_anchor_request_id": anchor["request_id"],
++        "capture_anchor_prefix": int(anchor["num_computed_tokens"]),
++        "observed_min_prefix": min_prefix,
 +        "observed_max_prefix": max_prefix,
++        "implementation_identity": {
++            "runner_class": {
++                "module": type(runner).__module__,
++                "qualname": type(runner).__qualname__,
++            },
++            "continue_decode": _p38_callable_identity(continue_decode),
++            "model_fn": _p38_callable_identity(getattr(
++                runner.model, "step_fn_no_options", runner.model_fn)),
++            "compute_logits_fn": _p38_callable_identity(
++                runner.compute_logits_fn),
++            "sample_fn": _p38_callable_identity(sample_fn),
++        },
 +        "sampling_tree": str(sampling_tree),
 +        "max_decode_steps": int(max_decode_steps),
 +        "static_max_decode_steps": int(runner.static_max_decode_steps),
@@ -375,7 +517,7 @@
  
  def _p18_weight_fingerprint(state_leaves):
      """Exact bitwise checksum over the weights, computed on-device (cheap).
-@@ -2142,8 +2503,8 @@
+@@ -2142,8 +2645,8 @@
              spec_decode_metadata,
              logits_indices_selector,
              padded_num_reqs,
@@ -386,7 +528,7 @@
              tokens_indices_selector,
          ) = self._prepare_inputs(scheduler_output)
  
-@@ -2171,6 +2532,20 @@
+@@ -2171,6 +2674,21 @@
              max_decode_steps = 1
          max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
  
@@ -399,6 +541,7 @@
 +            active_mask,
 +            attn_metadata,
 +            sampling_metadata,
++            sample,
 +            tokens_indices_selector,
 +            max_decode_steps,
 +            padded_num_scheduled_tokens_per_dp_rank,
@@ -407,7 +550,7 @@
          lora_metadata = self.lora_utils.extract_lora_metadata()
  
          # Run continue-decode as a single JIT'd on-device loop (JAX while_loop with
-@@ -2255,6 +2630,16 @@
+@@ -2255,6 +2773,16 @@
              lp_vals_cpu = np.asarray(lp_vals_cpu)[:actual_steps]
              lp_ranks_cpu = np.asarray(lp_ranks_cpu)[:actual_steps]
  

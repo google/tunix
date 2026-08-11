@@ -27,6 +27,7 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
 | P38.2g | FrozenLake single-row causal replay | Stock multi-turn replay reproduces the red before single-turn, MIXED-only KV-unified, and all-distribution KV-unified counterfactuals are interpreted | one-host target row 191 complete: local serving envelope not reproduced; R2/R3 stay gated; move shadow arms to Pathways |
 | P38.2g2 | Source-pinned Pathways serving capture and combined KV arm | Real continue-decode metadata is durable and stock is reproduced before the default-off all-cache-read arm is interpreted | target numerical runs exist: stock red and U red; serving postflight/archive missing, so `INCONCLUSIVE`; rerun stock only |
 | P38.2g3 | Exact-state physical-page and padding-boundary discriminator | The complete production action vector is first reproduced exactly, then real, relocated, contiguous, padding-sanitized, and padding-poison arms are compared with temporal page-content equivalence checks | pending; blocked on complete P38.2g2 stock archive and exact E0 reproduction |
+| P38.2g4 | Decode-envelope seam localization with stratified production capture | Four bounded prefix strata and implementation identity survive, at least one exact token-history join is admitted, E0 reproduces the complete A/B vectors, and the first A/B divergence is localized before any repair | active; D0 locally complete, D1 target capture not run |
 | P38.2h | Candidate target backward-no-commit | The selected candidate first makes all forward boundaries exact, then passes actual-model gradient/DP-reducer gates with zero optimizer commits | pending; forbidden before P38.2g selects a candidate |
 
 ## Decisions
@@ -136,3 +137,15 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
   evidence, and W&B warning/fraction/range metrics. The terminal classifier
   has `claim_level=convergence-only`. Frozen-image CPU and exact-image gates
   pass locally; no target run has been made.
+- Decision (2026-08-11): the next strict FrozenLake capture uses four prefix
+  strata `[1536,1792)`, `[1792,2048)`, `[2048,2304)`, and `[2304,2560)`
+  rather than one `min_prefix=1788` record. This is a diagnostic selection
+  contract, not a change to the model prompt, rollout length, cache, or
+  attention geometry. At least one exact token-history join is required;
+  missing or duplicate strata are inconclusive.
+- Decision (2026-08-11): the canonical core-operator chain does not prove
+  whole-executable identity. P38.2g4 first attests the native decode callable
+  envelope and reproduces E0, then checks ordered seams including RoPE,
+  residual/cast boundaries, RPA, and the logits tail. RoPE is a candidate
+  because it is not numerically canonicalized, but no repair is selected until
+  the first divergent checkpoint is measured with observer neutrality.

@@ -287,9 +287,11 @@ validate_p38_serving_preflight() (
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
   export CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=2
   export CANON_P38_SERVING_CAPTURE_DIR="$state/serving"
-  export CANON_P38_SERVING_CAPTURE_MAX_CALLS=1
-  export CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1788
-  export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=1
+  export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
+  export CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
+  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
+  export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
+  export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$state/serving.json"
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$state/serving.tar"
   export CANON_P38_PRECHECK_ONLY=1
@@ -297,7 +299,16 @@ validate_p38_serving_preflight() (
   export INJECTED_WANDB_API_KEY=test-key-not-a-credential
   bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
   grep -q 'export CANON_KV_UNIFIED=1' "$state/env.sh"
-  grep -q 'export CANON_P38_SERVING_CAPTURE_MAX_CALLS=1' "$state/env.sh"
+  grep -q 'export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4' "$state/env.sh"
+  grep -Fq 'export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536\,1792\,2048\,2304\,2560' "$state/env.sh"
+  grep -q 'export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5' "$state/env.sh"
+
+  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted drifted prefix strata" >&2
+    exit 1
+  fi
+  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
 
   unset CANON_P38_SERVING_CAPTURE_DIR
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then

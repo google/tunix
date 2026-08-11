@@ -138,6 +138,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py" \
       --directory "$CANON_P38_SERVING_CAPTURE_DIR" \
       --expected-records "$CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS" \
+      --prefix-bounds "$CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS" \
       --mismatch-capsule "$CANON_P38_MISMATCH_CAPSULE" \
       "${p38_join_args[@]}" \
       --output "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"

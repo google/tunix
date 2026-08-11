@@ -52,9 +52,16 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P33_RUN_STAGE"], "backward-no-commit")
         self.assertEqual(env["CANON_P33_NO_COMMIT"], "1")
         self.assertEqual(env["CANON_P38_PRECHECK_ONLY"], "1")
-        self.assertEqual(env["CANON_P38_SERVING_CAPTURE_MAX_CALLS"], "1")
-        self.assertEqual(env["CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS"], "1")
-        self.assertEqual(env["CANON_P38_SERVING_CAPTURE_MIN_PREFIX"], "1788")
+        self.assertEqual(env["CANON_P38_SERVING_CAPTURE_MAX_CALLS"], "4")
+        self.assertEqual(env["CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS"], "4")
+        self.assertEqual(env["CANON_P38_SERVING_CAPTURE_MIN_PREFIX"], "1536")
+        self.assertEqual(
+            env["CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS"],
+            "1536,1792,2048,2304,2560",
+        )
+        self.assertEqual(
+            env["CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER"], "5"
+        )
         self.assertTrue(env["CANON_P38_MISMATCH_CAPSULE"].endswith(".npz"))
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])

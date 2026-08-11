@@ -311,6 +311,25 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
           *args[:3], args[3], 2, *args[4:]
       )
 
+  def test_serving_capture_selects_each_prefix_stratum_once(self):
+    self.assertEqual(
+        [self.runner._p38_capture_stratum(value) for value in (
+            1535, 1536, 1791, 1792, 2047, 2048, 2303, 2304, 2559, 2560
+        )],
+        [
+            None,
+            (0, 1536, 1792),
+            (0, 1536, 1792),
+            (1, 1792, 2048),
+            (1, 1792, 2048),
+            (2, 2048, 2304),
+            (2, 2048, 2304),
+            (3, 2304, 2560),
+            (3, 2304, 2560),
+            None,
+        ],
+    )
+
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()

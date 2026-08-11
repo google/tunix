@@ -437,6 +437,10 @@ Consequently:
 
 ### Remote operator: run one fresh stock-only capture
 
+This older single-record instruction is superseded by P38.2g4 below. Do not
+launch from `b7b20e2` or use `CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1788` after
+the P38.2g4 implementation is published.
+
 Use exact source `b7b20e261433977bc57bd83452fd6ac1c4680cdd` (or a later reviewed
 documentation-only descendant that leaves the renderer/runtime unchanged).
 Use a fresh run ID and output directory. Render both manifests only because
@@ -500,3 +504,45 @@ pretty-printed alignment JSON or the generic `dae4e75d...` NPZ. P38.2g3 E0 is
 the next phase only after these artifacts pass transport, exact join, and
 whole-vector reproduction. E1-E5 and all repair claims remain blocked until
 E0 is exact.
+
+## P38.2g4 current handoff: local gate complete; do not launch yet
+
+The current active plan is
+`phases/p38-2g4-decode-envelope-seam.md`. It does not claim that RoPE, cache
+pages, or scheduler ownership is the root cause. It first replaces the brittle
+single capture threshold with four bounded intervals:
+
+```text
+[1536,1792) [1792,2048) [2048,2304) [2304,2560)
+```
+
+These are continue-decode capture filters only. They do not change prompt
+length, response length, attention tiles, prefix cache, or model geometry.
+Capture at most one call per interval, require the complete four-record set,
+and require at least one unambiguous token-history join to the run-specific
+mismatch capsule. Missing/duplicate intervals, zero joins, source identity
+drift, an incomplete outer log, or missing archive transport are
+`INCONCLUSIVE`.
+
+D0 is locally complete: classifier 25/25, renderer 5/5, shell postflight,
+exact-image Qwen3-1.7B and Qwen3-8B 14/14 each with all 29 manifest entries,
+and the full frozen-image P33 CPU gate all pass. The installed runner SHA-256
+is `fe81622996a1c73bbd17187ee603e6a191165202da40d07b5e428fe41b5db516`.
+Docker had no TPU device, so this proves construction and image compatibility,
+not target behavior. The work is still uncommitted and unpublished. Do not
+render or apply a target manifest until the user separately approves source
+publication and the target resource use.
+
+After publication and resource approval, run stock only on Attempt 0 with
+prefix cache disabled, backward disabled, and zero optimizer commits. Do not
+rerun combined U. Recover the complete head log, run-specific mismatch capsule,
+serving tar, classifier JSON, and final PATHTRACE. Before launch, estimate the
+archive size and require at least five times that size as free space.
+
+The next numerical gate is E0: the joined request's entire A vector and entire
+B vector must reproduce the production vectors bitwise, while source A-B stays
+red. Only then may the same record enter the ordered seam probe (layer input,
+Q/K/V projection, Q/K norm, post-RoPE, RPA, output/residual, MLP, layer output,
+final norm/logit/normalizer) and the independent page/cache E1-E4 branch.
+Observer instrumentation is void unless observer-off and observer-on endpoints
+remain bitwise equal.

@@ -121,6 +121,8 @@ esac
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   for k in CANON_P38_SERVING_CAPTURE_MAX_CALLS \
            CANON_P38_SERVING_CAPTURE_MIN_PREFIX \
+           CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS \
+           CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER \
            CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS \
            CANON_P38_SERVING_CAPTURE_CLASSIFICATION \
            CANON_P38_SERVING_CAPTURE_ARCHIVE \
@@ -137,9 +139,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 serving capture requires backward-no-commit" >&2
     fail=1
   }
-  [ "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}" = "1" ] && \
-  [ "${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}" = "1" ] || {
-    echo "[env] P38 serving capture must retain exactly one record" >&2
+  [ "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}" = "4" ] && \
+  [ "${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}" = "4" ] || {
+    echo "[env] P38 serving capture must retain exactly four strata" >&2
     fail=1
   }
   [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] || {
@@ -150,11 +152,21 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 serving capture minimum prefix must be non-negative" >&2
     fail=1
   }
+  [ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" = "1536" ] && \
+  [ "${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}" = \
+      "1536,1792,2048,2304,2560" ] || {
+    echo "[env] P38 serving capture prefix strata drifted" >&2
+    fail=1
+  }
+  [ "${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}" = "5" ] || {
+    echo "[env] P38 serving capture requires the five-times free-space guard" >&2
+    fail=1
+  }
   echo "[env] P38 serving capture enabled: kv_unified=${CANON_KV_UNIFIED:-0}"
 elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
   echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
   fail=1
-elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_PRECHECK_ONLY:-}" ]; then
+elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_PRECHECK_ONLY:-}" ]; then
   echo "[env] partial P38 serving-capture configuration is not admitted" >&2
   fail=1
 fi
