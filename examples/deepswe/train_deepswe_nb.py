@@ -778,7 +778,7 @@ if MODEL_SOURCE == "maxtext":
       model_path=MODEL_PATH,
       enable_checkpointing=True,
       allow_split_physical_axes=True,
-      scan_layers=False,
+      scan_layers=True,
   )
 else:
   qwen_reference = params_lib.create_model_from_safe_tensors(
