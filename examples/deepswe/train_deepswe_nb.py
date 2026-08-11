@@ -135,6 +135,8 @@ parser.add_argument(
 parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
 parser.add_argument("--max_to_keep", type=int, default=4)
 parser.add_argument("--save_interval_steps", type=int, default=500)
+parser.add_argument("--checkpoint_storage_concurrent_gb", type=int, default=96)
+
 
 # Microbatch Sizes
 parser.add_argument("--train_micro_batch_size", type=int, default=1)
@@ -779,6 +781,7 @@ if MODEL_SOURCE == "maxtext":
       enable_checkpointing=True,
       allow_split_physical_axes=True,
       scan_layers=True,
+      checkpoint_storage_concurrent_gb=args.checkpoint_storage_concurrent_gb,
   )
 else:
   qwen_reference = params_lib.create_model_from_safe_tensors(
