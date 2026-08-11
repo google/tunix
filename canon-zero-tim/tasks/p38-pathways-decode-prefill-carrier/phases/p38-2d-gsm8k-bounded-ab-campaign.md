@@ -44,6 +44,14 @@ boundaries hard. The GSM8K job performs 200 updates under the bounded policy.
 Neither result may be described as a full zero-TIM closure if any A/B drift is
 reported.
 
+The GSM8K full JobSet may restart up to three times. Checkpointing remains
+disabled, so every retry starts again at update 0. This is an operational
+availability tradeoff, not checkpoint/resume support. Because the simple
+JobSet policy retries every nonzero exit, it can also repeat a numerical gate
+failure; every attempt number must remain visible and only a complete attempt
+may be classified. FrozenLake and all diagnostic entries retain
+`maxRestarts: 0`.
+
 ## Verification
 
 Before push:

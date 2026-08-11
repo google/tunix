@@ -62,7 +62,17 @@ class RenderP33JobSetsTest(unittest.TestCase):
       states = []
       wandb_names = []
       for document in documents:
-        self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
+        labels = document["metadata"]["labels"]
+        expected_max_restarts = (
+            3
+            if labels["canon.zero-tim/workload"] == "gsm8k"
+            and labels["canon.zero-tim/stage"] == "full"
+            else 0
+        )
+        self.assertEqual(
+            document["spec"]["failurePolicy"]["maxRestarts"],
+            expected_max_restarts,
+        )
         self.assertEqual(
             document["spec"]["replicatedJobs"][0]["template"]["spec"][
                 "backoffLimit"
@@ -84,7 +94,6 @@ class RenderP33JobSetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P33_SHARED_MESH"], "16,4")
         self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
         self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
-        labels = document["metadata"]["labels"]
         if (
             labels["canon.zero-tim/workload"] == "frozenlake"
             and labels["canon.zero-tim/stage"] == "backward-no-commit"

@@ -9,7 +9,9 @@
 > **Current r17 recovery:** follow `P33_R17_HANDOFF.md`. It admits only GSM8K `full` and
 > FrozenLake `alignment-short`; do not apply the whole rendered directory.
 
-This runbook renders five independent, strict Attempt-0 JobSets:
+This runbook renders five independent JobSets. Diagnostic and FrozenLake jobs
+remain strict Attempt-0 runs. The user-approved GSM8K full campaign alone may
+restart from step 0 up to three times after a failed JobSet attempt.
 
 | Queue entry | Model | Stage | Update budget | Purpose |
 |---|---|---|---:|---|
@@ -27,7 +29,10 @@ classifies the two pre-backward boundaries.
 The renderer starts from `cluster/jobset-64chip.yaml` and validates every mutation before it
 writes output. Each JobSet has:
 
-- `maxRestarts: 0` and head/worker `backoffLimit: 0`;
+- GSM8K full: `maxRestarts: 3`; every restart begins again at step 0 because
+  checkpointing remains disabled;
+- every other entry: `maxRestarts: 0`; all entries retain head/worker
+  `backoffLimit: 0`;
 - one exact 40-character source commit assertion;
 - no inherited autoscaling device ids;
 - a unique JobSet name, Pathways GCS scratch, state directory, run log, pre-alignment JSONL,
@@ -82,8 +87,8 @@ Expected render terminal marker:
 ## Validate without allocating resources
 
 The local unit gate verifies exact command parity with `tunix.rl.dp_workloads`, three unique
-scratch/state identities, Attempt-0 retry policy, dynamic worker DNS, source pinning and negative
-controls:
+scratch/state identities, the workload-specific retry policy, dynamic worker
+DNS, source pinning and negative controls:
 
 ```bash
 sudo docker run --rm \
@@ -183,9 +188,13 @@ grep -aE '^\[entrypoint\] JOBSET_ATTEMPT|^\[P33.RUN\] (VERDICT|JSON)' \
   "evidence/p33/${JOBSET}.raw.log"
 ```
 
-A green JobSet requires all of the following in the same Attempt 0 log:
+A green diagnostic or FrozenLake JobSet requires all of the following in the
+same Attempt 0 log. A restarted GSM8K full attempt is operationally admitted,
+but its attempt number must be reported and it is not first-attempt
+determinism evidence:
 
-1. `[entrypoint] JOBSET_ATTEMPT 0 (first attempt)`;
+1. `[entrypoint] JOBSET_ATTEMPT 0 (first attempt)`, except for the explicitly
+   restartable GSM8K full campaign;
 2. image/overlay/source preflight green with the expected source commit;
 3. exactly one online W&B attestation;
 4. a monotonic-metrics close marker at the expected final step with zero regressions;
@@ -199,9 +208,12 @@ A green JobSet requires all of the following in the same Attempt 0 log:
 9. strict jobs: `[P33.RUN] VERDICT PASS ... reasons=[]`; GSM8K full under the
    P38.2d amendment: `PASS_WITH_AB_REPORT_POLICY ... reasons=[]`.
 
-A missing classifier line, retry, stale evidence rejection, traceback, red boundary or wrong count
-is not a partial pass. Preserve the raw log and classify the named JobSet as failed or
-inconclusive before changing code.
+A missing classifier line, stale evidence rejection, traceback, red boundary
+or wrong count is not a partial pass. Preserve the raw log and classify the
+named JobSet as failed or inconclusive before changing code. GSM8K full retries
+all nonzero exits, including numerical gate failures; this simple policy does
+not distinguish infrastructure failures. It performs no checkpoint restore and
+may run at most four complete attempts (initial plus three restarts).
 
 ## Runtime rollback
 
@@ -218,8 +230,9 @@ not admitted by P38.2d.
 
 User-approved launch of both full workloads under the verified proxy-XLA regime. Source must be
 pinned at or after the commit that records this contract; both JobSets render from
-`render_p33_jobsets.py` with fresh run ids and launch as strict Attempt 0 (`maxRestarts=0`,
-head `backoffLimit=0`). The step-1 and step-10 report groups are the promotion readouts of the
+`render_p33_jobsets.py` with fresh run ids. FrozenLake remains strict Attempt 0;
+GSM8K full uses `maxRestarts=3` with no checkpoint and therefore restarts from
+step 0. Both retain head `backoffLimit=0`. The step-1 and step-10 report groups are the promotion readouts of the
 old ladder, embedded in one launch; a red gate stops the run by itself with base evidence
 already persisted.
 

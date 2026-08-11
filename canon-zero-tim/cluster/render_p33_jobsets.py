@@ -18,6 +18,7 @@ _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _RUN_ID_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,14}[a-z0-9])?")
 _BRANCH = "yuxzhang/canon-zero-tim"
 _SCRATCH_ROOT = "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33"
+_GSM8K_FULL_MAX_RESTARTS = 3
 
 
 def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
@@ -262,7 +263,10 @@ def render_jobset(
       "canon.zero-tim/stage": spec.stage,
       "canon.zero-tim/source": source_commit[:8],
   })
-  document["spec"]["failurePolicy"]["maxRestarts"] = 0
+  max_restarts = (
+      _GSM8K_FULL_MAX_RESTARTS if spec.key == "gsm8k-full" else 0
+  )
+  document["spec"]["failurePolicy"]["maxRestarts"] = max_restarts
   document["spec"]["replicatedJobs"][1]["template"]["spec"][
       "backoffLimit"
   ] = 0
@@ -380,8 +384,17 @@ def validate_jobset(
     raise ValueError("P33 manifests require the reviewed JobSet API version")
   if document.get("metadata", {}).get("name") != name:
     raise ValueError("generated JobSet name drifted")
-  if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
-    raise ValueError("P33 JobSets must not hide a red gate behind a restart")
+  expected_max_restarts = (
+      _GSM8K_FULL_MAX_RESTARTS if spec.key == "gsm8k-full" else 0
+  )
+  if (
+      document["spec"]["failurePolicy"].get("maxRestarts")
+      != expected_max_restarts
+  ):
+    raise ValueError(
+        "P33 JobSet restart policy drifted: "
+        f"expected {expected_max_restarts} for {spec.key}"
+    )
   head_job = document["spec"]["replicatedJobs"][0]
   if head_job["template"]["spec"].get("backoffLimit") != 0:
     raise ValueError("P33 head Job must not retry a failed training attempt")
