@@ -106,6 +106,8 @@ def _pre_alignment(
 
 
 def _update(index: int) -> dict:
+  effective_lr = 0.0 if index == 0 else 4.0e-9
+  parameter_changed = 0 if index == 0 else 1
   return {
       "verdict": "PASS",
       "dp_axis": "data",
@@ -121,6 +123,20 @@ def _update(index: int) -> dict:
       "accumulator_changed_paths": [],
       "reference_changed_paths": [],
       "commit_gradient_norm": 1.0,
+      "optimizer_transaction_valid": True,
+      "parameter_mutation": (
+          "zero_lr_unchanged" if index == 0 else "observed_nonzero"
+      ),
+      "commit_evidence": {
+          "effective_learning_rate": effective_lr,
+          "gradient_nonzero_elements": 1,
+          "gradient_max_abs": 1.0,
+          "gradient_finite": True,
+          "parameter_changed_elements": parameter_changed,
+          "parameter_total_elements": 1,
+          "parameter_delta_max_abs": 0.0 if index == 0 else 1.0e-8,
+          "parameter_delta_finite": True,
+      },
   }
 
 
@@ -397,6 +413,42 @@ class ClassifyP33RunTest(unittest.TestCase):
       self.assertIn(
           "pre_alignment[0].S_decode_vs_S_prefill.differing_bytes",
           result["reasons"],
+      )
+
+  def test_negative_control_rejects_parameter_change_at_zero_lr(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      run_log = root / "run.log"
+      updates = root / "updates.jsonl"
+      pre_alignments = root / "pre_alignment.jsonl"
+      alignments = root / "alignment.jsonl"
+      run_log.write_text(
+          "[CANON_P33_WANDB] ONLINE_RUN_PASS\n"
+          "[CANON_P31_METRICS] monotonic_direct last_step=0 events=1 regressions=0\n"
+          "[CANON_P33_DP16] update_step_committed\n",
+          encoding="utf-8",
+      )
+      update = _update(0)
+      update["commit_evidence"]["parameter_changed_elements"] = 1
+      update["commit_evidence"]["parameter_delta_max_abs"] = 1.0e-8
+      update["parameter_mutation"] = "observed_nonzero"
+      self._write_jsonl(updates, [update])
+      self._write_jsonl(pre_alignments, [_pre_alignment(0)])
+      self._write_jsonl(
+          alignments,
+          (_alignment(index, optimizer_skipped=False) for index in range(16)),
+      )
+      result = classifier.classify(
+          workload="gsm8k",
+          stage="one-update",
+          run_log=run_log,
+          pre_alignment_report=pre_alignments,
+          update_report=updates,
+          alignment_report=alignments,
+      )
+      self.assertEqual(result["verdict"], "FAIL")
+      self.assertIn(
+          "update[0].zero_lr_model_unchanged", result["reasons"]
       )
 
   def test_negative_control_rejects_one_changed_boundary(self):

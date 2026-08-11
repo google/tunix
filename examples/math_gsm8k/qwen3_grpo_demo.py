@@ -695,21 +695,28 @@ if not CANON_GSM8K_L3:
   )
 
 
-def create_optimizer() -> optax.GradientTransformation:
+def create_learning_rate_schedule() -> optax.Schedule:
+  """Returns the exact schedule consumed by the GSM8K optimizer."""
   if CANON_GSM8K_UPDATE_CANARY:
     # The production schedule intentionally starts warmup at LR=0.  A one-step
     # update canary would therefore call the optimizer without changing any
     # weight.  Use the recipe's registered peak LR as a default-off diagnostic
     # constant so the canary tests a real update rather than a no-op.
-    learning_rate = optax.constant_schedule(LEARNING_RATE)
-  else:
-    learning_rate = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=LR_DECAY_STEPS,
-        end_value=0.0,
-    )
+    return optax.constant_schedule(LEARNING_RATE)
+  return optax.warmup_cosine_decay_schedule(
+      init_value=0.0,
+      peak_value=LEARNING_RATE,
+      warmup_steps=WARMUP_STEPS,
+      decay_steps=LR_DECAY_STEPS,
+      end_value=0.0,
+  )
+
+
+def create_optimizer(
+    learning_rate: optax.Schedule | None = None,
+) -> optax.GradientTransformation:
+  if learning_rate is None:
+    learning_rate = create_learning_rate_schedule()
   optimizer = optax.adamw(
       learning_rate=learning_rate,
       b1=ADAM_B1,
@@ -961,6 +968,7 @@ def main() -> None:
   else:
     raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
+  learning_rate_schedule = create_learning_rate_schedule()
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: shared_mesh,
@@ -970,7 +978,7 @@ def main() -> None:
       rollout_engine=ROLLOUT_ENGINE,
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
-          actor_optimizer=create_optimizer(),
+          actor_optimizer=create_optimizer(learning_rate_schedule),
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
           max_steps=MAX_STEPS,
           max_inflight_computations=1,
@@ -1037,6 +1045,9 @@ def main() -> None:
       reference=reference,
       tokenizer=tokenizer,
       cluster_config=cluster_config,
+  )
+  rl_cluster.actor_trainer.register_learning_rate_schedule(
+      learning_rate_schedule
   )
   show_hbm_usage("after RLCluster creation")
   if CANON_P32_WORKLOAD:

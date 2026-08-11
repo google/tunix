@@ -1154,6 +1154,59 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIsNone(scaled._jitted_precomputed_gradient_scaled_step_fn)
     self.assertIsNotNone(scaled._jitted_precomputed_gradient_scaled_step_impl)
 
+  @parameterized.named_parameters(
+      ("zero_lr", 0.0, False),
+      ("constant_lr", 1.0e-3, True),
+  )
+  def test_p33_commit_evidence_tracks_effective_parameter_delta(
+      self, learning_rate, expect_parameter_change
+  ):
+    schedule = optax.constant_schedule(learning_rate)
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=16,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.adamw(schedule), config
+    )
+    trainer.register_learning_rate_schedule(schedule)
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      for index in range(16):
+        gradient = jax.tree.map(
+            lambda value: type(value)(jnp.ones_like(value[...])),
+            nnx.state(trainer.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        trainer.accumulate_precomputed_gradient_microbatch(
+            gradient, microbatch_index=index
+        )
+      trainer.commit_precomputed_gradients()
+    evidence = trainer.consume_precomputed_commit_evidence()
+    self.assertEqual(evidence["effective_learning_rate"], learning_rate)
+    self.assertGreater(evidence["gradient_nonzero_elements"], 0)
+    self.assertTrue(evidence["gradient_finite"])
+    self.assertTrue(evidence["parameter_delta_finite"])
+    if expect_parameter_change:
+      self.assertGreater(evidence["parameter_changed_elements"], 0)
+      self.assertGreater(evidence["parameter_delta_max_abs"], 0.0)
+    else:
+      self.assertEqual(evidence["parameter_changed_elements"], 0)
+      self.assertEqual(evidence["parameter_delta_max_abs"], 0.0)
+
   def test_p30_optimizer_offload_matches_two_device_commits(self):
     def make_trainer(*, optimizer_offload):
       config = peft_trainer.TrainingConfig(

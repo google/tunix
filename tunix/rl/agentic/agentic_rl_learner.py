@@ -876,6 +876,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     ):
       commit_norm = actor_trainer.commit_precomputed_gradients()
     commit_norm.block_until_ready()
+    commit_evidence = actor_trainer.consume_precomputed_commit_evidence()
     elapsed = time.perf_counter() - start
     hbm_after_commit = memory_snapshot()
     emit_sharding_inventory("after_commit")
@@ -964,14 +965,40 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if before["reference"] is not None else []
     )
     has_learning_signal = any(activity)
-    mutation_ok = (
-        bool(changed["model"]) and bool(changed["optimizer"])
-        if has_learning_signal else True
+    effective_learning_rate = commit_evidence["effective_learning_rate"]
+    schedule_required = p33_workload and workload.name == "gsm8k"
+    schedule_known = effective_learning_rate is not None
+    zero_learning_rate = schedule_known and effective_learning_rate == 0.0
+    parameter_changed_elements = commit_evidence[
+        "parameter_changed_elements"
+    ]
+    parameter_fingerprint_consistent = (
+        not changed["model"] or parameter_changed_elements > 0
+    )
+    zero_lr_model_unchanged = (
+        not zero_learning_rate or parameter_changed_elements == 0
+    )
+    optimizer_transaction_valid = (
+        (not schedule_required or schedule_known)
+        and commit_evidence["gradient_finite"]
+        and commit_evidence["parameter_delta_finite"]
+        and parameter_fingerprint_consistent
+        and zero_lr_model_unchanged
+        and (bool(changed["optimizer"]) if has_learning_signal else True)
+    )
+    parameter_mutation = (
+        "zero_lr_unchanged"
+        if zero_learning_rate and parameter_changed_elements == 0
+        else "observed_nonzero"
+        if parameter_changed_elements > 0
+        else "positive_lr_quantized_zero"
+        if schedule_known and effective_learning_rate > 0.0
+        else "unregistered_schedule_no_change"
     )
     update_record = {
         "verdict": (
           "PASS"
-            if mutation_ok
+            if optimizer_transaction_valid
             and not changed["accumulator"]
             and not reference_changed
             and actor_trainer.train_steps == before["train_steps"] + 1
@@ -997,6 +1024,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "has_learning_signal": has_learning_signal,
         "micro_gradient_norms": [float(np.asarray(x)) for x in micro_norms],
         "commit_gradient_norm": float(np.asarray(commit_norm)),
+        "optimizer_transaction_valid": optimizer_transaction_valid,
+        "parameter_mutation": parameter_mutation,
+        "commit_evidence": commit_evidence,
         "model": {
             "changed_count": len(changed["model"]),
             "changed_paths": changed["model"],
@@ -1052,6 +1082,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               "canonical/active_microbatches": (
                   sum(activity), np.mean
               ),
+              "canonical/effective_learning_rate": (
+                  float(effective_learning_rate or 0.0), np.mean
+              ),
+              "canonical/parameter_changed_elements": (
+                  parameter_changed_elements, np.mean
+              ),
+              "canonical/max_abs_parameter_delta": (
+                  commit_evidence["parameter_delta_max_abs"], np.max
+              ),
           },
           mode=rl_cluster_lib.Mode.TRAIN,
           step=before["train_steps"],
@@ -1061,6 +1100,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         f"verdict={update_record['verdict']} "
         f"model_changed={len(changed['model'])} "
         f"optimizer_changed={len(changed['optimizer'])} "
+        f"parameter_changed_elements={parameter_changed_elements} "
+        f"effective_lr={effective_learning_rate} "
         f"reference_changed={len(reference_changed)}",
         flush=True,
     )

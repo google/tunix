@@ -443,6 +443,82 @@ def classify(
           f"{prefix}.commit_gradient_norm",
           reasons,
       )
+      _require(
+          record.get("optimizer_transaction_valid") is True,
+          f"{prefix}.optimizer_transaction_valid",
+          reasons,
+      )
+      evidence = record.get("commit_evidence")
+      _require(isinstance(evidence, dict), f"{prefix}.commit_evidence", reasons)
+      if isinstance(evidence, dict):
+        effective_lr = evidence.get("effective_learning_rate")
+        _require(
+            effective_lr is None
+            or (
+                isinstance(effective_lr, (int, float))
+                and math.isfinite(effective_lr)
+                and effective_lr >= 0.0
+            ),
+            f"{prefix}.effective_learning_rate",
+            reasons,
+        )
+        changed_elements = evidence.get("parameter_changed_elements")
+        _require(
+            isinstance(changed_elements, int) and changed_elements >= 0,
+            f"{prefix}.parameter_changed_elements",
+            reasons,
+        )
+        total_elements = evidence.get("parameter_total_elements")
+        _require(
+            isinstance(total_elements, int)
+            and total_elements >= 0
+            and isinstance(changed_elements, int)
+            and changed_elements <= total_elements,
+            f"{prefix}.parameter_total_elements",
+            reasons,
+        )
+        gradient_nonzero = evidence.get("gradient_nonzero_elements")
+        _require(
+            isinstance(gradient_nonzero, int) and gradient_nonzero >= 0,
+            f"{prefix}.gradient_nonzero_elements",
+            reasons,
+        )
+        for field in ("gradient_max_abs", "parameter_delta_max_abs"):
+          value = evidence.get(field)
+          _require(
+              isinstance(value, (int, float))
+              and math.isfinite(value)
+              and value >= 0.0,
+              f"{prefix}.{field}",
+              reasons,
+          )
+        _require(
+            evidence.get("gradient_finite") is True,
+            f"{prefix}.commit_gradient_finite",
+            reasons,
+        )
+        _require(
+            evidence.get("parameter_delta_finite") is True,
+            f"{prefix}.parameter_delta_finite",
+            reasons,
+        )
+        if workload == "gsm8k":
+          _require(
+              effective_lr is not None,
+              f"{prefix}.gsm8k_schedule_registered",
+              reasons,
+          )
+        if effective_lr == 0.0:
+          _require(
+              changed_elements == 0,
+              f"{prefix}.zero_lr_model_unchanged",
+              reasons,
+          )
+          _require(
+              record.get("parameter_mutation") == "zero_lr_unchanged",
+              f"{prefix}.zero_lr_mutation_class",
+              reasons,
+          )
 
   if stage in ("alignment-short", "backward-no-commit"):
     marker_count = log_text.count("[CANON_P33_DP16] backward_no_commit verdict=PASS")

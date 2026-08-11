@@ -230,6 +230,132 @@ class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
 
 class AgenticGrpoLearnerTest(parameterized.TestCase):
 
+  def test_p33_zero_lr_commit_accepts_optimizer_only_mutation(self):
+    class TinyModel(nnx.Module):
+
+      def __init__(self):
+        self.weight = nnx.Param(
+            jnp.arange(256, dtype=jnp.float32).reshape(16, 16)
+        )
+
+    class FakeAdapter:
+
+      def __init__(self, trainer):
+        self._trainer = trainer
+
+      def segmented_dp_grpo_value_and_grad(
+          self, *, gradient_microbatch_sink, **kwargs
+      ):
+        del kwargs
+        template = nnx.state(self._trainer.model, nnx.Param)
+        reports = []
+        for local_index in range(16):
+          gradient = jax.tree.map(
+              lambda value: type(value)(jnp.ones_like(value[...])),
+              template,
+              is_leaf=lambda value: isinstance(value, nnx.Variable),
+          )
+          gradient_microbatch_sink(
+              local_index, gradient, jnp.asarray(1.0, jnp.float32)
+          )
+          reports.append({
+              "trajectory_rows": tuple(
+                  local_index + 16 * rank for rank in range(16)
+              ),
+              "gradient_nonzero": 256,
+          })
+        return {
+            "loss": jnp.asarray(1.0, jnp.float32),
+            "per_token_logps": jnp.zeros((256, 2), jnp.float32),
+            "gradient_microbatches": 16,
+            "reports": tuple(reports),
+            "replica_equality": True,
+            "dp_axis": "data",
+            "dp_reduction_transactions": 16,
+            "dp_reduction_rounds_per_transaction": 8,
+            "dp_rank_pullbacks_per_transaction": 16,
+        }
+
+    schedule = optax.constant_schedule(0.0)
+    trainer = rl_trainer.Trainer(
+        TinyModel(),
+        optax.adam(schedule),
+        peft_trainer.TrainingConfig(
+            eval_every_n_steps=100,
+            max_steps=1,
+            gradient_accumulation_steps=16,
+            checkpoint_root_directory=None,
+        ),
+        custom_checkpoint_metadata_fn=lambda: {},
+    )
+    trainer.register_learning_rate_schedule(schedule)
+    cluster = types.SimpleNamespace(
+        actor_trainer=trainer,
+        rollout=types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 2),
+        reference=None,
+        inference_worker=None,
+        buffer_metrics_async=lambda *args, **kwargs: None,
+        _get_mesh_and_logical_axis_rules_cm=lambda role: contextlib.nullcontext(),
+    )
+    learner = object.__new__(agentic_grpo_learner.GRPOLearner)
+    learner.rl_cluster = cluster
+    learner.algo_config = types.SimpleNamespace()
+    train_example = types.SimpleNamespace(
+        completion_ids=jnp.zeros((256, 2), jnp.int32)
+    )
+    sidecar = {"value": jnp.zeros((256, 2), jnp.float32)}
+    workload = types.SimpleNamespace(
+        name="gsm8k", global_trajectories=256, local_trajectories=16
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P33_RUN_STAGE": "one-update",
+        "CANON_P29_FULL_TRAIN": "0",
+    }
+    with tempfile.TemporaryDirectory() as directory:
+      env["CANON_UPDATE_REPORT"] = os.path.join(directory, "update.json")
+      with (
+          mock.patch.dict(os.environ, env, clear=False),
+          mock.patch.object(alignment, "execution_mode", return_value="train"),
+          mock.patch.object(
+              alignment,
+              "unwrap_train_example",
+              return_value=(train_example, sidecar),
+          ),
+          mock.patch.object(
+              alignment,
+              "check_batch",
+              return_value={"hashes": {"all": "same"}},
+          ),
+          mock.patch(
+              "tunix.rl.canonical_forward.require_registered",
+              return_value=FakeAdapter(trainer),
+          ),
+          mock.patch(
+              "tunix.rl.dp_workloads.active_workload",
+              return_value=workload,
+          ),
+          mock.patch("tunix.rl.dp_workloads.validate_environment"),
+      ):
+        result = learner._run_p28_g6_update(  # pylint: disable=protected-access
+            object()
+        )
+
+    self.assertEqual(result["verdict"], "PASS")
+    self.assertEqual(result["parameter_mutation"], "zero_lr_unchanged")
+    self.assertTrue(result["optimizer_transaction_valid"])
+    self.assertEqual(
+        result["commit_evidence"]["parameter_changed_elements"], 0
+    )
+    self.assertGreater(result["optimizer"]["changed_count"], 0)
+
   def test_p33_backward_no_commit_preserves_training_state(self):
     class TinyModel(nnx.Module):
 

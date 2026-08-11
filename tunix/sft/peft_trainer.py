@@ -451,6 +451,8 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
+    self._registered_learning_rate_schedule = None
+    self._last_precomputed_commit_evidence = None
     self._p28_precomputed_microstep = 0
     max_step = None
     if self.config.max_steps is not None:
@@ -475,6 +477,36 @@ class PeftTrainer:
 
   def with_data_hooks(self, data_hooks: hooks.DataHooks):
     self.data_hooks = data_hooks
+
+  def register_learning_rate_schedule(
+      self, schedule: Callable[[ArrayLike], ArrayLike]
+  ) -> None:
+    """Registers the schedule used by an externally managed update gate."""
+    if not callable(schedule):
+      raise TypeError("learning rate schedule must be callable")
+    self._registered_learning_rate_schedule = schedule
+
+  def effective_learning_rate(self, step: int | None = None) -> float | None:
+    """Returns the learning rate applied by the next optimizer transaction."""
+    if step is None:
+      step = self._train_steps
+    if self._registered_learning_rate_schedule is not None:
+      value = self._registered_learning_rate_schedule(
+          jnp.asarray(step, dtype=jnp.int32)
+      )
+    else:
+      value = self._try_get_learning_rate()
+    if value is None:
+      return None
+    return float(np.asarray(jax.device_get(value)))
+
+  def consume_precomputed_commit_evidence(self) -> dict[str, Any]:
+    """Returns and clears evidence from the latest precomputed commit."""
+    evidence = self._last_precomputed_commit_evidence
+    if evidence is None:
+      raise RuntimeError("precomputed commit evidence is unavailable")
+    self._last_precomputed_commit_evidence = None
+    return evidence
 
   def clear_jit_cache(self):
     """Clears the JIT cache of the train and eval step functions.
@@ -540,7 +572,7 @@ class PeftTrainer:
       model: nnx.Module,
       optimizer: nnx.Optimizer,
       grad_accumulator: GradientAccumulator,
-  ) -> ArrayLike:
+  ) -> tuple[ArrayLike, dict[str, tuple[ArrayLike, ...]]]:
     """Commits the already accumulated G6 gradient exactly once."""
     acc_grads = grad_accumulator.get()
     norm = optax.global_norm(jax.tree.map(
@@ -557,9 +589,50 @@ class PeftTrainer:
             acc_leaves, param_dtypes, strict=True
         )],
     )
+    # JAX arrays are immutable.  Holding the input references is sufficient for
+    # the post-rounding comparison and avoids asking XLA to materialize an
+    # explicit full-model copy before the optimizer transaction.
+    params_before = tuple(
+        jax.tree.leaves(nnx.state(model, nnx.Param))
+    )
     optimizer.update(model, acc_grads)
+    params_after = tuple(
+        value for value in jax.tree.leaves(nnx.state(model, nnx.Param))
+    )
+    gradient_leaves = tuple(jax.tree.leaves(acc_grads))
+
+    def _nonzero_count(value):
+      return jnp.count_nonzero(value).astype(jnp.int32)
+
+    def _max_abs(value):
+      return jnp.max(jnp.abs(value.astype(jnp.float32)))
+
+    parameter_deltas = tuple(
+        after.astype(jnp.float32) - before.astype(jnp.float32)
+        for before, after in zip(params_before, params_after, strict=True)
+    )
+    commit_evidence = {
+        "gradient_nonzero_counts": tuple(
+            _nonzero_count(value) for value in gradient_leaves
+        ),
+        "gradient_max_abs": tuple(
+            _max_abs(value) for value in gradient_leaves
+        ),
+        "gradient_finite": tuple(
+            jnp.all(jnp.isfinite(value)) for value in gradient_leaves
+        ),
+        "parameter_changed_counts": tuple(
+            _nonzero_count(delta) for delta in parameter_deltas
+        ),
+        "parameter_delta_max_abs": tuple(
+            _max_abs(delta) for delta in parameter_deltas
+        ),
+        "parameter_delta_finite": tuple(
+            jnp.all(jnp.isfinite(delta)) for delta in parameter_deltas
+        ),
+    }
     grad_accumulator.reset()
-    return norm
+    return norm, commit_evidence
 
   def _put_optimizer_state_on_memory_kind(self, memory_kind: str) -> None:
     """Moves only OptState and verifies that the requested placement landed."""
@@ -812,6 +885,8 @@ class PeftTrainer:
 
   def commit_precomputed_gradients(self) -> ArrayLike:
     """Commits after all streamed microbatches and resets the accumulator."""
+    # A failed transaction must never leave evidence from an earlier commit.
+    self._last_precomputed_commit_evidence = None
     self._validate_precomputed_gradient_contract()
     expected_microsteps = 16 if (
         os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
@@ -822,6 +897,7 @@ class PeftTrainer:
           "segmented update commit cadence mismatch: "
           f"{self._p28_precomputed_microstep} != {expected_microsteps}"
       )
+    effective_learning_rate = self.effective_learning_rate(self._train_steps)
     if self.config.optimizer_offload:
       self._put_optimizer_state_on_memory_kind("device")
       print(
@@ -851,8 +927,39 @@ class PeftTrainer:
               self.grad_accumulator,
           )
       )
-    norm = self._jitted_precomputed_gradient_commit_fn()
+    norm, raw_evidence = self._jitted_precomputed_gradient_commit_fn()
     norm.block_until_ready()
+    host_evidence = jax.device_get(raw_evidence)
+
+    def _sum_counts(name: str) -> int:
+      return sum(int(np.asarray(value)) for value in host_evidence[name])
+
+    def _max_value(name: str) -> float:
+      values = [float(np.asarray(value)) for value in host_evidence[name]]
+      return max(values, default=0.0)
+
+    def _all_true(name: str) -> bool:
+      return all(bool(np.asarray(value)) for value in host_evidence[name])
+
+    self._last_precomputed_commit_evidence = {
+        "effective_learning_rate": effective_learning_rate,
+        "gradient_nonzero_elements": _sum_counts(
+            "gradient_nonzero_counts"
+        ),
+        "gradient_max_abs": _max_value("gradient_max_abs"),
+        "gradient_finite": _all_true("gradient_finite"),
+        "parameter_changed_elements": _sum_counts(
+            "parameter_changed_counts"
+        ),
+        "parameter_total_elements": sum(
+            int(value.size)
+            for value in jax.tree.leaves(nnx.state(self.model, nnx.Param))
+        ),
+        "parameter_delta_max_abs": _max_value(
+            "parameter_delta_max_abs"
+        ),
+        "parameter_delta_finite": _all_true("parameter_delta_finite"),
+    }
     if self.config.optimizer_offload:
       self._put_optimizer_state_on_memory_kind("pinned_host")
       print(
