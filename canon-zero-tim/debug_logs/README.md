@@ -1075,3 +1075,26 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 4. **Bounded Mismatch Capsule Persistence**:
    - Persisted mismatch rows `[191, 199]` into `.npz` capsule container (`dae4e75d3b4689f2607047edd74ea1e48ffaf97a853cec74a204caafc3dc626b`, 114,720 logical bytes).
    - Capsule contains prompt token IDs, completion token IDs, action mask, decode logits, prefill logits, learner logits, policy version, sampling parameters, and array-level SHA-256 digests for bitwise offline reproduction.
+
+---
+
+## 41. Phase 39.2 Attempt `p39d6`: 256-Chip DeepSWE Stage 1 Backward-No-Commit Diagnostics (Qwen3-32B DP16xTP8)
+
+- `debug_logs/p39_p39d6_deepswe_stage1_bwd.raw.log` (SHA-256: `11b01631e51b100ce39bba49b2e020ead25fb99f89037240110e71ff0a7ea9b1`)
+- Target Commit: `05db7fd8d036704d5c855e704dd88fc90405059a` (*Make r2egym optional for offline DeepSWE replay*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes, topology `4x8x8`)
+
+### Execution & Diagnostic Summary:
+
+1. **R2E-Gym Offline Import Verification (PASS)**:
+   - Module initialization succeeded without `r2egym` installed in the container image.
+   - `examples.deepswe.swe_agent` and `r2egym_runtime_patch` safely loaded with offline fallback.
+   - Local model detected on PVC mount: `✅ Found existing local model at /mnt/disks/linchai_data/models/Qwen3-32B`.
+
+2. **Environment Validation Contract Interception**:
+   - `deepswe_contract.validate_environment(os.environ)` intercepted execution with `ValueError: P34 environment mismatch: {'ABCPROD': None}`.
+   - **Root Cause**:
+     - `canon-zero-tim/cluster/steps/00_env.sh` (line 613) uses `compgen -e | grep -E '^(CANON_|WANDB_|HF_|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|...)'` to filter variables written to `$CANON_STATE/env.sh`.
+     - `ABCPROD` was exported in `cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env` (`export ABCPROD=256`), but the filtering regex in `00_env.sh` did not include `ABCPROD`.
+     - When `90_run.sh` sourced `$CANON_STATE/env.sh`, `ABCPROD` was not in `os.environ`.
