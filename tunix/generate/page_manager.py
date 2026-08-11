@@ -22,6 +22,7 @@ from typing import Any, Optional, Self
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import PartitionSpec as P
 from tunix.generate import utils
 
 def _get_dtype_packing(dtype):
@@ -66,21 +67,32 @@ class RaggedArray:
 class PageManagerConfig:
   page_size: int
   max_seq_len: int
-  num_pages: int
+  max_bytes: int
 
   num_kv_heads: int
   max_num_seqs: int
   head_dim: int
   dtype: jax.typing.DTypeLike
+  num_layers: int
 
   dp_axis: str | None = None
   tp_axis: str | None = None
+  dp_size: int = 1
+  tp_size: int = 1
+  device: jax.Device | None = None
+
+  @property
+  def num_pages(self) -> int:
+    # max_bytes is the budget per TP group
+    bytes_per_page = self.page_size * self.num_kv_heads * self.head_dim * 2 * self.num_layers * jnp.dtype(self.dtype).itemsize
+    num_pages_per_tp = self.max_bytes // bytes_per_page
+    return num_pages_per_tp
 
   @property
   def max_num_pages_per_seq(self) -> int:
     return int(self.max_seq_len / self.page_size)
   
-  def init(self, device: jax.Device | None = None) -> page_manager_lib.PageManager:
+  def init(self) -> "PageManager":
     """Explicitly initializes physical page tensors for a PageManager pool, placing CPU caches on host memory."""
     kv_packing = _get_dtype_packing(self.dtype)
 
@@ -89,25 +101,25 @@ class PageManagerConfig:
     token_block = jax.lax.empty(
         (self.num_pages, self.page_size), dtype=jnp.int32
     )
-    if dp_axis is not None:
-      token_block = utils.shard(token_block, (dp_axis, None))
+    if self.dp_axis is not None:
+      token_block = utils.shard(token_block, (self.dp_axis, None))
     if device is not None:
       token_block = jax.device_put(token_block, device)
     blocks["token_buffer"] = token_block
 
-    for i in range(self.cache_config.num_layers):
+    for i in range(self.num_layers):
       layer_block = jax.lax.empty(
           (
-              num_pages,
-              page_size,
+              self.num_pages,
+              self.page_size,
               2 * self.num_kv_heads // kv_packing,
               kv_packing,
               self.head_dim,
           ),
           dtype=self.dtype,
       )
-      if dp_axis is not None or tp_axis is not None:
-        layer_block = utils.shard(layer_block, (dp_axis, None, tp_axis, None, None))
+      if self.dp_axis is not None or self.tp_axis is not None:
+        layer_block = utils.shard(layer_block, (self.dp_axis, None, self.tp_axis, None, None))
       if device is not None:
         layer_block = jax.device_put(layer_block, device)
       blocks[f"layer_{i}"] = layer_block
@@ -117,11 +129,11 @@ class PageManagerConfig:
     num_available_pages = jnp.array(self.num_pages, dtype=jnp.int32)
     seq_lens = jnp.zeros((self.max_num_seqs,), dtype=jnp.int32)
 
-    if device is not None:
-      page_indices = jax.device_put(page_indices, device)
-      available_page_indices = jax.device_put(available_page_indices, device)
-      num_available_pages = jax.device_put(num_available_pages, device)
-      seq_lens = jax.device_put(seq_lens, device)
+    if self.device is not None:
+      page_indices = jax.device_put(page_indices, self.device)
+      available_page_indices = jax.device_put(available_page_indices, self.device)
+      num_available_pages = jax.device_put(num_available_pages, self.device)
+      seq_lens = jax.device_put(seq_lens, self.device)
 
     return PageManager(
         pages=blocks,
@@ -129,8 +141,8 @@ class PageManagerConfig:
         available_page_indices=available_page_indices,
         num_available_pages=num_available_pages,
         seq_lens=seq_lens,
-        page_size=page_size,
-        max_seq_len=max_seq_len,
+        page_size=self.page_size,
+        max_seq_len=self.max_seq_len,
         window_size=None,
     )
       

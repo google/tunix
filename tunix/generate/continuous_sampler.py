@@ -39,13 +39,8 @@ from tunix.generate import utils
 
 @dataclasses.dataclass
 class SamplingConfig:
-  max_num_sequences: int
   max_generation_steps: int
   max_prompt_length: int = 200 
-  num_cpu_pages: int = 4096 * 32
-  num_hbm_pages: int = 256 * 32
-  page_size: int = 8 
-  dtype: jnp.dtype = jnp.bfloat16
   temperature: float = 0.0
   top_p: float | None = None
   top_k: int | None = None
@@ -163,8 +158,9 @@ class VanillaSampler:
       self,
       transformer: nnx.Module,
       tokenizer: Any,
-      cache_config: sampler_lib.CacheConfig,
+      cache_config: Any,
   ):
+    self.transformer = transformer
     self.tokenizer = tokenizer
     self.cache_config = cache_config
 
@@ -188,69 +184,7 @@ class VanillaSampler:
     """Update underlying NNX model weights in-place with synchronization barrier."""
     pass
 
-  def _init_page_manager(
-      self,
-      max_seqs: int,
-      page_size: int,
-      max_seq_len: int,
-      num_pages: int,
-      dp_axis: str | None = None,
-      tp_axis: str | None = None,
-      device: Any = None,
-  ) -> page_manager_lib.PageManager:
-    """Explicitly initializes physical page tensors for a PageManager pool, placing CPU caches on host memory."""
-    blocks: dict[str, jax.Array] = {}
-    max_num_pages_per_seq = int(max_seq_len / page_size)
-
-    token_block = jax.lax.empty(
-        (num_pages, page_size), dtype=jnp.int32
-    )
-    if dp_axis is not None:
-      token_block = sampler_lib.shard(token_block, (dp_axis, None))
-    if device is not None:
-      token_block = jax.device_put(token_block, device)
-    blocks["token_buffer"] = token_block
-
-    # layer_dtype = getattr(self.cache_config, "dtype", jnp.bfloat16)
-    for i in range(self.cache_config.num_layers):
-      layer_block = jax.lax.empty(
-          (
-              num_pages,
-              page_size,
-              2 * self.cache_config.num_kv_heads // self.cache_config.kv_packing,
-              self.cache_config.kv_packing,
-              self.cache_config.head_dim,
-          ),
-          dtype=self.dtype,
-      )
-      if dp_axis is not None or tp_axis is not None:
-        layer_block = sampler_lib.shard(layer_block, (dp_axis, None, tp_axis, None, None))
-      if device is not None:
-        layer_block = jax.device_put(layer_block, device)
-      blocks[f"layer_{i}"] = layer_block
-
-    page_indices = jnp.zeros((max_seqs, max_num_pages_per_seq), dtype=jnp.int32)
-    available_page_indices = jnp.arange(num_pages, dtype=jnp.int32)
-    num_available_pages = jnp.array(num_pages, dtype=jnp.int32)
-    seq_lens = jnp.zeros((max_seqs,), dtype=jnp.int32)
-
-    if device is not None:
-      page_indices = jax.device_put(page_indices, device)
-      available_page_indices = jax.device_put(available_page_indices, device)
-      num_available_pages = jax.device_put(num_available_pages, device)
-      seq_lens = jax.device_put(seq_lens, device)
-    
-
-    return page_manager_lib.PageManager(
-        pages=blocks,
-        page_indices=page_indices,
-        available_page_indices=available_page_indices,
-        num_available_pages=num_available_pages,
-        seq_lens=seq_lens,
-        page_size=page_size,
-        max_seq_len=max_seq_len,
-        window_size=None,
-    )
+  
   
   def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
     """Returns the transformer graphdef and state."""
@@ -365,65 +299,70 @@ class VanillaSampler:
       beam_size: Optional[int] = None,
   ) -> _SamplingState:
     """Initialize sampling state with HBM, Offloaded, and Prefix cache pools."""
-    max_seqs = sampling_config.max_num_sequences
     max_seq_len = sampling_config.max_generation_steps + sampling_config.max_prompt_length
     
     page_size = self.cache_config.page_size
-    hbm_num_pages = self.cache_config.num_hbm_pages
-    cpu_num_pages = self.cache_config.num_cpu_pages
+    max_num_seqs = getattr(self.cache_config, "max_num_seqs", getattr(self.cache_config, "max_num_sequences", 32))
+    max_seqs = max_num_seqs
+    
+    num_kv_heads = self.transformer.config.num_kv_heads
+    head_dim = self.transformer.config.head_dim
+    num_layers = self.transformer.config.num_layers
+    dtype = self.dtype
 
+    hbm_max_bytes = self.cache_config.hbm_cache_max_bytes
+    cpu_max_bytes = self.cache_config.host_cache_max_bytes
 
     shd_config = getattr(getattr(self.transformer, "config", None), "shd_config", None)
+    
+    dp_size = 1
+    tp_size = 1
     if shd_config is not None:
       dp_axis = shd_config.act_btd[0]
       tp_axis = shd_config.act_btnh[2]
+      
+      try:
+        param_0 = jax.tree.leaves(self._flattened_transformer_state)[0]
+        if hasattr(param_0, "sharding") and hasattr(param_0.sharding, "mesh") and param_0.sharding.mesh is not None:
+          mesh = param_0.sharding.mesh
+          dp_size = mesh.shape.get(dp_axis, 1) if dp_axis else 1
+          tp_size = mesh.shape.get(tp_axis, 1) if tp_axis else 1
+      except Exception:
+        pass
     else:
       dp_axis = None
       tp_axis = None
 
     hbm_pm_config = page_manager_lib.PageManagerConfig(
-        page_size=hbm_num_pages,
+        page_size=page_size,
         max_seq_len=max_seq_len,
-        num_pages=hbm_num_pages,
-        num_kv_heads=num_kv_heads
-        max_num_seqs=sampling_config.max_num_sequences,
-        head_dim=self.cache_config.head_dim,
-        dtype=self.sampling_config.dtype,
+        max_bytes=hbm_max_bytes,
+        num_kv_heads=num_kv_heads,
+        max_num_seqs=max_num_seqs,
+        head_dim=head_dim,
+        dtype=dtype,
+        num_layers=num_layers,
         dp_axis=dp_axis,
-        tp_axis=tp_axis
+        tp_axis=tp_axis,
+        dp_size=dp_size,
+        tp_size=tp_size,
     )
     hbm_cache = hbm_pm_config.init()
 
     cpu_device = jax.devices("cpu")[0] if jax.devices("cpu") else None
     cpu_pm_config = dataclasses.replace(
       hbm_pm_config,
-      num_pages = num_cpu_pages,
+      max_bytes=cpu_max_bytes,
       dp_axis=None,
       tp_axis=None,
+      dp_size=1,
+      tp_size=1,
       device=cpu_device
     ) 
     cpu_cache = cpu_pm_config.init()
 
 
-
-    hbm_cache = self._init_page_manager(
-        num_pages=hbm_num_pages,
-        max_seqs=max_seqs,
-        page_size=page_size,
-        max_seq_len=max_seq_len,
-        dp_axis=dp_axis,
-        tp_axis=tp_axis,
-        device=None,
-    )
-    offloaded_cache = self._init_page_manager(
-        num_pages=cpu_num_pages, 
-        max_seqs=max_seqs,
-        page_size=page_size,
-        max_seq_len=max_seq_len,
-        dp_axis=None,
-        tp_axis=None,
-        device=cpu_device,
-    )
+    offloaded_cache = cpu_cache
 
     eos_ids = tuple(sampling_config.eos_tokens) if sampling_config.eos_tokens is not None else None
     

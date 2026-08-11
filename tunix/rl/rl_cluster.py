@@ -404,11 +404,8 @@ class RLCluster:
       self._rollout = vanilla_rollout.VanillaRollout(
           self.rollout_actor,
           self.tokenizer,
-          cache_config_or_size=base_rollout.CacheConfig(
-              cache_size=max_kv_cache_size,
-              num_layers=self.rollout_actor.config.num_layers,
-              num_kv_heads=self.rollout_actor.config.num_kv_heads,
-              head_dim=self.rollout_actor.config.head_dim,
+          cache_config=vanilla_rollout.CacheConfig(
+              max_num_seqs=max_kv_cache_size,
           ),
       )
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)

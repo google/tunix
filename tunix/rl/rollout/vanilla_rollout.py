@@ -56,7 +56,7 @@ class VanillaRollout(base_rollout.BaseRollout):
   ):
     self._model = model
     self._tokenizer = tokenizer
-    self.cache_config = cache_config_or_size
+    self.cache_config = cache_config
     self.use_continuous_sampling = use_continuous_sampling
     self.server_mode = server_mode
 
@@ -71,7 +71,6 @@ class VanillaRollout(base_rollout.BaseRollout):
         self._driver = continuous_async_driver.VanillaInProcessDriver(
             sampler=self._continuous_sampler,
             sampling_config=continuous_sampler.SamplingConfig(
-                max_num_sequences=32,
                 max_generation_steps=800,
                 max_prompt_length=256
             ),
@@ -81,7 +80,14 @@ class VanillaRollout(base_rollout.BaseRollout):
       self._sampler = sampler.Sampler(
           model,
           tokenizer,
-          sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+          sampler.CacheConfig(
+              cache_size=cache_config.max_num_seqs,
+              num_layers=model.config.num_layers,
+              num_kv_heads=model.config.num_kv_heads,
+              head_dim=model.config.head_dim,
+              max_seq_len=cache_config.max_prompt_length + cache_config.max_tokens_to_generate,
+              page_size=cache_config.page_size,
+          ),
       )
 
   def generate(
@@ -124,7 +130,6 @@ class VanillaRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     sampling_config = continuous_sampler.SamplingConfig(
-        max_num_sequences=32,
         max_generation_steps=rollout_config.max_tokens_to_generate,
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
