@@ -18,8 +18,8 @@ to launch on the remote cluster.
 | P43.0 | Clean isolated branch and canonical task ledger | Exact fetched base SHA and clean starting worktree are recorded | passed |
 | P43.1 | Separate Qwen3-8B DP4xTP8 debug profile, renderer, and bounded stage contract | CPU renderer/preflight tests accept only the signed 64-chip debug geometry and reject production-contract drift | passed |
 | P43.2 | Durable real-trajectory dump and grouped solve/advantage metrics | Unit fixtures pass for all-solved, all-failed, mixed, incomplete, and non-binary-reward cases; batch artifacts round-trip | passed |
-| P43.3 | Integrated local and pinned-image evidence | P43 gates and adjacent P34/P39 regressions pass from the exact candidate SHA | active |
-| P43.4 | Remote-agent operator handbook and immutable publication | Runbook render examples validate; reviewed commit is pushed to `yuxzhang/canon-zero-tim` and read back at the exact SHA | pending |
+| P43.3 | Integrated local and pinned-image evidence | P43 gates and adjacent P34/P39 regressions pass from the exact candidate SHA | passed |
+| P43.4 | Remote-agent operator handbook and immutable publication | Runbook render examples validate; reviewed commit is pushed to `yuxzhang/canon-zero-tim` and read back at the exact SHA | passed in surrounding publication transaction |
 | P43.5 | Remote 64-chip evidence | `rollout-only`, `one-update`, then `three-update` produce the required raw logs, trajectory files, metric rows, and three finite commits | pending |
 
 ## Decisions

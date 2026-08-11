@@ -78,3 +78,27 @@
   tip, resolve only the overlapping P43 integration hunks, then rerun gates
   from the rebased exact SHA.
 - Next: Create the local P43 commit and rebase onto `340b0e36`.
+
+## 2026-08-11T23:35:46Z — P43.3-P43.4: rebase and commit-bound gates
+
+- Type: validation/publication preparation
+- Action: Committed P43, rebased it without conflict onto remote tip
+  `340b0e364f374fde8798d8f62331e6bc33e0e58a`, producing tested implementation
+  commit `c73443e3a63a022976b2fa07d6c1b0475903933f`.
+- Command: Re-ran P43 CPU, P39 CPU, P34 static, and P43 qwen8b exact-image
+  gates from `c73443e3`.
+- Result: PASS; markers were `P43_DEEPSWE_DEBUG_CPU_PASS`,
+  `P39_DEEPSWE_PILOT_CPU_PASS`, `P34_STATIC_PASS suites=10`, and
+  `P43_EXACT_IMAGE_CPU_PASS overlay=qwen8b`.
+- Command: Ran `tests/p38_serving/test_postflight.sh` and
+  `test_render_p38_serving_jobsets.py` because the fetched remote commits and
+  P43 both touch `90_run.sh`.
+- Result: PASS; P38 exact-stop postflight and five renderer cases remained
+  green.
+- Decision: The final branch-tip SHA is the documentation commit containing
+  this entry. The publishing agent must push it with an explicit lease and
+  read back `refs/heads/yuxzhang/canon-zero-tim`; the remote launch agent must
+  independently verify that supplied SHA before rendering.
+- Next: Commit this ledger update, rerun the small P43 gate from the resulting
+  branch-tip SHA, push with lease, and verify the remote ref. Remote stages
+  remain P43.5 and NOT RUN.
