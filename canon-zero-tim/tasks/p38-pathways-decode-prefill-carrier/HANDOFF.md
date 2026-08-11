@@ -322,8 +322,8 @@ the new capture and counterfactual environment variables unset.
 
 ## P38.2g2 local handoff: admission hardened, target not run
 
-Commit `763b60b1` introduced the implementation described above. The current
-local hardening is an uncommitted diff on source base `2cd46433`:
+Commit `763b60b1` introduced the implementation described above. The admission
+hardening is published at `bbc1d329` on `yuxzhang/canon-zero-tim`:
 
 - patch 09 captures the actual donated-cache `continue_decode` call, including
   request IDs, full current token histories, physical page IDs, scheduler and
@@ -349,7 +349,7 @@ renderer 5/5, archive transport 4/4, shell stock/U controls PASS, and the
 complete P33 CPU suite passes 67 workload plus 28 alignment tests and all
 adjacent negative controls. No Pathways/TPU target result exists.
 
-Do not render from the dirty worktree. After explicit review and publication,
+Fetch `yuxzhang/canon-zero-tim`, verify `git rev-parse HEAD` is `bbc1d329`, and
 follow the exact stock-first commands in
 `phases/p38-2g2-pathways-serving-envelope.md`. Dry-run both manifests but apply
 only stock; never apply the output directory. Do not run U until stock joins

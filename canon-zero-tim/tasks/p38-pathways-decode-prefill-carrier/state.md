@@ -6,17 +6,17 @@
 - Definition of done: One source-pinned flag-on run reports `S_decode_vs_S_prefill=0`,
   `S_prefill_vs_T_old=0`, and `T_old_vs_T_current=0` before a full workload is allowed to commit.
 - Task directory: `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`
-- Directory state: tracked. Local HEAD and
-  `origin/yuxzhang/canon-zero-tim` are `2cd46433`. The P38.2g2 admission
-  hardening is an uncommitted local diff on that exact base. Main was not
-  checked out or modified.
+- Directory state: tracked. P38.2g2 admission hardening is published at
+  `bbc1d329` on `origin/yuxzhang/canon-zero-tim`; the remote hash was verified
+  as `bbc1d3290188df47595a3126e457788a94c289d9`. Main was not checked out or
+  modified.
 - Current phases: two independent tracks are deliberately active. P38.2d has
   added and locally gated the user-requested GSM8K-full warning-only alignment
   override so the time-sensitive convergence campaign cannot be stopped by an
   alignment gate.
   P38.2g2 remains the strict zero-TIM root-cause track. Its local admission
-  hardening is complete and green; source publication and the stock target
-  capture are not run. P38.2g3 is pending on an exact stock P38.2g2 capture.
+  hardening is complete, green, and published; the stock target capture is not
+  run. P38.2g3 is pending on an exact stock P38.2g2 capture.
 - Latest local gate: the real `continue_decode` capture now excludes
   live-but-unscheduled requests without compacting their physical scheduler
   slots, emits and validates request/DP/slot/global/attention/selector/page
@@ -65,9 +65,9 @@
   numerical change; it was a clean negative in its four-chip/short-context
   domain, not a successful repair that was later dropped. It may be retested
   only as a default-off causal arm in the new domain.
-- Next action for the strict track: review, commit, and publish the local
-  P38.2g2 hardening, render from that exact source commit, dry-run both
-  manifests, and apply stock only. U remains forbidden until stock joins the
+- Next action for the strict track: pull and verify `bbc1d329`, render from
+  that exact source commit, dry-run both manifests, and apply stock only. U
+  remains forbidden until stock joins the
   durable mismatch and reproduces the known hard A-B red with no backward and
   zero optimizer commits. The independent GSM8K convergence campaign remains
   governed by its published warning-only policy.

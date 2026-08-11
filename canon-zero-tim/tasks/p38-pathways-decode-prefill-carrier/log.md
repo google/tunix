@@ -638,3 +638,27 @@
 - Next: after explicit commit/push approval, publish this exact source, render
   fresh manifests, dry-run both, and apply stock only. U and P38.2g3 E1-E5
   remain blocked until stock exactly joins and reproduces the known mismatch.
+
+## 2026-08-11 UTC — P38.2g2 admission hardening published
+
+- Type: source publication and evidence reconciliation; no TPU/cloud
+  experiment, backward, optimizer commit, or training launch.
+- Implementation commit: `bbc1d329 Harden the Pathways serving capture
+  admission`, based directly on `2cd46433`; no rebase was required because a
+  fresh fetch showed local, FETCH_HEAD, and remote at the same base.
+- Push result: `origin/yuxzhang/canon-zero-tim` advanced from `2cd46433` to
+  `bbc1d329`. `git ls-remote` verified the full remote hash as
+  `bbc1d3290188df47595a3126e457788a94c289d9`.
+- Authentication: the stale VS Code askpass failed first without changing the
+  remote. The successful retry used a temporary mode-700 askpass that read
+  only `GITHUB_USER` and `GITHUB_TOKEN` from the repository root `.env`; the
+  helper was deleted immediately. No W&B or HF setting was read or changed.
+- Claim ceiling: publication makes the code available for the target stock
+  diagnostic; it does not prove a production capture, mismatch reproduction,
+  U effect, page-topology cause, or zero-TIM repair.
+- Rollback: leave `CANON_P38_SERVING_CAPTURE_DIR` and `CANON_KV_UNIFIED`
+  unset, or revert `bbc1d329` in a separate reviewed change. Stock runtime
+  behavior remains the default.
+- Next: fetch and verify `bbc1d329`, render both P38.2g2 manifests from that
+  exact commit, server-side dry-run both, and apply stock only. U remains
+  blocked on the stock mismatch join and reproduction gate.

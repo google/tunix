@@ -1,7 +1,7 @@
 # P38.2g2: source-pinned Pathways serving envelope
 
-Status: local admission hardening complete and gated; uncommitted; target run
-not authorized or run.
+Status: local admission hardening complete and gated; published at
+`bbc1d329`; target run not authorized or run.
 
 ## Objective
 
