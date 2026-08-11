@@ -1,0 +1,856 @@
+{
+  "capsule": {
+    "path": "canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/artifacts/p38_synthetic_kv1792_0811.npz",
+    "schema": "p38-frozenlake-mismatch-capsule-v1",
+    "selected_rows": [
+      900001
+    ],
+    "sha256": "b4742b0e6517e35d178de7ae71e78858ed0dab54230dd7f317dc3e978fbd6809"
+  },
+  "claim_ceiling": "Schedules are derived from token masks and do not reproduce the captured serving scheduler metadata.",
+  "schedules": [
+    {
+      "action_targets": [
+        1,
+        2,
+        5,
+        6,
+        9,
+        10,
+        13,
+        14
+      ],
+      "arm": "R0",
+      "calls": [
+        {
+          "action_targets": [],
+          "kind": "initial_prefill",
+          "kv_length_after": 256,
+          "kv_length_before": 0,
+          "logical_start": 0,
+          "logical_stop": 256,
+          "ordinal": 0,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 512,
+          "kv_length_before": 256,
+          "logical_start": 256,
+          "logical_stop": 512,
+          "ordinal": 1,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 768,
+          "kv_length_before": 512,
+          "logical_start": 512,
+          "logical_stop": 768,
+          "ordinal": 2,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1024,
+          "kv_length_before": 768,
+          "logical_start": 768,
+          "logical_stop": 1024,
+          "ordinal": 3,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1280,
+          "kv_length_before": 1024,
+          "logical_start": 1024,
+          "logical_stop": 1280,
+          "ordinal": 4,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1536,
+          "kv_length_before": 1280,
+          "logical_start": 1280,
+          "logical_stop": 1536,
+          "ordinal": 5,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1788,
+          "kv_length_before": 1536,
+          "logical_start": 1536,
+          "logical_stop": 1788,
+          "ordinal": 6,
+          "query_length": 252,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            1
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 1789,
+          "kv_length_before": 1788,
+          "logical_start": 1788,
+          "logical_stop": 1789,
+          "ordinal": 7,
+          "query_length": 1,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            2
+          ],
+          "kind": "decode",
+          "kv_length_after": 1790,
+          "kv_length_before": 1789,
+          "logical_start": 1789,
+          "logical_stop": 1790,
+          "ordinal": 8,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 1791,
+          "kv_length_before": 1790,
+          "logical_start": 1790,
+          "logical_stop": 1791,
+          "ordinal": 9,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            5
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 1793,
+          "kv_length_before": 1791,
+          "logical_start": 1791,
+          "logical_stop": 1793,
+          "ordinal": 10,
+          "query_length": 2,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            6
+          ],
+          "kind": "decode",
+          "kv_length_after": 1794,
+          "kv_length_before": 1793,
+          "logical_start": 1793,
+          "logical_stop": 1794,
+          "ordinal": 11,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 1795,
+          "kv_length_before": 1794,
+          "logical_start": 1794,
+          "logical_stop": 1795,
+          "ordinal": 12,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            9
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 1797,
+          "kv_length_before": 1795,
+          "logical_start": 1795,
+          "logical_stop": 1797,
+          "ordinal": 13,
+          "query_length": 2,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            10
+          ],
+          "kind": "decode",
+          "kv_length_after": 1798,
+          "kv_length_before": 1797,
+          "logical_start": 1797,
+          "logical_stop": 1798,
+          "ordinal": 14,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 1799,
+          "kv_length_before": 1798,
+          "logical_start": 1798,
+          "logical_stop": 1799,
+          "ordinal": 15,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            13
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 1801,
+          "kv_length_before": 1799,
+          "logical_start": 1799,
+          "logical_stop": 1801,
+          "ordinal": 16,
+          "query_length": 2,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            14
+          ],
+          "kind": "decode",
+          "kv_length_after": 1802,
+          "kv_length_before": 1801,
+          "logical_start": 1801,
+          "logical_stop": 1802,
+          "ordinal": 17,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 1803,
+          "kv_length_before": 1802,
+          "logical_start": 1802,
+          "logical_stop": 1803,
+          "ordinal": 18,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "completion_length": 16,
+      "local_m": 256,
+      "logical_input_sha256": "37d8ac325b0f975bf9bc7a5a1f7f26fcf0726937a279717b2a4e281ceeff710c",
+      "prompt_length": 1788,
+      "provenance": "mask-derived-v1",
+      "source_row": 900001
+    },
+    {
+      "action_targets": [
+        1,
+        2,
+        5,
+        6,
+        9,
+        10,
+        13,
+        14
+      ],
+      "arm": "R1",
+      "calls": [
+        {
+          "action_targets": [],
+          "kind": "initial_prefill",
+          "kv_length_after": 256,
+          "kv_length_before": 0,
+          "logical_start": 0,
+          "logical_stop": 256,
+          "ordinal": 0,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 512,
+          "kv_length_before": 256,
+          "logical_start": 256,
+          "logical_stop": 512,
+          "ordinal": 1,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 768,
+          "kv_length_before": 512,
+          "logical_start": 512,
+          "logical_stop": 768,
+          "ordinal": 2,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1024,
+          "kv_length_before": 768,
+          "logical_start": 768,
+          "logical_stop": 1024,
+          "ordinal": 3,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1280,
+          "kv_length_before": 1024,
+          "logical_start": 1024,
+          "logical_stop": 1280,
+          "ordinal": 4,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1536,
+          "kv_length_before": 1280,
+          "logical_start": 1280,
+          "logical_stop": 1536,
+          "ordinal": 5,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continued_prefill",
+          "kv_length_after": 1788,
+          "kv_length_before": 1536,
+          "logical_start": 1536,
+          "logical_stop": 1788,
+          "ordinal": 6,
+          "query_length": 252,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            1
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1789,
+          "kv_length_before": 1788,
+          "logical_start": 1788,
+          "logical_stop": 1789,
+          "ordinal": 7,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            2
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1790,
+          "kv_length_before": 1789,
+          "logical_start": 1789,
+          "logical_stop": 1790,
+          "ordinal": 8,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 1791,
+          "kv_length_before": 1790,
+          "logical_start": 1790,
+          "logical_stop": 1791,
+          "ordinal": 9,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 1792,
+          "kv_length_before": 1791,
+          "logical_start": 1791,
+          "logical_stop": 1792,
+          "ordinal": 10,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            5
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1793,
+          "kv_length_before": 1792,
+          "logical_start": 1792,
+          "logical_stop": 1793,
+          "ordinal": 11,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            6
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1794,
+          "kv_length_before": 1793,
+          "logical_start": 1793,
+          "logical_stop": 1794,
+          "ordinal": 12,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 1795,
+          "kv_length_before": 1794,
+          "logical_start": 1794,
+          "logical_stop": 1795,
+          "ordinal": 13,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 1796,
+          "kv_length_before": 1795,
+          "logical_start": 1795,
+          "logical_stop": 1796,
+          "ordinal": 14,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            9
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1797,
+          "kv_length_before": 1796,
+          "logical_start": 1796,
+          "logical_stop": 1797,
+          "ordinal": 15,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            10
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1798,
+          "kv_length_before": 1797,
+          "logical_start": 1797,
+          "logical_stop": 1798,
+          "ordinal": 16,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 1799,
+          "kv_length_before": 1798,
+          "logical_start": 1798,
+          "logical_stop": 1799,
+          "ordinal": 17,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 1800,
+          "kv_length_before": 1799,
+          "logical_start": 1799,
+          "logical_stop": 1800,
+          "ordinal": 18,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            13
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1801,
+          "kv_length_before": 1800,
+          "logical_start": 1800,
+          "logical_stop": 1801,
+          "ordinal": 19,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            14
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 1802,
+          "kv_length_before": 1801,
+          "logical_start": 1801,
+          "logical_stop": 1802,
+          "ordinal": 20,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 1803,
+          "kv_length_before": 1802,
+          "logical_start": 1802,
+          "logical_stop": 1803,
+          "ordinal": 21,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "completion_length": 16,
+      "local_m": 256,
+      "logical_input_sha256": "37d8ac325b0f975bf9bc7a5a1f7f26fcf0726937a279717b2a4e281ceeff710c",
+      "prompt_length": 1788,
+      "provenance": "mask-derived-v1",
+      "source_row": 900001
+    },
+    {
+      "action_targets": [
+        1,
+        2,
+        5,
+        6,
+        9,
+        10,
+        13,
+        14
+      ],
+      "arm": "REF",
+      "calls": [
+        {
+          "action_targets": [],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 256,
+          "kv_length_before": 0,
+          "logical_start": 0,
+          "logical_stop": 256,
+          "ordinal": 0,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 512,
+          "kv_length_before": 256,
+          "logical_start": 256,
+          "logical_stop": 512,
+          "ordinal": 1,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 768,
+          "kv_length_before": 512,
+          "logical_start": 512,
+          "logical_stop": 768,
+          "ordinal": 2,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 1024,
+          "kv_length_before": 768,
+          "logical_start": 768,
+          "logical_stop": 1024,
+          "ordinal": 3,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 1280,
+          "kv_length_before": 1024,
+          "logical_start": 1024,
+          "logical_stop": 1280,
+          "ordinal": 4,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 1536,
+          "kv_length_before": 1280,
+          "logical_start": 1280,
+          "logical_stop": 1536,
+          "ordinal": 5,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            1,
+            2
+          ],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 1792,
+          "kv_length_before": 1536,
+          "logical_start": 1536,
+          "logical_stop": 1792,
+          "ordinal": 6,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            5,
+            6,
+            9,
+            10,
+            13,
+            14
+          ],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 1804,
+          "kv_length_before": 1792,
+          "logical_start": 1792,
+          "logical_stop": 1804,
+          "ordinal": 7,
+          "query_length": 12,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        }
+      ],
+      "completion_length": 16,
+      "local_m": 256,
+      "logical_input_sha256": "ad3a61303ecb0798af19e2956db9431a29d23cf87699fb0a5769347d656ac172",
+      "prompt_length": 1788,
+      "provenance": "canonical-fixed-chunk-v1",
+      "source_row": 900001
+    }
+  ],
+  "schema": "p38-frozenlake-replay-schedule-v1",
+  "tpu_status": "NOT_RUN",
+  "verdict": "LOCALLY_ADMITTED"
+}

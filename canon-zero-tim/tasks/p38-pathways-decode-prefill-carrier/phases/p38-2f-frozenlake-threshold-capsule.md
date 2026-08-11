@@ -41,10 +41,11 @@ cache disabled and record raw target logit, vocabulary normalizer, processed
 logprob, q/kv lengths, page-table digest, and cache digest for every arm.
 
 Pre-registered prefix points include the captured onset and
-`1790/1791/1792`, `1800`, `1931`, `2047/2048/2049`, and `3839/3840` when the
-captured row is long enough. Compare teacher-forced q_len=1 decode with the
-unchanged M256 rescore, then sweep chunk sizes only as diagnostic arms. Add a
-single-turn sequence at the same depth as a negative control.
+page-only and page-plus-512-block boundaries. Scan at least four positions on
+both sides of `1536`, `1792`, `2048`, `3840`, and `4096` when the captured row
+is long enough. Compare teacher-forced q_len=1 decode with the unchanged M256
+rescore, then sweep chunk sizes only as diagnostic arms. Add a single-turn
+sequence at the same depth as a negative control.
 
 - Raw target logit first differs: localize upstream through attention/KV.
 - Raw target is exact but normalizer differs: localize the vocabulary
@@ -52,6 +53,19 @@ single-turn sequence at the same depth as a negative control.
 - Only processed logprob differs: localize transform/gather/subtraction.
 - No one-host reproduction: retain a Pathways-only classification; do not
   call the carrier repaired.
+
+## Target-capture execution gate
+
+The first refreshed manifest is named `backward-no-commit`, but the known A-B
+hard gate runs before backward. Its admitted purpose is therefore capsule
+capture. Require Attempt 0, exact source `e9cfe298`, strict B-C, a nonzero A-B
+record matching the known signature, complete capsule stdout, and successful
+transport plus embedded-array verification. A missing backward marker is
+expected and must not be reported as a gradient failure or PASS.
+
+Do not add KV-unified or other attention counterfactuals to this first target
+run. The verified capsule advances to P38.2g. GSM8K full may run on independent
+resources, but its outcome cannot promote this phase.
 
 ## Rollback
 

@@ -7,6 +7,7 @@ is selected via the ``ROLLOUT_ENGINE`` environment variable ("vllm" or
 """
 
 import contextlib
+import json
 import logging
 import math
 import os
@@ -59,6 +60,7 @@ _CANON_PRELEARNER_ONLY = (
     or os.getenv("CANON_P28_G3_ONLY", "") == "1"
     or os.getenv("CANON_P28_G4_ONLY", "") == "1"
     or os.getenv("CANON_P28_G5_ONLY", "") == "1"
+    or os.getenv("CANON_P38_FROZENLAKE_REPLAY", "") == "1"
 )
 if not _CANON_PRELEARNER_ONLY:
   from examples.frozenlake.agent import FrozenLakeAgent
@@ -172,6 +174,9 @@ CANON_P28_G4_ONLY = os.getenv("CANON_P28_G4_ONLY", "") == "1"
 CANON_P28_G5_ONLY = os.getenv("CANON_P28_G5_ONLY", "") == "1"
 CANON_P28_G5C_ONLY = os.getenv("CANON_P28_G5C_ONLY", "") == "1"
 CANON_P28_G6_UPDATE = os.getenv("CANON_P28_G6_UPDATE", "") == "1"
+CANON_P38_FROZENLAKE_REPLAY = (
+    os.getenv("CANON_P38_FROZENLAKE_REPLAY", "") == "1"
+)
 CANON_P29_FULL_TRAIN = os.getenv("CANON_P29_FULL_TRAIN", "") == "1"
 CANON_P31_CONVERGENCE = os.getenv("CANON_P31_CONVERGENCE", "") == "1"
 _P32_WORKLOAD_NAME = os.getenv("CANON_P32_WORKLOAD", "")
@@ -210,6 +215,7 @@ prelearner_modes = {
     "P28-G3-only": CANON_P28_G3_ONLY,
     "P28-G4-only": CANON_P28_G4_ONLY,
     "P28-G5-only": CANON_P28_G5_ONLY,
+    "P38-FrozenLake-replay": CANON_P38_FROZENLAKE_REPLAY,
 }
 active_prelearner_modes = [
     name for name, active in prelearner_modes.items() if active
@@ -672,7 +678,7 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 # before producing an action.
 chat_parser = parser.QwenChatTemplateParser(tokenizer, enable_thinking=False)
 
-if CANON_CONTRACT_ONLY or CANON_A3_ONLY:
+if CANON_CONTRACT_ONLY or CANON_A3_ONLY or CANON_P38_FROZENLAKE_REPLAY:
   # A1b/A2 inventory needs the real model and rollout runner, not an RL batch.
   # Skipping dataset I/O keeps this preflight independent of FrozenLake data.
   train_dataset = test_dataset = None
@@ -992,6 +998,49 @@ if CANON_L3:
     rl_cluster.rollout.run_p28_full_chain_gate()
     print(
         "[P28.G5B] CHAIN_ONLY_PASS no_loss=1 no_optimizer=1",
+        flush=True,
+    )
+    raise SystemExit(0)
+  if CANON_P38_FROZENLAKE_REPLAY:
+    from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+
+    capsule_path = os.getenv("CANON_P38_CAPSULE_INPUT", "")
+    report_path = os.getenv("CANON_P38_REPLAY_REPORT", "")
+    if not capsule_path or not report_path:
+      raise ValueError(
+          "P38 FrozenLake replay requires CANON_P38_CAPSULE_INPUT and "
+          "CANON_P38_REPLAY_REPORT"
+      )
+    if os.path.exists(report_path):
+      raise FileExistsError(
+          f"refusing to overwrite P38 replay report: {report_path}"
+      )
+    weight_attestation = rl_cluster.attest_actor_anchor_matches_engine()
+    if weight_attestation.get("equal") is not True:
+      raise ValueError(
+          "P38 FrozenLake replay requires bitwise-equal actor and engine weights"
+      )
+    report = canonical_forward.require_registered().run_p38_frozenlake_causal_replay(
+        capsule_path=capsule_path,
+        row_index=int(os.getenv("CANON_P38_CAPSULE_ROW_INDEX", "0")),
+        temperature=TEMPERATURE,
+    )
+    report["weight_attestation"] = {
+        "equal": True,
+        "mapped_leaves": int(weight_attestation["mapped_leaves"]),
+        "live_leaves": int(weight_attestation["live_leaves"]),
+        "total_elements": int(weight_attestation["total_elements"]),
+        "mismatch_indices": list(weight_attestation["mismatch_indices"]),
+        "mesh_device_ids": list(weight_attestation["mesh_device_ids"]),
+    }
+    os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+    with open(report_path, "x", encoding="utf-8") as report_file:
+      json.dump(report, report_file, sort_keys=True, indent=2)
+      report_file.write("\n")
+    print(
+        "[CANON_P38_REPLAY] COMPLETE "
+        f"report={report_path} classification={report['classification']} "
+        "no_backward=1 optimizer_commits=0",
         flush=True,
     )
     raise SystemExit(0)

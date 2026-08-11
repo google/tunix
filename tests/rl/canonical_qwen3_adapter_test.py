@@ -2351,6 +2351,84 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             sampler=sampler, trainer_state=source
         )
 
+  def test_p38_frozenlake_replay_runs_r0_r1_and_negative_control(self):
+    names = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    mesh = jax.make_mesh(
+        (1, 1, 1, 1, 4, 1),
+        names,
+        devices=jax.devices()[:4],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    runner = _ForwardRunner(self.target, mesh)
+    sampler = _Sampler(runner, self.mapping)
+    sampler.args["tensor_parallel_size"] = 4
+    arrays = {
+        "prompt_ids": np.asarray([[0, 11, 12]], np.int32),
+        "prompt_mask": np.asarray([[False, True, True]]),
+        "completion_ids": np.asarray([[21, 31, 32, 22]], np.int32),
+        "completion_valid_mask": np.asarray([[True, True, True, True]]),
+        "action_mask": np.asarray([[True, False, False, True]]),
+        "s_decode": np.zeros((1, 4), np.float32),
+        "s_prefill": np.zeros((1, 4), np.float32),
+        "t_old": np.zeros((1, 4), np.float32),
+        "policy_version": np.zeros((1, 1), np.int32),
+        "sampling_values": np.asarray([[1.0]], np.float32),
+    }
+    metadata = {
+        "schema": "p38-frozenlake-mismatch-capsule-v1",
+        "selected_rows": [7],
+        "arrays": {
+            name: {
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "sha256": hashlib.sha256(value.tobytes()).hexdigest(),
+            }
+            for name, value in arrays.items()
+        },
+    }
+    env = {
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+        "CANON_LOGPROB_M": "256",
+        "MIN_TOKEN_BUCKET": "256",
+        "CANON_P38_FROZENLAKE_REPLAY": "1",
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+      capsule = os.path.join(tmp, "capsule.npz")
+      np.savez_compressed(
+          capsule,
+          selected_rows=np.asarray([7], np.int32),
+          metadata_json=np.frombuffer(
+              json.dumps(metadata, sort_keys=True).encode(), np.uint8
+          ),
+          **arrays,
+      )
+      with mock.patch.dict(os.environ, env, clear=False):
+        adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
+            sampler=sampler
+        )
+        report = adapter.run_p38_frozenlake_causal_replay(
+            capsule_path=capsule,
+            temperature=1.0,
+        )
+    self.assertEqual(report["measurement_status"], "COMPLETE")
+    self.assertTrue(report["no_backward"])
+    self.assertTrue(
+        all(
+            stage["exact"]
+            for arm in report["repeat_comparisons"].values()
+            for stage in arm.values()
+        )
+    )
+    self.assertEqual(report["negative_control"]["differing_elements"], 1)
+
   def test_p35_exact_replay_uses_captured_tensors_and_repeats_exactly(self):
     names = (
         "data",

@@ -43,6 +43,7 @@ from tunix.rl import canonical_logsoftmax
 from tunix.rl import dp_training
 from tunix.rl import dp_workloads
 from tunix.rl import deepswe_contract
+from tunix.rl import p38_frozenlake_replay
 
 
 class FunctionalMappingError(ValueError):
@@ -245,6 +246,53 @@ def _bitwise_difference_summary(left: Any, right: Any) -> dict[str, Any]:
       "differing_elements": differing,
       "total_elements": total,
       "exact": differing == 0,
+  }
+
+
+def _host_difference_summary(left: Any, right: Any) -> dict[str, Any]:
+  """Returns exact and numeric diagnostics for one bounded host-side vector."""
+  left_value = np.ascontiguousarray(np.asarray(left))
+  right_value = np.ascontiguousarray(np.asarray(right))
+  if left_value.shape != right_value.shape or left_value.dtype != right_value.dtype:
+    return {
+        "valid": False,
+        "shape_left": list(left_value.shape),
+        "shape_right": list(right_value.shape),
+        "dtype_left": str(left_value.dtype),
+        "dtype_right": str(right_value.dtype),
+    }
+  byte_difference = left_value.view(np.uint8) != right_value.view(np.uint8)
+  element_difference = byte_difference.reshape(
+      left_value.size, left_value.dtype.itemsize
+  ).any(axis=1).reshape(left_value.shape)
+  coordinates = np.argwhere(element_difference)
+  first = None
+  if coordinates.size:
+    coordinate = tuple(int(value) for value in coordinates[0])
+    first = {
+        "index": list(coordinate),
+        "left": float(left_value[coordinate]),
+        "right": float(right_value[coordinate]),
+    }
+  if left_value.size:
+    max_abs = float(
+        np.max(np.abs(left_value.astype(np.float64) - right_value.astype(np.float64)))
+    )
+  else:
+    max_abs = 0.0
+  return {
+      "valid": True,
+      "shape": list(left_value.shape),
+      "dtype": str(left_value.dtype),
+      "differing_bytes": int(byte_difference.sum()),
+      "total_bytes": int(byte_difference.size),
+      "differing_elements": int(element_difference.sum()),
+      "total_elements": int(element_difference.size),
+      "exact": not bool(element_difference.any()),
+      "max_abs": max_abs,
+      "first_mismatch": first,
+      "left_sha256": hashlib.sha256(left_value.tobytes()).hexdigest(),
+      "right_sha256": hashlib.sha256(right_value.tobytes()).hexdigest(),
   }
 
 
@@ -1736,6 +1784,7 @@ class Qwen3EngineForwardAdapter:
       prompt_mask,
       completion_mask,
       temperature,
+      score_mask=None,
   ):
     """Replays captured B tensors through the canonical model entry."""
     records = tuple(records)
@@ -1760,16 +1809,26 @@ class Qwen3EngineForwardAdapter:
     completions = np.asarray(completion_tokens)
     prompt_valid = np.asarray(prompt_mask, dtype=np.bool_)
     completion_valid = np.asarray(completion_mask, dtype=np.bool_)
+    score_valid = (
+        completion_valid
+        if score_mask is None
+        else np.asarray(score_mask, dtype=np.bool_)
+    )
     if (
         prompts.ndim != 2
         or completions.ndim != 2
         or prompts.shape != prompt_valid.shape
         or completions.shape != completion_valid.shape
+        or completions.shape != score_valid.shape
         or prompts.shape[0] != self._data_size
         or completions.shape[0] != self._data_size
     ):
       raise FunctionalMappingError(
-          "P35.3 captured replay requires one prompt/completion per data rank"
+        "P35.3 captured replay requires one prompt/completion per data rank"
+      )
+    if np.any(score_valid & ~completion_valid):
+      raise FunctionalMappingError(
+          "P35.3 score mask includes an invalid completion token"
       )
     prompt_lengths = prompt_valid.sum(axis=1, dtype=np.int64)
     completion_lengths = completion_valid.sum(axis=1, dtype=np.int64)
@@ -1912,7 +1971,10 @@ class Qwen3EngineForwardAdapter:
           flat_row = rank * self._sequence_bucket + local_row
           target_ids[flat_row] = int(sequence[target_position])
           completion_slot = target_position - int(prompt_lengths[rank])
-          if 0 <= completion_slot < int(completion_lengths[rank]):
+          if (
+              0 <= completion_slot < int(completion_lengths[rank])
+              and score_valid[rank, completion_slot]
+          ):
             if observed[rank, completion_slot]:
               raise FunctionalMappingError(
                   "P35.3 captured records duplicate one action predictor"
@@ -2086,16 +2148,16 @@ class Qwen3EngineForwardAdapter:
         flush=True,
     )
 
-    if not np.array_equal(observed, completion_valid):
-      missing = np.argwhere(completion_valid & ~observed)
-      extra = np.argwhere(observed & ~completion_valid)
+    if not np.array_equal(observed, score_valid):
+      missing = np.argwhere(score_valid & ~observed)
+      extra = np.argwhere(observed & ~score_valid)
       raise FunctionalMappingError(
           "P35.3 captured records do not cover the selected action mask: "
           f"missing={missing[:8].tolist()} extra={extra[:8].tolist()}"
       )
     if hidden_rows is None:
       raise FunctionalMappingError("P35.3 captured replay produced no actions")
-    mask = jnp.asarray(completion_valid)
+    mask = jnp.asarray(score_valid)
     return replay_logps, {
         "final_hidden": jnp.where(mask[..., None], hidden_rows, 0),
         "raw_targets": jnp.where(mask, raw_targets, 0),
@@ -2103,6 +2165,230 @@ class Qwen3EngineForwardAdapter:
         "implied_log_normalizers": jnp.where(mask, log_normalizers, 0),
         "logps": jnp.where(mask, replay_logps, 0),
     }
+
+  def run_p38_frozenlake_causal_replay(
+      self,
+      *,
+      capsule_path,
+      row_index=0,
+      temperature=0.7,
+  ) -> dict[str, Any]:
+    """Runs the default-off DP1 R0/R1 FrozenLake causal discriminator."""
+    if os.environ.get("CANON_P38_FROZENLAKE_REPLAY", "") != "1":
+      raise FunctionalMappingError(
+          "P38 FrozenLake replay requires CANON_P38_FROZENLAKE_REPLAY=1"
+      )
+    if self._data_size != 1 or self._tp_size != 4:
+      raise FunctionalMappingError(
+          "P38 FrozenLake replay requires the admitted DP1 x TP4 host: "
+          f"data={self._data_size} model={self._tp_size}"
+      )
+    if self._bucket != 256 or self._sequence_bucket != 256:
+      raise FunctionalMappingError(
+          "P38 FrozenLake replay requires global/local M=256: "
+          f"{self._bucket}/{self._sequence_bucket}"
+      )
+    capsule = p38_frozenlake_replay.load_verified_capsule(capsule_path)
+    if row_index < 0 or row_index >= len(capsule.rows):
+      raise FunctionalMappingError(
+          f"P38 capsule row index is out of range: {row_index}"
+      )
+    row = capsule.rows[row_index]
+    expected_policy_version = int(
+        os.environ.get("CANON_P38_EXPECTED_POLICY_VERSION", "0")
+    )
+    policy_versions = np.asarray(row.policy_version).reshape(-1)
+    if (
+        policy_versions.size == 0
+        or not np.all(policy_versions == expected_policy_version)
+    ):
+      raise FunctionalMappingError(
+          "P38 capsule policy version does not match the local base checkpoint: "
+          f"observed={policy_versions.tolist()} "
+          f"expected={expected_policy_version}"
+      )
+
+    r0_schedule = p38_frozenlake_replay.build_r0_mask_derived_schedule(
+        row, local_m=self._sequence_bucket
+    )
+    r1_schedule = p38_frozenlake_replay.build_r1_continuous_decode_schedule(
+        row, local_m=self._sequence_bucket
+    )
+    reference_schedule = (
+        p38_frozenlake_replay.build_fixed_chunk_reference_schedule(
+            row, local_m=self._sequence_bucket
+        )
+    )
+
+    def records(schedule):
+      return p38_frozenlake_replay.build_engine_records(
+          schedule,
+          max_num_reqs=self._max_num_reqs,
+          blocks_per_request=self._blocks_per_req,
+          cache_blocks=self._cache_shape[0],
+      )
+
+    prompt = jnp.asarray(row.prompt_ids[None, :], jnp.int32)
+    completion = jnp.asarray(row.completion_ids[None, :], jnp.int32)
+    prompt_valid = jnp.ones_like(prompt, dtype=jnp.bool_)
+    completion_valid = jnp.ones_like(completion, dtype=jnp.bool_)
+    score_mask = jnp.asarray(row.action_mask[None, :], jnp.bool_)
+    engine_leaves = tuple(self._runner.state_leaves)
+
+    def execute(schedule, label):
+      return self._p35_run_captured_records(
+          engine_leaves,
+          records(schedule),
+          replay_label=label,
+          prompt_tokens=prompt,
+          completion_tokens=completion,
+          prompt_mask=prompt_valid,
+          completion_mask=completion_valid,
+          temperature=temperature,
+          score_mask=score_mask,
+      )
+
+    r0_first = execute(r0_schedule, "P38_R0_first")
+    r0_repeat = execute(r0_schedule, "P38_R0_repeat")
+    r1_first = execute(r1_schedule, "P38_R1_first")
+    r1_repeat = execute(r1_schedule, "P38_R1_repeat")
+    reference_first = execute(reference_schedule, "P38_REF_first")
+    reference_repeat = execute(reference_schedule, "P38_REF_repeat")
+    jax.block_until_ready((
+        r0_first,
+        r0_repeat,
+        r1_first,
+        r1_repeat,
+        reference_first,
+        reference_repeat,
+    ))
+
+    action_indices = np.flatnonzero(row.action_mask)
+
+    def selected(value):
+      array = np.asarray(jax.device_get(value))
+      if array.ndim == 2 and array.shape[0] == 1:
+        array = array[0]
+      if array.shape[0] != row.completion_length:
+        raise FunctionalMappingError(
+            "P38 replay stage is not completion aligned: "
+            f"{array.shape}/{row.completion_length}"
+        )
+      return np.ascontiguousarray(array[action_indices])
+
+    stage_names = (
+        "raw_targets",
+        "processed_targets",
+        "implied_log_normalizers",
+        "logps",
+    )
+    arm_values = {
+        "R0": {name: selected(r0_first[1][name]) for name in stage_names},
+        "R1": {name: selected(r1_first[1][name]) for name in stage_names},
+        "REF": {
+            name: selected(reference_first[1][name]) for name in stage_names
+        },
+    }
+    repeat_values = {
+        "R0": {name: selected(r0_repeat[1][name]) for name in stage_names},
+        "R1": {name: selected(r1_repeat[1][name]) for name in stage_names},
+        "REF": {
+            name: selected(reference_repeat[1][name]) for name in stage_names
+        },
+    }
+    repeat_comparisons = {
+        arm: {
+            name: _host_difference_summary(values[name], repeat_values[arm][name])
+            for name in stage_names
+        }
+        for arm, values in arm_values.items()
+    }
+    if not all(
+        comparison["exact"]
+        for arm in repeat_comparisons.values()
+        for comparison in arm.values()
+    ):
+      raise FunctionalMappingError("P38 replay is not bitwise deterministic")
+
+    negative = arm_values["R0"]["logps"].copy()
+    negative.view(np.uint8).reshape(-1)[0] ^= np.uint8(1)
+    negative_control = _host_difference_summary(
+        arm_values["R0"]["logps"], negative
+    )
+    if negative_control["exact"]:
+      raise FunctionalMappingError("P38 one-bit negative control was not detected")
+
+    comparisons = {}
+    for left, right in (("R0", "R1"), ("R0", "REF"), ("R1", "REF")):
+      comparisons[f"{left}_vs_{right}"] = {
+          name: _host_difference_summary(
+              arm_values[left][name], arm_values[right][name]
+          )
+          for name in stage_names
+      }
+    r0_reference_exact = comparisons["R0_vs_REF"]["logps"]["exact"]
+    r1_reference_exact = comparisons["R1_vs_REF"]["logps"]["exact"]
+    if not r0_reference_exact and r1_reference_exact:
+      classification = "MULTITURN_SCHEDULE_CARRIER_CANDIDATE"
+    elif r0_reference_exact:
+      classification = "LOCAL_CARRIER_NOT_REPRODUCED"
+    else:
+      classification = "LOCAL_CARRIER_NOT_ISOLATED"
+
+    captured = {
+        "S_decode_vs_S_prefill": _host_difference_summary(
+            row.s_decode[action_indices], row.s_prefill[action_indices]
+        ),
+        "S_prefill_vs_T_old": _host_difference_summary(
+            row.s_prefill[action_indices], row.t_old[action_indices]
+        ),
+    }
+    report = {
+        "schema": "p38-frozenlake-causal-replay-v1",
+        "measurement_status": "COMPLETE",
+        "classification": classification,
+        "claim_ceiling": (
+            "R0 is derived from action and validity masks; the capsule does "
+            "not contain the original serving scheduler call metadata."
+        ),
+        "capsule": {
+            "path": str(capsule.path),
+            "sha256": capsule.sha256,
+            "source_row": row.source_row,
+            "row_index": row_index,
+            "policy_version": expected_policy_version,
+        },
+        "geometry": {
+            "data": self._data_size,
+            "model": self._tp_size,
+            "local_m": self._sequence_bucket,
+            "global_m": self._bucket,
+            "prompt_length": row.prompt_length,
+            "completion_length": row.completion_length,
+            "action_tokens": int(action_indices.size),
+            "prefix_cache": False,
+            "runtime_kv_cache": True,
+        },
+        "schedules": [
+            r0_schedule.as_dict(),
+            r1_schedule.as_dict(),
+            reference_schedule.as_dict(),
+        ],
+        "captured_boundaries": captured,
+        "comparisons": comparisons,
+        "repeat_comparisons": repeat_comparisons,
+        "negative_control": negative_control,
+        "no_backward": True,
+        "no_optimizer": True,
+    }
+    print(
+        "[CANON_P38_REPLAY] "
+        f"classification={classification} row={row.source_row} "
+        f"R0_vs_REF={comparisons['R0_vs_REF']['logps']['differing_elements']} "
+        f"R1_vs_REF={comparisons['R1_vs_REF']['logps']['differing_elements']}",
+        flush=True,
+    )
+    return report
 
   def p35_exact_input_replay(
       self,

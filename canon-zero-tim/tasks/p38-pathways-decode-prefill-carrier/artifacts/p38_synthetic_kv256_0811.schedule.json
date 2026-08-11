@@ -1,0 +1,585 @@
+{
+  "capsule": {
+    "path": "canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/artifacts/p38_synthetic_kv256_0811.npz",
+    "schema": "p38-frozenlake-mismatch-capsule-v1",
+    "selected_rows": [
+      900001
+    ],
+    "sha256": "1affab1398c1658b53830ad956b7e99031534377c977eb01bc171d7738348469"
+  },
+  "claim_ceiling": "Schedules are derived from token masks and do not reproduce the captured serving scheduler metadata.",
+  "schedules": [
+    {
+      "action_targets": [
+        1,
+        2,
+        5,
+        6,
+        9,
+        10,
+        13,
+        14
+      ],
+      "arm": "R0",
+      "calls": [
+        {
+          "action_targets": [],
+          "kind": "initial_prefill",
+          "kv_length_after": 256,
+          "kv_length_before": 0,
+          "logical_start": 0,
+          "logical_stop": 256,
+          "ordinal": 0,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            1
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 257,
+          "kv_length_before": 256,
+          "logical_start": 256,
+          "logical_stop": 257,
+          "ordinal": 1,
+          "query_length": 1,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            2
+          ],
+          "kind": "decode",
+          "kv_length_after": 258,
+          "kv_length_before": 257,
+          "logical_start": 257,
+          "logical_stop": 258,
+          "ordinal": 2,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 259,
+          "kv_length_before": 258,
+          "logical_start": 258,
+          "logical_stop": 259,
+          "ordinal": 3,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            5
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 261,
+          "kv_length_before": 259,
+          "logical_start": 259,
+          "logical_stop": 261,
+          "ordinal": 4,
+          "query_length": 2,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            6
+          ],
+          "kind": "decode",
+          "kv_length_after": 262,
+          "kv_length_before": 261,
+          "logical_start": 261,
+          "logical_stop": 262,
+          "ordinal": 5,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 263,
+          "kv_length_before": 262,
+          "logical_start": 262,
+          "logical_stop": 263,
+          "ordinal": 6,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            9
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 265,
+          "kv_length_before": 263,
+          "logical_start": 263,
+          "logical_stop": 265,
+          "ordinal": 7,
+          "query_length": 2,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            10
+          ],
+          "kind": "decode",
+          "kv_length_after": 266,
+          "kv_length_before": 265,
+          "logical_start": 265,
+          "logical_stop": 266,
+          "ordinal": 8,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 267,
+          "kv_length_before": 266,
+          "logical_start": 266,
+          "logical_stop": 267,
+          "ordinal": 9,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            13
+          ],
+          "kind": "environment_prefill",
+          "kv_length_after": 269,
+          "kv_length_before": 267,
+          "logical_start": 267,
+          "logical_stop": 269,
+          "ordinal": 10,
+          "query_length": 2,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            14
+          ],
+          "kind": "decode",
+          "kv_length_after": 270,
+          "kv_length_before": 269,
+          "logical_start": 269,
+          "logical_stop": 270,
+          "ordinal": 11,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "decode",
+          "kv_length_after": 271,
+          "kv_length_before": 270,
+          "logical_start": 270,
+          "logical_stop": 271,
+          "ordinal": 12,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "completion_length": 16,
+      "local_m": 256,
+      "logical_input_sha256": "a12ddd35cfc5bb32619adbc4b879ec6795bf99f2eb11310d2fbeca5be2760e57",
+      "prompt_length": 256,
+      "provenance": "mask-derived-v1",
+      "source_row": 900001
+    },
+    {
+      "action_targets": [
+        1,
+        2,
+        5,
+        6,
+        9,
+        10,
+        13,
+        14
+      ],
+      "arm": "R1",
+      "calls": [
+        {
+          "action_targets": [],
+          "kind": "initial_prefill",
+          "kv_length_after": 256,
+          "kv_length_before": 0,
+          "logical_start": 0,
+          "logical_stop": 256,
+          "ordinal": 0,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            1
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 257,
+          "kv_length_before": 256,
+          "logical_start": 256,
+          "logical_stop": 257,
+          "ordinal": 1,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            2
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 258,
+          "kv_length_before": 257,
+          "logical_start": 257,
+          "logical_stop": 258,
+          "ordinal": 2,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 259,
+          "kv_length_before": 258,
+          "logical_start": 258,
+          "logical_stop": 259,
+          "ordinal": 3,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 260,
+          "kv_length_before": 259,
+          "logical_start": 259,
+          "logical_stop": 260,
+          "ordinal": 4,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            5
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 261,
+          "kv_length_before": 260,
+          "logical_start": 260,
+          "logical_stop": 261,
+          "ordinal": 5,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            6
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 262,
+          "kv_length_before": 261,
+          "logical_start": 261,
+          "logical_stop": 262,
+          "ordinal": 6,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 263,
+          "kv_length_before": 262,
+          "logical_start": 262,
+          "logical_stop": 263,
+          "ordinal": 7,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 264,
+          "kv_length_before": 263,
+          "logical_start": 263,
+          "logical_stop": 264,
+          "ordinal": 8,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            9
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 265,
+          "kv_length_before": 264,
+          "logical_start": 264,
+          "logical_stop": 265,
+          "ordinal": 9,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            10
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 266,
+          "kv_length_before": 265,
+          "logical_start": 265,
+          "logical_stop": 266,
+          "ordinal": 10,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 267,
+          "kv_length_before": 266,
+          "logical_start": 266,
+          "logical_stop": 267,
+          "ordinal": 11,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 268,
+          "kv_length_before": 267,
+          "logical_start": 267,
+          "logical_stop": 268,
+          "ordinal": 12,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            13
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 269,
+          "kv_length_before": 268,
+          "logical_start": 268,
+          "logical_stop": 269,
+          "ordinal": 13,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            14
+          ],
+          "kind": "continuous_decode",
+          "kv_length_after": 270,
+          "kv_length_before": 269,
+          "logical_start": 269,
+          "logical_stop": 270,
+          "ordinal": 14,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "action_targets": [],
+          "kind": "continuous_decode",
+          "kv_length_after": 271,
+          "kv_length_before": 270,
+          "logical_start": 270,
+          "logical_stop": 271,
+          "ordinal": 15,
+          "query_length": 1,
+          "request_distribution": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "completion_length": 16,
+      "local_m": 256,
+      "logical_input_sha256": "a12ddd35cfc5bb32619adbc4b879ec6795bf99f2eb11310d2fbeca5be2760e57",
+      "prompt_length": 256,
+      "provenance": "mask-derived-v1",
+      "source_row": 900001
+    },
+    {
+      "action_targets": [
+        1,
+        2,
+        5,
+        6,
+        9,
+        10,
+        13,
+        14
+      ],
+      "arm": "REF",
+      "calls": [
+        {
+          "action_targets": [],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 256,
+          "kv_length_before": 0,
+          "logical_start": 0,
+          "logical_stop": 256,
+          "ordinal": 0,
+          "query_length": 256,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "action_targets": [
+            1,
+            2,
+            5,
+            6,
+            9,
+            10,
+            13,
+            14
+          ],
+          "kind": "fixed_chunk_reference",
+          "kv_length_after": 272,
+          "kv_length_before": 256,
+          "logical_start": 256,
+          "logical_stop": 272,
+          "ordinal": 1,
+          "query_length": 16,
+          "request_distribution": [
+            0,
+            0,
+            1
+          ]
+        }
+      ],
+      "completion_length": 16,
+      "local_m": 256,
+      "logical_input_sha256": "8bd4b48a82e93e038abae3714a5477dd4a11308d16eaaa37ecd8102509292fa5",
+      "prompt_length": 256,
+      "provenance": "canonical-fixed-chunk-v1",
+      "source_row": 900001
+    }
+  ],
+  "schema": "p38-frozenlake-replay-schedule-v1",
+  "tpu_status": "NOT_RUN",
+  "verdict": "LOCALLY_ADMITTED"
+}
