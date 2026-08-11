@@ -31,7 +31,7 @@ MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
-MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
+MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models/${MODEL_ID}"}}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
 
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
@@ -59,10 +59,10 @@ INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 
-TRAINER_LOG="${DIR}/trainer.log"
-ROLLOUT_LOG="${DIR}/rollout.log"
-INFERENCE_LOG="${DIR}/inference.log"
-ORCHESTRATOR_LOG="${DIR}/orchestrator.log"
+TRAINER_LOG="${ARTIFACT_ROOT}/log/trainer.log"
+ROLLOUT_LOG="${ARTIFACT_ROOT}/log/rollout.log"
+INFERENCE_LOG="${ARTIFACT_ROOT}/log/inference.log"
+ORCHESTRATOR_LOG="${ARTIFACT_ROOT}/log/orchestrator.log"
 
 print_section() {
   echo
@@ -310,6 +310,7 @@ PY
   done
 }
 
+mkdir -p "${ARTIFACT_ROOT}/log"
 : > "$TRAINER_LOG"
 : > "$ROLLOUT_LOG"
 : > "$INFERENCE_LOG"
@@ -361,6 +362,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
   export PYTHONUNBUFFERED=1
+  env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
   # exec bash -c "echo 'dummy trainer' && sleep infinity"
@@ -397,6 +399,7 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
   export PYTHONUNBUFFERED=1
+  env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
   # exec bash -c "echo 'dummy rollout' && sleep infinity"
@@ -441,6 +444,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
     export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
     export PYTHONUNBUFFERED=1
+    env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
     exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
   ) &
@@ -481,6 +485,7 @@ if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; t
   ORCHESTRATOR_CMD+=(--sync_lora_weights)
 fi
 export JAX_PLATFORMS=cpu
+env | egrep 'JAX|TPU'
 print_command "Orchestrator command" PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}"
 PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1 || {
   exit_code="$?"

@@ -7,8 +7,23 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential git python3 python3-pip curl && \
+    apt-get install -y \
+        build-essential git python3 python3-pip curl \
+        vim lsof procps \
+        apt-transport-https ca-certificates gnupg && \
     rm -rf /var/lib/apt/lists/*
+
+# Install gcloud, kubectl, k9s
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+    | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+RUN apt-get update && apt-get install -y \
+    google-cloud-cli \
+    google-cloud-cli-gke-gcloud-auth-plugin \
+    kubectl \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -sS https://webinstall.dev/k9s | bash
 
 # Upgrade pip
 RUN python3 -m pip install --upgrade pip

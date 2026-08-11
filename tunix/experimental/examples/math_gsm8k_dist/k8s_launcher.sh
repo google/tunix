@@ -1,11 +1,17 @@
 #!/usr/bin/bash
 
-ROLE=""
-TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:latest"
+while [[ "$USER" == "" ]]; do
+  echo -n "USER is empty. input one: "
+  read -r USER
+done
+
+COMMAND=""
+
+TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0810"
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
-export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models}
+export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models/${MODEL_ID}}
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
@@ -20,13 +26,13 @@ export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
 
-export ORCHESTRATOR_ID=$USER-orch
+export ORCHESTRATOR_ID=${USER%_google_com}-orch
 export ORCHESTRATOR_PORT=20000
 
-export ROLLOUT_ID=$USER-roll
+export ROLLOUT_ID=${USER%_google_com}-roll
 export ROLLOUT_PORT=20001
 
-export TRAINER_ID=$USER-train
+export TRAINER_ID=${USER%_google_com}-train
 export TRAINER_PORT=20002
 
 stop_orchestrator() {
@@ -126,13 +132,11 @@ enter_kube_context() {
   PROJECT="cloud-tpu-multipod-dev"
   REGION="us-central1"
   ZONE="us-central1-a"
-  CLUSTER="rl-scaffolding"
+  CLUSTER="trellis-demo-0810"
 
   export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config.$PROJECT.$REGION.$CLUSTER}"
-  if ! [ -f "$KUBECONFIG" ] || ! kubectl get namespaces &>/dev/null; then
-    gcloud container clusters get-credentials $CLUSTER --region=$REGION --project=$PROJECT --dns-endpoint &>/dev/null || { echo "gcloud get-credentials failed"; exit 1; }
-    kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" >/dev/null || { echo "kubectl use-context failed"; exit 1; }
-  fi
+  gcloud container clusters get-credentials $CLUSTER --region=$REGION --project=$PROJECT --dns-endpoint &>/dev/null || { echo "gcloud get-credentials failed"; exit 1; }
+  kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" >/dev/null || { echo "kubectl use-context failed"; exit 1; }
   kubectl config set-context --current --namespace=default >/dev/null || { echo "kubectl set-context failed"; exit 1; }
 }
 
@@ -140,12 +144,12 @@ enter_kube_context
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --role)
-      ROLE="$2"
+    --command)
+      COMMAND="$2"
       shift 2
       ;;
-    --role=*)
-      ROLE="${1#*=}"
+    --command=*)
+      COMMAND="${1#*=}"
       shift
       ;;
     --image)
@@ -162,17 +166,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$ROLE" == "orchestrator" ]]; then
+if [[ "$COMMAND" == "orchestrator" ]]; then
   stop_orchestrator; start_orchestrator
-elif [[ "$ROLE" == "trainer" ]]; then
+elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
-elif [[ "$ROLE" == "rollout" ]]; then
+elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
-elif [[ "$ROLE" == "stop" ]]; then
+elif [[ "$COMMAND" == "stop" ]]; then
   stop_orchestrator
   stop_trainer
   stop_rollout
-elif [[ "$ROLE" == "start" ]]; then
+elif [[ "$COMMAND" == "start" ]]; then
   stop_orchestrator
   stop_trainer
   stop_rollout
@@ -180,6 +184,6 @@ elif [[ "$ROLE" == "start" ]]; then
   start_trainer
   start_rollout
 else
-  echo "Error: Invalid role '$ROLE'. Available roles: 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Choose one: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
   exit 1
 fi
