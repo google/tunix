@@ -1,6 +1,7 @@
 # P38.2g2: source-pinned Pathways serving envelope
 
-Status: locally implemented and gated; target run not authorized or run.
+Status: local admission hardening complete and gated; uncommitted; target run
+not authorized or run.
 
 ## Objective
 
@@ -81,18 +82,30 @@ physical-to-logical token selector. This permits an exact token-history join
 to a recovered mismatch capsule; row ordinal alone is not an admitted join
 key.
 
+Only requests with a positive scheduled-token count are captured. Their
+original scheduler slot is preserved even when an idle live request is
+filtered, so filtering cannot silently compact the row mapping. Every selected
+request must be a one-token continue-decode request and must agree across the
+request list, DP assignment, global token row, attention row, selector range,
+sequence length, query-start range, and physical block-table row.
+
 ## Local implementation gate
 
 - patches 08 and 09 install from the pinned image for Qwen3-1.7B and Qwen3-8B;
 - each installed overlay matches its 29-file SHA manifest;
-- both existing logprob-chunking suites pass 10/10;
-- the serving classifier passes ten tests, including missing-post,
-  missing-page, missing-sampling-metadata, corrupt-SHA, and count controls;
-- the dedicated renderer passes four tests, including stock/U separation,
-  zero retries, poison-SHA quoting, and overwrite refusal;
+- both installed logprob-chunking suites pass 13/13, including scheduled-only
+  selection, preserved physical-slot mapping, empty-selection rejection, and
+  selector-drift rejection;
+- the serving classifier passes 18 tests, including missing-post,
+  missing-page, missing-sampling-metadata, corrupt-SHA, count, internal mapping,
+  required-capsule, missing-join, and ambiguous-join controls;
+- the dedicated renderer passes five tests, including stock/U separation,
+  zero retries, poison-SHA quoting, missing-capsule rejection, and overwrite
+  refusal;
 - the archive transport extractor passes four tests; and
-- the shell postflight accepts exactly one complete precheck stop and rejects
-  a numerically red stop without that marker; and
+- the shell postflight accepts exactly one complete precheck stop, rejects a
+  numerical red without that marker, rejects a stock U hit, rejects U without
+  a hit, and accepts exact U only with a positive hit; and
 - the complete pinned-image P33 CPU gate passes.
 
 These are construction gates only. They do not show that production decode

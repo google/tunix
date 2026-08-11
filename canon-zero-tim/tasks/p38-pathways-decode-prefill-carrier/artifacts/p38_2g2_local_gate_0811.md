@@ -9,9 +9,9 @@ Status: PASS locally; target Pathways numerical run NOT RUN.
 - patch 08 SHA-256:
   `3486a601c14a52b8748fb3a773dd497e411bf2b6344161e356d8a6d61c787996`;
 - patch 09 SHA-256:
-  `593f77fda925b33ea3553609ee70492c8c4ac886d872200db34c3a8773ed2928`;
+  `b2cd3a002749f0e02c1adda698472221a6b85a22743ca45e88b63fa5a5a0bfa1`;
 - installed `tpu_runner_p21_l30.py` SHA-256:
-  `7aa31da1cfb4168d7b459e7e1edefdca008d2dc69372f837adbdaa914b55a256`;
+  `adacdaeeda7a73a44c8f0af4a6866e6aebd077f7a90338537da7d4fd0faa579a`;
 - installed `attn_iface_patched.py` SHA-256:
   `804d33649b8585a26b005822b26625d463b6c558f4d8b87bf8b7284d339b3e97`.
 
@@ -35,13 +35,13 @@ git diff --check
 
 Observed results:
 
-- serving classifier: 10/10 PASS;
+- serving classifier: 18/18 PASS;
 - archive transport: 4/4 PASS;
-- stock/U renderer: 4/4 PASS;
+- stock/U renderer: 5/5 PASS;
 - postflight:
-  `[P38.SERVING] POSTFLIGHT_PASS exact_stop=accepted red_stop=rejected`;
-- exact-image Qwen3-1.7B overlay: 29/29 manifest, chunking 10/10;
-- exact-image Qwen3-8B overlay: 29/29 manifest, chunking 10/10;
+  `[P38.SERVING] POSTFLIGHT_PASS exact_stop=accepted red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted`;
+- exact-image Qwen3-1.7B overlay: 29/29 manifest, runtime 13/13;
+- exact-image Qwen3-8B overlay: 29/29 manifest, runtime 13/13;
 - exact-image terminal marker:
   `P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 overlays=2`;
 - complete P33 CPU terminal marker:

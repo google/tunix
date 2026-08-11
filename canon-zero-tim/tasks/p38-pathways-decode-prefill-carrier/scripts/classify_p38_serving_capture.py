@@ -32,6 +32,18 @@ POST_ARRAYS = {
     "logprob_values",
     "logprob_ranks",
 }
+CAPSULE_ARRAYS = {
+    "selected_rows",
+    "metadata_json",
+    "prompt_ids",
+    "prompt_mask",
+    "completion_ids",
+    "completion_valid_mask",
+    "action_mask",
+    "s_decode",
+    "s_prefill",
+    "t_old",
+}
 
 
 class CaptureError(RuntimeError):
@@ -47,6 +59,155 @@ def _sha256(path: Path) -> str:
   return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _array_sha256(value: Any) -> str:
+  array = np.ascontiguousarray(np.asarray(value))
+  return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _token_history_sha256(value: Any) -> str:
+  array = np.ascontiguousarray(np.asarray(value, dtype="<i8"))
+  return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _primary_block_ids(value: Any) -> list[int]:
+  """Returns the single Qwen KV group's physical page list."""
+  _require(isinstance(value, list) and value, "request has invalid physical page IDs")
+  if isinstance(value[0], list):
+    _require(len(value) == 1, "capture contains more than one KV cache group")
+    value = value[0]
+  _require(all(isinstance(item, int) for item in value), "physical page IDs are not integers")
+  return [int(item) for item in value]
+
+
+def _load_mismatch_capsule(path: Path) -> dict[str, Any]:
+  _require(path.is_file(), f"mismatch capsule does not exist: {path}")
+  with np.load(path, allow_pickle=False) as archive:
+    arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
+  _require(CAPSULE_ARRAYS.issubset(arrays), f"mismatch capsule inventory is incomplete: {sorted(CAPSULE_ARRAYS - set(arrays))}")
+  try:
+    metadata = json.loads(arrays["metadata_json"].tobytes().decode("utf-8"))
+  except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise CaptureError("mismatch capsule metadata is invalid") from error
+  _require(metadata.get("schema") == "p38-frozenlake-mismatch-capsule-v1", "mismatch capsule schema is invalid")
+  selected_rows = np.asarray(arrays["selected_rows"]).reshape(-1)
+  _require(selected_rows.size > 0, "mismatch capsule selected no rows")
+  _require(len(set(int(row) for row in selected_rows)) == selected_rows.size, "mismatch capsule selected duplicate rows")
+  for name in CAPSULE_ARRAYS - {"selected_rows", "metadata_json"}:
+    value = arrays[name]
+    _require(value.ndim > 0 and value.shape[0] == selected_rows.size, f"mismatch capsule {name} is not row aligned")
+    expected = metadata.get("arrays", {}).get(name, {})
+    _require(expected.get("shape") == list(value.shape), f"mismatch capsule {name} shape attestation failed")
+    _require(expected.get("dtype") == str(value.dtype), f"mismatch capsule {name} dtype attestation failed")
+    _require(expected.get("sha256") == _array_sha256(value), f"mismatch capsule {name} SHA attestation failed")
+  return {"arrays": arrays, "metadata": metadata}
+
+
+def _validate_request_mapping(
+    meta: dict[str, Any], arrays: dict[str, np.ndarray], seq: int
+) -> list[dict[str, Any]]:
+  request_ids = meta.get("request_ids", [])
+  requests = meta.get("requests", [])
+  by_dp = meta.get("request_ids_by_dp", {})
+  index_map = meta.get("req_id_to_index", {})
+  _require(request_ids and len(set(request_ids)) == len(request_ids), f"sequence {seq} has invalid request IDs")
+  _require(len(requests) == len(request_ids), f"sequence {seq} request metadata count mismatch")
+  _require(int(meta.get("scheduled_request_count", -1)) == len(request_ids), f"sequence {seq} scheduled request count mismatch")
+  _require(isinstance(by_dp, dict) and by_dp, f"sequence {seq} has no DP request mapping")
+  _require(set(index_map) == set(request_ids), f"sequence {seq} request-index keys mismatch")
+
+  flattened = [request_id for rank in sorted(by_dp, key=int) for request_id in by_dp[rank]]
+  _require(len(flattened) == len(set(flattened)), f"sequence {seq} DP mapping contains duplicates")
+  _require(set(flattened) == set(request_ids), f"sequence {seq} DP mapping request set mismatch")
+  records = {item.get("request_id"): item for item in requests}
+  _require(set(records) == set(request_ids), f"sequence {seq} request record IDs mismatch")
+
+  padded_rows = int(meta.get("padded_rows_per_dp", 0))
+  attention_rows = int(meta.get("max_attention_rows_per_dp", 0))
+  _require(padded_rows > 0 and attention_rows > 0, f"sequence {seq} row geometry is invalid")
+  selector = np.asarray(arrays["tokens_indices_selector"]).reshape(-1)
+  positions = np.asarray(arrays["input_positions"]).reshape(-1)
+  active = np.asarray(arrays["active_mask"], dtype=np.bool_).reshape(-1)
+  seq_lens = np.asarray(arrays["md_seq_lens"]).reshape(-1)
+  query_start = np.asarray(arrays["md_query_start_loc"]).reshape(-1)
+  block_tables = np.asarray(arrays["md_block_tables"])
+  _require(block_tables.ndim == 2, f"sequence {seq} block tables are not rank two")
+
+  seen_indices: set[int] = set()
+  seen_slots: set[tuple[int, int]] = set()
+  for rank_text in sorted(by_dp, key=int):
+    dp_rank = int(rank_text)
+    for request_id in by_dp[rank_text]:
+      item = records[request_id]
+      local_slot = int(item.get("local_scheduler_slot", -1))
+      input_index = int(item.get("input_batch_index", -1))
+      scheduled_tokens = int(item.get("scheduled_tokens", 0))
+      _require(0 <= local_slot < attention_rows, f"sequence {seq} request {request_id} local slot out of range")
+      _require((dp_rank, local_slot) not in seen_slots, f"sequence {seq} local scheduler slot is duplicated")
+      seen_slots.add((dp_rank, local_slot))
+      global_row = dp_rank * padded_rows + local_slot
+      attention_row = dp_rank * attention_rows + local_slot
+      query_index = dp_rank * (attention_rows + 1) + local_slot
+      _require(scheduled_tokens == 1, f"sequence {seq} request {request_id} is not a one-token decode")
+      _require(input_index == int(index_map[request_id]), f"sequence {seq} request {request_id} input index mismatch")
+      _require(input_index not in seen_indices, f"sequence {seq} input index is duplicated")
+      seen_indices.add(input_index)
+      _require(int(item.get("dp_rank", -1)) == dp_rank, f"sequence {seq} request {request_id} DP rank mismatch")
+      _require(int(item.get("global_row", -1)) == global_row, f"sequence {seq} request {request_id} global row mismatch")
+      _require(int(item.get("attention_row", -1)) == attention_row, f"sequence {seq} request {request_id} attention row mismatch")
+      _require(int(item.get("selector_index", -1)) == input_index, f"sequence {seq} request {request_id} selector index mismatch")
+      _require(0 <= input_index < selector.size, f"sequence {seq} request {request_id} selector index out of range")
+      _require(int(selector[input_index]) == global_row, f"sequence {seq} request {request_id} selector value mismatch")
+      _require(item.get("selector_range") == [global_row, global_row + 1], f"sequence {seq} request {request_id} selector range mismatch")
+      _require(global_row < positions.size and global_row < active.size and bool(active[global_row]), f"sequence {seq} request {request_id} active row mismatch")
+      computed = int(item.get("num_computed_tokens", -1))
+      expected_seq_len = computed + scheduled_tokens
+      _require(int(positions[global_row]) == computed, f"sequence {seq} request {request_id} position mismatch")
+      _require(int(item.get("expected_seq_len", -1)) == expected_seq_len, f"sequence {seq} request {request_id} expected length mismatch")
+      _require(attention_row < seq_lens.size and int(seq_lens[attention_row]) == expected_seq_len, f"sequence {seq} request {request_id} sequence length mismatch")
+      _require(query_index + 1 < query_start.size, f"sequence {seq} request {request_id} query range out of bounds")
+      expected_query = [int(query_start[query_index]), int(query_start[query_index + 1])]
+      _require(item.get("query_start_range") == expected_query and expected_query[1] - expected_query[0] == 1, f"sequence {seq} request {request_id} query range mismatch")
+      token_ids = item.get("token_ids", [])
+      _require(token_ids and len(token_ids) == int(item.get("num_tokens", -1)), f"sequence {seq} request {request_id} token history length mismatch")
+      _require(item.get("token_history_sha256") == _token_history_sha256(token_ids), f"sequence {seq} request {request_id} token-history SHA mismatch")
+      logical_blocks = int(item.get("logical_blocks", 0))
+      _require(logical_blocks > 0 and attention_row < block_tables.shape[0], f"sequence {seq} request {request_id} block-table row mismatch")
+      metadata_pages = [int(value) for value in block_tables[attention_row, :logical_blocks]]
+      _require(item.get("metadata_block_ids") == metadata_pages, f"sequence {seq} request {request_id} metadata page mismatch")
+      _require(_primary_block_ids(item.get("block_ids"))[:logical_blocks] == metadata_pages, f"sequence {seq} request {request_id} physical page mapping mismatch")
+  return requests
+
+
+def _join_mismatch_capsule(
+    requests: list[dict[str, Any]], capsule: dict[str, Any], seq: int
+) -> dict[str, Any]:
+  arrays = capsule["arrays"]
+  selected_rows = np.asarray(arrays["selected_rows"]).reshape(-1)
+  candidates = []
+  for capsule_index, source_row in enumerate(selected_rows):
+    prompt = np.asarray(arrays["prompt_ids"][capsule_index])[
+        np.asarray(arrays["prompt_mask"][capsule_index], dtype=np.bool_)
+    ]
+    completion = np.asarray(arrays["completion_ids"][capsule_index])[
+        np.asarray(arrays["completion_valid_mask"][capsule_index], dtype=np.bool_)
+    ]
+    full_history = np.concatenate((prompt, completion)).astype(np.int64, copy=False)
+    for item in requests:
+      captured = np.asarray(item["token_ids"], dtype=np.int64)
+      if captured.size <= full_history.size and np.array_equal(captured, full_history[:captured.size]):
+        candidates.append((item, int(source_row), full_history[:captured.size]))
+  _require(len(candidates) == 1, f"sequence {seq} mismatch token-history join expected one candidate, found {len(candidates)}")
+  item, source_row, matching_prefix = candidates[0]
+  prefix_sha = _token_history_sha256(matching_prefix)
+  _require(prefix_sha == item["token_history_sha256"], f"sequence {seq} mismatch join hash mismatch")
+  return {
+      "request_id": item["request_id"],
+      "source_row": source_row,
+      "captured_tokens": len(item["token_ids"]),
+      "token_history_sha256": prefix_sha,
+  }
+
+
 def _load_stage(directory: Path, seq: int, stage: str) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
   base = directory / f"p38_serving_{seq:04d}_{stage}"
   json_path = Path(str(base) + ".json")
@@ -54,7 +215,7 @@ def _load_stage(directory: Path, seq: int, stage: str) -> tuple[dict[str, Any], 
   _require(json_path.is_file(), f"missing {stage} JSON for sequence {seq}")
   _require(npz_path.is_file(), f"missing {stage} NPZ for sequence {seq}")
   record = json.loads(json_path.read_text(encoding="utf-8"))
-  _require(record.get("schema_version") == 1, f"bad schema for {stage} sequence {seq}")
+  _require(record.get("schema_version") == 2, f"bad schema for {stage} sequence {seq}")
   _require(record.get("stage") == stage, f"bad stage for sequence {seq}: {record.get('stage')!r}")
   _require(record.get("seq") == seq, f"bad sequence number in {stage} record")
   _require(record.get("npz_sha256") == _sha256(npz_path), f"NPZ SHA mismatch for {stage} sequence {seq}")
@@ -64,7 +225,13 @@ def _load_stage(directory: Path, seq: int, stage: str) -> tuple[dict[str, Any], 
   return record, arrays
 
 
-def classify(directory: Path, expected_records: int) -> dict[str, Any]:
+def classify(
+    directory: Path,
+    expected_records: int,
+    mismatch_capsule: Path | None,
+    *,
+    require_mismatch_join: bool = True,
+) -> dict[str, Any]:
   _require(expected_records > 0, "expected_records must be positive")
   _require(directory.is_dir(), f"capture directory does not exist: {directory}")
   pre_files = sorted(directory.glob("p38_serving_*_pre.json"))
@@ -72,6 +239,13 @@ def classify(directory: Path, expected_records: int) -> dict[str, Any]:
   _require(len(pre_files) == expected_records, f"expected {expected_records} pre records, found {len(pre_files)}")
   _require(len(post_files) == expected_records, f"expected {expected_records} post records, found {len(post_files)}")
 
+  capsule = None
+  if mismatch_capsule is not None and mismatch_capsule.is_file():
+    capsule = _load_mismatch_capsule(mismatch_capsule)
+  _require(
+      capsule is not None or not require_mismatch_join,
+      "required mismatch capsule is absent",
+  )
   summaries = []
   for seq in range(expected_records):
     pre, pre_arrays = _load_stage(directory, seq, "pre")
@@ -84,7 +258,7 @@ def classify(directory: Path, expected_records: int) -> dict[str, Any]:
     )
 
     meta = pre.get("meta", {})
-    requests = meta.get("requests", [])
+    requests = _validate_request_mapping(meta, pre_arrays, seq)
     _require(meta.get("continue_decode_enabled") is True, f"sequence {seq} did not capture continue-decode")
     _require(meta.get("caller_update_kv_cache") is True, f"sequence {seq} has an invalid caller cache-update contract")
     _require(
@@ -92,8 +266,7 @@ def classify(directory: Path, expected_records: int) -> dict[str, Any]:
         f"sequence {seq} has an inconsistent output cache-update contract",
     )
     _require(meta.get("request_ids"), f"sequence {seq} has no request IDs")
-    _require(meta.get("request_ids_by_dp"), f"sequence {seq} has no DP request mapping")
-    _require(requests, f"sequence {seq} has no request metadata")
+    _require(requests, f"sequence {seq} has no scheduled request metadata")
     _require(all(item.get("block_ids") for item in requests), f"sequence {seq} has a request without physical page IDs")
     _require(all(item.get("token_ids") for item in requests), f"sequence {seq} has a request without token history")
     _require(meta.get("kv_caches_spec"), f"sequence {seq} has no KV-cache specification")
@@ -109,12 +282,20 @@ def classify(directory: Path, expected_records: int) -> dict[str, Any]:
     _require(int(post_meta.get("completed_records", -1)) == seq + 1, f"sequence {seq} has a bad completed-record count")
     _require(int(post_meta.get("expected_max_records", -1)) >= expected_records, f"sequence {seq} reports an undersized record budget")
 
+    mismatch_join = None
+    if capsule is not None:
+      try:
+        mismatch_join = _join_mismatch_capsule(requests, capsule, seq)
+      except CaptureError:
+        if require_mismatch_join:
+          raise
     summaries.append({
         "seq": seq,
         "requests": len(requests),
         "actual_steps": actual_steps,
         "observed_max_prefix": int(meta["observed_max_prefix"]),
         "kv_unified": bool(meta.get("kv_unified")),
+        "mismatch_join": mismatch_join,
     })
 
   return {
@@ -129,10 +310,17 @@ def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--directory", required=True, type=Path)
   parser.add_argument("--expected-records", required=True, type=int)
+  parser.add_argument("--mismatch-capsule", required=True, type=Path)
+  parser.add_argument("--require-mismatch-join", action="store_true")
   parser.add_argument("--output", type=Path)
   args = parser.parse_args()
   try:
-    report = classify(args.directory, args.expected_records)
+    report = classify(
+        args.directory,
+        args.expected_records,
+        args.mismatch_capsule,
+        require_mismatch_join=args.require_mismatch_join,
+    )
   except CaptureError as error:
     report = {
         "schema_version": 1,

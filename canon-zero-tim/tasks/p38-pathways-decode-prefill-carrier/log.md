@@ -601,3 +601,40 @@
 - Next: render and launch only the source-pinned GSM8K full JobSet for the
   time-sensitive convergence run. FrozenLake and DeepSWE remain strict and
   proceed through their diagnostic/admission ladders.
+
+## 2026-08-11 UTC — P38.2g2 serving-capture admission hardening complete
+
+- Type: default-off diagnostic hardening; no TPU/cloud experiment, backward,
+  optimizer commit, source commit, push, or training launch.
+- Source base: local HEAD and `origin/yuxzhang/canon-zero-tim` are
+  `2cd46433`; main remains `41b4c54e` and was not modified.
+- Closed the four reopened admission gaps: scheduled-only request selection
+  with physical-slot preservation; explicit and validated
+  request/DP/slot/global/attention/selector/page mappings; exact mismatch
+  capsule join by request/token history for stock; and zero-stock/positive-U
+  `KV_UNIFIED_two_pass` PATHTRACE enforcement.
+- Final review caught and fixed a classifier-only slot-compaction bug: the
+  capture preserved a scheduled request at physical slot 1 after filtering an
+  idle slot 0, but the classifier initially re-enumerated the filtered list as
+  slot 0. The classifier now trusts the explicit slot only after bounds and
+  uniqueness checks; its default positive fixture contains this gap.
+- The first exact-image attempt exposed malformed patch hunk metadata; after
+  correcting the hunk ranges, the manifest correctly rejected the changed
+  installed runner SHA. The manifest was regenerated from the pinned image,
+  then both model overlays installed and passed. These were construction
+  failures caught before any target run, not numerical failures.
+- Focused results: classifier 18/18 PASS, renderer 5/5 PASS, archive transport
+  4/4 PASS, Python compilation PASS, and shell postflight PASS across exact
+  stock, red stock, illegal stock U hit, missing U hit, and exact U controls.
+- Full results: frozen-image P33 CPU gate PASS with 67 workload tests, 28
+  alignment tests, and all adjacent suites; exact-image Qwen3-1.7B and
+  Qwen3-8B each match all 29 manifest entries and pass 13/13 runtime tests.
+- Claim ceiling: locally admissible for source review and publication only.
+  Production stock capture, mismatch reproduction, U numerical effect, page
+  topology, padding poison, backward, and optimizer behavior remain NOT RUN.
+- Rollback: leave `CANON_P38_SERVING_CAPTURE_DIR` and `CANON_KV_UNIFIED`
+  unset, or discard this uncommitted hardening diff. Stock runtime behavior is
+  unchanged.
+- Next: after explicit commit/push approval, publish this exact source, render
+  fresh manifests, dry-run both, and apply stock only. U and P38.2g3 E1-E5
+  remain blocked until stock exactly joins and reproduces the known mismatch.

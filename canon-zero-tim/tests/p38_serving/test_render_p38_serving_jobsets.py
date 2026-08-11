@@ -55,6 +55,7 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P38_SERVING_CAPTURE_MAX_CALLS"], "1")
         self.assertEqual(env["CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS"], "1")
         self.assertEqual(env["CANON_P38_SERVING_CAPTURE_MIN_PREFIX"], "1788")
+        self.assertTrue(env["CANON_P38_MISMATCH_CAPSULE"].endswith(".npz"))
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])
 
@@ -71,6 +72,21 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
     )
     entry["value"] = "2"
     with self.assertRaisesRegex(ValueError, "environment drifted"):
+      renderer.validate_capture_jobset(document, unified=unified)
+
+  def test_rejects_missing_mismatch_capsule_path(self):
+    base = renderer.p33.load_base(_BASE)
+    spec, unified = renderer._SPECS[0]
+    document = renderer.render_jobset(
+        base, spec, _SOURCE, _RUN_ID, unified=unified
+    )
+    main = renderer._main_container(document)
+    entry = next(
+        item for item in main["env"]
+        if item["name"] == "CANON_P38_MISMATCH_CAPSULE"
+    )
+    entry["value"] = ""
+    with self.assertRaisesRegex(ValueError, "requires a mismatch capsule"):
       renderer.validate_capture_jobset(document, unified=unified)
 
   def test_quotes_numeric_looking_source_commit(self):

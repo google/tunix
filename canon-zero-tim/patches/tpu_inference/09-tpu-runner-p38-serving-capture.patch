@@ -20,7 +20,7 @@
  
  
  def _p18_leaf(x):
-@@ -1015,6 +1028,237 @@
+@@ -1015,6 +1028,354 @@
      )
  
  
@@ -77,7 +77,7 @@
 +        np.savez(stream, **arrays)
 +    npz_sha256 = _hashlib.sha256(npz_path.read_bytes()).hexdigest()
 +    record = {
-+        "schema_version": 1,
++        "schema_version": 2,
 +        "stage": stage,
 +        "seq": seq,
 +        "arrays": sorted(arrays),
@@ -102,45 +102,159 @@
 +    )
 +
 +
-+def _p38_serving_request_meta(runner, scheduler_output, req_ids_dp):
-+    """Describe the exact logical requests and physical pages in one call."""
-+    num_reqs = runner.input_batch.num_reqs
-+    request_ids = list(runner.input_batch.req_ids[:num_reqs])
-+    requests = []
++def _p38_token_history_sha256(token_ids):
++    """Hash an exact integer token prefix using one portable representation."""
++    import hashlib as _hashlib
++
++    values = np.ascontiguousarray(np.asarray(token_ids, dtype="<i8"))
++    return _hashlib.sha256(values.tobytes()).hexdigest()
++
++
++def _p38_serving_request_meta(
++        runner, scheduler_output, req_ids_dp, tokens_indices_selector,
++        padded_rows_per_dp, input_positions, active_mask, md_block_tables,
++        md_seq_lens, md_query_start_loc):
++    """Describe scheduled requests and prove their physical row mappings."""
++    scheduled = scheduler_output.num_scheduled_tokens
 +    assigned_dp_rank = getattr(scheduler_output, "assigned_dp_rank", None)
-+    for req_id in request_ids:
-+        req_index = runner.input_batch.req_id_to_index[req_id]
-+        request_state = runner.requests.get(req_id)
-+        block_ids = getattr(request_state, "block_ids", None)
-+        requests.append({
-+            "request_id": req_id,
-+            "input_batch_index": int(req_index),
-+            "assigned_dp_rank": int(
-+                assigned_dp_rank.get(req_id, 0)
-+                if assigned_dp_rank is not None else 0),
-+            "scheduled_tokens": int(
-+                scheduler_output.num_scheduled_tokens[req_id]),
-+            "num_computed_tokens": int(
-+                runner.input_batch.num_computed_tokens_cpu[req_index]),
-+            "num_prompt_tokens": int(
-+                runner.input_batch.num_prompt_tokens[req_index]),
-+            "num_tokens": int(runner.input_batch.num_tokens[req_index]),
-+            "token_ids": [
++    max_rows_per_dp = runner.max_num_reqs // runner.dp_size
++    selector = None
++    if tokens_indices_selector is not None:
++        selector = np.asarray(jax.device_get(tokens_indices_selector)).reshape(-1)
++    positions = np.asarray(input_positions).reshape(-1)
++    active = np.asarray(active_mask, dtype=np.bool_).reshape(-1)
++    seq_lens = np.asarray(jax.device_get(md_seq_lens)).reshape(-1)
++    query_start = np.asarray(jax.device_get(md_query_start_loc)).reshape(-1)
++    block_tables = np.asarray(jax.device_get(md_block_tables))
++
++    scheduled_by_dp = {}
++    requests_by_id = {}
++    for dp_rank in range(runner.dp_size):
++        selected = []
++        for local_slot, req_id in enumerate(req_ids_dp.get(dp_rank, ())):
++            count = int(scheduled.get(req_id, 0))
++            if count <= 0:
++                continue
++            if count != 1:
++                raise RuntimeError(
++                    "P38 continue-decode capture requires one scheduled token "
++                    f"per request; request={req_id} scheduled={count}")
++            req_index = int(runner.input_batch.req_id_to_index[req_id])
++            recorded_dp_rank = int(
++                assigned_dp_rank.get(req_id, dp_rank)
++                if assigned_dp_rank is not None else dp_rank)
++            if recorded_dp_rank != dp_rank:
++                raise RuntimeError(
++                    "P38 scheduled request DP mapping mismatch: "
++                    f"request={req_id} grouped={dp_rank} assigned={recorded_dp_rank}")
++            global_row = dp_rank * padded_rows_per_dp + local_slot
++            attention_row = dp_rank * max_rows_per_dp + local_slot
++            query_index = dp_rank * (max_rows_per_dp + 1) + local_slot
++            selector_row = (
++                int(selector[req_index]) if selector is not None else global_row)
++            if selector_row != global_row:
++                raise RuntimeError(
++                    "P38 token selector mapping mismatch: "
++                    f"request={req_id} selector={selector_row} row={global_row}")
++            if global_row >= positions.size or global_row >= active.size:
++                raise RuntimeError(
++                    f"P38 scheduled row out of range: request={req_id} row={global_row}")
++            if not bool(active[global_row]):
++                raise RuntimeError(
++                    f"P38 scheduled row is inactive: request={req_id} row={global_row}")
++            if attention_row >= seq_lens.size or attention_row >= block_tables.shape[0]:
++                raise RuntimeError(
++                    "P38 attention metadata row out of range: "
++                    f"request={req_id} row={attention_row}")
++            if query_index + 1 >= query_start.size:
++                raise RuntimeError(
++                    "P38 query-start row out of range: "
++                    f"request={req_id} row={query_index}")
++
++            num_computed = int(
++                runner.input_batch.num_computed_tokens_cpu[req_index])
++            num_tokens = int(runner.input_batch.num_tokens[req_index])
++            if int(positions[global_row]) != num_computed:
++                raise RuntimeError(
++                    "P38 input-position mapping mismatch: "
++                    f"request={req_id} position={int(positions[global_row])} "
++                    f"computed={num_computed}")
++            expected_seq_len = num_computed + count
++            if int(seq_lens[attention_row]) != expected_seq_len:
++                raise RuntimeError(
++                    "P38 sequence-length mapping mismatch: "
++                    f"request={req_id} metadata={int(seq_lens[attention_row])} "
++                    f"expected={expected_seq_len}")
++            query_range = [
++                int(query_start[query_index]),
++                int(query_start[query_index + 1]),
++            ]
++            if query_range[1] - query_range[0] != count:
++                raise RuntimeError(
++                    "P38 query-start mapping mismatch: "
++                    f"request={req_id} range={query_range} scheduled={count}")
++
++            request_state = runner.requests.get(req_id)
++            block_ids = getattr(request_state, "block_ids", None)
++            if not block_ids:
++                raise RuntimeError(
++                    f"P38 scheduled request has no physical pages: {req_id}")
++            logical_blocks = (expected_seq_len + runner.block_size - 1) // runner.block_size
++            metadata_block_ids = [
++                int(value)
++                for value in block_tables[attention_row, :logical_blocks]
++            ]
++            token_ids = [
 +                int(token_id) for token_id in np.asarray(
-+                    runner.input_batch.token_ids_cpu[
-+                        req_index, :runner.input_batch.num_tokens[req_index]
-+                    ])
-+            ],
-+            "block_ids": _p38_jsonable(block_ids),
-+        })
++                    runner.input_batch.token_ids_cpu[req_index, :num_tokens])
++            ]
++            request_record = {
++                "request_id": req_id,
++                "input_batch_index": req_index,
++                "dp_rank": dp_rank,
++                "local_scheduler_slot": local_slot,
++                "global_row": global_row,
++                "attention_row": attention_row,
++                "selector_index": req_index,
++                "selector_range": [selector_row, selector_row + count],
++                "scheduled_tokens": count,
++                "num_computed_tokens": num_computed,
++                "num_prompt_tokens": int(
++                    runner.input_batch.num_prompt_tokens[req_index]),
++                "num_tokens": num_tokens,
++                "expected_seq_len": expected_seq_len,
++                "query_start_range": query_range,
++                "token_ids": token_ids,
++                "token_history_sha256": _p38_token_history_sha256(token_ids),
++                "block_ids": _p38_jsonable(block_ids),
++                "metadata_block_ids": metadata_block_ids,
++                "logical_blocks": logical_blocks,
++            }
++            selected.append(req_id)
++            if req_id in requests_by_id:
++                raise RuntimeError(f"P38 duplicate scheduled request: {req_id}")
++            requests_by_id[req_id] = request_record
++        scheduled_by_dp[str(dp_rank)] = selected
++
++    if not requests_by_id:
++        raise RuntimeError("P38 serving capture selected no scheduled requests")
++    input_order = [
++        req_id for req_id in runner.input_batch.req_ids[:runner.input_batch.num_reqs]
++        if req_id in requests_by_id
++    ]
++    if len(input_order) != len(requests_by_id):
++        raise RuntimeError("P38 scheduled requests do not map uniquely into input batch")
 +    return {
-+        "request_ids": request_ids,
-+        "request_ids_by_dp": _p38_jsonable(req_ids_dp),
-+        "requests": requests,
++        "request_ids": input_order,
++        "request_ids_by_dp": scheduled_by_dp,
++        "requests": [requests_by_id[req_id] for req_id in input_order],
 +        "req_id_to_index": {
 +            req_id: int(runner.input_batch.req_id_to_index[req_id])
-+            for req_id in request_ids
++            for req_id in input_order
 +        },
++        "padded_rows_per_dp": int(padded_rows_per_dp),
++        "max_attention_rows_per_dp": int(max_rows_per_dp),
++        "scheduled_request_count": len(input_order),
 +    }
 +
 +
@@ -197,7 +311,10 @@
 +    meta = {
 +        **_p18_contract_meta(runner.mesh),
 +        **_p38_serving_request_meta(
-+            runner, scheduler_output, req_ids_dp),
++            runner, scheduler_output, req_ids_dp, tokens_indices_selector,
++            padded_num_scheduled_tokens_per_dp_rank, positions_host,
++            active_host, attn_metadata.block_tables, attn_metadata.seq_lens,
++            attn_metadata.query_start_loc),
 +        "capture_max_calls": _P38_SERVING_CAPTURE_MAX_CALLS,
 +        "capture_min_prefix": _P38_SERVING_CAPTURE_MIN_PREFIX,
 +        "observed_max_prefix": max_prefix,
@@ -258,7 +375,7 @@
  
  def _p18_weight_fingerprint(state_leaves):
      """Exact bitwise checksum over the weights, computed on-device (cheap).
-@@ -2142,8 +2386,8 @@
+@@ -2142,8 +2503,8 @@
              spec_decode_metadata,
              logits_indices_selector,
              padded_num_reqs,
@@ -269,7 +386,7 @@
              tokens_indices_selector,
          ) = self._prepare_inputs(scheduler_output)
  
-@@ -2171,6 +2415,20 @@
+@@ -2171,6 +2532,20 @@
              max_decode_steps = 1
          max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
  
@@ -290,7 +407,7 @@
          lora_metadata = self.lora_utils.extract_lora_metadata()
  
          # Run continue-decode as a single JIT'd on-device loop (JAX while_loop with
-@@ -2255,6 +2513,16 @@
+@@ -2255,6 +2630,16 @@
              lp_vals_cpu = np.asarray(lp_vals_cpu)[:actual_steps]
              lp_ranks_cpu = np.asarray(lp_ranks_cpu)[:actual_steps]
  

@@ -25,7 +25,7 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
 | P38.2e | Schedule-aware GSM8K optimizer transaction | LR-zero and positive-LR commit controls plus target update-0 evidence | ready for independent parallel target run |
 | P38.2f | FrozenLake KV-threshold mismatch capsule | Attempt 0 reproduces the hard pre-backward red, and two bounded rows survive pod deletion and pass transport/array SHA checks | complete; rows 191/199 verified at `036e845a` |
 | P38.2g | FrozenLake single-row causal replay | Stock multi-turn replay reproduces the red before single-turn, MIXED-only KV-unified, and all-distribution KV-unified counterfactuals are interpreted | one-host target row 191 complete: local serving envelope not reproduced; R2/R3 stay gated; move shadow arms to Pathways |
-| P38.2g2 | Source-pinned Pathways serving capture and combined KV arm | Real continue-decode metadata is durable and stock is reproduced before the default-off all-cache-read arm is interpreted | active; published, local hardening reopened, target not run |
+| P38.2g2 | Source-pinned Pathways serving capture and combined KV arm | Real continue-decode metadata is durable and stock is reproduced before the default-off all-cache-read arm is interpreted | local hardening complete and green; uncommitted, target not run |
 | P38.2g3 | Exact-state physical-page and padding-boundary discriminator | The complete production action vector is first reproduced exactly, then real, relocated, contiguous, padding-sanitized, and padding-poison arms are compared with temporal page-content equivalence checks | pending; blocked on P38.2g2 stock capture |
 | P38.2h | Candidate target backward-no-commit | The selected candidate first makes all forward boundaries exact, then passes actual-model gradient/DP-reducer gates with zero optimizer commits | pending; forbidden before P38.2g selects a candidate |
 
@@ -108,8 +108,9 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
   `local_slot == 15` without an explicit row/request/DP mapping. The next
   capture emits `global_row`, `dp_rank`, and `local_slot` independently; modulo
   arithmetic is not an admitted semantic join.
-- Decision: P38.2g2 stock capture is the next target experiment, but only after
-  local admission hardening. A stock/U comparison from unrelated stochastic
+- Decision: P38.2g2 stock capture is the next target experiment after the
+  locally green hardening is reviewed, committed, and published. A stock/U
+  comparison from unrelated stochastic
   trajectories is candidate screening, not a causal proof. P38.2g3 requires an
   exact request/token-history join and page-content equivalence before
   interpreting physical page IDs.

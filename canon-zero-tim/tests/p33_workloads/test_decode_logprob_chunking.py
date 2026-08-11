@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -213,6 +214,101 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
           max_logprobs=1,
           dp_size=2,
           target_rows=2,
+      )
+
+  def _serving_mapping_case(self):
+    input_batch = SimpleNamespace(
+        num_reqs=3,
+        req_ids=["request-a", "request-idle", "request-b"],
+        req_id_to_index={"request-a": 0, "request-idle": 1, "request-b": 2},
+        num_computed_tokens_cpu=np.array([2, 0, 4], dtype=np.int32),
+        num_prompt_tokens=np.array([2, 0, 3], dtype=np.int32),
+        num_tokens=np.array([3, 1, 5], dtype=np.int32),
+        token_ids_cpu=np.array([
+            [101, 102, 103, 0, 0, 0],
+            [201, 0, 0, 0, 0, 0],
+            [301, 302, 303, 304, 305, 0],
+        ], dtype=np.int32),
+    )
+    runner = SimpleNamespace(
+        input_batch=input_batch,
+        dp_size=2,
+        max_num_reqs=8,
+        block_size=256,
+        requests={
+            "request-a": SimpleNamespace(block_ids=[[7]]),
+            "request-idle": SimpleNamespace(block_ids=[[8]]),
+            "request-b": SimpleNamespace(block_ids=[[9]]),
+        },
+    )
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={
+            "request-a": 1,
+            "request-idle": 0,
+            "request-b": 1,
+        },
+        assigned_dp_rank={
+            "request-a": 0,
+            "request-idle": 1,
+            "request-b": 1,
+        },
+    )
+    req_ids_dp = {
+        0: ["request-a"],
+        1: ["request-idle", "request-b"],
+    }
+    selector = np.array([0, 2, 3], dtype=np.int32)
+    positions = np.array([2, 0, 0, 4], dtype=np.int32)
+    active = np.array([True, False, False, True])
+    block_tables = np.zeros((8, 4), dtype=np.int32)
+    block_tables[0, 0] = 7
+    block_tables[5, 0] = 9
+    seq_lens = np.array([3, 0, 0, 0, 0, 5, 0, 0], dtype=np.int32)
+    query_start = np.array(
+        [0, 1, 1, 1, 1, 0, 0, 1, 1, 1], dtype=np.int32
+    )
+    return (
+        runner,
+        scheduler,
+        req_ids_dp,
+        selector,
+        positions,
+        active,
+        block_tables,
+        seq_lens,
+        query_start,
+    )
+
+  def test_serving_capture_keeps_physical_slot_while_filtering_idle_request(self):
+    args = self._serving_mapping_case()
+    result = self.runner._p38_serving_request_meta(
+        *args[:3], args[3], 2, *args[4:]
+    )
+    self.assertEqual(result["request_ids"], ["request-a", "request-b"])
+    self.assertEqual(result["request_ids_by_dp"], {"0": ["request-a"], "1": ["request-b"]})
+    request_b = result["requests"][1]
+    self.assertEqual(request_b["local_scheduler_slot"], 1)
+    self.assertEqual(request_b["global_row"], 3)
+    self.assertEqual(request_b["attention_row"], 5)
+
+  def test_serving_capture_rejects_empty_scheduled_selection(self):
+    args = list(self._serving_mapping_case())
+    args[1].num_scheduled_tokens = {
+        "request-a": 0,
+        "request-idle": 0,
+        "request-b": 0,
+    }
+    with self.assertRaisesRegex(RuntimeError, "selected no scheduled requests"):
+      self.runner._p38_serving_request_meta(
+          *args[:3], args[3], 2, *args[4:]
+      )
+
+  def test_serving_capture_rejects_selector_mapping_drift(self):
+    args = list(self._serving_mapping_case())
+    args[3] = np.array([1, 2, 3], dtype=np.int32)
+    with self.assertRaisesRegex(RuntimeError, "selector mapping mismatch"):
+      self.runner._p38_serving_request_meta(
+          *args[:3], args[3], 2, *args[4:]
       )
 
 

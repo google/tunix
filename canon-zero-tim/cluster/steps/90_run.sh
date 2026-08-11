@@ -130,10 +130,16 @@ if [ "$rc" -ne 0 ] && [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
   base64 "$CANON_P38_MISMATCH_CAPSULE" | sed 's/^/[CANON_P38_CAPSULE_B64] /'
 fi
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  p38_join_args=()
+  if [ "${CANON_KV_UNIFIED:-0}" = "0" ]; then
+    p38_join_args+=(--require-mismatch-join)
+  fi
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
     python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py" \
       --directory "$CANON_P38_SERVING_CAPTURE_DIR" \
       --expected-records "$CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS" \
+      --mismatch-capsule "$CANON_P38_MISMATCH_CAPSULE" \
+      "${p38_join_args[@]}" \
       --output "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
   p38_capture_rc=$?
   if [ -s "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" ]; then
@@ -171,7 +177,18 @@ n_p35_stage_begin=$(grep -ac '^\[CANON_P35.3C\] STAGE_BEGIN' "$LOG" || true)
 n_p35_stage_ready=$(grep -ac '^\[CANON_P35.3C\] STAGE_READY' "$LOG" || true)
 n_p35_stage_complete=$(grep -ac '^\[CANON_P35.3C\] STAGE_PROBE_COMPLETE .*NO_NUMERICAL_VERDICT' "$LOG" || true)
 n_p38_precheck=$(grep -ac '^\[CANON_P38\] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck"
+n_p38_kv_unified=$(grep -ac 'KV_UNIFIED_two_pass' "$LOG" || true)
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_kv_unified=$n_p38_kv_unified"
+if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  if [ "${CANON_KV_UNIFIED:-0}" = "1" ] && [ "$n_p38_kv_unified" -le 0 ]; then
+    echo "[run] FATAL: P38 U arm did not execute KV_UNIFIED_two_pass" >&2
+    exit 1
+  fi
+  if [ "${CANON_KV_UNIFIED:-0}" = "0" ] && [ "$n_p38_kv_unified" -ne 0 ]; then
+    echo "[run] FATAL: P38 stock arm executed KV_UNIFIED_two_pass" >&2
+    exit 1
+  fi
+fi
 if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
    [ -s "${CANON_P35_PRE_REPLAY_REPORT:-}" ]; then
   p35_base_sha="$(sha256sum "$CANON_P35_PRE_REPLAY_REPORT" | awk '{print $1}')"

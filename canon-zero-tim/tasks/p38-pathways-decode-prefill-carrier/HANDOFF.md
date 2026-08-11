@@ -320,10 +320,10 @@ Keep prefix cache disabled, backward disabled, optimizer commits zero, and the
 precision/fixed-M/fixed-reduction configuration unchanged. Rollback is leaving
 the new capture and counterfactual environment variables unset.
 
-## P38.2g2 local handoff: published, target not run
+## P38.2g2 local handoff: admission hardened, target not run
 
-Commit `763b60b1` on `yuxzhang/canon-zero-tim` contains the implementation
-described above. The local worktree was clean when this handoff was reconciled:
+Commit `763b60b1` introduced the implementation described above. The current
+local hardening is an uncommitted diff on source base `2cd46433`:
 
 - patch 09 captures the actual donated-cache `continue_decode` call, including
   request IDs, full current token histories, physical page IDs, scheduler and
@@ -338,21 +338,23 @@ described above. The local worktree was clean when this handoff was reconciled:
   manifests force `CANON_P38_PRECHECK_ONLY=1`, so an exact U arm stops before
   backward rather than falling through the misleadingly named workload stage.
 
-Local gates are green: pinned-image install 29/29 for both model overlays,
-logprob chunking 10/10 for each overlay, ten serving-classifier controls,
-four renderer controls, four archive-transport controls, and the complete
-P33 CPU suite. A shell postflight also proves exact precheck stop is accepted
-while a red stop is rejected. No Pathways/TPU target result exists.
+The four admission gaps from the post-publication review are closed locally:
+only scheduled requests are selected without compacting physical slots;
+request/DP/slot/global/attention/selector/page mappings are explicit and
+internally validated; stock must join one durable mismatch by request/token
+history; and postflight requires zero U PATHTRACE hits for stock plus a
+positive hit for U. Pinned-image install is 29/29 for both model overlays,
+installed runtime tests pass 13/13 for each overlay, serving classifier 18/18,
+renderer 5/5, archive transport 4/4, shell stock/U controls PASS, and the
+complete P33 CPU suite passes 67 workload plus 28 alignment tests and all
+adjacent negative controls. No Pathways/TPU target result exists.
 
-Do not launch it yet. A static post-publication review found four admission
-gaps that must be closed locally first: live-but-unscheduled requests can be
-indexed through `num_scheduled_tokens`; row/DP/slot semantics are not emitted
-explicitly; classifier checks field presence but not full internal mapping
-consistency; and the runtime gate does not hard-require zero U PATHTRACE hits
-for stock plus a positive hit for U. After those focused tests and the full P33
-CPU gate pass, follow the exact stock-first commands in
-`phases/p38-2g2-pathways-serving-envelope.md`. Never apply the output
-directory.
+Do not render from the dirty worktree. After explicit review and publication,
+follow the exact stock-first commands in
+`phases/p38-2g2-pathways-serving-envelope.md`. Dry-run both manifests but apply
+only stock; never apply the output directory. Do not run U until stock joins
+the mismatch capsule and reproduces the known hard A-B red with Attempt 0,
+no backward, and zero optimizer commits.
 
 The next pending phase is
 `phases/p38-2g3-page-topology-discriminator.md`. It treats fragmented physical

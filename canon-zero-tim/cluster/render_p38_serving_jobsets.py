@@ -68,6 +68,8 @@ def validate_capture_jobset(
   wrong = {name: env.get(name) for name, value in expected.items() if env.get(name) != value}
   if wrong:
     raise ValueError(f"P38 serving-capture environment drifted: {wrong}")
+  if not env.get("CANON_P38_MISMATCH_CAPSULE", "").endswith(".npz"):
+    raise ValueError("P38 serving capture requires a mismatch capsule path")
   labels = document["metadata"].get("labels", {})
   if labels.get("canon.zero-tim/diagnostic") != "p38-serving-capture":
     raise ValueError("P38 serving-capture label is missing")
