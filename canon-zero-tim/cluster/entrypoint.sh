@@ -137,5 +137,6 @@ if [ "$MODE" = "dp16-rc" ]; then
 fi
 
 step 60_wait_workers.sh
+step 65_probe_devices.sh
 step 90_run.sh
 log "done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

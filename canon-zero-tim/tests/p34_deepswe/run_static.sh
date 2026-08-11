@@ -20,4 +20,6 @@ JAX_PLATFORMS=cpu PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
   canon-zero-tim/tests/p34_deepswe/test_r2egym_optional.py
 PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
   canon-zero-tim/tests/p34_deepswe/test_r2egym_install_step.py
-echo "P34_STATIC_PASS suites=9"
+PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 \
+  canon-zero-tim/tests/p34_deepswe/test_device_probe.py
+echo "P34_STATIC_PASS suites=10"

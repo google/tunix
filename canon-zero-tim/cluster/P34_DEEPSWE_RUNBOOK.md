@@ -62,6 +62,14 @@ unless the entire backward-no-commit contract completes.
 
 ## Fail-closed facts
 
+- Step 65 gates the Pathways session: the workload does not start until a
+  fresh-process probe sees exactly `CANON_EXPECTED_SLICE_DEVICES` (256, the
+  whole slice before the role split) from the proxy, retrying inside a
+  bounded window so late worker registration self-heals (p39d7 died on a
+  session cancelled during an incomplete registration window). On probe
+  timeout, archive the `pathways-proxy` and `pathways-rm` container logs
+  BEFORE deleting the JobSet, then check for stale JobSets/clients holding
+  the slice.
 - R2E-Gym is provisioned by `cluster/steps/35_install_r2egym.sh`: a pinned
   checkout (`CANON_R2EGYM_COMMIT`) with the vendored
   `patches/r2egym/r2egym.patch` applied, pip-installed in the pod together
