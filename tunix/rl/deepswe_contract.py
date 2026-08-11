@@ -265,7 +265,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_VJP2_MAX_SEQS": "1",
       "CANON_LOGPROB_M": "256",
       "MIN_TOKEN_BUCKET": "4096",
-      "ABCPROD": "256",
+      "CANON_P34_ABCPROD": "256",
       "CANON_QWEN3_TP_SIZE": "8",
       "CANON_P34_PREFIX_CACHE": "0",
       "CANON_P34_MAX_NUM_SEQS": "4",

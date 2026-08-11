@@ -83,7 +83,7 @@ class DeepSWEContractTest(unittest.TestCase):
     ).read_text()
     self.assertIn("export CANON_LOGPROB_M=256", text)
     self.assertIn("export MIN_TOKEN_BUCKET=4096", text)
-    self.assertIn("export ABCPROD=256", text)
+    self.assertIn("export CANON_P34_ABCPROD=256", text)
     self.assertIn("export CANON_VJP2_MAX_SEQS=1", text)
     self.assertIn("export CANON_P34_MAX_NUM_SEQS=4", text)
     self.assertIn("export CANON_P34_MAX_BATCHED_TOKENS=256", text)
