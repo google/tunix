@@ -1098,3 +1098,26 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      - `canon-zero-tim/cluster/steps/00_env.sh` (line 613) uses `compgen -e | grep -E '^(CANON_|WANDB_|HF_|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|...)'` to filter variables written to `$CANON_STATE/env.sh`.
      - `ABCPROD` was exported in `cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env` (`export ABCPROD=256`), but the filtering regex in `00_env.sh` did not include `ABCPROD`.
      - When `90_run.sh` sourced `$CANON_STATE/env.sh`, `ABCPROD` was not in `os.environ`.
+
+---
+
+## 42. Phase 39.3 Attempt `p39d7`: 256-Chip DeepSWE Stage 1 Backward-No-Commit Diagnostics (Qwen3-32B DP16xTP8)
+
+- `debug_logs/p39_p39d7_deepswe_stage1_bwd.raw.log` (SHA-256: `e9de4655b0825e3256aa493360c9c1b247f2785847f7fc97592c3a0bb4a23c2a`)
+- Target Commit: `69052acfdf4fe4c337de2862a02ba8c491ccd05c` (*Rename the P34 chip-count attestation to survive env persistence*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes, topology `4x8x8`)
+
+### Execution & Diagnostic Summary:
+
+1. **R2E-Gym Pinned Build & Overlay Verification (PASS)**:
+   - Step 35 cloned and patched pinned `r2egym` (`0d94c4eb...`), verification import passed: `[r2egym] VERIFY import ok`.
+   - Step 40 / 50 6-overlay SHA-256 byte identity verified.
+   - Gold dataset filter passed: `[P34.DATASET] GOLD_FILTER_PASS rows=4578->28 images=28`.
+
+2. **JAX Pathways Proxy Device Count Interception**:
+   - `PjRt-IFRT device count: total=1, addressable=1`
+   - `Addressable PjRt-IFRT device: CpuDevice(id=0)`
+   - `split_4x8x8_role_devices` intercepted with `ValueError: P34 physical half split crosses host boundaries: processes=[0]`.
+   - **Root Cause**:
+     - The client process connected to the IFRT proxy server at `localhost:29000` but observed only 1 CPU device (`CpuDevice(id=0)`), rather than the 256 TPU devices on the 4x8x8 slice.
