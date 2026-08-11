@@ -272,3 +272,182 @@
 - Next: target operator pulls `1ff24684`, runs GSM8K full plus FrozenLake
   backward-no-commit only, and verifies the recovered capsule before another
   FrozenLake run.
+
+## 2026-08-11 UTC — FrozenLake causal ladder preregistered
+
+- Type: evidence correction and phase-plan refinement; no experiment run.
+- Correction: Phase 13's PATHTRACE-proven KV-unified two-pass arm had zero
+  numerical effect and was a clean negative in its original domain. It is not
+  historical proof of a dropped repair.
+- Correction: GSM8K completion-length summaries do not establish that its
+  logical KV prefixes crossed 1792; valid prompt length plus completion
+  position must be measured directly.
+- Decision: the first target FrozenLake `backward-no-commit` manifest is
+  capsule capture because its known A-B hard gate precedes backward. It will
+  not carry an unverified KV-unified change.
+- Plan: verified capsule -> R0 stock replay -> R1 same-depth single-turn -> R2
+  MIXED-only two-pass -> R3 all-distribution two-pass -> candidate target
+  backward-no-commit -> full training.
+- Scan: page-only and page-plus-512-block boundaries around 1536, 1792, 2048,
+  3840, and 4096, with per-call metadata and first-differing-layer hashes.
+- Files: `plan.md`, `state.md`, `HANDOFF.md`,
+  `phases/p38-2f-frozenlake-threshold-capsule.md`, and
+  `phases/p38-2g-frozenlake-causal-replay.md`.
+- Rollback: discard this planning-only working-tree change; published runtime
+  behavior at `e9cfe298` is unchanged.
+
+## 2026-08-11 UTC — P38.2g R0/R1 replay locally admitted
+
+- Type: default-off implementation and local validation; no target run, no
+  production default, no backward, and no optimizer commit.
+- Added a hash-verifying capsule loader and strict `mask-derived-v1` R0/R1
+  scheduler. Every action predictor must be covered exactly once; invalid
+  masks, hash drift, missing arrays, page-table overflow, and duplicate
+  coverage fail closed.
+- Added live adapter execution for DP1xTP4 M256. R0, R1, and the unchanged
+  fixed-chunk reference each run twice from independent fresh caches. Full
+  logits remain on device; only action target, normalizer, and logprob vectors
+  are copied to host.
+- Added the FrozenLake prelearner entry point, one-host runner, measurement
+  classifier, and one-bit negative control. The run exits before learner,
+  backward, optimizer, checkpoint, and W&B.
+- First exact-image integration attempt exposed a report-wiring error: the
+  reference logprob is returned separately from its diagnostics dictionary.
+  Normalizing that return fixed the issue; the unchanged rerun passed.
+- Evidence: focused tests 11/11 + 5/5 + 1/1, full exact-image CPU gate exit 0,
+  and Qwen3-1.7B/Qwen3-8B overlay gates 10/10 each. See
+  `artifacts/p38_2g_local_gate.md`.
+- Limitation: no verified P38.2f target capsule exists, so real Qwen3-8B TPU
+  replay is NOT RUN. R2/R3 remain unimplemented by preregistered design.
+- Rollback: leave `CANON_P38_FROZENLAKE_REPLAY` unset or discard this bounded
+  uncommitted change. Published `e9cfe298` behavior is unchanged.
+
+## 2026-08-11 UTC — Real-Qwen one-host synthetic deep/shallow controls
+
+- Type: DP1xTP4 forward-only measurement admission; synthetic input, not a
+  target P38.2f replay.
+- Deep result: prompt 1788, R0=R1 bitwise at raw target, normalizer, and
+  logprob; both differ from REF at all eight action logprobs, maximum 0.74558.
+- Shallow negative control: prompt 256 gives the same classification and a
+  larger R0/REF logprob maximum of 7.21813. The synthetic red is therefore not
+  evidence of a KV-1791 onset.
+- Integrity: 399/399 actor/engine leaves and 8,190,735,360 elements bitwise
+  equal; every arm repeats exactly; one-bit negative detected; no backward;
+  zero optimizer commits; each run completed in about 264 seconds.
+- Harness corrections: add the L3 alignment-gate env, use the size-one `fsdp`
+  model axis without an FSDP split, and satisfy the inert GRPO configuration
+  with `num_generations=2`.
+- Evidence: `artifacts/p38_2g_onehost_synthetic_0811.md`.
+- Decision: R2/R3 remain gated. Capture the verified target capsule, then add
+  an exact serving-envelope control if the broad incremental/chunk split
+  repeats.
+
+## 2026-08-11 UTC — P38e1 target capsule recovered and CPU-admitted
+
+- Type: target evidence recovery and phase transition; no TPU run.
+- Source commit: `036e845a` on `yuxzhang/canon-zero-tim`.
+- Artifacts: `../../debug_logs/p38_p38e1_frozenlake_mismatch_capsule.npz`
+  (`sha256=dae4e75d3b4689f2607047edd74ea1e48ffaf97a853cec74a204caafc3dc626b`)
+  and `../../debug_logs/p38_p38e1_frozenlake_pre_alignment.jsonl`
+  (`sha256=02a34c42548c0ae2c2f0775299480bc6d547125497cc16b858c2193aef497eb9`).
+- Result: capsule schema and every embedded array SHA pass. Source rows 191
+  and 199 produce complete R0/R1/REF schedules with exact action-predictor
+  coverage. The captured batch has `S_prefill_vs_T_old=0` and 15 of 49,002
+  action elements red at `S_decode_vs_S_prefill`, maximum absolute difference
+  0.10391998291015625.
+- Localization: mismatches span logical KV prefixes 1850-2462, turns 3-4, and
+  sequence chunks 7-9; none immediately follows an environment token.
+- Claim ceiling: the capsule contains exact tokens, masks, and logprobs but no
+  original serving block tables or per-call scheduler metadata. R0 remains
+  mask-derived and must reproduce locally before R2/R3 can be interpreted.
+- Rollback: preserve the immutable target artifacts; leave
+  `CANON_P38_FROZENLAKE_REPLAY` unset to exclude all replay code from normal
+  execution.
+- Next: run source row 191 on real Qwen3-8B DP1xTP4 through R0/R1/REF.
+
+## 2026-08-11 UTC — Target row 191 rejects the local serving envelope
+
+- Type: real-Qwen3-8B DP1xTP4 forward-only causal gate.
+- Command: `bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh canon-zero-tim/debug_logs/p38_p38e1_frozenlake_mismatch_capsule.npz p38e1_row191_stock_0811`.
+- Integrity: exact actor/engine weights across 399 leaves and 8,190,735,360
+  elements; all arm repeats exact; one-bit negative control detected; prefix
+  cache disabled; no backward; zero optimizer commits; elapsed 417 seconds.
+- Result: captured row has 3/517 action elements red at decode-versus-prefill.
+  Local R0=R1 exactly at raw target, processed target, normalizer, and logprob.
+  Both are red against REF at 395/517 logprobs, while REF's logprob SHA exactly
+  equals captured `S_prefill`/`T_old`.
+- Classification: `LOCAL_CARRIER_NOT_ISOLATED`; measurement-integrity PASS;
+  production repair not admitted.
+- Decision: the mask-derived R0 serving envelope did not reproduce production
+  decode. Keep R2/R3 gated and move the stock/KV-unified shadow arms to the
+  actual source-pinned Pathways serving path with captured scheduler metadata.
+- Artifacts: `artifacts/p38_2g_onehost_target_row191_0811.md` and the immutable
+  host artifacts recorded there.
+- Rollback: leave `CANON_P38_FROZENLAKE_REPLAY` unset. No persistent training
+  state was created.
+
+## 2026-08-11 UTC — P38.2d: bound GSM8K full to three restarts
+
+- Type: operational code change after explicit user approval.
+- Fact: the P33 renderer previously forced `maxRestarts: 0` for every queue
+  entry, while GSM8K checkpointing is disabled.
+- Action: render `maxRestarts: 3` only for `gsm8k-full`; retain zero restarts
+  for all diagnostics and FrozenLake jobs. Head and worker `backoffLimit`
+  remain zero, and no checkpoint, training, numerical, W&B, or credential
+  setting changed.
+- Command: frozen-image
+  `bash canon-zero-tim/tests/p33_workloads/run_cpu.sh`.
+- Result: PASS; 67 workload tests, 26 alignment tests, and all adjacent P33
+  suites and negative controls passed. A direct render reported restart values
+  `0,0,0,0,3`, with three assigned only to `gsm8k-full`.
+- Rollback: set `_GSM8K_FULL_MAX_RESTARTS` back to zero and restore the strict
+  renderer assertion; generated YAML is disposable and must not be edited.
+- Next: review and, only with explicit approval, commit/push the isolated
+  operational change with the existing P38.2g work separated as needed.
+
+## 2026-08-11 UTC — P38.2g2 pinned serving-source audit
+
+- Type: zero-TPU source archaeology and phase correction.
+- Image: `tunix_frozenlake_image:vllm-tpu0.25.0`, local image ID
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- Evidence: archived pinned RPA v3, continue-decode, attention-metadata, and
+  v2 cache-writer sources under `artifacts/`; exact SHA values are registered
+  in `phases/p38-2g2-pathways-serving-envelope.md`.
+- Finding: ordinary decode can bypass the prompt/standard runner call and run
+  multiple steps inside one donated-cache `lax.while_loop`. Existing P18/P35
+  capture therefore misses production A.
+- Finding: v3 has no public write-only mode. `update_kv_cache=False` both
+  suppresses the fused write and forces all-cache reads. The proposed W/R/A
+  decomposition would mislabel variables; only the combined two-pass U arm is
+  currently constructible without changing kernel internals.
+- Decision: implement the real continue-decode capture first, then a
+  default-off U arm. No target launch, backward, optimizer commit, commit, or
+  push occurred.
+- Rollback: remove the archived source copies and P38.2g2 documentation; no
+  runtime behavior changed in this audit.
+
+## 2026-08-11 05:42 UTC — P38.2g2 local implementation gated
+
+- Type: default-off diagnostic implementation; no target run, backward,
+  optimizer commit, cloud mutation, source commit, or push.
+- Added patch 09 around the production `continue_decode` program. It records
+  one bounded pre/post pair with scheduler inputs, sampling leaves, request
+  token histories, physical pages, cache contract, selector, outputs, and
+  cryptographic inventory. Missing fields/counts and collisions fail closed.
+- Added patch 08 as the combined historical `U` operation: stock RPA writes,
+  its attention output is discarded, and a second all-cache-read RPA output is
+  used. The public v3 API cannot isolate a writer-only arm.
+- Added separate stock/U renderers with zero retries, a capture classifier,
+  stdout tar transport, and a SHA-verifying extractor. U without bounded
+  FrozenLake no-commit capture is rejected at preflight.
+- Both arms force precheck-only mode. A complete exact precheck is accepted as
+  an expected diagnostic stop only with a PASS capture; a hard numerical red
+  remains nonzero. The shell positive/negative postflight control passes.
+- Verification: pinned Qwen3-1.7B and Qwen3-8B overlays install with all 29
+  manifest entries; each existing chunking suite passes 10/10; serving
+  classifier 10/10, renderer 4/4, transport 4/4; complete pinned-image P33 CPU
+  gate PASS.
+- Claim ceiling: locally ready for review only. Production decode capture and
+  numerical effect of U are NOT RUN.
+- Rollback: leave `CANON_P38_SERVING_CAPTURE_DIR` and `CANON_KV_UNIFIED`
+  unset; stock branches remain selected.

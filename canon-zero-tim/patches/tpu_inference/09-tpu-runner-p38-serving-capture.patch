@@ -1,0 +1,309 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p38_serving_capture.py
+@@ -932,6 +932,19 @@
+ _P18_SEQ = {"n": 0}
+ _P35_METADATA_DIR = os.environ.get("CANON_P35_METADATA_DIR", "")
+ _P35_METADATA_SEQ = {"n": 0}
++_P38_SERVING_CAPTURE_DIR = os.environ.get(
++    "CANON_P38_SERVING_CAPTURE_DIR", "")
++_P38_SERVING_CAPTURE_MAX_CALLS = int(
++    os.environ.get("CANON_P38_SERVING_CAPTURE_MAX_CALLS", "1") or "1")
++_P38_SERVING_CAPTURE_MIN_PREFIX = int(
++    os.environ.get("CANON_P38_SERVING_CAPTURE_MIN_PREFIX", "0") or "0")
++_P38_SERVING_CAPTURE_SEQ = {"n": 0}
++
++if _P38_SERVING_CAPTURE_DIR and _P38_SERVING_CAPTURE_MAX_CALLS < 1:
++    raise RuntimeError(
++        "CANON_P38_SERVING_CAPTURE_MAX_CALLS must be positive when capture is enabled")
++if _P38_SERVING_CAPTURE_MIN_PREFIX < 0:
++    raise RuntimeError("CANON_P38_SERVING_CAPTURE_MIN_PREFIX must be non-negative")
+ 
+ 
+ def _p18_leaf(x):
+@@ -1015,6 +1028,237 @@
+     )
+ 
+ 
++def _p38_jsonable(value):
++    """Convert small host-side scheduler values to stable JSON data."""
++    if value is None or isinstance(value, (str, int, float, bool)):
++        return value
++    if isinstance(value, np.generic):
++        return value.item()
++    if isinstance(value, dict):
++        return {str(k): _p38_jsonable(v) for k, v in value.items()}
++    if isinstance(value, (list, tuple)):
++        return [_p38_jsonable(v) for v in value]
++    if isinstance(value, np.ndarray):
++        return value.tolist()
++    return str(value)
++
++
++def _p38_serving_dump(stage, seq, payload, meta):
++    """Persist one bounded serving record without overwriting prior evidence."""
++    import hashlib as _hashlib
++    import json as _json
++    from pathlib import Path as _Path
++
++    if stage not in ("pre", "post"):
++        raise RuntimeError(f"unsupported P38 serving stage: {stage!r}")
++    directory = _Path(_P38_SERVING_CAPTURE_DIR)
++    directory.mkdir(parents=True, exist_ok=True)
++    base = directory / f"p38_serving_{seq:04d}_{stage}"
++    npz_path = _Path(str(base) + ".npz")
++    json_path = _Path(str(base) + ".json")
++    if npz_path.exists() or json_path.exists():
++        raise RuntimeError(f"P38 serving evidence collision at {base}")
++
++    arrays = {}
++    describe = {}
++    for key, value in payload.items():
++        if isinstance(value, dict) and "array" in value:
++            arrays[key] = value["array"]
++            describe[key] = {
++                name: field for name, field in value.items() if name != "array"
++            }
++        elif isinstance(value, np.ndarray):
++            arrays[key] = value
++            describe[key] = {
++                "shape": tuple(value.shape),
++                "dtype": str(value.dtype),
++                "sharding": "host",
++            }
++        elif value is not None:
++            describe[key] = _p38_jsonable(value)
++
++    with npz_path.open("xb") as stream:
++        np.savez(stream, **arrays)
++    npz_sha256 = _hashlib.sha256(npz_path.read_bytes()).hexdigest()
++    record = {
++        "schema_version": 1,
++        "stage": stage,
++        "seq": seq,
++        "arrays": sorted(arrays),
++        "describe": describe,
++        "meta": _p38_jsonable(meta),
++        "npz_sha256": npz_sha256,
++    }
++    with json_path.open("x", encoding="utf-8") as stream:
++        _json.dump(record, stream, indent=2, sort_keys=True)
++    json_sha256 = _hashlib.sha256(json_path.read_bytes()).hexdigest()
++    print(
++        "[CANON_P38_SERVING_CAPTURE] "
++        + _json.dumps({
++            "stage": stage,
++            "seq": seq,
++            "arrays": len(arrays),
++            "npz_sha256": npz_sha256,
++            "json_sha256": json_sha256,
++            "base": str(base),
++        }, sort_keys=True),
++        flush=True,
++    )
++
++
++def _p38_serving_request_meta(runner, scheduler_output, req_ids_dp):
++    """Describe the exact logical requests and physical pages in one call."""
++    num_reqs = runner.input_batch.num_reqs
++    request_ids = list(runner.input_batch.req_ids[:num_reqs])
++    requests = []
++    assigned_dp_rank = getattr(scheduler_output, "assigned_dp_rank", None)
++    for req_id in request_ids:
++        req_index = runner.input_batch.req_id_to_index[req_id]
++        request_state = runner.requests.get(req_id)
++        block_ids = getattr(request_state, "block_ids", None)
++        requests.append({
++            "request_id": req_id,
++            "input_batch_index": int(req_index),
++            "assigned_dp_rank": int(
++                assigned_dp_rank.get(req_id, 0)
++                if assigned_dp_rank is not None else 0),
++            "scheduled_tokens": int(
++                scheduler_output.num_scheduled_tokens[req_id]),
++            "num_computed_tokens": int(
++                runner.input_batch.num_computed_tokens_cpu[req_index]),
++            "num_prompt_tokens": int(
++                runner.input_batch.num_prompt_tokens[req_index]),
++            "num_tokens": int(runner.input_batch.num_tokens[req_index]),
++            "token_ids": [
++                int(token_id) for token_id in np.asarray(
++                    runner.input_batch.token_ids_cpu[
++                        req_index, :runner.input_batch.num_tokens[req_index]
++                    ])
++            ],
++            "block_ids": _p38_jsonable(block_ids),
++        })
++    return {
++        "request_ids": request_ids,
++        "request_ids_by_dp": _p38_jsonable(req_ids_dp),
++        "requests": requests,
++        "req_id_to_index": {
++            req_id: int(runner.input_batch.req_id_to_index[req_id])
++            for req_id in request_ids
++        },
++    }
++
++
++def _p38_serving_begin(runner, scheduler_output, req_ids_dp, input_ids,
++                       input_positions, active_mask, attn_metadata,
++                       sampling_metadata, tokens_indices_selector,
++                       max_decode_steps,
++                       padded_num_scheduled_tokens_per_dp_rank):
++    """Write the pre-dispatch record and return its sequence number."""
++    if not _P38_SERVING_CAPTURE_DIR:
++        return None
++    seq = _P38_SERVING_CAPTURE_SEQ["n"]
++    if seq >= _P38_SERVING_CAPTURE_MAX_CALLS:
++        return None
++
++    positions_host, active_host = jax.device_get(
++        (input_positions, active_mask))
++    positions_host = np.asarray(positions_host)
++    active_host = np.asarray(active_host, dtype=np.bool_)
++    active_positions = positions_host[active_host]
++    max_prefix = int(active_positions.max()) if active_positions.size else -1
++    if max_prefix < _P38_SERVING_CAPTURE_MIN_PREFIX:
++        return None
++
++    _P38_SERVING_CAPTURE_SEQ["n"] += 1
++    sampling_leaves, sampling_tree = jax.tree_util.tree_flatten(
++        sampling_metadata)
++    payload = {
++        "input_ids": _p18_leaf(input_ids),
++        "input_positions": {
++            "array": positions_host,
++            "shape": tuple(positions_host.shape),
++            "dtype": str(positions_host.dtype),
++            "sharding": str(getattr(input_positions, "sharding", None)),
++        },
++        "active_mask": {
++            "array": active_host,
++            "shape": tuple(active_host.shape),
++            "dtype": str(active_host.dtype),
++            "sharding": str(getattr(active_mask, "sharding", None)),
++        },
++        "md_input_positions": _p18_leaf(attn_metadata.input_positions),
++        "md_block_tables": _p18_leaf(attn_metadata.block_tables),
++        "md_seq_lens": _p18_leaf(attn_metadata.seq_lens),
++        "md_query_start_loc": _p18_leaf(attn_metadata.query_start_loc),
++        "md_request_distribution": _p18_leaf(
++            attn_metadata.request_distribution),
++        "tokens_indices_selector": _p18_leaf(tokens_indices_selector),
++        "rng": _p18_leaf(runner.rng_params_for_sampling),
++    }
++    for index, leaf in enumerate(sampling_leaves):
++        payload[f"sampling_leaf_{index:02d}"] = _p18_leaf(leaf)
++
++    meta = {
++        **_p18_contract_meta(runner.mesh),
++        **_p38_serving_request_meta(
++            runner, scheduler_output, req_ids_dp),
++        "capture_max_calls": _P38_SERVING_CAPTURE_MAX_CALLS,
++        "capture_min_prefix": _P38_SERVING_CAPTURE_MIN_PREFIX,
++        "observed_max_prefix": max_prefix,
++        "sampling_tree": str(sampling_tree),
++        "max_decode_steps": int(max_decode_steps),
++        "static_max_decode_steps": int(runner.static_max_decode_steps),
++        "tokens_per_dp": int(input_ids.shape[0] // runner.dp_size),
++        "padded_num_scheduled_tokens_per_dp_rank": int(
++            padded_num_scheduled_tokens_per_dp_rank),
++        "dp_size": int(runner.dp_size),
++        "block_size": int(runner.block_size),
++        "continue_decode_enabled": bool(runner.enable_continue_decode),
++        "kv_unified": os.environ.get("CANON_KV_UNIFIED") == "1",
++        "caller_update_kv_cache": True,
++        "output_update_kv_cache": os.environ.get("CANON_KV_UNIFIED") != "1",
++        "rpa_block_tuples": {
++            name: os.environ.get(name)
++            for name in ("CANON_RPA_D", "CANON_RPA_P", "CANON_RPA_M")
++        },
++        "kv_caches_spec": [{
++            "shape": tuple(cache.shape),
++            "dtype": str(cache.dtype),
++            "sharding": str(getattr(cache, "sharding", None)),
++        } for cache in runner.kv_caches],
++        "layer_name_to_kvcache_index": list(
++            runner.layer_name_to_kvcache_index.items()),
++    }
++    _p38_serving_dump("pre", seq, payload, meta)
++    return seq
++
++
++def _p38_serving_finish(seq, generated_tokens, actual_steps,
++                        final_state, logprob_token_ids, logprob_values,
++                        logprob_ranks):
++    """Write small post-dispatch outputs for an admitted capture record."""
++    if seq is None:
++        return
++    final_positions, final_seq_lens = jax.device_get((
++        final_state.attn_metadata.input_positions,
++        final_state.attn_metadata.seq_lens,
++    ))
++    payload = {
++        "generated_tokens": np.asarray(generated_tokens),
++        "final_input_positions": np.asarray(final_positions),
++        "final_seq_lens": np.asarray(final_seq_lens),
++    }
++    if logprob_token_ids is not None:
++        payload["logprob_token_ids"] = np.asarray(logprob_token_ids)
++        payload["logprob_values"] = np.asarray(logprob_values)
++        payload["logprob_ranks"] = np.asarray(logprob_ranks)
++    _p38_serving_dump("post", seq, payload, {
++        "actual_steps": int(actual_steps),
++        "completed_records": seq + 1,
++        "expected_max_records": _P38_SERVING_CAPTURE_MAX_CALLS,
++    })
++
++
+ 
+ def _p18_weight_fingerprint(state_leaves):
+     """Exact bitwise checksum over the weights, computed on-device (cheap).
+@@ -2142,8 +2386,8 @@
+             spec_decode_metadata,
+             logits_indices_selector,
+             padded_num_reqs,
+-            _,
+-            _,
++            req_ids_dp,
++            padded_num_scheduled_tokens_per_dp_rank,
+             tokens_indices_selector,
+         ) = self._prepare_inputs(scheduler_output)
+ 
+@@ -2171,6 +2415,20 @@
+             max_decode_steps = 1
+         max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
+ 
++        p38_serving_seq = _p38_serving_begin(
++            self,
++            scheduler_output,
++            req_ids_dp,
++            input_ids,
++            input_positions,
++            active_mask,
++            attn_metadata,
++            sampling_metadata,
++            tokens_indices_selector,
++            max_decode_steps,
++            padded_num_scheduled_tokens_per_dp_rank,
++        )
++
+         lora_metadata = self.lora_utils.extract_lora_metadata()
+ 
+         # Run continue-decode as a single JIT'd on-device loop (JAX while_loop with
+@@ -2255,6 +2513,16 @@
+             lp_vals_cpu = np.asarray(lp_vals_cpu)[:actual_steps]
+             lp_ranks_cpu = np.asarray(lp_ranks_cpu)[:actual_steps]
+ 
++        _p38_serving_finish(
++            p38_serving_seq,
++            generated_tokens_cpu,
++            actual_steps,
++            final_state,
++            lp_token_ids_cpu,
++            lp_vals_cpu,
++            lp_ranks_cpu,
++        )
++
+         # Expose request dimension as axis 0 after transpose: shape (batch_size, actual_steps)
+         generated_tokens_cpu = generated_tokens_cpu.T
+         if tokens_indices_selector is not None:

@@ -101,6 +101,16 @@ patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
   echo "      PATCH FAILED: 07-tpu-runner-p35-metadata.patch" >&2
   exit 1
 }
+patch -s --no-backup-if-mismatch "$OUT/attn_iface_patched.py" \
+  "$PKG/patches/tpu_inference/08-attention-kv-unified.patch" || {
+  echo "      PATCH FAILED: 08-attention-kv-unified.patch" >&2
+  exit 1
+}
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/09-tpu-runner-p38-serving-capture.patch" || {
+  echo "      PATCH FAILED: 09-tpu-runner-p38-serving-capture.patch" >&2
+  exit 1
+}
 
 echo "[3/4] laying down the shim chain (model=$MODEL)"
 cp "$PKG"/src/engine_shims/*.py "$OUT/"

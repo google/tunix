@@ -114,6 +114,50 @@ case "${CANON_RUN_P38_AVAL:-0}" in
     ;;
 esac
 
+case "${CANON_KV_UNIFIED:-0}" in
+  0|1) ;;
+  *) echo "[env] CANON_KV_UNIFIED must be 0 or 1" >&2; fail=1 ;;
+esac
+if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  for k in CANON_P38_SERVING_CAPTURE_MAX_CALLS \
+           CANON_P38_SERVING_CAPTURE_MIN_PREFIX \
+           CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS \
+           CANON_P38_SERVING_CAPTURE_CLASSIFICATION \
+           CANON_P38_SERVING_CAPTURE_ARCHIVE \
+           CANON_P38_PRECHECK_ONLY; do
+    req "$k"
+  done
+  [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] || {
+    echo "[env] P38 serving capture requires the FrozenLake workload" >&2
+    fail=1
+  }
+  [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+  [ "${CANON_P33_NO_COMMIT:-}" = "1" ] || {
+    echo "[env] P38 serving capture requires backward-no-commit" >&2
+    fail=1
+  }
+  [ "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}" = "1" ] && \
+  [ "${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}" = "1" ] || {
+    echo "[env] P38 serving capture must retain exactly one record" >&2
+    fail=1
+  }
+  [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] || {
+    echo "[env] P38 serving capture must stop after an exact precheck" >&2
+    fail=1
+  }
+  [[ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" =~ ^[0-9]+$ ]] || {
+    echo "[env] P38 serving capture minimum prefix must be non-negative" >&2
+    fail=1
+  }
+  echo "[env] P38 serving capture enabled: kv_unified=${CANON_KV_UNIFIED:-0}"
+elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
+  echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
+  fail=1
+elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_PRECHECK_ONLY:-}" ]; then
+  echo "[env] partial P38 serving-capture configuration is not admitted" >&2
+  fail=1
+fi
+
 if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
   for k in CANON_P35_ENVELOPE_REPORT CANON_P35_METADATA_DIR \
            CANON_P35_CLASSIFICATION CANON_DP_SIZE CANON_LOGPROB_M; do

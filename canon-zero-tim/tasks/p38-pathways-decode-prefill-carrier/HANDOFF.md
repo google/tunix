@@ -198,3 +198,149 @@ Do not rerun FrozenLake before the capsule has passed transport and embedded
 array SHA checks. Prefix cache remains disabled. The next action is the
 single-row prefix sweep specified in
 `phases/p38-2f-frozenlake-threshold-capsule.md`, not a full training launch.
+
+## Current FrozenLake execution order
+
+The published source is `e9cfe298`. The first refreshed
+`frozenlake-backward-no-commit` run is expected to stop at the pre-backward A-B
+gate. Treat it as P38.2f capsule capture; do not claim that backward ran merely
+because of the manifest name. Do not add KV-unified or another numerical arm
+to this first target run.
+
+After capsule recovery, follow
+`phases/p38-2g-frozenlake-causal-replay.md`: R0 stock multi-turn reproduction,
+R1 same-depth single-turn control, R2 MIXED-only two-pass cache write/read, and
+R3 all-distribution two-pass. Each arm requires an independent cache seed.
+Only a selected candidate with exact forward boundaries may advance to a new
+target backward-no-commit run. That later run must prove gradient and DP
+reducer health while committing neither parameters nor optimizer state.
+
+GSM8K full may run in parallel on independent resources. Its schedule-aware
+transaction result is independent evidence and cannot promote FrozenLake.
+
+## P38.2g implementation ready in the current worktree
+
+The current uncommitted worktree on top of `e9cfe298` contains the locally
+admitted R0/R1 replay implementation. It has not been published and has not
+run on a real Qwen3-8B TPU model. Do not tell the target operator to pull it
+until the user explicitly approves commit and push.
+
+After P38.2f produces a capsule, recover it with
+`scripts/extract_p38_capsule.py`, copy the verified NPZ to the authorized
+DP1xTP4 host, and run:
+
+```bash
+scripts/run_p38_frozenlake_replay.sh \
+  /absolute/path/to/recovered-p38-capsule.npz <unique-label>
+```
+
+The runner verifies the capsule before model initialization, loads Qwen3-8B,
+executes R0/R1/reference twice with fresh caches, runs a one-bit negative
+control, requires bitwise-equal actor/engine leaves, writes a bounded report,
+and exits before the agentic learner/backward with zero optimizer commits.
+R0 is `mask-derived-v1`; exact serving scheduler metadata was not captured.
+
+Expected classification is one of:
+
+- `MULTITURN_SCHEDULE_CARRIER_CANDIDATE`: R0 is red and R1 is exact against
+  the fixed-chunk reference;
+- `LOCAL_CARRIER_NOT_REPRODUCED`: R0 is exact locally;
+- `LOCAL_CARRIER_NOT_ISOLATED`: R0 and R1 are both red.
+
+All three are measurement outcomes, not production repair admission. R2/R3
+must remain absent until a verified target capsule makes R0/R1 interpretable.
+Local proof and exact commands are in `artifacts/p38_2g_local_gate.md`.
+
+Real Qwen3-8B synthetic controls have now exercised the runner. At prompt
+lengths 256 and 1788, R0 and R1 were bitwise exact with each other, while both
+were red against REF at all eight scored actions. The shallow maximum was
+larger than the deep maximum. This is `LOCAL_CARRIER_NOT_ISOLATED`, not a
+production reproduction and not evidence for a KV-1791 threshold. See
+`artifacts/p38_2g_onehost_synthetic_0811.md`.
+
+Do not implement or interpret R2/R3 from the synthetic result. The target
+operator must still produce a verified P38.2f capsule. If target R0/R1 show the
+same broad split, add an exact serving-envelope control before changing KV
+update behavior.
+# 2026-08-11 target-row update: local serving envelope rejected
+
+The verified P38e1 source row 191 has now run on real Qwen3-8B DP1xTP4. Do not
+implement or interpret local R2/R3 from the current mask-derived schedule.
+
+- R0 equals R1 bitwise at raw target, processed target, normalizer, and logprob.
+- R0/R1 differ from REF at 395 of 517 action logprobs.
+- REF logprob SHA exactly equals captured `S_prefill`/`T_old`.
+- R0/R1 do not equal captured `S_decode`.
+- Measurement integrity passed; classification is
+  `LOCAL_CARRIER_NOT_ISOLATED`; no production repair is admitted.
+- Evidence: `artifacts/p38_2g_onehost_target_row191_0811.md`.
+
+The next implementation belongs in the actual serving envelope. The existing
+P18/P35 capture in `patches/tpu_inference/06-tpu-runner.patch` and
+`07-tpu-runner-p35-metadata.patch` records metadata only when
+`input_batch.num_prompt_logprobs` is non-empty, which captures rescore B but not
+ordinary decode A. Add a separate default-off P38 serving-metadata capture that
+also executes for decode and records, per scheduler call:
+
+1. monotonically increasing call ordinal and the live request/slot IDs needed
+   to join a capsule row back to its serving request;
+2. input IDs and positions;
+3. attention input positions, block tables, sequence lengths, query starts,
+   and request distribution;
+4. exact logical-to-physical page IDs used by the selected requests;
+5. cache shape, dtype, sharding, page size, and configured D/P/M block tuples;
+6. whether the call is decode, prefill, or mixed and the effective
+   `update_kv_cache` value.
+
+The capture must be bounded, attempt-unique, fail on overwrite, print completed
+record counts, and include a negative control proving that missing decode
+records reject classification. The mismatch capsule must also preserve the
+row-to-request-ID mapping; row order alone is not an admissible join key.
+
+The pinned-source audit is recorded in
+`phases/p38-2g2-pathways-serving-envelope.md`. Production A can execute inside
+`runner/decode_loop.py::continue_decode`, so capture limited to ordinary
+`model_fn` or prompt-logprob calls is invalid. The v3 public API also cannot
+construct a clean write-only arm: `update_kv_cache=False` both skips the write
+and forces all-cache reads. Do not label any v2-writer experiment as a
+single-variable `W` arm.
+
+After an exact serving record exists, run stock first. Only if that record
+reproduces captured `S_decode` may a separate source-pinned diagnostic enable
+the combined historical `U` arm: stock RPA writes the cache, its output is
+discarded, and a second RPA call with `update_kv_cache=False` supplies the
+attention output. This can establish causality for the combined mechanism but
+cannot distinguish fused-write effects from read-source effects.
+
+Keep prefix cache disabled, backward disabled, optimizer commits zero, and the
+precision/fixed-M/fixed-reduction configuration unchanged. Rollback is leaving
+the new capture and counterfactual environment variables unset.
+
+## P38.2g2 local handoff: implementation gated, target not run
+
+The current dirty worktree now contains the implementation described above:
+
+- patch 09 captures the actual donated-cache `continue_decode` call, including
+  request IDs, full current token histories, physical page IDs, scheduler and
+  attention metadata, sampling leaves, the physical/logical selector, and
+  bounded post-dispatch outputs;
+- patch 08 adds only the combined two-pass `U` arm. It cannot distinguish the
+  fused writer from the read-source change and must never be named `W`;
+- `render_p38_serving_jobsets.py` renders separate stock and U Attempt-0
+  manifests; and
+- `90_run.sh` classifies and emits a SHA-verified tar as base64 so evidence
+  survives pod deletion. `extract_p38_serving_archive.py` recovers it. Both
+  manifests force `CANON_P38_PRECHECK_ONLY=1`, so an exact U arm stops before
+  backward rather than falling through the misleadingly named workload stage.
+
+Local gates are green: pinned-image install 29/29 for both model overlays,
+logprob chunking 10/10 for each overlay, ten serving-classifier controls,
+four renderer controls, four archive-transport controls, and the complete
+P33 CPU suite. A shell postflight also proves exact precheck stop is accepted
+while a red stop is rejected. No Pathways/TPU target result exists.
+
+Do not tell an operator to pull this worktree until the user explicitly
+approves commit and push. After publication, follow the exact commands in
+`phases/p38-2g2-pathways-serving-envelope.md`: render both, dry-run both,
+apply stock only, archive/classify it, and apply U only if stock reproduced the
+known red with complete capture evidence. Never apply the output directory.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Is this image's tpu_inference the one the patches were cut against?
 #
-# The six patches in patches/tpu_inference are anchored to one specific build.  Against a
+# The ordered patch set in patches/tpu_inference is anchored to one specific build. Against a
 # different build they either fail to apply -- loud, fine -- or apply with fuzz and produce a
 # file nobody has ever gated.  This step answers the question up front, per file, before the
 # install runs, so a version difference is a decision instead of a mystery.

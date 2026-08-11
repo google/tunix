@@ -1,0 +1,37 @@
+--- attn_iface_patched.py
++++ attn_iface_p38_kv_unified.py
+@@ -616,6 +616,34 @@
+         _dist = jnp.stack([jnp.zeros_like(_dist[0]), jnp.zeros_like(_dist[1]), _dist[2]])
+         _ahit("FORCE_MIXED distribution -> [0, 0, k]")
+ 
++    # P38.2g2: target-only combined cache-write/read causal arm. This is the
++    # historical two-pass operation, not a write-only intervention: the first
++    # RPA call performs the normal fused cache update and its attention output
++    # is discarded; the second call skips the write and reads every K/V value
++    # from the cache populated by the first call. The v3 public API does not
++    # expose a write-only mode, so this arm must not be used to attribute a
++    # result specifically to the writer or the read-source change.
++    #
++    # Keep the stock branch textually unchanged when the flag is absent. The
++    # target admission run must still prove capture-on/off neutrality.
++    if os.environ.get("CANON_KV_UNIFIED") == "1":
++        if not update_kv_cache:
++            raise ValueError(
++                "CANON_KV_UNIFIED requires the caller's stock cache update")
++        _, kv_cache = sharded_ragged_paged_attention(
++            mesh, q, k, v, kv_cache, md.seq_lens, md.block_tables,
++            md.query_start_loc, _dist, sinks,
++            sm_scale=sm_scale,
++            attention_chunk_size=attention_chunk_size,
++            q_scale=q_scale,
++            k_scale=k_scale,
++            v_scale=v_scale,
++            update_kv_cache=True,
++            use_causal_mask=use_causal_mask,
++        )
++        update_kv_cache = False
++        _ahit("KV_UNIFIED_two_pass")
++
+     # (T, N, H)
+     output, kv_cache = sharded_ragged_paged_attention(
+         mesh,

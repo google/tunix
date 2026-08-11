@@ -33,6 +33,15 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
   if [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
     report_keys+=(CANON_P38_MISMATCH_CAPSULE)
   fi
+  if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+    report_keys+=(CANON_P38_SERVING_CAPTURE_CLASSIFICATION
+                  CANON_P38_SERVING_CAPTURE_ARCHIVE)
+    if [ -e "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
+      echo "[run] FATAL: P38 serving-capture directory already exists: $CANON_P38_SERVING_CAPTURE_DIR" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$CANON_P38_SERVING_CAPTURE_DIR")"
+  fi
   for report_key in "${report_keys[@]}"; do
     report_path="${!report_key:-}"
     if [ -z "$report_path" ]; then
@@ -120,6 +129,33 @@ if [ "$rc" -ne 0 ] && [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
   echo "[CANON_P38_CAPSULE_ARTIFACT] path=$CANON_P38_MISMATCH_CAPSULE bytes=$capsule_bytes sha256=$capsule_sha encoding=base64"
   base64 "$CANON_P38_MISMATCH_CAPSULE" | sed 's/^/[CANON_P38_CAPSULE_B64] /'
 fi
+if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+    python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py" \
+      --directory "$CANON_P38_SERVING_CAPTURE_DIR" \
+      --expected-records "$CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS" \
+      --output "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
+  p38_capture_rc=$?
+  if [ -s "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" ]; then
+    p38_class_sha="$(sha256sum "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" | awk '{print $1}')"
+    echo "[CANON_P38_SERVING_CLASSIFICATION] path=$CANON_P38_SERVING_CAPTURE_CLASSIFICATION sha256=$p38_class_sha"
+    sed 's/^/[CANON_P38_SERVING_CLASSIFICATION_JSON] /' \
+      "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
+  fi
+  if [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
+    tar --sort=name --mtime=@0 --owner=0 --group=0 \
+      -C "$CANON_P38_SERVING_CAPTURE_DIR" \
+      -cf "$CANON_P38_SERVING_CAPTURE_ARCHIVE" .
+    p38_archive_sha="$(sha256sum "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | awk '{print $1}')"
+    p38_archive_bytes="$(wc -c < "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | tr -d '[:space:]')"
+    echo "[CANON_P38_SERVING_ARCHIVE] path=$CANON_P38_SERVING_CAPTURE_ARCHIVE bytes=$p38_archive_bytes sha256=$p38_archive_sha encoding=base64"
+    base64 "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | \
+      sed 's/^/[CANON_P38_SERVING_ARCHIVE_B64] /'
+  fi
+  if [ "$p38_capture_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then
+    rc=2
+  fi
+fi
 # grep -a: progress-bar control characters make grep treat the log as binary and drop every
 # match silently, which reads exactly like "the intervention never fired".
 n_ar=$(grep -ac 'CANON_FIXED_AR=1 fixed-order tree' "$LOG" || true)
@@ -134,7 +170,8 @@ n_p35_replay=$(grep -ac '^\[CANON_P35.3\] REPLAY_COMPLETE' "$LOG" || true)
 n_p35_stage_begin=$(grep -ac '^\[CANON_P35.3C\] STAGE_BEGIN' "$LOG" || true)
 n_p35_stage_ready=$(grep -ac '^\[CANON_P35.3C\] STAGE_READY' "$LOG" || true)
 n_p35_stage_complete=$(grep -ac '^\[CANON_P35.3C\] STAGE_PROBE_COMPLETE .*NO_NUMERICAL_VERDICT' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete"
+n_p38_precheck=$(grep -ac '^\[CANON_P38\] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD' "$LOG" || true)
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck"
 if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
    [ -s "${CANON_P35_PRE_REPLAY_REPORT:-}" ]; then
   p35_base_sha="$(sha256sum "$CANON_P35_PRE_REPLAY_REPORT" | awk '{print $1}')"
@@ -256,6 +293,15 @@ if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
     echo "[run] P35 expected diagnostic exit=1 accepted after COMPLETE classification"
     rc=0
   fi
+elif [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
+     [ "$n_p38_precheck" -gt 0 ]; then
+  if [ "$rc" -ne 1 ] || [ "$n_p38_precheck" -ne 1 ] || \
+     [ "${p38_capture_rc:-1}" -ne 0 ]; then
+    echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset}" >&2
+    exit 1
+  fi
+  echo "[run] P38 serving expected precheck exit=1 accepted; backward=0 optimizer_commits=0"
+  rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   classification="$CANON_STATE/p34_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

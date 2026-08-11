@@ -55,8 +55,8 @@ the engine's own attention kernel rather than a training-side equivalent.
 
 ## What is changed
 
-Six patches against the engine, one file each, **1252 lines total**. Every switch defaults
-off; with the environment unset the patched files behave byte-identically to stock.
+Nine ordered patches against six engine files. Every switch defaults off; with
+the environment unset the patched files retain the stock execution branches.
 
 | # | Patch | Root cause it addresses | Switch |
 |---|---|---|---|
@@ -66,6 +66,9 @@ off; with the environment unset the patched files behave byte-identically to sto
 | 04 | `qwen3` | **none — diagnostic instrumentation only** (bisection cut points, depth reduction) | `CANON_CUT`, `P16_NUM_LAYERS` |
 | 05 | `qwen2` | **none — diagnostic instrumentation only** (tail cut, optimization barriers) | `CANON_TAIL`, `CANON_BARRIER_ALL` |
 | 06 | `tpu-runner` | Decode and prefill land in different token buckets; the vocab reduction splits by `M` **and** by nested-jit caller; prompt scoring does not inherit decode's processed-logprob semantics | `MIN_TOKEN_BUCKET`, `CANON_LOGPROB_M`, `CANON_PROMPT_PROCESSED_LOGPROBS` |
+| 07 | `tpu-runner` | **none — P35 diagnostic metadata only** | `CANON_P35_METADATA_DIR` |
+| 08 | `attention-interface` | **none by default — P38 target-only combined cache-write/all-cache-read causal arm** | `CANON_KV_UNIFIED` |
+| 09 | `tpu-runner` | **none — bounded capture around the real donated-cache `continue_decode` program** | `CANON_P38_SERVING_CAPTURE_DIR` and bounds |
 
 Patches 04 and 05 carry no fix. They are here because the shim chain bottoms out in those two
 files, so removing their instrumentation would break byte-identity with the sources that carry
@@ -169,7 +172,7 @@ CLUSTER_ADMISSION.md    what to measure before trusting a new topology
 install.sh              assemble the chain (two source modes)
 MANIFEST.sha256         expected SHA of every installed file
 STOCK_MANIFEST.sha256   expected SHA of the six upstream files the patches are cut against
-patches/tpu_inference/  six real diffs, one per file
+patches/tpu_inference/  nine ordered diffs across six pinned engine files
 src/engine_shims/       the shim chain + promoted Pallas ops + model-specific modules
 tests/t0_cpu/           CPU gates
 tests/t1_tpu/           topology admission probes

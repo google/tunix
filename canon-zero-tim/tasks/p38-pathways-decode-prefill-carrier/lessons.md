@@ -22,3 +22,19 @@ Completion-relative positions can hide a boundary after a long prompt. The
 FrozenLake onset appeared only after adding prompt length and expressing each
 action in logical KV-prefix and sequence-chunk coordinates. Register and test
 the coordinate system itself before inferring a page, tile, or turn boundary.
+
+## 2026-08-11 — A historical negative arm is not a lost repair
+
+Phase 13's KV-unified branch printed its execution marker and left the measured
+values unchanged. Reusing the idea in a new version/topology/workload domain is
+valid as a fresh causal test, but describing the old arm as a successful fix
+reverses the evidence. Read the terminal verdict, not only the original plan or
+mechanism hypothesis.
+
+## 2026-08-11 — Token capsules do not reconstruct scheduler provenance
+
+A capsule containing exact tokens, masks, and logprobs still cannot prove the
+original serving call boundaries, page tables, or request distributions. A
+schedule inferred from action and validity masks is useful as a controlled
+counterfactual, but it must carry an explicit claim ceiling and a local
+reproduction prerequisite. Do not rename derived metadata as captured truth.
