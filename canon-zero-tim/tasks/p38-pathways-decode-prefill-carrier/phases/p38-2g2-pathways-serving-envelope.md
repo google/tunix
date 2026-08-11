@@ -1,7 +1,10 @@
 # P38.2g2: source-pinned Pathways serving envelope
 
-Status: local admission hardening complete and gated; published at
-`bbc1d329`; target run not authorized or run.
+Status: local admission hardening complete and gated. Stock and U numerical
+target runs exist, but both available head logs stop at the child alignment
+traceback before the official serving classifier/archive and final postflight.
+U executed and remained red, so it is not a sufficient repair. The phase is
+`INCONCLUSIVE` pending one complete stock-only capture; do not rerun U.
 
 ## Objective
 
@@ -144,10 +147,13 @@ python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract
   --output /path/to/stock-serving.tar
 ```
 
-Only after the stock run contains one PASS serving-capture classification,
-one verified archive, the expected hard A/B red, Attempt 0, and zero optimizer
-commits may the operator apply the unified manifest. The unified result is a
-combined mechanism test; it is not a writer-only verdict.
+The original plan admitted U only after stock contained one PASS
+serving-capture classification, one verified archive, the expected hard A/B
+red, Attempt 0, and zero optimizer commits. U was subsequently run without a
+complete stock serving archive and remained materially red. This answers its
+sufficiency question: do not apply the unified manifest again. The remaining
+operation is a fresh stock-only run that reaches the complete outer
+postflight.
 
 Both manifests set `CANON_P38_PRECHECK_ONLY=1`. If U makes the pre-backward
 record exact, the learner emits exactly one
@@ -158,18 +164,20 @@ outcome and is never converted to success.
 
 ## Target ladder
 
-1. Run stock capture only. It must reproduce the known decode output for the
-   selected request and preserve all required fields.
-2. Run `U` as a separate default-off source-pinned diagnostic. Prefix cache,
-   precision, fixed-M, block sizes, weights, prompts, and all other controls
-   remain unchanged.
-3. If `U` makes the forward boundary exact, rerun GSM8K A/B and the VJP2
-   chain/oracle gates, then run FrozenLake backward-no-commit.
-4. Only an exact forward plus healthy/correct gradient and zero optimizer
-   commits may advance to FrozenLake full training.
+1. Rerun stock capture only. It must reproduce the known decode red for the
+   selected request, preserve all required fields, and emit the official
+   classifier, serving archive, run-specific capsule transport, and final
+   PATHTRACE after the child numerical failure.
+2. Do not rerun `U`. The completed production run executed
+   `KV_UNIFIED_two_pass` and remained red; stock/U were different stochastic
+   samples, so their differing-element counts are not a paired effect size.
+3. Admit P38.2g3 E0 only after the complete stock archive joins the mismatch by
+   request/token history and reproduces the whole action vector exactly.
+4. Only a later candidate with exact forward plus healthy/correct gradient and
+   zero optimizer commits may advance to FrozenLake full training.
 
-The first target run is diagnostic and uses Attempt 0. Operational JobSet
-restarts are not allowed for this numerical classification.
+The fresh stock-only target run is diagnostic and uses Attempt 0. Operational
+JobSet restarts are not allowed for this numerical classification.
 
 ## Pre-registered verdict
 
@@ -181,6 +189,12 @@ restarts are not allowed for this numerical classification.
   writer from the read-source change.
 - Any source drift, retry, cache collision, missing count, B/C regression, or
   infrastructure disconnect voids downstream numerical interpretation.
+
+The current evidence lands before the first registered verdict: stock and U
+alignment values are available, and U remained red, but the official stock
+serving archive/join is absent. Therefore U is rejected as a sufficient repair
+while scheduler/page ownership, stale tables, writes, padding leakage, and
+physical topology remain unproven.
 
 ## Rollback
 

@@ -7,16 +7,19 @@
   `S_prefill_vs_T_old=0`, and `T_old_vs_T_current=0` before a full workload is allowed to commit.
 - Task directory: `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`
 - Directory state: tracked. P38.2g2 admission hardening is published at
-  `bbc1d329` on `origin/yuxzhang/canon-zero-tim`; the remote hash was verified
-  as `bbc1d3290188df47595a3126e457788a94c289d9`. Main was not checked out or
+  `bbc1d329`; the current evidence head on `origin/yuxzhang/canon-zero-tim` is
+  `b7b20e261433977bc57bd83452fd6ac1c4680cdd`. Main was not checked out or
   modified.
 - Current phases: two independent tracks are deliberately active. P38.2d has
   added and locally gated the user-requested GSM8K-full warning-only alignment
   override so the time-sensitive convergence campaign cannot be stopped by an
   alignment gate.
   P38.2g2 remains the strict zero-TIM root-cause track. Its local admission
-  hardening is complete, green, and published; the stock target capture is not
-  run. P38.2g3 is pending on an exact stock P38.2g2 capture.
+  hardening is complete, green, and published. Stock and U target numerical
+  runs now exist, but both logs stop at the child alignment traceback before
+  the serving classifier/archive and final postflight. P38.2g2 therefore
+  remains inconclusive at the serving-envelope layer. P38.2g3 is pending on a
+  complete stock-only P38.2g2 capture.
 - Latest local gate: the real `continue_decode` capture now excludes
   live-but-unscheduled requests without compacting their physical scheduler
   slots, emits and validates request/DP/slot/global/attention/selector/page
@@ -63,19 +66,36 @@
   evidence remain NOT RUN.
 - Historical correction: Phase 13 executed `CANON_KV_UNIFIED` and observed no
   numerical change; it was a clean negative in its four-chip/short-context
-  domain, not a successful repair that was later dropped. It may be retested
-  only as a default-off causal arm in the new domain.
-- Next action for the strict track: pull and verify `bbc1d329`, render from
-  that exact source commit, dry-run both manifests, and apply stock only. U
-  remains forbidden until stock joins the
-  durable mismatch and reproduces the known hard A-B red with no backward and
-  zero optimizer commits. The independent GSM8K convergence campaign remains
-  governed by its published warning-only policy.
-- Blockers: current evidence proves a real-serving history/envelope dependency,
-  not physical-page causality. The existing capture records physical page IDs
-  but not enough page-content equivalence evidence for a fragmented-versus-
-  contiguous verdict. The external 64-chip operator is required for the stock
-  capture. The pinned v3 API cannot express a clean write-only `W` arm.
+  domain, not a successful repair that was later dropped. The default-off U
+  operation has now also executed in the 64-chip production domain and
+  remained materially red; it is not a sufficient repair and need not be
+  rerun.
+- Latest target evidence: stock `p38s1` reproduced the strict A-B red at
+  43/46,417 action elements (`max_abs=0.2780647277832031`) with B-C exact.
+  U `p38u1` executed `KV_UNIFIED_two_pass` and remained red at 9/46,589
+  elements (`max_abs=0.27657318115234375`) with B-C exact. U is therefore not
+  a sufficient repair. Because these are different sampled trajectories, the
+  43-to-9 count change is not a controlled improvement measurement and does
+  not prove a writer, timing, or page-lifecycle mechanism.
+- Evidence correction: neither target head log reached outer postflight. Both
+  lack the official serving-classification PASS, serving archive, complete
+  capsule transport, and final PATHTRACE. The generic committed capsule has
+  SHA `dae4e75d...` and is an exact duplicate of the older P38e1 capsule, not
+  the logged p38s1 (`2dffb993...`) or p38u1 (`245a0c9b...`) artifact. The
+  earlier stock-capture PASS wording is withdrawn.
+- Next action for the strict track: fetch and verify
+  `b7b20e261433977bc57bd83452fd6ac1c4680cdd`, render a fresh P38 serving pair,
+  and apply stock only. Preserve the complete terminal head log through outer
+  postflight and recover both the real run-specific capsule and serving tar.
+  Do not rerun U. P38.2g3 E0 remains blocked until the official stock capture
+  passes exact request/token-history join and whole-vector reproduction.
+  The independent GSM8K convergence campaign remains governed by its
+  published warning-only policy.
+- Blockers: the decisive serving block-table/page-state archive is missing.
+  Current evidence does not prove scheduler ownership, stale page-table,
+  partial-write, padding-leak, or physical-topology causality. The external
+  64-chip operator is required for one complete stock-only capture. The pinned
+  v3 API cannot express a clean write-only `W` arm.
 - Key artifacts: `../../debug_logs/p33_r35_gsm8k_full.raw.log`,
   `../../debug_logs/p33_r35_frozenlake_full.raw.log`, `plan.md`,
   `phases/p38-1-evidence-hardening.md`, `HANDOFF.md`
@@ -84,6 +104,10 @@
   `/mnt/disks/tunix-data/logp_probe_1host/p38_aval_0810_r1.result.json`,
   `../../debug_logs/p38_p38e1_frozenlake_mismatch_capsule.npz`,
   `../../debug_logs/p38_p38e1_frozenlake_pre_alignment.jsonl`,
+  `../../debug_logs/p38_p38s1_frozenlake_stock.raw.log`,
+  `../../debug_logs/p38_p38s1_frozenlake_pre_alignment.jsonl`,
+  `../../debug_logs/p38_p38u1_frozenlake_unified.raw.log`,
+  `../../debug_logs/p38_p38u1_frozenlake_pre_alignment.jsonl`,
   `artifacts/p38_2g_local_gate.md`,
   `artifacts/p38_2g_onehost_synthetic_0811.md`,
   `artifacts/p38_2g_onehost_target_row191_0811.md`,
@@ -95,7 +119,7 @@
   negative controls), exact-image Qwen3-1.7B/Qwen3-8B overlay gates 13/13 each
   PASS, serving classifier 18/18, renderer 5/5, and postflight stock/U
   PATHTRACE negative controls PASS.
-- Updated: 2026-08-11 UTC
+- Updated: 2026-08-11 UTC after p38s1/p38u1 evidence reconciliation
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,

@@ -320,7 +320,10 @@ Keep prefix cache disabled, backward disabled, optimizer commits zero, and the
 precision/fixed-M/fixed-reduction configuration unchanged. Rollback is leaving
 the new capture and counterfactual environment variables unset.
 
-## P38.2g2 local handoff: admission hardened, target not run
+## P38.2g2 historical local handoff (superseded below)
+
+This section records the pre-target state. Do not execute its U instruction;
+the 2026-08-11 evidence correction below is the current operator contract.
 
 Commit `763b60b1` introduced the implementation described above. The admission
 hardening is published at `bbc1d329` on `yuxzhang/canon-zero-tim`:
@@ -347,14 +350,16 @@ positive hit for U. Pinned-image install is 29/29 for both model overlays,
 installed runtime tests pass 13/13 for each overlay, serving classifier 18/18,
 renderer 5/5, archive transport 4/4, shell stock/U controls PASS, and the
 complete P33 CPU suite passes 67 workload plus 28 alignment tests and all
-adjacent negative controls. No Pathways/TPU target result exists.
+adjacent negative controls. At the time this historical section was written,
+no Pathways/TPU target result existed; see the correction below for p38s1 and
+p38u1.
 
 Fetch `yuxzhang/canon-zero-tim`, verify `git rev-parse HEAD` is `bbc1d329`, and
 follow the exact stock-first commands in
 `phases/p38-2g2-pathways-serving-envelope.md`. Dry-run both manifests but apply
-only stock; never apply the output directory. Do not run U until stock joins
-the mismatch capsule and reproduces the known hard A-B red with Attempt 0,
-no backward, and zero optimizer commits.
+only stock; never apply the output directory. The historical instruction was
+to defer U until stock joined the mismatch capsule. U has since run and
+remained red; do not rerun it.
 
 The next pending phase is
 `phases/p38-2g3-page-topology-discriminator.md`. It treats fragmented physical
@@ -384,3 +389,114 @@ Only committed GSM8K full may set the flag. Its terminal result is
 `PASS_WITH_ALIGNMENT_WARNINGS`, `claim_level=convergence-only`. It is not
 zero-TIM evidence and does not relax FrozenLake, DeepSWE, or P38.2g2/P38.2g3.
 Commit, push, and target launch remain pending explicit approval.
+
+## 2026-08-11 evidence correction: stock/U values exist, serving capture does not
+
+The branch now contains the complete available head logs and alignment-layer
+reports for `p38s1` and `p38u1`. They are useful numerical evidence, but
+neither run completed the P38.2g2 serving-capture postflight. Do not treat
+either run as a completed serving-envelope capture.
+
+Verified observations:
+
+- `p38s1` stock ran on Attempt 0 with `CANON_KV_UNIFIED=0`. It measured
+  `S_decode_vs_S_prefill` red at 43/46,417 action elements (68 differing
+  bytes, `max_abs=0.2780647277832031`) while `S_prefill_vs_T_old` was exact.
+- `p38u1` executed the `KV_UNIFIED_two_pass` path and remained red at
+  9/46,589 action elements (16 differing bytes,
+  `max_abs=0.27657318115234375`) while `S_prefill_vs_T_old` remained exact.
+  Therefore combined U is not a sufficient repair for the production
+  boundary.
+- Stock and U sampled different trajectories and have different action counts.
+  The change from 43 to 9 elements is not a controlled paired reduction and
+  must not be used to claim that U improved the carrier, changed writer
+  timing, or proved a page-lifecycle cause.
+- Both head logs end at the child `AlignmentGateError`. They do not contain
+  the outer `[run] exit=...`, `[CANON_PRE_ALIGN_ARTIFACT]`, official
+  `[CANON_P38_SERVING_CLASSIFICATION]`,
+  `[CANON_P38_SERVING_ARCHIVE]`, or final `[run] PATHTRACE` records. The
+  checked-in `p38-serving-capture-stock` and
+  `p38-serving-capture-unified` JSON files are alignment summaries, not the
+  official `classify_p38_serving_capture.py` output.
+- The generic checked-in `debug_logs/p38_frozenlake_mismatch_capsule.npz` has
+  SHA-256 `dae4e75d3b4689f2607047edd74ea1e48ffaf97a853cec74a204caafc3dc626b`.
+  It is byte-for-byte the older P38e1 capsule, not the `p38s1` capsule logged
+  as `2dffb993...` or the `p38u1` capsule logged as `245a0c9b...`. It contains
+  no serving block table or page-ownership history.
+
+Consequently:
+
+- the earlier `artifacts/p38_2g2_pathways_stock_capture_0811.md` PASS claim is
+  withdrawn; it proves the stock alignment red but not a complete serving
+  capture;
+- P38.2g2 remains `INCONCLUSIVE` at the serving-envelope layer;
+- scheduler/page ownership, stale block tables, partial writes, padding
+  leakage, and other serving-state hypotheses remain unproven; and
+- do not run U again. Its only registered question has already been answered:
+  the combined operation remained materially red.
+
+### Remote operator: run one fresh stock-only capture
+
+Use exact source `b7b20e261433977bc57bd83452fd6ac1c4680cdd` (or a later reviewed
+documentation-only descendant that leaves the renderer/runtime unchanged).
+Use a fresh run ID and output directory. Render both manifests only because
+the renderer emits them as a pair; dry-run both, but apply **stock only**:
+
+```bash
+git fetch origin yuxzhang/canon-zero-tim
+git checkout --detach b7b20e261433977bc57bd83452fd6ac1c4680cdd
+test "$(git rev-parse HEAD)" = "b7b20e261433977bc57bd83452fd6ac1c4680cdd"
+
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+RUN_ID="p38s2-serving"
+OUT="/tmp/p38-serving-$RUN_ID"
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --output-dir "$OUT"
+
+kubectl apply --dry-run=server -f "$OUT/jobset-p38-serving-stock.yaml"
+kubectl apply --dry-run=server -f "$OUT/jobset-p38-serving-unified.yaml"
+kubectl apply -f "$OUT/jobset-p38-serving-stock.yaml"
+```
+
+Capture the complete head-container log only after the JobSet is terminal. Do
+not stop log collection at the child traceback. The stock result is admitted
+only if the complete log contains all of the following:
+
+1. `JOBSET_ATTEMPT 0 (first attempt)`;
+2. the known finite hard `S_decode_vs_S_prefill` red and exact
+   `S_prefill_vs_T_old`;
+3. `[run] exit=1` from the child numerical gate;
+4. `[CANON_PRE_ALIGN_ARTIFACT]` and
+   `[CANON_P38_CAPSULE_ARTIFACT]` plus all capsule base64 lines;
+5. one official `[CANON_P38_SERVING_CLASSIFICATION]` whose JSON verdict is
+   `PASS` and whose request/token-history join is exact;
+6. `[CANON_P38_SERVING_ARCHIVE]` plus all serving-archive base64 lines; and
+7. a final `[run] PATHTRACE ... p38_kv_unified=0`.
+
+Stock is expected to exit nonzero because its known A/B red remains hard. It
+must not print the U hit, a successful backward, or an optimizer commit. The
+outer wrapper is still required to run its classifier/archive/PATHTRACE logic
+after the child failure. If any item above is absent, classify the attempt as
+`INCONCLUSIVE`; do not infer anything from the numerical values alone.
+
+Recover both durable binary artifacts from the unedited complete log:
+
+```bash
+python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
+  --log /path/to/p38s2-serving-head.raw.log \
+  --output /path/to/p38s2-serving-capsule.npz
+python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
+  --log /path/to/p38s2-serving-head.raw.log \
+  --output /path/to/p38s2-serving-capture.tar
+sha256sum /path/to/p38s2-serving-capsule.npz \
+  /path/to/p38s2-serving-capture.tar
+```
+
+Return the unedited complete head log, both recovered binaries, their SHA-256
+values, and the official serving-classification JSON. Do not substitute a
+pretty-printed alignment JSON or the generic `dae4e75d...` NPZ. P38.2g3 E0 is
+the next phase only after these artifacts pass transport, exact join, and
+whole-vector reproduction. E1-E5 and all repair claims remain blocked until
+E0 is exact.

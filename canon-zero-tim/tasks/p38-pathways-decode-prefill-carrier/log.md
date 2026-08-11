@@ -662,3 +662,34 @@
 - Next: fetch and verify `bbc1d329`, render both P38.2g2 manifests from that
   exact commit, server-side dry-run both, and apply stock only. U remains
   blocked on the stock mismatch join and reproduction gate.
+
+## 2026-08-11 UTC — p38s1/p38u1 evidence reconciled; stock serving archive still missing
+
+- Type: read-only evidence audit followed by documentation correction. No TPU,
+  cloud, runtime-code, training, commit, or push action was performed.
+- Source audited: `b7b20e261433977bc57bd83452fd6ac1c4680cdd` on
+  `origin/yuxzhang/canon-zero-tim`.
+- Stock `p38s1`: Attempt 0, 43/46,417 A-B differing elements, 68 differing
+  bytes, `max_abs=0.2780647277832031`, and B-C exact.
+- U `p38u1`: `KV_UNIFIED_two_pass` executed, 9/46,589 A-B differing elements,
+  16 differing bytes, `max_abs=0.27657318115234375`, and B-C exact. U is not a
+  sufficient repair. Different trajectories/action counts prohibit treating
+  43-to-9 as a paired improvement or a causal timing/writer result.
+- Both available head logs terminate at the child `AlignmentGateError` and
+  omit the outer `[run] exit`, official serving classifier/archive, capsule
+  base64 transport, and final PATHTRACE. The numerical observations are valid;
+  the serving-capture admission is `INCONCLUSIVE`.
+- The generic committed capsule SHA `dae4e75d...` equals the old P38e1 capsule
+  byte-for-byte and is not the p38s1 (`2dffb993...`) or p38u1
+  (`245a0c9b...`) run-specific artifact. It cannot supply block-table/page
+  evidence.
+- Correction: withdrew the earlier complete-capture PASS and its instruction
+  to run U. Page ownership/lifecycle, stale table, partial write, padding
+  leakage, and topology remain hypotheses.
+- Next: one fresh stock-only Attempt-0 run must preserve the terminal head log
+  through outer postflight, emit an official serving-classification PASS and
+  serving archive, transport the real run-specific capsule, prove zero U hits,
+  and remain pre-backward with zero optimizer commits. P38.2g3 E0-E5 stay
+  blocked until the stock archive passes exact join and whole-vector replay.
+- Rollback: documentation-only. Restore these files from version control if
+  the correction itself must be reverted; runtime behavior is unchanged.
