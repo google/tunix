@@ -44,29 +44,6 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
-def _match_to_target_keys(
-    converted: Any, spec_flat: Dict[Tuple[Any, ...], Any]
-) -> Dict[Tuple[Any, ...], Any]:
-  """Re-keys converter output onto the target state's own flat key tuples.
-
-  Accepts either a nested pytree or a dict already flattened with string keys
-  (dotted or otherwise), and keeps only entries the target actually has.
-  """
-  by_dotted = {".".join(str(p) for p in key): key for key in spec_flat}
-
-  if isinstance(converted, dict) and all(
-      isinstance(k, str) for k in converted
-  ) and any(k in by_dotted for k in converted):
-    flat = {by_dotted[k]: v for k, v in converted.items() if k in by_dotted}
-  else:
-    flat = {
-        k: v
-        for k, v in traverse_util.flatten_dict(converted).items()
-        if k in spec_flat
-    }
-  return flat
-
-
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -207,65 +184,42 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           " jax.sharding.Mesh."
       )
 
-  def _is_maxtext_rollout(self) -> bool:
-    """True when vLLM is running the MaxText model rather than an HF one.
+  def _assign_converted_state(self, converted: Any) -> None:
+    """Reshards an externally-converted state onto the model runner.
 
-    `maxtext_config` in `additional_config` is what makes vLLM instantiate
-    `MaxTextForCausalLM`, which is exactly the condition under which the
-    trainer and rollout trees match structurally and a direct sync is valid.
+    Generic on purpose: a converter is expected to return weights already keyed
+    like `transformer_state`, so this knows nothing about any particular model
+    family. Anything the converter did not supply keeps its current value --
+    coverage is the converter's contract to enforce, not this engine's.
     """
-    return "maxtext_config" in (self.config.additional_config or {})
-
-  def _target_state_dict(self):
-    """The vLLM model-runner state as a plain nested dict."""
     state = self.transformer_state
-    if isinstance(state, nnx.State):
-      return (
-          state.to_pure_dict() if hasattr(state, "to_pure_dict") else dict(state)
-      )
-    return state
-
-  def _apply_converted_weights(self, converted: Any) -> None:
-    """Reshards converter output onto the vLLM model-runner state.
-
-    Converters return one of two shapes, and both are in use:
-      * a nested pytree keyed like the target state, or
-      * a flat dict keyed by the target's dotted paths (the torchax converters
-        in MaxText build their output that way).
-    Both are normalized against the target's own flat keys so a converter's
-    choice of key encoding never silently drops weights.
-
-    Coverage is deliberately *not* enforced here -- each converter knows which
-    subset it is responsible for and validates its own plan. This only reports
-    what it saw.
-    """
-    state_dict = self._target_state_dict()
+    state_dict = (
+        (state.to_pure_dict() if hasattr(state, "to_pure_dict") else dict(state))
+        if isinstance(state, nnx.State)
+        else state
+    )
     spec_flat = traverse_util.flatten_dict(state_dict)
-
-    src_flat = _match_to_target_keys(converted, spec_flat)
+    src_flat = {
+        k: v
+        for k, v in traverse_util.flatten_dict(converted).items()
+        if k in spec_flat
+    }
     if not src_flat:
       raise ValueError(
-          f"{type(self.converter).__name__}.convert() produced no weights that "
-          "match the vLLM model-runner state. This would leave the rollout on "
-          "its randomly-initialized dummy weights."
-      )
-    if len(src_flat) < len(spec_flat):
-      logging.warning(
-          "Converter supplied %d of %d rollout parameters; the remainder keep "
-          "their current values.", len(src_flat), len(spec_flat),
+          f"{type(self.converter).__name__}.convert() returned no weights "
+          "matching the vLLM model-runner state; the rollout would keep its "
+          "randomly-initialized dummy weights."
       )
 
-    chunk_size = getattr(self.config, "reshard_chunk_size", None) or len(src_flat)
-    resharded_flat = utils._reshard_in_chunks(  # pylint: disable=protected-access
-        src_flat,
-        spec_flat,
-        reshard.reshard_pytree,
-        chunk_size,
-        getattr(self.config, "delete_dst_buffers", False),
+    resharded = traverse_util.unflatten_dict(
+        utils._reshard_in_chunks(  # pylint: disable=protected-access
+            src_flat,
+            spec_flat,
+            reshard.reshard_pytree,
+            self.config.reshard_chunk_size or len(src_flat),
+            self.config.delete_dst_buffers,
+        )
     )
-    resharded = traverse_util.unflatten_dict(resharded_flat)
-
-    state = self.transformer_state
     if isinstance(state, nnx.State):
       nnx.update(state, resharded)
     elif hasattr(state, "update"):
@@ -292,26 +246,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     jax.effects_barrier()
 
     if self.converter is not None:
+      # Conversion is owned by the integrator (MaxText), not by this engine:
+      # it returns weights already shaped for `transformer_state`, and all we
+      # do here is reshard them onto the runner's shardings and assign.
       logging.info("Weight sync via converter %s.", type(self.converter).__name__)
-      self._apply_converted_weights(
+      self._assign_converted_state(
           self.converter.convert(
               updated_weights, target_state=self.transformer_state
           )
-      )
-    elif self._is_maxtext_rollout():
-      # No converter (use_weight_converter=False) and vLLM is running the
-      # MaxText model itself, so source and target trees already match
-      # structurally. Fall back to the legacy direct sync rather than the HF
-      # key-mapping path, whose mappings do not describe this target at all.
-      logging.info(
-          "No converter configured; falling back to transfer_state_directly()."
-      )
-      utils.transfer_state_directly(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=True,  # Free HBM held by the previous weights.
-          reshard_chunk_size=self.config.reshard_chunk_size,
       )
     elif self.to_hf_key_mappings:
       preprocess_fn = self.config.mapping_config.preprocess_src_state
@@ -340,11 +282,27 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           tp_size=self.args.get("tensor_parallel_size", 1),
       )
     else:
-      raise ValueError(
-          "No weight sync path is configured: there is no converter, no HF key "
-          "mappings, and 'maxtext_config' is absent from 'additional_config' "
-          "(direct structural sync is only valid when vLLM runs the MaxText "
-          "model itself). The rollout would keep its dummy weights."
+      # Direct Weight Sync (e.g. MaxText -> MaxText)
+      logging.debug(
+          "No key mappings configuration found. Proceeding with direct"
+          " structural weight synchronization (assuming matching source/target"
+          " structures)."
+      )
+
+      additional_config = self.config.additional_config or {}
+      if "maxtext_config" not in additional_config:
+        raise ValueError(
+            "Direct weight synchronization is currently supported only for "
+            "MaxText models. The required 'maxtext_config' key is missing "
+            "from 'additional_config'."
+        )
+
+      utils.transfer_state_directly(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          reshard_fn=reshard.reshard_pytree,
+          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
+          reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
     if hasattr(self._model_runner, "state_leaves"):
