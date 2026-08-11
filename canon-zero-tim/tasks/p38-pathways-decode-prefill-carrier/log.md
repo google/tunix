@@ -197,3 +197,65 @@
   `NOT RUN` and no target numerical claim is made.
 - Rollback: leave `CANON_GSM8K_AB_REPORT_ONLY=0`, or revert the bounded-policy
   commit. The strict default path is unchanged.
+
+## 2026-08-11 UTC — P38d5 target diagnosis corrected
+
+- Type: evidence correction.
+- Fact: the GSM8K production schedule uses
+  `warmup_cosine_decay_schedule(init_value=0.0, ...)`; update 0 therefore has
+  effective LR exactly zero. The prior explanation that a tiny update merely
+  fell below bf16 resolution was not the primary mechanism and is withdrawn.
+- Fact: P38d5 had 16 active finite gradient microbatches, exact DP replicas,
+  one optimizer commit, changed Adam state, unchanged sampled model state, and
+  exact A/B/C boundaries. The old G6 mutation predicate was schedule-blind.
+- Fact: P38d5 FrozenLake had 25 of 48,946 action elements red, maximum absolute
+  difference `0.153839111328125`, and no localized mismatch below logical KV
+  prefix 1791. This does not yet identify the responsible kernel or page size.
+- Artifacts: `../../debug_logs/p38_p38d5_gsm8k_full.raw.log` and
+  `../../debug_logs/p38_p38d5_frozenlake_bwd.raw.log`.
+
+## 2026-08-11 UTC — Schedule-aware commit and mismatch capsule implemented
+
+- Type: local implementation checkpoint.
+- Action: registered the exact optimizer schedule, added bounded device-side
+  commit evidence, and made G6 distinguish LR-zero immutability from a failed
+  optimizer transaction.
+- Action: added a two-row FrozenLake mismatch capsule with exact arrays,
+  per-array hashes, stdout base64 survival, and a recovery verifier.
+- Verification: focused alignment tests ran 26/26; renderer tests ran 10/10;
+  zero-LR and positive-LR commit tests passed; the tiny end-to-end G6 LR-zero
+  transaction passed with optimizer state changed and zero changed parameters;
+  capsule recovery positive and corrupt-payload negative controls passed.
+- Status: complete local gate is still required before publication. No cloud
+  job, optimizer checkpoint, commit, or push occurred.
+- Rollback: revert P38.2e/P38.2f files together or leave the capsule env empty.
+
+## 2026-08-11 UTC — P38.2e/P38.2f complete local gate
+
+- Type: local verification checkpoint.
+- Command: frozen-image `canon-zero-tim/tests/p33_workloads/run_cpu.sh`.
+- Result: PASS. Workload/classifier tests 67/67, alignment tests 26/26,
+  rollout tests 14/14, P35 tests 31/31, target renderers and all negative
+  controls passed, including corrupt capsule transport rejection.
+- Prior unchanged-overlay command:
+  `bash canon-zero-tim/tests/p33_workloads/run_exact_image.sh`.
+- Result: `P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 overlays=2`.
+- Status: local implementation complete. Target DP16xTP4 schedule-aware commit
+  and FrozenLake capsule capture are NOT RUN. No commit or push occurred.
+
+## 2026-08-11 UTC — Final working-tree audit and hardware-canary boundary
+
+- Type: local release audit.
+- Result: `git diff --check`, Python bytecode compilation, shell syntax,
+  executable-source English-only scan, and credential-pattern scan all pass.
+- Hardware-canary finding: the legacy GSM8K L3 recipe admits exactly two
+  trajectories, while its non-production G6 update contract requires eight.
+  That pre-existing contract mismatch prevents reusing the old L3 runner as a
+  trustworthy real-model commit gate. It was not weakened or bypassed for this
+  change.
+- Claim ceiling: unit and integration tests exercise real Optax transactions,
+  but the added scalar evidence has not yet been compiled with Qwen3-1.7B on
+  the direct-attached TPU. Compile time and peak HBM therefore remain target
+  admission measurements, not local PASS claims.
+- Status: working tree is ready for review. No commit, push, cloud lifecycle
+  action, precision change, prefix-cache change, or training launch occurred.

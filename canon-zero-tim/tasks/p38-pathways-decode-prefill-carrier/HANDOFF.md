@@ -16,7 +16,7 @@ run is `alignment-degraded`, not a zero-TIM completion claim.
 
 ## Proven locally
 
-- The alignment test suite passes 21/21 in `tunix_frozenlake_image:vllm-tpu0.25.0`.
+- The alignment test suite passes 26/26 in `tunix_frozenlake_image:vllm-tpu0.25.0`.
 - The complete P33 CPU gate passes, including a deliberately failed workload whose pre-alignment
   JSON and SHA survive in stdout.
 - The existing hard gate is unchanged: any nonzero pre-backward boundary still exits nonzero.
@@ -34,13 +34,26 @@ run is `alignment-degraded`, not a zero-TIM completion claim.
 - A synthetic multi-turn mismatch now records turn index, action-run offset,
   completion and sequence chunk coordinates, logical KV prefix length, and
   distance to the next M256 boundary. The complete CPU gate passed.
+- A real zero-LR Adam commit with 16 active gradient microbatches advances
+  optimizer state, keeps all parameter elements unchanged, and passes the new
+  schedule-aware transaction gate. A positive constant-LR control reports
+  nonzero post-rounding parameter changes.
+- A blocking pre-backward mismatch can persist at most two replay rows to a
+  hash-attested NPZ. The failed-run wrapper emits base64 to stdout, and
+  `scripts/extract_p38_capsule.py` rejects corrupt transport or array hashes.
 
 ## Not proven
 
-- No 64-chip P38 run has been launched.
-- The r35 A-B carrier has not been localized to a specific token, operator, or proxy flag effect.
-- `T_old_vs_T_current` remains unmeasured in the flag-on production model because r35 stopped
-  before backward.
+- P38d5 ran on 64 target chips, but the new schedule-aware commit evidence and
+  mismatch capsule were implemented afterward and remain untested there.
+- The FrozenLake A-B carrier has not been localized to a specific operator,
+  page layout, or attention tile. Its observed onset is a coordinate, not a
+  causal repair.
+- GSM8K P38d5 measured `T_old_vs_T_current=0` across all 16 microbatches.
+  FrozenLake still stops pre-backward, so its actual-model third-program
+  boundary remains unmeasured.
+- The new schedule-aware commit evidence and mismatch capsule have not run on
+  DP16xTP4 target hardware.
 
 The one-host result is a construction gate, not evidence that r35 was repaired.
 Its immutable local artifacts are:
@@ -168,3 +181,20 @@ The GSM8K classifier may exit successfully as
 `PASS_WITH_AB_REPORT_POLICY`. This means the run completed under a downgraded
 admission policy, not that A=B=C was proven. Archive the raw log and all
 alignment/update JSONL before deleting either JobSet.
+
+The refreshed FrozenLake backward-no-commit manifest must contain
+`CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=2` and a run-isolated
+`CANON_P38_MISMATCH_CAPSULE` path. On the expected hard red, archive all
+`[CANON_P38_CAPSULE_ARTIFACT]` and `[CANON_P38_CAPSULE_B64]` lines. Recover the
+file without editing the raw log:
+
+```bash
+python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
+  --log /path/to/frozenlake-head.raw.log \
+  --output /path/to/p38-frozenlake-capsule.npz
+```
+
+Do not rerun FrozenLake before the capsule has passed transport and embedded
+array SHA checks. Prefix cache remains disabled. The next action is the
+single-row prefix sweep specified in
+`phases/p38-2f-frozenlake-threshold-capsule.md`, not a full training launch.

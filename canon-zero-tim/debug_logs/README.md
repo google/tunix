@@ -1006,17 +1006,16 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      - `commit_gradient_norm = 1.45809`, `segmented_loss = 0.00003`, `alignment_max_differing_bytes = 0`.
      - `[P30.G1] OPT_STATE before_commit memory_kind=device` -> `after_commit memory_kind=pinned_host`.
      - W&B run live synchronized: [`zero-tim-gsm8k-dp16-tp4 (Run 0q80a0ve)`](https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/0q80a0ve).
-   - **Post-Update Snapshot Fingerprint Root Cause**:
+   - **Post-Update Snapshot Gate Root Cause**:
      - The post-update snapshot gate (`_canon_fingerprint_state`) samples tensors with $\le 1\text{M}$ elements to prevent HBM exhaustion (which for Qwen3-1.7B selects only LayerNorm scale weights initialized to 1.0).
-     - Under Step 0's tiny loss ($3\times 10^{-5}$) and small learning rate, the Adam update on LayerNorm weights was below the bfloat16 representation threshold, leaving LayerNorm SHA-256 unchanged while Adam momentum states ($\mu, \nu$) updated across all 12 sampled leaves (`optimizer_changed = 12`).
+     - The production warmup schedule has `init_value=0.0`, so update 0 applies an effective learning rate of exactly zero. Model parameters therefore must remain unchanged while Adam momentum states ($\mu, \nu$) update across all 12 sampled leaves (`optimizer_changed = 12`). The earlier bf16-quantization explanation was not the primary mechanism and is withdrawn; the actor parameters are float32 in this recipe.
      - The strict check `mutation_ok = bool(changed["model"]) and bool(changed["optimizer"])` raised `AlignmentGateError` due to `changed["model"] = 0` on the sampled subset.
 
 2. **FrozenLake 36-Layer BWD Diagnostics (Qwen3-8B, 64 TPU Chips, Physical Slice `aff204e7`)**:
    - **Rollout vs Learner Weight Synchronization (100% Bitwise Identical)**:
-     - `S_prefill_vs_T_old`: **0 / 187,844 differing bytes (0 / 48,946 differing action elements, 100% BITWISE EQUAL)**.
+     - `S_prefill_vs_T_old`: **0 / 195,784 differing bytes (0 / 48,946 differing action elements, 100% BITWISE EQUAL)**.
      - Confirms zero weight synchronization drift between vLLM serving engine and JAX Learner.
-   - **Multi-Turn Long-Context Decode vs Prefill Floating-Point Associativity**:
-     - `S_decode_vs_S_prefill`: **40 / 187,844 differing bytes (25 / 48,946 differing action elements, 99.95% agreement)**.
-     - Divergence arises from floating-point reduction tree differences in long multi-turn context (2,000+ tokens across 4 environment turns) between single-token decode kernel and chunked prefill kernel.
+   - **Multi-Turn Long-Context Decode vs Prefill Carrier (Unlocalized)**:
+     - `S_decode_vs_S_prefill`: **40 / 195,784 differing bytes (25 / 48,946 differing action elements, 99.95% element agreement)**.
+     - Every localized mismatch has logical KV prefix at least 1791; the earliest is at sequence-chunk offset 255. This is evidence for a depth/chunk threshold, not proof of a floating-point reduction-tree, attention-tile, page-layout, or multi-turn cause.
      - Fail-closed gate (`CANON_PRE_ALIGN_GATE=1`) successfully intercepted the run prior to backprop, generating `pre_alignment.jsonl` evidence.
-

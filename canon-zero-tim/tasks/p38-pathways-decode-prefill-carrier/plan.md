@@ -22,6 +22,8 @@ while A-B is red.
 | P38.5 | Carrier-specific numerical repair | A-B returns to zero under the source-pinned flag-on regime | pending |
 | P38.6 | GSM8K and FrozenLake full campaigns | All step-0 boundaries are zero and the unchanged hard gates automatically admit training | pending |
 | P38.2d | User-approved bounded GSM8K full campaign plus strict FrozenLake backward-no-commit | Renderer, preflight, runtime gate, classifier, and negative controls enforce the workload-specific policy | active |
+| P38.2e | Schedule-aware GSM8K optimizer transaction | LR-zero and positive-LR commit controls plus target update-0 evidence | active; local gates complete, target not run |
+| P38.2f | FrozenLake KV-threshold mismatch capsule | Two bounded rows survive pod deletion and pass transport/array SHA checks | active; producer complete, target capsule not captured |
 
 ## Decisions
 
@@ -54,3 +56,10 @@ while A-B is red.
   full campaign with bounded A/B drift reported rather than blocked. This does
   not replace P38.5 or P38.6 and cannot support a zero-TIM completion claim.
   FrozenLake remains fail-closed and is limited to backward-no-commit.
+- Correction (2026-08-11): P38d5 GSM8K update 0 applied an effective LR of
+  exactly zero, not merely a small update below a bf16 threshold. Adam moments
+  changed and all 16 microbatches were active; the old G6 gate incorrectly
+  required a model mutation at LR zero.
+- Observation (2026-08-11): the 25 P38d5 FrozenLake mismatches begin only at
+  logical KV prefix 1791 or later. This is a localization signal, not yet a
+  causal attribution to a page or attention tile boundary.
