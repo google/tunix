@@ -465,4 +465,3 @@ def safe_set_n_cpu_devices(n: int) -> None:
           f"JAX already initialized with {len(devices)} CPU devices, "
           f"but {n} are required."
       ) from e
-
