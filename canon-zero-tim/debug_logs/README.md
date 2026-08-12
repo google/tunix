@@ -1282,6 +1282,40 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - `p22xj_padded_swiglu.py` triggered `ValueError: P22.XJ requires positive M and F%256=0, got (4096, 1216)`.
    - Root Cause: Qwen3-4B intermediate size is 9,728, which under TP8 yields per-chip local feature dimension $F_{\text{local}} = 9728 / 8 = 1216$.
    - The unchanged P22.XG kernel requires $F \pmod{256} == 0$. Qwen3-8B's registered local width $3072$ satisfies it; Qwen3-32B's TP8-local width $3200$ does not and therefore has the same latent geometry class.
-   - The selected local repair preserves the BF256 kernel and custom VJP. The model overlays explicitly admit Qwen3-4B $1216\rightarrow1280$ and Qwen3-32B $3200\rightarrow3328$ zero-padding, while Qwen3-8B remains unpadded. The wrapper slices the elementwise SwiGLU result back to the original semantic width and rejects every unregistered non-BF256 width.
    - Immutable-image Pallas-interpret probes pass exact forward and VJP comparisons for all three registered widths, including negative controls. This is local contract evidence only; a fresh target attempt is still required.
+
+## 49. P44 DeepSWE 256-Chip Parity Rollout (Attempt `r05` - SwiGLU Feature-Padding Validation & Mosaic MatMul Tiling Discovery)
+
+- `debug_logs/p44_p44r05_deepswe_256_parity.raw.log` (SHA-256: `51b1674c3c3b2d42e6738a0d66dce3a5f222bbd2c52a296ce75379488e181168`)
+- Target Commit: `115ef8144a873b5f108ec4b52aafc959032c3f43` (*docs: correct DeepSWE repair commit anchor*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes)
+
+### Execution & Diagnostic Summary:
+
+1. **SwiGLU 1216->1280 Padding (100% SUCCESS)**:
+   - Proved the commit `1a058b46` fix for Qwen3-4B SwiGLU feature padding `1216 -> 1280`.
+   - The forward pass smoothly bypassed the earlier SwiGLU dimension check and reached Pallas Mosaic TPU compilation.
+   - W&B session connected and streamed online at `https://wandb.ai/yuxzhang-google/tunix/runs/zty9vw2x`.
+
+2. **Mosaic Pallas MatMul Tiling Lowering Discovery**:
+   - `p22_pallas_matmul.py:78` triggered `ValueError: The Pallas TPU lowering currently requires that the last two dimensions of your block shape are divisible by 8 and 128 respectively, or be equal to the respective dimensions of the overall array. Block spec for args[0] in pallas_call canon_matmul_bm128_bn64_bk64 has block shape (128, 64), array shape (4096, 2560)`.
+   - Root Cause: TPU hardware sublane vector width requires the trailing block shape dimension to be divisible by 128 (e.g. `BK=128` or `BN=128`).
+   - Adapting `BK=128` resolves Mosaic lowering across all projection shapes.
+
+## 50. P38 FrozenLake Stock Serving Capture (Attempt `s5` - Full Non-Timestamped Run-and-Return Log)
+
+- `debug_logs/p38_p38s5_frozenlake_stock.raw.log` (SHA-256: `3df95a5f9797274945d8aa13158c352ff469ba17b8f9e61c563ef1e2b6c757c9`)
+- Target Commit: `e4ead609498771987c011a9cbc16fec7e4b17f69` (*Record the P38s5 handoff publication*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes)
+
+### Execution & Diagnostic Summary:
+
+1. **Complete Non-Timestamped Byte-0 Head Execution (100% COMPLETE)**:
+   - 6,069 lines / 567 KB complete log captured without truncation, `--tail`, or column-shifting `--timestamps`.
+   - All 6 overlay files byte-verified by SHA-256; 64 devices registered in single Pathways session.
+   - Initialized 36-layer KV cache block pools (5,216 blocks, 18.99 GiB HBM) and completed 256 rollout samples.
+   - Completed full 36-layer reverse VJP pass down from Layer 35 through Layer 0 to `model.norm`.
+
 
