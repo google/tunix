@@ -2970,9 +2970,9 @@ class Qwen3EngineForwardAdapter:
     _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
         prompt, completion, prompt_valid, completion_valid
     )
-    if self._data_size != 16:
+    if self._data_size not in (8, 16):
       raise FunctionalMappingError(
-          f"P32 grouped reverse requires data size 16, got {self._data_size}"
+          f"P32 grouped reverse requires data size 8 or 16, got {self._data_size}"
       )
     prompt = jnp.asarray(prompt)
     completion = jnp.asarray(completion)
