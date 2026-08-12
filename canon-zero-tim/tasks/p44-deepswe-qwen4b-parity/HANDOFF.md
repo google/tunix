@@ -33,6 +33,9 @@ zero-TIM equivalence between allocations.
   commit: `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`. The local v5p evidence predates
   this commit and records a base SHA plus tracked development changes, so it
   remains development evidence rather than clean execution-source evidence.
+- First publication metadata read-back:
+  `0b492277167004743c07f2fe77705d27c1f8cb01`. Later ledger-only commits may
+  advance the branch; the execution-source rule below remains authoritative.
 - Exact execution source: resolve the current remote head with
   `git ls-remote origin refs/heads/yuxzhang/canon-zero-tim`, detach at that
   exact SHA, require that it contains the P44.7 and P44.9 repairs above plus

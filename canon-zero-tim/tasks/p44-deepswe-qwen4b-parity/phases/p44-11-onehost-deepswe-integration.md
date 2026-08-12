@@ -2,7 +2,7 @@
 
 - Status: rollout integration PASS; backward executed but
   `INCONCLUSIVE_NO_SIGNAL`; implementation commit
-  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`; publication push pending
+  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63` published; clean-source repeat pending
 
 ## Scope and provenance
 

@@ -378,3 +378,17 @@
   remains scoped only to `origin/yuxzhang/canon-zero-tim`.
 - Next: Commit this publication metadata, push both commits to the operator
   branch, and read back the exact remote head before handoff.
+
+## 2026-08-12T05:10:00Z — P44.10/P44.11: operator publication read back
+
+- Type: publication read-back
+- Result: Fast-forward push to `origin/yuxzhang/canon-zero-tim` succeeded.
+  The first exact remote read-back was
+  `0b492277167004743c07f2fe77705d27c1f8cb01`, which contains implementation
+  commit `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`.
+- Safety: the push used explicit ref
+  `HEAD:refs/heads/yuxzhang/canon-zero-tim`; main was untouched and no force
+  update was used.
+- Next: Resolve the latest remote SHA again at launch time, require the
+  implementation commit as an ancestor, repeat clean-source one-host
+  rollout-only, then enter the independent 64/256 promotion ladder.

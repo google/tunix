@@ -35,6 +35,7 @@ does not waive any stage on the other.
 
 ## Result
 
-Pending P44.10/P44.11 remote publication read-back and target execution. The
+P44.10/P44.11 publication is complete. Clean-source repetition and target
+execution remain pending. The
 pre-repair 256-device attempts `p44r02` through `p44r05` stopped before a
 completed rollout-only stage and cannot be promoted or reclassified.

@@ -1,7 +1,7 @@
 # P44.10 — r05 Mosaic matmul geometry repair
 
 - Status: local and real one-host v5p gates passed; implementation commit
-  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`; publication push and remote target pending
+  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63` published; remote target pending
 
 ## Evidence and diagnosis
 
