@@ -42,3 +42,13 @@
 - Files/artifacts: `HANDOFF.md`; `state.md`; isolated P45 renderer/profile/tests.
 - Rollback: stop rendering the isolated P45 carrier; the existing DP16xTP4 entries remain available.
 - Next: execute P45.3 on one 64-chip slice and return the complete evidence bundle.
+
+## 2026-08-12 UTC — make P45 the explicit resident operator route
+
+- Type: documentation correction
+- Fact: the P42 evaluation runbook still selected `render_p33_jobsets.py`, which deliberately resolves DP16xTP4 with `CANON_OPT_STATE_RESIDENT=0` and `CANON_P30_OPT_STATE_OFFLOAD=1`. Its title made it easy to mistake that historical evaluation carrier for the new resident full-training route.
+- Action: added a dedicated P45 operator runbook, marked P42 as the legacy/offload route, linked the P45 handoff and active target phase to the new entry point, and documented the runtime placement markers that distinguish the two carriers.
+- Result: the fixed-image gate passed 77 workload/renderer tests and 31 alignment tests, followed by `[P45.PROFILE] ADMITTED_PREFLIGHT_PASS` and `[P45.FROZENLAKE] CPU_GATE PASS`. The operator path now fails conceptually before launch: new resident full/eval runs select only `render_p45_frozenlake.py`; a `pinned-host-offload` runtime marker is explicitly classified as selection of the wrong carrier. A host-Python attempt was non-authoritative because that environment lacks `datasets` and `metrax`; the required pinned image contains the reviewed dependencies. No JobSet was launched and no placement code changed.
+- Files/artifacts: `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`; `../../cluster/P42_FROZENLAKE_EVAL_RUNBOOK.md`; `HANDOFF.md`; `state.md`; `phases/p45-3-target-run.md`
+- Rollback: remove only the P45 routing documentation and restore the P42 banner; renderer/profile behavior is unchanged.
+- Next: run documentation/render gates, then execute P45.3 and capture first-update resident/HBM evidence.

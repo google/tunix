@@ -10,8 +10,10 @@ placement drift.
 
 ## Entry point
 
-Follow `../HANDOFF.md`. Dry-run both generated manifests, apply exactly one,
-and copy the first update JSON while the pod is still live.
+Follow `../../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`, then use
+`../HANDOFF.md` for the complete evidence return checklist. Dry-run both
+generated manifests, apply exactly one, and copy the first update JSON while
+the pod is still live.
 
 ## Stop conditions
 

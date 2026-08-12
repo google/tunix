@@ -6,8 +6,8 @@
 - Task directory: `canon-zero-tim/tasks/p45-frozenlake-dp8-tp8-resident/`
 - Directory state: tracked and published in implementation commit `fae4e67f`
 - Current phase: P45.3 — 64-chip target run
-- Last verified fact: on the final source, the pinned-image P45 gate passes 77 workload/renderer/classifier tests plus 29 alignment tests; merged `00_env.sh` admission resolves DP8xTP8, 32 local trajectories, global M2048, evaluation on, and device-resident optimizer state. The complete adjacent P33/P38 CPU gate also passes on that same final source.
-- Next action: fetch `yuxzhang/canon-zero-tim` at or after `fae4e67f`, follow `HANDOFF.md`, server-dry-run both generated manifests, then apply exactly one full or full-eval JobSet and capture the first committed update's HBM and optimizer timing evidence.
+- Last verified fact: on the current source, the pinned-image P45 gate passes 77 workload/renderer/classifier tests plus 31 alignment tests; merged `00_env.sh` admission resolves DP8xTP8, 32 local trajectories, global M2048, evaluation on, warning-only alignment, and device-resident optimizer state. The dedicated operator runbook routes new resident launches through `render_p45_frozenlake.py` and identifies P42/P33 as the legacy DP16xTP4 offload route.
+- Next action: fetch `yuxzhang/canon-zero-tim` at or after `fae4e67f`, follow `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`, server-dry-run both generated manifests, then apply exactly one full or full-eval JobSet and capture the first committed update's HBM and optimizer timing evidence. Do not use the legacy P42/P33 renderer, which remains DP16xTP4 with pinned-host offload.
 - Blockers: no 64-chip target evidence exists for FrozenLake DP8xTP8 or resident multi-update stability.
-- Key artifacts: `HANDOFF.md`; `plan.md`; `phases/p45-1-contract-and-renderer.md`; `phases/p45-2-local-admission.md`; `phases/p45-3-target-run.md`; `../p41-optimizer-residency/phases/p41-4-frozenlake-capacity.md`
+- Key artifacts: `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`; `HANDOFF.md`; `plan.md`; `phases/p45-1-contract-and-renderer.md`; `phases/p45-2-local-admission.md`; `phases/p45-3-target-run.md`; `../p41-optimizer-residency/phases/p41-4-frozenlake-capacity.md`
 - Updated: 2026-08-12 UTC

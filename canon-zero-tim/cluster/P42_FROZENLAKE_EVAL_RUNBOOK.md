@@ -1,8 +1,42 @@
 # P42 FrozenLake full-training evaluation runbook
 
-Status: implementation and local gates are available; the 64-chip target has
-not run. This runbook selects the separate evaluation-enabled full-training
-manifest. The existing evaluation-disabled manifest remains the rollback.
+> **Legacy/offload route.** Do not use this runbook for a new throughput-oriented
+> FrozenLake full-training launch. P42 deliberately renders DP16xTP4 with
+> pinned-host optimizer offload. A JobSet already launched from this runbook
+> cannot become device-resident by changing its name or environment afterward.
+> The supported fast full/eval route is
+> [`P45_FROZENLAKE_RESIDENT_RUNBOOK.md`](P45_FROZENLAKE_RESIDENT_RUNBOOK.md),
+> which renders DP8xTP8 with optimizer state resident on TPU.
+
+Status: implementation and local gates are available, and target attempts have
+not produced an admitted completed P42 evaluation result. This runbook remains
+only for reproducing or diagnosing the old DP16xTP4/offload regime. The existing
+evaluation-disabled manifest remains its rollback.
+
+## Route selection
+
+| Goal | Required route | Topology | Optimizer placement |
+|---|---|---|---|
+| Reproduce the historical P42 evaluation carrier | This P42 runbook | DP16xTP4 | pinned-host offload |
+| Run FrozenLake full training with evaluation and avoid optimizer round trips | P45 resident runbook | DP8xTP8 | device-resident |
+
+P42 resolves these values by construction:
+
+```text
+CANON_OPT_STATE_RESIDENT=0
+CANON_P30_OPT_STATE_OFFLOAD=1
+```
+
+At runtime, a genuine P42 launch reports:
+
+```text
+[P41.OPTIMIZER] before_reverse placement=pinned-host-offload memory_kind=pinned_host
+```
+
+This means Adam arithmetic still executes on TPU, but its state is copied from
+pinned host before commit and copied back afterward. That H2D/D2H round trip is
+the expected P42 behavior and is why this route is not the recommended full-run
+carrier.
 
 The run is Qwen3-8B DP16xTP4 with 32 prompts x 8 generations, 450 committed
 updates, a 2048-token response limit, and a five-step FrozenLake environment.
@@ -77,6 +111,8 @@ CANON_P31_ENABLE_EVAL=1
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
 CANON_P33_RUN_STAGE=full
 CANON_P33_NO_COMMIT=0
+CANON_OPT_STATE_RESIDENT=0
+CANON_P30_OPT_STATE_OFFLOAD=1
 --num_test_batches=4
 --eval_every_n_steps=10
 ```

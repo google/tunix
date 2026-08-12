@@ -1,5 +1,10 @@
 # P45 FrozenLake DP8xTP8 resident handoff
 
+The canonical operator entry point is
+[`../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`](../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md).
+The P42 evaluation runbook is a legacy DP16xTP4 pinned-host-offload carrier and
+must not be used for a new P45 resident launch.
+
 ## Purpose and claim boundary
 
 P45 is the fast 64-chip FrozenLake production carrier requested for training:
