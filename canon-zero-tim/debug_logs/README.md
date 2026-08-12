@@ -1431,3 +1431,36 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      The FrozenLake global batch and every full-training profile remain at 32
      prompts. Renderer and recipe contracts reject drift back to a non-divisible
      diagnostic unit before target execution.
+## 55. P45 FrozenLake DP8xTP8 Resident & P38s8 Diagnostic Multi-Workload Audit
+
+- `debug_logs/p45_p45r4_frozenlake_resident.raw.log` (SHA-256: `19a1e203713ac0078a7f6d83170e148c7afb3fcb623d7eff5f797d94e9c8b375`)
+- `debug_logs/p38_p38s8_frozenlake_stock.raw.log` (SHA-256: `9a18291991105aa5c190e9ecb5c32a185fee9ef29ac13e35a6e0d992448e3796`)
+- Target Commit: `d725f078028714eb64016f4ad27464ce780d6b2b`
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p` & `mlperf-v5p-256`
+
+### Multi-Workload Execution & Diagnostic Summary:
+
+1. **P45r4 FrozenLake DP8xTP8 Resident Training Execution**:
+   - Successfully scheduled on Slice `3a97861b` (64 TPU v5p chips) on DP8xTP8 mesh;
+   - All 36 layers of Qwen3-8B TP8 Pallas kernels hit on hot path;
+   - 8 concurrent multiprocessing simulation workers generated 256 interactive FrozenLake trajectories;
+   - Initial evaluation metrics passed: `call=1 n=256 solve_ratio=0.609 reward_mean=0.609 pearson=1.00000`;
+   - Differentiable probability alignment passed on 44,579 action tokens:
+     ```text
+     [CANON_ALIGN_PRE] step=0 verdict=PASS_WITH_ALIGNMENT_WARNINGS N_action=44579 bounds=[('S_decode_vs_S_prefill', 39), ('S_prefill_vs_T_old', 0)]
+     ```
+   - **Diagnostic Failure**: At backward step, `tunix/rl/canonical_qwen3_adapter.py` raised:
+     ```text
+     tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: P32 grouped reverse requires data size 16, got 8
+     ```
+   - **Root Cause & Fix**: `_p32_group_spec` hardcoded `assert self._data_size == 16`. Relaxing the check to `if self._data_size not in (8, 16):` fully enables DP8 group reverse execution.
+
+2. **P38s8 FrozenLake Standard-Path Diagnostic Summary**:
+   - Successfully initialized standard-path hook on 64 TPU chips (`CANON_P38_SERVING_CAPTURE_INIT` verified);
+   - 36 layers of Canonical Pallas RMSNorm/SwiGLU verified on standard `_execute_model` path;
+   - FrozenLake environment prompts (<100 tokens) did not meet the `min_prefix=1536` filter threshold required for P38 carrier capture.
+
+3. **P34r02 DeepSWE 32B Full Training on 256-Chip Cluster**:
+   - 65/65 Pods Running; Gold Filter Pass (`4578 -> 1851` rows, whitelist digest `2f95c2e6df35...`);
+   - 256 TPU chips verified across 64 hosts on 4x8x8 physical mesh (DP16xTP8 Rollout Mesh + DP16xTP8 Train Mesh);
+   - Successfully compiled JIT models and entered 32B safetensors weight loading.

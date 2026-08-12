@@ -1,0 +1,1437 @@
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 07:24:02 - INFO - [absl] Using 11.4 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+Shared mesh: Mesh('dp': 16, 'tp': 4, axis_types=(Auto, Auto))
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+wandb: Currently logged in as: yuxzhang (yuxzhang-google) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 9rf2ymn6
+wandb: Tracking run with wandb version 0.28.1
+wandb: Run data is saved locally in /app/wandb/run-20260812_072404-9rf2ymn6
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run canon-p38-fl-stock-p38s8-d725f078
+wandb: ⭐️ View project at https://wandb.ai/yuxzhang-google/zero-tim-frozenlake-dp16-tp4
+wandb: 🚀 View run at https://wandb.ai/yuxzhang-google/zero-tim-frozenlake-dp16-tp4/runs/9rf2ymn6
+2026-08-12 07:24:05 - INFO - [root] W&B run URL: https://wandb.ai/yuxzhang-google/zero-tim-frozenlake-dp16-tp4/runs/9rf2ymn6
+INFO 08-12 07:24:05 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+INFO 08-12 07:24:05 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-12 07:24:05 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-12 07:24:05 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+WARNING 08-12 07:24:05 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-12 07:24:08 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-12 07:24:08 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-12 07:24:08 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'model' with value 'Qwen/Qwen3-8B'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'max_model_len' with value '6400'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'async_scheduling' with value 'False'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'max_num_batched_tokens' with value '256'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'max_num_seqs' with value '16'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'hf_config_path' with value 'None'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'max_logprobs' with value '1'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'logprobs_mode' with value 'processed_logprobs'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'kv_cache_metrics' with value 'True'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'disable_log_stats' with value 'False'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'enable_prefix_caching' with value 'False'.
+2026-08-12 07:24:10 - INFO - [absl] Engine kwargs setting key 'dtype' with value 'bfloat16'.
+INFO 08-12 07:24:10 [attention_interface.py:58] Using default RPA kernel
+WARNING 08-12 07:24:10 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-12 07:24:10 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-12 07:24:10 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-12 07:24:10 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 08-12 07:24:10 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 08-12 07:24:10 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 08-12 07:24:10 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 08-12 07:24:10 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 08-12 07:24:10 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+WARNING 08-12 07:24:10 [arg_utils.py:1617] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 08-12 07:24:23 [model.py:619] Resolved architecture: Qwen3ForCausalLM
+INFO 08-12 07:24:23 [model.py:1776] Using max model len 6400
+INFO 08-12 07:24:23 [scheduler.py:252] Chunked prefill is enabled with max_num_batched_tokens=256.
+INFO 08-12 07:24:23 [vllm.py:1089] Asynchronous scheduling is disabled.
+WARNING 08-12 07:24:23 [vllm.py:1191] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 08-12 07:24:23 [kernel.py:292] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+INFO 08-12 07:24:23 [tpu_platform.py:263] Resolved TPU_MULTIPROCESS_DP=0
+INFO 08-12 07:24:23 [tpu_platform.py:233] Initialized sharding configuration: ShardingConfigManager(total_devices=64, sharding_strategy=ShardingStrategy(tensor_parallelism=4, expert_parallelism=1, sequence_parallelism=1, data_parallelism=16, attention_data_parallelism=1, attention_data_expert_parallelism=1, decode_context_parallelism=1), mm_encoder_tp_mode=weights, device_indexes=[0, 1, 2, 3, 16, 17, 18, 19, 32, 33, 34, 35, 48, 49, 50, 51, 4, 5, 6, 7, 20, 21, 22, 23, 36, 37, 38, 39, 52, 53, 54, 55, 8, 9, 10, 11, 24, 25, 26, 27, 40, 41, 42, 43, 56, 57, 58, 59, 12, 13, 14, 15, 28, 29, 30, 31, 44, 45, 46, 47, 60, 61, 62, 63])
+INFO 08-12 07:24:23 [tpu_platform.py:320] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+WARNING 08-12 07:24:23 [vllm.py:557] Model Runner V2 requires Triton; using the V1 model runner instead.
+INFO 08-12 07:24:23 [compilation.py:312] Enabled custom fusions: norm_quant, act_quant
+INFO 08-12 07:24:27 [core.py:114] Initializing a V1 LLM engine (v0.25.0) with config: model='Qwen/Qwen3-8B', speculative_config=None, tokenizer='Qwen/Qwen3-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=6400, download_dir=None, load_format=dummy, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=True, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=Qwen/Qwen3-8B, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'eager', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::qwen_gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [256], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, moe_backend='auto', linear_backend='auto')
+[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 min_prefix=1536 prefix_bounds=(1536, 1792, 2048, 2304, 2560) expected_path=standard module=/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py
+INFO 08-12 07:24:28 [parallel_state.py:1607] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/tmp2arfs_0p backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 08-12 07:24:28 [parallel_state.py:1942] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+INFO 08-12 07:24:28 [tpu_runner.py:1869] Creating new model mesh | devices=64, num_slices=1
+INFO 08-12 07:24:28 [tpu_runner.py:1864] Init mesh | mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto))
+INFO 08-12 07:24:28 [utils.py:210] Prepared token paddings: [4096]
+INFO 08-12 07:24:29 [utils.py:156] Prepared request paddings: [16, 32, 64, 128, 256]
+INFO 08-12 07:24:29 [utils.py:175] Prepared attn request paddings: [16]
+INFO 08-12 07:24:29 [compilation_manager.py:63] Enabling JAX compile cache.
+INFO 08-12 07:24:29 [tpu_worker.py:377] Init worker | rank=0 | is_first_rank=True | is_last_rank=True | topology_order_id=0 | is_driver_worker=True | hbm=[(11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0), (11.44, 95.0)]GiB |self.devices=[device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)] | total devices=[device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)] | local_devices=[device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)]
+INFO 08-12 07:24:29 [model_loader.py:621] Loading model with MODEL_IMPL_TYPE=auto
+INFO 08-12 07:24:29 [model_loader.py:624] Resolved MODEL_IMPL_TYPE 'auto' to 'flax_nnx'
+ERROR 08-12 07:24:29 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+ERROR 08-12 07:24:29 [tpu_info.py:40] Unable to poll TPU GCE Metadata. Got status code: 404 and content: <!DOCTYPE html>
+ERROR 08-12 07:24:29 [tpu_info.py:40] <html lang=en>
+ERROR 08-12 07:24:29 [tpu_info.py:40]   <meta charset=utf-8>
+ERROR 08-12 07:24:29 [tpu_info.py:40]   <meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width">
+ERROR 08-12 07:24:29 [tpu_info.py:40]   <title>Error 404 (Not Found)!!1</title>
+ERROR 08-12 07:24:29 [tpu_info.py:40]   <style>
+ERROR 08-12 07:24:29 [tpu_info.py:40]     *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7% auto 0;max-width:390px;min-height:180px;padding:30px 0 15px}* > body{background:url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat;padding-right:205px}p{margin:11px 0 22px;overflow:hidden}ins{color:#777;text-decoration:none}a img{border:0}@media screen and (max-width:772px){body{background:none;margin-top:0;max-width:none;padding-right:0}}#logo{background:url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;margin-left:-5px}@media only screen and (min-resolution:192dpi){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;-moz-border-image:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0}}@media only screen and (-webkit-min-device-pixel-ratio:2){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;-webkit-background-size:100% 100%}}#logo{display:inline-block;height:54px;width:150px}
+ERROR 08-12 07:24:29 [tpu_info.py:40]   </style>
+ERROR 08-12 07:24:29 [tpu_info.py:40]   <a href=//www.google.com/><span id=logo aria-label=Google></span></a>
+ERROR 08-12 07:24:29 [tpu_info.py:40]   <p><b>404.</b> <ins>That’s an error.</ins>
+ERROR 08-12 07:24:29 [tpu_info.py:40]   <p>The requested URL <code>/computeMetadata/v1/instance/attributes/accelerator-type</code> was not found on this server.  <ins>That’s all we know.</ins>
+ERROR 08-12 07:24:29 [tpu_info.py:40] 
+INFO 08-12 07:24:29 [qwen3.py:92] Running with attention Q-Projection laid out as DNH
+INFO 08-12 07:26:00 [pathways_dummy_loader.py:125] Pathways dummy weight loading (jax) took 88.23s
+INFO 08-12 07:26:03 [tpu_runner.py:2226] Cleared JIT caches after weight loading
+INFO 08-12 07:26:03 [tpu_runner.py:2228] Init model | hbm=[(16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0), (16.13, 95.0)]GiB
+INFO 08-12 07:26:03 [tpu_platform.py:399] Using cache_config.block_size: 256 instead of overriding with _align_hybrid_block_size() since we set mamba_page_size_padded in kv_cache_manager.py
+INFO 08-12 07:26:03 [tpu_worker.py:463] Memory statistics | total_hbm_limit_gb=6080.0GiB | total_hbm_limit_cap_gb=1216.0GiB | total_hbm_used_gb=1032.08GiB | total_hbm_avail_gb=183.92GiB
+INFO 08-12 07:26:03 [kv_cache_utils.py:2168] GPU KV cache size: 1,339,136 tokens
+INFO 08-12 07:26:03 [kv_cache_utils.py:2169] Maximum concurrency for 6,400 tokens per request: 209.24x
+INFO 08-12 07:26:03 [compilation_manager.py:855] Compiling sampling with different input shapes.
+INFO 08-12 07:26:05 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': True}
+INFO 08-12 07:26:09 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': True} finished in 3.89 [secs].
+INFO 08-12 07:26:09 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': False}
+INFO 08-12 07:26:13 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': False} finished in 3.88 [secs].
+INFO 08-12 07:26:13 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': True}
+INFO 08-12 07:26:13 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': True} finished in 0.31 [secs].
+INFO 08-12 07:26:13 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': False}
+INFO 08-12 07:26:13 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': False} finished in 0.31 [secs].
+INFO 08-12 07:26:14 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': True}
+INFO 08-12 07:26:16 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': True} finished in 1.58 [secs].
+INFO 08-12 07:26:16 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': False}
+INFO 08-12 07:26:18 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': False} finished in 1.62 [secs].
+INFO 08-12 07:26:18 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': True}
+INFO 08-12 07:26:18 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': True} finished in 0.29 [secs].
+INFO 08-12 07:26:18 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': False}
+INFO 08-12 07:26:18 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': False} finished in 0.30 [secs].
+INFO 08-12 07:26:19 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': True}
+INFO 08-12 07:26:21 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': True} finished in 1.65 [secs].
+INFO 08-12 07:26:21 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': False}
+INFO 08-12 07:26:22 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': False} finished in 1.65 [secs].
+INFO 08-12 07:26:22 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': True}
+INFO 08-12 07:26:23 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': True} finished in 0.32 [secs].
+INFO 08-12 07:26:23 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': False}
+INFO 08-12 07:26:23 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': False} finished in 0.29 [secs].
+INFO 08-12 07:26:24 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': True}
+INFO 08-12 07:26:27 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': True} finished in 3.26 [secs].
+INFO 08-12 07:26:27 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': False}
+INFO 08-12 07:26:30 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': False} finished in 3.22 [secs].
+INFO 08-12 07:26:30 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': True}
+INFO 08-12 07:26:30 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': True} finished in 0.30 [secs].
+INFO 08-12 07:26:30 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': False}
+INFO 08-12 07:26:31 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': False} finished in 0.28 [secs].
+INFO 08-12 07:26:31 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': True}
+INFO 08-12 07:26:39 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': True} finished in 7.63 [secs].
+INFO 08-12 07:26:39 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': False}
+INFO 08-12 07:26:47 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': False} finished in 7.36 [secs].
+INFO 08-12 07:26:47 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': True}
+INFO 08-12 07:26:47 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': True} finished in 0.36 [secs].
+INFO 08-12 07:26:47 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': False}
+INFO 08-12 07:26:47 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': False} finished in 0.35 [secs].
+INFO 08-12 07:26:47 [compilation_manager.py:944] Compiling gather_logprobs with different input shapes.
+INFO 08-12 07:26:47 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 16}
+INFO 08-12 07:26:48 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 16} finished in 0.34 [secs].
+INFO 08-12 07:26:48 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 32}
+INFO 08-12 07:26:48 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 32} finished in 0.38 [secs].
+INFO 08-12 07:26:49 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 64}
+INFO 08-12 07:26:49 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 64} finished in 0.39 [secs].
+INFO 08-12 07:26:49 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 128}
+INFO 08-12 07:26:50 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 128} finished in 0.42 [secs].
+INFO 08-12 07:26:50 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 256}
+INFO 08-12 07:26:50 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 256} finished in 0.42 [secs].
+INFO 08-12 07:26:50 [compilation_manager.py:993] Compiling compute_and_gather_prompt_logprobs with different input shapes.
+INFO 08-12 07:26:50 [compilation_manager.py:999] Skipping precompilation of compute_and_gather_prompt_logprobs for num_tokens=4096, as it exceeds the MAX_PRECOMPILE_PROMPT_TOKENS=1024 limit to prevent HBM exhaustion.
+INFO 08-12 07:27:28 [compilation_manager.py:207] Warm-up call pass finished in 37.69 [secs] over 25 tasks.
+INFO 08-12 07:27:29 [kv_cache_manager.py:976] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=36, kv_cache_config.num_blocks=5231, duplicate_shared_layers=False
+INFO 08-12 07:27:29 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=36 | num_blocks=[5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216, 5216] | regular_attn_layers=36 | regular_attn_shape=(num_blocks, (256, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0), (18.99, 95.0)]Gb
+INFO 08-12 07:27:29 [compilation_manager.py:215] Precompile all the subgraphs with possible input shapes.
+INFO 08-12 07:27:30 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 4096, 'num_reqs': 256}
+INFO 08-12 07:27:30 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+[PATHTRACE] CANON_FIXED_AR_EMBED=1 fixed-order embed gather (tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.0.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.0.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.0.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.0.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.0.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] RPA_VJP2 on (chunked-cache differentiable)
+[PATHTRACE] RPA_BLOCK d_block_sizes=(128, 512, 128, 512)
+[PATHTRACE] RPA_BLOCK p_block_sizes=(128, 512, 128, 512)
+[PATHTRACE] RPA_BLOCK m_block_sizes=(128, 512, 128, 512)
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.0.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.0.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.0.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.0.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.0.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.0.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.0.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.1.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.1.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.1.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.1.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.1.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.1.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.1.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.1.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.1.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.1.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.1.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.1.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.1.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.2.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.2.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.2.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.2.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.2.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.2.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.2.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.2.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.2.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.2.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.2.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.2.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.2.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.3.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.3.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.3.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.3.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.3.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.3.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.3.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.3.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.3.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.3.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.3.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.3.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.3.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.4.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.4.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.4.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.4.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.4.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.4.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.4.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.4.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.4.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.4.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.4.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.4.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.4.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.5.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.5.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.5.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.5.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.5.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.5.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.5.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.5.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.5.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.5.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.5.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.5.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.5.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.6.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.6.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.6.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.6.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.6.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.6.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.6.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.6.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.6.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.6.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.6.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.6.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.6.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.7.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.7.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.7.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.7.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.7.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.7.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.7.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.7.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.7.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.7.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.7.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.7.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.7.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.8.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.8.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.8.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.8.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.8.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.8.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.8.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.8.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.8.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.8.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.8.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.8.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.8.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.9.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.9.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.9.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.9.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.9.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.9.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.9.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.9.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.9.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.9.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.9.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.9.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.9.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.10.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.10.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.10.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.10.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.10.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.10.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.10.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.10.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.10.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.10.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.10.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.10.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.10.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.11.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.11.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.11.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.11.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.11.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.11.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.11.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.11.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.11.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.11.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.11.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.11.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.11.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.12.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.12.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.12.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.12.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.12.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.12.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.12.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.12.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.12.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.12.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.12.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.12.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.12.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.13.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.13.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.13.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.13.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.13.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.13.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.13.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.13.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.13.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.13.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.13.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.13.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.13.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.14.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.14.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.14.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.14.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.14.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.14.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.14.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.14.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.14.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.14.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.14.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.14.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.14.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.15.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.15.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.15.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.15.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.15.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.15.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.15.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.15.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.15.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.15.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.15.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.15.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.15.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.16.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.16.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.16.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.16.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.16.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.16.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.16.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.16.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.16.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.16.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.16.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.16.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.16.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.17.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.17.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.17.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.17.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.17.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.17.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.17.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.17.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.17.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.17.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.17.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.17.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.17.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.18.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.18.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.18.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.18.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.18.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.18.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.18.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.18.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.18.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.18.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.18.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.18.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.18.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.19.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.19.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.19.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.19.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.19.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.19.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.19.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.19.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.19.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.19.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.19.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.19.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.19.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.20.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.20.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.20.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.20.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.20.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.20.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.20.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.20.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.20.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.20.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.20.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.20.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.20.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.21.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.21.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.21.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.21.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.21.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.21.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.21.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.21.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.21.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.21.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.21.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.21.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.21.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.22.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.22.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.22.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.22.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.22.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.22.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.22.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.22.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.22.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.22.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.22.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.22.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.22.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.23.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.23.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.23.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.23.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.23.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.23.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.23.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.23.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.23.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.23.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.23.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.23.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.23.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.24.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.24.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.24.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.24.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.24.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.24.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.24.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.24.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.24.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.24.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.24.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.24.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.24.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.25.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.25.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.25.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.25.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.25.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.25.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.25.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.25.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.25.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.25.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.25.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.25.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.25.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.26.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.26.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.26.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.26.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.26.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.26.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.26.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.26.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.26.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.26.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.26.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.26.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.26.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.27.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.27.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.27.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.27.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.27.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.27.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.27.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.27.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.27.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.27.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.27.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.27.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.27.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.28.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.28.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.28.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.28.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.28.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.28.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.28.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.28.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.28.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.28.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.28.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.28.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.28.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.29.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.29.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.29.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.29.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.29.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.29.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.29.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.29.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.29.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.29.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.29.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.29.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.29.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.30.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.30.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.30.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.30.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.30.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.30.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.30.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.30.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.30.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.30.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.30.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.30.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.30.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.31.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.31.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.31.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.31.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.31.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.31.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.31.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.31.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.31.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.31.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.31.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.31.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.31.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.32.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.32.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.32.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.32.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.32.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.32.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.32.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.32.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.32.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.32.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.32.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.32.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.32.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.33.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.33.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.33.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.33.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.33.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.33.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.33.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.33.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.33.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.33.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.33.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.33.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.33.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.34.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.34.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.34.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.34.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.34.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.34.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.34.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.34.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.34.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.34.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.34.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.34.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.34.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.35.input_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=1024
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=1024 Np=1024 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.35.self_attn.q_proj M=4096 Klocal=4096 Nlocal=1024
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=32768 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.35.self_attn.q_norm rows=32768 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.35.self_attn.k_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=8192 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.35.self_attn.k_norm rows=8192 F=128 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=256
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=256 Np=256 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.35.self_attn.v_proj M=4096 Klocal=4096 Nlocal=256
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.35.self_attn.o_proj (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=1024 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=1024 Kp=1024 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.35.self_attn.o_proj M=4096 Klocal=1024 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.35.post_attention_layernorm rows=4096 F=4096 model=qwen3-8b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.35.mlp.gate_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=4096 N=3072
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=4096 Kp=4096 N=3072 Np=3072 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.35.mlp.up_proj M=4096 Klocal=4096 Nlocal=3072
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=4096 F=3072
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 F=3072 Fp=3072 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=4096 Flocal=3072
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at model.layers.35.mlp.down_proj (mn,np->mp, tp=4)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=4096 K=3072 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 K=3072 Kp=3072 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.35.mlp.down_proj M=4096 Klocal=3072 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=4096 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=final prefix=model.norm rows=4096 F=4096 model=qwen3-8b
