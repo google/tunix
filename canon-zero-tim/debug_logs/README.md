@@ -1264,3 +1264,24 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - The environment variable `CANON_EXPECT_MODEL_MESH_IDS` was inherited from single-host defaults (`0,2,1,3`).
    - Unsetting `CANON_EXPECT_MODEL_MESH_IDS` in `cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env` allows the 256-chip model mesh to construct cleanly.
 
+## 48. P44 DeepSWE 256-Chip Parity Rollout (Attempt `r04` - SwiGLU Kernel Tiling Discovery)
+
+- `debug_logs/p44_p44r04_deepswe_256_parity.raw.log` (SHA-256: `523ddc87f334ca8ce435688ce6a3a5feaf6da23b2da5cdefa2d445d7eab691c3`)
+- Target Commit: `819207bdb73181e581022f62eacc7f492f7372e7` (*Archive P38s4 FrozenLake serving debug raw log*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes)
+
+### Execution & Diagnostic Summary:
+
+1. **256-Chip Model Mesh & W&B Online Session (100% SUCCESS)**:
+   - Proved `CANON_EXPECT_MODEL_MESH_IDS=""` successfully unlocked dynamic mesh configuration across 256 chips.
+   - W&B session connected and streamed online at `https://wandb.ai/yuxzhang-google/tunix/runs/ghncj932`.
+   - Initialized Pathways proxy, loaded Qwen3-4B weights, and executed forward pass graph down to MLP block.
+
+2. **SwiGLU Feature Dimension Alignment Discovery**:
+   - `p22xj_padded_swiglu.py` triggered `ValueError: P22.XJ requires positive M and F%256=0, got (4096, 1216)`.
+   - Root Cause: Qwen3-4B intermediate size is 9,728, which under TP8 yields per-chip local feature dimension $F_{\text{local}} = 9728 / 8 = 1216$.
+   - The kernel assertion required $F \pmod{256} == 0$, designed for 8B and 32B ($F=3072$).
+   - Since $1216 = 19 \times 64$, padding or tiling with $BF=64$ or padding $F$ to $1280$ cleanly supports 4B TP8 geometry.
+
+
