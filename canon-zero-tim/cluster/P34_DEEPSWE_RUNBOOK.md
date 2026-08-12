@@ -1,6 +1,8 @@
 # P34 DeepSWE Qwen3-32B DP16xTP8 operator runbook
 
-Status: local package gates pass; the 4x8x8 target has not run. The DP16
+Status: local package gates pass; target Attempt `p34r02` failed before its
+first rollout on a stale one-host mesh-ID assertion, and the repaired target
+retry has not run. The DP16
 processed-logprob contract accepts only global compact M256 and global padded
 M4096. Both shard to the same local canonical M256 program; every other global
 row count fails closed.
@@ -87,6 +89,14 @@ pins `R2E-Gym/R2E-Gym-Subset`, split `train`, revision
 `2e8108ff942f24fcb5686badfaf7f9a8808566d5`, 4578 source rows, 1851 clean
 whitelist rows, 1851 unique images and 1851 retained rows.
 
+The rendered environment must contain an empty
+`CANON_EXPECT_MODEL_MESH_IDS`.  This is intentional: the legacy default
+`0,2,1,3` describes a direct-attached four-device host and caused `p34r02` to
+reject its healthy 128-device rollout role.  Do not replace it with the 128
+global IDs observed in a previous run; those IDs depend on the allocation.
+The authoritative P34 topology gate remains the exact 256-device, 4x8x8,
+disjoint/exhaustive and host-complete role-split check.
+
 ## Short diagnostic modes
 
 1. `backward-no-commit`: initializes topology/model/rollout, checks all four forward boundaries,
@@ -143,6 +153,11 @@ unless the entire backward-no-commit contract completes.
   failing, archive the `jax-tpu`, `pathways-proxy`, and `pathways-rm` logs
   before deleting the JobSet, then check for incomplete registration or stale
   clients holding the slice.
+- P34 must resolve `CANON_EXPECT_MODEL_MESH_IDS` to the empty string.
+  `00_env.sh` rejects a nonempty value before launch.  Seeing
+  `PATHTRACE CANON_MODEL_MESH_IDS expected=[0, 2, 1, 3]` on the target means
+  the wrong profile/manifest or an unreviewed override was used; stop and
+  archive provenance rather than retrying the same manifest.
 - R2E-Gym is provisioned by `cluster/steps/35_install_r2egym.sh`: a pinned
   checkout (`CANON_R2EGYM_COMMIT`) with the vendored
   `patches/r2egym/r2egym.patch` applied, pip-installed in the pod together

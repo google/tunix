@@ -1,6 +1,7 @@
 # P39.4 — Qwen3-32B direct full training contract
 
-- Status: local implementation PASS, publication approved; target NOT RUN
+- Status: local mesh-admission repair PASS; target Attempt `p34r02` FAILED
+  before rollout; repaired target retry NOT RUN
 - Source base: `yuxzhang/canon-zero-tim` at
   `4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd` (implementation started at
   `4e4ca2891a01448f09428affd1eb2434bbd61657`; the intervening FrozenLake/P38
@@ -78,3 +79,31 @@ Pathways health, HBM capacity or training quality.
 The exact-image negative control proves that finite A-B/B-C residuals produce
 `PASS_WITH_ALIGNMENT_WARNINGS`, while a nonfinite B-C residual remains
 `FAIL`. These are local contract tests, not a target-training result.
+
+## Target Attempt p34r02
+
+The complete archived target log at source
+`d725f078487ec1b8dc07d27db61d27b446af94f0` is
+`debug_logs/p34_p34r02_deepswe_full.raw.log`, SHA-256
+`6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`.
+It proves attempt zero, pinned overlay/R2E-Gym, the 4578-to-1851 clean-data
+join, all 256 devices on 64 hosts, disjoint DP16xTP8 rollout/trainer roles,
+trainer-side Qwen3-32B loading, 30.5 GiB/device on trainer-role devices, online
+W&B initialization and entry into vLLM rollout-engine construction.
+
+The failure is exact: `tpu_runner.py::_init_mesh()` created a healthy
+128-device rollout role, then compared it with
+`CANON_EXPECT_MODEL_MESH_IDS=[0,2,1,3]` and raised
+`RuntimeError: CANON_EXPECT_MODEL_MESH_IDS mismatch`.  The four IDs came from
+the legacy one-host default in `cluster/profiles/_canonical_engine.env`; the
+P34 production profile did not override it.  This is a configuration-scope
+bug, not an OOM, dataset, R2E-Gym, B-C, optimizer or training-math failure.
+No rollout, trajectory, backward or optimizer transaction occurred.
+
+The local repair explicitly clears the allocation-specific assertion in the
+P34 base profile and renderer, and makes `00_env.sh` reject any nonempty value
+for P34.  Do not pin the 128 IDs observed in this run: global Pathways IDs are
+allocation-specific, while P34 already fails closed on 256 unique devices,
+4x8x8 physical extents and a disjoint, exhaustive, host-complete role split.
+The repair passes the P34 static and exact-image gates plus the inherited
+P39/P43/P44 CPU gates.  Target retry remains NOT RUN.

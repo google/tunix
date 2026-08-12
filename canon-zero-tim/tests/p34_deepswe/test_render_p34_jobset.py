@@ -121,6 +121,7 @@ class RenderP34JobSetTest(unittest.TestCase):
     )
     self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
     self.assertEqual(env["CANON_P34_WHITELIST_SHA256"], "3" * 64)
+    self.assertEqual(env["CANON_EXPECT_MODEL_MESH_IDS"], "")
     command = env["CANON_RUN_CMD"]
     for value in (
         "--batch_size=8",

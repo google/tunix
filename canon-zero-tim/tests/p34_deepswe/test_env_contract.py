@@ -106,7 +106,15 @@ class P34EnvironmentContractTest(unittest.TestCase):
     self.assertEqual(result.returncode, 0, result.stdout)
     self.assertIn("[env] P34 contract OK: DP16xTP8", result.stdout)
     self.assertIn("export CANON_PRE_ALIGN_GATE=1", resolved)
+    self.assertIn("export CANON_EXPECT_MODEL_MESH_IDS=''", resolved)
     self.assertNotIn("test-only", resolved)
+
+  def test_onehost_model_mesh_assertion_is_rejected(self):
+    result, _ = self._run_env(
+        override_profile="export CANON_EXPECT_MODEL_MESH_IDS=0,2,1,3"
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("must not inherit a one-host model mesh ID", result.stdout)
 
   def test_rendered_full_environment_pins_capture_device_and_warning_policy(self):
     result, resolved = self._run_env(stage="full")

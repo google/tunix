@@ -201,3 +201,66 @@ change was performed.
 - Publication decision: the operator subsequently authorized commit and push
   to `yuxzhang/canon-zero-tim`.  The target run remains separately gated and
   was not authorized by that publication decision.
+
+## 2026-08-12 UTC — P39.4 target Attempt p34r02 stops without a failure record
+
+- Type: target evidence audit
+- Source: `d725f078487ec1b8dc07d27db61d27b446af94f0` from the raw `[sync] HEAD`
+  marker.  Evidence:
+  `../../debug_logs/p34_p34r02_deepswe_full.raw.log`, SHA-256
+  `375b600e5d234e817810f40008d50bac529d6c81e1088e99fc859d82f8da7e08`.
+- Confirmed PASS: attempt zero, source provenance, six overlay files, pinned
+  R2E-Gym installation and bounded patch, local Qwen3-32B checkpoint, signed
+  CLI, dataset revision and 4578 source rows, exact 1851-image clean join, 256
+  devices across 64 four-device hosts, and two disjoint 128-device DP16xTP8
+  role meshes.
+- Last evidence: line 163 is the train-mesh print.  Control flow next enters
+  replicated-parameter sharding and `create_model_from_safe_tensors`.
+- Missing: no model-load DONE/HBM marker, Python traceback, OOM, IFRT
+  disconnect, container exit reason/signal, rollout, trajectory, alignment,
+  backward, optimizer placement/commit, checkpoint, or classifier record.
+- Classification: `INCONCLUSIVE_MODEL_INITIALIZATION`.  The log does not prove
+  a DeepSWE code failure.  The kubeconfig warning is nonfatal at this point and
+  occurs before later PASS markers; it is not the cause of this stop.
+- Next: recover Pod termination JSON, JobSet events, the persistent PVC
+  `run.log`, and `pathways-proxy`/`pathways-rm` logs.  If unavailable, add
+  explicit model-load START/DONE and head RSS/cgroup-memory telemetry, keep the
+  same 32B/data/topology/device-optimizer contract, and rerun.
+- Boundary: no cluster query was possible on this workstation because
+  `kubectl` is not installed.  No training code, cloud object, commit, or push
+  was changed by this audit.
+
+## 2026-08-12 UTC — P39.4 p34r02 complete-log correction and local repair
+
+- Type: evidence correction, root-cause analysis and local implementation.
+- Source synchronization: fast-forwarded the isolated worktree to
+  `42139ffa9cf30b4f07cc9902896ab11294ac68d7`, which archives the complete
+  p34r02 log.  The three pre-existing local ledger edits were preserved; the
+  remote update did not overlap them.
+- Evidence correction: the previous checkpoint audited a truncated
+  163-line artifact and remains the historical record of that limited audit.
+  The complete 686-line artifact supersedes its `INCONCLUSIVE` verdict:
+  `../../debug_logs/p34_p34r02_deepswe_full.raw.log`, SHA-256
+  `6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`.
+- Confirmed PASS before failure: clean data 4578 -> 1851; 256 devices on 64
+  hosts; disjoint 128-device DP16xTP8 roles; trainer-side Qwen3-32B load;
+  30.5 GiB/device on trainer-role devices; online W&B; and vLLM rollout-engine
+  construction.
+- Root cause: `_canonical_engine.env` supplied the legacy one-host default
+  `CANON_EXPECT_MODEL_MESH_IDS=0,2,1,3`.  P34 inherited it and rejected the
+  healthy 128-device rollout mesh in `tpu_runner.py::_init_mesh()` with an
+  exact mismatch.  Classification is `FAILED_ROLLOUT_MESH_ADMISSION`; no
+  rollout, trajectory, backward or optimizer transaction occurred.
+- Repair: the P34 base profile and renderer now explicitly clear the
+  allocation-specific ID assertion.  P34 preflight rejects any nonempty
+  override, so the same leak fails before resource-intensive target work.
+  Physical 4x8x8 inventory and host-complete role placement remain
+  fail-closed.
+- Commands/results: targeted renderer/environment tests passed 19 cases;
+  `P34_STATIC_PASS suites=10`; `P39_DEEPSWE_PILOT_CPU_PASS`;
+  `P43_DEEPSWE_DEBUG_CPU_PASS`; `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`; and
+  `P34_EXACT_IMAGE_CPU_PASS unit_cases=55 alignment_cases=3 pallas_cases=2
+  contract_cases=5 scheduler_cases=1 overlay=qwen32b`.
+- Boundary: no target retry, cloud action, credential change, commit or push
+  occurred.  The local repair must be explicitly approved for publication
+  before a fresh full-run manifest is rendered from the read-back SHA.

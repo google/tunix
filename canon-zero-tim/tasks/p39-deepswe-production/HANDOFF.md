@@ -10,7 +10,7 @@ Read `plan.md`, then `state.md`, then `log.md`.
 ## Current revision
 
 - Latest operator-branch base used by this worktree:
-  `4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd`
+  `42139ffa9cf30b4f07cc9902896ab11294ac68d7`
 - P39.4 publication revision: the exact 40-character HEAD after pulling
   `yuxzhang/canon-zero-tim`; do not substitute the base SHA listed above
 - Hardening base: `5ee6dbfb5601cf1d1f864ccf6859764ba1f321fe`
@@ -59,6 +59,10 @@ publication HEAD.  Do not launch from this local branch or substitute an older S
    backward.  Eight-of-eight, not four-of-eight, defines an all-solved group.
 10. `effective_prompt_groups == 0` remains visible but does not resample,
     inject signal or skip the normal optimizer transaction.
+11. The local p34r02 repair explicitly clears
+    `CANON_EXPECT_MODEL_MESH_IDS`.  P34 must never inherit the legacy
+    four-device `0,2,1,3` default into its 128-device Pathways rollout role;
+    renderer validation and `00_env.sh` now enforce that before launch.
 
 ## Reproduce local validation
 
@@ -92,6 +96,15 @@ The selected objective is one continuous `full` convergence campaign, exactly
 Finite A-B, B-C and downstream alignment residuals are warning-only and remain
 fully recorded.  Do not hand-edit a rendered manifest.  Follow
 `../../cluster/P34_DEEPSWE_RUNBOOK.md` exactly.
+
+Attempt `p34r02` reached Qwen3-32B trainer-side loading and vLLM rollout-engine
+construction, then failed before rollout because the 128-device model mesh was
+compared with the stale one-host ID list `[0,2,1,3]`.  The complete raw log is
+`../../debug_logs/p34_p34r02_deepswe_full.raw.log`, SHA-256
+`6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`.
+The fix is local and all affected CPU/exact-image gates pass; a repaired target
+retry has not run.  Do not hard-code the 128 IDs observed in p34r02 because
+they are allocation-specific.
 
 ## Stop conditions
 

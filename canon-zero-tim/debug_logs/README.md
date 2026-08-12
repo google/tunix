@@ -1438,7 +1438,7 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 - `debug_logs/p38_p38s5_head_full.raw.log` (SHA-256: `56476e90faefd1f1cf319adadb9d9be0e27be1692117fc2cf12646a5ecce3c21`)
 - `debug_logs/p38_p38s6_head_full.raw.log` (SHA-256: `3b751bc3edcf959ea88d82963f537ac647f0ba3296fc3f3dd3be6479e608cafa`)
 - `debug_logs/p34_p34r02_deepswe_full.raw.log` (SHA-256: `6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`)
-- Target Commit: `d725f078028714eb64016f4ad27464ce780d6b2b`
+- Target Commit: `d725f078487ec1b8dc07d27db61d27b446af94f0`
 - Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p` & `mlperf-v5p-256`
 
 ### Multi-Workload Execution & Diagnostic Summary:

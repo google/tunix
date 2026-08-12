@@ -2,28 +2,31 @@
 
 Updated: 2026-08-12 UTC
 
-Current phase: **P39.4 locally complete — publication to the operator branch
-is approved.** No target run has
-been launched and no Qwen3-32B optimizer-capacity or convergence claim exists.
+Current phase: **P39.4 target Attempt `p34r02` FAILED during rollout-engine
+mesh initialization; the local repair is PASS and the target retry is NOT
+RUN.** The complete archived log proves Qwen3-32B trainer-side model loading
+and identifies a stale four-device mesh-ID assertion before the first rollout.
+No optimizer-capacity or convergence claim exists.
 
 | Ledger | Status | Detail |
 |---|---|---|
-| Implementation | LOCAL PASS / PUBLICATION APPROVED | direct full stage, pinned clean data, device optimizer CLI, finite alignment warning policy and durable production trajectory capture |
+| Implementation | LOCAL REPAIR PASS / NOT PUBLISHED | direct full stage plus an explicit P34 ban on inheriting the one-host model-mesh ID assertion |
 | Static validation | STATIC PASS | `bash canon-zero-tim/tests/p34_deepswe/run_static.sh` |
 | Exact image | CPU PASS | pinned image; 55 unit, 3 alignment, 2 Pallas, 5 contract and 1 scheduler cases |
 | Adjacent P33 regression | PASS | workload CPU gate and both pinned-image overlays remain green |
 | Toxic SHA round trip | LOCAL PASS | `022893e2` remains an explicitly quoted string after render and parse |
-| Direct TPU | TARGET NOT RUN | no operator or full-model claim from this change |
-| Pathways/GKE | TARGET NOT RUN | 4x8x8 P34 has never run |
-| Real DeepSWE recipe | TARGET NOT RUN | no backward, optimizer commit or convergence claim |
+| Direct TPU | TARGET PARTIAL | 256 devices, 64 hosts, both DP16xTP8 roles and trainer-side 32B loading passed; recorded trainer-role HBM was 30.5 GiB/device before rollout initialization |
+| Pathways/GKE | TARGET FAILED | rollout-engine `_init_mesh()` compared the healthy 128-device role with stale one-host IDs `[0,2,1,3]` and raised before rollout |
+| Real DeepSWE recipe | MODEL/DATA PASS / ROLLOUT NOT ENTERED | pinned R2E-Gym and clean filter passed 4578 -> 1851; Qwen3-32B actor/reference initialization reached vLLM construction, but no rollout, trajectory, backward or optimizer record exists |
 | P39 64-chip pilot implementation | PUBLISHED / LOCAL PASS | published at `7328cde7`; separate DP4xTP8 profile and renderer, one/three-update stages, resident-only optimizer contract, dedicated classifier and 15-test CPU gate |
 | P39 64-chip pilot target | DEFERRED / NOT RUN | the available 4x8x8 slice makes this capacity pilot optional; no resident-optimizer evidence exists |
-| P34 256-chip launch selection | SELECTED / NOT RUN | direct 4x8x8 DP16xTP8 full training with device-resident optimizer, clean-data pin, durable trajectory capture and finite alignment warning-only policy |
+| P34 256-chip launch selection | ATTEMPTED / FAILED | `p34r02` stopped at `CANON_EXPECT_MODEL_MESH_IDS`; the local profile/renderer/preflight repair passes all affected gates, but has not run on the target |
 
-Next action: pull the published operator branch into a clean worktree, record
-its exact 40-character HEAD, rerun the local gates, then render and review the
-signed `full` manifest before any apply.  Never substitute the pre-publication
-base SHA for the publication HEAD.
+Next action: after explicit publication approval, publish the repair to
+`yuxzhang/canon-zero-tim`, read back its exact 40-character SHA, render a fresh
+manifest and retry the same full 32B/data/topology/device-optimizer
+configuration.  The retry must get past `Creating new model mesh` without a
+mesh-ID mismatch before rollout evidence can begin.
 
 ## First hard boundary
 

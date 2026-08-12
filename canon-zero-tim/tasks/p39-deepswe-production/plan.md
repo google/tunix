@@ -105,6 +105,13 @@ bucket remain rejected.
     to device-resident optimizer state, pin the clean dataset/whitelist, persist
     every trajectory batch, and keep finite A-B/B-C residuals warning-only.
     The short stages remain available but are not launch prerequisites.
+11. Attempt `p34r02` failed before rollout because P34 inherited the
+    direct-attached four-device `CANON_EXPECT_MODEL_MESH_IDS=0,2,1,3`
+    assertion into a 128-device Pathways role.  Explicitly clear the
+    allocation-specific assertion in the P34 profile/renderer and reject any
+    nonempty P34 value during preflight.  After publication, retry the same
+    signed 32B/data/topology/device-optimizer configuration; do not hard-code
+    device IDs observed on a prior allocation.
 
 ## Rollback
 

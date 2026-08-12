@@ -321,6 +321,10 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       "CANON_P34_CLEAN_ROWS": (
           str(P34_CLEAN_ROWS) if stage == "full" else "0"
       ),
+      # Never inherit `_canonical_engine.env`'s four-device mesh order into a
+      # 128-device Pathways rollout role.  Physical topology and role placement
+      # remain fail-closed in split_4x8x8_role_devices.
+      "CANON_EXPECT_MODEL_MESH_IDS": "",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if stage == "full" else "0",
@@ -421,6 +425,7 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
       "CANON_P34_DATASET_SPLIT": P34_DATASET_SPLIT,
       "CANON_P34_DATASET_ROWS": str(P34_DATASET_ROWS),
       "CANON_P34_CLEAN_ROWS": str(P34_CLEAN_ROWS) if stage == "full" else "0",
+      "CANON_EXPECT_MODEL_MESH_IDS": "",
   }
   wrong = {key: env.get(key) for key, value in expected.items() if env.get(key) != value}
   if wrong:

@@ -530,6 +530,10 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   [ "${CANON_P34_DATASET_ROWS:-}" = "4578" ] || {
     echo "[env] P34 dataset source pin changed" >&2; fail=1;
   }
+  [ -z "${CANON_EXPECT_MODEL_MESH_IDS:-}" ] || {
+    echo "[env] P34 must not inherit a one-host model mesh ID assertion" >&2
+    fail=1
+  }
   if [[ ! "${CANON_P34_WHITELIST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
     echo "[env] P34 whitelist SHA-256 is malformed" >&2
     fail=1
