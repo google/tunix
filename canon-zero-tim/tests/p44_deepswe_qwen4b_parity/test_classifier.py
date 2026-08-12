@@ -70,6 +70,8 @@ def _log(topology: str, stage: str, batches: int) -> str:
       f"hosts={spec['hosts']} devices_per_host=4 "
       f"rollout_hosts={spec['role_hosts']} trainer_hosts={spec['role_hosts']}",
       "[P34.TOPOLOGY] PASS",
+      "[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 "
+      "F=1216 Fp=1280 row_padded=0 feature_padded=1",
       "[CANON_P34_WANDB] ONLINE_RUN_PASS",
       f"Prepared token paddings: [{spec['global_m']}]",
       "Precompile worker0 backbone --> "
@@ -243,6 +245,28 @@ class P44ClassifierTest(unittest.TestCase):
           topology=topology,
       )
       self.assertIn("logps_batch_exact", report["failed"])
+
+  def test_missing_swiglu_feature_padding_evidence_is_rejected(self):
+    topology = "256"
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text).resolve()
+      self._artifacts(root, topology=topology, stage="rollout-only", batches=1)
+      log = _log(topology, "rollout-only", 1).replace(
+          "[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 "
+          "F=1216 Fp=1280 row_padded=0 feature_padded=1",
+          "",
+      )
+      report = classifier.classify(
+          log_text=log,
+          debug_dir=root,
+          weight_attestations=[],
+          pre_alignment=[],
+          alignment=[],
+          updates=[],
+          stage="rollout-only",
+          topology=topology,
+      )
+      self.assertIn("swiglu_feature_padding_active", report["failed"])
 
   def test_nonmonotonic_update_is_rejected(self):
     topology = "256"

@@ -264,6 +264,12 @@ def classify(
           f"trainer_hosts={spec['role_hosts']}"
       ) == 1,
       "topology_exact": log_text.count("[P34.TOPOLOGY] PASS") == 1,
+      "swiglu_feature_padding_active": bool(re.search(
+          r"\[PATHTRACE\] CANON_PALLAS_SWIGLU_MPAD=1 "
+          r"M=\d+ Mp=\d+ F=1216 Fp=1280 "
+          r"row_padded=[01] feature_padded=1",
+          log_text,
+      )),
       "logps_batch_exact": log_text.count(
           "[P44.LOGPS_BATCH] configured_prompts=4 generations=4 "
           "execution_trajectories=16 observed_trajectories=16"

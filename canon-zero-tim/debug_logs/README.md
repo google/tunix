@@ -1281,7 +1281,7 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 2. **SwiGLU Feature Dimension Alignment Discovery**:
    - `p22xj_padded_swiglu.py` triggered `ValueError: P22.XJ requires positive M and F%256=0, got (4096, 1216)`.
    - Root Cause: Qwen3-4B intermediate size is 9,728, which under TP8 yields per-chip local feature dimension $F_{\text{local}} = 9728 / 8 = 1216$.
-   - The kernel assertion required $F \pmod{256} == 0$, designed for 8B and 32B ($F=3072$).
-   - Since $1216 = 19 \times 64$, padding or tiling with $BF=64$ or padding $F$ to $1280$ cleanly supports 4B TP8 geometry.
-
+   - The unchanged P22.XG kernel requires $F \pmod{256} == 0$. Qwen3-8B's registered local width $3072$ satisfies it; Qwen3-32B's TP8-local width $3200$ does not and therefore has the same latent geometry class.
+   - The selected local repair preserves the BF256 kernel and custom VJP. The model overlays explicitly admit Qwen3-4B $1216\rightarrow1280$ and Qwen3-32B $3200\rightarrow3328$ zero-padding, while Qwen3-8B remains unpadded. The wrapper slices the elementwise SwiGLU result back to the original semantic width and rejects every unregistered non-BF256 width.
+   - Immutable-image Pallas-interpret probes pass exact forward and VJP comparisons for all three registered widths, including negative controls. This is local contract evidence only; a fresh target attempt is still required.
 

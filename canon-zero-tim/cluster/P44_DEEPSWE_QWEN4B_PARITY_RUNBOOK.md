@@ -58,10 +58,11 @@ Required terminal markers are `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`,
 `P43_DEEPSWE_DEBUG_CPU_PASS`, `P39_DEEPSWE_PILOT_CPU_PASS`, and
 `P34_STATIC_PASS suites=10`.
 
-The P44 gate must report 32 cases and includes negative controls for the
+The P44 gate must report 34 cases and includes negative controls for the
 Pathways `logical_task` host mapping, exact 4-device host cardinality,
 single-conversation generation batching, and trajectory-counted logprob
-microbatching. An older 27-case marker does not contain the r02 repair.
+microbatching. It also rejects missing Qwen3-4B `1216->1280` SwiGLU runtime
+evidence. An older 32-case marker does not contain the r04 repair.
 
 ## 2. Verify immutable runtime inputs
 
@@ -86,9 +87,18 @@ bash canon-zero-tim/tests/p44_deepswe_qwen4b_parity/run_exact_image.sh \
   "$CLIENT_IMAGE_DIGEST"
 ```
 
-The required marker is `P44_EXACT_IMAGE_CPU_PASS overlay=qwen4b`. Verify the
-checkpoint, whitelist, and whitelist digest from a read-only pod mounting the
-same PVC. Also check the PriorityClass without changing cluster state:
+Require both markers:
+
+```text
+SWIGLU_FEATURE_PADDING_INTERPRET_PASS model=qwen3-4b-tp8 shape=129x1216 padded=256x1280 forward_exact=1 vjp_exact=1 negative=1
+P44_EXACT_IMAGE_CPU_PASS overlay=qwen4b
+```
+
+The first marker proves exact forward and custom-VJP behavior against the
+canonical SwiGLU in Pallas interpret mode and rejection of an adjacent
+unregistered width. It is not TPU target evidence. Verify the checkpoint,
+whitelist, and whitelist digest from a read-only pod mounting the same PVC.
+Also check the PriorityClass without changing cluster state:
 
 ```bash
 kubectl get priorityclass very-high \
@@ -191,7 +201,7 @@ jq . "$RUN_ROOT/p44_deepswe_${TOPOLOGY}_${STAGE}.classification.json"
 Useful log scan:
 
 ```bash
-grep -aE '\[P34.CLI\]|\[P34.TOPOLOGY\]|\[P44\.|CANON_ALIGN_PRE_JSON|update_step_committed|Traceback|OOM|RESOURCE_EXHAUSTED|CANCELLED|IFRT' \
+grep -aE '\[P34.CLI\]|\[P34.TOPOLOGY\]|\[P44\.|\[PATHTRACE\]|CANON_ALIGN_PRE_JSON|update_step_committed|Traceback|OOM|RESOURCE_EXHAUSTED|CANCELLED|IFRT' \
   "$RUN_ROOT/run.log"
 ```
 
@@ -212,11 +222,28 @@ one-update, `3` for three-update):
 [P44.LOGPS_BATCH] configured_prompts=4 generations=4 execution_trajectories=16 observed_trajectories=16
 ```
 
+Require at least one Qwen3-4B SwiGLU runtime line before accepting any stage:
+
+```text
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=<positive> Mp=<BM128-aligned> F=1216 Fp=1280 row_padded=<0|1> feature_padded=1
+```
+
+The classifier validates the numeric fields and fails closed if the marker is
+missing. Do not accept a generic MPAD line from the older row-only wrapper.
+
 `p44r02` is a known pre-repair 256-device failure: it found all 256 Pathways
 devices but grouped them under degenerate `process_index=0` and stopped before
 mesh construction. The standalone CPU IFRT diagnostic showing one CPU device
 is not the failure root cause. Do not rerun from `p44r02`'s source SHA, and do
 not bypass the new inventory check.
+
+`p44r03` proved the repaired host-complete 256-device split and then failed an
+inherited one-host model-mesh-id assertion. `p44r04` proved the dynamic mesh,
+checkpoint load, W&B session, and execution into the MLP, then failed at
+TP8-local SwiGLU feature width `1216`. The current published head
+`e4ead609498771987c011a9cbc16fec7e4b17f69` archives r04 but does not contain
+the locally validated feature-padding repair. Do not launch again until the
+P44 handoff records a newer publication commit containing that repair.
 
 For update stages, finite A/B/C alignment differences are warning-only and
 the claim remains systems-debug functional parity. Missing/non-finite values,

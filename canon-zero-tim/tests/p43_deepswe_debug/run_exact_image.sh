@@ -26,5 +26,8 @@ $DOCKER run --rm \
     bash canon-zero-tim/tests/p43_deepswe_debug/run_cpu.sh
     PYTHONPATH=/workspace/canon-zero-tim/src/engine_shims/models/qwen8b \
       python3 canon-zero-tim/src/engine_shims/models/qwen8b/p22xf_contract.py
+    PYTHONPATH=/tmp/p43-overlay python3 \
+      canon-zero-tim/tests/p44_deepswe_qwen4b_parity/probe_swiglu_feature_padding.py \
+      --feature 3072 --padded-feature 3072 --model qwen3-8b-tp4
     echo "P43_EXACT_IMAGE_CPU_PASS overlay=qwen8b"
   '

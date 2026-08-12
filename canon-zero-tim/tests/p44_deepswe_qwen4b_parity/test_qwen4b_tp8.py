@@ -52,6 +52,16 @@ class Qwen4BTP8Test(unittest.TestCase):
     self.assertNotIn("from p22_pallas_matmul import BK", source)
     self.assertEqual(1216 % model.BK, 0)
 
+  def test_swiglu_feature_padding_is_model_pinned(self):
+    self.assertEqual(model.SWIGLU_FEATURE_PADDING, {1216: 1280})
+    self.assertNotEqual(1216 % 256, 0)
+    self.assertEqual(1280 % 256, 0)
+    wrapper = (
+        ROOT / "canon-zero-tim/src/engine_shims/p22xj_padded_swiglu.py"
+    ).read_text()
+    self.assertIn("SWIGLU_FEATURE_PADDING", wrapper)
+    self.assertIn("return out[:m, :f]", wrapper)
+
   def test_model_manifest_matches(self):
     for line in (MODEL_DIR / "MANIFEST.sha256").read_text().splitlines():
       digest, name = line.split()

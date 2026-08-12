@@ -22,6 +22,7 @@ differ.
 | P44.6 | Target promotion ladder | 64 and 256 each classify rollout-only, one-update, and three-update as PASS | pending |
 | P44.7 | Repair the first target failure and preempt the next reviewed runtime faults | Pathways-style 64/256 host placement, single-conversation rollout batching, and 4-prompt x 4-generation logprob execution batching pass fail-closed tests and adjacent release gates | passed |
 | P44.8 | Optional direct-attached v5p Qwen3-4B one-host smoke | Hardware/dependency inventory is recorded; when prerequisites exist, real rollout through backward-no-commit passes without changing P34/P39/P44 production contracts | prerequisite-blocked; not run |
+| P44.9 | Repair the r04 TP8-local SwiGLU feature geometry without changing the BF256 kernel | Model-pinned 4B/32B padding passes exact forward/VJP probes; 8B remains unpadded; unknown widths and missing runtime evidence fail closed | passed locally; unpublished |
 
 ## Decisions
 
@@ -36,3 +37,5 @@ differ.
 - Decision: On Pathways, derive host identity from `(slice_id, logical_task)` rather than the virtual devices' degenerate `process_index`; keep exact host cardinality and host-complete role checks hard-failing on both topologies.
 - Decision: Selectively port main commits `38a6fbfc` and `7a15620d`; do not merge main or the workload-reference branches wholesale.
 - Decision: A direct-attached Qwen3-4B DP1xTP4 smoke, if runnable, proves only one-host frontend/rollout/trajectory/trainer integration and cannot promote TP8, role separation, DP4/DP16, Pathways, 64/256-chip, or Qwen3-32B claims.
+- Confirmed: `p44r04` reached Qwen3-4B model execution and failed at the SwiGLU wrapper because TP8-local intermediate width `9728/8=1216` is not divisible by the unchanged kernel BF256. Qwen3-32B also has a latent non-divisible TP8-local width `25600/8=3200`; Qwen3-8B width `12288/4=3072` already satisfies BF256.
+- Decision: Preserve the BF256 kernel and custom VJP. Admit zero-padding only through exact model-overlay mappings (`1216->1280` for 4B and `3200->3328` for 32B), slice back to the semantic width, and reject every unregistered non-BF256 width. The P44 classifier must observe the 4B runtime feature-padding trace before accepting a stage.

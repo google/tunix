@@ -159,7 +159,7 @@ bash canon-zero-tim/tests/p34_deepswe/run_exact_image.sh
 The required terminal marker is:
 
 ```text
-P34_EXACT_IMAGE_CPU_PASS unit_cases=54 pallas_cases=1 contract_cases=5 scheduler_cases=1 overlay=qwen32b
+P34_EXACT_IMAGE_CPU_PASS unit_cases=55 pallas_cases=2 contract_cases=5 scheduler_cases=1 overlay=qwen32b
 ```
 
 ## Rollback

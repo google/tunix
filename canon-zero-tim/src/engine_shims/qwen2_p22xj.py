@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 
 from p22xj_contract import preflight
+from p22xj_padded_swiglu import padded_feature_extent
 from p22xj_padded_swiglu import swiglu as padded_swiglu
 
 
@@ -20,10 +21,13 @@ preflight(require_enabled=True)
 def traced_padded_swiglu(gate, up, *, interpret=False,
                          shape_invariant_numerics=True):
     m = int(gate.shape[0])
+    f = int(gate.shape[1])
     mp = ((m + 127) // 128) * 128
+    fp = padded_feature_extent(f)
     print(
         f"[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M={m} Mp={mp} "
-        f"padded={int(mp != m)}",
+        f"F={f} Fp={fp} row_padded={int(mp != m)} "
+        f"feature_padded={int(fp != f)}",
         flush=True,
     )
     return padded_swiglu(
@@ -40,4 +44,3 @@ for name, obj in vars(_p22xj_xg_module).items():
 
 P22XJ_XG_MODULE = _p22xj_xg_module
 P22XJ_PADDED_ACTIVE = P22XJ_XG_MODULE.pallas_swiglu is traced_padded_swiglu
-

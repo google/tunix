@@ -143,3 +143,44 @@
 - Files/artifacts: implementation commit `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`, updated `HANDOFF.md` publication contract.
 - Rollback: Revert the two publication commits on the operator branch; do not rewrite or touch main.
 - Next: Push, read back the exact remote head, and give that head to the launch agent as the execution source.
+
+## 2026-08-12T02:45:02Z — P44.9: r04 SwiGLU feature repair passes latest-baseline gates
+
+- Type: target-failure reconciliation, implementation, and local verification
+- Fact: Archived attempt `p44r04` reached the Qwen3-4B MLP and failed at
+  `(M, F)=(4096, 1216)` because the TP8-local intermediate width is not
+  divisible by the unchanged BF256 SwiGLU kernel. Audit also found that the
+  future Qwen3-32B TP8-local width is `3200`, not BF256-aligned; Qwen3-8B width
+  `3072` is already aligned.
+- Action: Preserved the base kernel, bf16 formula, and canonical custom VJP;
+  added exact model-overlay feature-padding mappings `1216->1280` and
+  `3200->3328`; left the 8B mapping empty; sliced the output to the semantic
+  width; rejected unregistered widths; exposed `F/Fp` in PATHTRACE; and made
+  the P44 classifier require the 4B runtime marker.
+- Integration: Fetched and safely fast-forwarded the dirty development
+  worktree from `a9dc5f296a5cd1225efba7a66a7249113baefe00` to exact operator baseline
+  `e4ead609498771987c011a9cbc16fec7e4b17f69` using a named temporary stash.
+  The two intervening commits affect only the P38 task ledger. The task-owned
+  stash was restored and dropped; two pre-existing user stashes were not
+  changed.
+- Commands: P44/P43/P39 CPU gates; P34 static, trajectory, and update gates;
+  P44/P43/P34 exact-image gates using immutable local image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`;
+  `git diff --check`.
+- Result: PASS — P44 34 cases, P43 22 cases, P39 15 cases, P34 10 static
+  suites plus trajectory/update gates; all overlays install 29/29. Exact
+  Pallas-interpret forward/VJP markers report 4B `1216->1280`, unpadded 8B
+  `3072->3072`, and 32B `3200->3328`, each with an adjacent-width negative
+  control. P34 terminal marker reports 55 unit and two Pallas cases.
+- Files/artifacts: model contracts and manifests for qwen4b/qwen8b/qwen32b;
+  `p22xj_padded_swiglu.py`; `qwen2_p22xj.py`; P44 classifier/probe/tests;
+  P34/P43 exact-image regressions; P44 phase ledger, handoff, runbook, and r04
+  archive interpretation.
+- Boundary: No TPU target, rollout, backward, optimizer update, cloud action,
+  commit, push, main-branch change, precision change, loss change, or optimizer
+  policy change occurred for P44.9.
+- Rollback: Do not publish or launch P44.9. The repair is additive and
+  model-pinned; no broad branch reset or main-branch operation is required.
+- Next: Obtain explicit commit/push authorization, publish only to
+  `yuxzhang/canon-zero-tim`, record the exact read-back SHA, then launch a fresh
+  rollout-only `p44r05` on the available 64- or 256-device allocation.

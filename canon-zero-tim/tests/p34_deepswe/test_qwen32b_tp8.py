@@ -49,6 +49,12 @@ class Qwen32BTP8Test(unittest.TestCase):
     ]
     self.assertEqual(offenders, ["k_proj", "v_proj", "gate_proj", "up_proj"])
 
+  def test_swiglu_feature_padding_is_model_pinned(self):
+    contract = _contract()
+    self.assertEqual(contract.SWIGLU_FEATURE_PADDING, {3200: 3328})
+    self.assertNotEqual(3200 % 256, 0)
+    self.assertEqual(3328 % 256, 0)
+
   def test_projection_wrapper_forwards_model_tiles(self):
     linear = (ROOT / "canon-zero-tim/src/engine_shims/linear_p22xf.py").read_text()
     matmul = (

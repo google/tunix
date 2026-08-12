@@ -23,6 +23,7 @@ CONFLICTS = (
 BM = 128
 BN = 256
 BK = 256
+SWIGLU_FEATURE_PADDING = {}
 
 HIDDEN_SIZE = 4096
 INTERMEDIATE_SIZE = 12288
@@ -103,6 +104,9 @@ def validate_manifest(sites) -> None:
                 f"{site.family} local shape {(site.k_local, site.n_local)} "
                 f"does not divide BK/BN={BK}/{BN}"
             )
+    local_feature = INTERMEDIATE_SIZE // TP_SIZE
+    if local_feature % 256 or SWIGLU_FEATURE_PADDING:
+        raise ValueError("Qwen3-8B SwiGLU must remain on the unpadded BF256 path")
 
 
 def preflight(*, require_enabled: bool) -> None:
@@ -148,6 +152,7 @@ def self_test() -> None:
         assert len(SITES) == 7
         assert match_site("model.layers.0.self_attn.q_proj", "TD,DNH->TNH").n_local == 1024
         assert match_site("model.layers.0.mlp.down_proj", "mn,np->mp").k_local == 3072
+        assert SWIGLU_FEATURE_PADDING == {}
         os.environ["CANON_QWEN3_HIDDEN_SIZE"] = "5120"
         try:
             preflight(require_enabled=True)

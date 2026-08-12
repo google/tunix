@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
+import sys
 import unittest
 
 
@@ -11,6 +13,21 @@ PKG = ROOT / "canon-zero-tim"
 
 
 class P43IntegrationContractTest(unittest.TestCase):
+
+  def test_qwen8b_swiglu_remains_on_unpadded_bf256_path(self):
+    path = (
+        ROOT
+        / "canon-zero-tim/src/engine_shims/models/qwen8b/p22xf_contract.py"
+    )
+    spec = importlib.util.spec_from_file_location("p43_qwen8b_contract", path)
+    if spec is None or spec.loader is None:
+      raise RuntimeError(f"cannot import {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    self.assertEqual(module.INTERMEDIATE_SIZE // module.TP_SIZE, 3072)
+    self.assertEqual(module.SWIGLU_FEATURE_PADDING, {})
+    self.assertEqual(3072 % 256, 0)
 
   def test_dataset_loader_uses_modern_datasets_api(self):
     text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
