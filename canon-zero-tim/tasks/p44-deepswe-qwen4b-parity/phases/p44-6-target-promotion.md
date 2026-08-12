@@ -4,8 +4,8 @@
 
 ## Inputs
 
-- Exact repair publication SHA on `origin/yuxzhang/canon-zero-tim` after
-  explicit commit/push authorization.
+- Exact remote head of `origin/yuxzhang/canon-zero-tim` containing repair
+  implementation commit `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`.
 - One exact 64-device `4x4x4` slice or 256-device `4x8x8` slice.
 - Registry-digest client image, existing Qwen3-4B checkpoint, pinned R2E-Gym,
   and reviewed gold whitelist/digest.
@@ -29,5 +29,6 @@ does not waive any stage on the other.
 
 ## Result
 
-Pending publication and target execution. The pre-repair 256-device `p44r02`
-attempt stopped before mesh construction and is not a completed stage.
+Pending remote read-back and target execution. The pre-repair 256-device
+`p44r02` attempt stopped before mesh construction and is not a completed
+stage.

@@ -132,3 +132,14 @@
 - Files/artifacts: complete unstaged P44 implementation and documentation diff.
 - Rollback: No external state changed; no commit or push exists. The operator branch remains untouched at the upstream baseline.
 - Next: Wait for explicit commit/push authorization. After publication, fill in the exact repair SHA in `HANDOFF.md` and begin P44.6 with rollout-only on the available 64- or 256-device allocation.
+
+## 2026-08-12T01:11:42Z — P44.7: repair implementation committed for publication
+
+- Type: publication checkpoint
+- Fact: The user explicitly authorized commit and push to the operator branch; main remains forbidden.
+- Action: Staged only the 20 P44/DeepSWE implementation, test, runbook, handoff, and phase-ledger files and created repair implementation commit `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51` with subject `deepswe: repair Pathways placement and batch semantics`.
+- Command: `git commit -m "deepswe: repair Pathways placement and batch semantics"`.
+- Result: Commit created on local development branch from exact operator baseline `7ea2176f807e3e13fde17499e15fef2bd497363b`; this publication-metadata checkpoint will be committed on top and both commits pushed only to `origin/yuxzhang/canon-zero-tim`.
+- Files/artifacts: implementation commit `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`, updated `HANDOFF.md` publication contract.
+- Rollback: Revert the two publication commits on the operator branch; do not rewrite or touch main.
+- Next: Push, read back the exact remote head, and give that head to the launch agent as the execution source.

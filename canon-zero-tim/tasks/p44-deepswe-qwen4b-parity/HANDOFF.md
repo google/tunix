@@ -19,11 +19,14 @@ zero-TIM equivalence between allocations.
 
 - Required remote branch: `yuxzhang/canon-zero-tim`
 - Repair development baseline: `7ea2176f807e3e13fde17499e15fef2bd497363b`
-- Exact repair publication SHA: not assigned until an explicitly authorized
-  commit/push; do not launch the unpublished worktree or the baseline SHA.
-  After publication, resolve the current remote head with
+- Repair implementation commit:
+  `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`
+- Exact execution source: resolve the current remote head with
   `git ls-remote origin refs/heads/yuxzhang/canon-zero-tim`, detach at that
-  exact SHA, and record it in the rendered JobSet and returned evidence
+  exact SHA, require that it contains the repair implementation commit, and
+  record the resolved head in the rendered JobSet and returned evidence. The
+  publication-metadata commit may be newer than the implementation commit; do
+  not silently substitute either SHA for the other.
 - Local development branch: `codex/p43-deepswe-64-debug`
 - Remote execution owner: the launch agent/operator, not the implementation
   agent

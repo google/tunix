@@ -6,8 +6,8 @@
 - Task directory: `canon-zero-tim/tasks/p44-deepswe-qwen4b-parity/`
 - Directory state: tracked
 - Current phase: [P44.6 — target promotion ladder](phases/p44-6-target-promotion.md)
-- Last verified fact: On operator baseline `7ea2176f807e3e13fde17499e15fef2bd497363b`, the r02 repair passes 32 P44 CPU cases plus two affected learner unit tests in the pinned dependency image; adjacent P43/P39/P34 and exact-image gates remain green. The optional local smoke is `BLOCKED_REAL_ENVIRONMENT` because this session exposes neither TPU/libtpu nor existing Qwen3-4B/R2E prerequisites.
-- Next action: After explicit commit/push authorization, publish to `origin/yuxzhang/canon-zero-tim`, read back its exact SHA, then have the launch agent run rollout-only on whichever exact 64- or 256-device allocation is available.
-- Blockers: target execution requires a published repair SHA and remote allocation; optional one-host smoke prerequisites are absent in this session.
+- Last verified fact: Repair implementation commit `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`, based on operator SHA `7ea2176f807e3e13fde17499e15fef2bd497363b`, passes 32 P44 CPU cases plus two affected learner unit tests in the pinned dependency image; adjacent P43/P39/P34 and exact-image gates remain green.
+- Next action: Read back the exact publication head from `origin/yuxzhang/canon-zero-tim`, then have the launch agent run rollout-only on whichever exact 64- or 256-device allocation is available.
+- Blockers: target execution requires a remote allocation; optional one-host smoke prerequisites are absent in this session.
 - Key artifacts: `debug_logs/p44_p44r02_deepswe_256_parity.raw.log`, `plan.md`, `log.md`
-- Updated: 2026-08-12T01:07:00Z
+- Updated: 2026-08-12T01:11:42Z
