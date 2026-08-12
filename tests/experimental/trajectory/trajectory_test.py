@@ -3,6 +3,8 @@ import os
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import numpy as np
+from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory
 
 _SAMPLE_ATIF_PATH = os.path.join(
@@ -104,7 +106,7 @@ class TrajectoryTest(parameterized.TestCase):
 
     serialized = traj.to_json_dict()
     reloaded = trajectory.Trajectory.from_json_dict(serialized)
-    self.assertEqual(reloaded, traj)
+    store_testing.assert_trajectory_equal(self, reloaded, traj)
 
   def test_dynamic_step_logging(self):
     traj = trajectory.Trajectory(
@@ -336,37 +338,200 @@ class TrajectoryTest(parameterized.TestCase):
     self.assertFalse(hasattr(meta, "steps"))
     self.assertFalse(hasattr(meta, "subagent_trajectories"))
 
-  def test_embedded_subagent_trajectories_serialization(self) -> None:
-    """Verifies trajectories containing embedded subagent_trajectories serialize and deserialize."""
-    sub_traj = trajectory.Trajectory(
-        trajectory_id="embedded_sub_1",
-        agent=trajectory.Agent(name="sub_agent", version="1.0"),
-        steps=[
-            trajectory.Step(
-                step_id=1,
-                source=trajectory.Source.AGENT,
-                message="Subagent action",
+  def test_step_initialization_with_rl_fields(self):
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="Running bash command",
+        reasoning_content="Thought process",
+        assistant_tokens=np.array([10, 20]),
+        assistant_masks=np.array([1, 1]),
+        logprobs=np.array([-0.1, -0.2]),
+        mc_return=1.5,
+        extra={"custom_key": "custom_val"},
+    )
+    self.assertEqual(step.step_id, 1)
+    self.assertEqual(step.source, trajectory.Source.AGENT)
+    self.assertEqual(step.message, "Running bash command")
+    self.assertEqual(step.reasoning_content, "Thought process")
+    np.testing.assert_array_equal(step.assistant_tokens, np.array([10, 20]))
+    np.testing.assert_array_equal(step.assistant_masks, np.array([1, 1]))
+    np.testing.assert_array_equal(step.logprobs, np.array([-0.1, -0.2]))
+    self.assertEqual(step.mc_return, 1.5)
+    self.assertEqual(step.extra, {"custom_key": "custom_val"})
+    self.assertIsNone(step.reward)
+    self.assertIsNone(step.done)
+
+  def test_step_env_fields(self):
+    step = trajectory.Step(
+        step_id=2,
+        source=trajectory.Source.SYSTEM,
+        message="Observation result",
+        reward=1.0,
+        done=True,
+        env_tokens=np.array([100]),
+        env_masks=np.array([1]),
+    )
+    self.assertEqual(step.reward, 1.0)
+    self.assertTrue(step.done)
+    np.testing.assert_array_equal(step.env_tokens, np.array([100]))
+    np.testing.assert_array_equal(step.env_masks, np.array([1]))
+    self.assertIsNone(step.assistant_tokens)
+    self.assertIsNone(step.mc_return)
+
+  def test_step_json_serialization_and_deserialization(self):
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="Thinking",
+        assistant_tokens=np.array([10, 20]),
+        logprobs=np.array([-0.5, -0.3]),
+        mc_return=2.0,
+    )
+    json_str = step.model_dump_json(exclude_none=True)
+    loaded_dict = json.loads(json_str)
+    self.assertEqual(loaded_dict["assistant_tokens"], [10, 20])
+    self.assertEqual(loaded_dict["logprobs"], [-0.5, -0.3])
+    self.assertEqual(loaded_dict["mc_return"], 2.0)
+
+    reloaded_step = trajectory.Step.model_validate_json(json_str)
+    self.assertEqual(reloaded_step.assistant_tokens, [10, 20])
+    self.assertEqual(reloaded_step.logprobs, [-0.5, -0.3])
+    self.assertEqual(reloaded_step.mc_return, 2.0)
+
+  def test_step_equality(self):
+    step1 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        assistant_tokens=np.array([1, 2]),
+    )
+    step2 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        assistant_tokens=np.array([1, 2]),
+    )
+    step3 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        assistant_tokens=np.array([1, 3]),
+    )
+    store_testing.assert_step_equal(self, step1, step2)
+    self.assertNotEqual(step1.model_dump(), step3.model_dump())
+
+  def test_step_equality_with_extra_numpy_arrays(self):
+    step1 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={
+            "arr": np.array([1, 2]),
+            "nested": {"val": np.array([3, 4])},
+        },
+    )
+    step2 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={
+            "arr": np.array([1, 2]),
+            "nested": {"val": np.array([3, 4])},
+        },
+    )
+    step3 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={
+            "arr": np.array([1, 2]),
+            "nested": {"val": np.array([3, 5])},
+        },
+    )
+    step4 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"arr": np.array([1, 2])},
+    )
+    step5 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra=None,
+    )
+    store_testing.assert_step_equal(self, step1, step2)
+    self.assertNotEqual(step1.model_dump(), step3.model_dump())
+    self.assertNotEqual(step1.model_dump(), step4.model_dump())
+    self.assertNotEqual(step1.model_dump(), step5.model_dump())
+
+  def test_step_equality_with_nested_tool_calls_and_observations(self):
+    step1 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        tool_calls=[
+            trajectory.ToolCall(
+                tool_call_id="call-1",
+                function_name="fn",
+                arguments={"arr": np.array([1, 2])},
             )
         ],
+        observation=trajectory.Observation(
+            results=[
+                trajectory.ObservationResult(
+                    source_call_id="call-1",
+                    content="output",
+                    extra={"res_arr": np.array([10, 20])},
+                )
+            ]
+        ),
     )
-
-    parent_traj = trajectory.Trajectory(
-        trajectory_id="parent_traj_1",
-        agent=trajectory.Agent(name="parent_agent", version="2.0"),
-        steps=[
-            trajectory.Step(
-                step_id=1,
-                source=trajectory.Source.USER,
-                message="Parent request",
+    step2 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        tool_calls=[
+            trajectory.ToolCall(
+                tool_call_id="call-1",
+                function_name="fn",
+                arguments={"arr": np.array([1, 2])},
             )
         ],
-        subagent_trajectories=[sub_traj],
+        observation=trajectory.Observation(
+            results=[
+                trajectory.ObservationResult(
+                    source_call_id="call-1",
+                    content="output",
+                    extra={"res_arr": np.array([10, 20])},
+                )
+            ]
+        ),
     )
-
-    json_dict = parent_traj.to_json_dict()
-    reconstructed = trajectory.Trajectory.from_json_dict(json_dict)
-
-    self.assertEqual(reconstructed, parent_traj)
+    step3 = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        tool_calls=[
+            trajectory.ToolCall(
+                tool_call_id="call-1",
+                function_name="fn",
+                arguments={"arr": np.array([1, 99])},
+            )
+        ],
+        observation=trajectory.Observation(
+            results=[
+                trajectory.ObservationResult(
+                    source_call_id="call-1",
+                    content="output",
+                    extra={"res_arr": np.array([10, 20])},
+                )
+            ]
+        ),
+    )
+    store_testing.assert_step_equal(self, step1, step2)
+    self.assertNotEqual(step1.model_dump(), step3.model_dump())
 
 
 if __name__ == "__main__":

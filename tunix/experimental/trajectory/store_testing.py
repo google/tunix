@@ -1,12 +1,51 @@
-"""Reusable test harness and contract tests for TrajectoryReader and TrajectoryWriter implementations."""
-
 import abc
+import dataclasses
 import datetime
-from typing import Final
+from typing import Any, Final
 
 from absl.testing import parameterized
+import numpy as np
+import pydantic
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+
+def assert_step_equal(
+    test_case: parameterized.TestCase,
+    actual: Any,
+    expected: Any,
+    msg: str | None = None,
+) -> None:
+  """Asserts that two Step instances (ATIF or Tunix) are equal."""
+  test_case.assertEqual(type(actual), type(expected))
+  if isinstance(actual, pydantic.BaseModel):
+    test_case.assertEqual(actual.model_dump(), expected.model_dump(), msg=msg)
+  elif dataclasses.is_dataclass(actual):
+    for field in dataclasses.fields(actual):
+      v1 = getattr(actual, field.name)
+      v2 = getattr(expected, field.name)
+      if isinstance(v1, np.ndarray) or isinstance(v2, np.ndarray):
+        np.testing.assert_array_equal(
+            v1, v2, err_msg=msg or f"Field '{field.name}' mismatch"
+        )
+      else:
+        test_case.assertEqual(
+            v1, v2, msg=msg or f"Field '{field.name}' mismatch"
+        )
+  else:
+    test_case.assertEqual(actual, expected, msg=msg)
+
+
+def assert_trajectory_equal(
+    test_case: parameterized.TestCase,
+    actual: trajectory_lib.Trajectory,
+    expected: trajectory_lib.Trajectory,
+    msg: str | None = None,
+) -> None:
+  """Asserts that two Trajectory instances are equal, including nested steps and subagents."""
+  test_case.assertIsInstance(actual, trajectory_lib.Trajectory)
+  test_case.assertIsInstance(expected, trajectory_lib.Trajectory)
+  test_case.assertEqual(actual.model_dump(), expected.model_dump(), msg=msg)
 
 TEST_TIMESTAMP: Final[datetime.datetime] = datetime.datetime(
     2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc
