@@ -1,4 +1,4 @@
-"""Tests for the frozen DP16 workload contracts."""
+"""Tests for the frozen 64-device DP/TP workload contracts."""
 
 from __future__ import annotations
 
@@ -15,9 +15,11 @@ from examples.frozenlake import data as frozenlake_data
 from tunix.models.qwen3 import model as qwen3_model
 from tunix.cli.utils import data as data_lib
 from tunix.rl import dp_workloads
+from tunix.rl.agentic import agentic_rl_learner
 
 
 def _environment(name: str) -> dict[str, str]:
+  workload = dp_workloads.get_workload(name)
   environ = {
       "CANON_P32_WORKLOAD": name,
       "CANON_P32_TRAIN_ADMITTED": "0",
@@ -27,21 +29,23 @@ def _environment(name: str) -> dict[str, str]:
       "CANON_P33_RUN_STAGE": "full",
       "CANON_WANDB_ONLINE_REQUIRED": "1",
       "CANON_P31_MONOTONIC_METRICS": "1",
-      "CANON_WANDB_PROJECT": f"zero-tim-{name}-dp16-tp4",
-      "CANON_WANDB_GROUP": f"qwen3-{name}-dp16-tp4",
+      "CANON_WANDB_PROJECT": workload.wandb_project,
+      "CANON_WANDB_GROUP": f"qwen3-{name}-test",
       "CANON_WANDB_RUN_NAME": f"p33-{name}-test",
       "WANDB_MODE": "online",
       "WANDB_API_KEY": "test-key-not-a-credential",
-      "CANON_DP_SIZE": "16",
-      "CANON_TP_SIZE": "4",
-      "CANON_TOTAL_DEVICES": "64",
-      "CANON_GLOBAL_PROMPTS": "32",
-      "CANON_LOCAL_PROMPTS": "2",
-      "CANON_NUM_GENERATIONS": "8",
-      "CANON_LOCAL_TRAJECTORIES": "16",
-      "CANON_GLOBAL_TRAJECTORIES": "256",
-      "CANON_LOGPROB_M": "256",
-      "MIN_TOKEN_BUCKET": "4096",
+      "CANON_DP_SIZE": str(workload.dp_size),
+      "CANON_TP_SIZE": str(workload.tp_size),
+      "CANON_TOTAL_DEVICES": str(workload.total_devices),
+      "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_QWEN3_TP_SIZE": str(workload.tp_size),
+      "CANON_GLOBAL_PROMPTS": str(workload.global_prompts),
+      "CANON_LOCAL_PROMPTS": str(workload.local_prompts),
+      "CANON_NUM_GENERATIONS": str(workload.num_generations),
+      "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
+      "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
+      "CANON_LOGPROB_M": str(workload.local_m),
+      "MIN_TOKEN_BUCKET": str(workload.global_m),
       "CANON_FIXED_AR": "1",
       "CANON_FIXED_AR_EMBED": "1",
       "CANON_RPA_VJP2": "1",
@@ -66,12 +70,12 @@ def _environment(name: str) -> dict[str, str]:
       "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
       "CANON_P30_RELEASE_CAPTURED_STATE": "1",
       "CANON_P30_RESHARD_ACCUMULATOR": "1",
-      "FL_SHARED_MESH": "1,4",
+      "FL_SHARED_MESH": f"1,{workload.tp_size}",
       "XLA_FLAGS": (
           "--xla_cpu_max_isa=AVX2 --xla_allow_excess_precision=false"
       ),
   }
-  if name == "frozenlake":
+  if name.startswith("frozenlake"):
     environ["CANON_P33_ENABLE_EVAL"] = "0"
     environ["CANON_P33_DISABLE_EVAL"] = "1"
     environ["CANON_P31_ENABLE_EVAL"] = "0"
@@ -127,6 +131,40 @@ class DPWorkloadsTest(unittest.TestCase):
       self.assertIn(
           "--train_trajectory_micro_batch_size=16", workload.command()
       )
+
+  def test_frozenlake_dp8_tp8_resident_candidate_geometry(self):
+    workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
+    self.assertEqual((workload.dp_size, workload.tp_size), (8, 8))
+    self.assertEqual(workload.total_devices, 64)
+    self.assertEqual(workload.global_trajectories, 256)
+    self.assertEqual(workload.local_trajectories, 32)
+    self.assertEqual(workload.global_m, 2048)
+    self.assertIn("--mesh_dp=8", workload.command())
+    self.assertIn("--mesh_tp=8", workload.command())
+    self.assertIn("--vllm_max_num_seqs=32", workload.command())
+    self.assertIn("--vllm_max_num_batched_tokens=256", workload.command())
+
+    environ = _environment("frozenlake-dp8-tp8")
+    environ.update({
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "FL_SHARED_MESH": "8,8",
+    })
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+
+    segmented_geometry = agentic_rl_learner._segmented_update_geometry({
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+    })
+    self.assertEqual(
+        segmented_geometry,
+        (256, 8, "[CANON_P33_DP8]", True),
+    )
 
   def test_gsm8k_preserves_signed_local_recipe_lengths(self):
     workload = dp_workloads.get_workload("gsm8k")

@@ -349,9 +349,21 @@ def _precomputed_expected_microbatches(environ) -> int:
     return 1
   if (
       environ.get("CANON_P31_CONVERGENCE", "") == "1"
-      or environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
   ):
     return 16
+  if environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1":
+    raw = environ.get("CANON_LOCAL_TRAJECTORIES", "")
+    try:
+      expected = int(raw)
+    except (TypeError, ValueError) as exc:
+      raise ValueError(
+          "canonical workload requires integer CANON_LOCAL_TRAJECTORIES"
+      ) from exc
+    if expected <= 0:
+      raise ValueError(
+          "canonical workload requires positive CANON_LOCAL_TRAJECTORIES"
+      )
+    return expected
   return 4
 
 

@@ -43,19 +43,29 @@ class JobSpec:
   job_prefix: str
   command: tuple[str, ...]
   enable_evaluation: bool = False
+  dp_size: int = 16
+  tp_size: int = 4
+  optimizer_resident: bool = False
 
   @property
   def filename(self) -> str:
     return f"jobset-p33-{self.key}.yaml"
 
 
-def _common_args(*, max_steps: int, prompt: int, response: int) -> tuple[str, ...]:
+def _common_args(
+    *,
+    max_steps: int,
+    prompt: int,
+    response: int,
+    dp_size: int = 16,
+    tp_size: int = 4,
+) -> tuple[str, ...]:
   return (
-      "--mesh_dp=16",
-      "--mesh_tp=4",
+      f"--mesh_dp={dp_size}",
+      f"--mesh_tp={tp_size}",
       "--batch_size=32",
       "--mini_batch_size=32",
-      "--train_trajectory_micro_batch_size=16",
+      f"--train_trajectory_micro_batch_size={dp_size}",
       f"--max_steps={max_steps}",
       "--num_generations=8",
       f"--max_prompt_length={prompt}",
@@ -65,8 +75,14 @@ def _common_args(*, max_steps: int, prompt: int, response: int) -> tuple[str, ..
 
 
 def _frozenlake_command(
-    max_steps: int, *, short_alignment: bool = False, enable_evaluation: bool = False
+    max_steps: int,
+    *,
+    short_alignment: bool = False,
+    enable_evaluation: bool = False,
+    dp_size: int = 16,
+    tp_size: int = 4,
 ) -> tuple[str, ...]:
+  local_trajectories = 256 // dp_size
   command = (
     "python3",
     "-u",
@@ -75,8 +91,10 @@ def _frozenlake_command(
         max_steps=max_steps,
         prompt=4096,
         response=512 if short_alignment else 2048,
+        dp_size=dp_size,
+        tp_size=tp_size,
     ),
-    "--vllm_max_num_seqs=16",
+    f"--vllm_max_num_seqs={local_trajectories}",
     "--vllm_max_num_batched_tokens=256",
     f"--env_max_steps={2 if short_alignment else 5}",
     "--num_batches=150",
@@ -267,6 +285,10 @@ def render_jobset(
     raise ValueError(
         "run id must be a 1-16 character lowercase DNS label component"
     )
+  if spec.dp_size * spec.tp_size != 64:
+    raise ValueError("P33/P45 JobSpecs must consume exactly 64 devices")
+  if spec.dp_size not in (8, 16) or spec.tp_size not in (4, 8):
+    raise ValueError("P33/P45 JobSpec topology is not registered")
 
   document = copy.deepcopy(base)
   name = _job_name(spec, source_commit, run_id)
@@ -315,10 +337,15 @@ def render_jobset(
           "CANON_P32_TRAIN_ADMITTED": "1",
           "CANON_P32_DP_REDUCTION_ADMITTED": "1",
           "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
-          "CANON_P33_SHARED_MESH": "16,4",
+          "CANON_P33_SHARED_MESH": f"{spec.dp_size},{spec.tp_size}",
           "CANON_P33_RUN_STAGE": spec.stage,
           "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
-          "CANON_OPT_STATE_RESIDENT": "0",
+          "CANON_OPT_STATE_RESIDENT": (
+              "1" if spec.optimizer_resident else "0"
+          ),
+          "CANON_P30_OPT_STATE_OFFLOAD": (
+              "0" if spec.optimizer_resident else "1"
+          ),
           "CANON_GSM8K_AB_REPORT_ONLY": "0",
           "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
               "1"
@@ -347,7 +374,7 @@ def render_jobset(
           ),
           "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "2",
           "CANON_WANDB_RUN_NAME": name,
-          "MIN_TOKEN_BUCKET": "4096",
+          "MIN_TOKEN_BUCKET": str(spec.dp_size * 256),
           "CANON_WAYCOUNT_WIDTHS": "2,4,8",
           "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
           "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
@@ -447,10 +474,15 @@ def validate_jobset(
       "CANON_P32_TRAIN_ADMITTED": "1",
       "CANON_P32_DP_REDUCTION_ADMITTED": "1",
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
-      "CANON_P33_SHARED_MESH": "16,4",
+      "CANON_P33_SHARED_MESH": f"{spec.dp_size},{spec.tp_size}",
       "CANON_P33_RUN_STAGE": spec.stage,
       "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
-      "CANON_OPT_STATE_RESIDENT": "0",
+      "CANON_OPT_STATE_RESIDENT": (
+          "1" if spec.optimizer_resident else "0"
+      ),
+      "CANON_P30_OPT_STATE_OFFLOAD": (
+          "0" if spec.optimizer_resident else "1"
+      ),
       "CANON_GSM8K_AB_REPORT_ONLY": "0",
       "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
           "1"
@@ -468,7 +500,7 @@ def validate_jobset(
       "CANON_PRE_ALIGN_GATE": "1",
       "CANON_RUN_CMD": shlex.join(spec.command),
       "CANON_WANDB_RUN_NAME": name,
-      "MIN_TOKEN_BUCKET": "4096",
+      "MIN_TOKEN_BUCKET": str(spec.dp_size * 256),
       "CANON_P38_MISMATCH_CAPSULE": (
           f"{state}/p38_frozenlake_mismatch_capsule.npz"
           if spec.workload == "frozenlake"

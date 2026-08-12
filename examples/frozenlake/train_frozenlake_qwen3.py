@@ -180,12 +180,12 @@ CANON_P38_FROZENLAKE_REPLAY = (
 CANON_P29_FULL_TRAIN = os.getenv("CANON_P29_FULL_TRAIN", "") == "1"
 CANON_P31_CONVERGENCE = os.getenv("CANON_P31_CONVERGENCE", "") == "1"
 _P32_WORKLOAD_NAME = os.getenv("CANON_P32_WORKLOAD", "")
-if _P32_WORKLOAD_NAME and _P32_WORKLOAD_NAME != "frozenlake":
+if _P32_WORKLOAD_NAME and not _P32_WORKLOAD_NAME.startswith("frozenlake"):
   raise ValueError(
       "FrozenLake recipe cannot run a different P32 workload: "
       f"{_P32_WORKLOAD_NAME!r}"
   )
-CANON_P32_WORKLOAD = _P32_WORKLOAD_NAME == "frozenlake"
+CANON_P32_WORKLOAD = bool(_P32_WORKLOAD_NAME)
 CANON_P33_SHORT_ALIGNMENT = (
     os.getenv("CANON_P33_SHORT_ALIGNMENT", "0") == "1"
 )
@@ -193,15 +193,13 @@ CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
     os.environ
 )
 CANON_P33_DISABLE_EVAL = os.getenv("CANON_P33_DISABLE_EVAL", "") == "1"
-P32_WORKLOAD = (
-    dp_workloads.get_workload("frozenlake") if CANON_P32_WORKLOAD else None
-)
+P32_WORKLOAD = dp_workloads.active_workload() if CANON_P32_WORKLOAD else None
 if CANON_P32_WORKLOAD:
   dp_workloads.validate_environment(
       P32_WORKLOAD, require_reduction_admission=True
   )
   if not CANON_L3:
-    raise ValueError("canonical DP16 FrozenLake requires CANON_FROZENLAKE_L3=1")
+    raise ValueError("canonical DP FrozenLake requires CANON_FROZENLAKE_L3=1")
   CANON_P33_ENABLE_EVAL = dp_workloads.frozenlake_evaluation_enabled(
       os.environ
   )
@@ -345,6 +343,7 @@ BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
 if CANON_P32_WORKLOAD:
+  assert P32_WORKLOAD is not None
   expected_response_length = 512 if CANON_P33_SHORT_ALIGNMENT else 2048
   expected_env_steps = 2 if CANON_P33_SHORT_ALIGNMENT else 5
   expected_geometry = {
@@ -358,8 +357,14 @@ if CANON_P32_WORKLOAD:
           expected_response_length,
       ),
       "max_concurrency": (args.max_concurrency, 256),
-      "vllm_max_num_seqs": (VLLM_MAX_NUM_SEQS, 16),
-      "vllm_max_num_batched_tokens": (VLLM_MAX_BATCHED_TOKENS, 256),
+      "vllm_max_num_seqs": (
+          VLLM_MAX_NUM_SEQS,
+          P32_WORKLOAD.local_trajectories,
+      ),
+      "vllm_max_num_batched_tokens": (
+          VLLM_MAX_BATCHED_TOKENS,
+          P32_WORKLOAD.local_m,
+      ),
       "env_max_steps": (args.env_max_steps, expected_env_steps),
       "learning_rate": (args.learning_rate, 1e-6),
       "b1": (args.b1, 0.9),
@@ -373,8 +378,14 @@ if CANON_P32_WORKLOAD:
       "top_k": (args.top_k, 0),
       "loss_algo": (args.loss_algo, "gspo-token"),
       "advantage_estimator": (args.advantage_estimator, "rloo"),
-      "mesh": (SHARED_MESH_SHAPE, (16, 4)),
-      "trajectory_micro": (args.train_trajectory_micro_batch_size, 16),
+      "mesh": (
+          SHARED_MESH_SHAPE,
+          (P32_WORKLOAD.dp_size, P32_WORKLOAD.tp_size),
+      ),
+      "trajectory_micro": (
+          args.train_trajectory_micro_batch_size,
+          P32_WORKLOAD.dp_size,
+      ),
   }
   wrong_geometry = {
       name: got
@@ -599,9 +610,15 @@ if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
   )
 
 if CANON_P32_WORKLOAD:
-  if args.mesh_dp != 16 or args.mesh_tp != 4:
+  assert P32_WORKLOAD is not None
+  if (
+      args.mesh_dp != P32_WORKLOAD.dp_size
+      or args.mesh_tp != P32_WORKLOAD.tp_size
+  ):
     raise ValueError(
-        "canonical FrozenLake DP workload requires --mesh_dp=16 --mesh_tp=4"
+        "canonical FrozenLake DP workload requires "
+        f"--mesh_dp={P32_WORKLOAD.dp_size} "
+        f"--mesh_tp={P32_WORKLOAD.tp_size}"
     )
   shared_mesh = dp_workloads.create_mesh(jax.devices(), P32_WORKLOAD)
 else:

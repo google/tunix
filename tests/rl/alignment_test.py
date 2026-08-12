@@ -598,6 +598,23 @@ class AlignmentTest(absltest.TestCase):
         "frozenlake-full-alignment-warning-v1",
     )
 
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            **common,
+            "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ):
+      p45_record = alignment.check_pre_backward(wrapped, step=0)
+    self.assertEqual(
+        p45_record["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS"
+    )
+    self.assertEqual(
+        p45_record["admission_policy"]["workload"], "frozenlake"
+    )
+
     with mock.patch.dict(
         os.environ,
         {

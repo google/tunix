@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Frozen DP16xTP4 workload contracts for canonical RL training."""
+"""Frozen 64-device DP/TP workload contracts for canonical RL training."""
 
 from __future__ import annotations
 
@@ -95,25 +95,34 @@ class DPWorkloadSpec:
   def validate(self) -> None:
     """Rejects a workload that no longer matches the P32 release geometry."""
     self.training_contract()
-    if (self.dp_size, self.tp_size, self.total_devices) != (16, 4, 64):
+    if (self.dp_size, self.tp_size) not in ((16, 4), (8, 8)):
       raise ValueError(
-          "canonical workloads require exactly DP16xTP4 on 64 devices"
+          "canonical workloads require DP16xTP4 or DP8xTP8"
       )
+    if self.total_devices != 64:
+      raise ValueError("canonical workloads require exactly 64 devices")
     if (self.global_prompts, self.num_generations) != (32, 8):
       raise ValueError(
           "canonical workloads require 32 prompts and 8 generations"
       )
-    if (self.local_prompts, self.local_trajectories) != (2, 16):
+    expected_local_prompts = self.global_prompts // self.dp_size
+    expected_local_trajectories = self.global_trajectories // self.dp_size
+    if (
+        self.local_prompts,
+        self.local_trajectories,
+    ) != (expected_local_prompts, expected_local_trajectories):
       raise ValueError(
-          "canonical workloads require 2 prompts and 16 trajectories per rank"
+          "canonical workload local geometry changed: expected "
+          f"{expected_local_prompts} prompts and "
+          f"{expected_local_trajectories} trajectories per rank"
       )
-    if self.local_m != 256 or self.global_m != 4096:
+    if self.local_m != 256 or self.global_m != self.dp_size * 256:
       raise ValueError(
-          "canonical workloads require local M256 and global M4096"
+          "canonical workloads require local M256 and global M=DP*256"
       )
-    if self.gradient_groups != 16:
+    if self.gradient_groups != expected_local_trajectories:
       raise ValueError(
-          "canonical workloads require 16 rank-major gradient groups"
+          "canonical workload rank-major gradient group count changed"
       )
 
   def command(self, *, run_stage: str = "full") -> tuple[str, ...]:
@@ -138,11 +147,11 @@ class DPWorkloadSpec:
         else self.max_response_length
     )
     common = (
-        "--mesh_dp=16",
-        "--mesh_tp=4",
+        f"--mesh_dp={self.dp_size}",
+        f"--mesh_tp={self.tp_size}",
         "--batch_size=32",
         "--mini_batch_size=32",
-        "--train_trajectory_micro_batch_size=16",
+        f"--train_trajectory_micro_batch_size={self.dp_size}",
         f"--max_steps={max_steps}",
         "--num_generations=8",
         f"--max_prompt_length={self.max_prompt_length}",
@@ -162,7 +171,7 @@ class DPWorkloadSpec:
           f"--rollout_vllm_max_num_batched_tokens={self.local_m}",
           f"--wandb_project={self.wandb_project}",
       )
-    if self.name == "frozenlake":
+    if self.name.startswith("frozenlake"):
       return (
           "python3",
           "-u",
@@ -225,6 +234,27 @@ _WORKLOADS = {
         temperature=0.7,
         wandb_project="zero-tim-frozenlake-dp16-tp4",
         periodic_evaluation=False,
+    ),
+    "frozenlake-dp8-tp8": DPWorkloadSpec(
+        name="frozenlake-dp8-tp8",
+        model_id="Qwen/Qwen3-8B",
+        model_dir_name="qwen8b",
+        global_prompts=32,
+        num_generations=8,
+        local_trajectories=32,
+        max_prompt_length=4096,
+        max_response_length=2048,
+        max_steps=450,
+        learning_rate=1.0e-6,
+        beta=0.0,
+        optimizer_b1=0.9,
+        optimizer_b2=0.95,
+        weight_decay=0.0,
+        temperature=0.7,
+        wandb_project="zero-tim-frozenlake-dp8-tp8-resident",
+        periodic_evaluation=True,
+        dp_size=8,
+        tp_size=8,
     ),
 }
 
@@ -360,7 +390,7 @@ def frozenlake_evaluation_enabled(
     )
   if enabled == "1" and require_full_training:
     if (
-        values.get("CANON_P32_WORKLOAD") != "frozenlake"
+        not values.get("CANON_P32_WORKLOAD", "").startswith("frozenlake")
         or values.get("CANON_P33_RUN_STAGE") != "full"
         or values.get("CANON_P33_NO_COMMIT") != "0"
     ):
@@ -382,16 +412,18 @@ def validate_environment(
   values = os.environ if environ is None else environ
   expected = {
       "CANON_P32_WORKLOAD": workload.name,
-      "CANON_DP_SIZE": "16",
-      "CANON_TP_SIZE": "4",
-      "CANON_TOTAL_DEVICES": "64",
-      "CANON_GLOBAL_PROMPTS": "32",
-      "CANON_LOCAL_PROMPTS": "2",
-      "CANON_NUM_GENERATIONS": "8",
-      "CANON_LOCAL_TRAJECTORIES": "16",
-      "CANON_GLOBAL_TRAJECTORIES": "256",
-      "CANON_LOGPROB_M": "256",
-      "MIN_TOKEN_BUCKET": "4096",
+      "CANON_DP_SIZE": str(workload.dp_size),
+      "CANON_TP_SIZE": str(workload.tp_size),
+      "CANON_TOTAL_DEVICES": str(workload.total_devices),
+      "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_QWEN3_TP_SIZE": str(workload.tp_size),
+      "CANON_GLOBAL_PROMPTS": str(workload.global_prompts),
+      "CANON_LOCAL_PROMPTS": str(workload.local_prompts),
+      "CANON_NUM_GENERATIONS": str(workload.num_generations),
+      "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
+      "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
+      "CANON_LOGPROB_M": str(workload.local_m),
+      "MIN_TOKEN_BUCKET": str(workload.global_m),
       "CANON_FIXED_AR": "1",
       "CANON_FIXED_AR_EMBED": "1",
       "CANON_RPA_VJP2": "1",
@@ -424,14 +456,16 @@ def validate_environment(
       "1" if optimizer_placement == "pinned-host-offload" else "0"
   )
   expected["FL_SHARED_MESH"] = (
-      "16,4" if require_reduction_admission else "1,4"
+      f"{workload.dp_size},{workload.tp_size}"
+      if require_reduction_admission
+      else f"1,{workload.tp_size}"
   )
   expected["CANON_P33_SHORT_ALIGNMENT"] = (
       "1"
       if values.get("CANON_P33_RUN_STAGE", "") == "alignment-short"
       else "0"
   )
-  if workload.name == "frozenlake":
+  if workload.name.startswith("frozenlake"):
     evaluation_enabled = frozenlake_evaluation_enabled(values)
     expected["CANON_P33_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
     expected["CANON_P33_DISABLE_EVAL"] = "0" if evaluation_enabled else "1"
@@ -573,12 +607,12 @@ def require_online_wandb_run(
 def create_mesh(
     devices: Sequence[jax.Device], workload: DPWorkloadSpec
 ) -> jax.sharding.Mesh:
-  """Builds the topology-aware full-slice DP16xTP4 training mesh."""
+  """Builds the topology-aware full-slice DP/TP training mesh."""
   workload.validate()
   devices = tuple(devices)
   if len(devices) != workload.total_devices:
     raise ValueError(
-        "workload mesh requires exactly 64 visible devices: "
+        f"workload mesh requires exactly {workload.total_devices} visible devices: "
         f"got {len(devices)}"
     )
   arranged = mesh_utils.create_device_mesh(
@@ -589,7 +623,9 @@ def create_mesh(
   mesh = jax.sharding.Mesh(arranged, ("dp", "tp"))
   visible_ids = {int(device.id) for device in devices}
   mesh_ids = {int(device.id) for device in mesh.devices.flat}
-  if mesh.devices.shape != (16, 4) or mesh_ids != visible_ids:
+  if mesh.devices.shape != (workload.dp_size, workload.tp_size) or (
+      mesh_ids != visible_ids
+  ):
     raise RuntimeError(
         "topology-aware workload mesh does not cover the visible full slice"
     )

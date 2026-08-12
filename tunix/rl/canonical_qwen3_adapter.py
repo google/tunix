@@ -336,10 +336,17 @@ def _canonical_topology_contract() -> tuple[int, int, int, int]:
           "P32 topology values must be integers"
       ) from exc
     p34 = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
-    expected_tp = 8 if p34 else 4
-    expected_dp = (
-        deepswe_contract.active_workload(os.environ).dp_size if p34 else 16
+    workload = (
+        deepswe_contract.active_workload(os.environ)
+        if p34
+        else dp_workloads.active_workload(os.environ)
     )
+    if workload is None:
+      raise FunctionalMappingError(
+          "canonical training requires an active workload contract"
+      )
+    expected_tp = workload.tp_size
+    expected_dp = workload.dp_size
     if (data_size, tp_size) != (expected_dp, expected_tp):
       raise FunctionalMappingError(
           f"canonical training admits exactly DP{expected_dp}xTP{expected_tp}; got "
@@ -3351,10 +3358,17 @@ class Qwen3EngineForwardAdapter:
           "P32 DP16 reverse requires CANON_P32_DP16_SEGMENTED=1"
       )
     p34 = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
-    expected_tp = 8 if p34 else 4
-    expected_dp = (
-        deepswe_contract.active_workload(os.environ).dp_size if p34 else 16
+    workload = (
+        deepswe_contract.active_workload(os.environ)
+        if p34
+        else dp_workloads.active_workload(os.environ)
     )
+    if workload is None:
+      raise FunctionalMappingError(
+          "grouped reverse requires an active workload contract"
+      )
+    expected_tp = workload.tp_size
+    expected_dp = workload.dp_size
     if (
         os.environ.get("CANON_P32_TRAIN_ADMITTED", "") != "1"
         or self._data_size != expected_dp
@@ -3378,15 +3392,9 @@ class Qwen3EngineForwardAdapter:
       )
     if p34:
       deepswe_contract.validate_environment(os.environ)
-      workload = deepswe_contract.active_workload(os.environ)
       contract = workload
       reverse_groups = contract.rank_major_rows()
     else:
-      workload = dp_workloads.active_workload()
-      if workload is None:
-        raise FunctionalMappingError(
-            "P33 rank-local reverse requires CANON_P32_WORKLOAD"
-        )
       dp_workloads.validate_environment(
           workload, require_reduction_admission=True
       )

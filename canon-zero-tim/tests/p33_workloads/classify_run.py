@@ -12,7 +12,11 @@ import re
 from typing import Any, Iterable
 
 
-_FULL_STEPS = {"gsm8k": 200, "frozenlake": 450}
+_FULL_STEPS = {
+    "gsm8k": 200,
+    "frozenlake": 450,
+    "frozenlake-dp8-tp8": 450,
+}
 _BOUNDARIES = {
     "S_decode_vs_S_prefill",
     "S_prefill_vs_T_old",
@@ -74,7 +78,9 @@ def _require(condition: bool, reason: str, reasons: list[str]) -> None:
 
 
 def _warning_policy_expected(workload: str, stage: str) -> bool:
-  return workload in ("gsm8k", "frozenlake") and stage == "full"
+  return (
+      workload == "gsm8k" or workload.startswith("frozenlake")
+  ) and stage == "full"
 
 
 def _validate_warning_policy(
@@ -316,11 +322,19 @@ def classify(
     pre_alignment_report: Path,
     update_report: Path,
     alignment_report: Path,
+    dp_size: int = 16,
+    tp_size: int = 4,
 ) -> dict[str, Any]:
   if workload not in _FULL_STEPS:
     raise ValueError(f"unknown P33 workload: {workload!r}")
+  if (dp_size, tp_size) not in ((16, 4), (8, 8)):
+    raise ValueError(
+        "P33/P45 classifier requires DP16xTP4 or DP8xTP8, got "
+        f"DP{dp_size}xTP{tp_size}"
+    )
+  local_gradient_groups = 256 // dp_size
   expected_updates = _expected_updates(workload, stage)
-  expected_alignments = expected_updates * 16
+  expected_alignments = expected_updates * local_gradient_groups
   reasons: list[str] = []
 
   for path, label in (
@@ -349,7 +363,7 @@ def classify(
       "[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 "
       "held_out_rows=100 generations=8"
   )
-  if workload == "frozenlake":
+  if workload.startswith("frozenlake"):
     _require(
         eval_count + eval_enabled_count == 1,
         "frozenlake_eval_selection_count="
@@ -475,21 +489,32 @@ def classify(
     prefix = f"update[{index}]"
     _require(record.get("verdict") == "PASS", f"{prefix}.verdict", reasons)
     _require(record.get("dp_axis") == "data", f"{prefix}.dp_axis", reasons)
-    _require(record.get("microsteps") == 16, f"{prefix}.microsteps", reasons)
+    _require(record.get("dp_size") == dp_size, f"{prefix}.dp_size", reasons)
+    _require(record.get("tp_size") == tp_size, f"{prefix}.tp_size", reasons)
+    _require(
+        record.get("global_m") == dp_size * 256,
+        f"{prefix}.global_m",
+        reasons,
+    )
+    _require(
+        record.get("microsteps") == local_gradient_groups,
+        f"{prefix}.microsteps",
+        reasons,
+    )
     activity = record.get("gradient_activity")
     _require(
-        isinstance(activity, list) and len(activity) == 16,
+        isinstance(activity, list) and len(activity) == local_gradient_groups,
         f"{prefix}.gradient_activity",
         reasons,
     )
     _require(
-        len(record.get("alignment_hashes", [])) == 16,
+        len(record.get("alignment_hashes", [])) == local_gradient_groups,
         f"{prefix}.alignment_hashes",
         reasons,
     )
     norms = record.get("micro_gradient_norms", [])
     _require(
-        len(norms) == 16
+        len(norms) == local_gradient_groups
         and all(isinstance(value, (int, float)) and math.isfinite(value) for value in norms),
         f"{prefix}.micro_gradient_norms",
         reasons,
@@ -501,6 +526,12 @@ def classify(
         reasons,
     )
     expected_optimizer_kind = _OPTIMIZER_MEMORY_KIND.get(placement)
+    if (dp_size, tp_size) == (8, 8):
+      _require(
+          placement == "device-resident",
+          f"{prefix}.p45_optimizer_placement",
+          reasons,
+      )
     _require(
         record.get("optimizer_memory_kinds_before") == expected_optimizer_kind,
         f"{prefix}.optimizer_before",
@@ -606,6 +637,37 @@ def classify(
             f"{prefix}.parameter_delta_finite",
             reasons,
         )
+        if (dp_size, tp_size) == (8, 8):
+          timing = evidence.get("optimizer_timing")
+          _require(isinstance(timing, dict), f"{prefix}.optimizer_timing", reasons)
+          if isinstance(timing, dict):
+            _require(
+                isinstance(timing.get("optimizer_logical_bytes"), int)
+                and timing["optimizer_logical_bytes"] > 0,
+                f"{prefix}.optimizer_logical_bytes",
+                reasons,
+            )
+            for field in (
+                "adam_commit_seconds",
+                "optimizer_transaction_seconds",
+            ):
+              value = timing.get(field)
+              _require(
+                  isinstance(value, (int, float))
+                  and math.isfinite(value)
+                  and value >= 0.0,
+                  f"{prefix}.{field}",
+                  reasons,
+              )
+            for field in (
+                "optimizer_h2d_seconds",
+                "optimizer_d2h_seconds",
+            ):
+              _require(
+                  timing.get(field) == 0.0,
+                  f"{prefix}.{field}",
+                  reasons,
+              )
         if workload == "gsm8k":
           _require(
               effective_lr is not None,
@@ -625,9 +687,13 @@ def classify(
           )
 
   if stage in ("alignment-short", "backward-no-commit"):
-    marker_count = log_text.count("[CANON_P33_DP16] backward_no_commit verdict=PASS")
+    marker_count = log_text.count(
+        f"[CANON_P33_DP{dp_size}] backward_no_commit verdict=PASS"
+    )
   else:
-    marker_count = log_text.count("[CANON_P33_DP16] update_step_committed")
+    marker_count = log_text.count(
+        f"[CANON_P33_DP{dp_size}] update_step_committed"
+    )
   _require(
       marker_count == expected_updates,
       f"terminal_marker_count={marker_count} expected={expected_updates}",
@@ -646,6 +712,8 @@ def classify(
       "verdict": verdict,
       "workload": workload,
       "stage": stage,
+      "topology": {"dp": dp_size, "tp": tp_size},
+      "local_gradient_groups": local_gradient_groups,
       "expected_updates": expected_updates,
       "observed_updates": len(update_records),
       "expected_alignments": expected_alignments,
@@ -673,6 +741,8 @@ def classify(
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--workload", required=True, choices=tuple(_FULL_STEPS))
+  parser.add_argument("--dp-size", type=int, default=16)
+  parser.add_argument("--tp-size", type=int, default=4)
   parser.add_argument(
       "--stage",
       required=True,
@@ -700,6 +770,8 @@ def main() -> int:
       pre_alignment_report=args.pre_alignment_report,
       update_report=args.update_report,
       alignment_report=args.alignment_report,
+      dp_size=args.dp_size,
+      tp_size=args.tp_size,
   )
   args.output.parent.mkdir(parents=True, exist_ok=True)
   args.output.write_text(

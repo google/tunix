@@ -671,10 +671,11 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       }
     fi
     case "${CANON_P32_WORKLOAD:-}" in
-      gsm8k|frozenlake) ;;
+      gsm8k|frozenlake|frozenlake-dp8-tp8) ;;
       *) echo "[env] admitted P33 training has invalid workload" >&2; fail=1 ;;
     esac
-    if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; then
+    case "${CANON_P32_WORKLOAD:-}" in
+    frozenlake|frozenlake-dp8-tp8)
       req CANON_P33_ENABLE_EVAL
       req CANON_P33_DISABLE_EVAL
       req CANON_P31_ENABLE_EVAL
@@ -700,13 +701,14 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         echo "[env] FrozenLake warning-only policy requires committed full training" >&2
         fail=1
       fi
-    fi
+      ;;
+    esac
     [ "${CANON_P30_FUSED_PAIR_ACCUMULATION:-}" = "0" ] || {
       echo "[env] P33 rank-reduced groups require fused pair accumulation off" >&2
       fail=1
     }
-    [ "${FL_SHARED_MESH:-}" = "16,4" ] || {
-      echo "[env] admitted P33 training requires FL_SHARED_MESH=16,4" >&2
+    [ "${FL_SHARED_MESH:-}" = "${CANON_DP_SIZE:-},${CANON_TP_SIZE:-}" ] || {
+      echo "[env] admitted P33 training requires FL_SHARED_MESH=CANON_DP_SIZE,CANON_TP_SIZE" >&2
       fail=1
     }
     [ "${CANON_P32_DP_REDUCTION_ADMITTED:-0}" = "1" ] || {

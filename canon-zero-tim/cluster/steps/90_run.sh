@@ -212,8 +212,13 @@ if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && [ "$n_wandb" -ne 1 ]; then
     exit 1
   fi
 fi
-if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && \
-   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; then
+if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ]; then
+  case "${CANON_P32_WORKLOAD:-}" in
+    frozenlake|frozenlake-dp8-tp8) is_frozenlake=1 ;;
+    *) is_frozenlake=0 ;;
+  esac
+fi
+if [ "${is_frozenlake:-0}" = "1" ]; then
   if [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ]; then
     if [ "$n_eval_on" -ne 1 ] || [ "$n_eval_off" -ne 0 ]; then
       echo "[run] FATAL: admitted FrozenLake evaluation marker contract failed" >&2
@@ -386,6 +391,8 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
     python3 "$CANON_PKG/tests/p33_workloads/classify_run.py" \
       --workload "$CANON_P32_WORKLOAD" \
+      --dp-size "$CANON_DP_SIZE" \
+      --tp-size "$CANON_TP_SIZE" \
       --stage "$CANON_P33_RUN_STAGE" \
       --run-log "$LOG" \
       --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \

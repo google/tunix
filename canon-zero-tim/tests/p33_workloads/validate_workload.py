@@ -75,7 +75,11 @@ def build_record(name: str, *, require_reduction_admission: bool) -> dict:
 
 def main() -> int:
   parser = argparse.ArgumentParser()
-  parser.add_argument("--name", required=True, choices=("gsm8k", "frozenlake"))
+  parser.add_argument(
+      "--name",
+      required=True,
+      choices=("gsm8k", "frozenlake", "frozenlake-dp8-tp8"),
+  )
   parser.add_argument("--output", required=True)
   parser.add_argument("--launch", action="store_true")
   args = parser.parse_args()

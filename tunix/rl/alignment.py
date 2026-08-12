@@ -235,7 +235,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     stage = p34_stage
   elif frozenlake_warning_only:
     admitted = (
-        workload == "frozenlake"
+        workload in ("frozenlake", "frozenlake-dp8-tp8")
         and stage == "full"
         and no_commit == "0"
         and execution_mode() == "train"
@@ -245,6 +245,9 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           "FrozenLake alignment warning policy is admitted only for committed "
           "FrozenLake full training"
       )
+    # The policy schema describes the workload family, while topology remains
+    # attested independently by the P33/P45 update record.
+    workload = "frozenlake"
   elif enabled_policy:
     admitted = (
         workload == "gsm8k"

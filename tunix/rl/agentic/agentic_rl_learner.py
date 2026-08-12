@@ -39,6 +39,7 @@ from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import deepswe_contract
 from tunix.rl import deepswe_debug
+from tunix.rl import dp_workloads
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
@@ -106,7 +107,15 @@ def _segmented_update_geometry(environ) -> tuple[int, int, str, bool]:
         True,
     )
   if p33_workload:
-    return 256, 16, "[CANON_P33_DP16]", True
+    workload = dp_workloads.active_workload(environ)
+    if workload is None:
+      raise ValueError("P33 update requires an active canonical workload")
+    return (
+        workload.global_trajectories,
+        workload.dp_size,
+        f"[CANON_P33_DP{workload.dp_size}]",
+        True,
+    )
   if p41_optimizer_bench:
     return 2, 2, "[P41.OPTIMIZER]", False
   if p31_convergence:
@@ -508,7 +517,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     from flax import nnx  # pylint: disable=g-import-not-at-top
     from tunix.rl import alignment  # pylint: disable=g-import-not-at-top
     from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
-    from tunix.rl import dp_workloads  # pylint: disable=g-import-not-at-top
     from tunix.rl import deepswe_contract  # pylint: disable=g-import-not-at-top
 
     p31_convergence = os.environ.get("CANON_P31_CONVERGENCE", "") == "1"
@@ -594,7 +602,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "segmented update trajectory cadence changed: "
           f"trajectories={num_trajectories} micro={trajectory_micro}"
       )
-    expected_microbatches = num_trajectories // trajectory_micro
+    expected_microbatches = (
+        workload.local_trajectories
+        if canonical_workload
+        else num_trajectories // trajectory_micro
+    )
     if canonical_workload:
       expected_trajectories = workload.global_trajectories
     if num_trajectories != expected_trajectories:
@@ -896,6 +908,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           and actor_trainer.train_steps == before["train_steps"]
       )
       no_commit_record = {
+          "contract_name": (
+              workload.contract_name
+              if p34_workload
+              else workload.name
+              if p33_workload
+              else "legacy-segmented"
+          ),
+          "dp_size": workload.dp_size if canonical_workload else 1,
+          "tp_size": workload.tp_size if canonical_workload else 1,
+          "global_m": workload.global_m if canonical_workload else 256,
           "verdict": "PASS" if unchanged else "FAIL",
           "mode": run_stage,
           "microsteps": expected_microbatches,

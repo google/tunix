@@ -141,7 +141,11 @@ def _pre_alignment(
 
 
 def _update(
-    index: int, *, placement: str = "pinned-host-offload"
+    index: int,
+    *,
+    placement: str = "pinned-host-offload",
+    dp_size: int = 16,
+    tp_size: int = 4,
 ) -> dict:
   effective_lr = 0.0 if index == 0 else 4.0e-9
   parameter_changed = 0 if index == 0 else 1
@@ -151,13 +155,16 @@ def _update(
   return {
       "verdict": "PASS",
       "dp_axis": "data",
-      "microsteps": 16,
+      "dp_size": dp_size,
+      "tp_size": tp_size,
+      "global_m": dp_size * 256,
+      "microsteps": 256 // dp_size,
       "commits": 1,
       "train_steps_before": index,
       "train_steps_after": index + 1,
-      "gradient_activity": [True] * 16,
-      "alignment_hashes": [{"T_current": "a"}] * 16,
-      "micro_gradient_norms": [1.0] * 16,
+      "gradient_activity": [True] * (256 // dp_size),
+      "alignment_hashes": [{"T_current": "a"}] * (256 // dp_size),
+      "micro_gradient_norms": [1.0] * (256 // dp_size),
       "optimizer_placement": placement,
       "optimizer_memory_kinds_before": [memory_kind],
       "optimizer_memory_kinds_after": [memory_kind],
@@ -177,6 +184,13 @@ def _update(
           "parameter_total_elements": 1,
           "parameter_delta_max_abs": 0.0 if index == 0 else 1.0e-8,
           "parameter_delta_finite": True,
+          "optimizer_timing": {
+              "optimizer_logical_bytes": 1024,
+              "optimizer_h2d_seconds": 0.0,
+              "adam_commit_seconds": 1.0,
+              "optimizer_d2h_seconds": 0.0,
+              "optimizer_transaction_seconds": 1.0,
+          },
       },
   }
 
@@ -431,6 +445,9 @@ class ClassifyP33RunTest(unittest.TestCase):
       record = {
           "verdict": "PASS",
           "dp_axis": "data",
+          "dp_size": 16,
+          "tp_size": 4,
+          "global_m": 4096,
           "mode": "backward-no-commit",
           "microsteps": 16,
           "commits": 0,
@@ -479,6 +496,9 @@ class ClassifyP33RunTest(unittest.TestCase):
       update = {
           "verdict": "PASS",
           "dp_axis": "data",
+          "dp_size": 16,
+          "tp_size": 4,
+          "global_m": 4096,
           "mode": "alignment-short",
           "microsteps": 16,
           "commits": 0,
@@ -576,6 +596,79 @@ class ClassifyP33RunTest(unittest.TestCase):
           alignment_report=alignments,
       )
       self.assertEqual(result["verdict"], "PASS")
+
+  def test_p45_dp8_tp8_resident_topology_and_cadence(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      run_log = root / "run.log"
+      updates = root / "updates.jsonl"
+      pre_alignments = root / "pre_alignment.jsonl"
+      alignments = root / "alignment.jsonl"
+      run_log.write_text(
+          "[CANON_P33_WANDB] ONLINE_RUN_PASS\n"
+          "[CANON_P33_EVAL] DISABLED workload=frozenlake\n"
+          "[CANON_P31_METRICS] monotonic_direct last_step=0 events=1 regressions=0\n"
+          "[CANON_P33_DP8] update_step_committed\n",
+          encoding="utf-8",
+      )
+      self._write_jsonl(
+          updates,
+          [_update(0, placement="device-resident", dp_size=8, tp_size=8)],
+      )
+      self._write_jsonl(pre_alignments, [_pre_alignment(0)])
+      self._write_jsonl(
+          alignments,
+          (_alignment(index, optimizer_skipped=False) for index in range(32)),
+      )
+      result = classifier.classify(
+          workload="frozenlake-dp8-tp8",
+          stage="one-update",
+          run_log=run_log,
+          pre_alignment_report=pre_alignments,
+          update_report=updates,
+          alignment_report=alignments,
+          dp_size=8,
+          tp_size=8,
+      )
+      self.assertEqual(result["verdict"], "PASS")
+      self.assertEqual(result["local_gradient_groups"], 32)
+      self.assertEqual(result["topology"], {"dp": 8, "tp": 8})
+
+  def test_p45_rejects_offloaded_optimizer(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      run_log = root / "run.log"
+      updates = root / "updates.jsonl"
+      pre_alignments = root / "pre_alignment.jsonl"
+      alignments = root / "alignment.jsonl"
+      run_log.write_text(
+          "[CANON_P33_WANDB] ONLINE_RUN_PASS\n"
+          "[CANON_P33_EVAL] DISABLED workload=frozenlake\n"
+          "[CANON_P31_METRICS] monotonic_direct last_step=0 events=1 regressions=0\n"
+          "[CANON_P33_DP8] update_step_committed\n",
+          encoding="utf-8",
+      )
+      self._write_jsonl(
+          updates,
+          [_update(0, placement="pinned-host-offload", dp_size=8, tp_size=8)],
+      )
+      self._write_jsonl(pre_alignments, [_pre_alignment(0)])
+      self._write_jsonl(
+          alignments,
+          (_alignment(index, optimizer_skipped=False) for index in range(32)),
+      )
+      result = classifier.classify(
+          workload="frozenlake-dp8-tp8",
+          stage="one-update",
+          run_log=run_log,
+          pre_alignment_report=pre_alignments,
+          update_report=updates,
+          alignment_report=alignments,
+          dp_size=8,
+          tp_size=8,
+      )
+      self.assertEqual(result["verdict"], "FAIL")
+      self.assertIn("update[0].p45_optimizer_placement", result["reasons"])
 
   def test_negative_control_rejects_unattested_optimizer_placement(self):
     with tempfile.TemporaryDirectory() as tmp:
