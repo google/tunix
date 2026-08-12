@@ -1318,4 +1318,11 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Initialized 36-layer KV cache block pools (5,216 blocks, 18.99 GiB HBM) and completed 256 rollout samples.
    - Completed full 36-layer reverse VJP pass down from Layer 35 through Layer 0 to `model.norm`.
 
+2. **Capture Threshold & Precheck Contract Analysis**:
+   - `[CANON_P38_SERVING_CAPTURE]` was not triggered because FrozenLake's interactive environment prompts are ~200 tokens, which falls below `CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536` (`_CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)`). As a result, `_p38_capture_stratum(max_prefix)` evaluated to `None` on all rollout steps.
+   - `[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD` is wired to `tunix/rl/agentic/agentic_grpo_learner.py:1408`, whereas FrozenLake entrypoint `examples/frozenlake/train_frozenlake_qwen3.py` invokes `tunix/rl/dp_workloads.py`, completing the forward/reverse VJP without early diagnostic exit.
+   - Consequently, durable artifacts (`p38s5-mismatch-capsule.npz` and `p38s5-serving-capture.tar`) were 0-byte/unproduced.
+   - Full 6,069-line raw log and system metadata are archived to unblock TPU resources for full FrozenLake training (`canon-p42-fl-eval-p42e5`).
+
+
 
