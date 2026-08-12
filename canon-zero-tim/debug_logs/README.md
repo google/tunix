@@ -1366,6 +1366,9 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 ## 52. P44 DeepSWE 256-Chip Qwen3-4B TP8 Parity Rollout (Attempt `r06` — Full 256-Chip Scale-Out)
 
 - `debug_logs/p44_p44r06_deepswe256_rollout.raw.log` (SHA-256: `da2349ca535c2f98cf7ceed30f7ffabbdb41db6ffd3830495cbbfa68adc8d795`)
+- `debug_logs/p44_p44r06_debug/batch-000000.trajectories.jsonl.gz` (SHA-256: `9811f1a9d88ade76884f960de634ff937f6c14a44097ee6b54e5873cd86cb65b`)
+- `debug_logs/p44_p44r06_debug/batch_metrics.jsonl`
+- `debug_logs/p44_p44r06_debug/run_manifest.json`
 - Target Commit: `b26135f2a24e36df0a9a6616e47ac1f978578ed6`
 - Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
 - Hardware: 256 TPU v5p chips (64 worker nodes, 4x8x8 mesh)
@@ -1375,9 +1378,11 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 1. **256-Chip Topology & Initialization**:
    - 65/65 Pods scheduled and executed cleanly; loaded Qwen3-4B weights in 51.21s.
    - Sampling JIT compilation succeeded across DP16xTP8 partitioned topology.
-2. **Rollout Trajectory Generation**:
+2. **Rollout Trajectory Generation & Artifacts**:
    - Completed 16-way concurrent real SWE coding rollout with `[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS` hitting `rows=4096 rows_per_dp=256 canonical_rows=256`.
    - Prompt throughput peaked at 1288.1 tokens/s; generation throughput averaged ~2.5 tokens/s on max-context long outputs.
+   - 16 trajectories recorded across 4 prompt groups (`status_histogram: {"MAX_CONTEXT_LIMIT_REACHED": 13, "SUCCEEDED": 3}`).
+   - Exact artifacts retrieved from persistent volume `/mnt/disks/linchai_data` and verified by SHA-256 byte identity.
 
 ## 53. P45 FrozenLake DP8xTP8 Resident Training Carrier (Attempt `r3` — Qwen3-8B TP Contract Preflight)
 
