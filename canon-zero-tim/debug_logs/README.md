@@ -1435,7 +1435,9 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 
 - `debug_logs/p45_p45r4_frozenlake_resident.raw.log` (SHA-256: `19a1e203713ac0078a7f6d83170e148c7afb3fcb623d7eff5f797d94e9c8b375`)
 - `debug_logs/p38_p38s8_frozenlake_stock.raw.log` (SHA-256: `9a18291991105aa5c190e9ecb5c32a185fee9ef29ac13e35a6e0d992448e3796`)
-- `debug_logs/p34_p34r02_deepswe_full.raw.log` (SHA-256: `375b600e5d234e817810f40008d50bac529d6c81e1088e99fc859d82f8da7e08`)
+- `debug_logs/p38_p38s5_head_full.raw.log` (SHA-256: `56476e90faefd1f1cf319adadb9d9be0e27be1692117fc2cf12646a5ecce3c21`)
+- `debug_logs/p38_p38s6_head_full.raw.log` (SHA-256: `3b751bc3edcf959ea88d82963f537ac647f0ba3296fc3f3dd3be6479e608cafa`)
+- `debug_logs/p34_p34r02_deepswe_full.raw.log` (SHA-256: `6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`)
 - Target Commit: `d725f078028714eb64016f4ad27464ce780d6b2b`
 - Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p` & `mlperf-v5p-256`
 
