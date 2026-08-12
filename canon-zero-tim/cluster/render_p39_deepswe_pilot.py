@@ -27,7 +27,6 @@ def _pilot_command(
       "--rollout_mesh_dp=16": "--rollout_mesh_dp=4",
       "--train_mesh_dp=16": "--train_mesh_dp=4",
       "--rollout_vllm_max_num_seqs=4": "--rollout_vllm_max_num_seqs=16",
-      "--optimizer_offload=True": "--optimizer_offload=False",
   }
   for old, new in replacements.items():
     if args.count(old) != 1:
@@ -217,7 +216,7 @@ def validate(
       "--max_num_batched_tokens=256",
       "--max_response_length=4096",
       "--max_turns=5",
-      "--optimizer_offload=False",
+      "--no-optimizer-offload",
   )
   if any(value not in env["CANON_RUN_CMD"] for value in required_args):
     raise ValueError("P39 pilot command lost a signed field")

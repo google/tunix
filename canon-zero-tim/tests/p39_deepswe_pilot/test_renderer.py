@@ -52,7 +52,7 @@ class P39RendererTest(unittest.TestCase):
     self.assertEqual(env["CANON_OPT_STATE_RESIDENT"], "1")
     self.assertEqual(env["CANON_P30_OPT_STATE_OFFLOAD"], "0")
     self.assertIn("--rollout_mesh_dp=4", env["CANON_RUN_CMD"])
-    self.assertIn("--optimizer_offload=False", env["CANON_RUN_CMD"])
+    self.assertIn("--no-optimizer-offload", env["CANON_RUN_CMD"])
 
   def test_full_stage_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "only one-update or three-update"):

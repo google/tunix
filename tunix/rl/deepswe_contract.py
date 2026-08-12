@@ -600,6 +600,12 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "p44-qwen4b-parity-256",
   )
   parity_topology = str(workload.devices_per_role * 2) if parity else "none"
+  production_capture = bool(
+      not pilot
+      and not debug
+      and not parity
+      and values.get("CANON_P34_RUN_STAGE") == "full"
+  )
   expected = {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_TOPOLOGY_ADMITTED": "1",
@@ -624,6 +630,14 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_P34_DISABLE_SAMPLER_IS": "1",
       "CANON_P34_DISABLE_TIS": "1",
       "CANON_PRE_ALIGN_GATE": "1",
+      "CANON_P34_TRAJECTORY_CAPTURE": "1" if production_capture else "0",
+      "CANON_P34_DATASET_NAME": "R2E-Gym/R2E-Gym-Subset",
+      "CANON_P34_DATASET_REVISION": (
+          "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
+      ),
+      "CANON_P34_DATASET_SPLIT": "train",
+      "CANON_P34_DATASET_ROWS": "4578",
+      "CANON_P34_CLEAN_ROWS": "1851" if production_capture else "0",
       "WANDB_MODE": "online",
       "CANON_P39_64CHIP_PILOT": "1" if pilot else "0",
       "CANON_P39_PILOT_ADMITTED": "1" if pilot else "0",
@@ -656,16 +670,18 @@ def validate_environment(values: Mapping[str, str]) -> None:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
-        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+            "1" if production_capture else "0"
+        ),
     })
   else:
-    # Operator decision 2026-08-12: production defaults to device-resident optimizer
-    # state (speed over the unverified 32K-context HBM margin). On OOM, flip these two
-    # expectations back to "0"/"1" together with the profile pins and relaunch.
+    # Production full training is convergence-first: finite alignment drift is
+    # durable warning telemetry, while invalid shapes and nonfinite values
+    # remain blocking in alignment.py.
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
-        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
     })
   wrong = {
       key: values.get(key)
@@ -688,6 +704,10 @@ def validate_environment(values: Mapping[str, str]) -> None:
     debug_dir = values.get("CANON_P44_DEBUG_DIR", "")
     if not debug_dir or not os.path.isabs(debug_dir):
       raise ValueError("P44 parity artifact directory is missing")
+  if production_capture:
+    debug_dir = values.get("CANON_P34_DEBUG_DIR", "")
+    if not debug_dir or not os.path.isabs(debug_dir):
+      raise ValueError("P34 production trajectory artifact directory is missing")
   workload.validate()
   requested_max_steps(values)
 

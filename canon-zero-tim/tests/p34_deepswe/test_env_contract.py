@@ -37,12 +37,19 @@ def _main_env(document) -> dict[str, str]:
 
 class P34EnvironmentContractTest(unittest.TestCase):
 
-  def _run_env(self, *, override_profile: str | None = None):
+  def _run_env(
+      self, *, stage: str = "backward-no-commit",
+      override_profile: str | None = None
+  ):
     with tempfile.TemporaryDirectory() as root_text:
       root = Path(root_text)
-      whitelist = root / "gold.jsonl"
-      whitelist.write_text('{"docker_image":"test-image"}\n')
-      whitelist_sha = hashlib.sha256(whitelist.read_bytes()).hexdigest()
+      if stage == "full":
+        whitelist = Path(renderer.P34_CLEAN_WHITELIST)
+        whitelist_sha = renderer.P34_CLEAN_WHITELIST_SHA256
+      else:
+        whitelist = root / "gold.jsonl"
+        whitelist.write_text('{"docker_image":"test-image"}\n')
+        whitelist_sha = hashlib.sha256(whitelist.read_bytes()).hexdigest()
       base = yaml.safe_load(
           (PKG / "cluster/jobset-256cluster-64chip.yaml").read_text()
       )
@@ -52,7 +59,7 @@ class P34EnvironmentContractTest(unittest.TestCase):
           source_branch=renderer.DEFAULT_SOURCE_BRANCH,
           client_image="registry.example/tunix@sha256:" + "2" * 64,
           run_id="env-gate",
-          stage="backward-no-commit",
+          stage=stage,
           cpu_nodepool="cpu-pool",
           worker_nodepool="tpu-pool",
           model_pvc="model-pvc",
@@ -100,6 +107,22 @@ class P34EnvironmentContractTest(unittest.TestCase):
     self.assertIn("[env] P34 contract OK: DP16xTP8", result.stdout)
     self.assertIn("export CANON_PRE_ALIGN_GATE=1", resolved)
     self.assertNotIn("test-only", resolved)
+
+  def test_rendered_full_environment_pins_capture_device_and_warning_policy(self):
+    result, resolved = self._run_env(stage="full")
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn("export CANON_P34_TRAJECTORY_CAPTURE=1", resolved)
+    self.assertIn("export CANON_OPT_STATE_RESIDENT=1", resolved)
+    self.assertIn("export CANON_P30_OPT_STATE_OFFLOAD=0", resolved)
+    self.assertIn("export CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=1", resolved)
+
+  def test_full_environment_rejects_strict_alignment_override(self):
+    result, _ = self._run_env(
+        stage="full",
+        override_profile="export CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=0",
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("finite alignment warning-only", result.stdout)
 
   def test_missing_pre_backward_gate_is_rejected(self):
     result, _ = self._run_env(override_profile="export CANON_PRE_ALIGN_GATE=0")

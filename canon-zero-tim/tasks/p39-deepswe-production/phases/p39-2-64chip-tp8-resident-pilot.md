@@ -54,7 +54,7 @@ the production 32768-token, 50-turn memory envelope.
    DP4 from a DP16 artifact.
 5. Select device residency explicitly with
    `CANON_OPT_STATE_RESIDENT=1`, `CANON_P30_OPT_STATE_OFFLOAD=0`, and
-   `--optimizer_offload=False`. Require zero optimizer H2D/D2H transfer.
+   `--no-optimizer-offload`. Require zero optimizer H2D/D2H transfer.
 6. In one JobSet, initialize both TP8 engines, attest cross-role weights, produce
    a real rollout, run the forward and pre-backward reports, execute one real
    backward and commit, then continue through at most three updates to detect

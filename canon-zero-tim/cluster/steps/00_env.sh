@@ -241,6 +241,10 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P34_MAX_BATCHED_TOKENS CANON_P34_STRICT_CLI \
            CANON_P34_DISABLE_SAMPLER_IS CANON_P34_DISABLE_TIS \
            CANON_PRE_ALIGN_GATE \
+           CANON_P34_TRAJECTORY_CAPTURE \
+           CANON_P34_DATASET_NAME CANON_P34_DATASET_REVISION \
+           CANON_P34_DATASET_SPLIT CANON_P34_DATASET_ROWS \
+           CANON_P34_CLEAN_ROWS \
            CANON_P39_64CHIP_PILOT CANON_P39_PILOT_ADMITTED \
            CANON_P43_DEEPSWE_DEBUG CANON_P43_DEBUG_ADMITTED \
            CANON_P43_ROLLOUT_ONLY \
@@ -256,7 +260,8 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_ENGINE_DP_SIZE CANON_GLOBAL_PROMPTS \
            CANON_NUM_GENERATIONS CANON_LOCAL_TRAJECTORIES \
            CANON_GLOBAL_TRAJECTORIES CANON_TARGET_M CANON_P34_ABCPROD \
-           CANON_P34_MAX_NUM_SEQS CANON_P34_MAX_BATCHED_TOKENS; do
+           CANON_P34_MAX_NUM_SEQS CANON_P34_MAX_BATCHED_TOKENS \
+           CANON_P34_DATASET_ROWS; do
     positive_int "$k"
   done
   case "${CANON_P43_DEEPSWE_DEBUG:-}" in
@@ -397,6 +402,32 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
           echo "[env] production P34 requires CANON_P39_PILOT_ADMITTED=0" >&2
           fail=1
         }
+        [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
+          echo "[env] production P34 requires device-resident optimizer state" >&2
+          fail=1
+        }
+        if [ "${CANON_P34_RUN_STAGE:-}" = "full" ]; then
+          [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
+            echo "[env] P34 full requires finite alignment warning-only policy" >&2
+            fail=1
+          }
+          [ "${CANON_P34_TRAJECTORY_CAPTURE:-}" = "1" ] && \
+          [ "${CANON_P34_CLEAN_ROWS:-}" = "1851" ] || {
+            echo "[env] P34 full requires durable capture and 1851 clean rows" >&2
+            fail=1
+          }
+          case "${CANON_P34_DEBUG_DIR:-}" in
+            /*) ;;
+            *) echo "[env] P34 full artifact directory must be absolute" >&2; fail=1 ;;
+          esac
+        else
+          [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "0" ] && \
+          [ "${CANON_P34_TRAJECTORY_CAPTURE:-}" = "0" ] && \
+          [ "${CANON_P34_CLEAN_ROWS:-}" = "0" ] || {
+            echo "[env] P34 short diagnostic must remain strict without production capture" >&2
+            fail=1
+          }
+        fi
         ;;
       1)
         p34_expected_dp=4
@@ -493,6 +524,12 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   [ "${CANON_PRE_ALIGN_GATE:-}" = "1" ] || {
     echo "[env] P34 strict CLI, neutral importance paths and pre-backward gate are mandatory" >&2; fail=1;
   }
+  [ "${CANON_P34_DATASET_NAME:-}" = "R2E-Gym/R2E-Gym-Subset" ] && \
+  [ "${CANON_P34_DATASET_REVISION:-}" = "2e8108ff942f24fcb5686badfaf7f9a8808566d5" ] && \
+  [ "${CANON_P34_DATASET_SPLIT:-}" = "train" ] && \
+  [ "${CANON_P34_DATASET_ROWS:-}" = "4578" ] || {
+    echo "[env] P34 dataset source pin changed" >&2; fail=1;
+  }
   if [[ ! "${CANON_P34_WHITELIST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
     echo "[env] P34 whitelist SHA-256 is malformed" >&2
     fail=1
@@ -574,6 +611,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
              CANON_WANDB_RUN_NAME WANDB_API_KEY; do
       req "$k"
     done
+    if [ "${CANON_P34_TRAJECTORY_CAPTURE:-0}" = "1" ]; then
+      req CANON_P34_DEBUG_DIR
+    fi
     [ "${WANDB_MODE:-}" = "online" ] || {
       echo "[env] P34 requires WANDB_MODE=online" >&2; fail=1;
     }

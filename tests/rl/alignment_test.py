@@ -698,6 +698,77 @@ class AlignmentTest(absltest.TestCase):
     ):
       alignment.check_pre_backward(wrapped, step=0)
 
+  def test_deepswe_full_warning_policy_continues_finite_bc_only(self):
+    wrapped = self._wrapped().replace(
+        s_decode=self._wrapped().s_decode - np.float32(0.5),
+        t_old=self._wrapped().t_old + np.float32(0.25),
+    )
+    common = {
+        alignment.GATE_ONLY_ENV: "0",
+        alignment.UPDATE_CANARY_ENV: "0",
+        alignment.TRAIN_ENV: "1",
+        alignment.PRE_GATE_ENV: "1",
+        alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
+        alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "0",
+        alignment.FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV: "0",
+        alignment.DEEPSWE_ALIGNMENT_WARN_ONLY_ENV: "1",
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P34_RUN_STAGE": "full",
+        "CANON_P34_NO_COMMIT": "0",
+        "CANON_P39_64CHIP_PILOT": "0",
+        "CANON_P43_DEEPSWE_DEBUG": "0",
+        "CANON_P44_DEEPSWE_PARITY": "0",
+    }
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            **common,
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+            alignment.REPORT_ENV: os.path.join(tmpdir, "post.jsonl"),
+        },
+        clear=False,
+    ):
+      pre = alignment.check_pre_backward(wrapped, step=0)
+      post = alignment.check_batch(
+          wrapped,
+          t_current=wrapped.t_old - np.float32(0.125),
+          gradient_norm=np.asarray(0.0, np.float32),
+          optimizer_skipped=np.asarray(0, np.int32),
+          step=0,
+      )
+    self.assertEqual(pre["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEmpty(pre["blocking_reds"])
+    self.assertIn("S_decode_vs_S_prefill", pre["warning_reds"])
+    self.assertIn("S_prefill_vs_T_old", pre["warning_reds"])
+    self.assertEqual(post["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEmpty(post["blocking_reds"])
+    self.assertFalse(post["gradient"]["nonzero"])
+    self.assertEqual(
+        pre["admission_policy"]["claim_level"], "convergence-only"
+    )
+
+    nonfinite = wrapped.replace(t_old=np.full_like(wrapped.t_old, np.nan))
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            **common,
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "S_prefill_vs_T_old"
+    ):
+      alignment.check_pre_backward(nonfinite, step=0)
+
+    with mock.patch.dict(
+        os.environ,
+        {**common, "CANON_P34_RUN_STAGE": "one-update"},
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "P34 full training"
+    ):
+      alignment.gsm8k_ab_report_policy()
+
   def test_execution_mode_rejects_multiple_modes(self):
     with mock.patch.dict(
         os.environ,

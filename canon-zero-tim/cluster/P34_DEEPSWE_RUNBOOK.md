@@ -18,22 +18,30 @@ The optional P39 64-chip resident-optimizer pilot is not a prerequisite for the
 256-chip run. When a complete 4x8x8 slice is available, the operator may defer
 that pilot and exercise the actual DP16xTP8 production topology directly.
 
-Operator decision 2026-08-12: the production profile now defaults to
-device-resident optimizer state (`CANON_OPT_STATE_RESIDENT=1`,
-`CANON_P30_OPT_STATE_OFFLOAD=0`) for speed. The Qwen3-32B HBM margin is
-UNVERIFIED at 32K context (static ~72 GB/chip -- bf16 params 8 + fp32 actor 16 +
-accumulator 16 + optimizer 32 -- before activations); an OOM at admission or
-first commit is the expected failure mode, is classified INCONCLUSIVE (infra,
-not numerical), and the fallback is: flip the two profile pins back to
-offload, flip the matching production expectations in
-`tunix/rl/deepswe_contract.py`, and relaunch. Watch `[P41.OPTIMIZER]
-placement=` and the init `hbm=[(used, cap)]` lines on the first attempt.
+Operator decision 2026-08-12: launch one real `full` run directly.  The
+production profile uses device-resident optimizer state
+(`CANON_OPT_STATE_RESIDENT=1`, `CANON_P30_OPT_STATE_OFFLOAD=0`) and the command
+uses the unambiguous `--no-optimizer-offload` flag.  There is no automatic host
+fallback.  Qwen3-32B HBM margin at 32K response length remains UNVERIFIED; an
+OOM is infrastructure-INCONCLUSIVE and a host-offload relaunch requires a new
+reviewed manifest.  Watch `[P41.OPTIMIZER] placement=device-resident` and the
+init/update HBM records.
+
+Finite A-B, B-C and later alignment residuals are warning-only in `full` so
+that the convergence run continues.  The raw residuals, exact hashes and
+warning counts remain evidence.  Shape-invalid or nonfinite alignment,
+topology, exact-weight, replica, optimizer transaction, artifact, OOM and IFRT
+failures still stop the run.  The claim level is convergence-only, never
+zero-TIM.
 
 ## Required operator inputs
 
 - Exact 40-character source commit on `yuxzhang/canon-zero-tim`.
 - Client image pinned by registry SHA-256 digest. Tags such as `:latest` are rejected.
-- Gold whitelist on the mounted PVC, plus its lowercase SHA-256 digest.
+- The checked-in clean whitelist must be present unchanged at
+  `clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`.
+  Its only admitted SHA-256 is
+  `2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7`.
 - CPU and TPU node-pool names and the model/output PVC name.
 - A new 1-16 character lowercase run id for every manifest.
 - A cluster-scoped `very-high` PriorityClass with value `1000` and
@@ -43,7 +51,7 @@ The Kubernetes `HF_TOKEN` and `WANDB_API_KEY` secret references are inherited fr
 base manifest. The renderer never accepts secret values and `00_env.sh` never writes either token
 to the resolved environment file.
 
-## Render one immutable stage
+## Render the immutable full run
 
 First perform the read-only priority preflight on the DeepSWE cluster:
 
@@ -60,42 +68,63 @@ policy.
 ```bash
 python3 canon-zero-tim/cluster/render_p34_jobset.py \
   --base canon-zero-tim/cluster/jobset-256cluster-64chip.yaml \
-  --output /tmp/p34-backward-no-commit.yaml \
+  --output /tmp/p34-full.yaml \
   --source-commit "$SOURCE_SHA" \
   --source-branch yuxzhang/canon-zero-tim \
   --client-image "$CLIENT_IMAGE_DIGEST" \
   --run-id "$RUN_ID" \
-  --stage backward-no-commit \
+  --stage full \
   --cpu-nodepool deepswe-cpu-pool \
   --worker-nodepool mlperf-v5p-256-np-0 \
   --model-pvc haoyugao-cpu-np-pvc \
-  --whitelist /mnt/disks/linchai_data/deepswe/gold.jsonl \
-  --whitelist-sha256 "$WHITELIST_SHA256"
+  --whitelist clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl \
+  --whitelist-sha256 2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7
 ```
 
-Allowed stages are `backward-no-commit`, `one-update`, `three-update`, and `full`. Use a different
-run id and output path for each one. `full` is exactly 1000 updates; the renderer does not accept
-an arbitrary budget.
+`full` is exactly 1000 updates; the renderer does not accept an arbitrary
+budget.  The renderer rejects any other full-run whitelist path or digest and
+pins `R2E-Gym/R2E-Gym-Subset`, split `train`, revision
+`2e8108ff942f24fcb5686badfaf7f9a8808566d5`, 4578 source rows, 1851 clean
+whitelist rows, 1851 unique images and 1851 retained rows.
 
-## Available stage modes
+## Short diagnostic modes
 
 1. `backward-no-commit`: initializes topology/model/rollout, checks all four forward boundaries,
    computes each DP16 group twice, requires full-array gradient equality, and commits no state.
 2. `one-update`: requires one fixed DP transaction per group and exactly one optimizer commit.
 3. `three-update`: requires commits and synchronized rollout weights at steps 1, 2, and 3.
-4. `full`: starts only after a separately reviewed promotion decision.
+4. `full`: the selected operator path for this campaign.
 
-The list above is an evidence ladder, not a requirement to reserve four
-separate slices. A resource-constrained convergence campaign may use one
-reviewed `full` manifest because the same topology, cross-role weight,
-pre-alignment, backward, optimizer-transaction, replica, IFRT, and W&B checks
-run inside its first update and continue running afterward. The checked-in
-production profile is currently strict: every finite A-B or B-C mismatch still
-stops before backward. A convergence-first run that must continue through a
-finite alignment residual therefore requires a separate, default-off,
-reviewed DeepSWE warning-only admission before rendering `full`; do not edit
-the resolved environment or rendered YAML by hand. Nonfinite values and every
-non-alignment gate remain hard failures in that mode.
+These short modes remain useful diagnostics but are not prerequisites for this
+campaign.  Do not queue one-update and three-update allocations before the
+reviewed full manifest.  The same topology, weight, alignment, backward,
+optimizer, replica, IFRT and W&B checks execute from update zero onward.
+
+## Durable trajectory and quality telemetry
+
+Every full-run batch writes, before backward:
+
+- `debug/batch-XXXXXX.trajectories.jsonl.gz`: 64 redacted raw trajectories,
+  including group/pair identity, Docker image identity, complete conversation
+  and tool observations, tokens/masks/old logprobs, status, reward and
+  advantage;
+- `debug/batch_metrics.jsonl`: solve ratio plus all-solved, all-failed, mixed,
+  incomplete and effective prompt-group counts; and
+- `debug/run_manifest.json`: exact source, model, topology, dataset, whitelist
+  and schema identity.
+
+`effective_prompt_groups == 0` and a finite zero gradient are quality
+warnings.  They do not trigger resampling, signal injection or skip-commit.
+Artifact write failure is fatal.  The same metrics are sent to online W&B
+under `deepswe/*`.
+
+During the run, inspect without mutating artifacts:
+
+```bash
+jq -c '{step,trajectory_solve_ratio,all_solved_prompt_groups,all_failed_prompt_groups,mixed_prompt_groups,incomplete_prompt_groups,effective_prompt_groups,status_histogram}' \
+  "$RUN_ROOT/debug/batch_metrics.jsonl"
+gzip -cd "$RUN_ROOT/debug/batch-000000.trajectories.jsonl.gz" | head -n 1 | jq .
+```
 
 The first stage combines P34.5 forward evidence and P34.6 backward evidence in one allocation.
 Raw forward markers remain useful if backward fails, but the stage classifier does not report PASS
@@ -137,9 +166,10 @@ unless the entire backward-no-commit contract completes.
   Under DP16 these become exactly 64 global requests and one global M4096 token bucket.
 - FSDP, TIS, sampler importance correction, prefix caching, runtime dependency installation, and
   floating source/image/whitelist inputs are rejected.
-- `CANON_PRE_ALIGN_GATE=1` is mandatory. Every update must flush exactly one
-  passing A-B/B-C record before backward. A red record stops before gradient
-  computation and optimizer commit.
+- `CANON_PRE_ALIGN_GATE=1` is mandatory. Every update flushes exactly one
+  A-B/B-C record before backward. Finite residuals produce
+  `PASS_WITH_ALIGNMENT_WARNINGS` and continue; invalid shapes, empty action
+  sets and nonfinite values stop before gradient computation.
 - A missing evidence row is `INCONCLUSIVE`, never PASS.
 - Before every A/B/C comparison, all mapped trainer-anchor leaves must be
   bitwise equal to the live rollout-engine leaves. The run emits and persists
@@ -167,7 +197,7 @@ bash canon-zero-tim/tests/p34_deepswe/run_exact_image.sh
 The required terminal marker is:
 
 ```text
-P34_EXACT_IMAGE_CPU_PASS unit_cases=55 pallas_cases=2 contract_cases=5 scheduler_cases=1 overlay=qwen32b
+P34_EXACT_IMAGE_CPU_PASS unit_cases=55 alignment_cases=3 pallas_cases=2 contract_cases=5 scheduler_cases=1 overlay=qwen32b
 ```
 
 ## Rollback

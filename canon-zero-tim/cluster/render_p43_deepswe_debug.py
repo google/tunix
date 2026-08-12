@@ -44,7 +44,6 @@ def _debug_command(
       "--rollout_mesh_dp=16": "--rollout_mesh_dp=4",
       "--train_mesh_dp=16": "--train_mesh_dp=4",
       "--max_concurrency=64": "--max_concurrency=16",
-      "--optimizer_offload=True": "--optimizer_offload=False",
   }
   for old, new in replacements.items():
     if args.count(old) != 1:
@@ -261,7 +260,7 @@ def validate(
       "--max_response_length=4096",
       "--max_turns=5",
       "--max_concurrency=16",
-      "--optimizer_offload=False",
+      "--no-optimizer-offload",
       f"--max_steps={_STAGE_STEPS[stage]}",
   )
   if any(value not in env["CANON_RUN_CMD"] for value in required_args):

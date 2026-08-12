@@ -19,6 +19,18 @@ _DIGEST_IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
 _RUN_ID = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,14}[a-z0-9])?")
 DEFAULT_SOURCE_BRANCH = "yuxzhang/canon-zero-tim"
 _PRIORITY_CLASS = "very-high"
+P34_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+P34_DATASET_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
+P34_DATASET_SPLIT = "train"
+P34_DATASET_ROWS = 4578
+P34_CLEAN_WHITELIST = (
+    "clean_data/final_filter_result/"
+    "task_report_good_qwen3_128_retry_20260713_090141.jsonl"
+)
+P34_CLEAN_WHITELIST_SHA256 = (
+    "2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7"
+)
+P34_CLEAN_ROWS = 1851
 _STAGE_STEPS = {
     "backward-no-commit": 1,
     "one-update": 1,
@@ -127,7 +139,7 @@ def _replace_arg(args: list[str], prefix: str, value: str) -> None:
 
 def _command(stage: str, *, run_root: str, whitelist: str) -> tuple[str, ...]:
   steps = _STAGE_STEPS[stage]
-  return (
+  command = (
       "python3",
       "-u",
       "examples/deepswe/canonical_entrypoint.py",
@@ -177,13 +189,20 @@ def _command(stage: str, *, run_root: str, whitelist: str) -> tuple[str, ...]:
       "--max_num_batched_tokens=256",
       "--max_concurrency=64",
       "--vllm_utilization=0.6",
-      "--optimizer_offload=True",
+      "--no-optimizer-offload",
+      f"--dataset_name={P34_DATASET_NAME}",
+      f"--dataset_revision={P34_DATASET_REVISION}",
+      f"--dataset_split={P34_DATASET_SPLIT}",
+      f"--expected_source_rows={P34_DATASET_ROWS}",
       f"--gold_whitelist={whitelist}",
       f"--metric_logger_dir={run_root}/metrics",
       f"--ckpt_dir={run_root}/checkpoints",
       "--save_interval_steps=8",
       "--max_to_keep=8",
   )
+  if stage == "full":
+    command += (f"--expected_filtered_rows={P34_CLEAN_ROWS}",)
+  return command
 
 
 def render(
@@ -211,6 +230,14 @@ def render(
     raise ValueError("run_id must be a 1-16 character lowercase DNS component")
   if stage not in _STAGE_STEPS:
     raise ValueError(f"unknown P34 stage: {stage!r}")
+  if stage == "full" and (
+      whitelist != P34_CLEAN_WHITELIST
+      or whitelist_sha256 != P34_CLEAN_WHITELIST_SHA256
+  ):
+    raise ValueError(
+        "P34 full training requires the reviewed 1851-image clean whitelist "
+        "path and SHA-256"
+    )
   if not source_branch or any(ch.isspace() for ch in source_branch):
     raise ValueError("source_branch must be a nonempty ref without whitespace")
   for label, value in (
@@ -283,8 +310,20 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": no_commit,
+      "CANON_P34_TRAJECTORY_CAPTURE": "1" if stage == "full" else "0",
+      "CANON_P34_DEBUG_DIR": f"{run_root}/debug",
       "CANON_P34_WHITELIST": whitelist,
       "CANON_P34_WHITELIST_SHA256": whitelist_sha256,
+      "CANON_P34_DATASET_NAME": P34_DATASET_NAME,
+      "CANON_P34_DATASET_REVISION": P34_DATASET_REVISION,
+      "CANON_P34_DATASET_SPLIT": P34_DATASET_SPLIT,
+      "CANON_P34_DATASET_ROWS": str(P34_DATASET_ROWS),
+      "CANON_P34_CLEAN_ROWS": (
+          str(P34_CLEAN_ROWS) if stage == "full" else "0"
+      ),
+      "CANON_OPT_STATE_RESIDENT": "1",
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if stage == "full" else "0",
       "CANON_RUN_CMD": shlex.join(_command(stage, run_root=run_root, whitelist=whitelist)),
       "CANON_RUN_LOG": f"{run_root}/run.log",
       "CANON_PRE_ALIGN_GATE": "1",
@@ -373,6 +412,15 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
       "CANON_LOGPROB_M": "256",
       "CANON_VJP2_MAX_SEQS": "1",
       "CANON_PRE_ALIGN_GATE": "1",
+      "CANON_P34_TRAJECTORY_CAPTURE": "1" if stage == "full" else "0",
+      "CANON_OPT_STATE_RESIDENT": "1",
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if stage == "full" else "0",
+      "CANON_P34_DATASET_NAME": P34_DATASET_NAME,
+      "CANON_P34_DATASET_REVISION": P34_DATASET_REVISION,
+      "CANON_P34_DATASET_SPLIT": P34_DATASET_SPLIT,
+      "CANON_P34_DATASET_ROWS": str(P34_DATASET_ROWS),
+      "CANON_P34_CLEAN_ROWS": str(P34_CLEAN_ROWS) if stage == "full" else "0",
   }
   wrong = {key: env.get(key) for key, value in expected.items() if env.get(key) != value}
   if wrong:
@@ -406,6 +454,11 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
       "--b2=0.99",
       "--weight_decay=0.01",
       "--max_grad_norm=1.0",
+      "--no-optimizer-offload",
+      f"--dataset_name={P34_DATASET_NAME}",
+      f"--dataset_revision={P34_DATASET_REVISION}",
+      f"--dataset_split={P34_DATASET_SPLIT}",
+      f"--expected_source_rows={P34_DATASET_ROWS}",
   )
   if any(item not in command for item in required):
     raise ValueError("P34 command lost a signed CLI field")
@@ -419,6 +472,13 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
     raise ValueError("P34 weight attestation report path is missing")
   if not _SHA256.fullmatch(env.get("CANON_P34_WHITELIST_SHA256", "")):
     raise ValueError("P34 whitelist digest is missing or malformed")
+  if "--optimizer-offload" in command or "--optimizer_offload" in command:
+    raise ValueError("P34 command enabled optimizer host offload")
+  if stage == "full":
+    if f"--expected_filtered_rows={P34_CLEAN_ROWS}" not in command:
+      raise ValueError("P34 full command lost the clean-data row contract")
+    if not env.get("CANON_P34_DEBUG_DIR", "").endswith("/debug"):
+      raise ValueError("P34 full trajectory artifact directory is missing")
 
 
 def main() -> None:

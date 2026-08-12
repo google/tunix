@@ -118,12 +118,26 @@ class RolloutOrchestrator:
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
     gid = group_key_fn(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
+    metadata = {"generation_id": pair_idx}
+    entry = getattr(env, "entry", None)
+    if isinstance(entry, dict):
+      identity_keys = (
+          "instance_id",
+          "docker_image",
+          "repo_name",
+          "commit_hash",
+      )
+      metadata["task_identity"] = {
+          key: copy.deepcopy(entry[key])
+          for key in identity_keys
+          if key in entry
+      }
     item = TrajectoryItem(
         pair_index=pair_idx,
         group_id=gid,
         start_step=start_step,
         traj=traj,
-        metadata={"generation_id": pair_idx},
+        metadata=metadata,
     )
     await manager.put(item)
     return 1

@@ -35,6 +35,9 @@ import numpy as np
 TRAJECTORY_SCHEMA = "canon.p43.deepswe.trajectory.v1"
 METRICS_SCHEMA = "canon.p43.deepswe.batch-metrics.v1"
 MANIFEST_SCHEMA = "canon.p43.deepswe.run-manifest.v1"
+P34_TRAJECTORY_SCHEMA = "canon.p34.deepswe.trajectory.v1"
+P34_METRICS_SCHEMA = "canon.p34.deepswe.batch-metrics.v1"
+P34_MANIFEST_SCHEMA = "canon.p34.deepswe.run-manifest.v1"
 P44_TRAJECTORY_SCHEMA = "canon.p44.deepswe.trajectory.v1"
 P44_METRICS_SCHEMA = "canon.p44.deepswe.batch-metrics.v1"
 P44_MANIFEST_SCHEMA = "canon.p44.deepswe.run-manifest.v1"
@@ -55,18 +58,23 @@ def _mode(values: Mapping[str, str]) -> str:
   p43 = values.get("CANON_P43_DEEPSWE_DEBUG", "0")
   p44 = values.get("CANON_P44_DEEPSWE_PARITY", "0")
   onehost = values.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0")
+  p34 = values.get("CANON_P34_TRAJECTORY_CAPTURE", "0")
   if p43 not in ("0", "1"):
     raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
   if p44 not in ("0", "1"):
     raise ValueError("CANON_P44_DEEPSWE_PARITY must be exactly 0 or 1")
   if onehost not in ("0", "1"):
     raise ValueError("CANON_DEEPSWE_ONEHOST_SMOKE must be exactly 0 or 1")
-  if sum(raw == "1" for raw in (p43, p44, onehost)) > 1:
+  if p34 not in ("0", "1"):
+    raise ValueError("CANON_P34_TRAJECTORY_CAPTURE must be exactly 0 or 1")
+  if sum(raw == "1" for raw in (p34, p43, p44, onehost)) > 1:
     raise ValueError(
-        "P43, P44, and one-host debug artifacts are mutually exclusive"
+        "P34, P43, P44, and one-host artifacts are mutually exclusive"
     )
   if onehost == "1":
     return "onehost"
+  if p34 == "1":
+    return "p34"
   return "p44" if p44 == "1" else "p43"
 
 
@@ -75,6 +83,7 @@ def enabled(values: Mapping[str, str] | None = None) -> bool:
   mode = _mode(environ)
   key = {
       "onehost": "CANON_DEEPSWE_ONEHOST_SMOKE",
+      "p34": "CANON_P34_TRAJECTORY_CAPTURE",
       "p44": "CANON_P44_DEEPSWE_PARITY",
       "p43": "CANON_P43_DEEPSWE_DEBUG",
   }[mode]
@@ -104,6 +113,7 @@ def artifact_directory(values: Mapping[str, str] | None = None) -> str:
   environ = os.environ if values is None else values
   key = {
       "onehost": "CANON_DEEPSWE_ONEHOST_DEBUG_DIR",
+      "p34": "CANON_P34_DEBUG_DIR",
       "p44": "CANON_P44_DEBUG_DIR",
       "p43": "CANON_P43_DEBUG_DIR",
   }[_mode(environ)]
@@ -112,6 +122,8 @@ def artifact_directory(values: Mapping[str, str] | None = None) -> str:
 
 def rollout_only(values: Mapping[str, str] | None = None) -> bool:
   environ = os.environ if values is None else values
+  if _mode(environ) == "p34":
+    return False
   key = {
       "onehost": "CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY",
       "p44": "CANON_P44_ROLLOUT_ONLY",
@@ -127,6 +139,7 @@ def marker_prefix(values: Mapping[str, str] | None = None) -> str:
   environ = os.environ if values is None else values
   return {
       "onehost": "DEEPSWE.ONEHOST",
+      "p34": "P34",
       "p44": "P44",
       "p43": "P43",
   }[_mode(environ)]
@@ -140,6 +153,8 @@ def _schemas(values: Mapping[str, str]) -> tuple[str, str, str]:
         ONEHOST_METRICS_SCHEMA,
         ONEHOST_MANIFEST_SCHEMA,
     )
+  if mode == "p34":
+    return P34_TRAJECTORY_SCHEMA, P34_METRICS_SCHEMA, P34_MANIFEST_SCHEMA
   if mode == "p44":
     return P44_TRAJECTORY_SCHEMA, P44_METRICS_SCHEMA, P44_MANIFEST_SCHEMA
   return TRAJECTORY_SCHEMA, METRICS_SCHEMA, MANIFEST_SCHEMA
@@ -262,6 +277,19 @@ def _manifest(
     max_turns = 2
     max_response_length = 512
     stage = values.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+  elif mode == "p34":
+    if model_id != "Qwen/Qwen3-32B":
+      raise ValueError("P34 production artifacts require Qwen/Qwen3-32B")
+    contract_name = "p34-production"
+    slice_topology = "4x8x8"
+    role_topology = {"dp": 16, "tp": 8, "devices": 128}
+    global_prompts = 8
+    generations = 8
+    max_turns = 50
+    max_response_length = 32768
+    stage = values.get("CANON_P34_RUN_STAGE", "")
+    if stage != "full":
+      raise ValueError("P34 production artifacts require the full stage")
   elif mode == "p44":
     topology = values.get("CANON_P44_TOPOLOGY", "")
     if topology == "64":
@@ -309,6 +337,12 @@ def _manifest(
       "max_turns": max_turns,
       "max_response_length": max_response_length,
       "dataset_seed": 42,
+      "dataset_name": values.get("CANON_P34_DATASET_NAME", ""),
+      "dataset_revision": values.get("CANON_P34_DATASET_REVISION", ""),
+      "dataset_split": values.get("CANON_P34_DATASET_SPLIT", ""),
+      "dataset_rows": values.get("CANON_P34_DATASET_ROWS", ""),
+      "clean_rows": values.get("CANON_P34_CLEAN_ROWS", ""),
+      "whitelist_sha256": values.get("CANON_P34_WHITELIST_SHA256", ""),
       "artifact_directory": str(output_dir),
   }
 
@@ -419,6 +453,9 @@ def persist_batch(
         "training_reward": training_reward,
         "advantage": advantage,
         "advantage_nonzero": advantage != 0.0,
+        "task_identity": _serializable(
+            getattr(item, "metadata", {}).get("task_identity", {})
+        ),
         "trajectory": trajectory,
     }
     records.append(record)
@@ -448,7 +485,7 @@ def persist_batch(
     solved_count = sum(record["solved"] for record in group)
     if complete_count != expected_generations:
       category = "incomplete"
-    elif solved_count == 4:
+    elif solved_count == expected_generations:
       category = "all_solved"
     elif solved_count == 0:
       category = "all_failed"

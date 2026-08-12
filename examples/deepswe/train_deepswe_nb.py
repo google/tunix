@@ -57,6 +57,11 @@ parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--model_version", type=str, default="Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--dataset_path", type=str, default=None)
+parser.add_argument("--dataset_name", type=str, default=None)
+parser.add_argument("--dataset_revision", type=str, default=None)
+parser.add_argument("--dataset_split", type=str, default="train")
+parser.add_argument("--expected_source_rows", type=int, default=None)
+parser.add_argument("--expected_filtered_rows", type=int, default=None)
 
 parser.add_argument("--tpu_topology", type=str, default=None)
 
@@ -117,10 +122,12 @@ parser.add_argument("--weight_decay", type=float, default=0.01)
 parser.add_argument("--max_grad_norm", type=float, default=1)
 parser.add_argument(
     "--optimizer_offload",
-    type=bool,
+    "--optimizer-offload",
+    dest="optimizer_offload",
+    action=argparse.BooleanOptionalAction,
     default=False,
     help="Whether to offload optimizer states to CPU (pinned host memory).",
-)  # not supported yet
+)
 
 
 # Checkpointing
@@ -619,6 +626,8 @@ P34_DEEPSWE = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
 if P34_DEEPSWE:
   deepswe_contract.validate_environment(os.environ)
   p34 = deepswe_contract.active_workload(os.environ)
+  p34_stage = os.environ.get("CANON_P34_RUN_STAGE", "")
+  p34_full = p34.contract_name == "p34-production" and p34_stage == "full"
   expected_model_version = p34.model_id.removeprefix("Qwen/")
   exact = {
       "model_version": MODEL_VERSION in (
@@ -671,6 +680,19 @@ if P34_DEEPSWE:
       "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
       "top_k": TOP_K in (None, 0, -1),
       "top_p": TOP_P in (None, 1.0),
+      "optimizer_device_resident": OPTIMIZER_OFFLOAD is False,
+      "dataset_name": args.dataset_name == "R2E-Gym/R2E-Gym-Subset",
+      "dataset_revision": (
+          args.dataset_revision
+          == "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
+      ),
+      "dataset_split": args.dataset_split == "train",
+      "dataset_source_rows": args.expected_source_rows == 4578,
+      "clean_filtered_rows": (
+          args.expected_filtered_rows == 1851
+          if p34_full
+          else args.expected_filtered_rows is None
+      ),
       "rollout_max_num_seqs": (
           VLLM_MAX_NUM_SEQS == p34.max_num_seqs_per_dp
       ),
@@ -770,17 +792,36 @@ print("Loading Dataset...")
 if args.dataset_path:
   dataset = datasets_lib.load_from_disk(args.dataset_path)
   if isinstance(dataset, datasets_lib.DatasetDict):
-    dataset = dataset["train"]
+    dataset = dataset[args.dataset_split]
+  dataset_name = os.path.abspath(args.dataset_path)
 else:
+  dataset_name = args.dataset_name or (
+      "R2E-Gym/R2E-Gym-V1"
+      if ONEHOST_SMOKE
+      else "R2E-Gym/R2E-Gym-Subset"
+  )
   dataset = datasets_lib.load_dataset(
-      (
-          "R2E-Gym/R2E-Gym-V1"
-          if ONEHOST_SMOKE
-          else "R2E-Gym/R2E-Gym-Subset"
-      ),
-      split="train",
+      dataset_name,
+      revision=args.dataset_revision,
+      split=args.dataset_split,
       cache_dir=DATASET_CACHE,
   )
+source_rows = len(dataset)
+source_fingerprint = str(getattr(dataset, "_fingerprint", ""))
+if args.expected_source_rows is not None and (
+    source_rows != args.expected_source_rows
+):
+  raise ValueError(
+      "DeepSWE source dataset row count changed: "
+      f"expected={args.expected_source_rows} actual={source_rows}"
+  )
+print(
+    "[P34.DATASET] SOURCE "
+    f"name={dataset_name} revision={args.dataset_revision or 'unversioned'} "
+    f"split={args.dataset_split} rows={source_rows} "
+    f"fingerprint={source_fingerprint or 'unavailable'}",
+    flush=True,
+)
 
 
 def transform(entry):
@@ -804,6 +845,7 @@ if args.gold_whitelist:
   if not os.path.isfile(whitelist_path):
     raise FileNotFoundError(f"gold whitelist not found: {whitelist_path}")
   gold_images = set()
+  whitelist_rows = 0
   with open(whitelist_path, "r", encoding="utf-8") as whitelist_file:
     for line_number, line in enumerate(whitelist_file, start=1):
       if not line.strip():
@@ -815,6 +857,18 @@ if args.gold_whitelist:
             f"gold whitelist row {line_number} lacks docker_image"
         )
       gold_images.add(image)
+      whitelist_rows += 1
+  if args.expected_filtered_rows is not None:
+    if whitelist_rows != args.expected_filtered_rows:
+      raise ValueError(
+          "clean whitelist row count changed: "
+          f"expected={args.expected_filtered_rows} actual={whitelist_rows}"
+      )
+    if len(gold_images) != args.expected_filtered_rows:
+      raise ValueError(
+          "clean whitelist docker_image values are not unique: "
+          f"expected={args.expected_filtered_rows} unique={len(gold_images)}"
+      )
   before = len(dataset)
   dataset = dataset.filter(
       lambda entry: entry.get("docker_image") in gold_images,
@@ -822,13 +876,27 @@ if args.gold_whitelist:
   )
   if len(dataset) == 0:
     raise ValueError(
-        "gold whitelist retained zero rows; dataset and whitelist differ"
+      "gold whitelist retained zero rows; dataset and whitelist differ"
+    )
+  if args.expected_filtered_rows is not None and (
+      len(dataset) != args.expected_filtered_rows
+  ):
+    raise ValueError(
+        "clean whitelist join count changed: "
+        f"expected={args.expected_filtered_rows} actual={len(dataset)}"
     )
   print(
       f"[P34.DATASET] GOLD_FILTER_PASS rows={before}->{len(dataset)} "
-      f"images={len(gold_images)}",
+      f"images={len(gold_images)} whitelist_rows={whitelist_rows}",
       flush=True,
   )
+  if args.expected_filtered_rows is not None:
+    print(
+        "[P34.DATASET] CLEAN_DATA_PASS "
+        f"source_rows={source_rows} filtered_rows={len(dataset)} "
+        f"whitelist_rows={whitelist_rows} unique_images={len(gold_images)}",
+        flush=True,
+    )
 
 if ONEHOST_SMOKE:
   target_image = os.environ.get("CANON_DEEPSWE_ONEHOST_TASK_IMAGE", "")

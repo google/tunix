@@ -133,3 +133,71 @@ change was performed.
 - Next: implement the production warning-only contract or deliberately choose
   strict `backward-no-commit`, then rerun exact-image validation at the final
   publication SHA.
+
+## 2026-08-12 UTC — P39.4: register the direct 32B full-training contract
+
+- Type: operator decision and implementation checkpoint
+- Source: clean worktree from `yuxzhang/canon-zero-tim` at
+  `4e4ca2891a01448f09428affd1eb2434bbd61657`; the existing dirty P43/P38
+  worktree and `main` were not modified.
+- Decision: use one 4x8x8 DP16xTP8-per-role `full` run directly.  Device
+  optimizer state is the default.  Separate one/three-update jobs are not
+  prerequisites.
+- Decision: pin the R2E-Gym subset revision and the checked-in 1851-image clean
+  whitelist; persist every real trajectory batch and solve/group metrics.
+- Decision: an all-zero-signal batch is recorded and committed normally; no
+  resampling, skip-commit or signal injection is admitted.
+- Decision: finite A-B and B-C mismatches are warning-only.  Nonfinite,
+  topology, exact-weight, replica, optimizer, artifact, OOM and IFRT failures
+  remain hard errors.
+- Result: phase registered; implementation and local gates are still pending.
+- Boundary: no cluster resource, model, rollout, backward, optimizer commit,
+  credential, commit or push was performed.
+
+## 2026-08-12 UTC — P39.4: complete local implementation and gates
+
+- Type: implementation and local evidence
+- Source: implementation began at
+  `4e4ca2891a01448f09428affd1eb2434bbd61657`, then fast-forwarded to
+  `a9432ad21af3fcf0ac87c74dfc9165eeaa136539`.  The intervening change touched
+  only `canon-zero-tim/debug_logs/README.md` and did not overlap DeepSWE.
+- Publication synchronization: before push, the operator branch advanced to
+  `4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd`.  The unpublished P39.4 commit
+  rebased cleanly; that commit touched only FrozenLake/P38 files outside this
+  change set.
+- Action: fixed the optimizer boolean CLI so the launch uses the unambiguous
+  `--no-optimizer-offload` form; P34 full, P39, P43 and P44 now all preserve
+  device-resident optimizer semantics without an automatic host fallback.
+- Action: pinned the subset dataset revision, source/filtered row counts and
+  exact 1851-image clean whitelist.  Added fail-closed per-batch compressed
+  trajectory and solve/group metrics capture before backward.
+- Action: corrected all-solved classification to use the configured eight
+  generations.  `effective_prompt_groups == 0` and finite zero gradients are
+  quality telemetry and do not resample, inject signal or skip the normal
+  optimizer transaction.
+- Action: admitted finite A-B, B-C and downstream alignment residuals as
+  convergence-only warnings for P34 `full`.  Nonfinite and structurally
+  invalid records remain hard failures.
+- Commands/results: `P34_STATIC_PASS suites=10`;
+  `P34_TRAJECTORY_CPU_PASS tests=5`; `P34_UPDATE_CPU_PASS tests=5`;
+  `P39_DEEPSWE_PILOT_CPU_PASS`; `P43_DEEPSWE_DEBUG_CPU_PASS`;
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`.
+- Exact image: `P34_EXACT_IMAGE_CPU_PASS unit_cases=55 alignment_cases=3
+  pallas_cases=2 contract_cases=5 scheduler_cases=1 overlay=qwen32b`.
+  A finite mismatch returned `PASS_WITH_ALIGNMENT_WARNINGS`; an injected NaN
+  in B-C returned `FAIL`.
+- Local render check: a non-launchable manifest using a dummy digest-pinned
+  image rendered with `P34_JOBSET_RENDER_PASS` at source `a9432ad2`; inspection
+  confirmed `full`, 1000 updates, device optimizer, production trajectory
+  capture, finite alignment warning-only, dataset revision pin and 1851-row
+  clean-data gate.  This manifest was written only to `/tmp` and must never be
+  applied.
+- Validation: changed Python files passed `py_compile`, shell entry points
+  passed `bash -n`, and `git diff --check` passed.
+- Boundary: the exact image had no `/dev/vfio` TPU device and ran Pallas in
+  interpret mode.  No 4x8x8 resource, Qwen3-32B model initialization, real
+  rollout, backward, optimizer commit, W&B run, credential, commit or push was
+  performed. Target status remains NOT RUN.
+- Publication decision: the operator subsequently authorized commit and push
+  to `yuxzhang/canon-zero-tim`.  The target run remains separately gated and
+  was not authorized by that publication decision.

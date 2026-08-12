@@ -131,14 +131,13 @@ launch production automatically. The 4x8x8 target returns to DP16xTP8 on each
 128-device role and must independently re-prove DP16 collectives, role meshes,
 replica equality, W&B, and Pathways health.
 
-The existing 256-chip profile remains pinned-host offload by default. Promote
-device-resident optimizer state only after the P39 margin is accepted in a
-separate review. If the 64-chip pilot OOMs or leaves less than 8 GiB, retain
-offload for the 256-chip run. Never compensate by changing precision, FSDP,
-loss, sampling, or TP8.
+P39.4 supersedes that older promotion rule for the current campaign: the
+256-chip full run starts device-resident without making this optional pilot a
+prerequisite. That direct run must measure its own HBM and DP16 behavior. A
+future host-offload attempt is a separate reviewed relaunch. Never compensate
+by changing precision, FSDP, loss, sampling, or TP8.
 
 ## Rollback
 
-Do not render or apply the P39 pilot. The existing P34 DP16xTP8/offload profile
-is unchanged. A resident failure rolls back only optimizer placement; preserve
-the failed manifest and all evidence.
+Do not render or apply the P39 pilot. The current P34 campaign is documented in
+`P34_DEEPSWE_RUNBOOK.md`; preserve any failed manifest and all evidence.

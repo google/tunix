@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
+import tempfile
+import types
 import unittest
 
 
@@ -15,6 +18,16 @@ if SPEC is None or SPEC.loader is None:
 classifier = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = classifier
 SPEC.loader.exec_module(classifier)
+
+ARTIFACT_SPEC = importlib.util.spec_from_file_location(
+    "p34_production_artifacts",
+    PATH.parents[3] / "tunix/rl/deepswe_debug.py",
+)
+if ARTIFACT_SPEC is None or ARTIFACT_SPEC.loader is None:
+  raise RuntimeError("cannot import DeepSWE artifact writer")
+artifacts = importlib.util.module_from_spec(ARTIFACT_SPEC)
+sys.modules[ARTIFACT_SPEC.name] = artifacts
+ARTIFACT_SPEC.loader.exec_module(artifacts)
 
 
 def _alignment():
@@ -91,6 +104,63 @@ def _log(updates: int):
 
 class ClassifierTest(unittest.TestCase):
 
+  def test_production_artifacts_accept_zero_signal_and_count_eight_of_eight(self):
+    trajectories = []
+    for index in range(64):
+      group, pair = divmod(index, 8)
+      trajectories.append(types.SimpleNamespace(
+          group_id=group,
+          pair_index=pair,
+          metadata={
+              "task_identity": {
+                  "instance_id": group,
+                  "docker_image": f"repo/image-{group}:latest",
+              }
+          },
+          traj={
+              "status": "SUCCEEDED",
+              "trajectory_reward": 1.0,
+              "conversation_text": [
+                  {"role": "user", "content": f"prompt-{group}"},
+                  {"role": "assistant", "content": f"answer-{pair}"},
+              ],
+          },
+      ))
+    values = {
+        "CANON_P34_TRAJECTORY_CAPTURE": "1",
+        "CANON_P43_DEEPSWE_DEBUG": "0",
+        "CANON_P44_DEEPSWE_PARITY": "0",
+        "CANON_DEEPSWE_ONEHOST_SMOKE": "0",
+        "CANON_P34_RUN_STAGE": "full",
+        "CANON_EXPECT_COMMIT": "1" * 40,
+        "CANON_SOURCE_BRANCH": "yuxzhang/canon-zero-tim",
+        "CANON_RUN_ID": "production-artifact",
+        "CANON_P34_DATASET_NAME": "R2E-Gym/R2E-Gym-Subset",
+        "CANON_P34_DATASET_REVISION": classifier._DATASET_REVISION,
+        "CANON_P34_DATASET_SPLIT": "train",
+        "CANON_P34_DATASET_ROWS": "4578",
+        "CANON_P34_CLEAN_ROWS": "1851",
+        "CANON_P34_WHITELIST_SHA256": classifier._WHITELIST_SHA256,
+    }
+    with tempfile.TemporaryDirectory() as text:
+      root = Path(text).resolve()
+      metrics = artifacts.persist_batch(
+          trajectories,
+          [1.0] * 64,
+          [0.0] * 64,
+          expected_step=0,
+          output_dir=root,
+          model_id="Qwen/Qwen3-32B",
+          values=values,
+      )
+      checks, rows = classifier._artifact_checks(root, expected_batches=1)
+      manifest = json.loads((root / "run_manifest.json").read_text())
+    self.assertTrue(all(checks.values()), checks)
+    self.assertEqual(manifest["schema"], artifacts.P34_MANIFEST_SCHEMA)
+    self.assertEqual(metrics["all_solved_prompt_groups"], 8)
+    self.assertEqual(metrics["effective_prompt_groups"], 0)
+    self.assertEqual(rows[0]["effective_prompt_groups"], 0)
+
   def test_three_update_positive(self):
     updates = [{
         "verdict": "PASS",
@@ -102,8 +172,9 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
-        "optimizer_memory_kinds_after": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
+        "optimizer_memory_kinds_after": ["device"],
         "train_steps_after": step,
     } for step in (1, 2, 3)]
     report = classifier.classify(
@@ -128,8 +199,9 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
-        "optimizer_memory_kinds_after": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
+        "optimizer_memory_kinds_after": ["device"],
         "train_steps_after": 1,
     }
     report = classifier.classify(
@@ -154,7 +226,8 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
     }
     report = classifier.classify(
         log_text=_log(0).replace("ATTEMPT 0", "ATTEMPT 1"),
@@ -177,8 +250,9 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
-        "optimizer_memory_kinds_after": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
+        "optimizer_memory_kinds_after": ["device"],
         "train_steps_after": 1,
     }
     log_text = _log(1).replace(
@@ -206,8 +280,9 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
-        "optimizer_memory_kinds_after": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
+        "optimizer_memory_kinds_after": ["device"],
         "train_steps_after": 1,
     }
     log_text = _log(1).replace("'num_reqs': 64", "'num_reqs': 1024")
@@ -233,7 +308,8 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
     }
     report = classifier.classify(
         log_text=_log(0),
@@ -261,7 +337,8 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
     }
     report = classifier.classify(
         log_text=_log(0),
@@ -288,7 +365,8 @@ class ClassifierTest(unittest.TestCase):
         "dp_reduction_transactions": 4,
         "dp_reduction_rounds_per_transaction": 8,
         "dp_rank_pullbacks_per_transaction": 16,
-        "optimizer_memory_kinds_before": ["pinned_host"],
+        "optimizer_placement": "device-resident",
+        "optimizer_memory_kinds_before": ["device"],
     }
     report = classifier.classify(
         log_text=_log(0),

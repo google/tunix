@@ -33,6 +33,8 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
       report_keys+=(CANON_P44_DEBUG_DIR)
     elif [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
       report_keys+=(CANON_P43_DEBUG_DIR)
+    elif [ "${CANON_P34_TRAJECTORY_CAPTURE:-0}" = "1" ]; then
+      report_keys+=(CANON_P34_DEBUG_DIR)
     fi
   fi
   if [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
@@ -393,6 +395,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
         --stage "$CANON_P34_RUN_STAGE" \
         --run-log "$LOG" \
+        --debug-dir "$CANON_P34_DEBUG_DIR" \
         --weight-report "$CANON_P34_WEIGHT_REPORT" \
         --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
         --update-report "$CANON_UPDATE_REPORT" \

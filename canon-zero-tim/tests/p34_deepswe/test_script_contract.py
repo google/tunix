@@ -24,6 +24,33 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     self.assertIn('"enable_prefix_caching": not P34_DEEPSWE', text)
     self.assertIn("scheduler_per_dp={p34.max_num_seqs_per_dp}/", text)
 
+  def test_optimizer_cli_cannot_parse_false_as_true(self):
+    text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
+    start = text.index('"--optimizer_offload"')
+    end = text.index("# Checkpointing", start)
+    block = text[start:end]
+    self.assertIn("argparse.BooleanOptionalAction", block)
+    self.assertIn('"--optimizer-offload"', block)
+    self.assertNotIn("type=bool", block)
+
+  def test_full_capture_runs_before_rollout_only_or_backward(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
+    ).read_text()
+    consumer = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text()
+    self.assertIn('"p34-production"', learner)
+    self.assertIn("deepswe_debug.persist_batch(", learner)
+    self.assertLess(
+        learner.index("deepswe_debug.persist_batch("),
+        learner.index("policy_versions = np.array("),
+    )
+    self.assertLess(
+        consumer.index("deepswe_debug.rollout_only()"),
+        consumer.index("self._run_p28_g6_update("),
+    )
+
   def test_p34_uses_dp_axes_and_replicated_parameters(self):
     text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
     self.assertIn(

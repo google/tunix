@@ -154,11 +154,39 @@ class RenderP34JobSetTest(unittest.TestCase):
         "--b2=0.99",
         "--weight_decay=0.01",
         "--max_grad_norm=1.0",
+        "--no-optimizer-offload",
+        "--dataset_name=R2E-Gym/R2E-Gym-Subset",
+        "--dataset_revision=2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+        "--dataset_split=train",
+        "--expected_source_rows=4578",
     ):
       self.assertIn(value, command)
     self.assertNotIn("--rollout_vllm_max_num_seqs=64", command)
     self.assertNotIn("--max_num_batched_tokens=8192", command)
+    self.assertNotIn("--optimizer_offload", command)
+    self.assertNotIn("--optimizer-offload", command)
     self.assertNotIn("fsdp", command)
+
+  def test_full_stage_pins_clean_data_capture_and_warning_policy(self):
+    document = _render(
+        stage="full",
+        whitelist=renderer.P34_CLEAN_WHITELIST,
+        whitelist_sha256=renderer.P34_CLEAN_WHITELIST_SHA256,
+    )
+    env = renderer._env(document)
+    command = env["CANON_RUN_CMD"]
+    self.assertEqual(env["CANON_P34_TRAJECTORY_CAPTURE"], "1")
+    self.assertEqual(env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"], "1")
+    self.assertEqual(env["CANON_OPT_STATE_RESIDENT"], "1")
+    self.assertEqual(env["CANON_P30_OPT_STATE_OFFLOAD"], "0")
+    self.assertEqual(env["CANON_P34_CLEAN_ROWS"], "1851")
+    self.assertTrue(env["CANON_P34_DEBUG_DIR"].endswith("/debug"))
+    self.assertIn("--max_steps=1000", command)
+    self.assertIn("--expected_filtered_rows=1851", command)
+
+  def test_full_stage_rejects_any_other_whitelist(self):
+    with self.assertRaisesRegex(ValueError, "1851-image clean whitelist"):
+      _render(stage="full")
 
   def test_secret_refs_and_pvc_survive_render(self):
     document = _render()

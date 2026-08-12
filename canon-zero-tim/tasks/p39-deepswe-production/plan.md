@@ -4,10 +4,17 @@
 
 Turn the additive P34 Qwen3-32B DeepSWE package into a reviewable production
 candidate without changing precision, loss, sampling, gradient, optimizer, or
-credential semantics. The first target remains a fail-closed Attempt 0. A full
-training run is not a numerical probe.
+credential semantics. The first target remains an attempt-zero full training
+run. Finite alignment residuals are convergence telemetry; every structural,
+nonfinite, optimizer, replica and infrastructure contract remains fail-closed.
 
 ## Sources
+
+- Current P39.4 operator-branch base after non-overlapping synchronization:
+  `yuxzhang/canon-zero-tim` at
+  `4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd`. Implementation started from
+  `4e4ca2891a01448f09428affd1eb2434bbd61657`; the intervening operator commits
+  changed only FrozenLake/P38 files outside the P39.4 change set.
 
 - Production-candidate hardening base: `yuxzhang/canon-zero-tim` at
   `5ee6dbfb5601cf1d1f864ccf6859764ba1f321fe`. P39 was developed from
@@ -40,8 +47,13 @@ training run is not a numerical probe.
 | Evaluation cadence | 10; no eval dataset is supplied by this recipe |
 | Importance paths | rollout logprobs enabled; sampler IS and TIS disabled |
 | Prefix cache | disabled |
-| Optimizer state | pinned-host offload with device commit round trip |
+| Optimizer state | device-resident; host offload is an explicit relaunch fallback |
 | W&B | online and monotonic metrics required |
+| Dataset | `R2E-Gym/R2E-Gym-Subset` train at `2e8108ff942f24fcb5686badfaf7f9a8808566d5` |
+| Clean whitelist | 1851 unique images; SHA-256 `2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7` |
+| Trajectory capture | every batch, durable and fail-closed, with solve/group metrics |
+| Finite alignment residuals | warning-only for full convergence; nonfinite remains fatal |
+| Zero-signal batch | record and continue normal commit; never resample or inject signal |
 
 The older quality-fix launcher used FSDP-named axes and smaller defaults in
 some entry points. P39 does not copy those topology defaults. FSDP would add a
@@ -88,6 +100,11 @@ bucket remain rejected.
    margin gate; otherwise the 256-chip run retains pinned-host offload. The
    256-chip run must independently revalidate DP16 collective and replica
    behavior.
+10. Operator supersession on 2026-08-12: defer the optional capacity pilot and
+    launch one reviewed `full` production-topology manifest directly.  Default
+    to device-resident optimizer state, pin the clean dataset/whitelist, persist
+    every trajectory batch, and keep finite A-B/B-C residuals warning-only.
+    The short stages remain available but are not launch prerequisites.
 
 ## Rollback
 

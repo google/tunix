@@ -784,11 +784,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       else:
         workload = deepswe_contract.active_workload(os.environ)
         if workload.contract_name not in (
+            "p34-production",
             "p43-64chip-debug",
             "p44-qwen4b-parity-64",
             "p44-qwen4b-parity-256",
         ):
-          raise ValueError("DeepSWE debug artifacts require P43 or P44")
+          raise ValueError(
+              "DeepSWE artifacts require P34 production, P43, or P44"
+          )
         artifact_model_id = workload.model_id
       debug_metrics = deepswe_debug.persist_batch(
           trajectories,
