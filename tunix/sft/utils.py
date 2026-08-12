@@ -19,7 +19,7 @@ import contextlib
 import functools
 import gc
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from absl import logging
 from flax import nnx
@@ -229,4 +229,4 @@ class LossOutput:
   """
 
   primary_loss: WeightedMetric
-  aux_metrics: Dict[str, WeightedMetric]
+  aux_metrics: Mapping[str, WeightedMetric | jax.Array]

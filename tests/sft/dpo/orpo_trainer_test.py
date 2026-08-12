@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from tunix.sft import utils as sft_utils
 from tunix.sft.dpo import dpo_trainer as orpo_lib
 from tunix.tests import test_common as tc
 
@@ -279,8 +280,14 @@ class ORPOTrainerTest(parameterized.TestCase):
       self.assertIn("odds_ratio", aux)
 
       # Check that accuracy is between 0 and 1
-      self.assertGreaterEqual(aux["rewards/accuracy"].compute(), 0.0)
-      self.assertLessEqual(aux["rewards/accuracy"].compute(), 1.0)
+      accuracy = aux["rewards/accuracy"]
+      accuracy_val = (
+          accuracy.compute()
+          if isinstance(accuracy, sft_utils.WeightedMetric)
+          else accuracy
+      )
+      self.assertGreaterEqual(accuracy_val, 0.0)
+      self.assertLessEqual(accuracy_val, 1.0)
 
   def test_compute_logps_with_prompt_loss(self):
     """Test compute_logps directly to ensure correct slicing when enable_prompt_loss_orpo=True."""
@@ -385,7 +392,10 @@ class ORPOTrainerTest(parameterized.TestCase):
           enable_prompt_loss_orpo=True,
       )
       loss = out.primary_loss.compute()
-      aux = {k: v.compute() for k, v in out.aux_metrics.items()}
+      aux = {
+          k: v.compute() if isinstance(v, sft_utils.WeightedMetric) else v
+          for k, v in out.aux_metrics.items()
+      }
 
       # Assert against mathematically-verified golden values
       self.assertEqual(loss.shape, ())
@@ -442,7 +452,10 @@ class ORPOTrainerTest(parameterized.TestCase):
           average_log_prob_orpo=True,
       )
       loss = out.primary_loss.compute()
-      aux = {k: v.compute() for k, v in out.aux_metrics.items()}
+      aux = {
+          k: v.compute() if isinstance(v, sft_utils.WeightedMetric) else v
+          for k, v in out.aux_metrics.items()
+      }
 
       # Assert against mathematically-verified golden values
       self.assertEqual(loss.shape, ())
