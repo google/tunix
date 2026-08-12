@@ -42,6 +42,7 @@ from tunix.rl import deepswe_debug
 from tunix.rl import dp_workloads
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
+from tunix.rl import perf_log
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
@@ -983,6 +984,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     elapsed = time.perf_counter() - start
     hbm_after_commit = memory_snapshot()
     emit_sharding_inventory("after_commit")
+    opt_timing = commit_evidence.get("optimizer_timing") or {}
+    if perf_log.enabled() and opt_timing:
+      print(
+          "[PERF] stage=optimizer_transaction seconds=%.3f h2d=%.3f"
+          " adam=%.3f d2h=%.3f"
+          % (
+              float(opt_timing.get("optimizer_transaction_seconds", 0.0)),
+              float(opt_timing.get("optimizer_h2d_seconds", 0.0)),
+              float(opt_timing.get("adam_commit_seconds", 0.0)),
+              float(opt_timing.get("optimizer_d2h_seconds", 0.0)),
+          ),
+          flush=True,
+      )
+      self.rl_cluster.buffer_metrics_async(
+          {
+              f"perf/opt_{key}": (float(value), np.mean)
+              for key, value in opt_timing.items()
+              if isinstance(value, (int, float))
+          },
+          mode=rl_cluster_lib.Mode.TRAIN,
+          step=int(self.rl_cluster.global_steps),
+      )
     memory_profile_path = os.environ.get(
         "CANON_P30_MEMORY_PROFILE_PATH", ""
     )
@@ -2589,7 +2612,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self._rollout_sync_lock.acquire_weight_sync()
           try:
             logging.info("Sync lock acquired. Syncing weights.")
-            with self.rl_cluster.perf_v2.span(
+            with perf_log.phase(
+                "weight_sync",
+                step=int(self.rl_cluster.global_steps),
+                sink=lambda stage, seconds: self.rl_cluster.buffer_metrics_async(
+                    {f"perf/{stage}_seconds": (seconds, np.mean)},
+                    mode=rl_cluster_lib.Mode.TRAIN,
+                    step=int(self.rl_cluster.global_steps),
+                ),
+            ), self.rl_cluster.perf_v2.span(
                 perf_constants.WEIGHT_SYNC,
                 self.rl_cluster.perf_v2.all_devices,
                 tags={

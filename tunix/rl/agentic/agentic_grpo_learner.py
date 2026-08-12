@@ -46,6 +46,7 @@ from tunix.rl import deepswe_contract
 from tunix.rl import deepswe_debug
 from tunix.rl import envelope_probe
 from tunix.rl import function_registry
+from tunix.rl import perf_log
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
@@ -1089,23 +1090,37 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               "P34 requires exact rollout/trainer weights before A/B/C"
           ) from exc
       rescore_source = self.rl_cluster.rollout.get_prefill_rescore_logps
-      if envelope_probe.enabled():
-        s_prefill = self.rl_cluster.get_prefill_rescore_logps(
-            prompt_ids,
-            completion_ids,
-            completion_lengths=np.asarray(
-                raw_completion_lengths, dtype=np.int32
-            ),
-            diagnostic_arm="A",
+
+      def _perf_sink(stage, seconds):
+        self.rl_cluster.buffer_metrics_async(
+            {f"perf/{stage}_seconds": (seconds, np.mean)},
+            mode=rl_cluster_lib.Mode.TRAIN,
+            step=int(self.rl_cluster.global_steps),
         )
-      else:
-        s_prefill = self.rl_cluster.get_prefill_rescore_logps(
-            prompt_ids,
-            completion_ids,
-            completion_lengths=np.asarray(
-                raw_completion_lengths, dtype=np.int32
-            ),
-        )
+
+      with perf_log.phase(
+          "rescore_b",
+          step=int(self.rl_cluster.global_steps),
+          sink=_perf_sink,
+      ) as perf_info:
+        perf_info["rows"] = int(completion_ids.shape[0])
+        if envelope_probe.enabled():
+          s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+              prompt_ids,
+              completion_ids,
+              completion_lengths=np.asarray(
+                  raw_completion_lengths, dtype=np.int32
+              ),
+              diagnostic_arm="A",
+          )
+        else:
+          s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+              prompt_ids,
+              completion_ids,
+              completion_lengths=np.asarray(
+                  raw_completion_lengths, dtype=np.int32
+              ),
+          )
       rollout_config = self.rl_cluster.get_rollout_config(
           mode=rl_cluster_lib.Mode.TRAIN
       )

@@ -45,6 +45,7 @@ from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import common
+from tunix.rl import perf_log
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -974,11 +975,16 @@ class RLCluster:
       if trace_tags:
         perf_tags.update(trace_tags)
 
-      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
+      with perf_log.phase(
+          "rollout_generate"
+      ) as perf_info, self._perf.span(
+          "rollout", mesh.devices
+      ) as span, self._perf_v2.span(
           perf_constants.ROLLOUT,
           mesh.devices,
           tags=perf_tags,
       ) as span_v2:
+        perf_info["rows"] = len(string_prompts)
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
             for s in rl_utils.chunk_slices_by_size(
