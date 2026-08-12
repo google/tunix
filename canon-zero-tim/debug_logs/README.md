@@ -1216,6 +1216,10 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 3. **DP Rank-Local Gradient Fingerprint Distinctness Interception**:
    - `[P33.DP16] gradient_reducer_ready dp_axis=data dp_size=16`
    - `dp_training.py:L675` in `FixedDPRankGradientReducer.finalize()` asserted `require_distinct_fingerprints=True`.
-   - In the discrete 4x4 FrozenLake grid environment, identical trajectories across different DP ranks produced identical rank-local gradient fingerprints, triggering fail-closed interception `ValueError: DP rank-local gradient fingerprints are not distinct`.
+   - The compact rank-gradient signatures were not pairwise distinct, triggering fail-closed interception `ValueError: DP rank-local gradient fingerprints are not distinct`.
 
+4. **Post-Run Contract Finding**:
+   - Pairwise gradient-value uniqueness is not required by the fixed reduction. FrozenLake's binary reward plus RLOO can legitimately create duplicate zero-gradient contributions when all eight generations for a prompt have the same reward. The archived log does not contain the per-prompt reward inventory or signature list, so this mechanism explains why duplicates are valid but does not identify the exact duplicate ranks in `p42e2`.
+   - GSM8K previously passed because its observed rank signatures happened to be distinct; that workload-dependent property is not a valid production safety gate.
+   - The correction keeps rank cadence, exactly 16 contributions, the registered eight-round reduction tree, finite gradient health, and post-reduction replica equality fail-closed. It retains pairwise uniqueness only in synthetic admission probes and reports production signature multiplicity as evidence.
 

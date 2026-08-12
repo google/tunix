@@ -671,7 +671,8 @@ class FixedDPRankGradientReducer:
           'DP gradient reduction is missing rank contributions: '
           f'{self._next_rank} != {self._dp_size}'
       )
-    if self._require_distinct and len(set(self._fingerprints)) != self._dp_size:
+    unique_fingerprints = len(set(self._fingerprints))
+    if self._require_distinct and unique_fingerprints != self._dp_size:
       raise ValueError('DP rank-local gradient fingerprints are not distinct')
     reduced = self._reduce(self._staged)
     flags = np.asarray(jax.device_get(self._compare(reduced)), dtype=np.bool_)
@@ -685,9 +686,11 @@ class FixedDPRankGradientReducer:
         'dp_axis': self._dp_axis,
         'rank_contributions': self._next_rank,
         'rank_local_fingerprints': tuple(self._fingerprints),
-        'rank_local_fingerprints_distinct': (
-            len(set(self._fingerprints)) == self._dp_size
+        'rank_local_fingerprint_unique_count': unique_fingerprints,
+        'rank_local_fingerprint_duplicate_count': (
+            self._dp_size - unique_fingerprints
         ),
+        'rank_local_fingerprints_distinct': unique_fingerprints == self._dp_size,
         'reduction_transactions': 1,
         'reduction_rounds': fixed_dp_collective_count(self._dp_size),
         'replica_check_flags': int(flags.size),

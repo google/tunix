@@ -263,11 +263,57 @@ class DPTrainingTest(absltest.TestCase):
     )
     self.assertEqual(report['rank_contributions'], 16)
     self.assertLen(set(report['rank_local_fingerprints']), 16)
+    self.assertEqual(report['rank_local_fingerprint_unique_count'], 16)
+    self.assertEqual(report['rank_local_fingerprint_duplicate_count'], 0)
     self.assertTrue(report['rank_local_fingerprints_distinct'])
     self.assertEqual(report['reduction_transactions'], 1)
     self.assertEqual(report['reduction_rounds'], 8)
     self.assertEqual(report['replica_check_flags'], 16)
     self.assertTrue(report['post_reduction_replicas_exact'])
+
+  def test_rank_gradient_reducer_accepts_duplicate_production_gradients(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    template = jax.device_put(jnp.zeros((8,), jnp.float32), sharding)
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template,
+        dp_size=2,
+        dp_axis='data',
+        require_distinct_fingerprints=False,
+    )
+    reducer.begin()
+    for rank in range(2):
+      reducer.add(rank, template)
+    reduced, report = reducer.finalize()
+    np.testing.assert_array_equal(
+        np.asarray(reduced), np.zeros((8,), np.float32)
+    )
+    self.assertEqual(report['rank_contributions'], 2)
+    self.assertEqual(report['rank_local_fingerprint_unique_count'], 1)
+    self.assertEqual(report['rank_local_fingerprint_duplicate_count'], 1)
+    self.assertFalse(report['rank_local_fingerprints_distinct'])
+    self.assertTrue(report['post_reduction_replicas_exact'])
+
+  def test_rank_gradient_reducer_keeps_strict_probe_mode(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    template = jax.device_put(jnp.zeros((8,), jnp.float32), sharding)
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=2, dp_axis='data'
+    )
+    reducer.begin()
+    for rank in range(2):
+      reducer.add(rank, template)
+    with self.assertRaisesRegex(ValueError, 'fingerprints are not distinct'):
+      reducer.finalize()
 
   def test_rank_gradient_reducer_accepts_explicit_data_axis(self):
     if len(jax.devices()) < 4:

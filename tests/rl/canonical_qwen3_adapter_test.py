@@ -655,13 +655,23 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         reverse_group, adapter
     )
 
+    reducer_policies = []
+
     class FakeReducer:
 
-      def __init__(self, template, *, dp_size, dp_axis):
+      def __init__(
+          self,
+          template,
+          *,
+          dp_size,
+          dp_axis,
+          require_distinct_fingerprints,
+      ):
         del template
         self.dp_size = dp_size
         self.dp_axis = dp_axis
         self.values = []
+        reducer_policies.append(require_distinct_fingerprints)
 
       def begin(self):
         self.values = []
@@ -681,6 +691,8 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             "dp_axis": self.dp_axis,
             "rank_contributions": self.dp_size,
             "rank_local_fingerprints": fingerprints,
+            "rank_local_fingerprint_unique_count": self.dp_size,
+            "rank_local_fingerprint_duplicate_count": 0,
             "rank_local_fingerprints_distinct": True,
             "reduction_transactions": 1,
             "reduction_rounds": 8,
@@ -839,6 +851,11 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     self.assertEqual(result["dp_reduction_rounds_per_transaction"], 8)
     self.assertEqual(result["dp_axis"], "data")
     self.assertEqual(result["dp_rank_pullbacks_per_transaction"], 16)
+    self.assertEqual(reducer_policies, [False])
+    self.assertEqual(
+        result["rank_local_gradient_fingerprint_unique_counts"],
+        (16,) * 16,
+    )
     self.assertTrue(result["gradient_deterministic_repeat"])
     self.assertTrue(all(
         report["deterministic_repeat_exact"]

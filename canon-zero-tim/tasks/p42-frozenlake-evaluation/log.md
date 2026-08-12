@@ -44,3 +44,35 @@
   is `0/1/0`; do not delete the shared learner evaluation path.
 - Next: Publish after approval, rerun the gate at the publication SHA, then
   execute the target runbook.
+
+## 2026-08-12 UTC — P42.2b: diagnose target failure and correct the signature contract
+
+- Type: target diagnosis, implementation, and local evidence
+- Fact: Archived attempt `p42e2` completed the 800-trajectory step-0
+  evaluation and reported `local_M=256 global_M=4096`, proving the previous
+  geometry fix. It then failed at the first reducer `finalize()` call with
+  `DP rank-local gradient fingerprints are not distinct`, before fixed
+  reduction or optimizer commit.
+- Finding: the reducer conflated a synthetic observability property with a
+  production invariant. Equal rank gradients are legal, and binary-reward
+  RLOO can produce exact zero contributions for homogeneous prompt groups.
+  The five-float compact signature can also collide for different trees.
+- Action: retained strict uniqueness as the reducer default for synthetic
+  admission probes, but explicitly disabled it in the production segmented
+  adapter. Added signature multiplicity reporting while preserving rank
+  cadence, contribution count, fixed tree, finite-gradient, and replica-exact
+  gates.
+- Command: pinned-image reducer suite with 64 forced CPU devices.
+- Result: PASS, 19/19.
+- Command: pinned-image canonical adapter suite with 64 forced CPU devices.
+- Result: PASS, 36/36.
+- Command: `bash canon-zero-tim/tests/p33_workloads/run_cpu.sh` in the pinned
+  image.
+- Result: PASS; terminal marker `[P33.WORKLOAD] CPU_GATE PASS workloads=2
+  p35_postflight=1 p35_stage_probe=1`.
+- Boundary: no target reduction or optimizer commit has succeeded with this
+  fix. Publication and a separately approved 64-chip retry remain pending.
+- Rollback: remove the production `require_distinct_fingerprints=False`
+  selection; strict probe behavior itself was never changed.
+- Next: publish after approval, rerun the pinned gate at the published SHA,
+  and retry the evaluation-enabled manifest through the P42 runbook.

@@ -3579,6 +3579,12 @@ class Qwen3EngineForwardAdapter:
               rank_gradient,
               dp_size=contract.dp_size,
               dp_axis=self._dp_axis,
+              # Production rewards can legitimately produce identical rank
+              # gradients. In particular, RLOO gives every generation an
+              # exact zero advantage when all generations for one prompt have
+              # the same reward. Cadence, contribution count, fixed reduction
+              # order, and post-reduction replica equality remain hard gates.
+              require_distinct_fingerprints=False,
           )
           print(
               f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] "
@@ -3658,6 +3664,9 @@ class Qwen3EngineForwardAdapter:
           f"group={index + 1}/{contract.local_trajectories} "
           f"rows={reverse_groups[index]} "
           f"rank_pullbacks={report['dp_reduction']['rank_contributions']} "
+          "unique_rank_fingerprints="
+          f"{report['dp_reduction']['rank_local_fingerprint_unique_count']}/"
+          f"{contract.dp_size} "
           f"reduction_rounds={report['dp_reduction']['reduction_rounds']} "
           "replicas_exact="
           f"{int(report['dp_reduction']['post_reduction_replicas_exact'])} "
@@ -3715,6 +3724,10 @@ class Qwen3EngineForwardAdapter:
         "dp_axis": self._dp_axis,
         "rank_local_gradient_fingerprints": tuple(
             report["dp_reduction"]["rank_local_fingerprints"]
+            for report in reports
+        ),
+        "rank_local_gradient_fingerprint_unique_counts": tuple(
+            report["dp_reduction"]["rank_local_fingerprint_unique_count"]
             for report in reports
         ),
         "replica_equality": all(
