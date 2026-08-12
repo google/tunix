@@ -25,7 +25,7 @@ zero-TIM equivalence between allocations.
   `e4ead609498771987c011a9cbc16fec7e4b17f69`. It archives `p44r04` but does
   not itself contain the SwiGLU feature-padding repair.
 - P44.9 SwiGLU feature-padding implementation commit:
-  `1a058b46f606161307c5051884968ad3b9ea5f70`.
+  `1a058b461496e039a3857c094b109b794027783a`.
 - Exact execution source: resolve the current remote head with
   `git ls-remote origin refs/heads/yuxzhang/canon-zero-tim`, detach at that
   exact SHA, require that it contains both the P44.7 repair above and the

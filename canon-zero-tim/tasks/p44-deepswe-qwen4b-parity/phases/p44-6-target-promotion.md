@@ -7,7 +7,7 @@
 - Exact remote head of `origin/yuxzhang/canon-zero-tim` containing repair
   implementation commit `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`
   and P44.9 SwiGLU feature-padding implementation commit
-  `1a058b46f606161307c5051884968ad3b9ea5f70` recorded in `../HANDOFF.md`.
+  `1a058b461496e039a3857c094b109b794027783a` recorded in `../HANDOFF.md`.
   Baseline `e4ead609` does not satisfy this input.
 - One exact 64-device `4x4x4` slice or 256-device `4x8x8` slice.
 - Registry-digest client image, existing Qwen3-4B checkpoint, pinned R2E-Gym,

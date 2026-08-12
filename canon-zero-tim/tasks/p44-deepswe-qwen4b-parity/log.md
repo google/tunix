@@ -192,7 +192,7 @@
   main remains forbidden.
 - Action: Staged only the 27 P44.9 engine, model-contract, manifest, test,
   runbook, archive-interpretation, and phase-ledger files and created
-  implementation commit `1a058b46f606161307c5051884968ad3b9ea5f70` with
+  implementation commit `1a058b461496e039a3857c094b109b794027783a` with
   subject `deepswe: pad model-pinned SwiGLU features`.
 - Result: The implementation commit is based on exact operator revision
   `e4ead609498771987c011a9cbc16fec7e4b17f69`; the remote branch was fetched
@@ -206,3 +206,22 @@
   on the operator branch; do not rewrite history or touch main.
 - Next: Commit this publication metadata, push both commits only to
   `origin/yuxzhang/canon-zero-tim`, and read back the exact remote head.
+
+## 2026-08-12T02:56:29Z — P44.9: correct the implementation anchor expansion
+
+- Type: publication metadata correction
+- Fact: Push of implementation `1a058b46` and metadata `01e0f1c4` succeeded,
+  and remote read-back returned
+  `01e0f1c4f279d90b2805d0fc46716010f69e3bfc`. A subsequent ancestry check
+  exposed that the handoff had expanded the valid short implementation SHA to
+  an incorrect 40-character value.
+- Action: Read the object id directly with `git rev-parse 1a058b46`, corrected
+  every full-SHA occurrence to
+  `1a058b461496e039a3857c094b109b794027783a`, and marked P44.9 published.
+- Result: The implementation object and code are unchanged; this correction
+  repairs only the operator-facing provenance metadata.
+- Boundary: No force push, history rewrite, main-branch action, cloud action,
+  or target launch occurred.
+- Next: Commit and push this correction to the same operator branch, read back
+  its exact head, and require the launch agent to verify ancestry from the
+  corrected implementation anchor.
