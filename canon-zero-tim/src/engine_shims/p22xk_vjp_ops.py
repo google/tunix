@@ -7,9 +7,9 @@ from p22xk_contract import preflight
 
 
 def canonical_matmul(x, y):
-    """Pure-JAX replica of fixed BK=256, f32-accumulate, bf16-output matmul."""
+    """Pure-JAX replica of the model-pinned BK accumulation order."""
     import jax.numpy as jnp
-    from p22_pallas_matmul import BK
+    from p22xf_contract import BK
 
     if x.ndim != 2 or y.ndim != 2 or int(x.shape[1]) != int(y.shape[0]):
         raise ValueError(f"P22.XK matmul shapes invalid: {x.shape}, {y.shape}")
@@ -105,4 +105,3 @@ def rmsnorm(x, weight, *, epsilon: float, forward):
 
     op.defvjp(fwd, bwd)
     return op(x, weight)
-

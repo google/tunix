@@ -25,6 +25,7 @@ their manifests, artifacts, or promotion claims:
 | P38 GSM8K/FrozenLake alignment | `tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md` | 64-chip Pathways |
 | P39 Qwen3-32B DeepSWE | `tasks/p39-deepswe-production/HANDOFF.md` | one 4x8x8 (256-device) Pathways slice |
 | P43 Qwen3-8B DeepSWE debug | `tasks/p43-deepswe-64-debug/HANDOFF.md` | one 4x4x4 (64-device) Pathways slice |
+| P44 Qwen3-4B DeepSWE parity debug | `tasks/p44-deepswe-qwen4b-parity/HANDOFF.md` | one 4x4x4 (64-device) or one 4x8x8 (256-device) Pathways slice |
 
 The DeepSWE workload behavior is referenced from
 `yuxzhang/deepswe-quality-fix@023978b976dd6d94e7a42948c3f3a68e34d73744`,
@@ -55,6 +56,7 @@ but every target JobSet must fetch an exact published commit from
 | P35 three-arm envelope discriminator | **MULTI-CHUNK REPAIR PUBLISHED; TARGET NOT RUN** — r24 confirmed the response-256 Splash repair but exposed a diagnostic-only one-chunk assumption before B. The repaired producer reconstructs complete multi-chunk B metadata; no 64-chip carrier verdict exists yet. |
 | P34 Qwen3-32B DeepSWE DP16×TP8 per role | **LOCAL PASS, TARGET NOT RUN** — role split, canonical M256 adapter, fixed DP16 reducer, renderer and classifier exist; no 4×8×8 workload artifact. |
 | P43 Qwen3-8B DeepSWE DP4×TP8 per role | **LOCAL + EXACT-IMAGE CPU PASS, TARGET NOT RUN** — rollout-only/one/three-update renderers, durable real-trajectory artifacts, grouped solve metrics, and a fail-closed classifier exist; no 4×4×4 workload artifact yet. |
+| P44 Qwen3-4B DeepSWE DP4×TP8 or DP16×TP8 per role | **LOCAL + EXACT-IMAGE CPU PASS, TARGET NOT RUN** — one shared functional recipe renders for 64 and 256 devices with durable trajectories, grouped solve metrics, and a topology-aware fail-closed classifier; neither target ladder has run. |
 
 **Do not spend another 64-chip run repeating the bounded P32 admission.** Its model-init,
 backward and three-update systems gates have already passed, but they used a dense synthetic

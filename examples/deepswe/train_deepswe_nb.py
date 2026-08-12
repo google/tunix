@@ -908,10 +908,7 @@ train_shape = tuple(d for _, d in train_dims)
 if P34_DEEPSWE:
   split_roles = (
       deepswe_contract.split_4x4x4_role_devices
-      if p34.contract_name in (
-          "p39-64chip-pilot",
-          "p43-64chip-debug",
-      )
+      if p34.devices_per_role == 32
       else deepswe_contract.split_4x8x8_role_devices
   )
   rollout_role, trainer_role, placement_report = split_roles(devices)

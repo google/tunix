@@ -218,17 +218,18 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     p34_stage = os.environ.get("CANON_P34_RUN_STAGE", "")
     p39_pilot = os.environ.get("CANON_P39_64CHIP_PILOT", "") == "1"
     p43_debug = os.environ.get("CANON_P43_DEEPSWE_DEBUG", "") == "1"
+    p44_parity = os.environ.get("CANON_P44_DEEPSWE_PARITY", "") == "1"
     admitted = (
         os.environ.get("CANON_P34_DEEPSWE", "") == "1"
-        and p39_pilot != p43_debug
+        and sum((p39_pilot, p43_debug, p44_parity)) == 1
         and p34_stage in ("one-update", "three-update")
         and os.environ.get("CANON_P34_NO_COMMIT", "") == "0"
         and execution_mode() == "train"
     )
     if not admitted:
       raise AlignmentGateError(
-          "DeepSWE warning policy is admitted only for a committed P39 or "
-          "P43 64-chip debug update"
+          "DeepSWE warning policy is admitted only for a committed P39, P43, "
+          "or P44 debug update"
       )
     workload = "deepswe"
     stage = p34_stage

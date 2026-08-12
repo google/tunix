@@ -239,6 +239,8 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P39_64CHIP_PILOT CANON_P39_PILOT_ADMITTED \
            CANON_P43_DEEPSWE_DEBUG CANON_P43_DEBUG_ADMITTED \
            CANON_P43_ROLLOUT_ONLY \
+           CANON_P44_DEEPSWE_PARITY CANON_P44_PARITY_ADMITTED \
+           CANON_P44_TOPOLOGY CANON_P44_ROLLOUT_ONLY \
            CANON_OPT_STATE_RESIDENT CANON_P30_OPT_STATE_OFFLOAD \
            CANON_DEEPSWE_ALIGNMENT_WARN_ONLY \
            CANON_TRAIN_DP_SHARDING FL_SHARED_MESH \
@@ -260,7 +262,83 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       fail=1
       ;;
   esac
-  if [ "${CANON_P43_DEEPSWE_DEBUG:-}" = "1" ]; then
+  case "${CANON_P44_DEEPSWE_PARITY:-}" in
+    0) ;;
+    1) ;;
+    *)
+      echo "[env] CANON_P44_DEEPSWE_PARITY must be exactly 0 or 1" >&2
+      fail=1
+      ;;
+  esac
+  if [ "${CANON_P44_DEEPSWE_PARITY:-}" != "1" ]; then
+    [ "${CANON_P44_PARITY_ADMITTED:-}" = "0" ] || {
+      echo "[env] non-P44 runs require CANON_P44_PARITY_ADMITTED=0" >&2
+      fail=1
+    }
+    [ "${CANON_P44_TOPOLOGY:-}" = "none" ] || {
+      echo "[env] non-P44 runs require CANON_P44_TOPOLOGY=none" >&2
+      fail=1
+    }
+    [ "${CANON_P44_ROLLOUT_ONLY:-}" = "0" ] || {
+      echo "[env] non-P44 runs require CANON_P44_ROLLOUT_ONLY=0" >&2
+      fail=1
+    }
+  fi
+  if [ "${CANON_P44_DEEPSWE_PARITY:-}" = "1" ]; then
+    [ "${CANON_P39_64CHIP_PILOT:-}:${CANON_P39_PILOT_ADMITTED:-}" = "0:0" ] && \
+    [ "${CANON_P43_DEEPSWE_DEBUG:-}:${CANON_P43_DEBUG_ADMITTED:-}" = "0:0" ] && \
+    [ "${CANON_P43_ROLLOUT_ONLY:-}" = "0" ] || {
+      echo "[env] P44 parity cannot overlap P39 or P43" >&2
+      fail=1
+    }
+    [ "${CANON_P44_PARITY_ADMITTED:-}" = "1" ] || {
+      echo "[env] P44 parity requires CANON_P44_PARITY_ADMITTED=1" >&2
+      fail=1
+    }
+    p34_expected_prompts=4
+    p34_expected_generations=4
+    p34_expected_global_trajectories=16
+    case "${CANON_P44_TOPOLOGY:-}" in
+      64)
+        p34_expected_dp=4
+        p34_expected_devices=32
+        p34_expected_local_trajectories=4
+        p34_expected_global_m=1024
+        p34_expected_max_seqs=4
+        p34_expected_mesh=4,8
+        ;;
+      256)
+        p34_expected_dp=16
+        p34_expected_devices=128
+        p34_expected_local_trajectories=1
+        p34_expected_global_m=4096
+        p34_expected_max_seqs=1
+        p34_expected_mesh=16,8
+        ;;
+      *)
+        echo "[env] P44 parity requires topology 64 or 256" >&2
+        fail=1
+        p34_expected_dp=0
+        p34_expected_devices=0
+        p34_expected_local_trajectories=0
+        p34_expected_global_m=0
+        p34_expected_max_seqs=0
+        p34_expected_mesh=invalid
+        ;;
+    esac
+    [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
+      echo "[env] P44 parity requires device-resident optimizer state" >&2
+      fail=1
+    }
+    [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
+      echo "[env] P44 parity requires the preregistered alignment warning policy" >&2
+      fail=1
+    }
+    case "${CANON_P44_DEBUG_DIR:-}" in
+      /*) ;;
+      *) echo "[env] P44 parity artifact directory must be absolute" >&2; fail=1 ;;
+    esac
+  elif [ "${CANON_P43_DEEPSWE_DEBUG:-}" = "1" ]; then
     [ "${CANON_P39_64CHIP_PILOT:-}:${CANON_P39_PILOT_ADMITTED:-}" = "0:0" ] || {
       echo "[env] P43 debug cannot overlap the P39 pilot" >&2
       fail=1
@@ -455,8 +533,16 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         fail=1
         ;;
     esac
+  elif [ "${CANON_P44_DEEPSWE_PARITY:-}" = "1" ]; then
+    case "${CANON_P34_RUN_STAGE:-}:${CANON_P44_ROLLOUT_ONLY:-}" in
+      rollout-only:1|one-update:0|three-update:0) ;;
+      *)
+        echo "[env] P44 admits rollout-only, one-update, or three-update with exact rollout flag" >&2
+        fail=1
+        ;;
+    esac
   elif [ "${CANON_P34_RUN_STAGE:-}" = "rollout-only" ]; then
-    echo "[env] rollout-only is admitted only for P43 debug" >&2
+    echo "[env] rollout-only is admitted only for P43/P44 debug" >&2
     fail=1
   fi
   p34_admitted=0

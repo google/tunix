@@ -759,16 +759,20 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     if deepswe_debug.enabled() and mode == rl_cluster_lib.Mode.TRAIN:
       if expected_step is None:
-        raise ValueError("P43 debug artifacts require an expected step")
+        raise ValueError("DeepSWE debug artifacts require an expected step")
       workload = deepswe_contract.active_workload(os.environ)
-      if workload.contract_name != "p43-64chip-debug":
-        raise ValueError("P43 debug artifacts require the P43 workload")
+      if workload.contract_name not in (
+          "p43-64chip-debug",
+          "p44-qwen4b-parity-64",
+          "p44-qwen4b-parity-256",
+      ):
+        raise ValueError("DeepSWE debug artifacts require P43 or P44")
       debug_metrics = deepswe_debug.persist_batch(
           trajectories,
           rewards,
           advantages,
           expected_step=int(expected_step),
-          output_dir=os.environ.get("CANON_P43_DEBUG_DIR", ""),
+          output_dir=deepswe_debug.artifact_directory(),
           model_id=workload.model_id,
       )
       self.rl_cluster.buffer_metrics_async(
@@ -1006,7 +1010,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     if (
         deepswe_debug.enabled()
-        and os.environ.get("CANON_P43_ROLLOUT_ONLY", "") == "1"
+        and deepswe_debug.rollout_only()
     ):
       return [combined_batch]
     if alignment.enabled():

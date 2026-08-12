@@ -57,7 +57,6 @@ def create_dataset(
       dataset_name,
       split=dataset_split,
       cache_dir=cache_dir,
-      trust_remote_code=True,
   )
 
   def _transform(entry):

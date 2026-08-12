@@ -35,6 +35,9 @@ import numpy as np
 TRAJECTORY_SCHEMA = "canon.p43.deepswe.trajectory.v1"
 METRICS_SCHEMA = "canon.p43.deepswe.batch-metrics.v1"
 MANIFEST_SCHEMA = "canon.p43.deepswe.run-manifest.v1"
+P44_TRAJECTORY_SCHEMA = "canon.p44.deepswe.trajectory.v1"
+P44_METRICS_SCHEMA = "canon.p44.deepswe.batch-metrics.v1"
+P44_MANIFEST_SCHEMA = "canon.p44.deepswe.run-manifest.v1"
 SOLVE_DEFINITION = "r2egym_final_reward_eq_1"
 _COMPLETE_STATUS = "SUCCEEDED"
 _SENSITIVE_KEY = re.compile(
@@ -45,12 +48,61 @@ _SECRET_VALUE = re.compile(
 )
 
 
+def _mode(values: Mapping[str, str]) -> str:
+  p43 = values.get("CANON_P43_DEEPSWE_DEBUG", "0")
+  p44 = values.get("CANON_P44_DEEPSWE_PARITY", "0")
+  if p43 not in ("0", "1"):
+    raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
+  if p44 not in ("0", "1"):
+    raise ValueError("CANON_P44_DEEPSWE_PARITY must be exactly 0 or 1")
+  if p43 == p44 == "1":
+    raise ValueError("P43 and P44 debug artifacts are mutually exclusive")
+  return "p44" if p44 == "1" else "p43"
+
+
 def enabled(values: Mapping[str, str] | None = None) -> bool:
   environ = os.environ if values is None else values
-  raw = environ.get("CANON_P43_DEEPSWE_DEBUG", "0")
+  mode = _mode(environ)
+  key = (
+      "CANON_P44_DEEPSWE_PARITY"
+      if mode == "p44"
+      else "CANON_P43_DEEPSWE_DEBUG"
+  )
+  return environ.get(key, "0") == "1"
+
+
+def artifact_directory(values: Mapping[str, str] | None = None) -> str:
+  environ = os.environ if values is None else values
+  return environ.get(
+      "CANON_P44_DEBUG_DIR"
+      if _mode(environ) == "p44"
+      else "CANON_P43_DEBUG_DIR",
+      "",
+  )
+
+
+def rollout_only(values: Mapping[str, str] | None = None) -> bool:
+  environ = os.environ if values is None else values
+  key = (
+      "CANON_P44_ROLLOUT_ONLY"
+      if _mode(environ) == "p44"
+      else "CANON_P43_ROLLOUT_ONLY"
+  )
+  raw = environ.get(key, "0")
   if raw not in ("0", "1"):
-    raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
+    raise ValueError(f"{key} must be exactly 0 or 1")
   return raw == "1"
+
+
+def marker_prefix(values: Mapping[str, str] | None = None) -> str:
+  environ = os.environ if values is None else values
+  return "P44" if _mode(environ) == "p44" else "P43"
+
+
+def _schemas(values: Mapping[str, str]) -> tuple[str, str, str]:
+  if _mode(values) == "p44":
+    return P44_TRAJECTORY_SCHEMA, P44_METRICS_SCHEMA, P44_MANIFEST_SCHEMA
+  return TRAJECTORY_SCHEMA, METRICS_SCHEMA, MANIFEST_SCHEMA
 
 
 def _serializable(value: Any, *, key: str = "") -> Any:
@@ -154,19 +206,38 @@ def _append_fsync(path: Path, record: Mapping[str, Any]) -> None:
 def _manifest(
     values: Mapping[str, str], *, model_id: str, output_dir: Path
 ) -> dict[str, Any]:
+  trajectory_schema, metrics_schema, manifest_schema = _schemas(values)
+  if _mode(values) == "p44":
+    topology = values.get("CANON_P44_TOPOLOGY", "")
+    if topology == "64":
+      contract_name = "p44-qwen4b-parity-64"
+      slice_topology = "4x4x4"
+      role_topology = {"dp": 4, "tp": 8, "devices": 32}
+    elif topology == "256":
+      contract_name = "p44-qwen4b-parity-256"
+      slice_topology = "4x8x8"
+      role_topology = {"dp": 16, "tp": 8, "devices": 128}
+    else:
+      raise ValueError("P44 artifact topology must be exactly 64 or 256")
+    if model_id != "Qwen/Qwen3-4B":
+      raise ValueError("P44 artifacts require Qwen/Qwen3-4B")
+  else:
+    contract_name = "p43-64chip-debug"
+    slice_topology = "4x4x4"
+    role_topology = {"dp": 4, "tp": 8, "devices": 32}
   return {
-      "schema": MANIFEST_SCHEMA,
-      "trajectory_schema": TRAJECTORY_SCHEMA,
-      "metrics_schema": METRICS_SCHEMA,
+      "schema": manifest_schema,
+      "trajectory_schema": trajectory_schema,
+      "metrics_schema": metrics_schema,
       "solve_definition": SOLVE_DEFINITION,
       "source_commit": values.get("CANON_EXPECT_COMMIT", ""),
       "source_branch": values.get("CANON_SOURCE_BRANCH", ""),
       "run_id": values.get("CANON_RUN_ID", ""),
       "stage": values.get("CANON_P34_RUN_STAGE", ""),
       "model_id": model_id,
-      "contract_name": "p43-64chip-debug",
-      "slice_topology": "4x4x4",
-      "role_topology": {"dp": 4, "tp": 8, "devices": 32},
+      "contract_name": contract_name,
+      "slice_topology": slice_topology,
+      "role_topology": role_topology,
       "global_prompts": 4,
       "generations": 4,
       "global_trajectories": 16,
@@ -232,6 +303,9 @@ def persist_batch(
         "P43 requires exactly 16 trajectories, rewards, and advantages"
     )
   root = Path(output_dir)
+  trajectory_schema, metrics_schema, _ = _schemas(
+      os.environ if values is None else values
+  )
   ensure_manifest(root, model_id=model_id, values=values)
 
   records = []
@@ -259,7 +333,7 @@ def persist_batch(
     status_histogram[status] += 1
     reward_histogram[format(raw_reward, ".12g")] += 1
     record = {
-        "schema": TRAJECTORY_SCHEMA,
+        "schema": trajectory_schema,
         "step": expected_step,
         "group_id": group_id,
         "pair_index": pair_index,
@@ -314,7 +388,7 @@ def persist_batch(
   complete_trajectories = sum(record["complete"] for record in records)
   nonzero_advantages = sum(record["advantage_nonzero"] for record in records)
   metrics = {
-      "schema": METRICS_SCHEMA,
+      "schema": metrics_schema,
       "step": expected_step,
       "solve_definition": SOLVE_DEFINITION,
       "trajectories": 16,
@@ -352,10 +426,11 @@ def persist_batch(
   metrics["trajectory_sha256"] = digest
   _append_fsync(root / "batch_metrics.jsonl", metrics)
   payload = json.dumps(metrics, sort_keys=True, separators=(",", ":"))
+  prefix = marker_prefix(os.environ if values is None else values)
   print(
-      f"[P43.TRAJECTORY_BATCH] step={expected_step} "
+      f"[{prefix}.TRAJECTORY_BATCH] step={expected_step} "
       f"path={trajectory_path} sha256={digest}",
       flush=True,
   )
-  print(f"[P43.BATCH_METRICS_JSON] {payload}", flush=True)
+  print(f"[{prefix}.BATCH_METRICS_JSON] {payload}", flush=True)
   return metrics

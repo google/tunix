@@ -37,6 +37,8 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
+from tunix.rl import deepswe_contract
+from tunix.rl import deepswe_debug
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
@@ -1987,11 +1989,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
 
       if (
-          os.environ.get("CANON_P43_DEEPSWE_DEBUG", "") == "1"
-          and os.environ.get("CANON_P43_ROLLOUT_ONLY", "") == "1"
+          deepswe_debug.enabled()
+          and deepswe_debug.rollout_only()
       ):
+        marker = deepswe_debug.marker_prefix()
         print(
-            "[P43.ROLLOUT_ONLY] PASS trajectories=16 backward=0 "
+            f"[{marker}.ROLLOUT_ONLY] PASS trajectories=16 backward=0 "
             "optimizer_commits=0",
             flush=True,
         )

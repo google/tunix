@@ -29,7 +29,9 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
   report_keys=(CANON_RUN_LOG CANON_PRE_ALIGN_REPORT CANON_ALIGN_REPORT CANON_UPDATE_REPORT)
   if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     report_keys+=(CANON_P34_WEIGHT_REPORT)
-    if [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
+    if [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ]; then
+      report_keys+=(CANON_P44_DEBUG_DIR)
+    elif [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
       report_keys+=(CANON_P43_DEBUG_DIR)
     fi
   fi
@@ -331,7 +333,20 @@ elif [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
   echo "[run] P38 serving expected precheck exit=1 accepted; backward=0 optimizer_commits=0"
   rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
-  if [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
+  if [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ]; then
+    classification="$CANON_STATE/p44_deepswe_${CANON_P44_TOPOLOGY}_${CANON_P34_RUN_STAGE}.classification.json"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tests/p44_deepswe_qwen4b_parity/classify_run.py" \
+        --topology "$CANON_P44_TOPOLOGY" \
+        --stage "$CANON_P34_RUN_STAGE" \
+        --run-log "$LOG" \
+        --debug-dir "$CANON_P44_DEBUG_DIR" \
+        --weight-report "$CANON_P34_WEIGHT_REPORT" \
+        --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
+        --update-report "$CANON_UPDATE_REPORT" \
+        --alignment-report "$CANON_ALIGN_REPORT" \
+        --output "$classification" || exit 1
+  elif [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
     classification="$CANON_STATE/p43_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
       python3 "$CANON_PKG/tests/p43_deepswe_debug/classify_run.py" \

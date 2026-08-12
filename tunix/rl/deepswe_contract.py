@@ -27,6 +27,13 @@ import numpy as np
 
 
 WEIGHT_ATTESTATION_SCHEMA = "canon.p34.deepswe.weight-attestation.v1"
+P44_TOPOLOGY_FIELDS = frozenset({
+    "contract_name",
+    "dp_size",
+    "devices_per_role",
+    "global_m",
+    "max_num_seqs_per_dp",
+})
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -90,6 +97,12 @@ class DeepSWEWorkload:
         ),
         "p43-64chip-debug": (
             "Qwen/Qwen3-8B", 4, 4, 4, 8, 32, 4, 1024, 4, 4096, 5, 3,
+        ),
+        "p44-qwen4b-parity-64": (
+            "Qwen/Qwen3-4B", 4, 4, 4, 8, 32, 4, 1024, 4, 4096, 5, 3,
+        ),
+        "p44-qwen4b-parity-256": (
+            "Qwen/Qwen3-4B", 4, 4, 16, 8, 128, 1, 4096, 1, 4096, 5, 3,
         ),
     }
     try:
@@ -247,6 +260,51 @@ P43_DEBUG_WORKLOAD = DeepSWEWorkload(
     global_m=1024,
     max_num_seqs_per_dp=4,
 )
+P44_PARITY_64_WORKLOAD = DeepSWEWorkload(
+    contract_name="p44-qwen4b-parity-64",
+    model_id="Qwen/Qwen3-4B",
+    global_prompts=4,
+    generations=4,
+    max_response_length=4096,
+    max_turns=5,
+    max_steps=3,
+    dp_size=4,
+    devices_per_role=32,
+    global_m=1024,
+    max_num_seqs_per_dp=4,
+)
+P44_PARITY_256_WORKLOAD = dataclasses.replace(
+    P44_PARITY_64_WORKLOAD,
+    contract_name="p44-qwen4b-parity-256",
+    dp_size=16,
+    devices_per_role=128,
+    global_m=4096,
+    max_num_seqs_per_dp=1,
+)
+
+
+def p44_workload(topology: str) -> DeepSWEWorkload:
+  """Returns one of the two exact Qwen3-4B parity topologies."""
+  if topology == "64":
+    return P44_PARITY_64_WORKLOAD
+  if topology == "256":
+    return P44_PARITY_256_WORKLOAD
+  raise ValueError("CANON_P44_TOPOLOGY must be exactly 64 or 256")
+
+
+def p44_recipe_signature(workload: DeepSWEWorkload) -> dict[str, Any]:
+  """Normalizes a P44 workload by the preregistered topology allowlist."""
+  if workload.contract_name not in (
+      "p44-qwen4b-parity-64",
+      "p44-qwen4b-parity-256",
+  ):
+    raise ValueError("P44 recipe signature requires a P44 workload")
+  workload.validate()
+  return {
+      key: value
+      for key, value in dataclasses.asdict(workload).items()
+      if key not in P44_TOPOLOGY_FIELDS
+  }
 
 
 def active_workload(
@@ -256,13 +314,19 @@ def active_workload(
   environ = os.environ if values is None else values
   pilot_raw = environ.get("CANON_P39_64CHIP_PILOT", "0")
   debug_raw = environ.get("CANON_P43_DEEPSWE_DEBUG", "0")
+  parity_raw = environ.get("CANON_P44_DEEPSWE_PARITY", "0")
   if pilot_raw not in ("0", "1"):
     raise ValueError("CANON_P39_64CHIP_PILOT must be exactly 0 or 1")
   if debug_raw not in ("0", "1"):
     raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
-  if pilot_raw == "1" and debug_raw == "1":
-    raise ValueError("P39 pilot and P43 debug modes are mutually exclusive")
-  if debug_raw == "1":
+  if parity_raw not in ("0", "1"):
+    raise ValueError("CANON_P44_DEEPSWE_PARITY must be exactly 0 or 1")
+  selected = sum(raw == "1" for raw in (pilot_raw, debug_raw, parity_raw))
+  if selected > 1:
+    raise ValueError("P39, P43, and P44 DeepSWE modes are mutually exclusive")
+  if parity_raw == "1":
+    workload = p44_workload(environ.get("CANON_P44_TOPOLOGY", ""))
+  elif debug_raw == "1":
     workload = P43_DEBUG_WORKLOAD
   elif pilot_raw == "1":
     workload = P39_PILOT_WORKLOAD
@@ -436,6 +500,11 @@ def validate_environment(values: Mapping[str, str]) -> None:
   workload = active_workload(values)
   pilot = workload.contract_name == "p39-64chip-pilot"
   debug = workload.contract_name == "p43-64chip-debug"
+  parity = workload.contract_name in (
+      "p44-qwen4b-parity-64",
+      "p44-qwen4b-parity-256",
+  )
+  parity_topology = str(workload.devices_per_role * 2) if parity else "none"
   expected = {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_TOPOLOGY_ADMITTED": "1",
@@ -470,6 +539,14 @@ def validate_environment(values: Mapping[str, str]) -> None:
           if debug and values.get("CANON_P34_RUN_STAGE") == "rollout-only"
           else "0"
       ),
+      "CANON_P44_DEEPSWE_PARITY": "1" if parity else "0",
+      "CANON_P44_PARITY_ADMITTED": "1" if parity else "0",
+      "CANON_P44_TOPOLOGY": parity_topology,
+      "CANON_P44_ROLLOUT_ONLY": (
+          "1"
+          if parity and values.get("CANON_P34_RUN_STAGE") == "rollout-only"
+          else "0"
+      ),
       "CANON_DP_SIZE": str(workload.dp_size),
       "CANON_TP_SIZE": str(workload.tp_size),
       "CANON_TOTAL_DEVICES": str(workload.devices_per_role),
@@ -480,7 +557,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
       "FL_SHARED_MESH": f"{workload.dp_size},{workload.tp_size}",
   }
-  if pilot or debug:
+  if pilot or debug or parity:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
@@ -509,6 +586,10 @@ def validate_environment(values: Mapping[str, str]) -> None:
     debug_dir = values.get("CANON_P43_DEBUG_DIR", "")
     if not debug_dir or not os.path.isabs(debug_dir):
       raise ValueError("P43 debug artifact directory is missing")
+  if parity:
+    debug_dir = values.get("CANON_P44_DEBUG_DIR", "")
+    if not debug_dir or not os.path.isabs(debug_dir):
+      raise ValueError("P44 parity artifact directory is missing")
   workload.validate()
   requested_max_steps(values)
 
@@ -519,8 +600,12 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
   stage = values.get("CANON_P34_RUN_STAGE", "")
   no_commit = values.get("CANON_P34_NO_COMMIT", "0")
   if stage == "rollout-only":
-    if workload.contract_name != "p43-64chip-debug":
-      raise ValueError("rollout-only is admitted only for P43 debug")
+    if workload.contract_name not in (
+        "p43-64chip-debug",
+        "p44-qwen4b-parity-64",
+        "p44-qwen4b-parity-256",
+    ):
+      raise ValueError("rollout-only is admitted only for P43/P44 debug")
     expected_no_commit, steps = "1", 1
   elif stage == "backward-no-commit":
     expected_no_commit, steps = "1", 1
@@ -551,6 +636,18 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
   ):
     raise ValueError(
         "P43 64-chip debug admits only rollout-only, one-update, or "
+        "three-update"
+    )
+  if workload.contract_name in (
+      "p44-qwen4b-parity-64",
+      "p44-qwen4b-parity-256",
+  ) and stage not in (
+      "rollout-only",
+      "one-update",
+      "three-update",
+  ):
+    raise ValueError(
+        "P44 Qwen3-4B parity admits only rollout-only, one-update, or "
         "three-update"
     )
   return steps
