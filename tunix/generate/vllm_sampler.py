@@ -92,21 +92,6 @@ def _log_reshard_placement(resharded_flat, spec_flat) -> None:
     )
 
 
-def _log_post_update_placement(state) -> None:
-  """Reports the runner state's placement after the update has been applied."""
-  try:
-    spans = {}
-    for leaf in jax.tree_util.tree_leaves(state):
-      span = _placement(leaf).split(" spec=")[0]
-      spans[span] = spans.get(span, 0) + 1
-    logging.info(
-        "weight_sync_debug: runner state after update, leaves by device span: %s",
-        spans,
-    )
-  except Exception:  # pylint: disable=broad-except
-    logging.exception("weight_sync_debug: could not summarize runner state")
-
-
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -303,9 +288,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       state.update(resharded)
     else:
       self._model_runner.state = resharded
-
-    if debug:
-      _log_post_update_placement(self.transformer_state)
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
