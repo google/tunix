@@ -44,6 +44,69 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
+def _placement(x) -> str:
+  """Device-id span behind an array, for weight-sync debugging."""
+  arr = getattr(x, "value", x)
+  sharding = getattr(arr, "sharding", None)
+  if sharding is None:
+    return "<unsharded>"
+  mesh = getattr(sharding, "mesh", None)
+  try:
+    devices = (
+        np.asarray(mesh.devices).flatten().tolist()
+        if mesh is not None
+        else list(getattr(sharding, "device_set", ()))
+    )
+    ids = sorted(int(d.id) for d in devices)
+  except Exception:  # pylint: disable=broad-except
+    return "<unknown>"
+  if not ids:
+    return "<unknown>"
+  return f"[{ids[0]}..{ids[-1]}]({len(ids)}) spec={getattr(sharding, 'spec', None)}"
+
+
+def _log_reshard_placement(resharded_flat, spec_flat) -> None:
+  """Reports whether the reshard actually moved weights onto the target mesh.
+
+  Conversion legitimately produces trainer-mesh arrays; the reshard is what
+  crosses onto the rollout mesh. If a resharded array still reports the source
+  mesh here, the crossing silently did not happen and the rollout will later
+  execute against buffers its own client cannot address.
+  """
+  stale = []
+  for key, value in resharded_flat.items():
+    want = _placement(spec_flat[key])
+    got = _placement(value)
+    if want != got:
+      stale.append((".".join(map(str, key)), got, want))
+  if stale:
+    logging.error(
+        "weight_sync_debug: %d/%d resharded params did NOT land on the target "
+        "sharding. First 10 (name, got, want): %s",
+        len(stale), len(resharded_flat), stale[:10],
+    )
+  else:
+    logging.info(
+        "weight_sync_debug: all %d resharded params match their target "
+        "sharding.", len(resharded_flat),
+    )
+
+
+def _log_post_update_placement(state) -> None:
+  """Reports the runner state's placement after the update has been applied."""
+  try:
+    spans = {}
+    for leaf in jax.tree_util.tree_leaves(state):
+      span = _placement(leaf).split(" spec=")[0]
+      spans[span] = spans.get(span, 0) + 1
+    logging.info(
+        "weight_sync_debug: runner state after update, leaves by device span: %s",
+        spans,
+    )
+  except Exception:  # pylint: disable=broad-except
+    logging.exception("weight_sync_debug: could not summarize runner state")
+
+
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -211,21 +274,38 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           "randomly-initialized dummy weights."
       )
 
-    resharded = traverse_util.unflatten_dict(
-        utils._reshard_in_chunks(  # pylint: disable=protected-access
-            src_flat,
-            spec_flat,
-            reshard.reshard_pytree,
-            self.config.reshard_chunk_size or len(src_flat),
-            self.config.delete_dst_buffers,
-        )
+    debug = getattr(self.converter, "debug", False)
+    if debug:
+      missing = [k for k in spec_flat if k not in src_flat]
+      logging.info(
+          "weight_sync_debug: resharding %d/%d params; %d target params keep "
+          "their current value%s",
+          len(src_flat), len(spec_flat), len(missing),
+          (" (first 10: %s)" % [".".join(map(str, k)) for k in missing[:10]])
+          if missing else "",
+      )
+
+    resharded_flat = utils._reshard_in_chunks(  # pylint: disable=protected-access
+        src_flat,
+        spec_flat,
+        reshard.reshard_pytree,
+        self.config.reshard_chunk_size or len(src_flat),
+        self.config.delete_dst_buffers,
     )
+
+    if debug:
+      _log_reshard_placement(resharded_flat, spec_flat)
+
+    resharded = traverse_util.unflatten_dict(resharded_flat)
     if isinstance(state, nnx.State):
       nnx.update(state, resharded)
     elif hasattr(state, "update"):
       state.update(resharded)
     else:
       self._model_runner.state = resharded
+
+    if debug:
+      _log_post_update_placement(self.transformer_state)
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
