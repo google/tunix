@@ -11,8 +11,8 @@
   `origin/yuxzhang/canon-zero-tim`. The complete P38s5 operator
   run-and-return contract is published at
   `d5a0ac30bdc1ecdd4bf3c5948baf8e54c48502b5` on the same branch. Main was not
-  checked out or modified. P38.2g5 is locally complete in the isolated
-  detached worktree based on `76cef0ec`; it is not yet committed or pushed.
+  checked out or modified. P38.2g5 is published at
+  `02e8c05d45d9423a05ea96ce066b0f7009a511e2` on the same branch.
 - Current phases: two independent tracks are deliberately active. P38.2d has
   added and locally gated the user-requested GSM8K-full warning-only alignment
   override so the time-sensitive convergence campaign cannot be stopped by an

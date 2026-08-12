@@ -852,3 +852,18 @@
   section of `HANDOFF.md`. Do not rerun U or auto-adjust prefix bounds.
 - Rollback: leave `CANON_P38_SERVING_CAPTURE_*` and
   `CANON_P38_PRECHECK_ONLY` unset, or revert the P38.2g5 change.
+
+## 2026-08-12 UTC — P38.2g5 published
+
+- Type: source-publication receipt. No cloud/TPU run, backward, optimizer
+  commit, or training launch occurred.
+- Commit: `02e8c05d45d9423a05ea96ce066b0f7009a511e2` (`Harden P38
+  request-anchored capture`).
+- Push: normal non-force push advanced
+  `origin/yuxzhang/canon-zero-tim` from `76cef0ec` to `02e8c05d`;
+  `git ls-remote` verified the exact remote hash.
+- Published gates: both pinned model overlays pass 16/16 and 29/29 manifest
+  checks; the full frozen-image CPU gate passes 81 workload and 31 alignment
+  tests plus adjacent suites.
+- Next: the remote operator pulls this commit and follows the P38s6 section at
+  the top of `HANDOFF.md`. Stock only; do not rerun U.

@@ -1,6 +1,6 @@
 # P38.2g5: request-anchored serving capture
 
-- Status: locally complete; P38s6 target run pending.
+- Status: published at `02e8c05d`; P38s6 target run pending.
 
 ## Problem
 
