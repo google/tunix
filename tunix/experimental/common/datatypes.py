@@ -475,8 +475,9 @@ class TrainerPayload:
   """Generic trainer payload.
 
   Attributes:
-    token_ids: [B, T] token IDs. By default, structured as left-padded prompt
-      tokens concatenated with right-padded completion tokens.
+    token_ids: [B, T] token IDs for a batched trainer payload. By default,
+      each row is structured as left-padded prompt tokens concatenated with
+      right-padded completion tokens.
     token_mask: [B, T] token mask to differentiate padding tokens from valid
       tokens.
     segment_ids: Optional [B, T] packing segment ids.
@@ -498,9 +499,11 @@ class RLTrainerPayload(TrainerPayload):
     advantages: [B] or [B, C] advantages.
     loss_mask: [B, T], 1 where the position contributes to the loss.
     action_mask: Optional [B, T] or [B, C] mask of policy actions.
-    prompt_ids: Optional [B, P] prompt token ids for GRPO-style losses.
+    prompt_ids: Optional prompt token ids for GRPO-style losses. Unbatched
+      payloads may carry 1D unpadded rows; batch assembly pads them to [B, P].
     prompt_mask: Optional [B, P] prompt mask.
-    completion_ids: Optional [B, C] completion token ids.
+    completion_ids: Optional completion token ids. Unbatched payloads may carry
+      1D unpadded rows; batch assembly pads them to [B, C].
     completion_mask: Optional [B, C] completion/action mask.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
@@ -531,9 +534,9 @@ class LogprobsRequest(Request):
   """Request to score per-token log-probabilities under a frozen model.
 
   Attributes:
-    prompt_tokens: [B, P], LEFT-padded.
-    completion_tokens: [B, C], RIGHT-padded; the result aligns to these
-      completion columns.
+    prompt_tokens: [B, P] token ids, already LEFT-padded by the caller.
+    completion_tokens: [B, C] token ids, already RIGHT-padded by the caller;
+      the result aligns to these completion columns.
     temperature: Softmax temperature to score under. Mandatory: it must match
       the temperature the tokens were sampled at, or the log-probs are biased.
     model_role: Which hosted model to score against (v1: "reference").
@@ -567,8 +570,8 @@ class ScoreRequest(Request):
   """Request to score scalar rewards/values under a hosted model.
 
   Attributes:
-    prompt_tokens: [B, P], LEFT-padded.
-    completion_tokens: [B, C], RIGHT-padded.
+    prompt_tokens: [B, P] token ids, already LEFT-padded by the caller.
+    completion_tokens: [B, C] token ids, already RIGHT-padded by the caller.
     model_role: Which hosted model to score against (e.g. "reward").
   """
 

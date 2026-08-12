@@ -92,6 +92,15 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
       return np.zeros(0, dtype=np.int32)
     return arr[non_pad[0] :]
 
+  def _prompt_tokens_from_request(
+      self, req: Any, fallback_padded_tokens: Any
+  ) -> np.ndarray:
+    """Returns request token ids directly when available, else sampler output."""
+    prompt = req.prompt if hasattr(req, "prompt") else req
+    if not isinstance(prompt, str):
+      return np.asarray(prompt, dtype=np.int32).reshape(-1)
+    return self._unpadded_prompt_tokens(fallback_padded_tokens)
+
   # --- Lifecycle & Topology ---
   async def start(self, **kwargs) -> str | None | Any:
     """Starts the sampling engine or local loop."""
@@ -224,8 +233,8 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
           if toks is not None
           else np.zeros(0, dtype=np.int32)
       )
-      prompt_token_ids = self._unpadded_prompt_tokens(
-          sampler_output.padded_prompt_tokens[i]
+      prompt_token_ids = self._prompt_tokens_from_request(
+          req, sampler_output.padded_prompt_tokens[i]
       )
       log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
 

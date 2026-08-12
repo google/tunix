@@ -208,7 +208,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       prompts: Sequence[Any],
       generation_args: datatypes.GenerationArgs | None = None,
-      metadata: Mapping[str, Any] | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Blocking rollout generation: load-balances prompts across workers and awaits completion."""
@@ -224,23 +224,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     generation_kwargs = (
         generation_args.as_kwargs() if generation_args is not None else {}
     )
-    route_metadata = dict(metadata or {})
+    route_metadata_map = dict(route_metadata or {})
     worker_to_prompts: dict[Any, list[Any]] = collections.defaultdict(list)
     worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
         collections.defaultdict(list)
     )
     for p in prompts:
       if isinstance(p, datatypes.RolloutRequest):
-        metadata = dict(p.metadata or {})
-        route_key = metadata.get("prefix_hash") or p.prompt_id
+        request_metadata = dict(p.metadata or {})
+        route_key = request_metadata.get("prefix_hash") or p.prompt_id
         worker = self._rollout_pool._get_next_actor(
             kwargs={"route_key": route_key}
         )
         worker_to_requests[worker].append(p)
         continue
 
-      route_key = route_metadata.get("prefix_hash") or route_metadata.get(
-          "prompt_id"
+      route_key = (
+          route_metadata_map.get("prefix_hash")
+          or route_metadata_map.get("prompt_id")
       )
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
@@ -318,16 +319,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     worker = self._trainer_workers.get(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role}")
-    # TODO: we need on apply_optimizer=apply_optimize steps we need to call update() too.
-    return await self._invoke_worker(
+    fwd_bwd_result = await self._invoke_worker(
         worker,
         "fwd_bwd",
-        batch=payload,
-        accumulate_gradients=accumulate_gradients,
-        apply_optimizer=apply_optimizer,
+        payload=payload,
         skip_jit=skip_jit,
         **kwargs,
     )
+    if not apply_optimizer:
+      return fwd_bwd_result
+
+    train_step = await self._invoke_worker(worker, "update")
+    return {
+        "fwd_bwd": fwd_bwd_result,
+        "updated": True,
+        "train_step": train_step,
+        "accumulated": accumulate_gradients,
+    }
 
   async def sync_weights(  # pyrefly: ignore[bad-override]
       self,

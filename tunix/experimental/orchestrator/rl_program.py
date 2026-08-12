@@ -118,25 +118,24 @@ class SyncRLProgram:
   def step_once(
       self,
       prompts: Sequence[datatypes.RolloutRequest],
-      engine: rl_engine_interface.AbstractRLEngine | None = None,
       generation_args: datatypes.GenerationArgs | None = None,
-      metadata: Mapping[str, Any] | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> Any:
     """Executes a single end-to-end RL training step."""
-    active_engine = self._resolve_engine(engine)
+    active_engine = self._resolve_engine()
     current_step = self.policy_version
     if self.on_step_begin:
       self.on_step_begin(current_step)
 
     # 1. Generate rollouts
-    generate_kwargs = dict(kwargs)
+    engine_call_kwargs = dict(kwargs)
     if generation_args is not None:
-      generate_kwargs["generation_args"] = generation_args
-    if metadata is not None:
-      generate_kwargs["metadata"] = metadata
+      engine_call_kwargs["generation_args"] = generation_args
+    if route_metadata is not None:
+      engine_call_kwargs["route_metadata"] = route_metadata
     rollouts = _sync_or_async(
-        active_engine.generate(prompts=prompts, **generate_kwargs)
+        active_engine.generate(prompts=prompts, **engine_call_kwargs)
     )
 
     # 2. Evaluate rewards
@@ -209,20 +208,19 @@ class SyncRLProgram:
   def eval_step_once(
       self,
       prompts: Sequence[datatypes.RolloutRequest],
-      engine: rl_engine_interface.AbstractRLEngine | None = None,
       generation_args: datatypes.GenerationArgs | None = None,
-      metadata: Mapping[str, Any] | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[datatypes.RLTrainerPayload]:
     """Executes evaluation step without updating weights."""
-    active_engine = self._resolve_engine(engine)
-    generate_kwargs = dict(kwargs)
+    active_engine = self._resolve_engine()
+    engine_call_kwargs = dict(kwargs)
     if generation_args is not None:
-      generate_kwargs["generation_args"] = generation_args
-    if metadata is not None:
-      generate_kwargs["metadata"] = metadata
+      engine_call_kwargs["generation_args"] = generation_args
+    if route_metadata is not None:
+      engine_call_kwargs["route_metadata"] = route_metadata
     rollouts = _sync_or_async(
-        active_engine.generate(prompts=prompts, **generate_kwargs)
+        active_engine.generate(prompts=prompts, **engine_call_kwargs)
     )
     rewards = [
         (
@@ -243,10 +241,11 @@ class SyncRLProgram:
   ) -> None:
     """Runs the RL program training loop over the dataset."""
     active_engine = self._resolve_engine(engine)
+    self.engine = active_engine
     if train_dataset is None:
       raise ValueError("SyncRLProgram.run requires a train_dataset.")
     for idx, prompt_batch in enumerate(train_dataset):
       if num_steps is not None and idx >= num_steps:
         break
       logging.info("RLProgram starting step %d", self.step)
-      self.step_once(prompts=prompt_batch, engine=active_engine, **kwargs)
+      self.step_once(prompts=prompt_batch, **kwargs)

@@ -209,7 +209,12 @@ class InferenceWorker(abstract_worker.Worker):
       items: Sequence[datatypes.TrajectoryItem],
       **kwargs: Any,
   ) -> np.ndarray:
-    """Scores reference per-token log-probs for trajectory items."""
+    """Scores reference log-probs for trajectory items.
+
+    TrajectoryItem token arrays are produced by rollout and can be ragged. This
+    method pads them into the fixed-shape LogprobsRequest expected by
+    compute_logps().
+    """
     item_list = list(items)
     if not item_list:
       response_len = kwargs.get(

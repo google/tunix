@@ -38,6 +38,7 @@ class MockActorHandle(mock.MagicMock):
     self.poll_responses = mock.AsyncMock()
     self.weight_sync = mock.AsyncMock()
     self.fwd_bwd = mock.AsyncMock()
+    self.update = mock.AsyncMock()
     self.prepare_weight_sync = mock.AsyncMock()
     self.score = mock.AsyncMock()
     self.per_token_logps = mock.AsyncMock()
@@ -182,11 +183,42 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(res, {"loss": 0.5})
 
       self.mock_actor.fwd_bwd.assert_called_once_with(
-          batch=mock_payload,
-          accumulate_gradients=True,
-          apply_optimizer=False,
+          payload=mock_payload,
           skip_jit=False,
       )
+      self.mock_actor.update.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_train_step_applies_optimizer_on_last_microbatch(self):
+    async def _run():
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True}
+      )
+      self.mock_actor.update.return_value = 3
+      mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+
+      res = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=True,
+      )
+
+      self.assertEqual(
+          res,
+          {
+              "fwd_bwd": datatypes.Response(metadata={"queued": True}),
+              "updated": True,
+              "train_step": 3,
+              "accumulated": True,
+          },
+      )
+      self.mock_actor.fwd_bwd.assert_called_once_with(
+          payload=mock_payload,
+          skip_jit=False,
+      )
+      self.mock_actor.update.assert_called_once_with()
 
     asyncio.run(_run())
 

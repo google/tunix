@@ -39,7 +39,7 @@ class AbstractRLEngine(Protocol):
       self,
       prompts: Sequence[Any],
       generation_args: datatypes.GenerationArgs | None = None,
-      metadata: Mapping[str, Any] | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Synchronous batched rollout generation over rollout workers."""
@@ -65,7 +65,7 @@ class AbstractRLEngine(Protocol):
       apply_optimizer: bool = True,
       skip_jit: bool = False,
       **kwargs: Any,
-  ) -> dict[str, Any]:
+  ) -> Any:
     """Executes forward/backward gradient update on trainer workers."""
     ...
 
