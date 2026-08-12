@@ -1,3 +1,9 @@
+> **Pruned tip (2026-08-12).** The raw logs, capsules, and JSONL evidence files referenced
+> by the sections below were removed from this branch's *tip* to keep it browsable. **Nothing
+> is lost**: every file remains in git history — retrieve any of them with
+> `git show <ancestor-sha>:canon-zero-tim/debug_logs/<filename>` (e.g. ancestor `89753a7b`).
+> This README stays as the master evidence index.
+
 # Tunix 64-Chip Multi-Host P32 Admission Diagnostic Log
 
 ## 1. Provenance and Scope

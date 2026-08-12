@@ -1,9 +1,0 @@
-[minrepro] devices=4 dims T=256 D=512 F=2048 XLA_FLAGS='--xla_cpu_max_isa=AVX2'
-[minrepro] L=  4: primal差异  70556/262144 bytes  max|Δ|=2.344e-02  <<<<< DIFFERS
-[minrepro] L=  8: primal差异  92633/262144 bytes  max|Δ|=3.125e-02  <<<<< DIFFERS
-[minrepro] L= 12: primal差异 103437/262144 bytes  max|Δ|=3.906e-02  <<<<< DIFFERS
-[minrepro] L= 14: primal差异 106973/262144 bytes  max|Δ|=4.688e-02  <<<<< DIFFERS
-[minrepro] L= 15: primal差异 108524/262144 bytes  max|Δ|=3.906e-02  <<<<< DIFFERS
-[minrepro] L= 16: primal差异 109593/262144 bytes  max|Δ|=4.688e-02  <<<<< DIFFERS
-[minrepro] L= 20: primal差异 114026/262144 bytes  max|Δ|=5.078e-02  <<<<< DIFFERS
-[minrepro] L= 24: primal差异 116607/262144 bytes  max|Δ|=6.250e-02  <<<<< DIFFERS

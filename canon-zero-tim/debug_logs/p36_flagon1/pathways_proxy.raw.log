@@ -1,4 +1,0 @@
-WARNING: Logging before InitGoogle() is written to STDERR
-I0000 00:00:1786342843.777343       1 pipe_transport_registry.cc:30] Registering pipe transport grpc
-W0000 00:00:1786342843.792977       1 override_grpc_credentials_real.cc:57] Registering MLPathways gRPC credentials override 'grpc_insecure_override'
-ERROR: Unknown command line flag 'xla_allow_excess_precision'

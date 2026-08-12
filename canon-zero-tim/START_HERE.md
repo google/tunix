@@ -1,3 +1,10 @@
+> **Branch note (2026-08-12).** `yuxzhang/zero-tim-clean` is the pruned successor of
+> `yuxzhang/canon-zero-tim` (same history, noise removed from the tip: committed `.claude/`,
+> bulk raw logs, closed task ledgers, tracing logs, data files). Active development continues
+> HERE; the old branch is frozen as an archive. Render commands should pass
+> `--source-branch yuxzhang/zero-tim-clean` going forward. Historical docs referencing the old
+> branch name remain accurate for their time.
+
 # Start here
 
 You have this package and no context. This page gets you to a useful action in five minutes.

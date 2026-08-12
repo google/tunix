@@ -1,5 +1,0 @@
-[P36.ONEHOST] probe_sha256=faf65c53223c8ccf1b7d5545084aefe1eabb0918d88ea43127e61ecc577b602f
-[P36.ONEHOST] image=tunix_frozenlake_image:vllm-tpu0.25.0
-[P36.ONEHOST] OFF_COMPLETE sha256=a24139e233e435939fbc694e53c180ba9098b79f26ca35cd594769697a9581f2
-[P36.ONEHOST] ON_COMPLETE sha256=25673f20e07249e2660b8a1374a831457b14eeace06b2e010412dbce66b880ba
-[P36.ONEHOST] PAIR_COMPLETE off=/mnt/disks/tunix-data/logp_probe_1host/p36_onehost_excess_off.raw.log on=/mnt/disks/tunix-data/logp_probe_1host/p36_onehost_excess_on.raw.log

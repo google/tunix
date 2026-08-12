@@ -1,355 +1,0 @@
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-Error from server (BadRequest): container "jax-tpu" in pod "canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql" is waiting to start: PodInitializing
-XPK Start: 2026-08-09T20:13:04Z
-[entrypoint] start 2026-08-09T20:13:08Z  mode=run  pkg=/app/canon-zero-tim
-[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-p35-gsm8k-env-r27-e5b2d294-pathways-head-0-0-sj9ql
-[entrypoint] --> 00_env.sh
-[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
-[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
-[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
-[env] P35 envelope contract OK: gsm8k DP16 local-M256 response-256
-[env] P32 train mesh pin DISCOVERY: no release placement assertion
-[env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
-[env] profile=qwen3-1p7b-dp16-tp4-gsm8k model_dir=qwen1p7b
-[env] resolved configuration written to /tmp/canon-state/canon-p35-gsm8k-env-r27-e5b2d294/env.sh (128 lines)
-[entrypoint] <-- 00_env.sh ok
-[entrypoint] --> 10_sync_repo.sh
-[sync] HEAD=e5b2d29452f20eb02e216cbbecc41cc2ab306a1b
-[sync] describe=e5b2d294 Record the published P35 memory-space repair
-[sync] tracked_dirty=0
-[sync] package_untracked=0
-[sync] external_untracked=5
-[sync] provenance ok
-[entrypoint] <-- 10_sync_repo.sh ok
-[entrypoint] --> 20_probe_image.sh
-[probe] tpu_inference=/usr/local/lib/python3.12/site-packages/tpu_inference
-[probe] SAME      layers/common/attention_interface.py
-[probe] SAME      layers/jax/embed.py
-[probe] SAME      layers/jax/linear.py
-[probe] SAME      models/jax/qwen2.py
-[probe] SAME      models/jax/qwen3.py
-[probe] SAME      runner/tpu_runner.py
-[probe] SUMMARY same=6 drift=0 missing=0
-[probe] image matches the patch anchor exactly
-[entrypoint] <-- 20_probe_image.sh ok
-[entrypoint] --> 25_rope_fix.sh
-[rope] new form already present (upstream) -- not patching
-[rope]   35:from tpu_inference.layers.jax.rope_interface import (apply_rope,
-[rope]   66:        self.rope_theta = get_rope_theta(config, default=1000000.0)
-[rope]   67:        self.rope_scaling = get_rope_scaling(config)
-[rope] ROPE_FIX=not_needed
-[entrypoint] <-- 25_rope_fix.sh ok
-[entrypoint] --> 28_sync_cache.sh
-[cache] Target GCS cache: gs://yuxzhang-tunix-models/cache/p33_compilation_cache/qwen3-1p7b-dp16-tp4-gsm8k
-[cache] Local cache dir: /tmp/jax_compilation_cache
-[cache] Pre-warmed cache entries: 0
-[entrypoint] <-- 28_sync_cache.sh ok
-[entrypoint] --> 30_install_canon.sh
-[1/4] extracting stock tpu_inference (mode=path)
-      path=/usr/local/lib/python3.12/site-packages/tpu_inference
-[2/4] applying patches
-[3/4] laying down the shim chain (model=qwen1p7b)
-[4/4] verifying against MANIFEST.sha256
-      all 29 files match (qwen1p7b)
-
-Installed to: /tmp/canon-state/canon-p35-gsm8k-env-r27-e5b2d294/canon   (model=qwen1p7b)
-
-Container mounts -- target paths are under the engine's tpu_inference package
-($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
-
-  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
-  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
-  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
-  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
-  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
-  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
-
-  PYTHONPATH=/tmp/canon-state/canon-p35-gsm8k-env-r27-e5b2d294/canon:$PYTHONPATH
-  CANON_SHIM_ROOT=/tmp/canon-state/canon-p35-gsm8k-env-r27-e5b2d294/canon          # optional; defaults to each shim's own directory
-
-Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
-(cluster/steps/40_overlay_engine.sh does exactly that).
-
-The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
-and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
-WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
-[install] runtime deps OK numpy=2.3.5 numba=0.62.1
-[install] installed to /tmp/canon-state/canon-p35-gsm8k-env-r27-e5b2d294/canon (29 files)
-[entrypoint] <-- 30_install_canon.sh ok
-[entrypoint] --> 40_overlay_engine.sh
-[overlay] attn_iface_patched.py        -> layers/common/attention_interface.py
-[overlay] linear_p22xk.py              -> layers/jax/linear.py
-[overlay] embed_patched.py             -> layers/jax/embed.py
-[overlay] tpu_runner_p21_l30.py        -> runner/tpu_runner.py
-[overlay] qwen3_p22xk.py               -> models/jax/qwen3.py
-[overlay] qwen2_p22xk.py               -> models/jax/qwen2.py
-[overlay] PYTHONPATH and CANON_SHIM_ROOT recorded; originals in /tmp/canon-state/canon-p35-gsm8k-env-r27-e5b2d294/stock_backup
-[entrypoint] <-- 40_overlay_engine.sh ok
-[entrypoint] --> 50_verify_overlay.sh
-[verify] A. byte identity of overlay targets
-[verify]   OK   attn_iface_patched.py        8f8cec35f296
-[verify]   OK   linear_p22xk.py              8bc00bff932c
-[verify]   OK   embed_patched.py             4a0540323c75
-[verify]   OK   tpu_runner_p21_l30.py        ee181992447a
-[verify]   OK   qwen3_p22xk.py               be9b90f0aa05
-[verify]   OK   qwen2_p22xk.py               d89eeb6914ef
-[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
-[verify] Section B promotion checks will run inside Step 70 single Pathways session.
-
-[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
-[verify] This does NOT yet prove it executes on the hot path; 90_run.sh checks the
-[verify] [PATHTRACE] tally for that.
-[entrypoint] <-- 50_verify_overlay.sh ok
-[entrypoint] --> 60_wait_workers.sh
-[wait] giving all 64 devices on 16 TPU worker nodes 180s quiet period to boot and register with Pathways RM...
-[wait] hardware quiet period completed. Single-session unified runner in Step 70 will perform device assertion and all admission probes.
-[entrypoint] <-- 60_wait_workers.sh ok
-[entrypoint] --> 90_run.sh
-[run] cmd: python3 -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_dp=16 --mesh_tp=4 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=16 --max_steps=1 --num_generations=8 --max_prompt_length=1024 --max_response_length=256 --max_concurrency=256 --train_micro_batch_size=32 --compute_logps_micro_batch_size=32 --rollout_vllm_hbm_utilization=0.20 --rollout_vllm_max_num_seqs=16 --rollout_vllm_max_num_batched_tokens=256 --wandb_project=zero-tim-gsm8k-dp16-tp4
-[run] log: /tmp/canon-state/canon-p35-gsm8k-env-r27-e5b2d294/run.log
-Logging configured at INFO level.
-2026-08-09 20:16:18 - WARNING - [absl] Type handler registry type "<class 'jax.Array'>" overriding jax.Array
-I0809 20:16:18.915338     342 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
-I0809 20:16:18.915389     342 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
-I0809 20:16:18.915400     342 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
-I0809 20:16:18.917205     342 grpc_client_session.cc:264]   Established channel.
-I0809 20:16:18.917231     342 grpc_client_session.cc:269]   Created stub.
-I0809 20:16:18.930299     342 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
-I0809 20:16:18.992318     342 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
-I0809 20:16:18.992425     342 grpc_client_session.cc:264]   Established channel.
-I0809 20:16:18.992438     342 grpc_client_session.cc:269]   Created stub.
-I0809 20:16:18.993752     342 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
-I0809 20:16:19.023100     342 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
-I0809 20:16:19.023129     342 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
-jax devices:  [device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)]
-shared_mesh.devices.shape=(16, 4)
-2026-08-09 20:16:19 - WARNING - [absl] Variant folder /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/1.0.0 has no dataset_info.json
-2026-08-09 20:16:19 - INFO - [absl] Generating dataset gsm8k (/app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/1.0.0)
-Downloading and preparing dataset Unknown size (download: Unknown size, generated: Unknown size, total: Unknown size) to /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/1.0.0...
-Dl Completed...: 0 url [00:00, ? url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Downloading https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl into /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_grrJS2RhFr7vT_IovyhSl4MxHhzrGEOw_UQms8tDg3BQE.jsonl.tmp.344edb2098c342a3980be0dedc5bd132...
-Dl Completed...:   0%|          | 0/1 [00:00<?, ? url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Downloading https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test_socratic.jsonl into /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_grISouESCebaH1iFx7XNBU9uiZeiQdv4QnXpBcKLD0n1U.jsonl.tmp.4158928a630b48bb868abace2ff6a9da...
-Dl Completed...:   0%|          | 0/2 [00:00<?, ? url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Downloading https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl into /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_grb6OPNFhl2yOEHFlmWqZu3-9nNXfrgazn2uvcMFm7DsE.jsonl.tmp.2c5e79f35ee047b5bc21983dfae724ac...
-Dl Completed...:   0%|          | 0/3 [00:00<?, ? url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Downloading https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train_socratic.jsonl into /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_gr2MZGZhL1-jEHseV9KjGHESYiWQ5DuPqNnQzNNUrP-hU.jsonl.tmp.207b5f697f3b453e8a77a9e8a79fbfe3...
-Dl Completed...:   0%|          | 0/4 [00:00<?, ? url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:   0%|          | 0/4 [00:00<?, ? url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  25%|██▌       | 1/4 [00:00<00:00,  3.53 url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Skipping extraction for /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_grrJS2RhFr7vT_IovyhSl4MxHhzrGEOw_UQms8tDg3BQE.jsonl (method=NO_EXTRACT).
-Dl Completed...:  25%|██▌       | 1/4 [00:00<00:01,  2.81 url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  50%|█████     | 2/4 [00:00<00:00,  5.41 url/s]
-Dl Size...: 0 MiB [00:00, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Skipping extraction for /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_grISouESCebaH1iFx7XNBU9uiZeiQdv4QnXpBcKLD0n1U.jsonl (method=NO_EXTRACT).
-Dl Completed...:  50%|█████     | 2/4 [00:00<00:00,  3.50 url/s]
-Dl Size...:   0%|          | 0/1 [00:00<?, ? MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  50%|█████     | 2/4 [00:00<00:00,  3.40 url/s]
-Dl Size...: 100%|██████████| 1/1 [00:00<00:00,  1.70 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  50%|█████     | 2/4 [00:00<00:00,  3.35 url/s]
-Dl Size...: 2 MiB [00:00,  3.35 MiB/s]                     [A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  50%|█████     | 2/4 [00:00<00:00,  3.30 url/s]
-Dl Size...: 3 MiB [00:00,  4.95 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  75%|███████▌  | 3/4 [00:00<00:00,  4.89 url/s]
-Dl Size...: 3 MiB [00:00,  4.89 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Skipping extraction for /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_grb6OPNFhl2yOEHFlmWqZu3-9nNXfrgazn2uvcMFm7DsE.jsonl (method=NO_EXTRACT).
-Dl Completed...:  75%|███████▌  | 3/4 [00:00<00:00,  4.18 url/s]
-Dl Size...: 3 MiB [00:00,  4.18 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  75%|███████▌  | 3/4 [00:00<00:00,  4.09 url/s]
-Dl Size...: 4 MiB [00:00,  5.45 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  75%|███████▌  | 3/4 [00:00<00:00,  4.04 url/s]
-Dl Size...: 5 MiB [00:00,  6.74 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  75%|███████▌  | 3/4 [00:00<00:00,  4.00 url/s]
-Dl Size...: 6 MiB [00:00,  8.00 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  75%|███████▌  | 3/4 [00:00<00:00,  3.96 url/s]
-Dl Size...: 7 MiB [00:00,  9.23 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...:  75%|███████▌  | 3/4 [00:00<00:00,  3.91 url/s]
-Dl Size...: 8 MiB [00:00, 10.44 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[ADl Completed...: 100%|██████████| 4/4 [00:00<00:00,  5.21 url/s]
-Dl Size...: 8 MiB [00:00, 10.42 MiB/s][A
-
-Extraction completed...: 0 file [00:00, ? file/s][A[A2026-08-09 20:16:19 - INFO - [absl] Skipping extraction for /app/artifacts/qwen3_grpo_gsm8k_vtc/data/downloads/gsm8k/raw.gith.com_open_grad-scho-math_mast_gr2MZGZhL1-jEHseV9KjGHESYiWQ5DuPqNnQzNNUrP-hU.jsonl (method=NO_EXTRACT).
-Extraction completed...: 0 file [00:00, ? file/s]
-Dl Size...: 8 MiB [00:00, 10.37 MiB/s]
-Dl Completed...: 100%|██████████| 4/4 [00:00<00:00,  5.18 url/s]
-Generating splits...:   0%|          | 0/4 [00:00<?, ? splits/s]
-Generating train examples...: 0 examples [00:00, ? examples/s][A
-                                                              [A
-Shuffling /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-train.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]...:   0%|          | 0/7473 [00:00<?, ? examples/s][A
-                                                                                                                                                                                                                    [A2026-08-09 20:16:20 - INFO - [absl] Done writing /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-train.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]. Number of examples: 7473 (shards: [7473])
-Generating splits...:  25%|██▌       | 1/4 [00:00<00:01,  1.60 splits/s]
-Generating test examples...: 0 examples [00:00, ? examples/s][A
-                                                             [A
-Shuffling /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-test.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]...:   0%|          | 0/1319 [00:00<?, ? examples/s][A
-                                                                                                                                                                                                                   [A2026-08-09 20:16:20 - INFO - [absl] Done writing /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-test.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]. Number of examples: 1319 (shards: [1319])
-Generating splits...:  50%|█████     | 2/4 [00:00<00:00,  2.98 splits/s]
-Generating train_socratic examples...: 0 examples [00:00, ? examples/s][A
-                                                                       [A
-Shuffling /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-train_socratic.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]...:   0%|          | 0/7473 [00:00<?, ? examples/s][A
-                                                                                                                                                                                                                             [A2026-08-09 20:16:21 - INFO - [absl] Done writing /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-train_socratic.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]. Number of examples: 7473 (shards: [7473])
-Generating splits...:  75%|███████▌  | 3/4 [00:01<00:00,  2.11 splits/s]
-Generating test_socratic examples...: 0 examples [00:00, ? examples/s][A
-                                                                      [A
-Shuffling /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-test_socratic.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]...:   0%|          | 0/1319 [00:00<?, ? examples/s][A
-                                                                                                                                                                                                                            [A2026-08-09 20:16:21 - INFO - [absl] Done writing /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/incomplete.R95B2D_1.0.0/gsm8k-test_socratic.array_record-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]. Number of examples: 1319 (shards: [1319])
-Generating splits...: 100%|██████████| 4/4 [00:01<00:00,  2.93 splits/s]                                                                        Dataset gsm8k downloaded and prepared to /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/1.0.0. Subsequent calls will reuse this data.
-2026-08-09 20:16:21 - INFO - [absl] Load dataset info from /app/artifacts/qwen3_grpo_gsm8k_vtc/data/gsm8k/1.0.0
-2026-08-09 20:16:21 - INFO - [absl] Done with loading datasets - Using Pathways compatible HBM stats collector
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [absl] Using 0 Bytes on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
-2026-08-09 20:16:21 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/agent-harnesses "HTTP/1.1 200 OK"
-2026-08-09 20:16:21 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:21 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/config.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:21 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/config.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/tokenizer_config.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/tokenizer_config.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-1.7B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-1.7B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/vocab.json "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/vocab.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/vocab.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/merges.txt "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/merges.txt "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/merges.txt "HTTP/1.1 200 OK"
-2026-08-09 20:16:22 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/tokenizer.json "HTTP/1.1 302 Found"
-2026-08-09 20:16:23 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/added_tokens.json "HTTP/1.1 404 Not Found"
-2026-08-09 20:16:23 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/special_tokens_map.json "HTTP/1.1 404 Not Found"
-2026-08-09 20:16:24 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/chat_template.jinja "HTTP/1.1 404 Not Found"
-2026-08-09 20:16:24 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-1.7B "HTTP/1.1 200 OK"
-2026-08-09 20:16:24 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-1.7B/revision/main "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-1.7B/tree/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e?recursive=true&expand=false "HTTP/1.1 200 OK"
-Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/generation_config.json "HTTP/1.1 307 Temporary Redirect"
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-2026-08-09 20:16:25 - WARNING - [huggingface_hub.utils._http] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/generation_config.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/merges.txt "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/generation_config.json "HTTP/1.1 200 OK"
-Fetching 12 files:   8%|▊         | 1/12 [00:00<00:01,  6.00it/s]2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/merges.txt "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/README.md "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/README.md "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/.gitattributes "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/README.md "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/.gitattributes "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/.gitattributes "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/config.json "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/config.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/model.safetensors.index.json "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/LICENSE "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/LICENSE "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/model.safetensors.index.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/LICENSE "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/model.safetensors.index.json "HTTP/1.1 200 OK"
-Fetching 12 files:  58%|█████▊    | 7/12 [00:00<00:00, 26.65it/s]2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/tokenizer_config.json "HTTP/1.1 200 OK"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/vocab.json "HTTP/1.1 307 Temporary Redirect"
-2026-08-09 20:16:25 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-1.7B/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/vocab.json "HTTP/1.1 200 OK"
-Fetching 12 files:  92%|█████████▏| 11/12 [00:05<00:00,  1.70it/s]Fetching 12 files:  92%|█████████▏| 11/12 [00:24<00:00,  1.70it/s]Fetching 12 files: 100%|██████████| 12/12 [00:24<00:00,  3.27s/it]Fetching 12 files: 100%|██████████| 12/12 [00:24<00:00,  2.07s/it]
