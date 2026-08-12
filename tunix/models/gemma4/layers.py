@@ -19,6 +19,7 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.models.gemma4.config import ModelConfig
 from tunix.models.gemma4.config import ShardingConfig
@@ -243,7 +244,7 @@ class Einsum(nnx.Module):
       shape: flax.typing.Shape,
       *,
       rngs: nnx.Rngs,
-      sharding: Tuple[str | None, ...],
+      sharding: Tuple[str | None, ...] | P,
       dtype: jnp.dtype,
       param_dtype: jnp.dtype,
       w_scale: float | None = None,

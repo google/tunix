@@ -14,6 +14,7 @@
 
 """Gemma4 model configuration."""
 
+import bisect
 import dataclasses
 import enum
 from typing import Any, Tuple
@@ -71,62 +72,107 @@ class RematConfig(enum.Enum):
   DECODER = enum.auto()
 
 
+# Prefix-length bucketing prevents recompilation storms: each unique
+# prefix_length baked via partial triggers a separate XLA compilation, so we
+# round up to a fixed ladder of boundaries to bound the number of compiles.
+# Use pow2_buckets() / linear_buckets() to build common ladders.
+def pow2_buckets(max_len: int = 131072) -> tuple[int, ...]:
+  """Powers-of-two ladder: (0, 128, 256, ..., max_len). Default."""
+  buckets = [0]
+  n = 128
+  while n <= max_len:
+    buckets.append(n)
+    n *= 2
+  return tuple(buckets)
+
+
+def linear_buckets(step: int = 512, max_len: int = 131072) -> tuple[int, ...]:
+  """Linear ladder: (0, step, 2*step, ..., max_len). The 'x*512' case."""
+  return tuple(range(0, max_len + 1, step))
+
+
+def _bucket_prefix_length(
+    prefix_length: int, cache_len: int, boundaries: tuple[int, ...]
+) -> int:
+  """Round prefix_length up to the nearest bucket for compilation stability.
+
+  Positions beyond the actual prefix_length are zeroed via dynamic masking,
+  so the padding is semantically invisible to the model.
+  """
+  i = bisect.bisect_left(boundaries, prefix_length)
+  bucket = boundaries[i] if i < len(boundaries) else cache_len
+  return min(bucket, cache_len)
+
+
+def _maybe_bucket_prefix_length(
+    prefix_length: int,
+    cache: LayerCache | None,
+    is_chunked_prefill: bool,
+    boundaries: tuple[int, ...],
+) -> int:
+  """Buckets prefix_length during chunked prefill; passthrough otherwise."""
+  if not is_chunked_prefill or prefix_length <= 0 or not boundaries:
+    return prefix_length
+  cache_len = cache['v'].shape[1] if cache is not None else prefix_length
+  return _bucket_prefix_length(prefix_length, cache_len, boundaries)
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
 
-  emb_vd: Tuple[str | None, ...]
-  q_weight_ndh: Tuple[str | None, ...]
-  kv_weight_cndh: Tuple[str | None, ...]
-  qkv_weight_cndh: Tuple[str | None, ...]
-  o_weight_nhd: Tuple[str | None, ...]
-  ffw_weight_df: Tuple[str | None, ...]
-  ffw_weight_fd: Tuple[str | None, ...]
-  rms_norm_weight: Tuple[str | None, ...]
-  act_btd: Tuple[str | None, ...]
-  act_btf: Tuple[str | None, ...]
-  act_btnh: Tuple[str | None, ...]
-  vision_proj: Tuple[str | None, ...]
-  vision_soft_emb_norm_weight: Tuple[str | None, ...]
-  audio_proj: Tuple[str | None, ...]
+  emb_vd: Tuple[str | None, ...] | P
+  q_weight_ndh: Tuple[str | None, ...] | P
+  kv_weight_cndh: Tuple[str | None, ...] | P
+  qkv_weight_cndh: Tuple[str | None, ...] | P
+  o_weight_nhd: Tuple[str | None, ...] | P
+  ffw_weight_df: Tuple[str | None, ...] | P
+  ffw_weight_fd: Tuple[str | None, ...] | P
+  rms_norm_weight: Tuple[str | None, ...] | P
+  act_btd: Tuple[str | None, ...] | P
+  act_btf: Tuple[str | None, ...] | P
+  act_btnh: Tuple[str | None, ...] | P
+  vision_proj: Tuple[str | None, ...] | P
+  vision_soft_emb_norm_weight: Tuple[str | None, ...] | P
+  audio_proj: Tuple[str | None, ...] | P
   # MoE sharding
-  exp_weight_edf: Tuple[str | None, ...]
-  exp_weight_efd: Tuple[str | None, ...]
+  exp_weight_edf: Tuple[str | None, ...] | P
+  exp_weight_efd: Tuple[str | None, ...] | P
   # PLE sharding
-  per_layer_model_projection: Tuple[str | None, ...]
-  per_layer_input_gate: Tuple[str | None, ...]
-  per_layer_projection: Tuple[str | None, ...]
-  per_layer_input_embedding: Tuple[str | None, ...]
+  per_layer_model_projection: Tuple[str | None, ...] | P
+  per_layer_input_gate: Tuple[str | None, ...] | P
+  per_layer_projection: Tuple[str | None, ...] | P
+  per_layer_input_embedding: Tuple[str | None, ...] | P
   vision_shd: vision.VisionShardingConfig | None = None
   # Critic score sharding
-  score_weight_d1: Tuple[str | None, ...] | None = None
+  score_weight_d1: Tuple[str | None, ...] | P | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        q_weight_ndh=P('tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        kv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        qkv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        rms_norm_weight=P('tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btd=P('fsdp', None, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btnh=P('fsdp', None, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        vision_proj=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        vision_soft_emb_norm_weight=P('tp'),  # pyrefly: ignore[bad-argument-type]
-        audio_proj=P(fsdp, 'tp'),  # TODO check if good!  # pyrefly: ignore[bad-argument-type]
-        exp_weight_edf=P(fsdp, None, None, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        exp_weight_efd=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        per_layer_model_projection=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        per_layer_input_gate=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        per_layer_projection=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        per_layer_input_embedding=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp'),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
+        vision_proj=P(fsdp, 'tp'),
+        vision_soft_emb_norm_weight=P('tp'),
+        audio_proj=P(fsdp, 'tp'),  # TODO check if good!
+        exp_weight_edf=P(fsdp, None, None, 'tp'),
+        exp_weight_efd=P(fsdp, 'tp', None),
+        per_layer_model_projection=P(fsdp, 'tp'),
+        per_layer_input_gate=P(fsdp, 'tp'),
+        per_layer_projection=P('tp', fsdp),
+        per_layer_input_embedding=P('tp', fsdp),
         vision_shd=vision.VisionShardingConfig.get_default_sharding(
             is_sampling
         ),
@@ -167,7 +213,28 @@ class ModelConfig:
   dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
+  flash_attention_compute_block_size: int = 256
+  # Backward needs more VMEM/tile than forward; prod uses 256 (SPLASH_BLOCK_SIZES in
+  # //depot/GOOGLE_INTERNAL_PACKAGE_PATH/learning/gemini/prod/serving/jet_engine/gemma4/config_utils.py).
+  flash_attention_bwd_block_size: int = 256
   use_sliding_window_kv_cache: bool = False
+
+  # Remat checkpoint policy name from jax.checkpoint_policies; controls which
+  # activations are saved in fwd vs recomputed in bwd. Default recomputes
+  # everything (minimum HBM).
+  remat_policy: str = 'nothing_saveable'
+
+  # Prefix-length bucket ladder for chunked prefill. Each distinct bucketed
+  # prefix_length is baked as a static partial arg, so it is a separate XLA
+  # compilation; this ladder bounds the number of compiles. An empty tuple
+  # disables bucketing (passthrough, accepts recompiles). Use pow2_buckets() /
+  # linear_buckets() to build common ladders. Must be sorted and non-negative.
+  prefix_bucket_boundaries: tuple[int, ...] = pow2_buckets()
+
+  # When True, the splash attention backward pass uses a single fused kernel
+  # for dQ+dKV instead of two separate passes, reducing VMEM round-trips.
+  # When enabled, block_q_dq and block_kv_dq are ignored (set to None).
+  flash_attention_use_fused_bwd: bool = False
 
   # MoE config
   enable_moe: bool = False
@@ -184,10 +251,13 @@ class ModelConfig:
   audio_encoder: audio.ConformerConfig | None = None
 
   def __post_init__(self):
-    # TODO(tunix-dev): support flash attention with sliding window KV cache
-    if self.use_sliding_window_kv_cache and self.use_flash_attention:
+    boundaries = self.prefix_bucket_boundaries
+    if any(b < 0 for b in boundaries) or boundaries != tuple(
+        sorted(set(boundaries))
+    ):
       raise ValueError(
-          'Flash attention and sliding window KV cache are mutually exclusive.'
+          'prefix_bucket_boundaries must be non-negative and sorted strictly '
+          f'ascending with no duplicates; got {boundaries}'
       )
 
   @classmethod
@@ -394,10 +464,23 @@ def create_kv_cache_sharing_patterns(
     if i < num_unshared_layers:
       kv_cache_sharing_patterns.append(i)
     else:
-      if attention_types[i] == AttentionType.GLOBAL and share_global:
-        kv_cache_sharing_patterns.append(num_unshared_layers - 1)
-      elif attention_types[i] == AttentionType.LOCAL_SLIDING and share_local:
-        kv_cache_sharing_patterns.append(num_unshared_layers - 2)
+      attn_type = attention_types[i]
+      if (attn_type == AttentionType.GLOBAL and share_global) or (
+          attn_type == AttentionType.LOCAL_SLIDING and share_local
+      ):
+        lender = None
+        for j in reversed(range(num_unshared_layers)):
+          if attention_types[j] == attn_type:
+            lender = j
+            break
+        if lender is None:
+          raise ValueError(
+              f'Cannot share KV cache for layer {i} of type {attn_type}: no'
+              ' unshared layer of the same type exists in layers'
+              f' 0..{num_unshared_layers - 1}. Reduce frac_shared_layers or'
+              ' adjust attention_types.'
+          )
+        kv_cache_sharing_patterns.append(lender)
       else:
         kv_cache_sharing_patterns.append(i)
   return kv_cache_sharing_patterns
