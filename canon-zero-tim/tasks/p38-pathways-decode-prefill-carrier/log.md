@@ -812,3 +812,43 @@
 - Next: the remote operator follows the P38s5 section at the top of
   `HANDOFF.md`, applies stock only after resource approval, and returns the
   complete evidence directory. Do not accept a tail-only log.
+
+## 2026-08-12 UTC — P38s5 audited; request-anchored P38.2g5 locally complete
+
+- Type: evidence correction plus default-off diagnostic repair. No cloud/TPU
+  target run, backward, optimizer commit, training launch, commit, or push was
+  performed.
+- Source: latest remote evidence at
+  `76cef0ec8222fd1716422f6f7a0c24eeff5a527f` in an isolated detached
+  worktree.
+- P38s5 verdict: `INCONCLUSIVE_NONTERMINAL`. Its 6,069-line byte-0 log has no
+  hook init/observation/capture, alignment record, terminal precheck,
+  classifier, serving archive, or outer postflight. It ends after final-norm
+  trace and does not prove backward execution.
+- Evidence correction: withdrew the claims that FrozenLake prompts were about
+  200 tokens and that the recipe bypassed `GRPOLearner`. Neither is supported
+  by the current code or artifacts.
+- Runtime fix: capture strata now use the host scheduler's request-level
+  `num_computed_tokens`; packed device positions remain a hard attestation
+  after selection. Added one import marker and bounded observations by
+  256-token prefix band, so a miss identifies the hook and observed range.
+- Stop-contract fix: precheck-only now allows a finite diagnostic A-B red only
+  when B-C is exact, persists the mismatch capsule, emits the terminal marker,
+  and raises before backward. Invalid/non-finite evidence and B-C drift remain
+  fatal; non-diagnostic training remains unchanged and fail-closed.
+- Postflight now requires exactly one capture-init marker and at least one
+  observation marker.
+- Gates: Qwen3-1.7B and Qwen3-8B exact-image overlays each pass 16/16 with all
+  29 manifest entries matching. Full frozen-image CPU gate passes 81 workload
+  tests, 31 alignment tests, and adjacent suites. Renderer passes 5/5, P38
+  shell postflight passes, Python compilation and shell syntax pass, and
+  `git diff --check` is clean.
+- Installed runner SHA-256:
+  `72c4307859c32de4e7080823bbe0693fb04c21a67ab82a3cfe829bb6c39ed18c`.
+- Claim ceiling: diagnostic reachability only. No A-B repair, serving archive,
+  exact E0 replay, operator/page/cache cause, backward, or training admission
+  is claimed.
+- Next: publish P38.2g5, then run P38s6 stock only using the superseding top
+  section of `HANDOFF.md`. Do not rerun U or auto-adjust prefix bounds.
+- Rollback: leave `CANON_P38_SERVING_CAPTURE_*` and
+  `CANON_P38_PRECHECK_ONLY` unset, or revert the P38.2g5 change.

@@ -5,11 +5,10 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## DO THIS NOW: rerun one P38s5 FrozenLake stock capture
+## DO THIS NOW: run one P38s6 FrozenLake stock capture
 
-This operator contract was published in
-`d5a0ac30bdc1ecdd4bf3c5948baf8e54c48502b5` on
-`origin/yuxzhang/canon-zero-tim`.
+Use the latest published `origin/yuxzhang/canon-zero-tim` containing
+`p38-2g5-request-anchored-capture.md`. Do not launch from the P38s5 source.
 
 This section supersedes every older P38 serving-capture launch command below.
 The committed `p38_p38s4_frozenlake_stock.raw.log` is not a complete run log:
@@ -18,14 +17,17 @@ final RMSNorm without a workload exit, serving capture, classifier, archive,
 or final postflight. It is `INCONCLUSIVE` and must not be used to select a
 repair.
 
-The operator's only job is to run one fresh **stock-only** P38 diagnostic and
+P38s5 is also inconclusive: it starts at byte zero but ends without a child
+exit, alignment record, terminal precheck, classifier, archive, or outer
+postflight, and it emitted no capture-hook init or observation marker. The
+operator's only job is to run one fresh **stock-only** P38 diagnostic and
 return the complete evidence bundle. Do not launch unified KV, FrozenLake full
 training, GSM8K, backward, or an optimizer commit.
 
 ### 1. Fetch one immutable source and render
 
 Run every command block in this section sequentially in the same Bash shell
-from an existing clone of `google/tunix`. Use a new run ID if `p38s5` already
+from an existing clone of `google/tunix`. Use a new run ID if `p38s6` already
 exists. Do not reuse or overwrite an earlier output directory.
 
 ```bash
@@ -33,9 +35,9 @@ set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor \
-  340b0e364f374fde8798d8f62331e6bc33e0e58a "$SOURCE_COMMIT"
+  76cef0ec8222fd1716422f6f7a0c24eeff5a527f "$SOURCE_COMMIT"
 
-RUN_ID="p38s5"
+RUN_ID="p38s6"
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -46,6 +48,9 @@ git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
 cd "$WORKTREE"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
+rg -q '_p38_scheduled_decode_prefixes' \
+  canon-zero-tim/patches/tpu_inference/09-tpu-runner-p38-serving-capture.patch
+rg -q 'stop_after_diagnostic_precheck' tunix/rl/alignment.py
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 
@@ -147,18 +152,27 @@ The unedited `head.full.log` must contain all of the following:
 
 1. exactly one `JOBSET_ATTEMPT 0 (first attempt)`;
 2. `[sync] HEAD=$SOURCE_COMMIT` and a clean sync verdict;
-3. four `pre` and four `post` `[CANON_P38_SERVING_CAPTURE]` records, one pair
+3. exactly one `[CANON_P38_SERVING_CAPTURE_INIT]` and at least one
+   `[CANON_P38_SERVING_CAPTURE_OBSERVE]` record;
+4. four `pre` and four `post` `[CANON_P38_SERVING_CAPTURE]` records, one pair
    for each registered prefix stratum;
-4. finite `S_decode_vs_S_prefill` red and exact `S_prefill_vs_T_old`;
-5. exactly one `[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD`;
-6. child `[run] exit=1` followed by
+5. finite `S_decode_vs_S_prefill` red and exact `S_prefill_vs_T_old`;
+6. exactly one `[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD` carrying
+   `verdict=FAIL` and a positive `a_b_differing_bytes`;
+7. child `[run] exit=1` followed by
    `[CANON_PRE_ALIGN_ARTIFACT]` and `[CANON_P38_CAPSULE_ARTIFACT]`;
-7. official `[CANON_P38_SERVING_CLASSIFICATION]` with JSON verdict `PASS` and
+8. official `[CANON_P38_SERVING_CLASSIFICATION]` with JSON verdict `PASS` and
    at least one exact request/token-history join;
-8. `[CANON_P38_SERVING_ARCHIVE]` and every base64 payload line;
-9. `[run] P38 serving expected precheck exit=1 accepted; backward=0
+9. `[CANON_P38_SERVING_ARCHIVE]` and every base64 payload line;
+10. `[run] P38 serving expected precheck exit=1 accepted; backward=0
    optimizer_commits=0`; and
-10. final `[run] PATHTRACE` with `p38_kv_unified=0`.
+11. final `[run] PATHTRACE` with `p38_kv_unified=0`,
+    `p38_capture_init=1`, and positive `p38_capture_observe`.
+
+If no stratum is captured, return the complete failure package including every
+`CANON_P38_SERVING_CAPTURE_OBSERVE` line. Do not lower the bounds or relaunch:
+the observed request-level prefix range is the evidence needed for the next
+single-variable revision.
 
 Then recover the binaries from the unedited, non-timestamped complete log:
 
@@ -167,11 +181,11 @@ set -euo pipefail
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s5-mismatch-capsule.npz"
+  --output "$EVIDENCE/p38s6-mismatch-capsule.npz"
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s5-serving-capture.tar"
+  --output "$EVIDENCE/p38s6-serving-capture.tar"
 sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
 sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
@@ -180,8 +194,8 @@ test -s "$EVIDENCE/pre-alignment.jsonl"
 test -s "$EVIDENCE/serving-classification.json"
 sha256sum \
   "$EVIDENCE/head.full.log" \
-  "$EVIDENCE/p38s5-mismatch-capsule.npz" \
-  "$EVIDENCE/p38s5-serving-capture.tar" \
+  "$EVIDENCE/p38s6-mismatch-capsule.npz" \
+  "$EVIDENCE/p38s6-serving-capture.tar" \
   "$EVIDENCE/pre-alignment.jsonl" \
   "$EVIDENCE/serving-classification.json" | \
   tee "$EVIDENCE/SHA256SUMS"
@@ -214,19 +228,19 @@ head-pod.events.txt
 pathways-proxy.log
 pathways-rm.log
 head.previous.log
-p38s5-mismatch-capsule.npz
-p38s5-serving-capture.tar
+p38s6-mismatch-capsule.npz
+p38s6-serving-capture.tar
 pre-alignment.jsonl
 serving-classification.json
 SHA256SUMS
 ```
 
-The required ancestor `340b0e36` contains both the published P38.2g4 capture
-hardening (`b89435ca`) and the later FrozenLake segmented-engine global-M
-logging repair. The operator must also report in plain text: source SHA, run
+The required ancestor is only a baseline evidence anchor. The two `rg` checks
+above are mandatory proof that the checked-out source also contains P38.2g5.
+The operator must report in plain text: source SHA, run
 ID, JobSet name, pod name, final JobSet condition, pod exit reason/code,
 restart count, and
-whether all ten acceptance items above were present. The operator must not
+whether all eleven acceptance items above were present. The operator must not
 claim PASS from an A/B number alone.
 
 ## Purpose

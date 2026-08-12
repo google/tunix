@@ -24,6 +24,8 @@ run_case() (
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
   export CANON_KV_UNIFIED=0
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
+  command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4'"
+  command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"one_token_requests\":1}'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
   if [ "$mode" = exact ]; then

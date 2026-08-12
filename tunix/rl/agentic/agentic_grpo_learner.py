@@ -1400,12 +1400,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"P35 diagnostic complete before backward: {output}"
         )
       if alignment.precheck_enabled():
+        diagnostic_only = alignment.precheck_only_enabled()
         precheck_record = alignment.check_pre_backward(
             combined_batch,
             step=int(expected_step),
-            fail_closed=True,
+            fail_closed=not diagnostic_only,
         )
-        alignment.stop_after_exact_precheck(precheck_record)
+        if diagnostic_only:
+          alignment.stop_after_diagnostic_precheck(precheck_record)
     return [combined_batch]
 
 

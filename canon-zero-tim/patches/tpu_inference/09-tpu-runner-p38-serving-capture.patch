@@ -1,6 +1,6 @@
 --- tpu_runner_p21_l30.py
 +++ tpu_runner_p38_serving_capture.py
-@@ -932,6 +932,54 @@
+@@ -932,6 +932,67 @@
  _P18_SEQ = {"n": 0}
  _P35_METADATA_DIR = os.environ.get("CANON_P35_METADATA_DIR", "")
  _P35_METADATA_SEQ = {"n": 0}
@@ -27,6 +27,11 @@
 +        "CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS must contain integers") from error
 +_P38_SERVING_CAPTURE_SEQ = {"n": 0}
 +_P38_SERVING_CAPTURED_STRATA = set()
++_P38_SERVING_CAPTURE_OBSERVATION = {
++    "calls": 0,
++    "lines": 0,
++    "prefix_bands": set(),
++}
 +
 +if _P38_SERVING_CAPTURE_DIR and _P38_SERVING_CAPTURE_MAX_CALLS < 1:
 +    raise RuntimeError(
@@ -52,10 +57,18 @@
 +            _P38_SERVING_CAPTURE_PREFIX_BOUNDS) - 1:
 +        raise RuntimeError(
 +            "P38 serving capture call budget must equal the stratum count")
++    print(
++        "[CANON_P38_SERVING_CAPTURE_INIT] "
++        f"enabled=1 max_calls={_P38_SERVING_CAPTURE_MAX_CALLS} "
++        f"min_prefix={_P38_SERVING_CAPTURE_MIN_PREFIX} "
++        f"prefix_bounds={_P38_SERVING_CAPTURE_PREFIX_BOUNDS} "
++        f"module={__file__}",
++        flush=True,
++    )
  
  
  def _p18_leaf(x):
-@@ -1015,6 +1063,461 @@
+@@ -1015,6 +1076,518 @@
      )
  
  
@@ -121,6 +134,59 @@
 +        if lower <= max_prefix < upper:
 +            return index, lower, upper
 +    return None
++
++
++def _p38_scheduled_decode_prefixes(runner, scheduler_output):
++    """Return one-token decode prefixes from host scheduler state.
++
++    The capture trigger must use the same request-level quantity persisted in
++    the record.  Packed ``input_positions`` are retained as a device-side
++    attestation, but they are not a reliable trigger across runner layouts.
++    """
++    prefixes = []
++    for request_id, scheduled_tokens in (
++            scheduler_output.num_scheduled_tokens.items()):
++        if int(scheduled_tokens) != 1:
++            continue
++        if request_id not in runner.input_batch.req_id_to_index:
++            raise RuntimeError(
++                "P38 scheduled decode request is absent from input batch: "
++                f"{request_id}")
++        request_index = int(runner.input_batch.req_id_to_index[request_id])
++        prefixes.append({
++            "request_id": request_id,
++            "request_index": request_index,
++            "num_computed_tokens": int(
++                runner.input_batch.num_computed_tokens_cpu[request_index]),
++        })
++    return prefixes
++
++
++def _p38_observe_scheduled_prefixes(prefixes):
++    """Emit bounded evidence that the runtime hook ran, even on a miss."""
++    import json as _json
++
++    state = _P38_SERVING_CAPTURE_OBSERVATION
++    state["calls"] += 1
++    values = [int(item["num_computed_tokens"]) for item in prefixes]
++    bands = {value // 256 for value in values}
++    new_bands = bands - state["prefix_bands"]
++    should_emit = state["calls"] == 1 or bool(new_bands)
++    if should_emit and state["lines"] < 32:
++        state["lines"] += 1
++        state["prefix_bands"].update(bands)
++        print(
++            "[CANON_P38_SERVING_CAPTURE_OBSERVE] "
++            + _json.dumps({
++                "call": int(state["calls"]),
++                "one_token_requests": len(values),
++                "min_prefix": min(values) if values else None,
++                "max_prefix": max(values) if values else None,
++                "new_256_bands": sorted(int(value) for value in new_bands),
++                "captured_records": int(_P38_SERVING_CAPTURE_SEQ["n"]),
++            }, sort_keys=True),
++            flush=True,
++        )
 +
 +
 +def _p38_serving_dump(stage, seq, payload, meta):
@@ -373,6 +439,21 @@
 +    if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
 +        return None
 +
++    scheduled_prefixes = _p38_scheduled_decode_prefixes(
++        runner, scheduler_output)
++    _p38_observe_scheduled_prefixes(scheduled_prefixes)
++    candidate_strata = []
++    for index, (lower, upper) in enumerate(zip(
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS,
++            _P38_SERVING_CAPTURE_PREFIX_BOUNDS[1:])):
++        if index in _P38_SERVING_CAPTURED_STRATA:
++            continue
++        if any(lower <= int(item["num_computed_tokens"]) < upper
++               for item in scheduled_prefixes):
++            candidate_strata.append((index, lower, upper))
++    if not candidate_strata:
++        return None
++    stratum_index, stratum_lower, stratum_upper = candidate_strata[0]
 +    positions_host, active_host = jax.device_get(
 +        (input_positions, active_mask))
 +    positions_host = np.asarray(positions_host)
@@ -380,17 +461,6 @@
 +    active_positions = positions_host[active_host]
 +    min_prefix = int(active_positions.min()) if active_positions.size else -1
 +    max_prefix = int(active_positions.max()) if active_positions.size else -1
-+    candidate_strata = []
-+    for index, (lower, upper) in enumerate(zip(
-+            _P38_SERVING_CAPTURE_PREFIX_BOUNDS,
-+            _P38_SERVING_CAPTURE_PREFIX_BOUNDS[1:])):
-+        if index in _P38_SERVING_CAPTURED_STRATA:
-+            continue
-+        if np.any((active_positions >= lower) & (active_positions < upper)):
-+            candidate_strata.append((index, lower, upper))
-+    if not candidate_strata:
-+        return None
-+    stratum_index, stratum_lower, stratum_upper = candidate_strata[0]
 +    request_meta = _p38_serving_request_meta(
 +        runner, scheduler_output, req_ids_dp, tokens_indices_selector,
 +        padded_num_scheduled_tokens_per_dp_rank, positions_host,
@@ -517,7 +587,7 @@
  
  def _p18_weight_fingerprint(state_leaves):
      """Exact bitwise checksum over the weights, computed on-device (cheap).
-@@ -2142,8 +2645,8 @@
+@@ -2142,8 +2715,8 @@
              spec_decode_metadata,
              logits_indices_selector,
              padded_num_reqs,
@@ -528,7 +598,7 @@
              tokens_indices_selector,
          ) = self._prepare_inputs(scheduler_output)
  
-@@ -2171,6 +2674,21 @@
+@@ -2171,6 +2744,21 @@
              max_decode_steps = 1
          max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
  
@@ -550,7 +620,7 @@
          lora_metadata = self.lora_utils.extract_lora_metadata()
  
          # Run continue-decode as a single JIT'd on-device loop (JAX while_loop with
-@@ -2255,6 +2773,16 @@
+@@ -2255,6 +2843,16 @@
              lp_vals_cpu = np.asarray(lp_vals_cpu)[:actual_steps]
              lp_ranks_cpu = np.asarray(lp_ranks_cpu)[:actual_steps]
  

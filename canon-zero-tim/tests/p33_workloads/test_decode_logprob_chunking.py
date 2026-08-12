@@ -330,6 +330,54 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
         ],
     )
 
+  def test_serving_capture_triggers_from_host_scheduler_prefix(self):
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            req_id_to_index={"prefill": 0, "decode": 1},
+            num_computed_tokens_cpu=np.array([100, 1800], dtype=np.int32),
+        )
+    )
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={"prefill": 32, "decode": 1}
+    )
+    prefixes = self.runner._p38_scheduled_decode_prefixes(runner, scheduler)
+    self.assertEqual(prefixes, [{
+        "request_id": "decode",
+        "request_index": 1,
+        "num_computed_tokens": 1800,
+    }])
+    self.assertEqual(
+        self.runner._p38_capture_stratum(
+            prefixes[0]["num_computed_tokens"]
+        ),
+        (1, 1792, 2048),
+    )
+
+  def test_serving_capture_observation_is_bounded_by_prefix_band(self):
+    state = self.runner._P38_SERVING_CAPTURE_OBSERVATION
+    original = {
+        "calls": state["calls"],
+        "lines": state["lines"],
+        "prefix_bands": set(state["prefix_bands"]),
+    }
+    try:
+      state.update({"calls": 0, "lines": 0, "prefix_bands": set()})
+      with mock.patch("builtins.print") as print_mock:
+        self.runner._p38_observe_scheduled_prefixes([
+            {"num_computed_tokens": 1600}
+        ])
+        self.runner._p38_observe_scheduled_prefixes([
+            {"num_computed_tokens": 1610}
+        ])
+        self.runner._p38_observe_scheduled_prefixes([
+            {"num_computed_tokens": 1800}
+        ])
+      self.assertEqual(print_mock.call_count, 2)
+      self.assertEqual(state["calls"], 3)
+      self.assertEqual(state["lines"], 2)
+    finally:
+      state.update(original)
+
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()

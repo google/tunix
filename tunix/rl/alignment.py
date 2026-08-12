@@ -138,6 +138,44 @@ def stop_after_exact_precheck(record: dict[str, Any]) -> None:
   )
 
 
+def stop_after_diagnostic_precheck(record: dict[str, Any]) -> None:
+  """Stop after a finite P38 A/B diagnostic, including the expected red arm.
+
+  P38 is specifically intended to capture a known decode-versus-prefill
+  mismatch.  A durable finite A/B red with exact B/C is an admitted diagnostic
+  result, not a training admission.  Invalid arrays, non-finite values, an
+  empty action set, or B/C drift remain fatal.
+  """
+  if not precheck_only_enabled():
+    return
+  boundaries = record.get("boundaries", {})
+  a_b = boundaries.get("S_decode_vs_S_prefill", {})
+  b_c = boundaries.get("S_prefill_vs_T_old", {})
+  admitted = (
+      int(record.get("N_action", 0)) > 0
+      and a_b.get("valid") is True
+      and a_b.get("finite") is True
+      and isinstance(a_b.get("differing_bytes"), int)
+      and b_c.get("valid") is True
+      and b_c.get("finite") is True
+      and b_c.get("differing_bytes") == 0
+  )
+  if not admitted:
+    raise AlignmentGateError(
+        "P38 diagnostic precheck requires finite A/B evidence and exact B/C"
+    )
+  print(
+      "[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD "
+      f"step={record.get('step')} N_action={record.get('N_action')} "
+      f"verdict={record.get('verdict')} "
+      f"a_b_differing_bytes={a_b.get('differing_bytes')}",
+      flush=True,
+  )
+  raise PreAlignmentProbeComplete(
+      "P38 diagnostic precheck completed before backward"
+  )
+
+
 def execution_mode() -> str:
   """Return the single admitted alignment execution mode.
 

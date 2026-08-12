@@ -234,6 +234,62 @@ class AlignmentTest(absltest.TestCase):
         stdout.getvalue(),
     )
 
+  def test_p38_diagnostic_precheck_stops_after_finite_ab_red(self):
+    record = {
+        "verdict": "FAIL",
+        "step": 0,
+        "N_action": 17,
+        "boundaries": {
+            "S_decode_vs_S_prefill": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 3,
+            },
+            "S_prefill_vs_T_old": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 0,
+            },
+        },
+    }
+    stdout = io.StringIO()
+    with mock.patch.dict(
+        os.environ,
+        {alignment.PRECHECK_ONLY_ENV: "1"},
+        clear=False,
+    ), contextlib.redirect_stdout(stdout), self.assertRaisesRegex(
+        alignment.PreAlignmentProbeComplete, "before backward"
+    ):
+      alignment.stop_after_diagnostic_precheck(record)
+    self.assertIn("verdict=FAIL a_b_differing_bytes=3", stdout.getvalue())
+
+  def test_p38_diagnostic_precheck_rejects_bc_red(self):
+    record = {
+        "verdict": "FAIL",
+        "step": 0,
+        "N_action": 17,
+        "boundaries": {
+            "S_decode_vs_S_prefill": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 3,
+            },
+            "S_prefill_vs_T_old": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 1,
+            },
+        },
+    }
+    with mock.patch.dict(
+        os.environ,
+        {alignment.PRECHECK_ONLY_ENV: "1"},
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "exact B/C"
+    ):
+      alignment.stop_after_diagnostic_precheck(record)
+
   def test_p38_precheck_only_is_default_off_and_rejects_bad_values(self):
     with mock.patch.dict(
         os.environ,

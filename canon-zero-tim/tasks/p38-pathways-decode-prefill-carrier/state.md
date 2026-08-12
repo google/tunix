@@ -11,7 +11,8 @@
   `origin/yuxzhang/canon-zero-tim`. The complete P38s5 operator
   run-and-return contract is published at
   `d5a0ac30bdc1ecdd4bf3c5948baf8e54c48502b5` on the same branch. Main was not
-  checked out or modified.
+  checked out or modified. P38.2g5 is locally complete in the isolated
+  detached worktree based on `76cef0ec`; it is not yet committed or pushed.
 - Current phases: two independent tracks are deliberately active. P38.2d has
   added and locally gated the user-requested GSM8K-full warning-only alignment
   override so the time-sensitive convergence campaign cannot be stopped by an
@@ -25,8 +26,18 @@
   hardens that capture before another expensive target run: four bounded
   prefix strata replace the brittle single `min_prefix=1788` trigger, callable
   identity is attested, and first-divergence localization is preregistered
-  without naming RoPE or page state as the cause.
-- Latest local gate: P38.2g4 D0 is complete locally. The real
+  without naming RoPE or page state as the cause. P38.2g5 is now the active
+  diagnostic-reachability phase after P38s5 produced no hook evidence.
+- Latest local gate: P38.2g5 is complete locally. The trigger now selects
+  request-level scheduler prefixes, retains packed positions as an attestation,
+  and emits bounded init/observation evidence even on misses. A finite A-B red
+  with exact B-C now persists its capsule and exits before backward instead of
+  raising before the required stop marker. Qwen3-1.7B and Qwen3-8B overlays
+  each pass 16/16 exact-image tests with all 29 manifest entries matching; the
+  complete frozen-image CPU gate passes 81 workload tests, 31 alignment tests,
+  and all adjacent suites. The installed runner SHA-256 is
+  `72c4307859c32de4e7080823bbe0693fb04c21a67ab82a3cfe829bb6c39ed18c`.
+- Prior local gate: P38.2g4 D0 completed. The real
   `continue_decode` capture now excludes
   live-but-unscheduled requests without compacting their physical scheduler
   slots, selects one concrete scheduled request per prefix stratum, emits and
@@ -36,7 +47,7 @@
   must remain stable across all four records. Classifier controls pass 25/25,
   renderer controls 5/5, shell postflight passes, exact-image Qwen3-1.7B and
   Qwen3-8B overlays pass 14/14 each with all 29 manifest entries matching, and
-  the complete frozen-image P33 CPU gate passes (78 workload tests, 29
+  the complete frozen-image P33 CPU gate passed (78 workload tests, 29
   alignment tests, all adjacent suites). The installed runner SHA-256 is
   `fe81622996a1c73bbd17187ee603e6a191165202da40d07b5e428fe41b5db516`.
 - Last verified fact: P38e1 source row 191 completed on real Qwen3-8B DP1xTP4
@@ -99,9 +110,15 @@
   artifact, classifier, archive, or final postflight. P38s4 is therefore
   `INCONCLUSIVE_TAIL_ONLY`, not a completed D1 attempt and not evidence of a
   code failure.
-- Next action for the strict track: after separate resource approval, pull and
-  verify a clean remote source containing `340b0e36` (which descends from
-  `b89435ca`), then execute the P38s5
+- P38s5 evidence correction: the 6,069-line log starts at byte zero but ends
+  after final-norm trace without a child exit, alignment record, terminal
+  precheck, classifier, archive, or outer postflight. It contains no init,
+  observation, or capture marker, so it cannot establish whether the hook was
+  imported, called, or merely missed its ranges. The archived claim that
+  FrozenLake prompts were about 200 tokens and that the recipe bypassed
+  `GRPOLearner` is withdrawn as unsupported by the current code and evidence.
+- Next action for the strict track: after P38.2g5 is published and separate
+  resource approval is granted, execute the P38s6
   stock-only Attempt-0 run-and-return protocol at the top of `HANDOFF.md`.
   Preserve the complete non-timestamped terminal head log through outer
   postflight and return the exact evidence directory, including the real
@@ -140,8 +157,8 @@
   Qwen3-1.7B/Qwen3-8B overlay gates 14/14 each PASS, serving classifier 25/25,
   renderer 5/5, and postflight stock/U
   PATHTRACE negative controls PASS.
-- Updated: 2026-08-12 UTC after classifying P38s4 as tail-only and adding the
-  complete P38s5 operator run-and-return contract
+- Updated: 2026-08-12 UTC after auditing P38s5 and locally completing the
+  request-anchored P38.2g5 diagnostic repair
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,

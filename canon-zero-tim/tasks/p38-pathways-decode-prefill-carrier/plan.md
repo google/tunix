@@ -28,6 +28,7 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
 | P38.2g2 | Source-pinned Pathways serving capture and combined KV arm | Real continue-decode metadata is durable and stock is reproduced before the default-off all-cache-read arm is interpreted | target numerical runs exist: stock red and U red; serving postflight/archive missing, so `INCONCLUSIVE`; rerun stock only |
 | P38.2g3 | Exact-state physical-page and padding-boundary discriminator | The complete production action vector is first reproduced exactly, then real, relocated, contiguous, padding-sanitized, and padding-poison arms are compared with temporal page-content equivalence checks | pending; blocked on complete P38.2g2 stock archive and exact E0 reproduction |
 | P38.2g4 | Decode-envelope seam localization with stratified production capture | Four bounded prefix strata and implementation identity survive, at least one exact token-history join is admitted, E0 reproduces the complete A/B vectors, and the first A/B divergence is localized before any repair | active; D0 published at `b89435ca`, D1 target capture not run |
+| P38.2g5 | Request-anchored serving trigger and red-safe diagnostic stop | The installed runner attests module initialization and bounded scheduler-prefix observations, four request-anchored records survive, finite A-B red with exact B-C stops before backward, and outer postflight returns the real capsule/archive | locally complete; P38s6 target run pending |
 | P38.2h | Candidate target backward-no-commit | The selected candidate first makes all forward boundaries exact, then passes actual-model gradient/DP-reducer gates with zero optimizer commits | pending; forbidden before P38.2g selects a candidate |
 
 ## Decisions
@@ -149,3 +150,15 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
   residual/cast boundaries, RPA, and the logits tail. RoPE is a candidate
   because it is not numerically canonicalized, but no repair is selected until
   the first divergent checkpoint is measured with observer neutrality.
+- Correction (2026-08-12): P38s5 did not prove that a 1536-token threshold was
+  absent. The runtime emitted no hook-init or hook-observation record, and the
+  implementation selected strata from packed `input_positions` while later
+  attesting request-level `num_computed_tokens`. Those coordinate systems were
+  not proven identical. P38.2g5 triggers from host scheduler request prefixes,
+  retains packed positions as a hard device-side attestation, and emits bounded
+  observations even when no stratum is selected.
+- Correction (2026-08-12): precheck-only previously called the normal
+  fail-closed precheck before its stop helper, so the known stock A-B red raised
+  before `PRECHECK_COMPLETE`. P38.2g5 admits only a finite A-B diagnostic with
+  exact B-C, persists its capsule, and then exits before backward. This is a
+  diagnostic completion, never a training admission.

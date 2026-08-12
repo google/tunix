@@ -1303,7 +1303,7 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Root Cause: TPU hardware sublane vector width requires the trailing block shape dimension to be divisible by 128 (e.g. `BK=128` or `BN=128`).
    - Adapting `BK=128` resolves Mosaic lowering across all projection shapes.
 
-## 50. P38 FrozenLake Stock Serving Capture (Attempt `s5` - Full Non-Timestamped Run-and-Return Log)
+## 50. P38 FrozenLake Stock Serving Capture (Attempt `s5` — inconclusive nonterminal log)
 
 - `debug_logs/p38_p38s5_frozenlake_stock.raw.log` (SHA-256: `3df95a5f9797274945d8aa13158c352ff469ba17b8f9e61c563ef1e2b6c757c9`)
 - Target Commit: `e4ead609498771987c011a9cbc16fec7e4b17f69` (*Record the P38s5 handoff publication*)
@@ -1312,17 +1312,17 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 
 ### Execution & Diagnostic Summary:
 
-1. **Complete Non-Timestamped Byte-0 Head Execution (100% COMPLETE)**:
-   - 6,069 lines / 567 KB complete log captured without truncation, `--tail`, or column-shifting `--timestamps`.
+1. **Byte-0 log, but not terminal evidence**:
+   - 6,069 lines / 567 KB were captured without `--tail` or column-shifting `--timestamps`.
    - All 6 overlay files byte-verified by SHA-256; 64 devices registered in single Pathways session.
    - Initialized 36-layer KV cache block pools (5,216 blocks, 18.99 GiB HBM) and completed 256 rollout samples.
-   - Completed full 36-layer reverse VJP pass down from Layer 35 through Layer 0 to `model.norm`.
+   - The file ends after the layer-35/final-norm trace. It has no child exit, alignment record, terminal precheck, classifier, serving archive, or outer postflight. It therefore cannot be called 100% complete or proof that backward executed.
 
-2. **Capture Threshold & Precheck Contract Analysis**:
-   - `[CANON_P38_SERVING_CAPTURE]` was not triggered because FrozenLake's interactive environment prompts are ~200 tokens, which falls below `CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536` (`_CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)`). As a result, `_p38_capture_stratum(max_prefix)` evaluated to `None` on all rollout steps.
-   - `[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD` is wired to `tunix/rl/agentic/agentic_grpo_learner.py:1408`, whereas FrozenLake entrypoint `examples/frozenlake/train_frozenlake_qwen3.py` invokes `tunix/rl/dp_workloads.py`, completing the forward/reverse VJP without early diagnostic exit.
+2. **What the log does and does not diagnose**:
+   - No `CANON_P38_SERVING_CAPTURE` record exists, but the runtime emitted no hook-init or hook-observation marker. The log therefore cannot distinguish an unimported hook, an uncalled hook, or a prefix miss.
+   - The prior ~200-token explanation is withdrawn. Existing mismatch capsules contain prompt lengths around 1,000 and later multi-turn logical positions above 1,500. The current capture path also did not call `_p38_capture_stratum`; it selected from packed active positions directly.
+   - The claim that FrozenLake bypassed `GRPOLearner` is withdrawn. The recipe instantiates `GRPOLearner`, whose precheck call is in `agentic_grpo_learner.py`. The actual contract bug was that `fail_closed=True` raised on the known stock A-B red before the precheck-only stop helper could run.
    - Consequently, durable artifacts (`p38s5-mismatch-capsule.npz` and `p38s5-serving-capture.tar`) were 0-byte/unproduced.
-   - Full 6,069-line raw log and system metadata are archived to unblock TPU resources for full FrozenLake training (`canon-p42-fl-eval-p42e5`).
-
+   - Verdict: `INCONCLUSIVE_NONTERMINAL`. P38.2g5 changes the trigger to request-level scheduler prefixes, adds bounded init/observation evidence, and permits a finite A-B-red/exact-B-C diagnostic to stop after durable evidence but before backward.
 
 
