@@ -67,6 +67,11 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         )
         self.assertTrue(env["CANON_P38_MISMATCH_CAPSULE"].endswith(".npz"))
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
+        self.assertIn("--batch_size=32", env["CANON_RUN_CMD"])
+        self.assertIn("--mini_batch_size=4", env["CANON_RUN_CMD"])
+        self.assertIn("--num_generations=8", env["CANON_RUN_CMD"])
+        self.assertIn("--mesh_dp=16", env["CANON_RUN_CMD"])
+        self.assertNotIn("--mini_batch_size=32", env["CANON_RUN_CMD"])
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])
 
   def test_rejects_capture_contract_drift(self):
@@ -97,6 +102,22 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
     )
     entry["value"] = ""
     with self.assertRaisesRegex(ValueError, "requires a mismatch capsule"):
+      renderer.validate_capture_jobset(document, unified=unified)
+
+  def test_rejects_non_divisible_diagnostic_batch(self):
+    base = renderer.p33.load_base(_BASE)
+    spec, unified = renderer._SPECS[0]
+    document = renderer.render_jobset(
+        base, spec, _SOURCE, _RUN_ID, unified=unified
+    )
+    main = renderer._main_container(document)
+    entry = next(
+        item for item in main["env"] if item["name"] == "CANON_RUN_CMD"
+    )
+    entry["value"] = entry["value"].replace(
+        "--mini_batch_size=4", "--mini_batch_size=5"
+    )
+    with self.assertRaisesRegex(ValueError, "batch geometry changed"):
       renderer.validate_capture_jobset(document, unified=unified)
 
   def test_quotes_numeric_looking_source_commit(self):

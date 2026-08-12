@@ -59,12 +59,13 @@ def _common_args(
     response: int,
     dp_size: int = 16,
     tp_size: int = 4,
+    mini_batch_size: int = 32,
 ) -> tuple[str, ...]:
   return (
       f"--mesh_dp={dp_size}",
       f"--mesh_tp={tp_size}",
       "--batch_size=32",
-      "--mini_batch_size=32",
+      f"--mini_batch_size={mini_batch_size}",
       f"--train_trajectory_micro_batch_size={dp_size}",
       f"--max_steps={max_steps}",
       "--num_generations=8",
@@ -81,6 +82,7 @@ def _frozenlake_command(
     enable_evaluation: bool = False,
     dp_size: int = 16,
     tp_size: int = 4,
+    mini_batch_size: int = 32,
 ) -> tuple[str, ...]:
   local_trajectories = 256 // dp_size
   command = (
@@ -93,6 +95,7 @@ def _frozenlake_command(
         response=512 if short_alignment else 2048,
         dp_size=dp_size,
         tp_size=tp_size,
+        mini_batch_size=mini_batch_size,
     ),
     f"--vllm_max_num_seqs={local_trajectories}",
     "--vllm_max_num_batched_tokens=256",

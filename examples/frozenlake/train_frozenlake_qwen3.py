@@ -189,6 +189,9 @@ CANON_P32_WORKLOAD = bool(_P32_WORKLOAD_NAME)
 CANON_P33_SHORT_ALIGNMENT = (
     os.getenv("CANON_P33_SHORT_ALIGNMENT", "0") == "1"
 )
+CANON_P38_PRECHECK_ONLY = (
+    os.getenv("CANON_P38_PRECHECK_ONLY", "0") == "1"
+)
 CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
     os.environ
 )
@@ -346,9 +349,14 @@ if CANON_P32_WORKLOAD:
   assert P32_WORKLOAD is not None
   expected_response_length = 512 if CANON_P33_SHORT_ALIGNMENT else 2048
   expected_env_steps = 2 if CANON_P33_SHORT_ALIGNMENT else 5
+  # The P38 serving-capture job is a pre-backward diagnostic. It consumes four
+  # prompt groups so the first diagnostic batch is 4 x 8 = 32 trajectories,
+  # exactly divisible by DP16. The dataset/global batch remains 32 prompts and
+  # every non-P38 training profile retains mini_batch_size=32.
+  expected_mini_batch_size = 4 if CANON_P38_PRECHECK_ONLY else 32
   expected_geometry = {
       "batch_size": (BATCH_SIZE, 32),
-      "mini_batch_size": (MINI_BATCH_SIZE, 32),
+      "mini_batch_size": (MINI_BATCH_SIZE, expected_mini_batch_size),
       "num_batches": (NUM_BATCHES, 150),
       "num_generations": (NUM_GENERATIONS, 8),
       "max_prompt_length": (MAX_PROMPT_LENGTH, 4096),
@@ -446,10 +454,8 @@ elif CANON_P27:
   if wrong_geometry:
     raise ValueError(f"P27 frozen geometry mismatch: {wrong_geometry}")
 TRAJECTORY_MINI_BATCH_SIZE = (
-    256
-    if CANON_P32_WORKLOAD
-    else MINI_BATCH_SIZE * NUM_GENERATIONS
-    if CANON_P27
+    MINI_BATCH_SIZE * NUM_GENERATIONS
+    if CANON_P32_WORKLOAD or CANON_P27
     else None
 )
 _P27_TRAJECTORY_MICRO_RAW = os.getenv("CANON_P27_TRAJECTORY_MICRO", "")
@@ -457,6 +463,25 @@ if _P27_TRAJECTORY_MICRO_RAW and not CANON_P27:
   raise ValueError("CANON_P27_TRAJECTORY_MICRO requires CANON_FROZENLAKE_P27=1")
 if CANON_P32_WORKLOAD:
   TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = args.train_trajectory_micro_batch_size
+  if CANON_P38_PRECHECK_ONLY:
+    p38_trajectories = MINI_BATCH_SIZE * NUM_GENERATIONS
+    if (
+        P32_WORKLOAD is None
+        or P32_WORKLOAD.name != "frozenlake"
+        or p38_trajectories != 32
+        or p38_trajectories % P32_WORKLOAD.dp_size
+    ):
+      raise ValueError(
+          "P38 diagnostic requires 4 prompts x 8 generations = 32 "
+          "trajectories divisible by FrozenLake DP16"
+      )
+    print(
+        "[CANON_P38] DIAGNOSTIC_BATCH_CONTRACT "
+        f"global_prompts={BATCH_SIZE} mini_prompts={MINI_BATCH_SIZE} "
+        f"generations={NUM_GENERATIONS} trajectories={p38_trajectories} "
+        f"dp={P32_WORKLOAD.dp_size} verdict=PASS",
+        flush=True,
+    )
 elif CANON_P27:
   try:
     TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = int(

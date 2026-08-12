@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 from pathlib import Path
+import shlex
 import sys
 from typing import Any, Mapping
 
@@ -21,6 +22,9 @@ _P33_SPEC.loader.exec_module(p33)
 
 _CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)
 _CAPTURE_RECORDS = len(_CAPTURE_PREFIX_BOUNDS) - 1
+_DIAGNOSTIC_PROMPTS = 4
+_NUM_GENERATIONS = 8
+_ENGINE_DATA_SIZE = 16
 
 
 def _spec(*, unified: bool) -> Any:
@@ -32,7 +36,14 @@ def _spec(*, unified: bool) -> Any:
       profile="cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env",
       no_commit=True,
       job_prefix=f"canon-p38-fl-{suffix}",
-      command=p33._frozenlake_command(1),
+      # P38 stops after the first durable pre-backward diagnostic. Consume a
+      # complete four-prompt mini-batch instead of waiting for all 32 prompt
+      # groups. Four prompts x eight generations gives 32 trajectories, which
+      # remains exactly divisible by DP16. The workload's global input batch
+      # remains 32 prompts; production/full-training geometry is unchanged.
+      command=p33._frozenlake_command(
+          1, mini_batch_size=_DIAGNOSTIC_PROMPTS
+      ),
   )
 
 
@@ -84,6 +95,45 @@ def validate_capture_jobset(
     raise ValueError("P38 KV-unified label drifted")
   if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
     raise ValueError("P38 serving-capture JobSet must not restart")
+  command = shlex.split(env.get("CANON_RUN_CMD", ""))
+
+  def integer_argument(name: str) -> int:
+    prefix = f"--{name}="
+    values = [
+        value.removeprefix(prefix)
+        for value in command
+        if value.startswith(prefix)
+    ]
+    if len(values) != 1:
+      raise ValueError(f"P38 command requires exactly one {prefix} argument")
+    try:
+      return int(values[0])
+    except ValueError as exc:
+      raise ValueError(
+          f"P38 command has a non-integer {prefix} argument"
+      ) from exc
+
+  batch_size = integer_argument("batch_size")
+  mini_batch_size = integer_argument("mini_batch_size")
+  num_generations = integer_argument("num_generations")
+  mesh_dp = integer_argument("mesh_dp")
+  trajectories = mini_batch_size * num_generations
+  if batch_size != 32:
+    raise ValueError(f"P38 global prompt batch changed: {batch_size} != 32")
+  if (mini_batch_size, num_generations, mesh_dp) != (
+      _DIAGNOSTIC_PROMPTS,
+      _NUM_GENERATIONS,
+      _ENGINE_DATA_SIZE,
+  ):
+    raise ValueError(
+        "P38 diagnostic batch geometry changed: "
+        f"prompts={mini_batch_size} generations={num_generations} dp={mesh_dp}"
+    )
+  if trajectories % mesh_dp:
+    raise ValueError(
+        "P38 diagnostic trajectories are not divisible by engine DP: "
+        f"{trajectories} vs {mesh_dp}"
+    )
 
 
 def render_jobset(

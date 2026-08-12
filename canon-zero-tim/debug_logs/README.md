@@ -1414,10 +1414,20 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Verified 6/6 Canonical overlay files with exact SHA-256 byte identity (`tpu_runner_p21_l30.py` SHA: `a7bdc527182a`);
    - Successfully verified that native `program_path="standard"` hook was correctly reached and engaged in standard Pathways execution;
    - Allocated 3.8 GiB HBM per device across DP16xTP4 topology and registered `qwen3-canonical-dp16-tp4-m256-vjp2` differentiable adapter.
-2. **DP Divisibility Root Cause Diagnostic**:
+2. **DP Divisibility Failure and Evidence Correction**:
    - At step completion, `canonical_qwen3_adapter.py` raised:
      ```text
      tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: global batch must be divisible by the engine data size: 40 vs 16
      ```
-   - **Root Cause**: FrozenLake P38 profile generated 5 prompts $\times$ 8 generations = 40 total trajectories, which is not evenly divisible by `data_parallel_size = 16` ($40 \pmod{16} = 8 \neq 0$).
-   - **Remediation**: Adjusting prompt count to 4 ($4 \times 8 = 32$) or 2 ($2 \times 8 = 16$) satisfies the exact DP16 divisibility invariant. Slices transitioned to P45 DP8xTP8 Resident production.
+   - The prior claim that the P38 profile configured five global prompts is
+     withdrawn. The rendered command still configured a 32-prompt global batch,
+     32-prompt consumer mini-batch, and eight generations. The learner's queue
+     accepted a five-group partial consumer tail after production ended, so the
+     adapter observed $5 \times 8 = 40$ trajectories. The archived source does
+     not include the raw terminal log needed to determine why the producer ended
+     after five groups.
+   - **Remediation**: P38 alone now consumes a complete four-prompt diagnostic
+     mini-batch, producing $4 \times 8 = 32$ trajectories divisible by DP16.
+     The FrozenLake global batch and every full-training profile remain at 32
+     prompts. Renderer and recipe contracts reject drift back to a non-divisible
+     diagnostic unit before target execution.

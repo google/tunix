@@ -902,3 +902,29 @@
 - Next: publish P38.2g6, then execute P38s7 stock only using the superseding
   top section of `HANDOFF.md`. Do not force-enable continue decode, rerun U, or
   auto-adjust prefix bounds.
+
+## 2026-08-12 UTC — P38s7 audited; P38.2g7 diagnostic batch repair implemented
+
+- Type: target evidence correction plus default-off diagnostic batching fix.
+  No cloud/TPU launch, backward, optimizer commit, training launch, commit, or
+  push was performed in this entry.
+- P38s7 proved the standard runner hook, overlay identity, DP16xTP4 mesh, and
+  adapter registration. It then failed on `40 vs 16` before a terminal
+  diagnostic bundle returned.
+- Evidence correction: the profile still configured 32 global prompts and
+  eight generations. The 40-row adapter input was a five-group partial
+  consumer tail, not a five-prompt global workload. The raw terminal log was
+  not committed, so the producer's earlier stop is not assigned a cause.
+- Repair: P38 alone now uses a four-prompt consumer mini-batch, producing 32
+  trajectories divisible by DP16 while leaving the 32-prompt global dataset
+  batch and all full-training profiles unchanged. Renderer and recipe checks
+  fail closed on geometry drift; a five-prompt negative control is present.
+- Local gates: P38 renderer 6/6 PASS, P38 outer postflight PASS, both pinned
+  model overlays 20/20 PASS with 29/29 manifest identity, and the adjacent P45
+  exact-image gate PASS (83 workload tests, 31 alignment tests, seven TP8
+  projection sites plus canonical forward/VJP). Pinned image ID:
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- Claim ceiling: local construction only. No target P38s8 record, numerical
+  cause, backward, optimizer, or training result is claimed.
+- Next: publish this repair, then execute P38s8 stock only from the superseding
+  top section of `HANDOFF.md`. Do not rerun unified KV.

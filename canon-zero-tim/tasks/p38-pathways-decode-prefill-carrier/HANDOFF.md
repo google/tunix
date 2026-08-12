@@ -5,10 +5,10 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## DO THIS NOW: run one P38s7 FrozenLake standard-path stock capture
+## DO THIS NOW: run one P38s8 FrozenLake standard-path stock capture
 
 Use the latest published `origin/yuxzhang/canon-zero-tim` containing
-`p38-2g6-standard-runner-capture.md`. Do not launch from the P38s6 source.
+`p38-2g7-dp-divisible-diagnostic-batch.md`. Do not relaunch the P38s7 source.
 
 This section supersedes every older P38 serving-capture launch command below.
 The committed `p38_p38s4_frozenlake_stock.raw.log` is not a complete run log:
@@ -22,15 +22,20 @@ observations because the hook existed only in `_execute_continue_decode`, while
 FrozenLake uses standard `_execute_model` with `enable_continue_decode=False`.
 Its log also ends without alignment, terminal precheck, classifier, archive,
 or outer postflight. Lowering the prefix threshold cannot repair an unreachable
-hook. The operator's only job is to run one fresh **stock-only** standard-path
-P38 diagnostic and return the complete evidence bundle. Do not launch unified
+hook. P38s7 then reached the real standard hook, but the 32-group diagnostic
+consumer accepted a five-group partial tail and passed 40 trajectories to the
+DP16 adapter. P38s8 uses a P38-only four-prompt mini-batch: 32 global prompts
+remain queued, but the first complete diagnostic unit is 4 x 8 = 32
+trajectories and is DP16-divisible. The operator's only job is to run one fresh
+**stock-only** standard-path P38 diagnostic and return the complete evidence
+bundle. Do not launch unified
 KV, FrozenLake full training, GSM8K, backward, or an optimizer commit. Do not
 force-enable continue-decode because that changes the program being diagnosed.
 
 ### 1. Fetch one immutable source and render
 
 Run every command block in this section sequentially in the same Bash shell
-from an existing clone of `google/tunix`. Use a new run ID if `p38s7` already
+from an existing clone of `google/tunix`. Use a new run ID if `p38s8` already
 exists. Do not reuse or overwrite an earlier output directory.
 
 ```bash
@@ -40,7 +45,7 @@ SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor \
   76cef0ec8222fd1716422f6f7a0c24eeff5a527f "$SOURCE_COMMIT"
 
-RUN_ID="p38s7"
+RUN_ID="p38s8"
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -54,6 +59,8 @@ test -z "$(git status --porcelain)"
 rg -q 'program_path="standard"' \
   canon-zero-tim/patches/tpu_inference/10-tpu-runner-p38-standard-capture.patch
 rg -q 'CANON_P38_SERVING_CAPTURE_EXPECTED_PATH' \
+  canon-zero-tim/cluster/render_p38_serving_jobsets.py
+rg -q '_DIAGNOSTIC_PROMPTS = 4' \
   canon-zero-tim/cluster/render_p38_serving_jobsets.py
 rg -q 'stop_after_diagnostic_precheck' tunix/rl/alignment.py
 mkdir -p "$EVIDENCE"
@@ -86,6 +93,10 @@ CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
 CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
 CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
 CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
+CANON_RUN_CMD contains --batch_size=32
+CANON_RUN_CMD contains --mini_batch_size=4
+CANON_RUN_CMD contains --num_generations=8
+CANON_RUN_CMD contains --mesh_dp=16
 maxRestarts: 0
 ```
 
@@ -189,11 +200,11 @@ set -euo pipefail
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s7-mismatch-capsule.npz"
+  --output "$EVIDENCE/p38s8-mismatch-capsule.npz"
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s7-serving-capture.tar"
+  --output "$EVIDENCE/p38s8-serving-capture.tar"
 sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
 sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
@@ -202,8 +213,8 @@ test -s "$EVIDENCE/pre-alignment.jsonl"
 test -s "$EVIDENCE/serving-classification.json"
 sha256sum \
   "$EVIDENCE/head.full.log" \
-  "$EVIDENCE/p38s7-mismatch-capsule.npz" \
-  "$EVIDENCE/p38s7-serving-capture.tar" \
+  "$EVIDENCE/p38s8-mismatch-capsule.npz" \
+  "$EVIDENCE/p38s8-serving-capture.tar" \
   "$EVIDENCE/pre-alignment.jsonl" \
   "$EVIDENCE/serving-classification.json" | \
   tee "$EVIDENCE/SHA256SUMS"
@@ -236,8 +247,8 @@ head-pod.events.txt
 pathways-proxy.log
 pathways-rm.log
 head.previous.log
-p38s7-mismatch-capsule.npz
-p38s7-serving-capture.tar
+p38s8-mismatch-capsule.npz
+p38s8-serving-capture.tar
 pre-alignment.jsonl
 serving-classification.json
 SHA256SUMS

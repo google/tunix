@@ -30,8 +30,17 @@
   P38s6 proved that its hook was installed only in the unused
   `continue_decode` path. P38.2g6 is locally complete and moves the bounded
   capture into FrozenLake's real standard/mixed `_execute_model` and
-  `sample_tokens` lifecycle. P38s7 is the only pending target attempt.
-- Latest local gate: P38.2g6 is complete locally. Capture is default-off and
+  `sample_tokens` lifecycle. P38s7 reached that standard path and registered the
+  adapter, but the diagnostic consumer passed a five-group partial tail (40
+  trajectories) into DP16. P38.2g7 keeps the global batch at 32 prompts while
+  setting the P38-only consumer mini-batch to four prompts, giving a complete
+  32-trajectory DP16-divisible diagnostic unit. P38s8 is the only pending
+  target attempt.
+- Latest local gate: P38.2g7 is implemented locally. The renderer and recipe
+  require 32 global prompts, four diagnostic mini-batch prompts, eight
+  generations, and DP16; a five-prompt negative control is rejected. Full
+  FrozenLake and P45 training geometry remains unchanged. P38.2g6 capture is
+  default-off and
   path-attested as `standard`; standard/mixed packed-token rows map by token
   offset, the capture sequence survives through unchanged sampling, and
   wrong-path plus async-scheduling controls fail closed. Qwen3-1.7B and
@@ -130,8 +139,8 @@
   filtering. The log is also nonterminal and contains no alignment, child
   exit, classifier, archive, or outer postflight. Verdict is
   `INCONCLUSIVE_WRONG_PATH_NONTERMINAL`.
-- Next action for the strict track: after P38.2g6 is published and separate
-  resource approval is granted, execute the P38s7
+- Next action for the strict track: after P38.2g7 is published and separate
+  resource approval is granted, execute the P38s8
   stock-only Attempt-0 run-and-return protocol at the top of `HANDOFF.md`.
   Preserve the complete non-timestamped terminal head log through outer
   postflight and return the exact evidence directory, including the real
@@ -165,13 +174,14 @@
   `artifacts/p38_2g4_local_gate_0811.md`,
   `phases/p38-2g2-pathways-serving-envelope.md`,
   `phases/p38-2g3-page-topology-discriminator.md`
-- Current local gates: pinned-image P33 CPU gate PASS (81 workload tests, 31
-  alignment tests, adjacent regressions and negative controls), exact-image
+- Current local gates: pinned-image P33/P45 CPU gate PASS (83 workload tests,
+  31 alignment tests, adjacent regressions and negative controls), exact-image
   Qwen3-1.7B/Qwen3-8B overlay gates 20/20 each PASS with 29/29 manifest
-  entries, serving classifier 26/26, renderer 5/5, and postflight standard-
-  path plus stock/U negative controls PASS.
-- Updated: 2026-08-12 UTC after auditing P38s6 and locally completing the
-  standard-runner P38.2g6 diagnostic repair
+  entries, serving classifier 26/26, P38 renderer 6/6, P45 TP8 seven-site plus
+  forward/VJP probes PASS, and postflight standard-path plus stock/U negative
+  controls PASS.
+- Updated: 2026-08-12 UTC after auditing P38s7 and locally completing the
+  DP-divisible P38.2g7 diagnostic batch repair.
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,
