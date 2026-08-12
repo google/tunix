@@ -1244,3 +1244,23 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Pairwise gradient-value uniqueness is not required by the fixed reduction. FrozenLake's binary reward plus RLOO can legitimately create duplicate zero-gradient contributions when all eight generations for a prompt have the same reward. The archived log does not contain the per-prompt reward inventory or signature list, so this mechanism explains why duplicates are valid but does not identify the exact duplicate ranks in `p42e2`.
    - GSM8K previously passed because its observed rank signatures happened to be distinct; that workload-dependent property is not a valid production safety gate.
    - The correction keeps rank cadence, exactly 16 contributions, the registered eight-round reduction tree, finite gradient health, and post-reduction replica equality fail-closed. It retains pairwise uniqueness only in synthetic admission probes and reports production signature multiplicity as evidence.
+
+## 47. P44 DeepSWE 256-Chip Parity Rollout (Attempt `r03` - Hardware Mesh Validation)
+
+- `debug_logs/p44_p44r03_deepswe_256_parity.raw.log` (SHA-256: `ef9f403dd8da4f959b80013837a68d86158b322004be90f01d079a4d2efb3bcf`)
+- Target Commit: `fb3195d26871f4ec6dc73056e8fdf6b9e2bd63fd` (*docs: record DeepSWE repair publication*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes)
+
+### Execution & Diagnostic Summary:
+
+1. **Topology Discovery & Host Partitioning (100% SUCCESS)**:
+   - Proved the commit `5f0cf7e0` fix for `_runtime_device_host_key` and `_validate_host_complete_roles`.
+   - All 256 TPU v5p devices across 64 physical hosts were discovered and partitioned into 32 Rollout hosts (128 devices) and 32 Trainer hosts (128 devices) without crossing host boundaries.
+   - Initialized Pathways proxy, pinned R2E-Gym Kubernetes patch, and local model path `/mnt/disks/linchai_data/models/Qwen3-4B`.
+
+2. **Model Mesh Assertion**:
+   - `_init_mesh()` triggered `RuntimeError: CANON_EXPECT_MODEL_MESH_IDS mismatch: expected=[0, 2, 1, 3], actual=[0, 4, 8, 12, ... 253]`.
+   - The environment variable `CANON_EXPECT_MODEL_MESH_IDS` was inherited from single-host defaults (`0,2,1,3`).
+   - Unsetting `CANON_EXPECT_MODEL_MESH_IDS` in `cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env` allows the 256-chip model mesh to construct cleanly.
+

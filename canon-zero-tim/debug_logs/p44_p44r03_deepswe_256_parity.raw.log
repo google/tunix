@@ -1,0 +1,685 @@
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[P34.PATHWAYS] initialized_once=1 before_jax=1
+INFO 08-12 01:17:39 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+INFO 08-12 01:17:39 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-12 01:17:39 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-12 01:17:39 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+WARNING 08-12 01:17:39 [tpu_platform.py:408] Pin memory is not supported on TPU.
+✅ tunix pathways-utils, r2egym are successfully mapped.
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/mnt/disks/linchai_data/deepswe_zero_tim/canon-p44-ds4b-t256-rollout-r03/r2egym-src/src/r2egym/swesmith/constants.py:460: SyntaxWarning: invalid escape sequence '\/'
+  "sed -i '/^git+https:\/\/github.com\/Project-MONAI\//d' requirements-dev.txt",
+Using Kubernetes node selector: cloud.google.com/gke-nodepool=deepswe-cpu-pool
+Warning: Kubernetes config loading failed: Invalid kube-config file. No configuration found.
+2026-08-12 01:17:41,668 - root - INFO - Applied bounded R2E-Gym Kubernetes patch at /mnt/disks/linchai_data/deepswe_zero_tim/canon-p44-ds4b-t256-rollout-r03/r2egym-src/src/r2egym/agenthub/runtime/docker.py
+[P34.R2E] BOUNDED_KUBERNETES_PATCH_PASS path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p44-ds4b-t256-rollout-r03/r2egym-src/src/r2egym/agenthub/runtime/docker.py
+Looking for local model at: /mnt/disks/linchai_data/models/Qwen3-4B...
+✅ Found existing local model at /mnt/disks/linchai_data/models/Qwen3-4B
+kv_cache_size (Capped): 8320
+vllm_max_batched_tokens: 256
+[P34.CLI] PASS model=Qwen3-4B prompts=4 generations=4 prompt=4096 response=4096 turns=5 scheduler_per_dp=1/256
+Loading Dataset...
+Generating train split:   0%|          | 0/4578 [00:00<?, ? examples/s]Generating train split:  13%|█▎        | 573/4578 [00:00<00:02, 1440.97 examples/s]Generating train split:  25%|██▌       | 1146/4578 [00:01<00:03, 939.85 examples/s]Generating train split:  38%|███▊      | 1718/4578 [00:01<00:02, 969.35 examples/s]Generating train split:  50%|█████     | 2290/4578 [00:02<00:01, 1175.75 examples/s]Generating train split:  63%|██████▎   | 2862/4578 [00:02<00:01, 1290.96 examples/s]Generating train split:  75%|███████▌  | 3434/4578 [00:03<00:01, 935.55 examples/s] Generating train split:  88%|████████▊ | 4006/4578 [00:04<00:00, 619.46 examples/s]Generating train split: 100%|██████████| 4578/4578 [00:06<00:00, 520.82 examples/s]Generating train split: 100%|██████████| 4578/4578 [00:06<00:00, 714.16 examples/s]
+Map:   0%|          | 0/4578 [00:00<?, ? examples/s]Map:   4%|▎         | 165/4578 [00:00<00:02, 1569.10 examples/s]Map:   8%|▊         | 387/4578 [00:00<00:02, 1504.86 examples/s]Map:  13%|█▎        | 592/4578 [00:00<00:02, 1427.25 examples/s]Map:  16%|█▋        | 744/4578 [00:00<00:03, 1253.54 examples/s]Map:  19%|█▉        | 879/4578 [00:00<00:03, 1118.97 examples/s]Map:  22%|██▏       | 1000/4578 [00:01<00:10, 351.05 examples/s]Map:  25%|██▌       | 1146/4578 [00:01<00:07, 463.55 examples/s]Map:  28%|██▊       | 1280/4578 [00:01<00:05, 574.30 examples/s]Map:  32%|███▏      | 1443/4578 [00:01<00:04, 735.09 examples/s]Map:  36%|███▌      | 1638/4578 [00:02<00:03, 951.97 examples/s]Map:  40%|███▉      | 1830/4578 [00:02<00:02, 1148.22 examples/s]Map:  44%|████▎     | 2000/4578 [00:03<00:06, 405.88 examples/s] Map:  49%|████▊     | 2223/4578 [00:03<00:04, 575.64 examples/s]Map:  54%|█████▎    | 2460/4578 [00:03<00:02, 786.03 examples/s]Map:  59%|█████▉    | 2715/4578 [00:03<00:01, 1037.58 examples/s]Map:  65%|██████▌   | 2981/4578 [00:03<00:01, 1312.21 examples/s]Map:  71%|███████   | 3230/4578 [00:04<00:01, 874.38 examples/s] Map:  74%|███████▍  | 3407/4578 [00:04<00:01, 930.70 examples/s]Map:  78%|███████▊  | 3573/4578 [00:04<00:01, 966.67 examples/s]Map:  81%|████████▏ | 3724/4578 [00:04<00:00, 894.67 examples/s]Map:  84%|████████▍ | 3847/4578 [00:04<00:00, 796.14 examples/s]Map:  87%|████████▋ | 3975/4578 [00:05<00:00, 748.59 examples/s]Map:  89%|████████▉ | 4078/4578 [00:07<00:02, 169.99 examples/s]Map:  91%|█████████▏| 4179/4578 [00:07<00:01, 211.29 examples/s]Map:  94%|█████████▍| 4298/4578 [00:07<00:01, 275.33 examples/s]Map:  96%|█████████▌| 4401/4578 [00:07<00:00, 339.77 examples/s]Map:  99%|█████████▉| 4523/4578 [00:07<00:00, 434.69 examples/s]Map: 100%|██████████| 4578/4578 [00:08<00:00, 521.33 examples/s]
+Filter:   0%|          | 0/4578 [00:00<?, ? examples/s]Filter:  22%|██▏       | 1000/4578 [00:00<00:00, 3960.50 examples/s]Filter:  44%|████▎     | 2000/4578 [00:00<00:00, 3770.10 examples/s]Filter:  66%|██████▌   | 3000/4578 [00:00<00:00, 4972.76 examples/s]Filter:  87%|████████▋ | 4000/4578 [00:01<00:00, 3150.96 examples/s]Filter: 100%|██████████| 4578/4578 [00:01<00:00, 2591.63 examples/s]Filter: 100%|██████████| 4578/4578 [00:01<00:00, 3066.25 examples/s]
+[P34.DATASET] GOLD_FILTER_PASS rows=4578->1851 images=1851
+2026-08-12 01:18:00,812 - absl - INFO - Attempting to import: tunix.models.qwen3.model
+2026-08-12 01:18:00,813 - absl - INFO - Attempting to call: qwen3_4b() on object of type <class 'type'>
+I0812 01:18:00.832304     430 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0812 01:18:00.832341     430 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0812 01:18:00.832351     430 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0812 01:18:00.833523     430 grpc_client_session.cc:264]   Established channel.
+I0812 01:18:00.833540     430 grpc_client_session.cc:269]   Created stub.
+I0812 01:18:00.841144     430 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0812 01:18:00.891106     430 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0812 01:18:00.891198     430 grpc_client_session.cc:264]   Established channel.
+I0812 01:18:00.891211     430 grpc_client_session.cc:269]   Created stub.
+I0812 01:18:00.893964     430 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0812 01:18:00.906272     430 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0812 01:18:00.906292     430 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+[P34.DEVICE_INVENTORY] PASS devices=256 host_source=logical_task hosts=64 devices_per_host=4 rollout_hosts=32 trainer_hosts=32
+[P34.TOPOLOGY] PASS rollout_devices=128 trainer_devices=128 rollout_processes=32 trainer_processes=32
+*** Rollout Mesh *** | dims: [('dp', 16), ('tp', 8)] | Shape: OrderedDict({'dp': 16, 'tp': 8})
+*** Train Mesh *** | dims: [('dp', 16), ('tp', 8)] | Shape: OrderedDict({'dp': 16, 'tp': 8})
+2026-08-12 01:19:58,793 - absl - INFO -  - Using Pathways compatible HBM stats collector
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 3.7 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(16,TPU_DEVICE,coords=[0,4,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,866 - absl - INFO - Using 0 Bytes on device(17,TPU_DEVICE,coords=[1,4,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(18,TPU_DEVICE,coords=[2,4,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(19,TPU_DEVICE,coords=[3,4,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(20,TPU_DEVICE,coords=[0,5,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(21,TPU_DEVICE,coords=[1,5,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(22,TPU_DEVICE,coords=[2,5,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(23,TPU_DEVICE,coords=[3,5,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(24,TPU_DEVICE,coords=[0,6,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(25,TPU_DEVICE,coords=[1,6,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(26,TPU_DEVICE,coords=[2,6,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(27,TPU_DEVICE,coords=[3,6,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(28,TPU_DEVICE,coords=[0,7,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(29,TPU_DEVICE,coords=[1,7,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(30,TPU_DEVICE,coords=[2,7,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(31,TPU_DEVICE,coords=[3,7,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(32,TPU_DEVICE,coords=[0,0,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(33,TPU_DEVICE,coords=[1,0,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(34,TPU_DEVICE,coords=[2,0,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(35,TPU_DEVICE,coords=[3,0,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(36,TPU_DEVICE,coords=[0,1,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(37,TPU_DEVICE,coords=[1,1,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(38,TPU_DEVICE,coords=[2,1,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(39,TPU_DEVICE,coords=[3,1,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(40,TPU_DEVICE,coords=[0,2,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(41,TPU_DEVICE,coords=[1,2,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(42,TPU_DEVICE,coords=[2,2,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(43,TPU_DEVICE,coords=[3,2,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(44,TPU_DEVICE,coords=[0,3,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(45,TPU_DEVICE,coords=[1,3,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(46,TPU_DEVICE,coords=[2,3,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(47,TPU_DEVICE,coords=[3,3,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(48,TPU_DEVICE,coords=[0,4,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(49,TPU_DEVICE,coords=[1,4,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(50,TPU_DEVICE,coords=[2,4,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(51,TPU_DEVICE,coords=[3,4,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(52,TPU_DEVICE,coords=[0,5,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 0 Bytes on device(53,TPU_DEVICE,coords=[1,5,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(54,TPU_DEVICE,coords=[2,5,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,867 - absl - INFO - Using 3.7 GiB on device(55,TPU_DEVICE,coords=[3,5,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(56,TPU_DEVICE,coords=[0,6,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(57,TPU_DEVICE,coords=[1,6,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(58,TPU_DEVICE,coords=[2,6,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(59,TPU_DEVICE,coords=[3,6,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(60,TPU_DEVICE,coords=[0,7,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(61,TPU_DEVICE,coords=[1,7,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(62,TPU_DEVICE,coords=[2,7,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(63,TPU_DEVICE,coords=[3,7,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(64,TPU_DEVICE,coords=[0,0,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(65,TPU_DEVICE,coords=[1,0,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(66,TPU_DEVICE,coords=[2,0,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(67,TPU_DEVICE,coords=[3,0,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(68,TPU_DEVICE,coords=[0,1,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(69,TPU_DEVICE,coords=[1,1,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(70,TPU_DEVICE,coords=[2,1,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(71,TPU_DEVICE,coords=[3,1,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(72,TPU_DEVICE,coords=[0,2,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(73,TPU_DEVICE,coords=[1,2,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(74,TPU_DEVICE,coords=[2,2,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(75,TPU_DEVICE,coords=[3,2,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(76,TPU_DEVICE,coords=[0,3,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(77,TPU_DEVICE,coords=[1,3,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(78,TPU_DEVICE,coords=[2,3,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(79,TPU_DEVICE,coords=[3,3,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(80,TPU_DEVICE,coords=[0,4,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(81,TPU_DEVICE,coords=[1,4,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(82,TPU_DEVICE,coords=[2,4,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(83,TPU_DEVICE,coords=[3,4,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(84,TPU_DEVICE,coords=[0,5,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(85,TPU_DEVICE,coords=[1,5,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(86,TPU_DEVICE,coords=[2,5,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(87,TPU_DEVICE,coords=[3,5,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(88,TPU_DEVICE,coords=[0,6,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(89,TPU_DEVICE,coords=[1,6,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(90,TPU_DEVICE,coords=[2,6,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(91,TPU_DEVICE,coords=[3,6,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(92,TPU_DEVICE,coords=[0,7,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(93,TPU_DEVICE,coords=[1,7,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(94,TPU_DEVICE,coords=[2,7,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 3.7 GiB on device(95,TPU_DEVICE,coords=[3,7,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,868 - absl - INFO - Using 0 Bytes on device(96,TPU_DEVICE,coords=[0,0,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(97,TPU_DEVICE,coords=[1,0,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(98,TPU_DEVICE,coords=[2,0,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(99,TPU_DEVICE,coords=[3,0,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(100,TPU_DEVICE,coords=[0,1,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(101,TPU_DEVICE,coords=[1,1,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(102,TPU_DEVICE,coords=[2,1,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(103,TPU_DEVICE,coords=[3,1,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(104,TPU_DEVICE,coords=[0,2,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(105,TPU_DEVICE,coords=[1,2,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(106,TPU_DEVICE,coords=[2,2,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(107,TPU_DEVICE,coords=[3,2,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(108,TPU_DEVICE,coords=[0,3,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(109,TPU_DEVICE,coords=[1,3,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(110,TPU_DEVICE,coords=[2,3,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(111,TPU_DEVICE,coords=[3,3,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(112,TPU_DEVICE,coords=[0,4,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(113,TPU_DEVICE,coords=[1,4,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(114,TPU_DEVICE,coords=[2,4,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(115,TPU_DEVICE,coords=[3,4,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(116,TPU_DEVICE,coords=[0,5,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(117,TPU_DEVICE,coords=[1,5,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(118,TPU_DEVICE,coords=[2,5,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(119,TPU_DEVICE,coords=[3,5,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(120,TPU_DEVICE,coords=[0,6,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(121,TPU_DEVICE,coords=[1,6,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(122,TPU_DEVICE,coords=[2,6,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(123,TPU_DEVICE,coords=[3,6,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(124,TPU_DEVICE,coords=[0,7,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(125,TPU_DEVICE,coords=[1,7,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(126,TPU_DEVICE,coords=[2,7,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(127,TPU_DEVICE,coords=[3,7,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(128,TPU_DEVICE,coords=[0,0,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(129,TPU_DEVICE,coords=[1,0,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(130,TPU_DEVICE,coords=[2,0,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(131,TPU_DEVICE,coords=[3,0,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(132,TPU_DEVICE,coords=[0,1,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(133,TPU_DEVICE,coords=[1,1,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(134,TPU_DEVICE,coords=[2,1,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(135,TPU_DEVICE,coords=[3,1,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(136,TPU_DEVICE,coords=[0,2,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 0 Bytes on device(137,TPU_DEVICE,coords=[1,2,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,869 - absl - INFO - Using 3.7 GiB on device(138,TPU_DEVICE,coords=[2,2,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(139,TPU_DEVICE,coords=[3,2,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(140,TPU_DEVICE,coords=[0,3,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(141,TPU_DEVICE,coords=[1,3,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(142,TPU_DEVICE,coords=[2,3,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(143,TPU_DEVICE,coords=[3,3,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(144,TPU_DEVICE,coords=[0,4,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(145,TPU_DEVICE,coords=[1,4,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(146,TPU_DEVICE,coords=[2,4,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(147,TPU_DEVICE,coords=[3,4,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(148,TPU_DEVICE,coords=[0,5,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(149,TPU_DEVICE,coords=[1,5,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(150,TPU_DEVICE,coords=[2,5,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(151,TPU_DEVICE,coords=[3,5,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(152,TPU_DEVICE,coords=[0,6,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(153,TPU_DEVICE,coords=[1,6,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(154,TPU_DEVICE,coords=[2,6,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(155,TPU_DEVICE,coords=[3,6,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(156,TPU_DEVICE,coords=[0,7,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(157,TPU_DEVICE,coords=[1,7,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(158,TPU_DEVICE,coords=[2,7,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(159,TPU_DEVICE,coords=[3,7,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(160,TPU_DEVICE,coords=[0,0,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(161,TPU_DEVICE,coords=[1,0,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(162,TPU_DEVICE,coords=[2,0,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(163,TPU_DEVICE,coords=[3,0,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(164,TPU_DEVICE,coords=[0,1,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(165,TPU_DEVICE,coords=[1,1,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(166,TPU_DEVICE,coords=[2,1,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(167,TPU_DEVICE,coords=[3,1,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(168,TPU_DEVICE,coords=[0,2,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(169,TPU_DEVICE,coords=[1,2,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(170,TPU_DEVICE,coords=[2,2,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(171,TPU_DEVICE,coords=[3,2,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(172,TPU_DEVICE,coords=[0,3,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(173,TPU_DEVICE,coords=[1,3,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(174,TPU_DEVICE,coords=[2,3,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(175,TPU_DEVICE,coords=[3,3,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(176,TPU_DEVICE,coords=[0,4,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(177,TPU_DEVICE,coords=[1,4,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(178,TPU_DEVICE,coords=[2,4,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 3.7 GiB on device(179,TPU_DEVICE,coords=[3,4,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,870 - absl - INFO - Using 0 Bytes on device(180,TPU_DEVICE,coords=[0,5,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(181,TPU_DEVICE,coords=[1,5,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(182,TPU_DEVICE,coords=[2,5,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(183,TPU_DEVICE,coords=[3,5,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(184,TPU_DEVICE,coords=[0,6,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(185,TPU_DEVICE,coords=[1,6,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(186,TPU_DEVICE,coords=[2,6,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(187,TPU_DEVICE,coords=[3,6,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(188,TPU_DEVICE,coords=[0,7,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(189,TPU_DEVICE,coords=[1,7,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(190,TPU_DEVICE,coords=[2,7,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(191,TPU_DEVICE,coords=[3,7,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(192,TPU_DEVICE,coords=[0,0,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(193,TPU_DEVICE,coords=[1,0,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(194,TPU_DEVICE,coords=[2,0,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(195,TPU_DEVICE,coords=[3,0,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(196,TPU_DEVICE,coords=[0,1,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(197,TPU_DEVICE,coords=[1,1,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(198,TPU_DEVICE,coords=[2,1,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(199,TPU_DEVICE,coords=[3,1,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(200,TPU_DEVICE,coords=[0,2,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(201,TPU_DEVICE,coords=[1,2,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(202,TPU_DEVICE,coords=[2,2,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(203,TPU_DEVICE,coords=[3,2,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(204,TPU_DEVICE,coords=[0,3,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(205,TPU_DEVICE,coords=[1,3,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(206,TPU_DEVICE,coords=[2,3,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(207,TPU_DEVICE,coords=[3,3,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(208,TPU_DEVICE,coords=[0,4,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(209,TPU_DEVICE,coords=[1,4,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(210,TPU_DEVICE,coords=[2,4,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(211,TPU_DEVICE,coords=[3,4,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(212,TPU_DEVICE,coords=[0,5,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(213,TPU_DEVICE,coords=[1,5,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(214,TPU_DEVICE,coords=[2,5,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(215,TPU_DEVICE,coords=[3,5,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(216,TPU_DEVICE,coords=[0,6,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(217,TPU_DEVICE,coords=[1,6,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(218,TPU_DEVICE,coords=[2,6,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(219,TPU_DEVICE,coords=[3,6,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(220,TPU_DEVICE,coords=[0,7,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 0 Bytes on device(221,TPU_DEVICE,coords=[1,7,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,871 - absl - INFO - Using 3.7 GiB on device(222,TPU_DEVICE,coords=[2,7,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(223,TPU_DEVICE,coords=[3,7,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(224,TPU_DEVICE,coords=[0,0,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(225,TPU_DEVICE,coords=[1,0,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(226,TPU_DEVICE,coords=[2,0,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(227,TPU_DEVICE,coords=[3,0,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(228,TPU_DEVICE,coords=[0,1,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(229,TPU_DEVICE,coords=[1,1,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(230,TPU_DEVICE,coords=[2,1,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(231,TPU_DEVICE,coords=[3,1,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(232,TPU_DEVICE,coords=[0,2,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(233,TPU_DEVICE,coords=[1,2,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(234,TPU_DEVICE,coords=[2,2,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(235,TPU_DEVICE,coords=[3,2,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(236,TPU_DEVICE,coords=[0,3,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(237,TPU_DEVICE,coords=[1,3,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(238,TPU_DEVICE,coords=[2,3,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(239,TPU_DEVICE,coords=[3,3,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(240,TPU_DEVICE,coords=[0,4,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(241,TPU_DEVICE,coords=[1,4,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(242,TPU_DEVICE,coords=[2,4,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(243,TPU_DEVICE,coords=[3,4,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(244,TPU_DEVICE,coords=[0,5,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(245,TPU_DEVICE,coords=[1,5,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(246,TPU_DEVICE,coords=[2,5,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(247,TPU_DEVICE,coords=[3,5,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(248,TPU_DEVICE,coords=[0,6,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(249,TPU_DEVICE,coords=[1,6,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(250,TPU_DEVICE,coords=[2,6,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(251,TPU_DEVICE,coords=[3,6,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(252,TPU_DEVICE,coords=[0,7,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 0 Bytes on device(253,TPU_DEVICE,coords=[1,7,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(254,TPU_DEVICE,coords=[2,7,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:19:59,872 - absl - INFO - Using 3.7 GiB on device(255,TPU_DEVICE,coords=[3,7,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,299 - absl - INFO -  - Using Pathways compatible HBM stats collector
+2026-08-12 01:20:00,826 - absl - INFO - Using 0 Bytes on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 0 Bytes on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 3.7 GiB on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 3.7 GiB on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 0 Bytes on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 0 Bytes on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 3.7 GiB on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 3.7 GiB on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 0 Bytes on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 0 Bytes on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 3.7 GiB on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 3.7 GiB on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,826 - absl - INFO - Using 0 Bytes on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(16,TPU_DEVICE,coords=[0,4,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(17,TPU_DEVICE,coords=[1,4,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(18,TPU_DEVICE,coords=[2,4,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(19,TPU_DEVICE,coords=[3,4,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(20,TPU_DEVICE,coords=[0,5,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(21,TPU_DEVICE,coords=[1,5,0,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(22,TPU_DEVICE,coords=[2,5,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(23,TPU_DEVICE,coords=[3,5,0,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(24,TPU_DEVICE,coords=[0,6,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(25,TPU_DEVICE,coords=[1,6,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(26,TPU_DEVICE,coords=[2,6,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(27,TPU_DEVICE,coords=[3,6,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(28,TPU_DEVICE,coords=[0,7,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(29,TPU_DEVICE,coords=[1,7,0,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(30,TPU_DEVICE,coords=[2,7,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(31,TPU_DEVICE,coords=[3,7,0,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(32,TPU_DEVICE,coords=[0,0,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(33,TPU_DEVICE,coords=[1,0,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(34,TPU_DEVICE,coords=[2,0,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(35,TPU_DEVICE,coords=[3,0,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(36,TPU_DEVICE,coords=[0,1,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(37,TPU_DEVICE,coords=[1,1,1,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(38,TPU_DEVICE,coords=[2,1,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(39,TPU_DEVICE,coords=[3,1,1,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(40,TPU_DEVICE,coords=[0,2,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(41,TPU_DEVICE,coords=[1,2,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(42,TPU_DEVICE,coords=[2,2,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(43,TPU_DEVICE,coords=[3,2,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(44,TPU_DEVICE,coords=[0,3,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(45,TPU_DEVICE,coords=[1,3,1,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(46,TPU_DEVICE,coords=[2,3,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(47,TPU_DEVICE,coords=[3,3,1,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(48,TPU_DEVICE,coords=[0,4,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(49,TPU_DEVICE,coords=[1,4,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(50,TPU_DEVICE,coords=[2,4,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 3.7 GiB on device(51,TPU_DEVICE,coords=[3,4,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(52,TPU_DEVICE,coords=[0,5,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,827 - absl - INFO - Using 0 Bytes on device(53,TPU_DEVICE,coords=[1,5,1,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(54,TPU_DEVICE,coords=[2,5,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(55,TPU_DEVICE,coords=[3,5,1,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(56,TPU_DEVICE,coords=[0,6,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(57,TPU_DEVICE,coords=[1,6,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(58,TPU_DEVICE,coords=[2,6,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(59,TPU_DEVICE,coords=[3,6,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(60,TPU_DEVICE,coords=[0,7,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(61,TPU_DEVICE,coords=[1,7,1,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(62,TPU_DEVICE,coords=[2,7,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(63,TPU_DEVICE,coords=[3,7,1,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(64,TPU_DEVICE,coords=[0,0,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(65,TPU_DEVICE,coords=[1,0,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(66,TPU_DEVICE,coords=[2,0,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(67,TPU_DEVICE,coords=[3,0,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(68,TPU_DEVICE,coords=[0,1,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(69,TPU_DEVICE,coords=[1,1,2,0],logical_task=16,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(70,TPU_DEVICE,coords=[2,1,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(71,TPU_DEVICE,coords=[3,1,2,0],logical_task=17,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(72,TPU_DEVICE,coords=[0,2,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(73,TPU_DEVICE,coords=[1,2,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(74,TPU_DEVICE,coords=[2,2,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(75,TPU_DEVICE,coords=[3,2,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(76,TPU_DEVICE,coords=[0,3,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(77,TPU_DEVICE,coords=[1,3,2,0],logical_task=18,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(78,TPU_DEVICE,coords=[2,3,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(79,TPU_DEVICE,coords=[3,3,2,0],logical_task=19,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(80,TPU_DEVICE,coords=[0,4,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(81,TPU_DEVICE,coords=[1,4,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(82,TPU_DEVICE,coords=[2,4,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(83,TPU_DEVICE,coords=[3,4,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(84,TPU_DEVICE,coords=[0,5,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(85,TPU_DEVICE,coords=[1,5,2,0],logical_task=20,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(86,TPU_DEVICE,coords=[2,5,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(87,TPU_DEVICE,coords=[3,5,2,0],logical_task=21,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(88,TPU_DEVICE,coords=[0,6,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(89,TPU_DEVICE,coords=[1,6,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(90,TPU_DEVICE,coords=[2,6,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(91,TPU_DEVICE,coords=[3,6,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(92,TPU_DEVICE,coords=[0,7,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 0 Bytes on device(93,TPU_DEVICE,coords=[1,7,2,0],logical_task=22,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,828 - absl - INFO - Using 3.7 GiB on device(94,TPU_DEVICE,coords=[2,7,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(95,TPU_DEVICE,coords=[3,7,2,0],logical_task=23,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(96,TPU_DEVICE,coords=[0,0,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(97,TPU_DEVICE,coords=[1,0,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(98,TPU_DEVICE,coords=[2,0,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(99,TPU_DEVICE,coords=[3,0,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(100,TPU_DEVICE,coords=[0,1,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(101,TPU_DEVICE,coords=[1,1,3,0],logical_task=24,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(102,TPU_DEVICE,coords=[2,1,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(103,TPU_DEVICE,coords=[3,1,3,0],logical_task=25,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(104,TPU_DEVICE,coords=[0,2,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(105,TPU_DEVICE,coords=[1,2,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(106,TPU_DEVICE,coords=[2,2,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(107,TPU_DEVICE,coords=[3,2,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(108,TPU_DEVICE,coords=[0,3,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(109,TPU_DEVICE,coords=[1,3,3,0],logical_task=26,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(110,TPU_DEVICE,coords=[2,3,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(111,TPU_DEVICE,coords=[3,3,3,0],logical_task=27,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(112,TPU_DEVICE,coords=[0,4,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(113,TPU_DEVICE,coords=[1,4,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(114,TPU_DEVICE,coords=[2,4,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(115,TPU_DEVICE,coords=[3,4,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(116,TPU_DEVICE,coords=[0,5,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(117,TPU_DEVICE,coords=[1,5,3,0],logical_task=28,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(118,TPU_DEVICE,coords=[2,5,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(119,TPU_DEVICE,coords=[3,5,3,0],logical_task=29,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(120,TPU_DEVICE,coords=[0,6,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(121,TPU_DEVICE,coords=[1,6,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(122,TPU_DEVICE,coords=[2,6,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(123,TPU_DEVICE,coords=[3,6,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(124,TPU_DEVICE,coords=[0,7,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(125,TPU_DEVICE,coords=[1,7,3,0],logical_task=30,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(126,TPU_DEVICE,coords=[2,7,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(127,TPU_DEVICE,coords=[3,7,3,0],logical_task=31,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(128,TPU_DEVICE,coords=[0,0,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(129,TPU_DEVICE,coords=[1,0,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(130,TPU_DEVICE,coords=[2,0,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(131,TPU_DEVICE,coords=[3,0,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(132,TPU_DEVICE,coords=[0,1,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(133,TPU_DEVICE,coords=[1,1,4,0],logical_task=32,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(134,TPU_DEVICE,coords=[2,1,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 3.7 GiB on device(135,TPU_DEVICE,coords=[3,1,4,0],logical_task=33,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,829 - absl - INFO - Using 0 Bytes on device(136,TPU_DEVICE,coords=[0,2,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(137,TPU_DEVICE,coords=[1,2,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(138,TPU_DEVICE,coords=[2,2,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(139,TPU_DEVICE,coords=[3,2,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(140,TPU_DEVICE,coords=[0,3,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(141,TPU_DEVICE,coords=[1,3,4,0],logical_task=34,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(142,TPU_DEVICE,coords=[2,3,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(143,TPU_DEVICE,coords=[3,3,4,0],logical_task=35,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(144,TPU_DEVICE,coords=[0,4,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(145,TPU_DEVICE,coords=[1,4,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(146,TPU_DEVICE,coords=[2,4,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(147,TPU_DEVICE,coords=[3,4,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(148,TPU_DEVICE,coords=[0,5,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(149,TPU_DEVICE,coords=[1,5,4,0],logical_task=36,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(150,TPU_DEVICE,coords=[2,5,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(151,TPU_DEVICE,coords=[3,5,4,0],logical_task=37,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(152,TPU_DEVICE,coords=[0,6,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(153,TPU_DEVICE,coords=[1,6,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(154,TPU_DEVICE,coords=[2,6,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(155,TPU_DEVICE,coords=[3,6,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(156,TPU_DEVICE,coords=[0,7,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(157,TPU_DEVICE,coords=[1,7,4,0],logical_task=38,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(158,TPU_DEVICE,coords=[2,7,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(159,TPU_DEVICE,coords=[3,7,4,0],logical_task=39,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(160,TPU_DEVICE,coords=[0,0,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(161,TPU_DEVICE,coords=[1,0,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(162,TPU_DEVICE,coords=[2,0,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(163,TPU_DEVICE,coords=[3,0,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(164,TPU_DEVICE,coords=[0,1,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(165,TPU_DEVICE,coords=[1,1,5,0],logical_task=40,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(166,TPU_DEVICE,coords=[2,1,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(167,TPU_DEVICE,coords=[3,1,5,0],logical_task=41,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(168,TPU_DEVICE,coords=[0,2,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(169,TPU_DEVICE,coords=[1,2,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(170,TPU_DEVICE,coords=[2,2,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(171,TPU_DEVICE,coords=[3,2,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(172,TPU_DEVICE,coords=[0,3,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(173,TPU_DEVICE,coords=[1,3,5,0],logical_task=42,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(174,TPU_DEVICE,coords=[2,3,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(175,TPU_DEVICE,coords=[3,3,5,0],logical_task=43,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(176,TPU_DEVICE,coords=[0,4,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 0 Bytes on device(177,TPU_DEVICE,coords=[1,4,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(178,TPU_DEVICE,coords=[2,4,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,830 - absl - INFO - Using 3.7 GiB on device(179,TPU_DEVICE,coords=[3,4,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(180,TPU_DEVICE,coords=[0,5,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(181,TPU_DEVICE,coords=[1,5,5,0],logical_task=44,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(182,TPU_DEVICE,coords=[2,5,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(183,TPU_DEVICE,coords=[3,5,5,0],logical_task=45,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(184,TPU_DEVICE,coords=[0,6,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(185,TPU_DEVICE,coords=[1,6,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(186,TPU_DEVICE,coords=[2,6,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(187,TPU_DEVICE,coords=[3,6,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(188,TPU_DEVICE,coords=[0,7,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(189,TPU_DEVICE,coords=[1,7,5,0],logical_task=46,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(190,TPU_DEVICE,coords=[2,7,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(191,TPU_DEVICE,coords=[3,7,5,0],logical_task=47,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(192,TPU_DEVICE,coords=[0,0,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(193,TPU_DEVICE,coords=[1,0,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(194,TPU_DEVICE,coords=[2,0,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(195,TPU_DEVICE,coords=[3,0,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(196,TPU_DEVICE,coords=[0,1,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(197,TPU_DEVICE,coords=[1,1,6,0],logical_task=48,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(198,TPU_DEVICE,coords=[2,1,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(199,TPU_DEVICE,coords=[3,1,6,0],logical_task=49,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(200,TPU_DEVICE,coords=[0,2,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(201,TPU_DEVICE,coords=[1,2,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(202,TPU_DEVICE,coords=[2,2,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(203,TPU_DEVICE,coords=[3,2,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(204,TPU_DEVICE,coords=[0,3,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(205,TPU_DEVICE,coords=[1,3,6,0],logical_task=50,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(206,TPU_DEVICE,coords=[2,3,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(207,TPU_DEVICE,coords=[3,3,6,0],logical_task=51,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(208,TPU_DEVICE,coords=[0,4,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(209,TPU_DEVICE,coords=[1,4,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(210,TPU_DEVICE,coords=[2,4,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(211,TPU_DEVICE,coords=[3,4,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(212,TPU_DEVICE,coords=[0,5,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(213,TPU_DEVICE,coords=[1,5,6,0],logical_task=52,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(214,TPU_DEVICE,coords=[2,5,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(215,TPU_DEVICE,coords=[3,5,6,0],logical_task=53,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(216,TPU_DEVICE,coords=[0,6,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(217,TPU_DEVICE,coords=[1,6,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(218,TPU_DEVICE,coords=[2,6,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(219,TPU_DEVICE,coords=[3,6,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(220,TPU_DEVICE,coords=[0,7,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 0 Bytes on device(221,TPU_DEVICE,coords=[1,7,6,0],logical_task=54,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,831 - absl - INFO - Using 3.7 GiB on device(222,TPU_DEVICE,coords=[2,7,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(223,TPU_DEVICE,coords=[3,7,6,0],logical_task=55,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(224,TPU_DEVICE,coords=[0,0,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(225,TPU_DEVICE,coords=[1,0,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(226,TPU_DEVICE,coords=[2,0,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(227,TPU_DEVICE,coords=[3,0,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(228,TPU_DEVICE,coords=[0,1,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(229,TPU_DEVICE,coords=[1,1,7,0],logical_task=56,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(230,TPU_DEVICE,coords=[2,1,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(231,TPU_DEVICE,coords=[3,1,7,0],logical_task=57,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(232,TPU_DEVICE,coords=[0,2,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(233,TPU_DEVICE,coords=[1,2,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(234,TPU_DEVICE,coords=[2,2,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(235,TPU_DEVICE,coords=[3,2,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(236,TPU_DEVICE,coords=[0,3,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(237,TPU_DEVICE,coords=[1,3,7,0],logical_task=58,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(238,TPU_DEVICE,coords=[2,3,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(239,TPU_DEVICE,coords=[3,3,7,0],logical_task=59,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(240,TPU_DEVICE,coords=[0,4,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(241,TPU_DEVICE,coords=[1,4,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(242,TPU_DEVICE,coords=[2,4,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(243,TPU_DEVICE,coords=[3,4,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(244,TPU_DEVICE,coords=[0,5,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(245,TPU_DEVICE,coords=[1,5,7,0],logical_task=60,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(246,TPU_DEVICE,coords=[2,5,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(247,TPU_DEVICE,coords=[3,5,7,0],logical_task=61,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(248,TPU_DEVICE,coords=[0,6,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(249,TPU_DEVICE,coords=[1,6,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(250,TPU_DEVICE,coords=[2,6,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(251,TPU_DEVICE,coords=[3,6,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(252,TPU_DEVICE,coords=[0,7,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 0 Bytes on device(253,TPU_DEVICE,coords=[1,7,7,0],logical_task=62,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(254,TPU_DEVICE,coords=[2,7,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+2026-08-12 01:20:00,832 - absl - INFO - Using 3.7 GiB on device(255,TPU_DEVICE,coords=[3,7,7,0],logical_task=63,slice=0,default_mem=device,mem_spaces=3)
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+wandb: Currently logged in as: yuxzhang (yuxzhang-google) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 7tifeu9l
+wandb: Tracking run with wandb version 0.28.1
+wandb: Run data is saved locally in /app/wandb/run-20260812_012002-7tifeu9l
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run 2026-08-12_01-20-02
+wandb: ⭐️ View project at https://wandb.ai/yuxzhang-google/tunix
+wandb: 🚀 View run at https://wandb.ai/yuxzhang-google/tunix/runs/7tifeu9l
+wandb: Detected [openai] in use.
+wandb: Use W&B Weave for improved LLM call tracing. Install Weave with `pip install weave` then add `import weave` to the top of your script.
+wandb: For more information, check out the docs at: https://weave-docs.wandb.ai
+2026-08-12 01:20:04,160 - root - INFO - W&B run URL: https://wandb.ai/yuxzhang-google/tunix/runs/7tifeu9l
+INFO 08-12 01:20:04 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-12 01:20:04 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-12 01:20:04 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+2026-08-12 01:20:05,860 - absl - INFO - Engine kwargs setting key 'model' with value '/mnt/disks/linchai_data/models/Qwen3-4B'.
+2026-08-12 01:20:05,860 - absl - INFO - Engine kwargs setting key 'max_model_len' with value '8320'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'async_scheduling' with value 'True'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'max_num_batched_tokens' with value '256'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'max_num_seqs' with value '1'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'hf_config_path' with value 'None'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'max_logprobs' with value '1'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'logprobs_mode' with value 'processed_logprobs'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'kv_cache_metrics' with value 'True'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'disable_log_stats' with value 'False'.
+2026-08-12 01:20:05,861 - absl - INFO - Engine kwargs setting key 'enable_prefix_caching' with value 'False'.
+INFO 08-12 01:20:05 [attention_interface.py:58] Using default RPA kernel
+WARNING 08-12 01:20:05 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-12 01:20:05 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-12 01:20:05 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-12 01:20:05 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 08-12 01:20:06 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 08-12 01:20:06 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 08-12 01:20:06 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 08-12 01:20:06 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 08-12 01:20:06 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+WARNING 08-12 01:20:06 [arg_utils.py:1617] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 08-12 01:20:17 [model.py:619] Resolved architecture: Qwen3ForCausalLM
+INFO 08-12 01:20:17 [model.py:1776] Using max model len 8320
+INFO 08-12 01:20:17 [scheduler.py:252] Chunked prefill is enabled with max_num_batched_tokens=256.
+INFO 08-12 01:20:17 [vllm.py:1089] Asynchronous scheduling is enabled.
+WARNING 08-12 01:20:17 [vllm.py:1191] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 08-12 01:20:17 [kernel.py:292] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+INFO 08-12 01:20:17 [tpu_platform.py:263] Resolved TPU_MULTIPROCESS_DP=0
+INFO 08-12 01:20:17 [tpu_platform.py:233] Initialized sharding configuration: ShardingConfigManager(total_devices=128, sharding_strategy=ShardingStrategy(tensor_parallelism=8, expert_parallelism=1, sequence_parallelism=1, data_parallelism=16, attention_data_parallelism=1, attention_data_expert_parallelism=1, decode_context_parallelism=1), mm_encoder_tp_mode=weights, device_indexes=[0, 1, 32, 33, 64, 65, 96, 97, 128, 129, 160, 161, 192, 193, 224, 225, 4, 5, 36, 37, 68, 69, 100, 101, 132, 133, 164, 165, 196, 197, 228, 229, 8, 9, 40, 41, 72, 73, 104, 105, 136, 137, 168, 169, 200, 201, 232, 233, 12, 13, 44, 45, 76, 77, 108, 109, 140, 141, 172, 173, 204, 205, 236, 237, 16, 17, 48, 49, 80, 81, 112, 113, 144, 145, 176, 177, 208, 209, 240, 241, 20, 21, 52, 53, 84, 85, 116, 117, 148, 149, 180, 181, 212, 213, 244, 245, 24, 25, 56, 57, 88, 89, 120, 121, 152, 153, 184, 185, 216, 217, 248, 249, 28, 29, 60, 61, 92, 93, 124, 125, 156, 157, 188, 189, 220, 221, 252, 253])
+INFO 08-12 01:20:17 [tpu_platform.py:320] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+WARNING 08-12 01:20:17 [vllm.py:557] Model Runner V2 requires Triton; using the V1 model runner instead.
+INFO 08-12 01:20:17 [compilation.py:312] Enabled custom fusions: norm_quant, act_quant
+INFO 08-12 01:20:21 [core.py:114] Initializing a V1 LLM engine (v0.25.0) with config: model='/mnt/disks/linchai_data/models/Qwen3-4B', speculative_config=None, tokenizer='/mnt/disks/linchai_data/models/Qwen3-4B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=8320, download_dir=None, load_format=dummy, tensor_parallel_size=8, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=True, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=/mnt/disks/linchai_data/models/Qwen3-4B, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'eager', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::qwen_gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [256], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, moe_backend='auto', linear_backend='auto')
+INFO 08-12 01:20:21 [parallel_state.py:1607] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/tmpttvna91d backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 08-12 01:20:21 [parallel_state.py:1942] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+INFO 08-12 01:20:21 [tpu_runner.py:1705] Creating new model mesh | devices=128, num_slices=1
+PATHTRACE CANON_MODEL_MESH_IDS expected=[0, 2, 1, 3] actual=[0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73, 77, 81, 85, 89, 93, 97, 101, 105, 109, 113, 117, 121, 125, 129, 133, 137, 141, 145, 149, 153, 157, 161, 165, 169, 173, 177, 181, 185, 189, 193, 197, 201, 205, 209, 213, 217, 221, 225, 229, 233, 237, 241, 245, 249, 253]
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 25, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 21, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 1143, in <module>
+[rank0]:     rl_cluster = rl_cluster_lib.RLCluster(
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 305, in __init__
+[rank0]:     self._init_cluster()
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 470, in _init_cluster
+[rank0]:     self._rollout = vllm_rollout.VllmRollout(
+[rank0]:                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rollout/vllm_rollout.py", line 50, in __init__
+[rank0]:     self._sampler = vllm_sampler.VllmSampler(
+[rank0]:                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/generate/vllm_sampler.py", line 158, in __init__
+[rank0]:     self._driver = self._create_driver()
+[rank0]:                    ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/generate/vllm_sampler.py", line 316, in _create_driver
+[rank0]:     return VLLMInProcessDriver.from_engine_args(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/generate/vllm_async_driver.py", line 114, in from_engine_args
+[rank0]:     llm_engine = LLMEngine.from_engine_args(
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 179, in from_engine_args
+[rank0]:     return cls(
+[rank0]:            ^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 105, in __init__
+[rank0]:     self.engine_core = EngineCoreClient.make_client(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 105, in make_client
+[rank0]:     return InprocClient(vllm_config, executor_class, log_stats)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 287, in __init__
+[rank0]:     self.engine_core = EngineCore(*args, **kwargs)
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 123, in __init__
+[rank0]:     self.model_executor = executor_class(vllm_config)
+[rank0]:                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[rank0]:     return func(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/abstract.py", line 109, in __init__
+[rank0]:     self._init_executor()
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 63, in _init_executor
+[rank0]:     self.driver_worker.init_device()
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 331, in init_device
+[rank0]:     self.worker.init_device()  # type: ignore
+[rank0]:     ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/tpu_inference/worker/tpu_worker.py", line 374, in init_device
+[rank0]:     self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
+[rank0]:                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 1611, in __init__
+[rank0]:     self._init_mesh()
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 1687, in _init_mesh
+[rank0]:     raise RuntimeError(
+[rank0]: RuntimeError: CANON_EXPECT_MODEL_MESH_IDS mismatch: expected=[0, 2, 1, 3], actual=[0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73, 77, 81, 85, 89, 93, 97, 101, 105, 109, 113, 117, 121, 125, 129, 133, 137, 141, 145, 149, 153, 157, 161, 165, 169, 173, 177, 181, 185, 189, 193, 197, 201, 205, 209, 213, 217, 221, 225, 229, 233, 237, 241, 245, 249, 253]
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33m2026-08-12_01-20-02[0m at: [34mhttps://wandb.ai/yuxzhang-google/tunix/runs/7tifeu9l[0m
+[1;34mwandb[0m: Find logs at: [1;35mwandb/run-20260812_012002-7tifeu9l/logs[0m
