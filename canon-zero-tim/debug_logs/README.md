@@ -1339,12 +1339,29 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - All 6 overlay files byte-verified by SHA-256; 64 TPU devices attached and registered in single Pathways session.
    - Initialized 36-layer KV cache block pools (5,216 blocks, 18.99 GiB HBM) and completed 256 rollout samples.
    - Proved `[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 min_prefix=1536 prefix_bounds=(1536, 1792, 2048, 2304, 2560)` initialized live from `tpu_runner.py`.
-   - Executed full 36-layer forward and reverse Pallas VJP passes across all attention projections, SwiGLU, and RMSNorm down to `model.norm`.
+   - The log later entered the adapter forward and reached the final RMSNorm.
+     It contains no backward marker; `CANON_PALLAS_CANONICAL_VJP` names the
+     registered custom-VJP operator and is not proof that a reverse pass ran.
 
 2. **Capture Stratum & Diagnostic Analysis**:
-   - `[CANON_P38_SERVING_CAPTURE]` was not triggered because `_p38_serving_begin` filters scheduled decode prefixes against `_P38_SERVING_CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)`. In this 1-step FrozenLake rollout, active request lengths remained below the 1,536-token lower bound, resulting in empty `candidate_strata`.
+   - The previous claim that all active prefixes remained below 1,536 is
+     withdrawn. `_p38_serving_begin` emits its first
+     `CANON_P38_SERVING_CAPTURE_OBSERVE` before filtering prefix strata, but
+     P38s6 emitted zero observations despite completing rollout traffic.
+   - Exact pinned-source inspection identifies a reachability bug:
+     FrozenLake leaves `enable_continue_decode=False` and executes standard
+     `_execute_model`, while the P38.2g5 begin/finish hook existed only in
+     `_execute_continue_decode`. `CAPTURE_INIT` therefore proved module import,
+     not hot-path execution. Lowering the prefix bound cannot fix this.
    - As a consequence, `p38s6-mismatch-capsule.npz` and `p38s6-serving-capture.tar` were not generated.
-   - Full raw log and SHA-256 digest are archived to branch. Node slice is transitioned to high-throughput `P45` DP8xTP8 Device-Resident full training (`canon-p45-fl-eval-p45r1`).
+   - The log is also nonterminal: it has no alignment JSON, child exit,
+     precheck completion, classifier, serving archive, or outer postflight.
+     Verdict: `INCONCLUSIVE_WRONG_PATH_NONTERMINAL`.
+   - Full raw log and SHA-256 digest are archived. P38.2g6 moves the bounded
+     capture to the real standard/mixed path and requires path-specific init,
+     observation, pre/post records, and postflight before P38s7 can be read.
+     The node slice was then transitioned to P45 DP8xTP8 device-resident full
+     training; that separate run does not promote the P38 diagnosis.
 
 ## 52. P44 DeepSWE 256-Chip Qwen3-4B TP8 Parity Rollout (Attempt `r06` — Full 256-Chip Scale-Out)
 
@@ -1378,4 +1395,3 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 2. **Preflight Diagnostics**:
    - Runtime failed in `p22xf_contract.validate_qwen8b_env` due to static `CANON_QWEN3_TP_SIZE=4` check vs P45 carrier setting `CANON_QWEN3_TP_SIZE=8`.
    - Captured full raw execution trace and SHA-256 digest for audit.
-

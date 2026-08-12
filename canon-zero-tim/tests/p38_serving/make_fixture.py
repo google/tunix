@@ -70,7 +70,8 @@ def main() -> int:
   pre["tokens_indices_selector"] = np.array([0], dtype=np.int32)
   pre["sampling_leaf_0000"] = np.arange(4, dtype=np.float32)
   pre_meta = {
-      "continue_decode_enabled": True,
+      "continue_decode_enabled": False,
+      "program_path": "standard",
       "caller_update_kv_cache": True,
       "output_update_kv_cache": True,
       "request_ids": ["request-0"],
@@ -80,6 +81,7 @@ def main() -> int:
           "input_batch_index": 0,
           "dp_rank": 0,
           "local_scheduler_slot": 0,
+          "packed_token_offset": 0,
           "global_row": 0,
           "attention_row": 0,
           "selector_index": 0,
@@ -126,7 +128,8 @@ def main() -> int:
                   "source_sha256": None,
               }
               for name in (
-                  "continue_decode", "model_fn", "compute_logits_fn", "sample_fn"
+                  "continue_decode", "execute_model", "model_fn",
+                  "compute_logits_fn", "sample_fn"
               )
           },
       },
@@ -186,6 +189,7 @@ def main() -> int:
         "actual_steps": 1,
         "completed_records": seq + 1,
         "expected_max_records": 4,
+        "program_path": "standard",
     }, seq)
   prompt_ids = np.array([[101, 102]], dtype=np.int32)
   prompt_mask = np.array([[True, True]])

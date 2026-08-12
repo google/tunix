@@ -62,6 +62,9 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertEqual(
             env["CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER"], "5"
         )
+        self.assertEqual(
+            env["CANON_P38_SERVING_CAPTURE_EXPECTED_PATH"], "standard"
+        )
         self.assertTrue(env["CANON_P38_MISMATCH_CAPSULE"].endswith(".npz"))
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])

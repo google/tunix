@@ -17,6 +17,7 @@ run_case() (
   export CANON_P38_PRECHECK_ONLY=1
   export CANON_P38_SERVING_CAPTURE_DIR="$state/capture"
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
+  export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
   export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
   export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$state/capture.json"
@@ -24,8 +25,8 @@ run_case() (
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
   export CANON_KV_UNIFIED=0
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
-  command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4'"
-  command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"one_token_requests\":1}'"
+  command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 expected_path=standard'"
+  command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
   if [ "$mode" = exact ]; then

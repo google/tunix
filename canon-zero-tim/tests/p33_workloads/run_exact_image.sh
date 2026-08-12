@@ -20,6 +20,7 @@ $DOCKER run --rm \
     export CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
     export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
     export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
+    export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
     bash canon-zero-tim/install.sh "$qwen1p7b_overlay" \
       --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
       --model qwen1p7b
@@ -28,6 +29,7 @@ $DOCKER run --rm \
     grep -Fq 'CANON_P38_SERVING_CAPTURE_DIR' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'tokens_indices_selector' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'implementation_identity' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Eq program_path=.standard. "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     python3 -m py_compile "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen1p7b_overlay"
@@ -39,8 +41,9 @@ $DOCKER run --rm \
     grep -Fq 'CANON_P38_SERVING_CAPTURE_DIR' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'tokens_indices_selector' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'implementation_identity' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Eq program_path=.standard. "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 -m py_compile "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"
-    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 serving_capture_cases=6 overlays=2"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 serving_capture_cases=10 overlays=2"
   '

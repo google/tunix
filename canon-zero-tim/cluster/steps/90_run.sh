@@ -143,6 +143,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py" \
       --directory "$CANON_P38_SERVING_CAPTURE_DIR" \
       --expected-records "$CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS" \
+      --expected-program-path "$CANON_P38_SERVING_CAPTURE_EXPECTED_PATH" \
       --prefix-bounds "$CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS" \
       --mismatch-capsule "$CANON_P38_MISMATCH_CAPSULE" \
       "${p38_join_args[@]}" \
@@ -187,10 +188,16 @@ n_p38_precheck=$(grep -ac '^\[CANON_P38\] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD
 n_p38_kv_unified=$(grep -ac 'KV_UNIFIED_two_pass' "$LOG" || true)
 n_p38_capture_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\]' "$LOG" || true)
 n_p38_capture_observe=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\]' "$LOG" || true)
+n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
+n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
 echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
+    exit 1
+  fi
+  if [ "$n_p38_standard_init" -ne 1 ] || [ "$n_p38_standard_observe" -le 0 ]; then
+    echo "[run] FATAL: P38 capture did not execute the standard runner path: init=$n_p38_standard_init observe=$n_p38_standard_observe" >&2
     exit 1
   fi
   if [ "${CANON_KV_UNIFIED:-0}" = "1" ] && [ "$n_p38_kv_unified" -le 0 ]; then

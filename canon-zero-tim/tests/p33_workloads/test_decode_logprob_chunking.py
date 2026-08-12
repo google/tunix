@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import importlib.util
 from pathlib import Path
 import sys
@@ -282,7 +283,7 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
   def test_serving_capture_keeps_physical_slot_while_filtering_idle_request(self):
     args = self._serving_mapping_case()
     result = self.runner._p38_serving_request_meta(
-        *args[:3], args[3], 2, *args[4:]
+        *args[:3], args[3], 2, *args[4:], "continue_decode"
     )
     self.assertEqual(result["request_ids"], ["request-a", "request-b"])
     self.assertEqual(result["request_ids_by_dp"], {"0": ["request-a"], "1": ["request-b"]})
@@ -290,6 +291,59 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
     self.assertEqual(request_b["local_scheduler_slot"], 1)
     self.assertEqual(request_b["global_row"], 3)
     self.assertEqual(request_b["attention_row"], 5)
+
+  def test_standard_capture_maps_decode_after_packed_prefill_tokens(self):
+    token_ids_cpu = np.zeros((2, 1801), dtype=np.int32)
+    token_ids_cpu[0, :20] = 11
+    token_ids_cpu[1, :] = 22
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        req_ids=["prefill", "decode"],
+        req_id_to_index={"prefill": 0, "decode": 1},
+        num_computed_tokens_cpu=np.array([10, 1800], dtype=np.int32),
+        num_prompt_tokens=np.array([20, 100], dtype=np.int32),
+        num_tokens=np.array([20, 1801], dtype=np.int32),
+        token_ids_cpu=token_ids_cpu,
+    )
+    runner = SimpleNamespace(
+        input_batch=input_batch,
+        dp_size=1,
+        max_num_reqs=4,
+        block_size=256,
+        requests={
+            "prefill": SimpleNamespace(block_ids=[[3]]),
+            "decode": SimpleNamespace(block_ids=[list(range(7, 15))]),
+        },
+    )
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={"prefill": 3, "decode": 1},
+        assigned_dp_rank={"prefill": 0, "decode": 0},
+    )
+    positions = np.array([10, 11, 12, 1800, 0, 0, 0, 0], dtype=np.int32)
+    active = np.array([True, True, True, True, False, False, False, False])
+    block_tables = np.zeros((4, 16), dtype=np.int32)
+    block_tables[1, :8] = np.arange(7, 15)
+    seq_lens = np.array([13, 1801, 0, 0], dtype=np.int32)
+    query_start = np.array([0, 3, 4, 4, 4], dtype=np.int32)
+    result = self.runner._p38_serving_request_meta(
+        runner,
+        scheduler,
+        {0: ["prefill", "decode"]},
+        None,
+        8,
+        positions,
+        active,
+        block_tables,
+        seq_lens,
+        query_start,
+        "standard",
+    )
+    self.assertEqual(result["request_ids"], ["decode"])
+    decode = result["requests"][0]
+    self.assertEqual(decode["local_scheduler_slot"], 1)
+    self.assertEqual(decode["packed_token_offset"], 3)
+    self.assertEqual(decode["global_row"], 3)
+    self.assertEqual(decode["attention_row"], 1)
 
   def test_serving_capture_rejects_empty_scheduled_selection(self):
     args = list(self._serving_mapping_case())
@@ -300,7 +354,7 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
     }
     with self.assertRaisesRegex(RuntimeError, "selected no scheduled requests"):
       self.runner._p38_serving_request_meta(
-          *args[:3], args[3], 2, *args[4:]
+          *args[:3], args[3], 2, *args[4:], "continue_decode"
       )
 
   def test_serving_capture_rejects_selector_mapping_drift(self):
@@ -308,7 +362,7 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
     args[3] = np.array([1, 2, 3], dtype=np.int32)
     with self.assertRaisesRegex(RuntimeError, "selector mapping mismatch"):
       self.runner._p38_serving_request_meta(
-          *args[:3], args[3], 2, *args[4:]
+          *args[:3], args[3], 2, *args[4:], "continue_decode"
       )
 
   def test_serving_capture_selects_each_prefix_stratum_once(self):
@@ -335,6 +389,7 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
         input_batch=SimpleNamespace(
             req_id_to_index={"prefill": 0, "decode": 1},
             num_computed_tokens_cpu=np.array([100, 1800], dtype=np.int32),
+            num_prompt_tokens=np.array([200, 100], dtype=np.int32),
         )
     )
     scheduler = SimpleNamespace(
@@ -365,18 +420,138 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
       with mock.patch("builtins.print") as print_mock:
         self.runner._p38_observe_scheduled_prefixes([
             {"num_computed_tokens": 1600}
-        ])
+        ], "standard")
         self.runner._p38_observe_scheduled_prefixes([
             {"num_computed_tokens": 1610}
-        ])
+        ], "standard")
         self.runner._p38_observe_scheduled_prefixes([
             {"num_computed_tokens": 1800}
-        ])
+        ], "standard")
       self.assertEqual(print_mock.call_count, 2)
       self.assertEqual(state["calls"], 3)
       self.assertEqual(state["lines"], 2)
     finally:
       state.update(original)
+
+  def _fake_execute_runner(self, *, enable_continue_decode: bool):
+    input_ids = jnp.array([101, 102], dtype=jnp.int32)
+    positions = jnp.array([10, 20], dtype=jnp.int32)
+    attention = SimpleNamespace(
+        input_positions=positions,
+        block_tables=jnp.zeros((2, 4), dtype=jnp.int32),
+        seq_lens=jnp.array([11, 21], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([2, 2, 2], dtype=jnp.int32),
+    )
+    sampling = SimpleNamespace()
+    prepared = (
+        input_ids,
+        positions,
+        attention,
+        sampling,
+        jnp.array([0, 1], dtype=jnp.int32),
+        None,
+        None,
+        2,
+        {0: ["a", "b"]},
+        2,
+        None,
+    )
+    hidden = jnp.ones((2, 2), dtype=jnp.float32)
+    runner = SimpleNamespace(
+        persistent_batch_manager=SimpleNamespace(
+            update_states=mock.Mock()
+        ),
+        get_mrope_input_positions_fn=None,
+        input_batch=SimpleNamespace(
+            num_reqs=2,
+            request_distribution=np.array([2, 2, 2], dtype=np.int32),
+            num_prompt_logprobs={},
+        ),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        _pre_async_results=None,
+        enable_continue_decode=enable_continue_decode,
+        _execute_continue_decode=mock.Mock(return_value="continue-output"),
+        _prepare_inputs=mock.Mock(return_value=prepared),
+        is_multimodal_model=False,
+        speculative_config=None,
+        _get_input_ids_embeds=mock.Mock(return_value=(input_ids, None)),
+        lora_utils=SimpleNamespace(
+            extract_lora_metadata=mock.Mock(return_value=None)
+        ),
+        maybe_forbid_compile=nullcontext(),
+        vllm_config=SimpleNamespace(),
+        maybe_get_kv_connector_output=mock.Mock(
+            return_value=nullcontext(None)
+        ),
+        state_leaves=(),
+        mesh=None,
+        kv_caches=(),
+        model_fn=mock.Mock(return_value=((), hidden, None, None)),
+        layer_name_to_kvcache_index={},
+        is_first_rank=True,
+        is_last_rank=True,
+        is_pooling_model=False,
+        _select_from_array_fn=mock.Mock(return_value=hidden),
+        compute_logits_fn=mock.Mock(
+            return_value=jnp.ones((2, 3), dtype=jnp.float32)
+        ),
+        execute_model_state=None,
+    )
+    scheduler = SimpleNamespace(
+        total_num_scheduled_tokens=2,
+        finished_req_ids=[],
+    )
+    return runner, scheduler
+
+  def test_standard_execute_path_reaches_capture_when_continue_is_disabled(self):
+    runner, scheduler = self._fake_execute_runner(
+        enable_continue_decode=False
+    )
+    with (
+        mock.patch.object(
+            self.runner, "_p38_serving_begin", return_value=17
+        ) as begin,
+        mock.patch.object(
+            self.runner, "set_forward_context", return_value=nullcontext()
+        ),
+    ):
+      result = self.runner.TPUModelRunner._execute_model(runner, scheduler)
+    self.assertIsNone(result)
+    runner._execute_continue_decode.assert_not_called()
+    self.assertEqual(begin.call_args.kwargs["program_path"], "standard")
+    self.assertEqual(runner.execute_model_state.p38_serving_seq, 17)
+
+  def test_continue_path_does_not_masquerade_as_standard_capture(self):
+    runner, scheduler = self._fake_execute_runner(
+        enable_continue_decode=True
+    )
+    with mock.patch.object(self.runner, "_p38_serving_begin") as begin:
+      result = self.runner.TPUModelRunner._execute_model(runner, scheduler)
+    self.assertEqual(result, "continue-output")
+    runner._execute_continue_decode.assert_called_once_with(scheduler)
+    begin.assert_not_called()
+
+  def test_standard_capture_finish_writes_step_major_numeric_arrays(self):
+    attention = SimpleNamespace(
+        input_positions=jnp.array([10, 20], dtype=jnp.int32),
+        seq_lens=jnp.array([11, 21], dtype=jnp.int32),
+    )
+    output = SimpleNamespace(
+        sampled_token_ids=[[101], [202]],
+        logprobs=SimpleNamespace(
+            logprob_token_ids=np.array([[101], [202]], dtype=np.int32),
+            logprobs=np.array([[-0.1], [-0.2]], dtype=np.float32),
+            sampled_token_ranks=np.array([0, 0], dtype=np.int32),
+        ),
+    )
+    with mock.patch.object(self.runner, "_p38_serving_dump") as dump:
+      self.runner._p38_serving_finish_standard(3, attention, output)
+    stage, seq, payload, meta = dump.call_args.args
+    self.assertEqual((stage, seq), ("post", 3))
+    self.assertEqual(payload["generated_tokens"].shape, (1, 2))
+    self.assertEqual(payload["logprob_values"].shape, (1, 2, 1))
+    self.assertEqual(meta["program_path"], "standard")
 
 
 if __name__ == "__main__":

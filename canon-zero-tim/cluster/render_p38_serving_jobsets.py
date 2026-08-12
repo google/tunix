@@ -58,6 +58,7 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
           str(value) for value in _CAPTURE_PREFIX_BOUNDS
       ),
       "CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER": "5",
+      "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
       "CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS": str(_CAPTURE_RECORDS),
       "CANON_P38_SERVING_CAPTURE_CLASSIFICATION": (
           f"{state}/p38_serving_capture.classification.json"

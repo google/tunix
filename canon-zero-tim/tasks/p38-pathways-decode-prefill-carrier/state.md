@@ -26,17 +26,21 @@
   hardens that capture before another expensive target run: four bounded
   prefix strata replace the brittle single `min_prefix=1788` trigger, callable
   identity is attested, and first-divergence localization is preregistered
-  without naming RoPE or page state as the cause. P38.2g5 is now the active
-  diagnostic-reachability phase after P38s5 produced no hook evidence.
-- Latest local gate: P38.2g5 is complete locally. The trigger now selects
-  request-level scheduler prefixes, retains packed positions as an attestation,
-  and emits bounded init/observation evidence even on misses. A finite A-B red
-  with exact B-C now persists its capsule and exits before backward instead of
-  raising before the required stop marker. Qwen3-1.7B and Qwen3-8B overlays
-  each pass 16/16 exact-image tests with all 29 manifest entries matching; the
-  complete frozen-image CPU gate passes 81 workload tests, 31 alignment tests,
-  and all adjacent suites. The installed runner SHA-256 is
-  `72c4307859c32de4e7080823bbe0693fb04c21a67ab82a3cfe829bb6c39ed18c`.
+  without naming RoPE or page state as the cause. P38.2g5 is superseded:
+  P38s6 proved that its hook was installed only in the unused
+  `continue_decode` path. P38.2g6 is locally complete and moves the bounded
+  capture into FrozenLake's real standard/mixed `_execute_model` and
+  `sample_tokens` lifecycle. P38s7 is the only pending target attempt.
+- Latest local gate: P38.2g6 is complete locally. Capture is default-off and
+  path-attested as `standard`; standard/mixed packed-token rows map by token
+  offset, the capture sequence survives through unchanged sampling, and
+  wrong-path plus async-scheduling controls fail closed. Qwen3-1.7B and
+  Qwen3-8B overlays each pass 20/20 exact-image tests with all 29 manifest
+  entries matching. The complete pinned-image CPU gate passes 81 workload
+  tests, 31 alignment tests, the 26-case serving classifier suite, and all
+  adjacent suites and negative controls. Renderer tests pass 5/5 and shell
+  postflight passes. The installed runner SHA-256 is
+  `a7bdc527182ad115385e60005cff8c4e135efd2714eb97a2e929dc3dbc45e890`.
 - Prior local gate: P38.2g4 D0 completed. The real
   `continue_decode` capture now excludes
   live-but-unscheduled requests without compacting their physical scheduler
@@ -117,8 +121,17 @@
   imported, called, or merely missed its ranges. The archived claim that
   FrozenLake prompts were about 200 tokens and that the recipe bypassed
   `GRPOLearner` is withdrawn as unsupported by the current code and evidence.
-- Next action for the strict track: after P38.2g5 is published and separate
-  resource approval is granted, execute the P38s6
+- P38s6 evidence correction: the hook initialized with the requested bounds,
+  but emitted zero observation/capture records because FrozenLake leaves
+  `rollout_vllm_additional_config` unset and the pinned runner therefore has
+  `enable_continue_decode=False`. The installed hook lived only in
+  `_execute_continue_decode`. The old claim that prefixes merely missed the
+  1536 lower bound is withdrawn because observation precedes stratum
+  filtering. The log is also nonterminal and contains no alignment, child
+  exit, classifier, archive, or outer postflight. Verdict is
+  `INCONCLUSIVE_WRONG_PATH_NONTERMINAL`.
+- Next action for the strict track: after P38.2g6 is published and separate
+  resource approval is granted, execute the P38s7
   stock-only Attempt-0 run-and-return protocol at the top of `HANDOFF.md`.
   Preserve the complete non-timestamped terminal head log through outer
   postflight and return the exact evidence directory, including the real
@@ -152,13 +165,13 @@
   `artifacts/p38_2g4_local_gate_0811.md`,
   `phases/p38-2g2-pathways-serving-envelope.md`,
   `phases/p38-2g3-page-topology-discriminator.md`
-- Current local gates: frozen-image P33 CPU gate PASS (78 workload tests, 29
+- Current local gates: pinned-image P33 CPU gate PASS (81 workload tests, 31
   alignment tests, adjacent regressions and negative controls), exact-image
-  Qwen3-1.7B/Qwen3-8B overlay gates 14/14 each PASS, serving classifier 25/25,
-  renderer 5/5, and postflight stock/U
-  PATHTRACE negative controls PASS.
-- Updated: 2026-08-12 UTC after auditing P38s5 and locally completing the
-  request-anchored P38.2g5 diagnostic repair
+  Qwen3-1.7B/Qwen3-8B overlay gates 20/20 each PASS with 29/29 manifest
+  entries, serving classifier 26/26, renderer 5/5, and postflight standard-
+  path plus stock/U negative controls PASS.
+- Updated: 2026-08-12 UTC after auditing P38s6 and locally completing the
+  standard-runner P38.2g6 diagnostic repair
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,

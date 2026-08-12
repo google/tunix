@@ -867,3 +867,38 @@
   tests plus adjacent suites.
 - Next: the remote operator pulls this commit and follows the P38s6 section at
   the top of `HANDOFF.md`. Stock only; do not rerun U.
+
+## 2026-08-12 UTC — P38s6 audited; standard-runner P38.2g6 locally complete
+
+- Type: evidence correction plus default-off diagnostic repair. No cloud/TPU
+  target run, backward, optimizer commit, training launch, commit, or push was
+  performed.
+- P38s6 verdict: `INCONCLUSIVE_WRONG_PATH_NONTERMINAL`. The runner printed one
+  capture INIT but zero OBSERVE/capture records. FrozenLake does not enable
+  continue decode, so production used standard `_execute_model` and
+  `sample_tokens` while the P38.2g5 hook existed only inside
+  `_execute_continue_decode`. The claim that prefixes simply stayed below
+  1536 is withdrawn. The log also lacks alignment, child exit, classifier,
+  archive, and outer postflight.
+- Runtime repair: patch 10 adds a path-attested capture to the real standard
+  lifecycle after `_prepare_inputs`, carries its sequence in
+  `ExecuteModelState`, and completes it after unchanged sampling. Mixed batches
+  use packed-token offsets rather than request slots. Prefill rows are excluded
+  from decode selection. Standard capture rejects async scheduling and a
+  requested continue-decode path fails closed.
+- Contract repair: renderer, environment, classifier, and outer postflight now
+  require `CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard`; records attest
+  the same path and `execute_model` callable identity.
+- Gates: classifier 26/26 PASS, renderer 5/5 PASS, shell postflight PASS,
+  exact-image Qwen3-1.7B and Qwen3-8B overlays 20/20 each with all 29 manifest
+  entries matching, and the full pinned-image CPU gate PASS (81 workload
+  tests, 31 alignment tests, and all adjacent suites/negative controls).
+- Installed runner SHA-256:
+  `a7bdc527182ad115385e60005cff8c4e135efd2714eb97a2e929dc3dbc45e890`.
+- Artifact: `artifacts/p38_2g6_local_gate_0812.md`.
+- Claim ceiling: local construction only. No real Pathways standard-path
+  record, exact mismatch-capsule join, page-state cause, repair, backward, or
+  optimizer result is claimed.
+- Next: publish P38.2g6, then execute P38s7 stock only using the superseding
+  top section of `HANDOFF.md`. Do not force-enable continue decode, rerun U, or
+  auto-adjust prefix bounds.

@@ -89,7 +89,10 @@ def _validate_implementation_identity(meta: dict[str, Any], seq: int) -> None:
   runner_class = identity.get("runner_class", {})
   _require(runner_class.get("module") and runner_class.get("qualname"),
            f"sequence {seq} has an invalid runner-class identity")
-  for name in ("continue_decode", "model_fn", "compute_logits_fn", "sample_fn"):
+  for name in (
+      "continue_decode", "execute_model", "model_fn", "compute_logits_fn",
+      "sample_fn",
+  ):
     item = identity.get(name)
     _require(isinstance(item, dict) and item.get("chain"),
              f"sequence {seq} has no {name} identity")
@@ -157,6 +160,9 @@ def _validate_request_mapping(
 
   padded_rows = int(meta.get("padded_rows_per_dp", 0))
   attention_rows = int(meta.get("max_attention_rows_per_dp", 0))
+  program_path = meta.get("program_path")
+  _require(program_path in ("standard", "continue_decode"),
+           f"sequence {seq} has an invalid program path")
   _require(padded_rows > 0 and attention_rows > 0, f"sequence {seq} row geometry is invalid")
   selector = np.asarray(arrays["tokens_indices_selector"]).reshape(-1)
   positions = np.asarray(arrays["input_positions"]).reshape(-1)
@@ -178,7 +184,13 @@ def _validate_request_mapping(
       _require(0 <= local_slot < attention_rows, f"sequence {seq} request {request_id} local slot out of range")
       _require((dp_rank, local_slot) not in seen_slots, f"sequence {seq} local scheduler slot is duplicated")
       seen_slots.add((dp_rank, local_slot))
-      global_row = dp_rank * padded_rows + local_slot
+      if program_path == "standard":
+        packed_token_offset = int(item.get("packed_token_offset", -1))
+        _require(packed_token_offset >= 0,
+                 f"sequence {seq} request {request_id} has no packed offset")
+        global_row = dp_rank * padded_rows + packed_token_offset
+      else:
+        global_row = dp_rank * padded_rows + local_slot
       attention_row = dp_rank * attention_rows + local_slot
       query_index = dp_rank * (attention_rows + 1) + local_slot
       _require(scheduled_tokens == 1, f"sequence {seq} request {request_id} is not a one-token decode")
@@ -277,10 +289,13 @@ def classify(
     expected_records: int,
     mismatch_capsule: Path | None,
     prefix_bounds: tuple[int, ...],
+    expected_program_path: str,
     *,
     require_mismatch_join: bool = True,
 ) -> dict[str, Any]:
   _require(expected_records > 0, "expected_records must be positive")
+  _require(expected_program_path in ("standard", "continue_decode"),
+           "expected program path must be standard or continue_decode")
   _require(len(prefix_bounds) == expected_records + 1,
            "prefix-bound count must equal expected records plus one")
   _require(all(left < right for left, right in zip(
@@ -315,6 +330,8 @@ def classify(
     )
 
     meta = pre.get("meta", {})
+    _require(meta.get("program_path") == expected_program_path,
+             f"sequence {seq} captured the wrong program path")
     _validate_implementation_identity(meta, seq)
     current_identity = json.dumps(
         meta["implementation_identity"], sort_keys=True, separators=(",", ":")
@@ -332,7 +349,11 @@ def classify(
     _require(current_source == source_commit,
              f"sequence {seq} source commit identity drifted")
     requests = _validate_request_mapping(meta, pre_arrays, seq)
-    _require(meta.get("continue_decode_enabled") is True, f"sequence {seq} did not capture continue-decode")
+    _require(
+        meta.get("continue_decode_enabled") is
+        (expected_program_path == "continue_decode"),
+        f"sequence {seq} continue-decode configuration contradicts its path",
+    )
     _require(meta.get("caller_update_kv_cache") is True, f"sequence {seq} has an invalid caller cache-update contract")
     _require(
         meta.get("output_update_kv_cache") is (not bool(meta.get("kv_unified"))),
@@ -377,6 +398,8 @@ def classify(
     _require(all(meta.get("rpa_block_tuples", {}).get(name) for name in ("CANON_RPA_D", "CANON_RPA_P", "CANON_RPA_M")), f"sequence {seq} is missing a pinned RPA block tuple")
 
     post_meta = post.get("meta", {})
+    _require(post_meta.get("program_path") == expected_program_path,
+             f"sequence {seq} post record changed program path")
     actual_steps = int(post_meta.get("actual_steps", 0))
     _require(actual_steps > 0, f"sequence {seq} completed zero decode steps")
     _require(post_arrays["generated_tokens"].shape[0] == actual_steps, f"sequence {seq} generated-token step count mismatch")
@@ -398,6 +421,7 @@ def classify(
         "capture_anchor_prefix": anchor_prefix,
         "capture_stratum_index": stratum_index,
         "capture_stratum": expected_stratum,
+        "program_path": expected_program_path,
         "kv_unified": bool(meta.get("kv_unified")),
         "mismatch_join": mismatch_join,
     })
@@ -411,6 +435,7 @@ def classify(
       "verdict": "PASS",
       "scope": "p38-serving-capture",
       "prefix_bounds": list(prefix_bounds),
+      "program_path": expected_program_path,
       "successful_mismatch_joins": successful_joins,
       "source_commit": source_commit,
       "records": summaries,
@@ -421,6 +446,7 @@ def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--directory", required=True, type=Path)
   parser.add_argument("--expected-records", required=True, type=int)
+  parser.add_argument("--expected-program-path", required=True)
   parser.add_argument("--mismatch-capsule", required=True, type=Path)
   parser.add_argument("--prefix-bounds", required=True)
   parser.add_argument("--require-mismatch-join", action="store_true")
@@ -432,6 +458,7 @@ def main() -> None:
         args.expected_records,
         args.mismatch_capsule,
         _parse_prefix_bounds(args.prefix_bounds),
+        args.expected_program_path,
         require_mismatch_join=args.require_mismatch_join,
     )
   except CaptureError as error:

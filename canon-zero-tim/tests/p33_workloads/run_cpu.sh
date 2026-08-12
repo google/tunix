@@ -291,6 +291,7 @@ validate_p38_serving_preflight() (
   export CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
   export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
   export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
+  export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$state/serving.json"
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$state/serving.tar"
@@ -302,6 +303,14 @@ validate_p38_serving_preflight() (
   grep -q 'export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4' "$state/env.sh"
   grep -Fq 'export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536\,1792\,2048\,2304\,2560' "$state/env.sh"
   grep -q 'export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5' "$state/env.sh"
+  grep -q 'export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard' "$state/env.sh"
+
+  export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=continue_decode
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted the unreachable continue-decode path" >&2
+    exit 1
+  fi
+  export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
 
   export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then

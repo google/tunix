@@ -70,7 +70,8 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
   pre["sampling_leaf_0000"] = np.arange(4, dtype=np.float32)
   post = {name: np.arange(4, dtype=np.int32).reshape(1, 4) for name in MODULE.POST_ARRAYS}
   _write_stage(directory, "pre", pre, {
-      "continue_decode_enabled": True,
+      "continue_decode_enabled": False,
+      "program_path": "standard",
       "caller_update_kv_cache": True,
       "output_update_kv_cache": True,
       "request_ids": ["request-0"],
@@ -80,6 +81,7 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
           "input_batch_index": 0,
           "dp_rank": 0,
           "local_scheduler_slot": 1,
+          "packed_token_offset": 1,
           "global_row": 1,
           "attention_row": 1,
           "selector_index": 0,
@@ -126,7 +128,8 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
                   "source_sha256": None,
               }
               for name in (
-                  "continue_decode", "model_fn", "compute_logits_fn", "sample_fn"
+                  "continue_decode", "execute_model", "model_fn",
+                  "compute_logits_fn", "sample_fn"
               )
           },
       },
@@ -142,6 +145,7 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
       "actual_steps": 1,
       "completed_records": 1,
       "expected_max_records": 4,
+      "program_path": "standard",
   })
   for seq, observed_prefix in enumerate((5, 9, 13), start=1):
     pre_meta = json.loads(
@@ -167,6 +171,7 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
         "actual_steps": 1,
         "completed_records": seq + 1,
         "expected_max_records": 4,
+        "program_path": "standard",
     }, seq)
   capsule_arrays = {
       "prompt_ids": np.array([[101, 102]], dtype=np.int32),
@@ -213,12 +218,13 @@ def _classify(holder: tempfile.TemporaryDirectory, expected_records: int = 4):
       expected_records,
       directory / "mismatch.npz",
       bounds,
+      "standard",
   )
 
 
 class ClassifyServingCaptureTest(unittest.TestCase):
 
-  def test_accepts_complete_continue_decode_record(self):
+  def test_accepts_complete_standard_record(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)
     report = _classify(holder)
@@ -252,14 +258,24 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     with self.assertRaisesRegex(MODULE.CaptureError, "five-times storage guard"):
       _classify(holder)
 
-  def test_rejects_non_continue_decode_record(self):
+  def test_rejects_path_configuration_contradiction(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)
     path = Path(holder.name, "p38_serving_0000_pre.json")
     record = json.loads(path.read_text())
-    record["meta"]["continue_decode_enabled"] = False
+    record["meta"]["continue_decode_enabled"] = True
     path.write_text(json.dumps(record))
-    with self.assertRaisesRegex(MODULE.CaptureError, "did not capture continue-decode"):
+    with self.assertRaisesRegex(MODULE.CaptureError, "contradicts its path"):
+      _classify(holder)
+
+  def test_rejects_wrong_program_path(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name, "p38_serving_0000_pre.json")
+    record = json.loads(path.read_text())
+    record["meta"]["program_path"] = "continue_decode"
+    path.write_text(json.dumps(record))
+    with self.assertRaisesRegex(MODULE.CaptureError, "wrong program path"):
       _classify(holder)
 
   def test_rejects_missing_implementation_identity(self):
@@ -454,7 +470,9 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     capsule = Path(holder.name, "mismatch.npz")
     capsule.unlink()
     with self.assertRaisesRegex(MODULE.CaptureError, "capsule is absent"):
-      MODULE.classify(Path(holder.name), 4, capsule, PREFIX_BOUNDS)
+      MODULE.classify(
+          Path(holder.name), 4, capsule, PREFIX_BOUNDS, "standard"
+      )
 
   def test_allows_missing_capsule_when_join_is_not_required(self):
     holder = _valid_directory()
@@ -466,6 +484,7 @@ class ClassifyServingCaptureTest(unittest.TestCase):
         4,
         capsule,
         PREFIX_BOUNDS,
+        "standard",
         require_mismatch_join=False,
     )
     self.assertEqual(report["verdict"], "PASS")
@@ -486,6 +505,7 @@ class ClassifyServingCaptureTest(unittest.TestCase):
         4,
         Path(holder.name, "mismatch.npz"),
         PREFIX_BOUNDS,
+        "standard",
         require_mismatch_join=False,
     )
     self.assertEqual(report["verdict"], "PASS")

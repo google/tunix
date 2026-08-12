@@ -5,10 +5,10 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## DO THIS NOW: run one P38s6 FrozenLake stock capture
+## DO THIS NOW: run one P38s7 FrozenLake standard-path stock capture
 
 Use the latest published `origin/yuxzhang/canon-zero-tim` containing
-`p38-2g5-request-anchored-capture.md`. Do not launch from the P38s5 source.
+`p38-2g6-standard-runner-capture.md`. Do not launch from the P38s6 source.
 
 This section supersedes every older P38 serving-capture launch command below.
 The committed `p38_p38s4_frozenlake_stock.raw.log` is not a complete run log:
@@ -17,17 +17,20 @@ final RMSNorm without a workload exit, serving capture, classifier, archive,
 or final postflight. It is `INCONCLUSIVE` and must not be used to select a
 repair.
 
-P38s5 is also inconclusive: it starts at byte zero but ends without a child
-exit, alignment record, terminal precheck, classifier, archive, or outer
-postflight, and it emitted no capture-hook init or observation marker. The
-operator's only job is to run one fresh **stock-only** P38 diagnostic and
-return the complete evidence bundle. Do not launch unified KV, FrozenLake full
-training, GSM8K, backward, or an optimizer commit.
+P38s6 is also inconclusive. It initialized the patched module but emitted zero
+observations because the hook existed only in `_execute_continue_decode`, while
+FrozenLake uses standard `_execute_model` with `enable_continue_decode=False`.
+Its log also ends without alignment, terminal precheck, classifier, archive,
+or outer postflight. Lowering the prefix threshold cannot repair an unreachable
+hook. The operator's only job is to run one fresh **stock-only** standard-path
+P38 diagnostic and return the complete evidence bundle. Do not launch unified
+KV, FrozenLake full training, GSM8K, backward, or an optimizer commit. Do not
+force-enable continue-decode because that changes the program being diagnosed.
 
 ### 1. Fetch one immutable source and render
 
 Run every command block in this section sequentially in the same Bash shell
-from an existing clone of `google/tunix`. Use a new run ID if `p38s6` already
+from an existing clone of `google/tunix`. Use a new run ID if `p38s7` already
 exists. Do not reuse or overwrite an earlier output directory.
 
 ```bash
@@ -37,7 +40,7 @@ SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor \
   76cef0ec8222fd1716422f6f7a0c24eeff5a527f "$SOURCE_COMMIT"
 
-RUN_ID="p38s6"
+RUN_ID="p38s7"
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -48,8 +51,10 @@ git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
 cd "$WORKTREE"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
-rg -q '_p38_scheduled_decode_prefixes' \
-  canon-zero-tim/patches/tpu_inference/09-tpu-runner-p38-serving-capture.patch
+rg -q 'program_path="standard"' \
+  canon-zero-tim/patches/tpu_inference/10-tpu-runner-p38-standard-capture.patch
+rg -q 'CANON_P38_SERVING_CAPTURE_EXPECTED_PATH' \
+  canon-zero-tim/cluster/render_p38_serving_jobsets.py
 rg -q 'stop_after_diagnostic_precheck' tunix/rl/alignment.py
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
@@ -80,6 +85,7 @@ CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
 CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
 CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
 CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
+CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
 maxRestarts: 0
 ```
 
@@ -152,8 +158,10 @@ The unedited `head.full.log` must contain all of the following:
 
 1. exactly one `JOBSET_ATTEMPT 0 (first attempt)`;
 2. `[sync] HEAD=$SOURCE_COMMIT` and a clean sync verdict;
-3. exactly one `[CANON_P38_SERVING_CAPTURE_INIT]` and at least one
-   `[CANON_P38_SERVING_CAPTURE_OBSERVE]` record;
+3. exactly one `[CANON_P38_SERVING_CAPTURE_INIT]` carrying
+   `expected_path=standard` and at least one
+   `[CANON_P38_SERVING_CAPTURE_OBSERVE]` record carrying
+   `"program_path": "standard"`;
 4. four `pre` and four `post` `[CANON_P38_SERVING_CAPTURE]` records, one pair
    for each registered prefix stratum;
 5. finite `S_decode_vs_S_prefill` red and exact `S_prefill_vs_T_old`;
@@ -181,11 +189,11 @@ set -euo pipefail
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s6-mismatch-capsule.npz"
+  --output "$EVIDENCE/p38s7-mismatch-capsule.npz"
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s6-serving-capture.tar"
+  --output "$EVIDENCE/p38s7-serving-capture.tar"
 sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
 sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
@@ -194,8 +202,8 @@ test -s "$EVIDENCE/pre-alignment.jsonl"
 test -s "$EVIDENCE/serving-classification.json"
 sha256sum \
   "$EVIDENCE/head.full.log" \
-  "$EVIDENCE/p38s6-mismatch-capsule.npz" \
-  "$EVIDENCE/p38s6-serving-capture.tar" \
+  "$EVIDENCE/p38s7-mismatch-capsule.npz" \
+  "$EVIDENCE/p38s7-serving-capture.tar" \
   "$EVIDENCE/pre-alignment.jsonl" \
   "$EVIDENCE/serving-classification.json" | \
   tee "$EVIDENCE/SHA256SUMS"
@@ -228,15 +236,15 @@ head-pod.events.txt
 pathways-proxy.log
 pathways-rm.log
 head.previous.log
-p38s6-mismatch-capsule.npz
-p38s6-serving-capture.tar
+p38s7-mismatch-capsule.npz
+p38s7-serving-capture.tar
 pre-alignment.jsonl
 serving-classification.json
 SHA256SUMS
 ```
 
 The required ancestor is only a baseline evidence anchor. The two `rg` checks
-above are mandatory proof that the checked-out source also contains P38.2g5.
+above are mandatory proof that the checked-out source also contains P38.2g6.
 The operator must report in plain text: source SHA, run
 ID, JobSet name, pod name, final JobSet condition, pod exit reason/code,
 restart count, and
