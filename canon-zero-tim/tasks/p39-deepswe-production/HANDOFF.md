@@ -13,6 +13,8 @@ Read `plan.md`, then `state.md`, then `log.md`.
   `42139ffa9cf30b4f07cc9902896ab11294ac68d7`
 - P39.4 publication revision: the exact 40-character HEAD after pulling
   `yuxzhang/canon-zero-tim`; do not substitute the base SHA listed above
+- p34r02 mesh-admission repair commit:
+  `562f55b077bdadbcfa160177715b0d8ca903f457`
 - Hardening base: `5ee6dbfb5601cf1d1f864ccf6859764ba1f321fe`
 - Implementation started from: `697a29ab4b27015297af8e3dbb37c49db3560445`
 - Working branch: `codex/p46-deepswe-32b-full`
@@ -102,9 +104,10 @@ construction, then failed before rollout because the 128-device model mesh was
 compared with the stale one-host ID list `[0,2,1,3]`.  The complete raw log is
 `../../debug_logs/p34_p34r02_deepswe_full.raw.log`, SHA-256
 `6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`.
-The fix is local and all affected CPU/exact-image gates pass; a repaired target
-retry has not run.  Do not hard-code the 128 IDs observed in p34r02 because
-they are allocation-specific.
+The repair is published and all affected CPU/exact-image gates pass; a repaired
+target retry has not run.  Pull the operator branch and record its exact HEAD
+before rendering.  Do not hard-code the 128 IDs observed in p34r02 because they
+are allocation-specific.
 
 ## Stop conditions
 

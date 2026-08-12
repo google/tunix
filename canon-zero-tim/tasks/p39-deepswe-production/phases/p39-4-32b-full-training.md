@@ -1,7 +1,8 @@
 # P39.4 — Qwen3-32B direct full training contract
 
-- Status: local mesh-admission repair PASS; target Attempt `p34r02` FAILED
-  before rollout; repaired target retry NOT RUN
+- Status: mesh-admission repair published at
+  `562f55b077bdadbcfa160177715b0d8ca903f457`; target Attempt `p34r02`
+  FAILED before rollout; repaired target retry NOT RUN
 - Source base: `yuxzhang/canon-zero-tim` at
   `4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd` (implementation started at
   `4e4ca2891a01448f09428affd1eb2434bbd61657`; the intervening FrozenLake/P38

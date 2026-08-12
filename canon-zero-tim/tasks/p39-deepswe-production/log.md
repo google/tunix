@@ -264,3 +264,14 @@ change was performed.
 - Boundary: no target retry, cloud action, credential change, commit or push
   occurred.  The local repair must be explicitly approved for publication
   before a fresh full-run manifest is rendered from the read-back SHA.
+
+## 2026-08-12 UTC — P39.4 mesh-admission repair publication
+
+- Type: publication checkpoint.
+- Decision: the operator explicitly approved commit and push.
+- Result: repair commit
+  `562f55b077bdadbcfa160177715b0d8ca903f457` was pushed to
+  `yuxzhang/canon-zero-tim` and read back with the same 40-character SHA.
+- Boundary: publication did not launch a JobSet or target retry.  The next
+  operator must pull the branch into a clean worktree, record its exact HEAD
+  and render a new manifest; the failed p34r02 manifest must not be reused.

@@ -10,7 +10,7 @@ No optimizer-capacity or convergence claim exists.
 
 | Ledger | Status | Detail |
 |---|---|---|
-| Implementation | LOCAL REPAIR PASS / NOT PUBLISHED | direct full stage plus an explicit P34 ban on inheriting the one-host model-mesh ID assertion |
+| Implementation | REPAIR PUBLISHED / LOCAL PASS | mesh-admission repair commit `562f55b077bdadbcfa160177715b0d8ca903f457`; direct full stage plus an explicit P34 ban on inheriting the one-host model-mesh ID assertion |
 | Static validation | STATIC PASS | `bash canon-zero-tim/tests/p34_deepswe/run_static.sh` |
 | Exact image | CPU PASS | pinned image; 55 unit, 3 alignment, 2 Pallas, 5 contract and 1 scheduler cases |
 | Adjacent P33 regression | PASS | workload CPU gate and both pinned-image overlays remain green |
@@ -22,11 +22,11 @@ No optimizer-capacity or convergence claim exists.
 | P39 64-chip pilot target | DEFERRED / NOT RUN | the available 4x8x8 slice makes this capacity pilot optional; no resident-optimizer evidence exists |
 | P34 256-chip launch selection | ATTEMPTED / FAILED | `p34r02` stopped at `CANON_EXPECT_MODEL_MESH_IDS`; the local profile/renderer/preflight repair passes all affected gates, but has not run on the target |
 
-Next action: after explicit publication approval, publish the repair to
-`yuxzhang/canon-zero-tim`, read back its exact 40-character SHA, render a fresh
-manifest and retry the same full 32B/data/topology/device-optimizer
-configuration.  The retry must get past `Creating new model mesh` without a
-mesh-ID mismatch before rollout evidence can begin.
+Next action: pull `yuxzhang/canon-zero-tim` into a clean worktree, record the
+exact 40-character HEAD, render a fresh manifest and retry the same full
+32B/data/topology/device-optimizer configuration.  The retry must get past
+`Creating new model mesh` without a mesh-ID mismatch before rollout evidence
+can begin.
 
 ## First hard boundary
 
