@@ -1,0 +1,113 @@
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[P34.PATHWAYS] initialized_once=1 before_jax=1
+INFO 08-12 00:37:53 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+INFO 08-12 00:37:53 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-12 00:37:53 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-12 00:37:53 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+WARNING 08-12 00:37:53 [tpu_platform.py:408] Pin memory is not supported on TPU.
+✅ tunix pathways-utils, r2egym are successfully mapped.
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/mnt/disks/linchai_data/deepswe_zero_tim/canon-p44-ds4b-t256-rollout-r02/r2egym-src/src/r2egym/swesmith/constants.py:460: SyntaxWarning: invalid escape sequence '\/'
+  "sed -i '/^git+https:\/\/github.com\/Project-MONAI\//d' requirements-dev.txt",
+Using Kubernetes node selector: cloud.google.com/gke-nodepool=deepswe-cpu-pool
+Warning: Kubernetes config loading failed: Invalid kube-config file. No configuration found.
+2026-08-12 00:37:55,292 - root - INFO - Applied bounded R2E-Gym Kubernetes patch at /mnt/disks/linchai_data/deepswe_zero_tim/canon-p44-ds4b-t256-rollout-r02/r2egym-src/src/r2egym/agenthub/runtime/docker.py
+[P34.R2E] BOUNDED_KUBERNETES_PATCH_PASS path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p44-ds4b-t256-rollout-r02/r2egym-src/src/r2egym/agenthub/runtime/docker.py
+Looking for local model at: /mnt/disks/linchai_data/models/Qwen3-4B...
+Model not found locally. Starting download to /mnt/disks/linchai_data/models/Qwen3-4B...
+/usr/local/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:205: UserWarning: The `local_dir_use_symlinks` argument is deprecated and ignored in `snapshot_download`. Downloading to a local directory does not use symlinks anymore.
+  warnings.warn(
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files:   8%|▊         | 1/13 [00:00<00:03,  3.66it/s]Fetching 13 files:  31%|███       | 4/13 [00:00<00:00, 12.67it/s]Fetching 13 files:  54%|█████▍    | 7/13 [00:00<00:00, 17.10it/s]Fetching 13 files:  77%|███████▋  | 10/13 [00:00<00:00, 15.32it/s]Fetching 13 files:  85%|████████▍ | 11/13 [00:20<00:00, 15.32it/s]Fetching 13 files:  92%|█████████▏| 12/13 [00:25<00:03,  3.71s/it]Fetching 13 files: 100%|██████████| 13/13 [00:26<00:00,  3.20s/it]Fetching 13 files: 100%|██████████| 13/13 [00:26<00:00,  2.04s/it]
+Download complete!
+kv_cache_size (Capped): 8320
+vllm_max_batched_tokens: 256
+[P34.CLI] PASS model=Qwen3-4B prompts=4 generations=4 prompt=4096 response=4096 turns=5 scheduler_per_dp=1/256
+Loading Dataset...
+Generating train split:   0%|          | 0/4578 [00:00<?, ? examples/s]Generating train split:  13%|█▎        | 573/4578 [00:00<00:02, 1484.46 examples/s]Generating train split:  25%|██▌       | 1146/4578 [00:01<00:03, 955.61 examples/s]Generating train split:  38%|███▊      | 1718/4578 [00:01<00:02, 990.45 examples/s]Generating train split:  50%|█████     | 2290/4578 [00:01<00:01, 1239.70 examples/s]Generating train split:  63%|██████▎   | 2862/4578 [00:02<00:01, 1319.33 examples/s]Generating train split:  75%|███████▌  | 3434/4578 [00:03<00:01, 980.17 examples/s] Generating train split:  88%|████████▊ | 4006/4578 [00:04<00:00, 632.39 examples/s]Generating train split: 100%|██████████| 4578/4578 [00:06<00:00, 529.37 examples/s]Generating train split: 100%|██████████| 4578/4578 [00:06<00:00, 731.41 examples/s]
+Map:   0%|          | 0/4578 [00:00<?, ? examples/s]Map:   4%|▍         | 177/4578 [00:00<00:02, 1708.66 examples/s]Map:   9%|▉         | 424/4578 [00:00<00:02, 1663.57 examples/s]Map:  14%|█▎        | 624/4578 [00:00<00:02, 1496.78 examples/s]Map:  18%|█▊        | 813/4578 [00:00<00:03, 1223.47 examples/s]Map:  21%|██        | 962/4578 [00:00<00:03, 1134.42 examples/s]Map:  25%|██▌       | 1154/4578 [00:01<00:08, 420.19 examples/s]Map:  28%|██▊       | 1299/4578 [00:01<00:06, 522.02 examples/s]Map:  33%|███▎      | 1488/4578 [00:01<00:04, 691.26 examples/s]Map:  37%|███▋      | 1680/4578 [00:02<00:03, 875.50 examples/s]Map:  41%|████▏     | 1898/4578 [00:02<00:02, 1105.60 examples/s]Map:  46%|████▌     | 2105/4578 [00:03<00:05, 443.80 examples/s] Map:  52%|█████▏    | 2376/4578 [00:03<00:03, 646.36 examples/s]Map:  58%|█████▊    | 2643/4578 [00:03<00:02, 874.98 examples/s]Map:  64%|██████▍   | 2928/4578 [00:03<00:01, 1149.19 examples/s]Map:  70%|██████▉   | 3195/4578 [00:03<00:01, 886.89 examples/s] Map:  74%|███████▎  | 3371/4578 [00:04<00:01, 937.55 examples/s]Map:  78%|███████▊  | 3548/4578 [00:04<00:01, 986.18 examples/s]Map:  81%|████████▏ | 3724/4578 [00:04<00:00, 949.66 examples/s]Map:  85%|████████▍ | 3884/4578 [00:04<00:00, 841.35 examples/s]Map:  87%|████████▋ | 4000/4578 [00:07<00:02, 197.82 examples/s]Map:  90%|████████▉ | 4107/4578 [00:07<00:01, 239.54 examples/s]Map:  92%|█████████▏| 4212/4578 [00:07<00:01, 290.67 examples/s]Map:  95%|█████████▍| 4332/4578 [00:07<00:00, 366.59 examples/s]Map:  97%|█████████▋| 4454/4578 [00:07<00:00, 457.57 examples/s]Map: 100%|█████████▉| 4562/4578 [00:07<00:00, 539.16 examples/s]Map: 100%|██████████| 4578/4578 [00:08<00:00, 536.47 examples/s]
+Filter:   0%|          | 0/4578 [00:00<?, ? examples/s]Filter:  22%|██▏       | 1000/4578 [00:00<00:01, 3562.81 examples/s]Filter:  44%|████▎     | 2000/4578 [00:00<00:00, 3615.50 examples/s]Filter:  66%|██████▌   | 3000/4578 [00:00<00:00, 4837.92 examples/s]Filter:  87%|████████▋ | 4000/4578 [00:01<00:00, 3097.84 examples/s]Filter: 100%|██████████| 4578/4578 [00:01<00:00, 2580.67 examples/s]Filter: 100%|██████████| 4578/4578 [00:01<00:00, 3014.22 examples/s]
+[P34.DATASET] GOLD_FILTER_PASS rows=4578->1851 images=1851
+2026-08-12 00:38:40,575 - absl - INFO - Attempting to import: tunix.models.qwen3.model
+2026-08-12 00:38:40,575 - absl - INFO - Attempting to call: qwen3_4b() on object of type <class 'type'>
+I0812 00:38:40.594768     430 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0812 00:38:40.594805     430 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0812 00:38:40.594815     430 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0812 00:38:40.596127     430 grpc_client_session.cc:264]   Established channel.
+I0812 00:38:40.596145     430 grpc_client_session.cc:269]   Created stub.
+I0812 00:38:40.606722     430 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0812 00:38:40.656322     430 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0812 00:38:40.656401     430 grpc_client_session.cc:264]   Established channel.
+I0812 00:38:40.656413     430 grpc_client_session.cc:269]   Created stub.
+I0812 00:38:40.659389     430 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0812 00:38:40.669703     430 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0812 00:38:40.669718     430 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+Traceback (most recent call last):
+  File "/app/examples/deepswe/canonical_entrypoint.py", line 25, in <module>
+    main()
+  File "/app/examples/deepswe/canonical_entrypoint.py", line 21, in main
+    runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+  File "<frozen runpy>", line 229, in run_module
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/examples/deepswe/train_deepswe_nb.py", line 914, in <module>
+    rollout_role, trainer_role, placement_report = split_roles(devices)
+                                                   ^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/deepswe_contract.py", line 395, in split_4x8x8_role_devices
+    raise ValueError(
+ValueError: P34 physical half split crosses host boundaries: processes=[0]
+I0812 00:38:41.629968     430 client.cc:221] Client::~Client() starting.
+I0812 00:38:41.630527     430 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0812 00:38:41.630532     430 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0812 00:38:41.630731     430 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0812 00:38:41.630744     430 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0812 00:38:41.630746     430 grpc_client_session.cc:202] GrpcClientSession: Finish(): calling context_->TryCancel();
+I0812 00:38:41.630872     430 grpc_client_session.cc:205] GrpcClientSession: Waiting for reader thread to stop.
+I0812 00:38:41.630848     771 grpc_client_session.cc:176] GrpcClientSession: reader loop is exiting.
+I0812 00:38:41.631430     771 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status OK
+I0812 00:38:41.631445     430 grpc_client_session.cc:209] GrpClientSession: Attempting to call stream->Finish()
+I0812 00:38:41.631448     430 grpc_client_session.cc:213] GrpClientSession: Attempting to call stream->Finish(), mutex acquired
+I0812 00:38:41.631481     430 grpc_client_session.cc:216] GrpClientSession: stream->Finish() returned server status CANCELLED: CANCELLED
+I0812 00:38:41.631488     430 grpc_client_session.cc:237] GrpClientSession::Finish(): calling terminated cb with CANCELLED: CANCELLED
+W0812 00:38:41.631491     430 grpc_client.cc:91] IFRT proxy server disconnected: CANCELLED: CANCELLED; Stack trace: *** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	Py_FinalizeEx
+	
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+I0812 00:38:41.631734     430 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0812 00:38:41.631736     430 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0812 00:38:41.631738     430 client.cc:223] Client::~Client(): rpc_helper_->Disconnect() is done.
+I0812 00:38:41.631752     771 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0812 00:38:41.632831     430 rpc_helper.cc:509] RpcHelper::~RpcHelper() starting.
+I0812 00:38:41.632943     430 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0812 00:38:41.632946     430 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0812 00:38:41.632947     430 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0812 00:38:41.632949     430 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0812 00:38:41.632951     430 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0812 00:38:41.632952     430 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0812 00:38:41.632953     430 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
+I0812 00:38:41.632956     430 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
+I0812 00:38:41.632958     430 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
+I0812 00:38:41.632981     430 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
+I0812 00:38:41.632986     430 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
+I0812 00:38:41.632987     430 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0812 00:38:41.633118     430 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0812 00:38:41.633223     430 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.

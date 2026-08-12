@@ -1169,3 +1169,26 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Mismatch Capsule: `p38_frozenlake_mismatch_capsule.npz` (SHA-256: `2187a6d443da572e03752721bd7093de4a832f81243ace7d7046fd27718e7193`, selected rows `[215, 223]`).
    - Alignment Evidence: `pre_alignment.jsonl` (SHA-256: `12f3eea488cd5d269332b83e17b7b0dffeac5fef463dadc8393357723362f379`).
    - Gate Verdict: Fail-closed `AlignmentGateError` intercepted backward pass to preserve clean baseline.
+
+---
+
+## 45. Phase 44 Attempt `p44r02`: 256-Chip DeepSWE Qwen3-4B Dual-Topology Debug Rollout (4x8x8 DP16xTP8)
+
+- `debug_logs/p44_p44r02_deepswe_256_parity.raw.log` (SHA-256: `3d7101454fad0361394fecf06adc30d7734945d333a8c086b7a74b8d26dda944`)
+- Target Commit: `5a52cc8c4cdaacce9dbe4983ab141d342d0e5588` (*Add Qwen3-4B DeepSWE dual-topology debug lane*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes, physical slice `mlperf-v5p-256-np-0`, topology `4x8x8`)
+
+### Execution & Diagnostic Summary:
+
+1. **Overlay & Pinned Dependency Verification (PASS)**:
+   - 6 target Pallas shims verified with byte-exact SHA-256 identity.
+   - Pinned R2E-Gym (commit `0d94c4eb9431cd195c55a7ea3abd54006c9a1735`) cloned and patched.
+   - Gold dataset filter: `4578 -> 1851` instances (100% matched `gold.jsonl`, SHA-256 `2f95c2e6...`).
+   - Qwen3-4B safetensors weights downloaded to mounted PVC `/mnt/disks/linchai_data/models/Qwen3-4B`.
+
+2. **IFRT Proxy Device Discovery & Role Topology Interception**:
+   - `PjRt-IFRT device count: total=1, addressable=1 (CpuDevice(id=0))`
+   - JAX initialized with single local CPU device on client session before Pathways 256-chip worker pool registration was fully mapped into IFRT device registry.
+   - `split_4x8x8_role_devices` intercepted fail-closed: `ValueError: P34 physical half split crosses host boundaries: processes=[0]`.
+
