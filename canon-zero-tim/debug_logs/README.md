@@ -1400,3 +1400,24 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 2. **Preflight Diagnostics**:
    - Runtime failed in `p22xf_contract.validate_qwen8b_env` due to static `CANON_QWEN3_TP_SIZE=4` check vs P45 carrier setting `CANON_QWEN3_TP_SIZE=8`.
    - Captured full raw execution trace and SHA-256 digest for audit.
+
+## 54. P38 FrozenLake Standard-Path Serving Capture Diagnostic (Attempt `s7` — Pinned Standard Hook & DP Divisibility Gate)
+
+- Target Commit: `4e4ca2891a01448f09428affd1eb2434bbd61657`
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes on Slice `3a97861b`)
+
+### Execution & Diagnostic Summary:
+
+1. **Hardware Allocation & Native Standard-Path Hooking**:
+   - 17/17 Pods scheduled and executed on Slice `3a97861b` (64 TPU chips);
+   - Verified 6/6 Canonical overlay files with exact SHA-256 byte identity (`tpu_runner_p21_l30.py` SHA: `a7bdc527182a`);
+   - Successfully verified that native `program_path="standard"` hook was correctly reached and engaged in standard Pathways execution;
+   - Allocated 3.8 GiB HBM per device across DP16xTP4 topology and registered `qwen3-canonical-dp16-tp4-m256-vjp2` differentiable adapter.
+2. **DP Divisibility Root Cause Diagnostic**:
+   - At step completion, `canonical_qwen3_adapter.py` raised:
+     ```text
+     tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: global batch must be divisible by the engine data size: 40 vs 16
+     ```
+   - **Root Cause**: FrozenLake P38 profile generated 5 prompts $\times$ 8 generations = 40 total trajectories, which is not evenly divisible by `data_parallel_size = 16` ($40 \pmod{16} = 8 \neq 0$).
+   - **Remediation**: Adjusting prompt count to 4 ($4 \times 8 = 32$) or 2 ($2 \times 8 = 16$) satisfies the exact DP16 divisibility invariant. Slices transitioned to P45 DP8xTP8 Resident production.
