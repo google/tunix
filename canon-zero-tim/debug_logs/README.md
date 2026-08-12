@@ -1324,3 +1324,24 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - The claim that FrozenLake bypassed `GRPOLearner` is withdrawn. The recipe instantiates `GRPOLearner`, whose precheck call is in `agentic_grpo_learner.py`. The actual contract bug was that `fail_closed=True` raised on the known stock A-B red before the precheck-only stop helper could run.
    - Consequently, durable artifacts (`p38s5-mismatch-capsule.npz` and `p38s5-serving-capture.tar`) were 0-byte/unproduced.
    - Verdict: `INCONCLUSIVE_NONTERMINAL`. P38.2g5 changes the trigger to request-level scheduler prefixes, adds bounded init/observation evidence, and permits a finite A-B-red/exact-B-C diagnostic to stop after durable evidence but before backward.
+
+## 51. P38 FrozenLake Stock Serving Capture (Attempt `s6` — Request-Anchored Dynamic Trigger Analysis)
+
+- `debug_logs/p38_p38s6_frozenlake_stock.raw.log` (SHA-256: `3b751bc3edcf959ea88d82963f537ac647f0ba3296fc3f3dd3be6479e608cafa`)
+- Target Commit: `d8184123448d0add72b72f09d0a6faf5d326c26e` (*Record P38.2g5 publication*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes on NodePool `f08313ee`)
+
+### Execution & Diagnostic Summary:
+
+1. **Byte-0 Non-Truncated Pod Execution**:
+   - 5,924 lines / 557 KB captured cleanly without `--tail` or column-shifting `--timestamps` from Head Pod `canon-p38-fl-stock-p38s6-d8184123-pathways-head-0-0-8w7j8`.
+   - All 6 overlay files byte-verified by SHA-256; 64 TPU devices attached and registered in single Pathways session.
+   - Initialized 36-layer KV cache block pools (5,216 blocks, 18.99 GiB HBM) and completed 256 rollout samples.
+   - Proved `[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 min_prefix=1536 prefix_bounds=(1536, 1792, 2048, 2304, 2560)` initialized live from `tpu_runner.py`.
+   - Executed full 36-layer forward and reverse Pallas VJP passes across all attention projections, SwiGLU, and RMSNorm down to `model.norm`.
+
+2. **Capture Stratum & Diagnostic Analysis**:
+   - `[CANON_P38_SERVING_CAPTURE]` was not triggered because `_p38_serving_begin` filters scheduled decode prefixes against `_P38_SERVING_CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)`. In this 1-step FrozenLake rollout, active request lengths remained below the 1,536-token lower bound, resulting in empty `candidate_strata`.
+   - As a consequence, `p38s6-mismatch-capsule.npz` and `p38s6-serving-capture.tar` were not generated.
+   - Full raw log and SHA-256 digest are archived to branch. Node slice is transitioned to high-throughput `P45` DP8xTP8 Device-Resident full training (`canon-p45-fl-eval-p45r1`).

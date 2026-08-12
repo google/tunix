@@ -27,7 +27,7 @@ _SPECS = (
         stage="full",
         profile=_PROFILE,
         no_commit=False,
-        job_prefix="canon-p45-fl-dp8tp8",
+        job_prefix="canon-p45-fl-res",
         command=_frozenlake_command(450, dp_size=8, tp_size=8),
         dp_size=8,
         tp_size=8,
@@ -39,7 +39,7 @@ _SPECS = (
         stage="full",
         profile=_PROFILE,
         no_commit=False,
-        job_prefix="canon-p45-fl-dp8tp8-eval",
+        job_prefix="canon-p45-fl-eval",
         command=_frozenlake_command(
             450, enable_evaluation=True, dp_size=8, tp_size=8
         ),
