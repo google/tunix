@@ -1,6 +1,7 @@
 # P44.9 — r04 model-pinned SwiGLU feature padding
 
-- Status: passed locally; unpublished; target retry not run
+- Status: passed; implementation commit `1a058b46`; publication authorized;
+  target retry not run
 
 ## Finding
 
@@ -65,7 +66,8 @@ PASS locally on latest operator baseline
 
 ## Next
 
-Rerun the gates at the latest non-overlapping baseline, then publish only
-after explicit approval. The launch agent must start a fresh `rollout-only`
-attempt and return the required feature-padding PATHTRACE; `p44r04` cannot be
-reclassified.
+Publish implementation commit
+`1a058b46f606161307c5051884968ad3b9ea5f70` and its metadata commit only to
+`yuxzhang/canon-zero-tim`, then read back the exact remote head. The launch
+agent must start a fresh `rollout-only` attempt from that head and return the
+required feature-padding PATHTRACE; `p44r04` cannot be reclassified.

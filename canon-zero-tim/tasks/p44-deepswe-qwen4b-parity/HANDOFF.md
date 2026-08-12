@@ -21,17 +21,15 @@ zero-TIM equivalence between allocations.
 - Repair development baseline: `7ea2176f807e3e13fde17499e15fef2bd497363b`
 - P44.7 placement/batching repair implementation commit:
   `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`
-- Current published operator head at the P44.9 handoff:
+- P44.9 development baseline:
   `e4ead609498771987c011a9cbc16fec7e4b17f69`. It archives `p44r04` but does
-  **not** contain the P44.9 SwiGLU feature-padding repair and must not be used
-  for another target launch.
-- P44.9 SwiGLU feature-padding publication commit: **NOT YET CREATED**. The
-  implementation is locally validated but intentionally remains uncommitted
-  until the user explicitly authorizes commit/push.
+  not itself contain the SwiGLU feature-padding repair.
+- P44.9 SwiGLU feature-padding implementation commit:
+  `1a058b46f606161307c5051884968ad3b9ea5f70`.
 - Exact execution source: resolve the current remote head with
   `git ls-remote origin refs/heads/yuxzhang/canon-zero-tim`, detach at that
   exact SHA, require that it contains both the P44.7 repair above and the
-  future P44.9 repair commit recorded here after publication, and record the
+  P44.9 repair commit above, and record the
   resolved head in the rendered JobSet and returned evidence. The publication
   metadata commit may be newer than either implementation commit; do not
   silently substitute any SHA for another.

@@ -22,7 +22,7 @@ differ.
 | P44.6 | Target promotion ladder | 64 and 256 each classify rollout-only, one-update, and three-update as PASS | pending |
 | P44.7 | Repair the first target failure and preempt the next reviewed runtime faults | Pathways-style 64/256 host placement, single-conversation rollout batching, and 4-prompt x 4-generation logprob execution batching pass fail-closed tests and adjacent release gates | passed |
 | P44.8 | Optional direct-attached v5p Qwen3-4B one-host smoke | Hardware/dependency inventory is recorded; when prerequisites exist, real rollout through backward-no-commit passes without changing P34/P39/P44 production contracts | prerequisite-blocked; not run |
-| P44.9 | Repair the r04 TP8-local SwiGLU feature geometry without changing the BF256 kernel | Model-pinned 4B/32B padding passes exact forward/VJP probes; 8B remains unpadded; unknown widths and missing runtime evidence fail closed | passed locally; unpublished |
+| P44.9 | Repair the r04 TP8-local SwiGLU feature geometry without changing the BF256 kernel | Model-pinned 4B/32B padding passes exact forward/VJP probes; 8B remains unpadded; unknown widths and missing runtime evidence fail closed | passed; implementation commit `1a058b46` approved for operator-branch publication |
 
 ## Decisions
 

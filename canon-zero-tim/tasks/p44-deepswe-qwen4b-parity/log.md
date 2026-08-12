@@ -184,3 +184,25 @@
 - Next: Obtain explicit commit/push authorization, publish only to
   `yuxzhang/canon-zero-tim`, record the exact read-back SHA, then launch a fresh
   rollout-only `p44r05` on the available 64- or 256-device allocation.
+
+## 2026-08-12T02:54:29Z — P44.9: implementation committed for publication
+
+- Type: publication checkpoint
+- Fact: The user explicitly authorized commit and push to the operator branch;
+  main remains forbidden.
+- Action: Staged only the 27 P44.9 engine, model-contract, manifest, test,
+  runbook, archive-interpretation, and phase-ledger files and created
+  implementation commit `1a058b46f606161307c5051884968ad3b9ea5f70` with
+  subject `deepswe: pad model-pinned SwiGLU features`.
+- Result: The implementation commit is based on exact operator revision
+  `e4ead609498771987c011a9cbc16fec7e4b17f69`; the remote branch was fetched
+  immediately before commit and had not advanced. Local and exact-image gates
+  remain the evidence recorded in the preceding checkpoint.
+- Files/artifacts: implementation commit `1a058b46`; updated `HANDOFF.md`,
+  `state.md`, `plan.md`, and P44.6/P44.9 phase contracts.
+- Boundary: No main-branch action, force push, cloud action, or target launch
+  is authorized or performed by this checkpoint.
+- Rollback: Revert the P44.9 implementation and publication-metadata commits
+  on the operator branch; do not rewrite history or touch main.
+- Next: Commit this publication metadata, push both commits only to
+  `origin/yuxzhang/canon-zero-tim`, and read back the exact remote head.
