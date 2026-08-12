@@ -14,6 +14,7 @@
 
 """Gemma4 model attention."""
 
+import functools
 from functools import partial
 from flax import nnx
 import jax
@@ -35,6 +36,8 @@ from tunix.models.gemma4.layers import apply_rope
 from tunix.models.gemma4.layers import Einsum
 from tunix.models.gemma4.layers import RMSNorm
 from tunix.utils.sharding_utils import shard
+
+AxisSpec = str | tuple[str, ...] | None
 
 
 def find_last_one_index(attn_mask: jnp.ndarray) -> jnp.ndarray:
@@ -83,6 +86,26 @@ def create_sliding_window_mask(
   # 4. create final mask
   final_mask = window_mask & causal_mask
   return final_mask[:, None, :]  # [B, 1, cache_len]
+
+
+@functools.lru_cache(maxsize=128)
+def _get_local_mask(
+    q_len: int, kv_len: int, window_size: int, offset: int
+) -> mask_lib.LocalMask:
+  """Memoized LocalMask constructor that speeds up XLA JIT compilation by caching mask closure objects across unrolled decoder layers."""
+  return mask_lib.LocalMask(
+      (q_len, kv_len),
+      window_size=(window_size - 1, 0),
+      offset=offset,
+  )
+
+
+@functools.lru_cache(maxsize=128)
+def _get_causal_mask(
+    q_len: int, kv_len: int, offset: int
+) -> mask_lib.CausalMask:
+  """Memoized CausalMask constructor that speeds up XLA JIT compilation by caching mask closure objects across unrolled decoder layers."""
+  return mask_lib.CausalMask((q_len, kv_len), offset=offset)
 
 
 class Attention(nnx.Module):
@@ -187,36 +210,19 @@ class Attention(nnx.Module):
         param_dtype=config.param_dtype,
     )
 
-  def block(
+  def _compute_kv_projections(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-      kv_shared_cache: LayerCache | None = None,
-      segment_ids: jaxtyping.Array | None = None,
-  ) -> tuple[
-      LayerCache | None,
-      jaxtyping.Array,
-      tuple[jaxtyping.Array, jaxtyping.Array],
-  ]:
-    x = x.astype(self.config.dtype)
-    seq_len = x.shape[1]
-    query_proj = self.q_einsum(x)
-    query_proj = shard(query_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    query_proj = self._query_norm(query_proj)
-    query_proj = apply_rope(
-        query_proj,
-        segment_pos,
-        base_frequency=self.rope_base_frequency,
-        scale_factor=self.rope_scale_factor,
-        rope_proportion=self.rope_proportion,
-    )
+      kv_shared_cache: LayerCache | None,
+  ) -> tuple[jaxtyping.Array, jaxtyping.Array, jaxtyping.Array | None]:
+    """Computes or retrieves key/value projections."""
+    kv_valid_mask = None
 
     if kv_shared_cache is not None:
-      assert cache is None
       key_proj = kv_shared_cache['k']
       value_proj = kv_shared_cache['v']
+      kv_valid_mask = kv_shared_cache.get('valid_mask', None)
     else:
       if hasattr(self, 'k_einsum'):  # case where k_eq_v is True
         key_proj = self.k_einsum(x)
@@ -224,8 +230,8 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-      value_proj = shard(value_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
+      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -239,35 +245,195 @@ class Attention(nnx.Module):
           rope_proportion=self.rope_proportion,
       )
 
+    return key_proj, value_proj, kv_valid_mask
+
+  def _build_flash_mask(
+      self,
+      q_len: int,
+      kv_len: int,
+      offset: int,
+  ) -> mask_lib.Mask:
+    """Builds the single-head splash attention mask for one flash call.
+
+    Uses memoized computable masks (LocalMask / CausalMask) to prevent XLA
+    closure recompilations across unrolled layers and evaluate in-kernel.
+    """
+    if self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      return _get_local_mask(q_len, kv_len, window_size, offset)
+    return _get_causal_mask(q_len, kv_len, offset)
+
+  def _make_block_sizes(self, is_rectangular: bool) -> splash.BlockSizes:
+    """Selects splash block sizes for this attention call."""
+    # Choose block sizes. block_kv must divide kv_len.
+    # For LOCAL_SLIDING rectangular shapes, block_kv must divide both
+    # sliding_window_size and chunk_len. Use the smaller of the two.
+    block_q = self.config.flash_attention_block_size
+    if is_rectangular and self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      block_kv = min(
+          self.config.flash_attention_block_size,
+          window_size,
+      )
+    else:
+      block_kv = self.config.flash_attention_block_size
+
+    # Inner-loop tile size for the attention matmul; must divide block_kv.
+    block_kv_compute = min(
+        self.config.flash_attention_compute_block_size, block_kv
+    )
+
+    # Bwd holds Q + dO + attn_weights + grad accumulators; smaller Q block to
+    # fit VMEM.
+    block_bwd = min(self.config.flash_attention_bwd_block_size, block_q)
+    use_fused = self.config.flash_attention_use_fused_bwd
+    return splash.BlockSizes(
+        block_q=block_q,
+        block_kv=block_kv,
+        block_kv_compute=block_kv_compute,
+        block_q_dkv=block_bwd,
+        block_kv_dkv=block_kv,
+        block_kv_dkv_compute=block_kv_compute,
+        # Fused bwd kernel computes dQ+dKV in one pass; these are ignored.
+        block_q_dq=None if use_fused else block_bwd,
+        block_kv_dq=None if use_fused else block_kv,
+        use_fused_bwd_kernel=use_fused,
+    )
+
+  def _make_sharding_specs(self, b: int, kh: int, mesh: shd.Mesh):
+    """Computes mesh/shard-axis specs for splash attention."""
+    shd_b, shd_t, shd_n, shd_h = self.config.shd_config.act_btnh
+    if (
+        mesh is not None
+        and shd_b is not None
+        and shd_b in mesh.shape
+        and b % mesh.shape[shd_b] != 0
+    ):
+      shd_b = None
+    head_shards = (
+        mesh.shape[shd_n] if mesh is not None and shd_n in mesh.shape else 1
+    )
+    q_seq_shards = (
+        mesh.shape[shd_t] if mesh is not None and shd_t in mesh.shape else 1
+    )
+    shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+    shd_n_kv = (
+        shd_n
+        if mesh is not None
+        and shd_n is not None
+        and shd_n in mesh.shape
+        and kh % mesh.shape[shd_n] == 0
+        else None
+    )
+    unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
+    return (
+        shd_b,
+        shd_n,
+        shd_t,
+        shd_h,
+        head_shards,
+        q_seq_shards,
+        shd_n_kv,
+        shd_spec,
+        unsharded_seq_kv,
+    )
+
+  def _make_splash_kernel(
+      self,
+      multi_head_mask,
+      block_sizes: splash.BlockSizes,
+      head_shards: int,
+      q_seq_shards: int,
+      mesh: shd.Mesh,
+      shd_n: str | None,
+      shd_t: str | None,
+      save_residuals: bool = False,
+  ):
+    """Builds a splash MHA kernel and its manual sharding spec."""
+    kernel = splash.make_splash_mha(
+        multi_head_mask,
+        block_sizes=block_sizes,
+        head_shards=head_shards,
+        q_seq_shards=q_seq_shards,
+        save_residuals=save_residuals,
+    )
+    kernel_spec = kernel.manual_sharding_spec(
+        shd.NamedSharding(mesh, P(shd_n, shd_t))
+    )
+    return kernel, kernel_spec
+
+  def block(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+      force_eager: bool = False,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[jaxtyping.Array, jaxtyping.Array],
+  ]:
+    x = x.astype(self.config.dtype)
+    seq_len = x.shape[1]
+    query_proj = self.q_einsum(x)
+    query_proj = shard(query_proj, self.config.shd_config.act_btnh)
+    query_proj = self._query_norm(query_proj)
+    query_proj = apply_rope(
+        query_proj,
+        segment_pos,
+        base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
+        rope_proportion=self.rope_proportion,
+    )
+
+    key_proj, value_proj, kv_valid_mask = self._compute_kv_projections(
+        x,
+        segment_pos,
+        kv_shared_cache,
+    )
+
     if cache is not None:
       assert kv_shared_cache is None
-      # Update cache with new kv projections
       cache_len = cache['v'].shape[1]
       if seq_len > 1:  # prefill
-        if self.config.use_sliding_window_kv_cache:
-          # Sliding window cache update (prefill).
-          # Does not support chunked prefill.
-          valid_len = min(seq_len, cache_len)
-          latest_indices = jnp.arange(seq_len - valid_len, seq_len) % cache_len
-          cache_v = (
-              cache['v']
-              .at[:, latest_indices, ...]
-              .set(value_proj[:, -valid_len:, ...])
-          )
-          cache_k = (
-              cache['k']
-              .at[:, latest_indices, ...]
-              .set(key_proj[:, -valid_len:, ...])
-          )
+        if self.config.use_sliding_window_kv_cache and seq_len > cache_len:
+          valid_indices = (
+              (seq_len - cache_len) + jnp.arange(cache_len)
+          ) % cache_len
+          new_v = value_proj[:, -cache_len:, ...]
+          new_k = key_proj[:, -cache_len:, ...]
+          cache_v = cache['v'].at[:, valid_indices, ...].set(new_v)
+          cache_k = cache['k'].at[:, valid_indices, ...].set(new_k)
+          new_cache = {
+              'v': cache_v,
+              'k': cache_k,
+              'end_index': jnp.full(
+                  (value_proj.shape[0],), seq_len, dtype=jnp.int32
+              ),
+          }
         else:
-          cache_v = cache['v'].at[:, :seq_len, ...].set(value_proj)
-          cache_k = cache['k'].at[:, :seq_len, ...].set(key_proj)
-
-        new_cache = {
-            'v': cache_v,
-            'k': cache_k,
-            'end_index': cache['end_index'] + seq_len,
-        }
+          slice_indices = (0, 0, 0, 0)
+          cache_v = jax.lax.dynamic_update_slice(
+              cache['v'], value_proj, slice_indices
+          )
+          cache_k = jax.lax.dynamic_update_slice(
+              cache['k'], key_proj, slice_indices
+          )
+          new_cache = {
+              'v': cache_v,
+              'k': cache_k,
+              'end_index': jnp.full(
+                  (value_proj.shape[0],), seq_len, dtype=jnp.int32
+              ),
+          }
+        prior_end_index = None
+        split_prefix_k = None
+        split_prefix_v = None
       else:  # decode
         end_index = cache['end_index'][0]
         slice_indices = (0, end_index % cache_len, 0, 0)
@@ -291,227 +457,269 @@ class Attention(nnx.Module):
     b, _, qh, _ = query_proj.shape
     _, _, kh, _ = key_proj.shape
 
-    if self.config.use_flash_attention and seq_len > 1:
+    # Determine if we can use flash attention for this call.
+    q_len = query_proj.shape[1]
+    kv_len = key_proj.shape[1]
+    is_rectangular = kv_len > q_len
+    use_flash = (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and kv_len >= self.config.flash_attention_block_size
+        and not (is_rectangular and segment_ids is not None)
+        and not force_eager
+    )
+
+    if use_flash:
       query_proj = query_proj.transpose(0, 2, 1, 3)
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
 
       mesh = pxla.thread_resources.env.physical_mesh
-      if self.attn_type == AttentionType.LOCAL_SLIDING:
-        mask = mask_lib.LocalMask(
-            (seq_len, seq_len),
-            window_size=(self.config.sliding_window_size - 1, 0),  # pyrefly: ignore[unsupported-operation]
-            offset=0,
-        )
-      else:
-        mask = mask_lib.CausalMask((seq_len, seq_len))
+
+      # Offset: shifts Q positions so q[0] aligns with kv[prefix_len].
+      offset = kv_len - q_len if is_rectangular else 0
+
+      mask = self._build_flash_mask(q_len, kv_len, offset)
 
       multi_head_mask = mask_lib.MultiHeadMask([mask for _ in range(qh)])
 
-      block_sizes = splash.BlockSizes(
-          block_q=self.config.flash_attention_block_size,
-          block_kv=self.config.flash_attention_block_size,
-          block_q_dkv=self.config.flash_attention_block_size,
-          block_kv_dkv=self.config.flash_attention_block_size,
-          block_kv_dkv_compute=self.config.flash_attention_block_size,
-          block_q_dq=self.config.flash_attention_block_size,
-          block_kv_dq=self.config.flash_attention_block_size,
-      )
+      block_sizes = self._make_block_sizes(is_rectangular)
 
-      shd_b, shd_t, shd_n, shd_h = self.config.shd_config.act_btnh
-      if (
-          mesh is not None
-          and shd_b is not None
-          and shd_b in mesh.shape
-          and b % mesh.shape[shd_b] != 0
-      ):
-        shd_b = None
-      head_shards = (
-          mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
-      )
-      q_seq_shards = (
-          mesh.shape[shd_t] if shd_t is not None and shd_t in mesh.shape else 1
-      )
+      (
+          shd_b,
+          shd_n,
+          shd_t,
+          shd_h,
+          head_shards,
+          q_seq_shards,
+          shd_n_kv,
+          shd_spec,
+          unsharded_seq_kv,
+      ) = self._make_sharding_specs(b, kh, mesh)
 
-      splash_attn_kernel = splash.make_splash_mha(
+      splash_attn_kernel, kernel_spec = self._make_splash_kernel(
           multi_head_mask,
-          block_sizes=block_sizes,
-          head_shards=head_shards,
-          q_seq_shards=q_seq_shards,
+          block_sizes,
+          head_shards,
+          q_seq_shards,
+          mesh,
+          shd_n,
+          shd_t,
       )
 
-      shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      shd_n_kv = (
-          shd_n
-          if mesh is not None
-          and shd_n is not None
-          and shd_n in mesh.shape
-          and kh % mesh.shape[shd_n] == 0
-          else None
+      encoded, key_proj, value_proj = self._flash_attention_single(
+          query_proj,
+          key_proj,
+          value_proj,
+          segment_ids,
+          splash_attn_kernel,
+          kernel_spec,
+          shd_spec,
+          unsharded_seq_kv,
+          mesh,
+          shd_b,
+          shd_t,
       )
-      unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
-      kernel_spec = splash_attn_kernel.manual_sharding_spec(
-          shd.NamedSharding(mesh, P(shd_n, shd_t))
-      )
-
-      if segment_ids is not None:
-        seg_spec = P(shd_b, shd_t)
-        unsharded_seg_spec = P(shd_b, None)
-
-        @partial(
-            shard_map,
-            mesh=mesh,
-            in_specs=(
-                kernel_spec,
-                shd_spec,
-                unsharded_seq_kv,
-                unsharded_seq_kv,
-                seg_spec,
-                unsharded_seg_spec,
-            ),
-            out_specs=shd_spec,
-            check_rep=False,
-        )
-        def sharded_splash_attn(
-            kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
-        ):
-          seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
-          return jax.vmap(kernel)(
-              q_block, k_block, v_block, segment_ids=seg_ids
-          )
-
-        qkv: jaxtyping.Array = sharded_splash_attn(
-            splash_attn_kernel,
-            query_proj,
-            key_proj,
-            value_proj,
-            segment_ids,
-            segment_ids,
-        )
-      else:
-
-        @partial(
-            shard_map,
-            mesh=mesh,
-            in_specs=(
-                kernel_spec,
-                shd_spec,
-                unsharded_seq_kv,
-                unsharded_seq_kv,
-            ),
-            out_specs=shd_spec,
-            check_rep=False,
-        )
-        def sharded_splash_attn(kernel, q_block, k_block, v_block):
-          return jax.vmap(kernel)(q_block, k_block, v_block)
-
-        qkv: jaxtyping.Array = sharded_splash_attn(
-            splash_attn_kernel,
-            query_proj,
-            key_proj,
-            value_proj,
-        )
-      encoded = qkv.transpose(0, 2, 1, 3)
-      query_proj = query_proj.transpose(0, 2, 1, 3)
-      key_proj = key_proj.transpose(0, 2, 1, 3)
-      value_proj = value_proj.transpose(0, 2, 1, 3)
-
     else:
-      if self.use_gqa:
-        b, t, kg, h = query_proj.shape
-        n_groups = kg // self.num_kv_heads
-        query_reshaped = query_proj.reshape(
-            (b, t, self.num_kv_heads, n_groups, h)
-        )
-        logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_reshaped, key_proj)
-        b, t, k, g, s = logits.shape
-        logits = logits.reshape((b, t, k * g, s))
-      else:
-        logits = jnp.einsum('BTNH,BSNH->BTNS', query_proj, key_proj)
-
-      if seq_len > 1:
-        # Only compute attention scores for the actual sequence length.
-        attn_mask = attn_mask[..., :seq_len]
-
-      if self.attn_type == AttentionType.LOCAL_SLIDING:
-        if (
-            segment_pos.shape[1] == 1
-            and self.config.use_sliding_window_kv_cache
-        ):
-          # for decoding with sliding window cache
-          active_cache = cache if cache is not None else kv_shared_cache
-          if active_cache is None:
-            raise ValueError(
-                'Cache or shared cache is required for local sliding attention'
-                ' in decoding.'
-            )
-          cache_len = key_proj.shape[1]
-          end_idx = active_cache['end_index']
-          if cache is None and kv_shared_cache is not None:
-            # In case of shared KV cache, the origin layer already updated the
-            # end index. We need to subtract 1 to get the correct end index of
-            # the previous token.
-            end_idx = end_idx - 1
-          end_idx = end_idx[:, None, None]
-          p = jnp.arange(cache_len)[None, None, :]
-
-          # map physical index to logical index
-          logical_indices = end_idx - ((end_idx - p) % cache_len)
-
-          # identify uninitialized slots (before the cache fills up)
-          valid_physical = logical_indices >= 0
-          logical_indices = jnp.maximum(0, logical_indices)
-
-          attn_mask = jnp.take_along_axis(attn_mask, logical_indices, axis=-1)
-          attn_mask = attn_mask * valid_physical
-        elif segment_pos.shape[1] == 1:
-          # for decoding without sliding window cache
-          sliding_mask = create_sliding_window_mask(
-              attn_mask,
-              sliding_window_size=self.config.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
-          )
-          attn_mask = sliding_mask * attn_mask
-        else:  # for prefill
-          all_ones = jnp.ones_like(attn_mask)
-          sliding_mask = jnp.triu(
-              all_ones, -1 * self.config.sliding_window_size + 1  # pyrefly: ignore[unsupported-operation]
-          ) * jnp.tril(
-              all_ones, self.config.sliding_window_size - 1  # pyrefly: ignore[unsupported-operation]
-          )
-          attn_mask = sliding_mask * attn_mask
-
-      attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
-      attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-          key_proj.dtype
+      encoded = self._eager_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          attn_mask,
+          segment_pos,
+          cache,
+          kv_shared_cache,
+          seq_len,
       )
-
-      if self.use_gqa:
-        b, t, kg, s = attn.shape
-        n_groups = kg // self.num_kv_heads
-        probs_reshaped = attn.reshape((b, t, self.num_kv_heads, n_groups, s))
-        encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs_reshaped, value_proj)
-        b, t, k, g, h = encoded.shape
-        encoded = encoded.reshape((b, t, k * g, h))
-      else:
-        encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = shard(attn_output, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    attn_output = shard(attn_output, self.config.shd_config.act_btd)
     return new_cache, attn_output, (key_proj, value_proj)
 
+  def _flash_attention_single(
+      self,
+      query_proj: jaxtyping.Array,
+      key_proj: jaxtyping.Array,
+      value_proj: jaxtyping.Array,
+      segment_ids: jaxtyping.Array | None,
+      splash_attn_kernel: splash.SplashAttentionKernel,
+      kernel_spec: splash.SplashAttentionKernel | None,
+      shd_spec: P,
+      unsharded_seq_kv: P,
+      mesh: shd.Mesh,
+      shd_b: AxisSpec,
+      shd_t: AxisSpec,
+  ) -> tuple[jaxtyping.Array, jaxtyping.Array, jaxtyping.Array]:
+    """Single-kernel flash attention over concatenated (or plain) KV."""
+    # Original single-kernel attention path.
+    if segment_ids is not None:
+      seg_spec = P(shd_b, shd_t)
+      unsharded_seg_spec = P(shd_b, None)
+
+      @partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=(
+              kernel_spec,
+              shd_spec,
+              unsharded_seq_kv,
+              unsharded_seq_kv,
+              seg_spec,
+              unsharded_seg_spec,
+          ),
+          out_specs=shd_spec,
+          check_rep=False,
+      )
+      def sharded_splash_attn(
+          kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
+      ):
+        seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
+        return jax.vmap(kernel)(q_block, k_block, v_block, segment_ids=seg_ids)
+
+      qkv: jaxtyping.Array = sharded_splash_attn(
+          splash_attn_kernel,
+          query_proj,
+          key_proj,
+          value_proj,
+          segment_ids,
+          segment_ids,
+      )
+    else:
+
+      @partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=(
+              kernel_spec,
+              shd_spec,
+              unsharded_seq_kv,
+              unsharded_seq_kv,
+          ),
+          out_specs=shd_spec,
+          check_rep=False,
+      )
+      def sharded_splash_attn(kernel, q_block, k_block, v_block):
+        return jax.vmap(kernel)(q_block, k_block, v_block)
+
+      qkv: jaxtyping.Array = sharded_splash_attn(
+          splash_attn_kernel,
+          query_proj,
+          key_proj,
+          value_proj,
+      )
+    encoded = qkv.transpose(0, 2, 1, 3)
+    # Transpose KV back to (B, S, K, H); consumed by KV-sharing layers via
+    # layers_kvs.
+    key_proj = key_proj.transpose(0, 2, 1, 3)
+    value_proj = value_proj.transpose(0, 2, 1, 3)
+    return encoded, key_proj, value_proj
+
+  def _eager_attention(
+      self,
+      query_proj: jaxtyping.Array,
+      key_proj: jaxtyping.Array,
+      value_proj: jaxtyping.Array,
+      attn_mask: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      kv_shared_cache: LayerCache | None,
+      seq_len: int,
+  ) -> jaxtyping.Array:
+    """Eager einsum attention (non-flash path)."""
+    if self.use_gqa:
+      b, t, kg, h = query_proj.shape
+      n_groups = kg // self.num_kv_heads
+      query_reshaped = query_proj.reshape(
+          (b, t, self.num_kv_heads, n_groups, h)
+      )
+      logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_reshaped, key_proj)
+      b, t, k, g, s = logits.shape
+      logits = logits.reshape((b, t, k * g, s))
+    else:
+      logits = jnp.einsum('BTNH,BSNH->BTNS', query_proj, key_proj)
+
+    kv_len = key_proj.shape[1]
+    q_len = query_proj.shape[1]
+
+    if seq_len > 1:
+      attn_mask = attn_mask[..., :kv_len]
+
+    if self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      if segment_pos.shape[1] == 1 and self.config.use_sliding_window_kv_cache:
+        # for decoding with sliding window cache
+        active_cache = cache if cache is not None else kv_shared_cache
+        if active_cache is None:
+          raise ValueError(
+              'Cache or shared cache is required for local sliding attention'
+              ' in decoding.'
+          )
+        cache_len = key_proj.shape[1]
+        end_idx = active_cache['end_index']
+        if cache is None:
+          end_idx = end_idx - 1
+        end_idx = end_idx[:, None, None]
+        p = jnp.arange(cache_len)[None, None, :]
+
+        # map physical index to logical index
+        logical_indices = end_idx - ((end_idx - p) % cache_len)
+
+        # identify uninitialized slots (before the cache fills up)
+        valid_physical = logical_indices >= 0
+        logical_indices = jnp.maximum(0, logical_indices)
+
+        attn_mask = jnp.take_along_axis(attn_mask, logical_indices, axis=-1)
+        attn_mask = attn_mask * valid_physical
+      elif segment_pos.shape[1] == 1:
+        # for decoding without sliding window cache
+        sliding_mask = create_sliding_window_mask(
+            attn_mask,
+            sliding_window_size=window_size,
+        )
+        attn_mask = sliding_mask * attn_mask
+      else:  # for prefill
+        offset = kv_len - q_len
+        all_ones = jnp.ones_like(attn_mask)
+        sliding_mask = jnp.triu(all_ones, offset - window_size + 1) * jnp.tril(
+            all_ones, offset + window_size - 1
+        )
+        attn_mask = sliding_mask * attn_mask
+
+    attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
+    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
+        key_proj.dtype
+    )
+
+    if self.use_gqa:
+      b, t, kg, s = attn.shape
+      n_groups = kg // self.num_kv_heads
+      probs_reshaped = attn.reshape((b, t, self.num_kv_heads, n_groups, s))
+      encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs_reshaped, value_proj)
+      b, t, k, g, h = encoded.shape
+      encoded = encoded.reshape((b, t, k * g, h))
+    else:
+      encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
+    return encoded
+
   @property
-  def use_gqa(self):
-    return self.num_kv_heads != self.config.num_heads and self.num_kv_heads > 1
+  def use_gqa(self) -> bool:
+    return self.num_kv_heads != self.config.num_heads
 
   def __call__(
       self,
-      x,
-      segment_pos,
-      cache,
-      attn_mask,
-      kv_shared_cache=None,
-      segment_ids=None,
-  ):
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+      force_eager: bool = False,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[jaxtyping.Array, jaxtyping.Array],
+  ]:
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
         remat_config == RematConfig.BLOCK
@@ -524,7 +732,14 @@ class Attention(nnx.Module):
         return module.block(*args, **kwargs)
 
       return jax.checkpoint(_checkpointed_block)(
-          state, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
+          state,
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          kv_shared_cache,
+          segment_ids,
+          force_eager,
       )
     else:
       return self.block(
@@ -534,31 +749,35 @@ class Attention(nnx.Module):
           attn_mask,
           kv_shared_cache=kv_shared_cache,
           segment_ids=segment_ids,
+          force_eager=force_eager,
       )
 
-  def init_cache(self, batch_size, max_seq_len, dtype):
+  def init_cache(
+      self, batch_size: int, max_seq_len: int, dtype: jnp.dtype
+  ) -> LayerCache:
     cache_len = max_seq_len
+    sliding_window_size = self.config.sliding_window_size
     if (
         self.config.use_sliding_window_kv_cache
         and self.attn_type == AttentionType.LOCAL_SLIDING
-        and self.config.sliding_window_size is not None
+        and sliding_window_size is not None
     ):
-      cache_len = min(max_seq_len, self.config.sliding_window_size)
+      cache_len = min(max_seq_len, sliding_window_size)
 
     cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
     k = shard(
-        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
-        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
+        np.zeros(cache_shape, dtype),
+        self.config.shd_config.act_btnh,
         eager=True,
     )
     v = shard(
-        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
-        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
+        np.zeros(cache_shape, dtype),
+        self.config.shd_config.act_btnh,
         eager=True,
     )
     end_index = shard(
-        np.zeros((batch_size,), np.int32),  # pyrefly: ignore[bad-argument-type]
-        self.config.shd_config.act_btnh[:1],  # pyrefly: ignore[bad-argument-type]
+        np.zeros((batch_size,), np.int32),
+        self.config.shd_config.act_btnh[:1],
         eager=True,
     )
     return {'k': k, 'v': v, 'end_index': end_index}
