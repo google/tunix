@@ -38,6 +38,7 @@ class MockActorHandle(mock.MagicMock):
     self.poll_responses = mock.AsyncMock()
     self.weight_sync = mock.AsyncMock()
     self.fwd_bwd = mock.AsyncMock()
+    self.update = mock.AsyncMock()
     self.prepare_weight_sync = mock.AsyncMock()
     self.score = mock.AsyncMock()
     self.per_token_logps = mock.AsyncMock()
@@ -90,6 +91,62 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_generate_uses_explicit_generation_args(self):
+    async def _run():
+      resp = datatypes.RolloutResponse(
+          request_id="r1", status="COMPLETED", env_reward=1.0
+      )
+      self.mock_rollout_1.generate.return_value = [resp]
+      results = await self.engine.generate(
+          ["p1"],
+          generation_args=datatypes.GenerationArgs(
+              max_generation_steps=8,
+              temperature=0.5,
+              return_logprobs=False,
+          ),
+      )
+      self.assertLen(results, 1)
+      self.mock_rollout_1.generate.assert_called_once_with(
+          prompts=["p1"],
+          max_generation_steps=8,
+          temperature=0.5,
+          return_logprobs=False,
+      )
+    asyncio.run(_run())
+
+  def test_generate_rejects_legacy_generation_kwargs(self):
+    async def _run():
+      with self.assertRaisesRegex(TypeError, "GenerationArgs"):
+        await self.engine.generate(["p1"], temperature=0.5)
+    asyncio.run(_run())
+
+  def test_generate_routes_rollout_requests(self):
+    async def _run():
+      request = datatypes.RolloutRequest(
+          request_id="r1",
+          prompt="p1",
+          prompt_id="prompt_1",
+          generation_kwargs={"max_generation_steps": 8},
+          metadata={"prefix_hash": 0},
+      )
+      resp = datatypes.RolloutResponse(
+          request_id="r1",
+          prompt_id="prompt_1",
+          status="COMPLETED",
+          env_reward=1.0,
+      )
+      self.mock_rollout_1.generate.return_value = [resp]
+
+      results = await self.engine.generate([request])
+
+      self.assertLen(results, 1)
+      self.mock_rollout_1.generate.assert_called_once()
+      self.assertEqual(
+          self.mock_rollout_1.generate.call_args.kwargs["requests"], [request]
+      )
+
+    asyncio.run(_run())
+
   def test_poll_rollouts_aggregates_worker_responses(self):
     async def _run():
       resp1 = datatypes.RolloutResponse(
@@ -123,11 +180,42 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(res, {"loss": 0.5})
 
       self.mock_actor.fwd_bwd.assert_called_once_with(
-          batch=mock_payload,
-          accumulate_gradients=True,
-          apply_optimizer=False,
+          payload=mock_payload,
           skip_jit=False,
       )
+      self.mock_actor.update.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_train_step_applies_optimizer_on_last_microbatch(self):
+    async def _run():
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True}
+      )
+      self.mock_actor.update.return_value = 3
+      mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+
+      res = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=True,
+      )
+      self.assertEqual(
+          res,
+          {
+              "fwd_bwd": datatypes.Response(metadata={"queued": True}),
+              "updated": True,
+              "train_step": 3,
+              "accumulated": True,
+          },
+      )
+
+      self.mock_actor.fwd_bwd.assert_called_once_with(
+          payload=mock_payload,
+          skip_jit=False,
+      )
+      self.mock_actor.update.assert_called_once_with()
 
     asyncio.run(_run())
 
@@ -147,6 +235,15 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_actor.prepare_weight_sync.assert_called_once()
       self.mock_rollout_1.weight_sync.assert_called_once_with(metadata=mock_meta)
       self.mock_rollout_2.weight_sync.assert_called_once_with(metadata=mock_meta)
+
+    asyncio.run(_run())
+
+  def test_sync_weights_requires_weight_sync_metadata(self):
+    async def _run():
+      self.mock_actor.prepare_weight_sync.return_value = datatypes.Response()
+
+      with self.assertRaisesRegex(RuntimeError, "WeightSyncMetadata"):
+        await self.engine.sync_weights(role=datatypes.Role.ACTOR)
 
     asyncio.run(_run())
 

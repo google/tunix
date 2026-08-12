@@ -1112,7 +1112,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def prepare_weight_sync(self, **kwargs) -> None:
-    pass
+    if kwargs:
+      raise ValueError(f"Unexpected prepare_weight_sync kwargs: {sorted(kwargs)}")
+    raise NotImplementedError(
+        "PeftTrainer V2 weight sync is not implemented yet."
+    )
 
   @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:

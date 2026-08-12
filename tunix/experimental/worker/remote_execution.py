@@ -471,10 +471,17 @@ class ActorHandle(abc.ABC):
   """Stateful 1-to-1 routing handle targeting a specific remote worker instance."""
 
   @classmethod
-  def from_address(cls, target_address: str) -> "ActorHandle":
+  def from_address(
+      cls,
+      target_address: str,
+      *,
+      rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
+  ) -> "ActorHandle":
     """Instantiates a remote actor handle targeting the specified string URI."""
     if target_address.startswith("grpc://") and _GRPC_AVAILABLE:
-      return GrpcRemoteActorHandle(target_address=target_address)
+      return GrpcRemoteActorHandle(
+          target_address=target_address, rpc_timeout_s=rpc_timeout_s
+      )
     return RemoteActorHandle(target_address=target_address)
 
   @abc.abstractmethod
