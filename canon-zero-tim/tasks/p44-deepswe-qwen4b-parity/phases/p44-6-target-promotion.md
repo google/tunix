@@ -7,10 +7,9 @@
 - Exact remote head of `origin/yuxzhang/canon-zero-tim` containing repair
   implementation commit `5f0cf7e04b34932d8c9deb2463f3b205e3ad8b51`
   and P44.9 SwiGLU feature-padding implementation commit
-  `1a058b461496e039a3857c094b109b794027783a`, plus the future published
-  P44.10 matmul K/N-padding and P44.11 one-host integration implementation
-  commits recorded in `../HANDOFF.md`. Current remote head `d8184123` does not
-  satisfy this input.
+  `1a058b461496e039a3857c094b109b794027783a`, plus P44.10 matmul K/N-padding
+  and P44.11 one-host integration implementation commit
+  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63` recorded in `../HANDOFF.md`.
 - One exact 64-device `4x4x4` slice or 256-device `4x8x8` slice.
 - Registry-digest client image, existing Qwen3-4B checkpoint, pinned R2E-Gym,
   and reviewed gold whitelist/digest.
@@ -36,6 +35,6 @@ does not waive any stage on the other.
 
 ## Result
 
-Pending P44.10/P44.11 publication, remote read-back, and target execution. The
+Pending P44.10/P44.11 remote publication read-back and target execution. The
 pre-repair 256-device attempts `p44r02` through `p44r05` stopped before a
 completed rollout-only stage and cannot be promoted or reclassified.

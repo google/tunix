@@ -1,7 +1,8 @@
 # P44.11 — real one-host Qwen3-4B DeepSWE integration
 
 - Status: rollout integration PASS; backward executed but
-  `INCONCLUSIVE_NO_SIGNAL`; unpublished
+  `INCONCLUSIVE_NO_SIGNAL`; implementation commit
+  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`; publication push pending
 
 ## Scope and provenance
 

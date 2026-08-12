@@ -1,6 +1,7 @@
 # P44.10 — r05 Mosaic matmul geometry repair
 
-- Status: local and real one-host v5p gates passed; unpublished; remote target pending
+- Status: local and real one-host v5p gates passed; implementation commit
+  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`; publication push and remote target pending
 
 ## Evidence and diagnosis
 
@@ -78,6 +79,6 @@ does not change the narrower P44.10 kernel-gate claim.
 
 ## Next
 
-After explicit commit/push authorization, publish only to the operator branch,
-read back its exact head, and run a new rollout-only attempt named `p44r06` or
-later. Require both matmul-padding PATHTRACE directions before classification.
+Push only to the operator branch, read back its exact head, and run a new
+rollout-only attempt named `p44r06` or later. Require both matmul-padding
+PATHTRACE directions before classification.

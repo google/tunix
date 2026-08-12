@@ -255,12 +255,12 @@ inherited one-host model-mesh-id assertion. `p44r04` proved the dynamic mesh,
 checkpoint load, W&B session, and execution into the MLP, then failed at
 TP8-local SwiGLU feature width `1216`. `p44r05` then proved the SwiGLU repair
 across all 36 layers and failed Mosaic
-lowering on BN64/BK64 matmul block specs. Current remote head
+lowering on BN64/BK64 matmul block specs. Pre-publication operator baseline
 `d8184123448d0add72b72f09d0a6faf5d326c26e` archives r05 plus P38-specific
-capture/precheck hardening but does not contain the locally validated P44.10
-BN/BK128 plus K/N-padding or P44.11 one-host integration repair. Do not launch
-again until the P44 handoff records a newer publication commit containing
-both repairs.
+capture/precheck hardening. P44.10 BN/BK128 plus K/N-padding and P44.11
+one-host integration are contained in implementation commit
+`29cea119259f1f7fe583a3e3dd1cb190acc0bf63`. Before launch, resolve the current
+operator-branch remote head and require that it contains this exact commit.
 
 ## 4a. Optional repeatable one-host v5p gates
 

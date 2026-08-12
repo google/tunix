@@ -26,21 +26,17 @@ zero-TIM equivalence between allocations.
   not itself contain the SwiGLU feature-padding repair.
 - P44.9 SwiGLU feature-padding implementation commit:
   `1a058b461496e039a3857c094b109b794027783a`.
-- Current pulled operator head:
+- Pre-publication operator baseline:
   `d8184123448d0add72b72f09d0a6faf5d326c26e`. It archives `p44r05` plus P38
-  capture/precheck hardening and publication records, but does not contain the
-  uncommitted P44.10 matmul or P44.11 one-host integration repairs.
-- P44.10 matmul K/N-padding implementation commit: UNPUBLISHED. Do not launch
-  from the current remote head and do not invent a publication SHA. After
-  explicit publication, replace this state with the exact implementation and
-  remote read-back SHAs.
-- P44.11 one-host integration implementation commit: UNPUBLISHED. The local
-  v5p evidence records base `3ec5fd7c...` plus uncommitted development changes
-  and is not a clean execution-source SHA.
+  capture/precheck hardening and publication records.
+- P44.10 matmul K/N-padding and P44.11 one-host integration implementation
+  commit: `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`. The local v5p evidence predates
+  this commit and records a base SHA plus tracked development changes, so it
+  remains development evidence rather than clean execution-source evidence.
 - Exact execution source: resolve the current remote head with
   `git ls-remote origin refs/heads/yuxzhang/canon-zero-tim`, detach at that
   exact SHA, require that it contains the P44.7 and P44.9 repairs above plus
-  the future P44.10 and P44.11 implementation commits, and record the
+  implementation commit `29cea119259f1f7fe583a3e3dd1cb190acc0bf63`, and record the
   resolved head in the rendered JobSet and returned evidence. The publication
   metadata commit may be newer than either implementation commit; do not
   silently substitute any SHA for another.
@@ -103,7 +99,8 @@ Do not launch a local development worktree or an unverified symbolic branch.
   on all 36 layers. Mosaic rejected Qwen3-4B `BN64/BK64` matmul block specs.
   The local P44.10 repair uses BN/BK128, pads only registered matmul K/N width
   `1216` to `1280`, slices output N back, and makes both directions mandatory
-  classifier evidence. It has no remote publication or 64/256 execution yet.
+  classifier evidence. The implementation is committed, but it has no clean
+  post-publication or 64/256 execution evidence yet.
 
 ## First operator action after P44.10/P44.11 publication
 

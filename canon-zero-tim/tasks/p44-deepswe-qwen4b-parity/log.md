@@ -361,3 +361,20 @@
   or claim promotion occurred.
 - Next: Wait for explicit commit/push authorization, then require the launch
   agent to repeat rollout-only from a clean detached operator SHA.
+
+## 2026-08-12T05:05:00Z — P44.10/P44.11: implementation committed for publication
+
+- Type: publication checkpoint
+- Action: Audited and committed the Qwen3-4B BN/BK128 plus model-pinned
+  matmul K/N-padding repair, the default-off one-host DeepSWE integration
+  profile, durable trajectory/solve metrics, backward-no-commit boundary,
+  tests, runbook, and handoff. Generated `runs/` artifacts were excluded.
+- Result: Implementation commit
+  `29cea119259f1f7fe583a3e3dd1cb190acc0bf63` created from exact operator
+  baseline `d8184123448d0add72b72f09d0a6faf5d326c26e`. The previously recorded
+  P44/P43/P39/P34 and real v5p results remain the release evidence; no new
+  claim is inferred from committing them.
+- Safety: main was not checked out, modified, merged, or targeted. Publication
+  remains scoped only to `origin/yuxzhang/canon-zero-tim`.
+- Next: Commit this publication metadata, push both commits to the operator
+  branch, and read back the exact remote head before handoff.
