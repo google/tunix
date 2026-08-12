@@ -32,3 +32,13 @@
 - Files/artifacts: `HANDOFF.md`; `cluster/render_p45_frozenlake.py`; `cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env`; `tests/p45_frozenlake_dp8_tp8/`; phase files.
 - Rollback: stop using the isolated P45 renderer/profile. Existing P33/P38 workload entries and target evidence remain separate.
 - Next: 64-chip target run; capture first-update HBM, placement, timing, evaluation, and complete raw evidence.
+
+## 2026-08-12 UTC — publish P45 implementation
+
+- Type: publication
+- Fact: the focused fixed-image gate passed after rebasing onto remote commit `115ef814`; the remote DeepSWE changes did not overlap the P45 implementation.
+- Action: published the implementation, tests, renderer/profile, and operator handoff to `yuxzhang/canon-zero-tim`.
+- Result: implementation commit `fae4e67f` is the minimum P45 source anchor; no target JobSet was launched by this publication.
+- Files/artifacts: `HANDOFF.md`; `state.md`; isolated P45 renderer/profile/tests.
+- Rollback: stop rendering the isolated P45 carrier; the existing DP16xTP4 entries remain available.
+- Next: execute P45.3 on one 64-chip slice and return the complete evidence bundle.
