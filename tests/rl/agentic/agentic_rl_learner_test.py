@@ -34,6 +34,21 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 class AgenticRLLearnerTest(parameterized.TestCase):
 
+  def test_model_call_wraps_one_conversation_as_a_prompt_batch(self):
+    learner = object.__new__(DummyLearner)
+    learner.chat_parser = None
+    learner.rl_cluster = mock.Mock()
+    learner.rl_cluster.generate.return_value = mock.sentinel.rollout
+    conversation = [{"role": "user", "content": "hello"}]
+
+    result = learner._model_call(conversation)
+
+    self.assertIs(result, mock.sentinel.rollout)
+    self.assertEqual(
+        learner.rl_cluster.generate.call_args.kwargs["prompts"],
+        [conversation],
+    )
+
   def test_frozenlake_evaluation_metrics_are_finite_and_complete(self):
     metrics = agentic_rl_learner._frozenlake_evaluation_metrics(
         [0.0, 0.2, 1.0], wall_seconds=2.5, policy_step=10

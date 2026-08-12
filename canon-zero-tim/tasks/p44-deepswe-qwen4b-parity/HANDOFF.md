@@ -18,7 +18,10 @@ zero-TIM equivalence between allocations.
 ## Publication contract
 
 - Required remote branch: `yuxzhang/canon-zero-tim`
-- Exact publication SHA: resolve the current remote head with
+- Repair development baseline: `7ea2176f807e3e13fde17499e15fef2bd497363b`
+- Exact repair publication SHA: not assigned until an explicitly authorized
+  commit/push; do not launch the unpublished worktree or the baseline SHA.
+  After publication, resolve the current remote head with
   `git ls-remote origin refs/heads/yuxzhang/canon-zero-tim`, detach at that
   exact SHA, and record it in the rendered JobSet and returned evidence
 - Local development branch: `codex/p43-deepswe-64-debug`
@@ -32,22 +35,34 @@ Do not launch a local development worktree or an unverified symbolic branch.
 ## Current evidence
 
 - P44 shared-recipe, Qwen3-4B TP8 overlay, both topology renderers/preflights,
-  artifact schemas, both dataset entrypoints, and classifier controls: PASS
-  locally (27 tests).
+  artifact schemas, both dataset entrypoints, Pathways `logical_task` host
+  placement, prompt batching, trajectory-counted logprob batching, and
+  classifier controls: PASS locally (32 tests).
 - Qwen4B overlay exact-image CPU gate: PASS in local immutable image ID
   `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
-  This is not a remote registry digest; rerun with the launch image digest.
+  The same image passes the two affected real learner unit tests. This is not
+  a remote registry digest; rerun with the launch image digest.
 - Adjacent P43/P39/P34 regressions pass: P43 21/21, P39 15/15, and P34 10
   suites. Qwen8B and Qwen32B also reinstall 29/29 and pass their exact-image
   gates after the shared model-pinned BK change.
-- Remote 64-device and 256-device stages: NOT RUN.
+- Remote 64-device stages: NOT RUN.
+- Remote 256-device attempt `p44r02`: FAILED before mesh construction because
+  the old splitter treated degenerate `process_index=0` as host identity. It
+  nevertheless proved 256 Pathways devices, pinned R2E provisioning, Qwen3-4B
+  model access, CLI admission, and gold filtering. It proves no rollout or
+  training execution.
+- Optional local DP1xTP4 smoke: `BLOCKED_REAL_ENVIRONMENT` in the current
+  implementation session (no visible TPU/libtpu, local Qwen3-4B checkpoint,
+  r2egym package, or readable kubeconfig). No fake environment was substituted.
 
 ## First operator action after publication
 
 Follow the runbook's fetch and immutable-input preflight. Start only the
-64-device `rollout-only` stage unless the launch owner explicitly selects the
-256-device ladder first. Return the complete failure package on any red or
-inconclusive result; do not edit the recipe or immediately jump allocations.
+`rollout-only` stage on whichever exact allocation is currently available;
+64 and 256 use the same functional recipe but must promote independently.
+Require the exact `[P34.DEVICE_INVENTORY]` and `[P44.LOGPS_BATCH]` lines from
+the runbook. Return the complete failure package on any red or inconclusive
+result; do not edit the recipe or immediately jump stages.
 
 If 257 devices are available, P44 still renders an exact 256-device
 `4x8x8` target. The additional device is outside the mesh.

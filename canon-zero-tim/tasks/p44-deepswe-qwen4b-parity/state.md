@@ -4,10 +4,10 @@
 - Objective: Provide fail-closed Qwen3-4B DeepSWE debug launches on 64 and 256 TPU chips that share one functional recipe, stage ladder, artifact schema, and classifier contract.
 - Definition of done: Local parity, renderer, exact-image, and adjacent DeepSWE gates pass; then both topologies produce classified rollout-only, one-update, and three-update target evidence from the same pinned recipe.
 - Task directory: `canon-zero-tim/tasks/p44-deepswe-qwen4b-parity/`
-- Directory state: publication must be confirmed by remote branch read-back
-- Current phase: P44.6 — target promotion ladder
-- Last verified fact: P44 passes 27/27 locally and in the immutable local image, both dataset launchers avoid the removed datasets argument, and Qwen4B/Qwen8B/Qwen32B overlay regressions pass.
-- Next action: Resolve and detach at the exact remote branch head, then run the available allocation's rollout-only stage, classify it, and continue that allocation's independent ladder.
-- Blockers: none for local implementation; target evidence requires operator-owned 64-chip and 256-chip cluster runs.
-- Key artifacts: `plan.md`, `log.md`
-- Updated: 2026-08-12T00:20:18Z
+- Directory state: tracked
+- Current phase: [P44.6 — target promotion ladder](phases/p44-6-target-promotion.md)
+- Last verified fact: On operator baseline `7ea2176f807e3e13fde17499e15fef2bd497363b`, the r02 repair passes 32 P44 CPU cases plus two affected learner unit tests in the pinned dependency image; adjacent P43/P39/P34 and exact-image gates remain green. The optional local smoke is `BLOCKED_REAL_ENVIRONMENT` because this session exposes neither TPU/libtpu nor existing Qwen3-4B/R2E prerequisites.
+- Next action: After explicit commit/push authorization, publish to `origin/yuxzhang/canon-zero-tim`, read back its exact SHA, then have the launch agent run rollout-only on whichever exact 64- or 256-device allocation is available.
+- Blockers: target execution requires a published repair SHA and remote allocation; optional one-host smoke prerequisites are absent in this session.
+- Key artifacts: `debug_logs/p44_p44r02_deepswe_256_parity.raw.log`, `plan.md`, `log.md`
+- Updated: 2026-08-12T01:07:00Z

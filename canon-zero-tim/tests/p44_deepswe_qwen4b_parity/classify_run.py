@@ -26,6 +26,9 @@ _TOPOLOGY = {
         "contract": "p44-qwen4b-parity-64",
         "dp": 4,
         "devices": 32,
+        "total_devices": 64,
+        "hosts": 16,
+        "role_hosts": 8,
         "global_m": 1024,
         "local_trajectories": 4,
         "reduction_rounds": 4,
@@ -34,6 +37,9 @@ _TOPOLOGY = {
         "contract": "p44-qwen4b-parity-256",
         "dp": 16,
         "devices": 128,
+        "total_devices": 256,
+        "hosts": 64,
+        "role_hosts": 32,
         "global_m": 4096,
         "local_trajectories": 1,
         "reduction_rounds": 8,
@@ -250,7 +256,18 @@ def classify(
           "[P34.CLI] PASS model=Qwen3-4B prompts=4 generations=4"
       ) == 1,
       "source_exact": log_text.count("[sync] provenance ok") == 1,
+      "device_inventory_exact": log_text.count(
+          "[P34.DEVICE_INVENTORY] PASS "
+          f"devices={spec['total_devices']} host_source=logical_task "
+          f"hosts={spec['hosts']} devices_per_host=4 "
+          f"rollout_hosts={spec['role_hosts']} "
+          f"trainer_hosts={spec['role_hosts']}"
+      ) == 1,
       "topology_exact": log_text.count("[P34.TOPOLOGY] PASS") == 1,
+      "logps_batch_exact": log_text.count(
+          "[P44.LOGPS_BATCH] configured_prompts=4 generations=4 "
+          "execution_trajectories=16 observed_trajectories=16"
+      ) == expected_batches,
       "wandb_online": log_text.count(
           "[CANON_P34_WANDB] ONLINE_RUN_PASS"
       ) == 1,

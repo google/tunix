@@ -1546,8 +1546,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
+    prompts = [chat_lists]
     result = self.rl_cluster.generate(
-        prompts=chat_lists,  # pyrefly: ignore[bad-argument-type]
+        prompts=prompts,
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,

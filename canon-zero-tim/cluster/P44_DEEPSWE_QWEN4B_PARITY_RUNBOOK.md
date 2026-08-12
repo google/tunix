@@ -58,6 +58,11 @@ Required terminal markers are `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`,
 `P43_DEEPSWE_DEBUG_CPU_PASS`, `P39_DEEPSWE_PILOT_CPU_PASS`, and
 `P34_STATIC_PASS suites=10`.
 
+The P44 gate must report 32 cases and includes negative controls for the
+Pathways `logical_task` host mapping, exact 4-device host cardinality,
+single-conversation generation batching, and trajectory-counted logprob
+microbatching. An older 27-case marker does not contain the r02 repair.
+
 ## 2. Verify immutable runtime inputs
 
 Required inputs:
@@ -189,6 +194,29 @@ Useful log scan:
 grep -aE '\[P34.CLI\]|\[P34.TOPOLOGY\]|\[P44\.|CANON_ALIGN_PRE_JSON|update_step_committed|Traceback|OOM|RESOURCE_EXHAUSTED|CANCELLED|IFRT' \
   "$RUN_ROOT/run.log"
 ```
+
+Before accepting any stage, require these exact runtime lines once per run:
+
+```text
+# TOPOLOGY=64
+[P34.DEVICE_INVENTORY] PASS devices=64 host_source=logical_task hosts=16 devices_per_host=4 rollout_hosts=8 trainer_hosts=8
+
+# TOPOLOGY=256
+[P34.DEVICE_INVENTORY] PASS devices=256 host_source=logical_task hosts=64 devices_per_host=4 rollout_hosts=32 trainer_hosts=32
+```
+
+Require this line exactly once per completed batch (`1` for rollout-only and
+one-update, `3` for three-update):
+
+```text
+[P44.LOGPS_BATCH] configured_prompts=4 generations=4 execution_trajectories=16 observed_trajectories=16
+```
+
+`p44r02` is a known pre-repair 256-device failure: it found all 256 Pathways
+devices but grouped them under degenerate `process_index=0` and stopped before
+mesh construction. The standalone CPU IFRT diagnostic showing one CPU device
+is not the failure root cause. Do not rerun from `p44r02`'s source SHA, and do
+not bypass the new inventory check.
 
 For update stages, finite A/B/C alignment differences are warning-only and
 the claim remains systems-debug functional parity. Missing/non-finite values,

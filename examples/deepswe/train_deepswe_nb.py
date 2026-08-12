@@ -912,6 +912,16 @@ if P34_DEEPSWE:
       else deepswe_contract.split_4x8x8_role_devices
   )
   rollout_role, trainer_role, placement_report = split_roles(devices)
+  print(
+      "[P34.DEVICE_INVENTORY] PASS "
+      f"devices={placement_report['devices']} "
+      f"host_source={placement_report['host_source']} "
+      f"hosts={placement_report['hosts']} "
+      f"devices_per_host={placement_report['devices_per_host']} "
+      f"rollout_hosts={placement_report['rollout_hosts']} "
+      f"trainer_hosts={placement_report['trainer_hosts']}",
+      flush=True,
+  )
   rollout_devices = np.asarray(rollout_role, dtype=object).reshape(
       rollout_shape
   )

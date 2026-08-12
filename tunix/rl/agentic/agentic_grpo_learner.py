@@ -546,6 +546,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # when active: one extra trainer forward pass per training step.
     actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
+    configured_compute_logps = (
+        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+    )
+    compute_logps_micro_batch_size = (
+        configured_compute_logps * self.algo_config.num_generations
+        if configured_compute_logps
+        else len(trajectories)
+    )
+    if deepswe_debug.enabled():
+      marker = deepswe_debug.marker_prefix()
+      print(
+          f"[{marker}.LOGPS_BATCH] "
+          f"configured_prompts={configured_compute_logps} "
+          f"generations={self.algo_config.num_generations} "
+          f"execution_trajectories={compute_logps_micro_batch_size} "
+          f"observed_trajectories={len(trajectories)}",
+          flush=True,
+      )
     rollout_per_token_logps = None
     trainer_per_token_logps = None
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
@@ -563,7 +581,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=compute_logps_micro_batch_size,
             prompt_mask=prompt_mask,
             completion_mask=completion_valid_mask,
         )
@@ -585,7 +603,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+          micro_batch_size=compute_logps_micro_batch_size,
           prompt_mask=prompt_mask,
           completion_mask=completion_valid_mask,
       )
@@ -621,7 +639,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=compute_logps_micro_batch_size,
             prompt_mask=prompt_mask,
             completion_mask=completion_valid_mask,
         )

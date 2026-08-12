@@ -1,0 +1,33 @@
+# P44.6 — target promotion ladder
+
+- Status: active
+
+## Inputs
+
+- Exact repair publication SHA on `origin/yuxzhang/canon-zero-tim` after
+  explicit commit/push authorization.
+- One exact 64-device `4x4x4` slice or 256-device `4x8x8` slice.
+- Registry-digest client image, existing Qwen3-4B checkpoint, pinned R2E-Gym,
+  and reviewed gold whitelist/digest.
+
+## Execution
+
+1. Fetch, read back, and detach at the exact repair publication SHA.
+2. Run P44/P43/P39/P34 package and exact-image gates.
+3. Render only `rollout-only` for the available topology and server-side
+   dry-run it.
+4. Launch only with operator approval; require exact device-inventory,
+   trajectory-counted logprob, trajectory artifact, and batch-metric evidence.
+5. Promote that topology independently to one-update and then three-update
+   only after each classifier PASS.
+
+## Exit gate
+
+Both topologies independently classify rollout-only, one-update, and
+three-update as PASS from the same functional recipe. A pass on one topology
+does not waive any stage on the other.
+
+## Result
+
+Pending publication and target execution. The pre-repair 256-device `p44r02`
+attempt stopped before mesh construction and is not a completed stage.

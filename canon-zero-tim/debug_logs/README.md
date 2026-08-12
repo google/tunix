@@ -1187,10 +1187,32 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Gold dataset filter: `4578 -> 1851` instances (100% matched `gold.jsonl`, SHA-256 `2f95c2e6...`).
    - Qwen3-4B safetensors weights downloaded to mounted PVC `/mnt/disks/linchai_data/models/Qwen3-4B`.
 
-2. **IFRT Proxy Device Discovery & Role Topology Interception**:
+2. **Pathways Device Discovery & Role Topology Interception**:
    - `PjRt-IFRT device count: total=1, addressable=1 (CpuDevice(id=0))`
-   - JAX initialized with single local CPU device on client session before Pathways 256-chip worker pool registration was fully mapped into IFRT device registry.
+   - This CPU-only PjRt-IFRT line is a separate client diagnostic and is also
+     present in earlier successful Pathways runs; it does not establish
+     incomplete TPU registration.
+   - The training process subsequently discovered all 256 unique virtual TPU
+     devices with physical extents `(4, 8, 8)`. Their repr carries a
+     four-device-per-host `logical_task`, while `process_index` is degenerate
+     at `0` for every virtual device.
    - `split_4x8x8_role_devices` intercepted fail-closed: `ValueError: P34 physical half split crosses host boundaries: processes=[0]`.
+   - Root cause: the DeepSWE role splitter used `process_index` as host
+     identity instead of the Pathways repr `logical_task`. The attempt stopped
+     before mesh construction, rollout, trajectory persistence, forward,
+     backward, or optimizer commit.
+
+3. **Repair status**:
+   - The next unpublished repair derives Pathways host identity from
+     `(slice_id, logical_task)`, retains exact four-device host cardinality,
+     and requires exact 32/32 host-complete role halves on 256 devices (8/8 on
+     64 devices).
+   - It also wraps a single conversation as one generation prompt batch and
+     expands configured prompt logprob microbatch `4` to the 16 generated
+     trajectories.
+   - These repairs pass local and pinned-image gates but have not yet been
+     re-run on a target; `p44r02` remains a failed/inconclusive rollout-only
+     attempt, not target proof.
 
 ---
 
@@ -1222,4 +1244,3 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - Pairwise gradient-value uniqueness is not required by the fixed reduction. FrozenLake's binary reward plus RLOO can legitimately create duplicate zero-gradient contributions when all eight generations for a prompt have the same reward. The archived log does not contain the per-prompt reward inventory or signature list, so this mechanism explains why duplicates are valid but does not identify the exact duplicate ranks in `p42e2`.
    - GSM8K previously passed because its observed rank signatures happened to be distinct; that workload-dependent property is not a valid production safety gate.
    - The correction keeps rank cadence, exactly 16 contributions, the registered eight-round reduction tree, finite gradient health, and post-reduction replica equality fail-closed. It retains pairwise uniqueness only in synthetic admission probes and reports production signature multiplicity as evidence.
-

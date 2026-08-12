@@ -955,6 +955,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       # Each call to get_ref_per_token_logps should receive 4 trajectories.
       _, kwargs = mock_get_ref.call_args_list[0]
       self.assertEqual(kwargs["prompt_tokens"].shape[0], 4)
+      self.assertEqual(kwargs["micro_batch_size"], 4)
 
       # The full batch has 2 microbatches.
       # First iteration parallelized: 2 calls (1 per microbatch).

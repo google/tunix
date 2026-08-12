@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -342,26 +344,134 @@ class DevicePlacement:
 
   device_id: int
   coords: tuple[int, ...]
-  process_index: int
+  host_key: tuple[Any, ...]
+  host_source: str
+
+
+def _device_repr_attr(device: Any, attr_name: str) -> Any:
+  """Parses a Pathways-only device attribute without importing JAX/Tunix."""
+  match = re.search(
+      rf"(?:^|[,(]){re.escape(attr_name)}=(\[[^\]]*\]|[^,)]+)",
+      repr(device),
+  )
+  if match is None:
+    return None
+  raw_value = match.group(1).strip()
+  try:
+    return ast.literal_eval(raw_value)
+  except (SyntaxError, ValueError):
+    return raw_value
+
+
+def _runtime_device_host_key(
+    device: Any,
+) -> tuple[tuple[Any, ...] | None, str | None]:
+  """Returns Pathways logical-task identity or direct-JAX process identity."""
+  logical_task = _device_repr_attr(device, "logical_task")
+  if logical_task is not None:
+    task_id = logical_task
+    source = "logical_task"
+  else:
+    task_id = getattr(device, "process_index", None)
+    if callable(task_id):
+      task_id = task_id()
+    if task_id is None:
+      task_id = getattr(device, "host_id", None)
+    source = "process_index" if task_id is not None else None
+  if task_id is None:
+    return None, None
+  slice_id = getattr(device, "slice_index", None)
+  if callable(slice_id):
+    slice_id = slice_id()
+  return (slice_id, task_id), source
 
 
 def _as_device_placement(device: Any) -> DevicePlacement:
   coords = tuple(int(value) for value in getattr(device, "coords", ()))
   if len(coords) not in (3, 4):
     raise ValueError(f"P34 device lacks 3D topology coordinates: {coords}")
-  process_index = getattr(device, "process_index", None)
-  if callable(process_index):
-    process_index = process_index()
-  if process_index is None:
-    process_index = getattr(device, "host_id", None)
-  if process_index is None:
-    raise ValueError("P34 device lacks a process/host index")
+  host_key, host_source = _runtime_device_host_key(device)
+  if host_key is None or host_source is None:
+    raise ValueError("P34 device lacks a trustworthy runtime host identity")
   device_id = getattr(device, "id", None)
   if device_id is None:
     device_id = getattr(device, "device_id", None)
   if device_id is None:
     raise ValueError("P34 device lacks an id")
-  return DevicePlacement(int(device_id), coords, int(process_index))
+  return DevicePlacement(int(device_id), coords, host_key, host_source)
+
+
+def _validate_host_complete_roles(
+    rollout_placements: Sequence[DevicePlacement],
+    trainer_placements: Sequence[DevicePlacement],
+    *,
+    expected_hosts: int,
+    expected_role_hosts: int,
+    contract_name: str,
+) -> dict[str, Any]:
+  """Validates exact four-device hosts and a host-complete role partition."""
+  role_by_host: dict[tuple[Any, ...], set[str]] = {}
+  all_placements = tuple(rollout_placements) + tuple(trainer_placements)
+  for name, role in (
+      ("rollout", rollout_placements),
+      ("trainer", trainer_placements),
+  ):
+    for item in role:
+      role_by_host.setdefault(item.host_key, set()).add(name)
+  split_hosts = sorted(
+      (host for host, names in role_by_host.items() if len(names) != 1),
+      key=str,
+  )
+  if split_hosts:
+    raise ValueError(
+        f"{contract_name} physical half split crosses host boundaries: "
+        f"hosts={split_hosts[:8]}"
+    )
+
+  host_device_counts = {
+      host: sum(item.host_key == host for item in all_placements)
+      for host in role_by_host
+  }
+  invalid_host_sizes = sorted(
+      (
+          (host, count)
+          for host, count in host_device_counts.items()
+          if count != 4
+      ),
+      key=lambda item: str(item[0]),
+  )
+  if len(host_device_counts) != expected_hosts or invalid_host_sizes:
+    raise ValueError(
+        f"{contract_name} host inventory mismatch: "
+        f"hosts={len(host_device_counts)} expected={expected_hosts} "
+        f"invalid_sizes={invalid_host_sizes[:8]}"
+    )
+
+  host_sources = {item.host_source for item in all_placements}
+  if len(host_sources) != 1:
+    raise ValueError(
+        f"{contract_name} mixed runtime host identity sources: "
+        f"{sorted(host_sources, key=str)}"
+    )
+
+  rollout_hosts = {item.host_key for item in rollout_placements}
+  trainer_hosts = {item.host_key for item in trainer_placements}
+  if (
+      len(rollout_hosts) != expected_role_hosts
+      or len(trainer_hosts) != expected_role_hosts
+  ):
+    raise ValueError(
+        f"{contract_name} role host inventory mismatch: "
+        f"rollout={len(rollout_hosts)} trainer={len(trainer_hosts)} "
+        f"expected={expected_role_hosts}"
+    )
+  return {
+      "host_source": next(iter(host_sources)),
+      "hosts": len(host_device_counts),
+      "devices_per_host": 4,
+      "rollout_hosts": len(rollout_hosts),
+      "trainer_hosts": len(trainer_hosts),
+  }
 
 
 def split_4x8x8_role_devices(
@@ -384,18 +494,13 @@ def split_4x8x8_role_devices(
   trainer_placements = tuple(item for item in placements if item.coords[0] >= 2)
   if len(rollout_placements) != 128 or len(trainer_placements) != 128:
     raise ValueError("P34 role halves must each contain 128 devices")
-  role_by_process: dict[int, set[str]] = {}
-  for name, role in (("rollout", rollout_placements), ("trainer", trainer_placements)):
-    for item in role:
-      role_by_process.setdefault(item.process_index, set()).add(name)
-  split_processes = sorted(
-      process for process, names in role_by_process.items() if len(names) != 1
+  host_report = _validate_host_complete_roles(
+      rollout_placements,
+      trainer_placements,
+      expected_hosts=64,
+      expected_role_hosts=32,
+      contract_name="P34",
   )
-  if split_processes:
-    raise ValueError(
-        "P34 physical half split crosses host boundaries: "
-        f"processes={split_processes[:8]}"
-    )
 
   def order_key(item):
     core = item.coords[3] if len(item.coords) == 4 else 0
@@ -409,13 +514,14 @@ def split_4x8x8_role_devices(
       "slice_extents": extents,
       "rollout_devices": 128,
       "trainer_devices": 128,
-      "rollout_processes": len({item.process_index for item in rollout_placements}),
-      "trainer_processes": len({item.process_index for item in trainer_placements}),
+      "rollout_processes": host_report["rollout_hosts"],
+      "trainer_processes": host_report["trainer_hosts"],
       "disjoint": not bool(set(item.device_id for item in rollout_placements) & set(item.device_id for item in trainer_placements)),
       "exhaustive": len(set(ids)) == len(rollout) + len(trainer),
       "host_complete": True,
       "rollout_ids": tuple(item.device_id for item in rollout_placements),
       "trainer_ids": tuple(item.device_id for item in trainer_placements),
+      **host_report,
   }
   if not report["disjoint"] or not report["exhaustive"]:
     raise AssertionError("P34 role halves are not disjoint and exhaustive")
@@ -446,21 +552,13 @@ def split_4x4x4_role_devices(
   trainer_placements = tuple(item for item in placements if item.coords[0] >= 2)
   if len(rollout_placements) != 32 or len(trainer_placements) != 32:
     raise ValueError("P39 pilot role halves must each contain 32 devices")
-  role_by_process: dict[int, set[str]] = {}
-  for name, role in (
-      ("rollout", rollout_placements),
-      ("trainer", trainer_placements),
-  ):
-    for item in role:
-      role_by_process.setdefault(item.process_index, set()).add(name)
-  split_processes = sorted(
-      process for process, names in role_by_process.items() if len(names) != 1
+  host_report = _validate_host_complete_roles(
+      rollout_placements,
+      trainer_placements,
+      expected_hosts=16,
+      expected_role_hosts=8,
+      contract_name="P39 pilot",
   )
-  if split_processes:
-    raise ValueError(
-        "P39 pilot physical half split crosses host boundaries: "
-        f"processes={split_processes[:8]}"
-    )
 
   def order_key(item):
     core = item.coords[3] if len(item.coords) == 4 else 0
@@ -475,12 +573,8 @@ def split_4x4x4_role_devices(
       "slice_extents": extents,
       "rollout_devices": 32,
       "trainer_devices": 32,
-      "rollout_processes": len(
-          {item.process_index for item in rollout_placements}
-      ),
-      "trainer_processes": len(
-          {item.process_index for item in trainer_placements}
-      ),
+      "rollout_processes": host_report["rollout_hosts"],
+      "trainer_processes": host_report["trainer_hosts"],
       "disjoint": not bool(
           set(item.device_id for item in rollout_placements)
           & set(item.device_id for item in trainer_placements)
@@ -489,6 +583,7 @@ def split_4x4x4_role_devices(
       "host_complete": True,
       "rollout_ids": tuple(item.device_id for item in rollout_placements),
       "trainer_ids": tuple(item.device_id for item in trainer_placements),
+      **host_report,
   }
   if not report["disjoint"] or not report["exhaustive"]:
     raise AssertionError("P39 pilot role halves are not disjoint and exhaustive")

@@ -65,6 +65,10 @@ def _log(topology: str, stage: str, batches: int) -> str:
       "[P34.PATHWAYS] initialized_once=1 before_jax=1",
       "[P34.CLI] PASS model=Qwen3-4B prompts=4 generations=4",
       "[sync] provenance ok",
+      "[P34.DEVICE_INVENTORY] PASS "
+      f"devices={spec['total_devices']} host_source=logical_task "
+      f"hosts={spec['hosts']} devices_per_host=4 "
+      f"rollout_hosts={spec['role_hosts']} trainer_hosts={spec['role_hosts']}",
       "[P34.TOPOLOGY] PASS",
       "[CANON_P34_WANDB] ONLINE_RUN_PASS",
       f"Prepared token paddings: [{spec['global_m']}]",
@@ -73,6 +77,11 @@ def _log(topology: str, stage: str, batches: int) -> str:
   ]
   lines.extend("[P44.TRAJECTORY_BATCH]" for _ in range(batches))
   lines.extend("[P44.BATCH_METRICS_JSON]" for _ in range(batches))
+  lines.extend(
+      "[P44.LOGPS_BATCH] configured_prompts=4 generations=4 "
+      "execution_trajectories=16 observed_trajectories=16"
+      for _ in range(batches)
+  )
   if stage == "rollout-only":
     lines.append("[P44.ROLLOUT_ONLY] PASS")
   return "\n".join(lines)
@@ -212,6 +221,28 @@ class P44ClassifierTest(unittest.TestCase):
       self._artifacts(root, topology="64", stage="one-update", batches=1)
       report = self._classify(root, topology="256", stage="one-update")
       self.assertIn("manifest_exact", report["failed"])
+
+  def test_missing_runtime_batch_evidence_is_rejected(self):
+    topology = "64"
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text).resolve()
+      self._artifacts(root, topology=topology, stage="rollout-only", batches=1)
+      log = _log(topology, "rollout-only", 1).replace(
+          "[P44.LOGPS_BATCH] configured_prompts=4 generations=4 "
+          "execution_trajectories=16 observed_trajectories=16",
+          "",
+      )
+      report = classifier.classify(
+          log_text=log,
+          debug_dir=root,
+          weight_attestations=[],
+          pre_alignment=[],
+          alignment=[],
+          updates=[],
+          stage="rollout-only",
+          topology=topology,
+      )
+      self.assertIn("logps_batch_exact", report["failed"])
 
   def test_nonmonotonic_update_is_rejected(self):
     topology = "256"

@@ -65,3 +65,70 @@
 - Files/artifacts: complete P44 worktree, `cluster/P44_DEEPSWE_QWEN4B_PARITY_RUNBOOK.md`, `tasks/p44-deepswe-qwen4b-parity/HANDOFF.md`
 - Rollback: The P44 lane is default-off and isolated by explicit flags; removing its profile/renderer/tests plus P44 branches restores prior selection, while the model-pinned BK import can be independently reverted with its manifest hash.
 - Next: Publish to `yuxzhang/canon-zero-tim`, read back and detach at its exact SHA, then launch the available topology's first rollout-only stage.
+
+## 2026-08-12T00:51:20Z — P44.7: reconcile first 256-device target failure
+
+- Type: correction
+- Fact: Remote attempt `p44r02` used source `5a52cc8c4cdaacce9dbe4983ab141d342d0e5588`, passed the Pathways/R2E/model/CLI/dataset gates, and failed before mesh construction at `P34 physical half split crosses host boundaries: processes=[0]`. The splitter could only reach that check after accepting 256 unique device ids and coordinates with extents `(4, 8, 8)`.
+- Action: Pulled archived evidence commit `40cd16ad7ec2b229be15c4c7d50c12498ca323b4`, compared the traceback with the role splitter and existing topology helpers, and re-opened local implementation before target promotion.
+- Command: `git pull --ff-only origin yuxzhang/canon-zero-tim`
+- Result: Fast-forwarded `5a52cc8c` to `40cd16ad`; raw log SHA-256 is `3d7101454fad0361394fecf06adc30d7734945d333a8c086b7a74b8d26dda944`. Existing successful Pathways logs contain the same `PjRt-IFRT device count: total=1` CPU diagnostic followed by 64 virtual TPU devices carrying repr `logical_task`, so the current README explanation of incomplete worker registration is not established.
+- Files/artifacts: `debug_logs/p44_p44r02_deepswe_256_parity.raw.log`, `debug_logs/README.md`, `tunix/rl/deepswe_contract.py`, `tunix/utils/topology.py`
+- Rollback: This checkpoint changes only task records; code repair remains isolated to the default-off DeepSWE paths and will retain hard topology failures.
+- Next: Compare the available DeepSWE reference branches, then add target-derived placement tests before changing the splitter.
+
+## 2026-08-12T00:53:04Z — P44.7: correct the workload reference branch
+
+- Type: correction
+- Fact: The user-confirmed workload reference is `yuxzhang/deepswe-quality-fix`, pinned at `023978b976dd6d94e7a42948c3f3a68e34d73744`; `yuxzhang/deepswe-debug-fix` was a mistaken name and does not exist on origin.
+- Action: Removed `deepswe-launch-fix` from the phase input and bound comparison to the pinned quality-fix revision plus the two separately reviewed main commits.
+- Command: `git fetch origin yuxzhang/deepswe-debug-fix`
+- Result: The mistaken ref returned `couldn't find remote ref`; no branch switch, merge, source edit, or main mutation occurred.
+- Files/artifacts: `state.md`, `phases/p44-7-r02-repair.md`
+- Rollback: Not applicable; this checkpoint corrects reference provenance only.
+- Next: Verify and diff the pinned quality-fix revision against the current P44 implementation.
+
+## 2026-08-12T01:01:51Z — P44.7: repair passes exact-image and adjacent gates
+
+- Type: code change and verification
+- Fact: Pathways virtual TPU devices expose a degenerate `process_index=0` but a stable repr `logical_task` per four-device host; agentic generation consumes prompt batches while learner logprob calls consume generated trajectory batches.
+- Action: Added a standalone fail-closed DeepSWE host-key resolver, exact host-cardinality controls, deterministic device-inventory evidence, single-conversation prompt wrapping, and trajectory-counted logprob microbatching. Compared but did not merge `yuxzhang/deepswe-quality-fix@023978b976dd6d94e7a42948c3f3a68e34d73744`; ported only the independently reviewed narrow semantics.
+- Commands: P44/P43/P39/P34 CPU gates; P44/P43/P34 exact-image gates using `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`; targeted `AgenticRLLearner` and `AgenticGrpoLearner` unit tests in that image; `python3 -m py_compile`; `git diff --check`.
+- Result: PASS — P44 32/32 plus both affected learner unit tests; P43 21/21; P39 15/15; P34 static/trajectory/update gates; all three exact-image terminal markers. The branch was safely fast-forwarded from `40cd16ad` to then-current operator baseline `6b529510409fd21fe69c7dfac497c2a117e52913`; the intervening P42 evidence-only commit had no overlapping files.
+- Failure note: Importing `tunix.utils.topology` from the standalone contract initially pulled the package-level optional `metrax` dependency on the bare CPU gate, so the host-key parser remains self-contained at this boundary. Two preliminary targeted-test invocations selected the wrong absl/unittest module path; the tests passed once launched from `tests/rl/agentic`.
+- Files/artifacts: `tunix/rl/deepswe_contract.py`, `tunix/rl/agentic/agentic_rl_learner.py`, `tunix/rl/agentic/agentic_grpo_learner.py`, `examples/deepswe/train_deepswe_nb.py`, P44 classifier/tests/exact-image gate.
+- Rollback: Revert the isolated host-key resolver and P44 evidence requirements plus the two narrow agentic batching changes; no production flag default or existing P34/P39/P43 recipe was relaxed.
+- Next: Inventory direct-attached v5p/Qwen3-4B/R2E prerequisites before implementing or running a default-off one-host smoke.
+
+## 2026-08-12T01:04:25Z — P44.8: local smoke inventory is environment-blocked
+
+- Type: verification and documentation
+- Fact: The current host cannot initialize the TPU backend because `libtpu.so` is absent, exposes no `/dev/vfio` or `/dev/accel*`, has no existing Qwen3-4B checkpoint in the reviewed local roots, cannot import `r2egym`, and has neither `kubectl` nor a readable user kubeconfig.
+- Action: Stopped the optional one-host lane as `BLOCKED_REAL_ENVIRONMENT` without downloading weights, substituting a fake R2E environment, or running a forward/backward/update. Corrected the archived r02 explanation, promoted P44.7 to passed, made P44.6 target promotion active, and added exact host-inventory/logprob evidence requirements to the operator runbook and handoff.
+- Commands: Host JAX TPU inventory with `JAX_PLATFORMS=tpu`; read-only device-node, package, model-directory, and kubeconfig checks.
+- Result: Local one-host E2E NOT RUN. This does not invalidate the CPU/exact-image repair gates and does not block a publication followed by an operator-owned 64/256 rollout-only retry.
+- Files/artifacts: `phases/p44-8-onehost-smoke.md`, `phases/p44-6-target-promotion.md`, `cluster/P44_DEEPSWE_QWEN4B_PARITY_RUNBOOK.md`, `tasks/p44-deepswe-qwen4b-parity/HANDOFF.md`, `debug_logs/README.md` Section 45.
+- Rollback: Documentation-only phase transition; the P44 lane remains default-off and no external state changed.
+- Next: Audit the complete implementation diff, rerun syntax/diff and final P44 release markers, then wait for explicit commit/push authorization.
+
+## 2026-08-12T01:06:10Z — P44.7: replay repair onto latest operator baseline
+
+- Type: integration
+- Fact: While the final audit was running, `origin/yuxzhang/canon-zero-tim` advanced to `7ea2176f807e3e13fde17499e15fef2bd497363b` with the independent P42 duplicate-gradient contract correction.
+- Action: Fetched and fast-forwarded the development branch, then replayed all uncommitted P44 changes. The only textual conflict was adjacent documentation in `debug_logs/README.md`; resolution preserves both the P44 Section 45 root-cause correction and upstream P42 Section 46 finding. No DeepSWE code file overlapped.
+- Command: `git fetch origin yuxzhang/canon-zero-tim`; temporary local stash; `git merge --ff-only origin/yuxzhang/canon-zero-tim`; restore and resolve documentation.
+- Result: Worktree now exactly tracks operator baseline `7ea2176f807e3e13fde17499e15fef2bd497363b` plus the uncommitted P44 repair; all files are unstaged and `git diff --check` passes.
+- Files/artifacts: complete P44 diff, preserved P42 upstream changes.
+- Rollback: The conflict-preservation stash remains available until the final post-replay gates confirm the restored worktree.
+- Next: Rerun affected post-replay gates, then remove only the redundant task-owned stash and wait for explicit commit/push authorization.
+
+## 2026-08-12T01:07:00Z — P44.7: latest-baseline release gates pass
+
+- Type: verification
+- Fact: Development HEAD and `origin/yuxzhang/canon-zero-tim` both resolve to `7ea2176f807e3e13fde17499e15fef2bd497363b` before publication of the still-uncommitted P44 repair.
+- Action: Re-ran the affected fixed-image and adjacent gates after the upstream replay, verified the restored worktree, then dropped only the redundant task-owned conflict-recovery stash. Pre-existing unrelated stashes were preserved.
+- Commands: P44 exact-image gate; P43 and P39 CPU gates; P34 static, trajectory, and update CPU gates; `git diff --check`.
+- Result: PASS — `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS` (32 cases), two learner unit tests, `P44_EXACT_IMAGE_CPU_PASS overlay=qwen4b`, `P43_DEEPSWE_DEBUG_CPU_PASS`, `P39_DEEPSWE_PILOT_CPU_PASS`, `P34_STATIC_PASS suites=10`, `P34_TRAJECTORY_CPU_PASS tests=5`, and `P34_UPDATE_CPU_PASS tests=5`.
+- Files/artifacts: complete unstaged P44 implementation and documentation diff.
+- Rollback: No external state changed; no commit or push exists. The operator branch remains untouched at the upstream baseline.
+- Next: Wait for explicit commit/push authorization. After publication, fill in the exact repair SHA in `HANDOFF.md` and begin P44.6 with rollout-only on the available 64- or 256-device allocation.

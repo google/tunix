@@ -25,6 +25,21 @@ class P44IntegrationContractTest(unittest.TestCase):
     self.assertIn("if p34.devices_per_role == 32", text)
     self.assertIn("deepswe_contract.split_4x4x4_role_devices", text)
     self.assertIn("deepswe_contract.split_4x8x8_role_devices", text)
+    self.assertIn("[P34.DEVICE_INVENTORY] PASS", text)
+
+  def test_reviewed_agentic_batch_semantics_are_present(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text()
+    grpo = (
+        ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
+    ).read_text()
+    self.assertIn("prompts = [chat_lists]", learner)
+    self.assertIn("configured_compute_logps", grpo)
+    self.assertIn(
+        "configured_compute_logps * self.algo_config.num_generations", grpo
+    )
+    self.assertIn("[{marker}.LOGPS_BATCH]", grpo)
 
   def test_artifacts_precede_alignment_and_use_active_directory(self):
     text = (
