@@ -14,7 +14,7 @@
 
 """The RL engine interface (Layer 1 Compute Routing Protocol) following Orchestrator V2."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.experimental.common import datatypes
 
@@ -36,7 +36,11 @@ class AbstractRLEngine(Protocol):
     ...
 
   async def generate(
-      self, prompts: Sequence[Any], **kwargs: Any
+      self,
+      prompts: Sequence[Any],
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Synchronous batched rollout generation over rollout workers."""
     ...
@@ -61,7 +65,7 @@ class AbstractRLEngine(Protocol):
       apply_optimizer: bool = True,
       skip_jit: bool = False,
       **kwargs: Any,
-  ) -> dict[str, Any]:
+  ) -> Any:
     """Executes forward/backward gradient update on trainer workers."""
     ...
 

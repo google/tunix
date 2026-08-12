@@ -29,20 +29,24 @@ class RLProgramTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     self.mock_engine = mock.MagicMock(spec=rl_engine_interface.AbstractRLEngine)
-    mock_resp = datatypes.RolloutResponse(
+    self.mock_request = datatypes.RolloutRequest(
         request_id="r1",
-        status="COMPLETED",
-        env_reward=1.0,
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        segments=[
-            datatypes.TokenSegment(
-                source="assistant",
-                tokens=np.array([3, 4], dtype=np.int32),
-                loss_mask=np.array([1, 1], dtype=np.int32),
-            )
-        ],
+        prompt_id="prompt1",
+        prompt="prompt1",
     )
-    self.mock_engine.generate = mock.AsyncMock(return_value=[mock_resp])
+    mock_item = datatypes.TrajectoryItem(
+        pair_index=0,
+        group_id="prompt1",
+        start_step=0,
+        traj=datatypes.Trajectory(
+            reward=1.0,
+            status=datatypes.TrajectoryStatus.SUCCEEDED,
+        ),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.int32),
+    )
+    self.mock_engine.generate = mock.AsyncMock(return_value=[mock_item])
     self.mock_engine.train_step = mock.AsyncMock(return_value="mock_train_result")
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
 
@@ -76,10 +80,12 @@ class RLProgramTest(absltest.TestCase):
         on_step_end=on_end,
     )
 
-    res = program.step_once(prompts=["prompt1"])
+    res = program.step_once(prompts=[self.mock_request])
 
     self.assertEqual(res, "mock_train_result")
-    self.mock_engine.generate.assert_called_once_with(prompts=["prompt1"])
+    self.mock_engine.generate.assert_called_once_with(
+        prompts=[self.mock_request]
+    )
     self.mock_algo.create_trainer_payloads.assert_called_once()
     self.mock_engine.train_step.assert_called_once()
     self.mock_engine.sync_weights.assert_called_once_with(role=datatypes.Role.ACTOR)
@@ -87,6 +93,44 @@ class RLProgramTest(absltest.TestCase):
 
     self.assertEqual(begin_calls, [0])
     self.assertEqual(end_calls, [(1, "mock_train_result")])
+    self.assertIsNotNone(program.last_step_result)
+    self.assertEqual(program.last_step_result.num_rollouts, 1)
+    self.assertEqual(program.last_step_result.num_microbatches, 1)
+
+  def test_step_once_can_skip_weight_sync(self):
+    program = rl_program.SyncRLProgram(
+        engine=self.mock_engine,
+        algo=self.mock_algo,
+        assembler=self.assembler,
+        sync_weights=False,
+    )
+
+    res = program.step_once(prompts=[self.mock_request])
+
+    self.assertEqual(res, "mock_train_result")
+    self.mock_engine.sync_weights.assert_not_called()
+    self.assertEqual(program.step, 1)
+    self.assertIsNotNone(program.last_step_result)
+    self.assertEqual(program.last_step_result.policy_version, 1)
+
+  def test_run_accepts_orchestrator_supplied_engine(self):
+    program = rl_program.SyncRLProgram(
+        algo=self.mock_algo,
+        assembler=self.assembler,
+        sync_weights=False,
+    )
+
+    program.run(
+        train_dataset=[[self.mock_request]],
+        num_steps=1,
+        engine=self.mock_engine,
+    )
+
+    self.mock_engine.generate.assert_called_once_with(
+        prompts=[self.mock_request]
+    )
+    self.mock_engine.train_step.assert_called_once()
+    self.assertEqual(program.step, 1)
 
   def test_eval_step_once_flow(self):
     program = rl_program.SyncRLProgram(
@@ -94,10 +138,15 @@ class RLProgramTest(absltest.TestCase):
         algo=self.mock_algo,
         assembler=self.assembler,
     )
-    res = program.eval_step_once(prompts=["eval_prompt"])
+    eval_request = datatypes.RolloutRequest(
+        request_id="eval_r1",
+        prompt_id="eval_prompt",
+        prompt="eval_prompt",
+    )
+    res = program.eval_step_once(prompts=[eval_request])
 
     self.assertLen(res, 1)
-    self.mock_engine.generate.assert_called_once_with(prompts=["eval_prompt"])
+    self.mock_engine.generate.assert_called_once_with(prompts=[eval_request])
     self.mock_algo.create_trainer_payloads.assert_called_once()
 
 

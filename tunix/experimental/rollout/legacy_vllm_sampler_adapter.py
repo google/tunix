@@ -15,6 +15,7 @@
 """Legacy vLLM Sampler adapter integrating with Tunix VllmSampler."""
 
 import abc
+import numbers
 from typing import Any, List, Sequence
 import numpy as np
 
@@ -77,6 +78,28 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
           f"LegacyVllmSamplerAdapter [{self.server_id}] requires a vllm_sampler"
           " instance or tokenizer + config."
       )
+
+  def _unpadded_prompt_tokens(self, padded_tokens: Any) -> np.ndarray:
+    """Returns sampler-tokenized prompt ids without backend left padding."""
+    arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
+    pad_id = getattr(self.tokenizer, "pad_token_id", None)
+    if pad_id is None:
+      pad_id = getattr(self.tokenizer, "eos_token_id", None)
+    if not isinstance(pad_id, numbers.Integral):
+      return arr
+    non_pad = np.flatnonzero(arr != pad_id)
+    if non_pad.size == 0:
+      return np.zeros(0, dtype=np.int32)
+    return arr[non_pad[0] :]
+
+  def _prompt_tokens_from_request(
+      self, req: Any, fallback_padded_tokens: Any
+  ) -> np.ndarray:
+    """Returns request token ids directly when available, else sampler output."""
+    prompt = req.prompt if hasattr(req, "prompt") else req
+    if not isinstance(prompt, str):
+      return np.asarray(prompt, dtype=np.int32).reshape(-1)
+    return self._unpadded_prompt_tokens(fallback_padded_tokens)
 
   # --- Lifecycle & Topology ---
   async def start(self, **kwargs) -> str | None | Any:
@@ -210,12 +233,16 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
           if toks is not None
           else np.zeros(0, dtype=np.int32)
       )
+      prompt_token_ids = self._prompt_tokens_from_request(
+          req, sampler_output.padded_prompt_tokens[i]
+      )
       log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
 
       responses.append(
           base_sampler_lib.SamplingResponse(
               request_id=req_id,
               text=txt,
+              prompt_token_ids=prompt_token_ids,
               token_ids=tok_ids,
               logprobs=log_ps,
               finish_reason="stop",
@@ -255,6 +282,11 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
     """Queries status of an ongoing weight transfer or KV-cache migration."""
     del req_id, kwargs
     return "SUCCESS"
+
+  async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
+    """Returns best-effort vLLM queue/cache load information."""
+    del kwargs
+    return base_sampler_lib.LoadInfo()
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Finalizes and switches active policy weights after transfer completion."""

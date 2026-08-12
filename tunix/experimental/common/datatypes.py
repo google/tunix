@@ -30,17 +30,6 @@ from tunix.rl.agentic.agents import agent_types
 ##### Worker-internal datatypes #####
 
 
-# TODO(noghabi): Consolidate Role with rl_cluster.Role.
-class Role(enum.Enum):
-  """Role of the model."""
-
-  ACTOR = "actor"  # policy model
-  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
-  REFERENCE = "reference"  # kept fixed during training
-  REWARD = "reward"
-  ROLLOUT = "rollout"
-
-
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
 Step = agent_types.Step
@@ -56,7 +45,6 @@ class TrajectoryItem(agent_types.TrajectoryItem):
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
   policy_version: int = 0
-  # TODO: trajectory item having the completion tokens, masks, etc is quite redundant since those are in the trainer payload already.
 
 class Role(str, enum.Enum):
   """Orchestrator worker roles."""
@@ -217,6 +205,24 @@ class WorkerInfo:
 
 
 ##### Rollout DTOs #####
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class GenerationArgs:
+  """Typed generation arguments used by the orchestrator generate API."""
+  max_generation_steps: int | None = None
+  temperature: float | None = None
+  top_p: float | None = None
+  top_k: int | None = None
+  seed: int | None = None
+  return_logprobs: bool | None = None
+
+  def as_kwargs(self) -> dict[str, Any]:
+    return {
+        field.name: getattr(self, field.name)
+        for field in dataclasses.fields(self)
+        if getattr(self, field.name) is not None
+    }
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -468,8 +474,9 @@ class TrainerPayload:
   """Generic trainer payload.
 
   Attributes:
-    token_ids: [B, T] token IDs. By default, structured as left-padded prompt
-      tokens concatenated with right-padded completion tokens.
+    token_ids: [B, T] token IDs for a batched trainer payload. By default,
+      each row is structured as left-padded prompt tokens concatenated with
+      right-padded completion tokens.
     token_mask: [B, T] token mask to differentiate padding tokens from valid
       tokens.
     segment_ids: Optional [B, T] packing segment ids.
@@ -491,6 +498,12 @@ class RLTrainerPayload(TrainerPayload):
     advantages: [B] or [B, C] advantages.
     loss_mask: [B, T], 1 where the position contributes to the loss.
     action_mask: Optional [B, T] or [B, C] mask of policy actions.
+    prompt_ids: Optional prompt token ids for GRPO-style losses. Unbatched
+      payloads may carry 1D unpadded rows; batch assembly pads them to [B, P].
+    prompt_mask: Optional [B, P] prompt mask.
+    completion_ids: Optional completion token ids. Unbatched payloads may carry
+      1D unpadded rows; batch assembly pads them to [B, C].
+    completion_mask: Optional [B, C] completion/action mask.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
@@ -502,6 +515,10 @@ class RLTrainerPayload(TrainerPayload):
   advantages: ArrayLike
   loss_mask: ArrayLike
   action_mask: ArrayLike | None = None
+  prompt_ids: ArrayLike | None = None
+  prompt_mask: ArrayLike | None = None
+  completion_ids: ArrayLike | None = None
+  completion_mask: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
@@ -516,9 +533,9 @@ class LogprobsRequest(Request):
   """Request to score per-token log-probabilities under a frozen model.
 
   Attributes:
-    prompt_tokens: [B, P], LEFT-padded.
-    completion_tokens: [B, C], RIGHT-padded; the result aligns to these
-      completion columns.
+    prompt_tokens: [B, P] token ids, already LEFT-padded by the caller.
+    completion_tokens: [B, C] token ids, already RIGHT-padded by the caller;
+      the result aligns to these completion columns.
     temperature: Softmax temperature to score under. Mandatory: it must match
       the temperature the tokens were sampled at, or the log-probs are biased.
     model_role: Which hosted model to score against (v1: "reference").
@@ -552,8 +569,8 @@ class ScoreRequest(Request):
   """Request to score scalar rewards/values under a hosted model.
 
   Attributes:
-    prompt_tokens: [B, P], LEFT-padded.
-    completion_tokens: [B, C], RIGHT-padded.
+    prompt_tokens: [B, P] token ids, already LEFT-padded by the caller.
+    completion_tokens: [B, C] token ids, already RIGHT-padded by the caller.
     model_role: Which hosted model to score against (e.g. "reward").
   """
 

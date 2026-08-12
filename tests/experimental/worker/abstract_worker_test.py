@@ -88,7 +88,8 @@ class AbstractWorkerTest(parameterized.TestCase):
 
     with mock.patch(module_path) as mock_response:
       # Hook into the Response() creation inside the try-block to check state
-      def verify_initializing():
+      def verify_initializing(*args, **kwargs):
+        del args, kwargs
         self.assertEqual(worker.state, WorkerState.INITIALIZING)
         return mock.DEFAULT
 
@@ -96,7 +97,8 @@ class AbstractWorkerTest(parameterized.TestCase):
       worker.initialize()
       self.assertEqual(worker.state, WorkerState.READY)
 
-      def verify_compiling():
+      def verify_compiling(*args, **kwargs):
+        del args, kwargs
         self.assertEqual(worker.state, WorkerState.COMPILING)
         return mock.DEFAULT
 

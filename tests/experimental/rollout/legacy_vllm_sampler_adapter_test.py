@@ -72,6 +72,7 @@ class LegacyVllmSamplerAdapterTest(absltest.TestCase):
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
     self.assertEqual(response.request_id, "vllm_req_01")
     self.assertEqual(response.text, "completion 1")
+    np.testing.assert_array_equal(response.prompt_token_ids, [1, 2])
     np.testing.assert_array_equal(response.token_ids, [10, 20, 30])
     self.mock_vllm_sampler.assert_called_once()
 
@@ -101,6 +102,8 @@ class LegacyVllmSamplerAdapterTest(absltest.TestCase):
     self.assertLen(responses, 2)
     self.assertEqual(responses[0].text, "completion 1")
     self.assertEqual(responses[1].text, "completion 2")
+    np.testing.assert_array_equal(responses[0].prompt_token_ids, [1, 2])
+    np.testing.assert_array_equal(responses[1].prompt_token_ids, [3, 4])
 
   def test_weight_sync(self):
     mock_weights = {"layer1": "weights"}

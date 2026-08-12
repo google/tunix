@@ -880,6 +880,27 @@ class RLEngine:
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
+  def eval_actor(self, eval_ds: Any) -> Any:
+    """Runs an explicit actor evaluation phase."""
+    if eval_ds is None:
+      return None
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+      run_eval = getattr(self.actor_trainer, "_run_eval", None)
+      if callable(run_eval):
+        res = run_eval(eval_ds)
+      else:
+        eval_step = getattr(self.actor_trainer, "eval_step", None)
+        if not callable(eval_step):
+          raise TypeError(
+              "actor_trainer must expose _run_eval(...) or eval_step(...)."
+          )
+        res = None
+        for chunk in eval_ds:
+          eval_step(chunk)
+      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+      return res
+
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
