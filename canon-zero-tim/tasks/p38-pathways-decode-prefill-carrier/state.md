@@ -34,8 +34,10 @@
   adapter, but the diagnostic consumer passed a five-group partial tail (40
   trajectories) into DP16. P38.2g7 keeps the global batch at 32 prompts while
   setting the P38-only consumer mini-batch to four prompts, giving a complete
-  32-trajectory DP16-divisible diagnostic unit. P38s8 is the only pending
-  target attempt.
+  32-trajectory DP16-divisible diagnostic unit. The committed P38s8 file is an
+  interior compile excerpt and cannot validate that target gate. P38.2g8 is
+  active and requires one byte-zero terminal stock log before interpreting
+  reachability, prefix coverage, capture selection, or postflight.
 - Latest local gate: P38.2g7 is implemented locally. The renderer and recipe
   require 32 global prompts, four diagnostic mini-batch prompts, eight
   generations, and DP16; a five-prompt negative control is rejected. Full
@@ -139,9 +141,16 @@
   filtering. The log is also nonterminal and contains no alignment, child
   exit, classifier, archive, or outer postflight. Verdict is
   `INCONCLUSIVE_WRONG_PATH_NONTERMINAL`.
-- Next action for the strict track: after P38.2g7 is published and separate
-  resource approval is granted, execute the P38s8
-  stock-only Attempt-0 run-and-return protocol at the top of `HANDOFF.md`.
+- P38s8 evidence correction: the 1,437-line/173,137-byte committed artifact
+  starts inside a device-memory report and ends during initial canonical model
+  compilation. It has one standard-path INIT marker but no byte-zero preamble,
+  OBSERVE, capture, alignment, terminal exit, classifier, archive, or outer
+  postflight. It is `INCONCLUSIVE_PARTIAL_EXCERPT`. The claim that prefixes
+  merely stayed below 1536 is withdrawn because the runner emits OBSERVE before
+  applying the prefix filter.
+- Next action for the strict track: with separate resource approval, execute
+  the P38s9 stock-only Attempt-0 run-and-return protocol at the top of
+  `HANDOFF.md` and in `../../cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
   Preserve the complete non-timestamped terminal head log through outer
   postflight and return the exact evidence directory, including the real
   run-specific capsule and serving tar. Do not rerun U. P38.2g3 E0 remains
@@ -149,7 +158,12 @@
   history join and whole-vector reproduction.
   The independent GSM8K convergence campaign remains governed by its
   published warning-only policy.
-- Blockers: the decisive serving block-table/page-state archive is missing.
+- Parallel screen: a local v5p RoPE decode-shape/prefill-shape comparison may
+  prioritize the later seam walk but cannot bypass exact E0. P45 production
+  capture is not currently admitted because P38 postflight is intentionally
+  diagnostic-only and fail-closed; shadow mode requires a separate CL.
+- Blockers: the decisive serving block-table/page-state archive and a terminal
+  standard-path observation record are missing.
   Current evidence does not prove scheduler ownership, stale page-table,
   partial-write, padding-leak, or physical-topology causality. The external
   64-chip operator is required for one complete stock-only capture. The pinned
@@ -180,8 +194,8 @@
   entries, serving classifier 26/26, P38 renderer 6/6, P45 TP8 seven-site plus
   forward/VJP probes PASS, and postflight standard-path plus stock/U negative
   controls PASS.
-- Updated: 2026-08-12 UTC after auditing P38s7 and locally completing the
-  DP-divisible P38.2g7 diagnostic batch repair.
+- Updated: 2026-08-12 UTC after rejecting the P38s8 partial excerpt and
+  preregistering the terminal P38s9 operator protocol.
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,

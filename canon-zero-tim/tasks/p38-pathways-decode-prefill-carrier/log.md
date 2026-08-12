@@ -928,3 +928,43 @@
   cause, backward, optimizer, or training result is claimed.
 - Next: publish this repair, then execute P38s8 stock only from the superseding
   top section of `HANDOFF.md`. Do not rerun unified KV.
+
+## 2026-08-12 UTC — P38s8 partial evidence rejected; P38s9 operator protocol ready
+
+- Type: evidence correction and documentation-only operator handoff. No
+  cloud/TPU run, runtime-code change, backward, optimizer commit, or training
+  launch occurred.
+- Evidence: `p38_p38s8_frozenlake_stock.raw.log` has 1,437 lines and 173,137
+  bytes, starts inside a device-memory report, and ends during initial
+  canonical model compilation. It contains one standard-path INIT marker but
+  no byte-zero source/Attempt-0 preamble, OBSERVE, capture record, alignment,
+  child exit, classifier, archive, or outer postflight. Verdict:
+  `INCONCLUSIVE_PARTIAL_EXCERPT`.
+- Duplicate check: the s5 and s6 “head full” files added by `42139ffa` are
+  byte-for-byte identical to the previously audited s5/s6 logs. They add no
+  terminal evidence.
+- Correction: withdrew the Section 55 claim that FrozenLake prompts stayed
+  below 1536. The installed runner emits OBSERVE before prefix filtering, so
+  the absence of OBSERVE in a terminal full log would identify hook
+  reachability, not a range miss. The partial s8 excerpt cannot decide either.
+- Action: superseded the s8 launch instructions with a stock-only P38s9
+  run-and-return contract, added
+  `cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`, and preregistered distinct verdicts
+  for hook reachability, prefix-range miss, selection/mapping failure,
+  postflight failure, and an admitted capture.
+- Decision: a local v5p RoPE decode-shape/prefill-shape comparison is admitted
+  only as a cheap operator screen and cannot bypass exact E0. The current
+  fail-closed P38 environment is not compatible with P45 committed training;
+  a nonblocking production shadow capture would require a separate reviewed
+  default-off implementation rather than an operator YAML override.
+- Local gates: all Bash blocks in the new runbook and the superseding handoff
+  section pass `bash -n`; the P38 renderer passes 6/6; P38 postflight passes;
+  a live documentation render emits stock/unified manifests with the pinned
+  32/4/8/DP16 diagnostic geometry; `git diff --check` passes.
+- Claim ceiling: documentation/evidence correction only. Page ownership,
+  scheduler lifecycle, stale tables, RoPE, residual/cast seams, and the first
+  divergent operator remain unproven. P38s9 target execution is NOT RUN.
+- Next: publish this documentation, then the external operator executes P38s9
+  stock only and returns the entire terminal evidence directory. Do not rerun
+  unified KV or infer a cause from a partial log.
+- Rollback: documentation-only; runtime behavior is unchanged.

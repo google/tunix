@@ -1436,7 +1436,7 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 - `debug_logs/p45_p45r4_frozenlake_resident.raw.log` (SHA-256: `19a1e203713ac0078a7f6d83170e148c7afb3fcb623d7eff5f797d94e9c8b375`)
 - `debug_logs/p38_p38s8_frozenlake_stock.raw.log` (SHA-256: `9a18291991105aa5c190e9ecb5c32a185fee9ef29ac13e35a6e0d992448e3796`)
 - `debug_logs/p38_p38s5_head_full.raw.log` (SHA-256: `56476e90faefd1f1cf319adadb9d9be0e27be1692117fc2cf12646a5ecce3c21`)
-- `debug_logs/p38_p38s6_head_full.raw.log` (SHA-256: `3b751bc3edcf959ea88d82963f537ac647f0ba3296fc3f3dd3be6479e608cafa`)
+- `debug_logs/p38_p38s6_head_full.raw.log` (SHA-256: `3b751bc3edcf959ea88d82963f537ac647f0ba3296fc3f3ddbe6479e608cafa`)
 - `debug_logs/p34_p34r02_deepswe_full.raw.log` (SHA-256: `6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`)
 - Target Commit: `d725f078487ec1b8dc07d27db61d27b446af94f0`
 - Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p` & `mlperf-v5p-256`
@@ -1458,10 +1458,24 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
      ```
    - **Root Cause & Fix**: `_p32_group_spec` hardcoded `assert self._data_size == 16`. Relaxing the check to `if self._data_size not in (8, 16):` fully enables DP8 group reverse execution.
 
-2. **P38s8 FrozenLake Standard-Path Diagnostic Summary**:
-   - Successfully initialized standard-path hook on 64 TPU chips (`CANON_P38_SERVING_CAPTURE_INIT` verified);
-   - 36 layers of Canonical Pallas RMSNorm/SwiGLU verified on standard `_execute_model` path;
-   - FrozenLake environment prompts (<100 tokens) did not meet the `min_prefix=1536` filter threshold required for P38 carrier capture.
+2. **P38s8 FrozenLake Standard-Path Diagnostic Evidence Correction**:
+   - The committed file is an interior 1,437-line/173,137-byte excerpt. It
+     starts inside a device-memory report and ends during initial canonical
+     model compilation. It is not a terminal byte-zero head log.
+   - One `CANON_P38_SERVING_CAPTURE_INIT` marker with
+     `expected_path=standard` is present. No source/Attempt-0 preamble,
+     `CANON_P38_SERVING_CAPTURE_OBSERVE`, pre/post capture, alignment record,
+     child exit, classifier, serving archive, or outer postflight is present.
+   - Verdict: `INCONCLUSIVE_PARTIAL_EXCERPT`. The previous statement that
+     FrozenLake prompts stayed below `min_prefix=1536` is withdrawn. The
+     installed runner emits OBSERVE before prefix filtering, so that claim
+     cannot be inferred from this excerpt.
+   - The s5/s6 “head full” files added by the same evidence commit are
+     byte-for-byte copies of the previously audited s5/s6 logs; they add no new
+     terminal evidence.
+   - Next: run P38s9 stock only and return a terminal byte-zero log and exact
+     evidence bundle using
+     `cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md` and the P38 `HANDOFF.md`.
 
 3. **P34r02 DeepSWE 32B Full Training on 256-Chip Cluster**:
    - 65/65 Pods Running; Gold Filter Pass (`4578 -> 1851` rows, whitelist digest `2f95c2e6df35...`);

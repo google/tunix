@@ -5,10 +5,30 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## DO THIS NOW: run one P38s8 FrozenLake standard-path stock capture
+## DO THIS NOW: run one P38s9 FrozenLake standard-path stock capture
 
 Use the latest published `origin/yuxzhang/canon-zero-tim` containing
 `p38-2g7-dp-divisible-diagnostic-batch.md`. Do not relaunch the P38s7 source.
+
+This is the first attempt whose operator contract treats one terminal,
+byte-zero log as a prerequisite instead of inferring a verdict from a pasted
+excerpt.
+Do not call the previously committed P38s8 excerpt a complete log:
+
+- `p38_p38s5_head_full.raw.log` and `p38_p38s6_head_full.raw.log` in
+  `42139ffa` are byte-for-byte copies of the already audited s5/s6 logs. They
+  add no new evidence.
+- `p38_p38s8_frozenlake_stock.raw.log` has 1,437 lines and 173,137 bytes, starts
+  inside a device-memory report, and ends during the first canonical model
+  compilation. It has one standard-path INIT marker but no byte-zero
+  source/Attempt-0 preamble, OBSERVE, capture, alignment, child exit,
+  classifier, archive, or outer postflight. Its verdict is
+  `INCONCLUSIVE_PARTIAL_EXCERPT`.
+- The old explanation that s8 merely missed `min_prefix=1536` is withdrawn.
+  The runner emits `CANON_P38_SERVING_CAPTURE_OBSERVE` before applying the
+  prefix-stratum filter. A terminal full log with INIT but no OBSERVE would
+  indicate that the standard hook was not reached; the partial s8 excerpt
+  cannot decide that question.
 
 This section supersedes every older P38 serving-capture launch command below.
 The committed `p38_p38s4_frozenlake_stock.raw.log` is not a complete run log:
@@ -17,6 +37,24 @@ final RMSNorm without a workload exit, serving capture, classifier, archive,
 or final postflight. It is `INCONCLUSIVE` and must not be used to select a
 repair.
 
+### Why this remains a strict diagnostic instead of a P45 sidecar
+
+A local RoPE decode-shape versus prefill-shape comparison is a useful cheap
+screen and may run in parallel, but it cannot replace this capture. A nonzero
+operator result would show that one RoPE aval pair can drift; it would not
+prove that RoPE carries the production A-B boundary. An exact result would not
+exclude wrong production positions or a different outer fusion envelope. E0
+whole-vector reproduction remains mandatory before selecting a repair.
+
+Do not inject the current P38 environment into P45 full training. The published
+P38 contract deliberately requires `backward-no-commit`,
+`CANON_P38_PRECHECK_ONLY=1`, exactly four records, and a classifier/archive
+postflight. P45 is a warning-only committed-training profile. Combining them
+without a separately reviewed shadow-capture design would either fail the
+environment contract or let capture/postflight failure interrupt production.
+P38s9 is therefore the launchable diagnostic now; a nonblocking P45 shadow
+capture is a future code change, not an operator YAML edit.
+
 P38s6 is also inconclusive. It initialized the patched module but emitted zero
 observations because the hook existed only in `_execute_continue_decode`, while
 FrozenLake uses standard `_execute_model` with `enable_continue_decode=False`.
@@ -24,7 +62,7 @@ Its log also ends without alignment, terminal precheck, classifier, archive,
 or outer postflight. Lowering the prefix threshold cannot repair an unreachable
 hook. P38s7 then reached the real standard hook, but the 32-group diagnostic
 consumer accepted a five-group partial tail and passed 40 trajectories to the
-DP16 adapter. P38s8 uses a P38-only four-prompt mini-batch: 32 global prompts
+DP16 adapter. P38s9 uses a P38-only four-prompt mini-batch: 32 global prompts
 remain queued, but the first complete diagnostic unit is 4 x 8 = 32
 trajectories and is DP16-divisible. The operator's only job is to run one fresh
 **stock-only** standard-path P38 diagnostic and return the complete evidence
@@ -35,7 +73,7 @@ force-enable continue-decode because that changes the program being diagnosed.
 ### 1. Fetch one immutable source and render
 
 Run every command block in this section sequentially in the same Bash shell
-from an existing clone of `google/tunix`. Use a new run ID if `p38s8` already
+from an existing clone of `google/tunix`. Use a new run ID if `p38s9` already
 exists. Do not reuse or overwrite an earlier output directory.
 
 ```bash
@@ -43,9 +81,9 @@ set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor \
-  76cef0ec8222fd1716422f6f7a0c24eeff5a527f "$SOURCE_COMMIT"
+  4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd "$SOURCE_COMMIT"
 
-RUN_ID="p38s8"
+RUN_ID="p38s9"
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -188,10 +226,20 @@ The unedited `head.full.log` must contain all of the following:
 11. final `[run] PATHTRACE` with `p38_kv_unified=0`,
     `p38_capture_init=1`, and positive `p38_capture_observe`.
 
+Classify an incomplete run from the terminal `head.full.log` only:
+
+| Terminal evidence | Verdict | Next action |
+|---|---|---|
+| INIT=1, OBSERVE=0 | `INCONCLUSIVE_STANDARD_HOOK_NOT_REACHED` | inspect standard `_execute_model` wiring; do not lower prefix bounds |
+| OBSERVE>0 and every observed maximum is below 1536 | `INCONCLUSIVE_PREFIX_RANGE_MISS` | choose one new bounded range from the recorded request prefixes |
+| OBSERVE crosses a registered stratum but no pre/post pair exists | `INCONCLUSIVE_SELECTION_OR_MAPPING` | fix request/packed-row selection; do not change the workload |
+| Four pre/post pairs exist but classifier/archive is missing | `INCONCLUSIVE_POSTFLIGHT` | preserve the records and fix artifact transport only |
+| All eleven items exist | `CAPTURE_ADMITTED` | extract artifacts, then start exact E0 replay |
+
 If no stratum is captured, return the complete failure package including every
-`CANON_P38_SERVING_CAPTURE_OBSERVE` line. Do not lower the bounds or relaunch:
-the observed request-level prefix range is the evidence needed for the next
-single-variable revision.
+`CANON_P38_SERVING_CAPTURE_OBSERVE` line. Do not lower the bounds or relaunch
+automatically: the observed request-level prefix range is the evidence needed
+for the next single-variable revision.
 
 Then recover the binaries from the unedited, non-timestamped complete log:
 
@@ -200,11 +248,11 @@ set -euo pipefail
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s8-mismatch-capsule.npz"
+  --output "$EVIDENCE/p38s9-mismatch-capsule.npz"
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s8-serving-capture.tar"
+  --output "$EVIDENCE/p38s9-serving-capture.tar"
 sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
 sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
@@ -213,8 +261,8 @@ test -s "$EVIDENCE/pre-alignment.jsonl"
 test -s "$EVIDENCE/serving-classification.json"
 sha256sum \
   "$EVIDENCE/head.full.log" \
-  "$EVIDENCE/p38s8-mismatch-capsule.npz" \
-  "$EVIDENCE/p38s8-serving-capture.tar" \
+  "$EVIDENCE/p38s9-mismatch-capsule.npz" \
+  "$EVIDENCE/p38s9-serving-capture.tar" \
   "$EVIDENCE/pre-alignment.jsonl" \
   "$EVIDENCE/serving-classification.json" | \
   tee "$EVIDENCE/SHA256SUMS"
@@ -247,8 +295,8 @@ head-pod.events.txt
 pathways-proxy.log
 pathways-rm.log
 head.previous.log
-p38s8-mismatch-capsule.npz
-p38s8-serving-capture.tar
+p38s9-mismatch-capsule.npz
+p38s9-serving-capture.tar
 pre-alignment.jsonl
 serving-classification.json
 SHA256SUMS

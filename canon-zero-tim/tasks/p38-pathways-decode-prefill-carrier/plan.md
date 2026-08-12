@@ -30,7 +30,8 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
 | P38.2g4 | Decode-envelope seam localization with stratified production capture | Four bounded prefix strata and implementation identity survive, at least one exact token-history join is admitted, E0 reproduces the complete A/B vectors, and the first A/B divergence is localized before any repair | active; D0 published at `b89435ca`, D1 target capture not run |
 | P38.2g5 | Request-anchored serving trigger and red-safe diagnostic stop | The installed runner attests module initialization and bounded scheduler-prefix observations, four request-anchored records survive, finite A-B red with exact B-C stops before backward, and outer postflight returns the real capsule/archive | superseded: P38s6 proved the hook was installed only in an unreachable continue-decode path |
 | P38.2g6 | Standard/mixed runner serving capture | `enable_continue_decode=False` reaches a path-attested capture after standard `_prepare_inputs`, mixed packed-token rows map exactly, capture completes after unchanged sampling, and wrong-path/async controls fail closed | locally complete; P38s7 reached the standard hook but stopped on a partial-batch DP-divisibility error |
-| P38.2g7 | DP-divisible diagnostic consumer batch | P38 alone consumes 4 prompts x 8 generations = 32 trajectories, renderer rejects non-DP16-divisible drift, and full-training geometry remains 32 prompts x 8 | local implementation complete; P38s8 stock target pending |
+| P38.2g7 | DP-divisible diagnostic consumer batch | P38 alone consumes 4 prompts x 8 generations = 32 trajectories, renderer rejects non-DP16-divisible drift, and full-training geometry remains 32 prompts x 8 | local implementation complete; P38s8 artifact is partial and does not validate the target gate |
+| P38.2g8 | Terminal standard-path evidence capture | One byte-zero terminal stock log distinguishes hook reachability, prefix-range miss, selection/mapping failure, postflight failure, or an admitted serving archive without guessing from excerpts | active; P38s9 operator protocol ready |
 | P38.2h | Candidate target backward-no-commit | The selected candidate first makes all forward boundaries exact, then passes actual-model gradient/DP-reducer gates with zero optimizer commits | pending; forbidden before P38.2g selects a candidate |
 
 ## Decisions
@@ -164,3 +165,12 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
   before `PRECHECK_COMPLETE`. P38.2g5 admits only a finite A-B diagnostic with
   exact B-C, persists its capsule, and then exits before backward. This is a
   diagnostic completion, never a training admission.
+- Decision (2026-08-12): a local v5p RoPE decode-shape/prefill-shape probe is a
+  cheap operator screen, not a substitute for production E0. A red screen does
+  not prove production causality, and an exact screen does not exclude wrong
+  position metadata or outer-envelope fusion. Exact E0 remains mandatory.
+- Decision (2026-08-12): do not inject the fail-closed P38 capture environment
+  into P45 full training. P38 requires backward-no-commit, precheck-only stop,
+  exactly four records, and classifier/archive admission. A nonblocking
+  production shadow capture needs a separate default-off CL and tests; it is
+  not an operator YAML override.
