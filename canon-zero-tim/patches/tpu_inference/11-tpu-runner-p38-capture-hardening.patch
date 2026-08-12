@@ -1,0 +1,80 @@
+--- runner_base.py	2026-08-12 22:26:43.958367364 +0000
++++ tpu_runner_p21_l30.py	2026-08-12 22:26:43.974367350 +0000
+@@ -1316,6 +1316,14 @@
+     seq_lens = np.asarray(jax.device_get(md_seq_lens)).reshape(-1)
+     query_start = np.asarray(jax.device_get(md_query_start_loc)).reshape(-1)
+     block_tables = np.asarray(jax.device_get(md_block_tables))
++    if block_tables.ndim == 1:
++        # p38s9: standard-path metadata delivered a flattened
++        # [rows * max_blocks] table; normalize before 2-D indexing.
++        if seq_lens.size == 0 or block_tables.size % seq_lens.size:
++            raise RuntimeError(
++                "P38 block table not row-divisible: "
++                f"shape={block_tables.shape} rows={seq_lens.size}")
++        block_tables = block_tables.reshape(seq_lens.size, -1)
+ 
+     scheduled_by_dp = {}
+     requests_by_id = {}
+@@ -2363,8 +2371,15 @@
+                 kv_connector_output, logits_indices_selector, padded_num_reqs,
+                 expert_indices, full_hidden_states, full_logits, req_ids_dp,
+                 padded_num_scheduled_tokens_per_dp_rank)
+-            _p38_serving_finish_standard(
+-                p38_serving_seq, attn_metadata, output)
++            try:
++                _p38_serving_finish_standard(
++                    p38_serving_seq, attn_metadata, output)
++            except Exception as exc:  # the capture must never kill the run
++                print(
++                    "[CANON_P38_SERVING_CAPTURE_ERROR] stage=finish "
++                    f"error={type(exc).__name__}: {exc}",
++                    flush=True,
++                )
+             return output
+ 
+     def _modify_prev_results(self):
+@@ -2523,21 +2538,29 @@
+             _,
+         ) = self._prepare_inputs(scheduler_output)
+ 
+-        p38_serving_seq = _p38_serving_begin(
+-            self,
+-            scheduler_output,
+-            req_ids_dp,
+-            input_ids,
+-            input_positions,
+-            None,
+-            attn_metadata,
+-            sampling_metadata,
+-            sample,
+-            None,
+-            1,
+-            padded_num_scheduled_tokens_per_dp_rank,
+-            program_path="standard",
+-        )
++        try:
++            p38_serving_seq = _p38_serving_begin(
++                self,
++                scheduler_output,
++                req_ids_dp,
++                input_ids,
++                input_positions,
++                None,
++                attn_metadata,
++                sampling_metadata,
++                sample,
++                None,
++                1,
++                padded_num_scheduled_tokens_per_dp_rank,
++                program_path="standard",
++            )
++        except Exception as exc:  # the capture must never kill the run
++            print(
++                "[CANON_P38_SERVING_CAPTURE_ERROR] stage=begin "
++                f"error={type(exc).__name__}: {exc}",
++                flush=True,
++            )
++            p38_serving_seq = None
+ 
+         # multi-modal support
+         if self.is_multimodal_model:

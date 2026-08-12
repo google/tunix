@@ -57,6 +57,7 @@ test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
 rg -q 'program_path="standard"' \
   canon-zero-tim/patches/tpu_inference/10-tpu-runner-p38-standard-capture.patch
+  canon-zero-tim/patches/tpu_inference/11-tpu-runner-p38-capture-hardening.patch
 rg -q '_DIAGNOSTIC_PROMPTS = 4' \
   canon-zero-tim/cluster/render_p38_serving_jobsets.py
 mkdir -p "$EVIDENCE"
