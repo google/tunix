@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -24,7 +25,7 @@ import qwix
 from tunix.models.gemma4 import model as model_lib
 
 
-class ModelTest(absltest.TestCase):
+class ModelTest(parameterized.TestCase):
 
   def test_gemma4_12b_config(self):
     config = model_lib.ModelConfig.gemma4_12b()
@@ -64,6 +65,117 @@ class ModelTest(absltest.TestCase):
     self.assertEqual(it_config.num_kv_heads, config.num_kv_heads)
     self.assertEqual(it_config.num_global_kv_heads, config.num_global_kv_heads)
     self.assertEqual(it_config.attention_pattern, config.attention_pattern)
+
+  @parameterized.named_parameters(
+      (
+          'all_unshared',
+          0.0,
+          [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+      ),
+      (
+          'half_shared',
+          0.5,
+          [0, 1, 2, 3, 4, 5, 4, 4, 4, 4, 4, 5],
+      ),
+  )
+  def test_kv_cache_sharing_patterns(
+      self, frac_shared_layers, expected_patterns
+  ):
+    patterns = model_lib.create_kv_cache_sharing_patterns(
+        num_layers=12,
+        frac_shared_layers=frac_shared_layers,
+        share_global=True,
+        share_local=True,
+        attention_types=model_lib.GEMMA4_ATTENTION_PATTERN * 2,
+    )
+    self.assertEqual(patterns, expected_patterns)
+
+  def test_kv_cache_sharing_patterns_raises_on_missing_lender(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        r'Cannot share KV cache for layer \d+ of type AttentionType\..*: no'
+        r' unshared layer',
+    ):
+      model_lib.create_kv_cache_sharing_patterns(
+          num_layers=6,
+          frac_shared_layers=0.5,
+          share_global=True,
+          share_local=True,
+          attention_types=model_lib.GEMMA4_ATTENTION_PATTERN,
+      )
+
+  def test_forward_pass_kv_cache_sharing_lifecycle(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 4
+    config.num_embed = 128
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 2
+    config.num_global_kv_heads = 2
+    config.global_key_size = 64
+    config.sliding_window_size = 8
+    config.frac_shared_layers = 0.5
+    config.attention_pattern = (
+        model_lib.AttentionType.LOCAL_SLIDING,
+        model_lib.AttentionType.GLOBAL,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs)
+
+    self.assertEqual(model.kv_cache_sharing_patterns, [0, 1, 0, 1])
+
+    # 1. Init Cache: unshared layers (0, 1) are allocated; shared (2, 3) are skipped.
+    cache = model.init_cache(batch_size=1, max_seq_len=16, dtype=jnp.float32)
+    self.assertEqual(set(cache.keys()), {'layer_0', 'layer_1'})
+    self.assertNotIn('layer_2', cache)
+    self.assertNotIn('layer_3', cache)
+
+    # 2. Prefill Step (T=4)
+    prefill_tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (1, 4), 0, config.num_embed
+    )
+    prefill_positions = jnp.arange(4)[None, :]
+    prefill_mask = jnp.tril(jnp.ones((4, 4), dtype=jnp.bool_))[None, ...]
+
+    logits, updated_cache = model(
+        prefill_tokens,
+        positions=prefill_positions,
+        cache=cache,
+        attention_mask=prefill_mask,
+    )
+
+    self.assertEqual(logits.shape, (1, 4, config.num_embed))
+    self.assertFalse(jnp.isnan(logits).any())
+    self.assertEqual(set(updated_cache.keys()), {'layer_0', 'layer_1'})
+    self.assertNotIn('layer_2', updated_cache)
+    self.assertNotIn('layer_3', updated_cache)
+    self.assertEqual(int(updated_cache['layer_0']['end_index'][0]), 4)
+    self.assertEqual(int(updated_cache['layer_1']['end_index'][0]), 4)
+
+    # 3. Decode Step (T=1)
+    decode_tokens = jax.random.randint(
+        jax.random.PRNGKey(1), (1, 1), 0, config.num_embed
+    )
+    decode_positions = jnp.array([[4]])
+    decode_mask = jnp.ones((1, 1, 16), dtype=jnp.bool_)
+
+    decode_logits, final_cache = model(
+        decode_tokens,
+        positions=decode_positions,
+        cache=updated_cache,
+        attention_mask=decode_mask,
+    )
+
+    self.assertEqual(decode_logits.shape, (1, 1, config.num_embed))
+    self.assertFalse(jnp.isnan(decode_logits).any())
+    self.assertEqual(set(final_cache.keys()), {'layer_0', 'layer_1'})
+    self.assertNotIn('layer_2', final_cache)
+    self.assertNotIn('layer_3', final_cache)
+    self.assertEqual(int(final_cache['layer_0']['end_index'][0]), 5)
+    self.assertEqual(int(final_cache['layer_1']['end_index'][0]), 5)
 
   def test_forward_pass_dense(self):
     config = model_lib.ModelConfig.gemma4_e2b()
