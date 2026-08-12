@@ -6,7 +6,8 @@
 #   --from-image   development host: pull the six stock files out of a pinned image via docker
 #   --from-path    inside a container: read them straight off the filesystem (no docker, no
 #                  network, no image on disk).  This is the mode a GKE pod uses.
-#   --model        qwen1p7b (default) | qwen4b | qwen8b | qwen32b -- selects model modules
+#   --model        qwen1p7b (default) | qwen4b | qwen8b | qwen8b_tp8 | qwen32b
+#                  -- selects model modules
 #
 # Steps: extract stock -> apply patches/tpu_inference/*.patch -> lay down the shim chain ->
 # verify every produced file against MANIFEST.sha256.

@@ -94,7 +94,8 @@ class RenderP33JobSetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P32_DP_REDUCTION_ADMITTED"], "1")
         self.assertEqual(env["CANON_P33_WORKLOAD_LAUNCH_ADMITTED"], "1")
         self.assertEqual(env["CANON_P33_SHARED_MESH"], "16,4")
-        self.assertEqual(env["CANON_OPT_STATE_RESIDENT"], "0")
+        self.assertEqual(env["CANON_OPT_STATE_RESIDENT"], "1")
+        self.assertEqual(env["CANON_P30_OPT_STATE_OFFLOAD"], "0")
         self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
         self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
         if (
@@ -235,7 +236,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "environment drifted"):
       renderer.validate_jobset(document, spec, _SOURCE_COMMIT, _RUN_ID)
 
-  def test_rejects_unreviewed_resident_optimizer_render(self):
+  def test_rejects_unreviewed_offload_optimizer_render(self):
     base = renderer.load_base(_BASE_PATH)
     spec = renderer._SPECS[0]
     document = renderer.render_jobset(base, spec, _SOURCE_COMMIT, _RUN_ID)
@@ -250,7 +251,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
         for item in main["env"]
         if item["name"] == "CANON_OPT_STATE_RESIDENT"
     )
-    resident["value"] = "1"
+    resident["value"] = "0"
     with self.assertRaisesRegex(ValueError, "environment drifted"):
       renderer.validate_jobset(document, spec, _SOURCE_COMMIT, _RUN_ID)
 

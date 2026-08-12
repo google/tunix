@@ -1,8 +1,10 @@
 # P45 FrozenLake DP8xTP8 resident full/eval runbook
 
-This is the recommended 64-chip FrozenLake full-training route. It replaces the
-P42/P33 DP16xTP4 offload carrier for new throughput-oriented launches while
-preserving the old manifests for diagnosis and historical comparison.
+This is the recommended 64-chip FrozenLake DP8xTP8 full-training route. It is
+separate from the P42/P33 DP16xTP4 carrier and preserves those manifests for
+diagnosis and historical comparison. Current branch defaults may place the
+optimizer on device in both routes; topology and model overlay, not only
+optimizer placement, distinguish P45.
 
 P45 runs Qwen3-8B on one 4x4x4 v5p slice with:
 
@@ -20,9 +22,12 @@ values, OOM, placement drift, topology drift, failed optimizer transactions,
 replica mismatch, Pathways failure, and W&B failure remain hard errors. This is
 a convergence/throughput run, not proof that strict bitwise zero-TIM is closed.
 
-No 64-chip P45 result has yet proved resident HBM capacity or multi-update
-stability. Local gates prove wiring, not target capacity. The first committed
-update is therefore the capacity gate.
+Attempt `p45r3` did not test resident HBM: it selected the TP4-only `qwen8b`
+overlay and failed during model import with a TP-size contract mismatch before
+rollout or optimizer construction. The isolated `qwen8b_tp8` overlay now has a
+pinned-image import/forward/VJP gate, but no 64-chip result has yet proved
+resident HBM capacity or multi-update stability. The first committed update is
+therefore still the capacity gate.
 
 ## 1. Fetch one immutable source
 
@@ -33,7 +38,7 @@ Never place HF or W&B secret values in commands, manifests, logs, or handoffs.
 set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID="p45r1"
+RUN_ID="p45r4"
 WORKTREE="/tmp/canon-zero-tim-${RUN_ID}"
 OUT="/mnt/disks/linchai_data/launch_manifests/${RUN_ID}"
 EVIDENCE="/mnt/disks/linchai_data/launch_evidence/${RUN_ID}"
@@ -49,18 +54,20 @@ mkdir -p "$OUT" "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 ```
 
-The source must be at or after P45 implementation commit `fae4e67f`.
+The source must include the isolated TP8 overlay and profile binding:
+
+```bash
+test -f canon-zero-tim/src/engine_shims/models/qwen8b_tp8/MANIFEST.sha256
+grep -Fxq 'export CANON_MODEL_DIR_NAME=qwen8b_tp8' \
+  canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env
+```
 
 ## 2. Run the fixed-image gate and render both variants
 
 ```bash
-sudo docker run --rm --entrypoint bash \
-  -e PYTHONDONTWRITEBYTECODE=1 \
-  -e JAX_PLATFORMS=cpu \
-  -v "$WORKTREE:/workspace:ro" \
-  -w /workspace \
-  tunix_frozenlake_image:vllm-tpu0.25.0 \
-  -lc 'bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_cpu.sh' | \
+sudo docker image inspect tunix_frozenlake_image:vllm-tpu0.25.0 >/dev/null
+bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh \
+  tunix_frozenlake_image:vllm-tpu0.25.0 | \
   tee "$EVIDENCE/local-gate.txt"
 
 python3 canon-zero-tim/cluster/render_p45_frozenlake.py \
@@ -80,8 +87,18 @@ kubectl apply --server-side --dry-run=server -f "$EVAL" | \
   tee "$EVIDENCE/dry-run-eval.txt"
 ```
 
+The local gate is valid only if it ends with all of these markers:
+
+```text
+P45_QWEN8B_TP8_CONTRACT_SELFTEST_PASS cases=7/7 tp4_negative=1
+P45_QWEN8B_TP8_IMPORT_PASS chain=linear_p22xk model=qwen8b_tp8 tp=8 sites=7
+P45_QWEN8B_TP8_FORWARD_VJP_PASS ... forward_exact=1 vjp_exact=1
+P45_QWEN8B_TP8_PROBE_PASS sites=7/7 padding=none tp=8
+P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8
+```
+
 Do not use `render_p33_jobsets.py` for this launch. That renderer produces the
-old P42/P33 DP16xTP4 offload manifest.
+separate P42/P33 DP16xTP4 carrier.
 
 ## 3. Verify the rendered contract
 
@@ -89,6 +106,7 @@ Before applying either YAML, inspect it and require all of these values:
 
 ```text
 CANON_P32_WORKLOAD=frozenlake-dp8-tp8
+CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env
 CANON_P33_SHARED_MESH=8,8
 CANON_DP_SIZE=8
 CANON_TP_SIZE=8
@@ -106,6 +124,14 @@ CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
 
 If either optimizer value is `0/1` instead of `1/0`, stop: the wrong renderer
 or manifest was selected. Do not hand-edit generated YAML.
+
+`CANON_MODEL_DIR_NAME` is resolved when the profile is sourced inside the pod,
+not duplicated in the generated YAML. Before launch the source-level grep in
+Section 1 must pass; at runtime require this exact line before model loading:
+
+```text
+[env] profile=qwen3-8b-dp8-tp8-frozenlake-resident model_dir=qwen8b_tp8
+```
 
 ## 4. Choose and apply exactly one manifest
 
@@ -145,7 +171,7 @@ optimizer_d2h_seconds=0.0
 Also require finite HBM snapshots before reverse, after accumulation, and after
 commit; a finite gradient and parameter delta; a valid optimizer transaction;
 exact DP replicas; and no TPU OOM. Seeing `pinned-host-offload` is not an
-optimization fallback—it proves the wrong P42/P33 carrier was launched.
+optimization fallback—it violates the P45 placement contract.
 
 For `$EVAL`, require exactly one evaluation enablement marker and finite
 `[CANON_FROZENLAKE_P42_JSON]` summaries at policy steps `0,10,...,440`:
@@ -164,8 +190,8 @@ manifest. The exact commands and full return checklist are maintained in
 
 ## Rollback
 
-Stop selecting `render_p45_frozenlake.py` for future runs and return to the old
-DP16xTP4 carrier only when reproducing its offload behavior. A running P42
-JobSet cannot be converted in place; relaunching P45 is a separate operator
-decision. To restore strict alignment, make a reviewed renderer change setting
+Stop selecting `render_p45_frozenlake.py` for future runs and return to the
+separate DP16xTP4 carrier when reproducing that topology. A running P42 JobSet
+cannot be converted in place; relaunching P45 is a separate operator decision.
+To restore strict alignment, make a reviewed renderer change setting
 `CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0`; do not edit rendered YAML.

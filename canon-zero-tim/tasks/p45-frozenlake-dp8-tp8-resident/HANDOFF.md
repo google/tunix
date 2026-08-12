@@ -2,8 +2,10 @@
 
 The canonical operator entry point is
 [`../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`](../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md).
-The P42 evaluation runbook is a legacy DP16xTP4 pinned-host-offload carrier and
-must not be used for a new P45 resident launch.
+The P42 evaluation runbook is a separate DP16xTP4 carrier and must not be used
+for a new P45 DP8xTP8 launch. Optimizer defaults have changed over time, so do
+not identify the carrier from placement alone; require the P45 profile,
+DP8xTP8, and `model_dir=qwen8b_tp8` together.
 
 ## Purpose and claim boundary
 
@@ -26,8 +28,12 @@ This run is a convergence/throughput experiment. It is not evidence that the
 remaining FrozenLake decode/prefill carrier is bitwise closed. The classifier
 must report `convergence-only` when warning-only alignment is enabled.
 
-No 64-chip P45 target result exists yet. The local fixed-image CPU/render gate
-proves wiring and fail-closed contracts, not HBM capacity or target throughput.
+Attempt `p45r3` is VOID as a capacity result: it inherited the TP4-only
+`qwen8b` overlay and failed on `CANON_QWEN3_TP_SIZE='8'` during model import,
+before rollout, evaluation, optimizer construction, or PATHTRACE. The new
+exact-image gate closes that wiring gap by installing and importing
+`qwen8b_tp8`, but no successful 64-chip P45 target result exists yet. Local
+gates do not prove HBM capacity or target throughput.
 In particular, the prior four-chip P41 FrozenLake resident test had only about
 4.52 GiB of headroom. TP8 should reduce per-chip model, gradient, and optimizer
 state relative to TP4, but that is a sizing expectation, not target evidence.
@@ -42,7 +48,7 @@ already exists; never overwrite a prior render/evidence directory.
 set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID="p45r1"
+RUN_ID="p45r4"
 WORKTREE="/tmp/canon-zero-tim-${RUN_ID}"
 OUT="/tmp/p45-render-${RUN_ID}"
 EVIDENCE="/tmp/p45-evidence-${RUN_ID}"
@@ -56,6 +62,9 @@ test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
+test -f canon-zero-tim/src/engine_shims/models/qwen8b_tp8/MANIFEST.sha256
+grep -Fxq 'export CANON_MODEL_DIR_NAME=qwen8b_tp8' \
+  canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env
 ```
 
 ## Run the local admission gate, then render
@@ -64,13 +73,8 @@ Use the exact pinned image. Do not substitute a newer image and call the result
 equivalent.
 
 ```bash
-sudo docker run --rm --entrypoint bash \
-  -e PYTHONDONTWRITEBYTECODE=1 \
-  -e JAX_PLATFORMS=cpu \
-  -v "$WORKTREE:/workspace:ro" \
-  -w /workspace \
-  tunix_frozenlake_image:vllm-tpu0.25.0 \
-  -lc 'bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_cpu.sh' | \
+bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh \
+  tunix_frozenlake_image:vllm-tpu0.25.0 | \
   tee "$EVIDENCE/local-gate.txt"
 
 python3 canon-zero-tim/cluster/render_p45_frozenlake.py \
@@ -94,6 +98,7 @@ Both manifests must contain these resolved values before either is applied:
 
 ```text
 CANON_P32_WORKLOAD=frozenlake-dp8-tp8
+CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env
 CANON_P33_SHARED_MESH=8,8
 CANON_DP_SIZE=8
 CANON_TP_SIZE=8
@@ -107,6 +112,21 @@ CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
 --vllm_max_num_batched_tokens=256
 --learning_rate=1e-6
 --max_steps=450
+```
+
+The local gate must show seven `P45_QWEN8B_TP8_SITE_PASS` lines plus:
+
+```text
+P45_QWEN8B_TP8_CONTRACT_SELFTEST_PASS cases=7/7 tp4_negative=1
+P45_QWEN8B_TP8_IMPORT_PASS chain=linear_p22xk model=qwen8b_tp8 tp=8 sites=7
+P45_QWEN8B_TP8_FORWARD_VJP_PASS ... forward_exact=1 vjp_exact=1
+P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8
+```
+
+At runtime, before model loading, require:
+
+```text
+[env] profile=qwen3-8b-dp8-tp8-frozenlake-resident model_dir=qwen8b_tp8
 ```
 
 ## Choose exactly one launch

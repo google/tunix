@@ -52,3 +52,23 @@
 - Files/artifacts: `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`; `../../cluster/P42_FROZENLAKE_EVAL_RUNBOOK.md`; `HANDOFF.md`; `state.md`; `phases/p45-3-target-run.md`
 - Rollback: remove only the P45 routing documentation and restore the P42 banner; renderer/profile behavior is unchanged.
 - Next: run documentation/render gates, then execute P45.3 and capture first-update resident/HBM evidence.
+
+## 2026-08-12 UTC — P45 r3 invalidates model-overlay admission
+
+- Type: failed target gate and re-plan
+- Fact: `p45r3` from source `b26135f2` resolved the intended DP8xTP8 P45 profile but inherited `CANON_MODEL_DIR_NAME=qwen8b`. That overlay is TP4-only and rejected `CANON_QWEN3_TP_SIZE='8'` during model import.
+- Result: exit 1 before rollout with `PATHTRACE=0`. The attempt contains no evidence about resident optimizer HBM, evaluation, or training. The previous CPU/render gate was insufficient because it never installed/imported the selected engine overlay.
+- Files/artifacts: `../../debug_logs/p45_p45r3_frozenlake_resident.raw.log`; `phases/p45-2b-qwen8b-tp8-overlay.md`
+- Decision: add an isolated TP8 overlay and an exact-image contract/forward/VJP/negative gate; preserve the existing TP4 overlay.
+- Rollback: no production defaults changed by this checkpoint.
+- Next: complete P45.2b locally before re-admitting P45.3.
+
+## 2026-08-12 UTC — P45.2b exact-image admission complete
+
+- Type: implementation and validation
+- Action: added the isolated `qwen8b_tp8` model overlay with TP8-local projection contracts and BM/BN/BK `128/128/128`; bound only the P45 profile to it; added static, installed-chain import, seven-site shape, TP4-negative, and Pallas forward/VJP gates. Corrected two stale P33 renderer tests to the already-approved resident optimizer default while preserving an explicit offload-drift negative.
+- Commands: `bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`; complete pinned-image `canon-zero-tim/tests/p33_workloads/run_cpu.sh`; model SHA verification; `git diff --check`.
+- Result: exact image ID `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`; 29 installed files matched; `linear_p22xk` TP8 import PASS; seven projection sites PASS; no padding; TP4 negative PASS; Pallas interpret forward/VJP exact; P45 83 tests plus 31 alignment tests PASS; full adjacent P33 CPU gate PASS.
+- Claim boundary: this closes the r3 model-overlay wiring failure only. It does not prove 64-chip model execution, resident optimizer HBM, evaluation, or training.
+- Rollback: stop selecting `qwen8b_tp8` in the P45 profile and remove only the new overlay/tests; the TP4 `qwen8b` overlay was not modified.
+- Next: fetch the published branch head, launch one fresh P45 target attempt, and capture the first committed update.

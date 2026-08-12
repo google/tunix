@@ -12,19 +12,25 @@ python3 -c "import ast,pathlib; files=(\
 'examples/frozenlake/train_frozenlake_qwen3.py',\
 'canon-zero-tim/cluster/render_p33_jobsets.py',\
 'canon-zero-tim/cluster/render_p45_frozenlake.py',\
+'canon-zero-tim/src/engine_shims/models/qwen8b_tp8/p22xf_contract.py',\
 'canon-zero-tim/tests/p33_workloads/classify_run.py',\
-'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_renderer.py'); \
+'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_renderer.py',\
+'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_qwen8b_tp8.py',\
+'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_overlay_import.py',\
+'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_qwen8b_tp8.py'); \
 [ast.parse(pathlib.Path(path).read_text(), filename=path) for path in files]"
 
 bash -n \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env \
-  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_cpu.sh
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_cpu.sh \
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh
 
 JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
   canon-zero-tim/tests/p33_workloads/test_classify_run.py \
   canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py \
-  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_renderer.py
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_renderer.py \
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_qwen8b_tp8.py
 JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl \
   -p alignment_test.py
@@ -58,12 +64,13 @@ validate_p45_profile() (
   # shellcheck disable=SC1090
   source "$state/env.sh"
   [ "$CANON_P32_WORKLOAD" = frozenlake-dp8-tp8 ]
+  [ "$CANON_MODEL_DIR_NAME" = qwen8b_tp8 ]
   [ "$CANON_DP_SIZE:$CANON_TP_SIZE" = 8:8 ]
   [ "$CANON_LOCAL_TRAJECTORIES:$MIN_TOKEN_BUCKET" = 32:2048 ]
   [ "$CANON_OPT_STATE_RESIDENT:$CANON_P30_OPT_STATE_OFFLOAD" = 1:0 ]
   [ "$CANON_P33_ENABLE_EVAL:$CANON_P31_ENABLE_EVAL" = 1:1 ]
   [ "$CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY" = 1 ]
-  echo "[P45.PROFILE] ADMITTED_PREFLIGHT_PASS topology=DP8xTP8 local_trajectories=32 global_m=2048 optimizer=device-resident eval=on warning_only=on"
+  echo "[P45.PROFILE] ADMITTED_PREFLIGHT_PASS topology=DP8xTP8 model_dir=qwen8b_tp8 local_trajectories=32 global_m=2048 optimizer=device-resident eval=on warning_only=on"
 )
 
 validate_p45_profile
