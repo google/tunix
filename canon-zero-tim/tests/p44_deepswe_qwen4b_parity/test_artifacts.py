@@ -58,6 +58,37 @@ def _values(topology: str) -> dict[str, str]:
   }
 
 
+def _onehost_batch():
+  trajectories = []
+  for pair, reward in enumerate((0.0, 1.0)):
+    trajectories.append(types.SimpleNamespace(
+        group_id=0,
+        pair_index=pair,
+        traj={
+            "status": "SUCCEEDED",
+            "trajectory_reward": reward,
+            "conversation_text": [
+                {"role": "user", "content": "one-host-prompt"},
+                {"role": "assistant", "content": f"answer-{pair}"},
+            ],
+        },
+    ))
+  return trajectories, [0.0, 1.0], [-1.0, 1.0]
+
+
+def _onehost_values() -> dict[str, str]:
+  return {
+      "CANON_P43_DEEPSWE_DEBUG": "0",
+      "CANON_P44_DEEPSWE_PARITY": "0",
+      "CANON_DEEPSWE_ONEHOST_SMOKE": "1",
+      "CANON_DEEPSWE_ONEHOST_STAGE": "backward-no-commit",
+      "CANON_DEEPSWE_ONEHOST_NO_COMMIT": "1",
+      "CANON_EXPECT_COMMIT": "2" * 40,
+      "CANON_SOURCE_BRANCH": "yuxzhang/canon-zero-tim",
+      "CANON_RUN_ID": "onehost-artifact",
+  }
+
+
 class P44ArtifactTest(unittest.TestCase):
 
   def test_both_topologies_write_the_same_artifact_schema(self):
@@ -103,6 +134,50 @@ class P44ArtifactTest(unittest.TestCase):
           "CANON_P43_DEEPSWE_DEBUG": "1",
           "CANON_P44_DEEPSWE_PARITY": "1",
       })
+
+  def test_onehost_writes_local_geometry_and_group_metrics(self):
+    values = {
+        **_onehost_values(),
+        "CANON_DEEPSWE_ONEHOST_DEBUG_DIR": "/tmp/deepswe-onehost",
+        "CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY": "0",
+    }
+    with tempfile.TemporaryDirectory() as text:
+      root = Path(text).resolve()
+      metrics = artifacts.persist_batch(
+          *_onehost_batch(),
+          expected_step=0,
+          output_dir=root,
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          values=values,
+      )
+      manifest = json.loads((root / "run_manifest.json").read_text())
+    self.assertEqual(manifest["schema"], artifacts.ONEHOST_MANIFEST_SCHEMA)
+    self.assertEqual(manifest["contract_name"], "local-qwen4b-dp1-tp4")
+    self.assertEqual(manifest["role_topology"], {"dp": 1, "tp": 4, "devices": 4})
+    self.assertEqual(manifest["global_trajectories"], 2)
+    self.assertEqual(metrics["trajectories"], 2)
+    self.assertEqual(metrics["prompt_groups"], 1)
+    self.assertEqual(metrics["mixed_prompt_groups"], 1)
+    self.assertEqual(metrics["trajectory_solve_ratio"], 0.5)
+    self.assertTrue(artifacts.onehost(values))
+    self.assertTrue(artifacts.no_commit(values))
+    self.assertEqual(artifacts.marker_prefix(values), "DEEPSWE.ONEHOST")
+
+  def test_onehost_is_mutually_exclusive_and_model_pinned(self):
+    with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+      artifacts.enabled({
+          **_onehost_values(),
+          "CANON_P44_DEEPSWE_PARITY": "1",
+      })
+    with tempfile.TemporaryDirectory() as text:
+      with self.assertRaisesRegex(ValueError, "4B-Instruct-2507"):
+        artifacts.persist_batch(
+            *_onehost_batch(),
+            expected_step=0,
+            output_dir=Path(text).resolve(),
+            model_id="Qwen/Qwen3-4B",
+            values=_onehost_values(),
+        )
 
   def test_wrong_model_or_topology_is_rejected(self):
     with tempfile.TemporaryDirectory() as text:

@@ -225,3 +225,139 @@
 - Next: Commit and push this correction to the same operator branch, read back
   its exact head, and require the launch agent to verify ancestry from the
   corrected implementation anchor.
+
+## 2026-08-12T03:30:50Z — P44.10: r05 Mosaic repair passes real one-host v5p
+
+- Type: target-failure reconciliation, code change, and real-TPU verification
+- Fact: Fast-forwarded to exact operator head
+  `3ec5fd7c3074844c62d3a9ff2c95179449a66129`, which archives `p44r05` from
+  source `115ef8144a873b5f108ec4b52aafc959032c3f43`. The raw log SHA-256 is
+  `51b1674c3c3b2d42e6738a0d66dce3a5f222bbd2c52a296ce75379488e181168`.
+  r05 proved P44.9 through all 36 layers, then Mosaic rejected Qwen3-4B
+  BN64/BK64 matmul block specs. Gate/up semantic N and down semantic K are
+  both 1216, so the archived suggestion to change only BK was incomplete.
+- Action: Pinned the Qwen3-4B overlay to BN/BK128; added exact model-pinned
+  matmul K/N `1216->1280` padding, semantic output slicing, matching
+  padded-K canonical VJP, richer K/Kp/N/Np PATHTRACE, fail-closed classifier
+  requirements for both directions, interpret and real-TPU probes, and a
+  repeatable `run_onehost_v5p.sh` gate.
+- Commands: P44 CPU and exact-image gates; P43/P39/P34 DeepSWE CPU gates;
+  P43/P34 exact-image gates; syntax/compile/diff checks; and
+  `run_onehost_v5p.sh` with immutable local image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- Result: PASS — P44 36 cases; Qwen4B/Qwen8B/Qwen32B overlays each install
+  29/29; P43 22 cases; P39 15 cases; P34 static 10 suites plus
+  trajectory/update. The privileged image exposed four TPU v5 devices and
+  passed real Pallas forward/custom-VJP exact comparison at M=4096 for all
+  five unique local projection shapes (q, k/v, o, gate/up, down), including
+  N padding `2560x1216->2560x1280` and K padding
+  `1216x2560->1280x2560`; both unknown-width negative controls passed.
+  Terminal markers: `MATMUL_DIM_PADDING_PASS mode=tpu cases=5/5 ... devices=4`
+  and
+  `P44_ONEHOST_V5P_MATMUL_PASS model=qwen4b devices=4`.
+- Boundary: Full one-host DeepSWE E2E remains `BLOCKED_REAL_ENVIRONMENT`
+  because the image has no R2E-Gym or Kubernetes access and the reviewed HF
+  cache is not a complete initial-weight snapshot. No fake trajectory, model
+  download, remote launch, commit, push, main action, or optimizer/loss/
+  precision policy change occurred. The unrelated P45 bare-host suite was
+  inconclusive because optional `datasets` and `metrax` packages are absent.
+- Files/artifacts: engine/model manifests, P44 probes/classifier/tests,
+  `phases/p44-10-r05-matmul-padding.md`, runbook, handoff, and corrected r05
+  archive interpretation.
+- Rollback: Revert only the uncommitted P44.10 engine/test/documentation diff;
+  do not reset or touch main. The published operator branch remains at
+  `3ec5fd7c`.
+- Next: Wait for explicit commit/push authorization. After publication only to
+  `yuxzhang/canon-zero-tim`, read back the exact remote head and launch a fresh
+  rollout-only `p44r06` on the available 64- or 256-device allocation.
+
+## 2026-08-12T04:35:00Z — P44.11: real one-host DeepSWE chain reaches backward
+
+- Type: implementation, iterative target repair, and real-TPU verification
+- Fact: A complete Qwen3-4B-Instruct-2507 snapshot, pinned R2E-Gym checkout
+  `0d94c4eb9431cd195c55a7ea3abd54006c9a1735`, cached `R2E-Gym-V1`, reviewed
+  whitelist, working Docker daemon, and four direct-attached TPU v5 devices
+  are available on the host. This supersedes P44.8's earlier prerequisite
+  inventory.
+- Action: Added a default-off, mutually exclusive DP1 x TP4 colocated profile,
+  one-prompt/two-generation local artifact schemas, persistent solve metrics,
+  a fail-closed real-gradient/no-optimizer-commit boundary, state
+  fingerprints, optimizer-memory placement and HBM reporting, and a repeatable
+  runner. Iteration repaired cached dataset selection, vLLM CPU staging,
+  local `dp` data-axis selection, rollout-only's unnecessary trainer forward,
+  Splash-attention sequence divisibility, and production-prefix-cache static
+  contract preservation.
+- Commands: `run_onehost_deepswe_v5p.sh rollout-only` and
+  `run_onehost_deepswe_v5p.sh backward-no-commit`; P44/P43/P39 CPU gates; P34
+  static/trajectory/update/exact-image gates; P44 Qwen3-4B exact-image gate;
+  syntax/compile/diff checks.
+- Rollout result: PASS marker `DEEPSWE_ONEHOST_ROLLOUT_PASS`. Two real
+  trajectories selected the reviewed Orange3 task and executed real Docker
+  `search` actions, then both reached `MAX_CONTEXT_LIMIT_REACHED` under the
+  signed response-512/turn-2 bound. Trajectory and solve-metric artifacts are
+  complete; terminal episode completion and solve quality are not proved.
+- Backward result: the model loaded, sampler/trainer logprobs were exactly
+  equal, trainer forward and backward executed, and the no-commit report
+  proved `commits=0`, train step `0 -> 0`, device-resident optimizer state,
+  and no changed model/reference/optimizer/accumulator paths. The finite
+  gradient norm was `0.0` because both rewards and advantages were zero, so
+  verdict is deliberately `INCONCLUSIVE_NO_SIGNAL` and the runner exits 3.
+- Memory: per-device peak HBM was approximately 35.92 GiB against a 95.74 GiB
+  limit.
+- Evidence: copied without modification from `/tmp` to
+  `/mnt/disks/tunix-data/deepswe-onehost-evidence/20260812-p44-local-dev/`.
+  Report and trajectory hashes are recorded in
+  `phases/p44-11-onehost-deepswe-integration.md`.
+- Integration: During final gates the operator branch advanced from tested
+  base `3ec5fd7c3074844c62d3a9ff2c95179449a66129` first to `76cef0ec` and then
+  to `d8184123448d0add72b72f09d0a6faf5d326c26e`. The latter adds P38
+  capture/precheck hardening, including a guarded shared-learner precheck
+  change. The development branch was safely fast-forwarded; resolution
+  preserved upstream P38 Section 50, the P38 learner logic, and local P44
+  Section 49/one-host logic. Post-reconciliation regressions cover the combined
+  source; the actual v5p run remains development evidence from the earlier
+  recorded base plus diff.
+- Result: PASS — P44 40 tests and Qwen3-4B exact image; P43 22 tests; P39 15
+  tests; P34 static 10 suites, trajectory, update, and Qwen3-32B exact image.
+  The P44 exact-image gate initially caught a stale local test expectation for
+  the prefix-cache expression; restoring the original P34 expression plus a
+  separate one-host override made both P34 and P44 contracts pass.
+- Boundary: This is development evidence against a recorded base plus
+  uncommitted diff. It proves one-host integration wiring, real environment
+  action, backward execution, no-commit behavior, optimizer placement, and
+  HBM only. It proves no nonzero learning signal, update, TP8, Pathways,
+  separated roles, DP4/DP16, 64/256 behavior, Qwen3-32B training, zero-TIM, or
+  production admission. No commit, push, main-branch action, remote launch,
+  precision/loss/reward/optimizer-policy change, or secret access occurred.
+- Next: Audit the complete diff and wait for explicit commit/push
+  authorization. After publication only to `yuxzhang/canon-zero-tim`, repeat
+  rollout-only from a clean checkout before the independent 64/256 target
+  ladder.
+
+## 2026-08-12T04:44:00Z — P44.11: latest-head v5p reconciliation repeats the result
+
+- Type: latest-source target verification
+- Fact: Operator head advanced to
+  `d8184123448d0add72b72f09d0a6faf5d326c26e` with P38-specific capture and
+  alignment-precheck hardening, including a guarded change in the shared GRPO
+  learner.
+- Action: Preserved the upstream P38 code and evidence, reconciled the local
+  P44 changes, reran P44/P43/P39/P34 CPU and Qwen4B/Qwen32B exact-image gates,
+  then repeated both real one-host stages. The first rollout attempt was
+  stopped before TPU initialization because it was accidentally run inside a
+  network-restricted sandbox and libtpu could not reach instance metadata;
+  the authorized host rerun is the evidence-bearing attempt.
+- Result: All regression gates PASS. Latest-source rollout-only PASS; latest
+  backward-no-commit again returned exit 3 `INCONCLUSIVE_NO_SIGNAL` with
+  exact sampler/trainer logps, finite zero gradient, zero commits, unchanged
+  state, device-resident optimizer, and the same HBM profile. Both stages
+  executed real Docker tool actions and wrote persistent artifacts.
+- Evidence: paths and SHA-256 are recorded in
+  `phases/p44-11-onehost-deepswe-integration.md`. Both manifests explicitly
+  record `source_commit=d8184123...` and the local development branch; runner
+  inventory recorded `tracked_dirty=1`, so this is not clean-publication
+  evidence.
+- Boundary: No commit, push, main action, remote cluster launch, one-update,
+  or claim promotion occurred.
+- Next: Wait for explicit commit/push authorization, then require the launch
+  agent to repeat rollout-only from a clean detached operator SHA.

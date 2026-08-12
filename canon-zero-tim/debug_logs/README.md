@@ -1300,8 +1300,8 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
 
 2. **Mosaic Pallas MatMul Tiling Lowering Discovery**:
    - `p22_pallas_matmul.py:78` triggered `ValueError: The Pallas TPU lowering currently requires that the last two dimensions of your block shape are divisible by 8 and 128 respectively, or be equal to the respective dimensions of the overall array. Block spec for args[0] in pallas_call canon_matmul_bm128_bn64_bk64 has block shape (128, 64), array shape (4096, 2560)`.
-   - Root Cause: TPU hardware sublane vector width requires the trailing block shape dimension to be divisible by 128 (e.g. `BK=128` or `BN=128`).
-   - Adapting `BK=128` resolves Mosaic lowering across all projection shapes.
+   - Root Cause: TPU hardware sublane vector width requires the trailing block shape dimension to be divisible by 128. Both matmul block axes matter: Qwen3-4B gate/up expose semantic local `N=1216`, while down exposes semantic local `K=1216`.
+   - Therefore `BK=128` alone is incomplete. The local P44.10 repair uses `BN=BK=128`, model-pinned K/N padding `1216->1280`, output slicing, and a matching canonical-VJP padded-K order. It passes real target-shaped forward/VJP probes on four direct-attached TPU v5 devices, but a fresh 64/256 target attempt is still required.
 
 ## 50. P38 FrozenLake Stock Serving Capture (Attempt `s5` — inconclusive nonterminal log)
 
@@ -1324,5 +1324,3 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - The claim that FrozenLake bypassed `GRPOLearner` is withdrawn. The recipe instantiates `GRPOLearner`, whose precheck call is in `agentic_grpo_learner.py`. The actual contract bug was that `fail_closed=True` raised on the known stock A-B red before the precheck-only stop helper could run.
    - Consequently, durable artifacts (`p38s5-mismatch-capsule.npz` and `p38s5-serving-capture.tar`) were 0-byte/unproduced.
    - Verdict: `INCONCLUSIVE_NONTERMINAL`. P38.2g5 changes the trigger to request-level scheduler prefixes, adds bounded init/observation evidence, and permits a finite A-B-red/exact-B-C diagnostic to stop after durable evidence but before backward.
-
-

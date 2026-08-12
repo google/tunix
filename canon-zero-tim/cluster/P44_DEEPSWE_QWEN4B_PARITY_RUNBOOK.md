@@ -58,11 +58,12 @@ Required terminal markers are `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`,
 `P43_DEEPSWE_DEBUG_CPU_PASS`, `P39_DEEPSWE_PILOT_CPU_PASS`, and
 `P34_STATIC_PASS suites=10`.
 
-The P44 gate must report 34 cases and includes negative controls for the
+The P44 gate must report 40 cases and includes negative controls for the
 Pathways `logical_task` host mapping, exact 4-device host cardinality,
 single-conversation generation batching, and trajectory-counted logprob
 microbatching. It also rejects missing Qwen3-4B `1216->1280` SwiGLU runtime
-evidence. An older 32-case marker does not contain the r04 repair.
+evidence or either required K/N matmul-padding runtime trace. An older 34-case
+marker does not contain the r05 repair.
 
 ## 2. Verify immutable runtime inputs
 
@@ -87,16 +88,17 @@ bash canon-zero-tim/tests/p44_deepswe_qwen4b_parity/run_exact_image.sh \
   "$CLIENT_IMAGE_DIGEST"
 ```
 
-Require both markers:
+Require all three markers:
 
 ```text
 SWIGLU_FEATURE_PADDING_INTERPRET_PASS model=qwen3-4b-tp8 shape=129x1216 padded=256x1280 forward_exact=1 vjp_exact=1 negative=1
+MATMUL_DIM_PADDING_PASS mode=interpret cases=2/2 forward_exact=1 vjp_exact=1 negatives=2/2 devices=1
 P44_EXACT_IMAGE_CPU_PASS overlay=qwen4b
 ```
 
-The first marker proves exact forward and custom-VJP behavior against the
-canonical SwiGLU in Pallas interpret mode and rejection of an adjacent
-unregistered width. It is not TPU target evidence. Verify the checkpoint,
+The first two markers prove exact forward and custom-VJP behavior against the
+canonical SwiGLU/matmul implementations in Pallas interpret mode and reject
+adjacent unregistered widths. They are not TPU target evidence. Verify the checkpoint,
 whitelist, and whitelist digest from a read-only pod mounting the same PVC.
 Also check the PriorityClass without changing cluster state:
 
@@ -231,6 +233,17 @@ Require at least one Qwen3-4B SwiGLU runtime line before accepting any stage:
 The classifier validates the numeric fields and fails closed if the marker is
 missing. Do not accept a generic MPAD line from the older row-only wrapper.
 
+Require both Qwen3-4B matmul directions before accepting any stage:
+
+```text
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=<positive> Mp=<BM128-aligned> padded=<0|1> K=2560 Kp=2560 N=1216 Np=1280 contract_padded=0 output_padded=1
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=<positive> Mp=<BM128-aligned> padded=<0|1> K=1216 Kp=1280 N=2560 Np=2560 contract_padded=1 output_padded=0
+```
+
+The first proves model-pinned gate/up output padding and semantic output
+slicing; the second proves down-projection contracted-K padding. A generic
+BN/BK128 trace or only one direction is insufficient.
+
 `p44r02` is a known pre-repair 256-device failure: it found all 256 Pathways
 devices but grouped them under degenerate `process_index=0` and stopped before
 mesh construction. The standalone CPU IFRT diagnostic showing one CPU device
@@ -240,10 +253,86 @@ not bypass the new inventory check.
 `p44r03` proved the repaired host-complete 256-device split and then failed an
 inherited one-host model-mesh-id assertion. `p44r04` proved the dynamic mesh,
 checkpoint load, W&B session, and execution into the MLP, then failed at
-TP8-local SwiGLU feature width `1216`. The current published head
-`e4ead609498771987c011a9cbc16fec7e4b17f69` archives r04 but does not contain
-the locally validated feature-padding repair. Do not launch again until the
-P44 handoff records a newer publication commit containing that repair.
+TP8-local SwiGLU feature width `1216`. `p44r05` then proved the SwiGLU repair
+across all 36 layers and failed Mosaic
+lowering on BN64/BK64 matmul block specs. Current remote head
+`d8184123448d0add72b72f09d0a6faf5d326c26e` archives r05 plus P38-specific
+capture/precheck hardening but does not contain the locally validated P44.10
+BN/BK128 plus K/N-padding or P44.11 one-host integration repair. Do not launch
+again until the P44 handoff records a newer publication commit containing
+both repairs.
+
+## 4a. Optional repeatable one-host v5p gates
+
+On an authorized direct-attached v5p host with the immutable image present:
+
+```bash
+bash canon-zero-tim/tests/p44_deepswe_qwen4b_parity/run_onehost_v5p.sh \
+  "$PINNED_LOCAL_IMAGE_ID"
+```
+
+Require `MATMUL_DIM_PADDING_PASS mode=tpu cases=5/5 ... devices=4` and
+`P44_ONEHOST_V5P_MATMUL_PASS model=qwen4b devices=4`. The probe uses the r05
+target M=4096 and executes real Pallas forward plus the promoted custom VJP in
+all five unique Qwen3-4B TP8-local projection shapes, including both K/N
+padding directions. This is only a direct-attached matmul construction gate;
+it does not prove a model load, R2E trajectory, TP8, Pathways, 64/256 topology,
+backward across the model, optimizer state, or a completed P44 stage.
+
+For the real local DeepSWE integration smoke, use a clean checkout of the
+exact published operator SHA. The runner rejects tracked worktree changes by
+default, pins R2E-Gym, requires exactly four direct-attached TPU devices and a
+working Docker daemon, remains offline, disables W&B and checkpoints, and
+writes complete artifacts under the persistent data disk by default:
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+bash canon-zero-tim/tests/p44_deepswe_qwen4b_parity/run_onehost_deepswe_v5p.sh \
+  rollout-only
+```
+
+Require:
+
+```text
+[DEEPSWE.ONEHOST.DEVICES] PASS count=4 ...
+[DEEPSWE.ONEHOST.R2E] PASS docker=1 import=1
+[DEEPSWE.ONEHOST.DATASET] PASS rows=1 ...
+DEEPSWE_ONEHOST_ROLLOUT_PASS model=qwen3-4b-instruct-2507 devices=4 trajectories=2
+```
+
+The inventory line prints the exact source SHA/branch, tracked-dirty bit,
+R2E-Gym SHA, stage, and artifact directory. Return that entire directory,
+including `run_manifest.json`, `batch-000000.trajectories.jsonl.gz`, and
+`batch_metrics.jsonl`, plus SHA-256 for every file. Inspect the batch metrics;
+the terminal rollout marker proves artifact-complete integration, not that the
+two trajectories solved or completed their episodes.
+
+Only after rollout-only reaches its terminal marker may the operator run:
+
+```bash
+bash canon-zero-tim/tests/p44_deepswe_qwen4b_parity/run_onehost_deepswe_v5p.sh \
+  backward-no-commit
+```
+
+The runner must return one of these outcomes:
+
+- `DEEPSWE_ONEHOST_BACKWARD_NO_COMMIT_PASS` with exit 0: gradient finite and
+  nonzero, zero commits, train step unchanged, and no changed
+  model/reference/optimizer/accumulator paths.
+- `DEEPSWE_ONEHOST_BACKWARD_INCONCLUSIVE_NO_SIGNAL` with exit 3: the real
+  backward ran but the finite gradient was zero. Preserve the report and do
+  not promote a one-update run.
+- any other nonzero exit: FAIL or blocked; return full logs and artifacts.
+
+Inspect `backward_no_commit.json` for gradient norms, state fingerprints,
+optimizer memory kinds, and per-device HBM before/after/peak. The signed local
+geometry is Qwen3-4B, DP1 x TP4 colocated, one prompt x two generations,
+response 512, two turns, exact trainer sequence 4096, Docker R2E, prefix cache
+off, and device-resident optimizer state. Never use this local runner as proof
+of TP8, Pathways, role separation, DP4/DP16, 64/256 behavior, Qwen3-32B, or
+zero-TIM. `DEEPSWE_ONEHOST_ALLOW_DIRTY=1` is for explicitly labeled local
+development evidence only and is forbidden for operator acceptance evidence.
 
 For update stages, finite A/B/C alignment differences are warning-only and
 the claim remains systems-debug functional parity. Missing/non-finite values,

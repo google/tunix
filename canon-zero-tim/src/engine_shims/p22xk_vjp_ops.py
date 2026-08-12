@@ -7,19 +7,22 @@ from p22xk_contract import preflight
 
 
 def canonical_matmul(x, y):
-    """Pure-JAX replica of the model-pinned BK accumulation order."""
+    """Pure-JAX replica of the model-pinned padded-BK accumulation order."""
     import jax.numpy as jnp
-    from p22xf_contract import BK
+    from p22xf_contract import BK, BN
+    from p22xi_padded_matmul import padded_matmul_extents
 
     if x.ndim != 2 or y.ndim != 2 or int(x.shape[1]) != int(y.shape[0]):
         raise ValueError(f"P22.XK matmul shapes invalid: {x.shape}, {y.shape}")
     if x.dtype != jnp.bfloat16 or y.dtype != jnp.bfloat16:
         raise ValueError(f"P22.XK matmul requires bf16, got {x.dtype}, {y.dtype}")
     m, k, n = int(x.shape[0]), int(x.shape[1]), int(y.shape[1])
-    if k % BK:
-        raise ValueError(f"P22.XK matmul K must divide BK={BK}, got {k}")
+    kp, _ = padded_matmul_extents(k, n, block_k=BK, block_n=BN)
+    if kp != k:
+        x = jnp.pad(x, ((0, 0), (0, kp - k)), constant_values=0)
+        y = jnp.pad(y, ((0, kp - k), (0, 0)), constant_values=0)
     acc = jnp.zeros((m, n), jnp.float32)
-    for q in range(k // BK):
+    for q in range(kp // BK):
         lo, hi = q * BK, (q + 1) * BK
         acc = acc + jnp.dot(
             x[:, lo:hi], y[lo:hi, :], preferred_element_type=jnp.float32

@@ -270,6 +270,20 @@ def classify(
           r"row_padded=[01] feature_padded=1",
           log_text,
       )),
+      "matmul_contract_padding_active": bool(re.search(
+          r"\[PATHTRACE\] CANON_PALLAS_MPAD=1 "
+          r"M=\d+ Mp=\d+ padded=[01] "
+          r"K=1216 Kp=1280 N=2560 Np=2560 "
+          r"contract_padded=1 output_padded=0",
+          log_text,
+      )),
+      "matmul_output_padding_active": bool(re.search(
+          r"\[PATHTRACE\] CANON_PALLAS_MPAD=1 "
+          r"M=\d+ Mp=\d+ padded=[01] "
+          r"K=2560 Kp=2560 N=1216 Np=1280 "
+          r"contract_padded=0 output_padded=1",
+          log_text,
+      )),
       "logps_batch_exact": log_text.count(
           "[P44.LOGPS_BATCH] configured_prompts=4 generations=4 "
           "execution_trajectories=16 observed_trajectories=16"

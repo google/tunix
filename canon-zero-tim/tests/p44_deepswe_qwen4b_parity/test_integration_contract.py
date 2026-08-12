@@ -63,6 +63,66 @@ class P44IntegrationContractTest(unittest.TestCase):
     self.assertIn("p44_parity", alignment)
     self.assertIn("sum((p39_pilot, p43_debug, p44_parity)) == 1", alignment)
 
+  def test_onehost_is_shared_dp1_tp4_docker_and_default_off(self):
+    script = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
+    runner = (
+        ROOT
+        / "canon-zero-tim/tests/p44_deepswe_qwen4b_parity/"
+        "run_onehost_deepswe_v5p.sh"
+    ).read_text()
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text()
+    grpo = (
+        ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
+    ).read_text()
+    trainer = (ROOT / "tunix/sft/peft_trainer.py").read_text()
+    self.assertIn(
+        'ONEHOST_SMOKE = _ONEHOST_RAW == "1"', script
+    )
+    self.assertIn('rollout_dims = [("dp", 1), ("tp", 4)]', script)
+    self.assertIn('train_dims = [("dp", 1), ("tp", 4)]', script)
+    self.assertIn("rollout_devices = shared_devices", script)
+    self.assertIn("train_devices = shared_devices", script)
+    self.assertIn('{"backend": "docker"} if ONEHOST_SMOKE', script)
+    self.assertIn('"enable_prefix_caching": not P34_DEEPSWE', script)
+    self.assertIn(
+        'vllm_rollout_dict["rollout_vllm_kwargs"]'
+        '["enable_prefix_caching"] = False',
+        script,
+    )
+    self.assertIn("onehost_before", learner)
+    self.assertIn('"commits": 0', learner)
+    self.assertIn("INCONCLUSIVE_NO_SIGNAL", learner)
+    self.assertIn(
+        "have_actor_mesh and not deepswe_debug.rollout_only()", grpo
+    )
+    self.assertIn("_deepswe_onehost_no_commit", trainer)
+    self.assertIn("optimizer_boundary_skipped commits=0", trainer)
+    self.assertIn("export JAX_PLATFORMS=tpu,cpu", runner)
+    self.assertIn("/mnt/disks/tunix-data/deepswe-onehost-evidence/", runner)
+    self.assertIn("git status --porcelain --untracked-files=no", runner)
+    self.assertIn("DEEPSWE_ONEHOST_ALLOW_DIRTY", runner)
+    self.assertIn("--max_prompt_length 3584", runner)
+    self.assertIn("--max_response_length 512", runner)
+    self.assertIn("--max_turns 2", runner)
+    self.assertIn("--max_num_batched_tokens 512", runner)
+    self.assertIn(
+        'data_sharding_axis=("dp",) if ONEHOST_SMOKE else ("fsdp",)',
+        script,
+    )
+
+  def test_onehost_does_not_change_production_role_split(self):
+    script = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
+    p34 = script.index("if P34_DEEPSWE:", script.index("# 1. Resolve"))
+    local = script.index("elif ONEHOST_SMOKE:", p34)
+    legacy = script.index("elif rollout_fsdp", local)
+    self.assertLess(p34, local)
+    self.assertLess(local, legacy)
+    production = script[p34:local]
+    self.assertIn("p34.dp_size", production)
+    self.assertIn("p34.tp_size", production)
+
   def test_postflight_routes_p44_before_existing_deepswe_lanes(self):
     text = (ROOT / "canon-zero-tim/cluster/steps/90_run.sh").read_text()
     reservation = text.index("report_keys+=(CANON_P44_DEBUG_DIR)")

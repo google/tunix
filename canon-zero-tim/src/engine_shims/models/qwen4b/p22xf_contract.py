@@ -16,8 +16,10 @@ CONFLICTS = (
     "CANON_TAIL",
 )
 BM = 128
-BN = 64
-BK = 64
+BN = 128
+BK = 128
+MATMUL_K_PADDING = {1216: 1280}
+MATMUL_N_PADDING = {1216: 1280}
 SWIGLU_FEATURE_PADDING = {1216: 1280}
 
 HIDDEN_SIZE = 2560
@@ -93,11 +95,17 @@ def validate_manifest(sites) -> None:
       raise ValueError(
           f"{site.family} shape mismatch: {(site.k_local, site.n_local)}"
       )
-    if site.k_local % BK or site.n_local % BN:
+    k_padded = MATMUL_K_PADDING.get(site.k_local, site.k_local)
+    n_padded = MATMUL_N_PADDING.get(site.n_local, site.n_local)
+    if k_padded % BK or n_padded % BN:
       raise ValueError(
           f"{site.family} local shape {(site.k_local, site.n_local)} "
-          f"does not divide BK/BN={BK}/{BN}"
+          f"does not admit padded BK/BN={BK}/{BN} geometry"
       )
+  if MATMUL_K_PADDING != {1216: 1280}:
+    raise ValueError("Qwen3-4B matmul K padding must be exactly 1216->1280")
+  if MATMUL_N_PADDING != {1216: 1280}:
+    raise ValueError("Qwen3-4B matmul N padding must be exactly 1216->1280")
   local_feature = INTERMEDIATE_SIZE // TP_SIZE
   if SWIGLU_FEATURE_PADDING != {local_feature: 1280}:
     raise ValueError(
@@ -150,7 +158,9 @@ def self_test() -> None:
     assert match_site(
         "model.layers.0.mlp.down_proj", "mn,np->mp"
     ).k_local == 1216
-    assert (BM, BN, BK) == (128, 64, 64)
+    assert (BM, BN, BK) == (128, 128, 128)
+    assert MATMUL_K_PADDING == {1216: 1280}
+    assert MATMUL_N_PADDING == {1216: 1280}
     assert SWIGLU_FEATURE_PADDING == {1216: 1280}
     os.environ["CANON_QWEN3_TP_SIZE"] = "4"
     try:

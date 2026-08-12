@@ -375,6 +375,33 @@ def _requires_precomputed_gradient_accumulator(environ) -> bool:
   )
 
 
+def _deepswe_onehost_no_commit(environ) -> bool:
+  """Returns the fail-closed local DeepSWE optimizer-skip selection."""
+  smoke = environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0")
+  no_commit = environ.get("CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0")
+  if smoke not in ("0", "1"):
+    raise ValueError("CANON_DEEPSWE_ONEHOST_SMOKE must be exactly 0 or 1")
+  if no_commit not in ("0", "1"):
+    raise ValueError(
+        "CANON_DEEPSWE_ONEHOST_NO_COMMIT must be exactly 0 or 1"
+    )
+  if no_commit == "1" and smoke != "1":
+    raise ValueError("one-host no-commit requires one-host smoke mode")
+  if no_commit == "1" and any(
+      environ.get(key, "0") == "1"
+      for key in (
+          "CANON_ALIGNMENT_GATE",
+          "CANON_ALIGNMENT_GATE_ONLY",
+          "CANON_ALIGNMENT_UPDATE_CANARY",
+          "CANON_ALIGNMENT_TRAIN",
+      )
+  ):
+    raise ValueError(
+        "one-host no-commit cannot overlap a canonical alignment mode"
+    )
+  return smoke == no_commit == "1"
+
+
 class PeftTrainer:
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -1213,7 +1240,8 @@ class PeftTrainer:
           "CANON_ALIGNMENT_UPDATE_CANARY=1, or CANON_ALIGNMENT_TRAIN=1"
       )
     canon_gate_only = canon_alignment and canon_gate_only_requested
-    if canon_gate_only:
+    deepswe_onehost_no_commit = _deepswe_onehost_no_commit(os.environ)
+    if canon_gate_only or deepswe_onehost_no_commit:
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
@@ -1259,6 +1287,10 @@ class PeftTrainer:
         )
         aux.aux_metrics["canon/is_update_step"] = jnp.asarray(
             is_update_step, dtype=jnp.bool_
+        )
+      if deepswe_onehost_no_commit:
+        aux.aux_metrics["deepswe/optimizer_skipped"] = jnp.asarray(
+            1, dtype=jnp.int32
         )
       # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
       return loss_val, aux.aux_metrics, grad_norm
@@ -1707,7 +1739,14 @@ class PeftTrainer:
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
 
-        if is_update_step_val:
+        if is_update_step_val and _deepswe_onehost_no_commit(os.environ):
+          print(
+              "[DEEPSWE.ONEHOST] optimizer_boundary_skipped commits=0 "
+              f"train_steps={self._train_steps}",
+              flush=True,
+          )
+          self._write_train_metrics()
+        elif is_update_step_val:
           self._train_steps += 1
           if os.environ.get("CANON_ALIGNMENT_TRAIN", "") == "1":
             print(
@@ -1764,6 +1803,11 @@ class PeftTrainer:
       self.close()
 
   def _save_last_checkpoint(self):
+    if _deepswe_onehost_no_commit(os.environ):
+      logging.info(
+          "Skipping final checkpoint for DeepSWE one-host no-commit smoke."
+      )
+      return
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(

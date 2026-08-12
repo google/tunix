@@ -42,7 +42,7 @@ class Qwen4BTP8Test(unittest.TestCase):
     by_name = {site.family: site for site in model.SITES}
     self.assertEqual((by_name["q_proj"].k_local, by_name["q_proj"].n_local), (2560, 512))
     self.assertEqual((by_name["down_proj"].k_local, by_name["down_proj"].n_local), (1216, 2560))
-    self.assertEqual((model.BM, model.BN, model.BK), (128, 64, 64))
+    self.assertEqual((model.BM, model.BN, model.BK), (128, 128, 128))
 
   def test_canonical_vjp_uses_the_model_pinned_chunk(self):
     source = (
@@ -50,7 +50,28 @@ class Qwen4BTP8Test(unittest.TestCase):
     ).read_text()
     self.assertIn("from p22xf_contract import BK", source)
     self.assertNotIn("from p22_pallas_matmul import BK", source)
-    self.assertEqual(1216 % model.BK, 0)
+    self.assertNotEqual(1216 % model.BK, 0)
+    self.assertEqual(model.MATMUL_K_PADDING, {1216: 1280})
+    self.assertEqual(model.MATMUL_N_PADDING, {1216: 1280})
+    self.assertEqual(model.MATMUL_K_PADDING[1216] % model.BK, 0)
+    self.assertEqual(model.MATMUL_N_PADDING[1216] % model.BN, 0)
+
+  def test_matmul_padding_covers_both_mlp_directions(self):
+    by_name = {site.family: site for site in model.SITES}
+    gate = by_name["gate_proj"]
+    down = by_name["down_proj"]
+    self.assertEqual(
+        (gate.k_local, model.MATMUL_N_PADDING[gate.n_local]),
+        (2560, 1280),
+    )
+    self.assertEqual(
+        (model.MATMUL_K_PADDING[down.k_local], down.n_local),
+        (1280, 2560),
+    )
+    wrapper = (
+        ROOT / "canon-zero-tim/src/engine_shims/p22xi_padded_matmul.py"
+    ).read_text()
+    self.assertIn("return out[:m, :n]", wrapper)
 
   def test_swiglu_feature_padding_is_model_pinned(self):
     self.assertEqual(model.SWIGLU_FEATURE_PADDING, {1216: 1280})

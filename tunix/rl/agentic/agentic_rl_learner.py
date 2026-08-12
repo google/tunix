@@ -2016,8 +2016,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           and deepswe_debug.rollout_only()
       ):
         marker = deepswe_debug.marker_prefix()
+        trajectory_count = int(
+            merged_train_micro_batch.completion_ids.shape[0]
+        )
         print(
-            f"[{marker}.ROLLOUT_ONLY] PASS trajectories=16 backward=0 "
+            f"[{marker}.ROLLOUT_ONLY] PASS "
+            f"trajectories={trajectory_count} backward=0 "
             "optimizer_commits=0",
             flush=True,
         )
@@ -2249,6 +2253,50 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # microbatches, and #iterations=K, we will:
       #   1. Train on the m * n microbatches once as we get them from rollout.
       #   2. When we get the full batch, repeat K-1 times on the entire batch.
+      onehost_no_commit = (
+          deepswe_debug.onehost() and deepswe_debug.no_commit()
+      )
+      onehost_before = None
+      onehost_hbm_before = None
+      if onehost_no_commit:
+        from flax import nnx  # pylint: disable=g-import-not-at-top
+
+        def onehost_memory_snapshot():
+          snapshots = []
+          for device in jax.local_devices():
+            try:
+              stats = device.memory_stats() or {}
+            except Exception:  # pylint: disable=broad-except
+              stats = {}
+            snapshots.append({
+                "device": int(device.id),
+                "bytes_in_use": stats.get("bytes_in_use"),
+                "peak_bytes_in_use": stats.get("peak_bytes_in_use"),
+                "bytes_limit": stats.get("bytes_limit"),
+            })
+          return snapshots
+
+        actor_trainer = self.rl_cluster.actor_trainer
+        reference_state = _p28_reference_state(self.rl_cluster)
+        onehost_hbm_before = onehost_memory_snapshot()
+        onehost_before = {
+            "model": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                nnx.state(actor_trainer.model, nnx.Param)
+            ),
+            "optimizer": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+            ),
+            "accumulator": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                nnx.state(actor_trainer.grad_accumulator), min_elements=1
+            ),
+            "reference": (
+                actor_trainer._canon_fingerprint_state(reference_state)  # pylint: disable=protected-access
+                if reference_state is not None
+                else None
+            ),
+            "train_steps": actor_trainer.train_steps,
+        }
+
       if not p28_g6_update:
         self.rl_cluster.update_actor(
             chunked_train_micro_batch, current_eval_dataset, skip_jit
@@ -2257,6 +2305,124 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self.rl_cluster.update_critic(
               chunked_train_micro_batch, current_eval_dataset, skip_jit
           )
+
+      if onehost_no_commit:
+        from flax import nnx  # pylint: disable=g-import-not-at-top
+
+        if onehost_before is None:
+          raise RuntimeError("one-host no-commit pre-state snapshot is missing")
+        actor_trainer = self.rl_cluster.actor_trainer
+        reference_state = _p28_reference_state(self.rl_cluster)
+        onehost_after = {
+            "model": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                nnx.state(actor_trainer.model, nnx.Param)
+            ),
+            "optimizer": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+            ),
+            "accumulator": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                nnx.state(actor_trainer.grad_accumulator), min_elements=1
+            ),
+            "reference": (
+                actor_trainer._canon_fingerprint_state(reference_state)  # pylint: disable=protected-access
+                if reference_state is not None
+                else None
+            ),
+            "train_steps": actor_trainer.train_steps,
+        }
+        onehost_hbm_after = onehost_memory_snapshot()
+        changed = {
+            name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+                onehost_before[name], onehost_after[name]
+            )
+            for name in ("model", "optimizer", "accumulator")
+        }
+        reference_changed = (
+            actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+                onehost_before["reference"], onehost_after["reference"]
+            )
+            if onehost_before["reference"] is not None
+            else []
+        )
+        trainer_buffer = (
+            getattr(actor_trainer, "_prev_buffered_train_metrics", None)
+            or getattr(actor_trainer, "_buffered_train_metrics", None)
+        )
+        try:
+          gradient_values, _ = trainer_buffer.additional_metrics["grad_norm"]
+          gradient_norms = [
+              float(np.asarray(jax.device_get(value)))
+              for value in gradient_values
+          ]
+        except (AttributeError, KeyError, TypeError) as exc:
+          raise RuntimeError(
+              "one-host no-commit gradient metric is missing"
+          ) from exc
+        gradient_finite = bool(
+            gradient_norms and np.all(np.isfinite(gradient_norms))
+        )
+        gradient_nonzero = bool(
+            gradient_finite and any(value > 0.0 for value in gradient_norms)
+        )
+        state_unchanged = bool(
+            not any(changed.values())
+            and not reference_changed
+            and onehost_after["train_steps"]
+            == onehost_before["train_steps"]
+        )
+        if not gradient_finite or not state_unchanged:
+          verdict = "FAIL"
+        elif gradient_nonzero:
+          verdict = "PASS"
+        else:
+          verdict = "INCONCLUSIVE_NO_SIGNAL"
+        report = {
+            "schema": "canon.local.deepswe.backward-no-commit.v1",
+            "verdict": verdict,
+            "commits": 0,
+            "gradient_finite": gradient_finite,
+            "gradient_nonzero": gradient_nonzero,
+            "gradient_norms": gradient_norms,
+            "model_changed_paths": changed["model"],
+            "optimizer_changed_paths": changed["optimizer"],
+            "accumulator_changed_paths": changed["accumulator"],
+            "reference_changed_paths": reference_changed,
+            "train_steps_before": onehost_before["train_steps"],
+            "train_steps_after": onehost_after["train_steps"],
+            "optimizer_memory_kinds": list(
+                actor_trainer.optimizer_state_memory_kinds()
+            ),
+            "hbm_before_backward": onehost_hbm_before,
+            "hbm_after_backward": onehost_hbm_after,
+            "state_fingerprints_before": onehost_before,
+            "state_fingerprints_after": onehost_after,
+        }
+        report_path = os.environ.get("CANON_DEEPSWE_ONEHOST_REPORT", "")
+        if not report_path or not os.path.isabs(report_path):
+          raise RuntimeError(
+              "CANON_DEEPSWE_ONEHOST_REPORT must be an absolute path"
+          )
+        if os.path.exists(report_path):
+          raise FileExistsError(
+              f"refusing to overwrite one-host report: {report_path}"
+          )
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "x", encoding="utf-8") as report_file:
+          json.dump(report, report_file, indent=2, sort_keys=True)
+          report_file.write("\n")
+        print(
+            "[DEEPSWE.ONEHOST] backward_no_commit "
+            f"verdict={verdict} commits=0 "
+            f"gradient_norms={gradient_norms} "
+            f"optimizer_memory_kinds={report['optimizer_memory_kinds']}",
+            flush=True,
+        )
+        if verdict == "FAIL":
+          raise RuntimeError(f"one-host backward no-commit failed: {report}")
+        prompt_queue.put(None)
+        _ = producer_future.result()
+        self.rl_cluster.close()
+        return
 
       # --- Weight Sync Logic ---
       if p28_g6_update:

@@ -29,6 +29,9 @@ $DOCKER run --rm \
     PYTHONPATH=/tmp/p44-overlay python3 \
       canon-zero-tim/tests/p44_deepswe_qwen4b_parity/probe_swiglu_feature_padding.py \
       --feature 1216 --padded-feature 1280 --model qwen3-4b-tp8
+    PYTHONPATH=/tmp/p44-overlay python3 \
+      canon-zero-tim/tests/p44_deepswe_qwen4b_parity/probe_matmul_dim_padding.py \
+      --mode interpret
     (
       cd tests/rl/agentic
       PYTHONPATH=/workspace python3 -m unittest \

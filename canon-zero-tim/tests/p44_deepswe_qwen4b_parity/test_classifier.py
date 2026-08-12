@@ -72,6 +72,12 @@ def _log(topology: str, stage: str, batches: int) -> str:
       "[P34.TOPOLOGY] PASS",
       "[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=4096 Mp=4096 "
       "F=1216 Fp=1280 row_padded=0 feature_padded=1",
+      "[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 "
+      "K=2560 Kp=2560 N=1216 Np=1280 "
+      "contract_padded=0 output_padded=1",
+      "[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 "
+      "K=1216 Kp=1280 N=2560 Np=2560 "
+      "contract_padded=1 output_padded=0",
       "[CANON_P34_WANDB] ONLINE_RUN_PASS",
       f"Prepared token paddings: [{spec['global_m']}]",
       "Precompile worker0 backbone --> "
@@ -267,6 +273,36 @@ class P44ClassifierTest(unittest.TestCase):
           topology=topology,
       )
       self.assertIn("swiglu_feature_padding_active", report["failed"])
+
+  def test_missing_matmul_padding_evidence_is_rejected(self):
+    topology = "256"
+    markers = {
+        "matmul_output_padding_active": (
+            "[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 "
+            "K=2560 Kp=2560 N=1216 Np=1280 "
+            "contract_padded=0 output_padded=1"
+        ),
+        "matmul_contract_padding_active": (
+            "[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 "
+            "K=1216 Kp=1280 N=2560 Np=2560 "
+            "contract_padded=1 output_padded=0"
+        ),
+    }
+    for check, marker in markers.items():
+      with self.subTest(check=check), tempfile.TemporaryDirectory() as root_text:
+        root = Path(root_text).resolve()
+        self._artifacts(root, topology=topology, stage="rollout-only", batches=1)
+        report = classifier.classify(
+            log_text=_log(topology, "rollout-only", 1).replace(marker, ""),
+            debug_dir=root,
+            weight_attestations=[],
+            pre_alignment=[],
+            alignment=[],
+            updates=[],
+            stage="rollout-only",
+            topology=topology,
+        )
+        self.assertIn(check, report["failed"])
 
   def test_nonmonotonic_update_is_rejected(self):
     topology = "256"

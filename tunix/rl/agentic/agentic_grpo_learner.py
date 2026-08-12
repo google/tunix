@@ -573,7 +573,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # trainer's recomputed logp as ``old_per_token_logps``) requires a real
       # actor mesh; skip when not available.
       need_trainer_logps = (
-          have_actor_mesh or self.algo_config.sampler_is == "token"
+          (have_actor_mesh and not deepswe_debug.rollout_only())
+          or self.algo_config.sampler_is == "token"
       )
       if need_trainer_logps:
         trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
@@ -778,43 +779,59 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if deepswe_debug.enabled() and mode == rl_cluster_lib.Mode.TRAIN:
       if expected_step is None:
         raise ValueError("DeepSWE debug artifacts require an expected step")
-      workload = deepswe_contract.active_workload(os.environ)
-      if workload.contract_name not in (
-          "p43-64chip-debug",
-          "p44-qwen4b-parity-64",
-          "p44-qwen4b-parity-256",
-      ):
-        raise ValueError("DeepSWE debug artifacts require P43 or P44")
+      if deepswe_debug.onehost():
+        artifact_model_id = "Qwen/Qwen3-4B-Instruct-2507"
+      else:
+        workload = deepswe_contract.active_workload(os.environ)
+        if workload.contract_name not in (
+            "p43-64chip-debug",
+            "p44-qwen4b-parity-64",
+            "p44-qwen4b-parity-256",
+        ):
+          raise ValueError("DeepSWE debug artifacts require P43 or P44")
+        artifact_model_id = workload.model_id
       debug_metrics = deepswe_debug.persist_batch(
           trajectories,
           rewards,
           advantages,
           expected_step=int(expected_step),
           output_dir=deepswe_debug.artifact_directory(),
-          model_id=workload.model_id,
+          model_id=artifact_model_id,
       )
+      trajectory_count = debug_metrics["trajectories"]
+      prompt_group_count = debug_metrics["prompt_groups"]
       self.rl_cluster.buffer_metrics_async(
           {
               "deepswe/trajectory_solve_ratio": (
                   debug_metrics["trajectory_solve_ratio"], np.mean
               ),
               "deepswe/complete_trajectory_ratio": (
-                  debug_metrics["complete_trajectories"] / 16, np.mean
+                  debug_metrics["complete_trajectories"] / trajectory_count,
+                  np.mean,
               ),
               "deepswe/all_solved_prompt_ratio": (
-                  debug_metrics["all_solved_prompt_groups"] / 4, np.mean
+                  debug_metrics["all_solved_prompt_groups"]
+                  / prompt_group_count,
+                  np.mean,
               ),
               "deepswe/all_failed_prompt_ratio": (
-                  debug_metrics["all_failed_prompt_groups"] / 4, np.mean
+                  debug_metrics["all_failed_prompt_groups"]
+                  / prompt_group_count,
+                  np.mean,
               ),
               "deepswe/mixed_prompt_ratio": (
-                  debug_metrics["mixed_prompt_groups"] / 4, np.mean
+                  debug_metrics["mixed_prompt_groups"] / prompt_group_count,
+                  np.mean,
               ),
               "deepswe/incomplete_prompt_ratio": (
-                  debug_metrics["incomplete_prompt_groups"] / 4, np.mean
+                  debug_metrics["incomplete_prompt_groups"]
+                  / prompt_group_count,
+                  np.mean,
               ),
               "deepswe/effective_prompt_ratio": (
-                  debug_metrics["effective_prompt_groups"] / 4, np.mean
+                  debug_metrics["effective_prompt_groups"]
+                  / prompt_group_count,
+                  np.mean,
               ),
               "deepswe/nonzero_advantage_ratio": (
                   debug_metrics["nonzero_advantage_ratio"], np.mean

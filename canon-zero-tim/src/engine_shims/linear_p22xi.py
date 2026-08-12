@@ -6,6 +6,7 @@ import importlib.util
 
 from p22xi_contract import preflight
 from p22xi_padded_matmul import matmul as padded_matmul
+from p22xi_padded_matmul import padded_matmul_extents
 
 
 BASE_PATH = __import__("canon_shim_root").resolve('linear_p22xf.py')
@@ -25,10 +26,22 @@ def traced_padded_matmul(
     shape_invariant_numerics=True,
     **kwargs,
 ):
-    m = int(x.shape[0])
+    from p22_pallas_matmul import BK as default_bk
+    from p22_pallas_matmul import BN as default_bn
+
+    m, k = map(int, x.shape)
+    n = int(y.shape[1])
     mp = ((m + 127) // 128) * 128
+    kp, np = padded_matmul_extents(
+        k,
+        n,
+        block_k=int(kwargs.get("block_k", default_bk)),
+        block_n=int(kwargs.get("block_n", default_bn)),
+    )
     print(
-        f"[PATHTRACE] CANON_PALLAS_MPAD=1 M={m} Mp={mp} padded={int(mp != m)}",
+        f"[PATHTRACE] CANON_PALLAS_MPAD=1 M={m} Mp={mp} "
+        f"padded={int(mp != m)} K={k} Kp={kp} N={n} Np={np} "
+        f"contract_padded={int(kp != k)} output_padded={int(np != n)}",
         flush=True,
     )
     return padded_matmul(

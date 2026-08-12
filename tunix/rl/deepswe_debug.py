@@ -38,6 +38,9 @@ MANIFEST_SCHEMA = "canon.p43.deepswe.run-manifest.v1"
 P44_TRAJECTORY_SCHEMA = "canon.p44.deepswe.trajectory.v1"
 P44_METRICS_SCHEMA = "canon.p44.deepswe.batch-metrics.v1"
 P44_MANIFEST_SCHEMA = "canon.p44.deepswe.run-manifest.v1"
+ONEHOST_TRAJECTORY_SCHEMA = "canon.local.deepswe.trajectory.v1"
+ONEHOST_METRICS_SCHEMA = "canon.local.deepswe.batch-metrics.v1"
+ONEHOST_MANIFEST_SCHEMA = "canon.local.deepswe.run-manifest.v1"
 SOLVE_DEFINITION = "r2egym_final_reward_eq_1"
 _COMPLETE_STATUS = "SUCCEEDED"
 _SENSITIVE_KEY = re.compile(
@@ -51,43 +54,69 @@ _SECRET_VALUE = re.compile(
 def _mode(values: Mapping[str, str]) -> str:
   p43 = values.get("CANON_P43_DEEPSWE_DEBUG", "0")
   p44 = values.get("CANON_P44_DEEPSWE_PARITY", "0")
+  onehost = values.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0")
   if p43 not in ("0", "1"):
     raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
   if p44 not in ("0", "1"):
     raise ValueError("CANON_P44_DEEPSWE_PARITY must be exactly 0 or 1")
-  if p43 == p44 == "1":
-    raise ValueError("P43 and P44 debug artifacts are mutually exclusive")
+  if onehost not in ("0", "1"):
+    raise ValueError("CANON_DEEPSWE_ONEHOST_SMOKE must be exactly 0 or 1")
+  if sum(raw == "1" for raw in (p43, p44, onehost)) > 1:
+    raise ValueError(
+        "P43, P44, and one-host debug artifacts are mutually exclusive"
+    )
+  if onehost == "1":
+    return "onehost"
   return "p44" if p44 == "1" else "p43"
 
 
 def enabled(values: Mapping[str, str] | None = None) -> bool:
   environ = os.environ if values is None else values
   mode = _mode(environ)
-  key = (
-      "CANON_P44_DEEPSWE_PARITY"
-      if mode == "p44"
-      else "CANON_P43_DEEPSWE_DEBUG"
-  )
+  key = {
+      "onehost": "CANON_DEEPSWE_ONEHOST_SMOKE",
+      "p44": "CANON_P44_DEEPSWE_PARITY",
+      "p43": "CANON_P43_DEEPSWE_DEBUG",
+  }[mode]
   return environ.get(key, "0") == "1"
+
+
+def onehost(values: Mapping[str, str] | None = None) -> bool:
+  """Returns whether the default-off local integration contract is active."""
+  environ = os.environ if values is None else values
+  return _mode(environ) == "onehost" and enabled(environ)
+
+
+def no_commit(values: Mapping[str, str] | None = None) -> bool:
+  """Returns the fail-closed one-host backward-without-commit selection."""
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0")
+  if raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_DEEPSWE_ONEHOST_NO_COMMIT must be exactly 0 or 1"
+    )
+  if raw == "1" and not onehost(environ):
+    raise ValueError("one-host no-commit requires the one-host smoke mode")
+  return raw == "1"
 
 
 def artifact_directory(values: Mapping[str, str] | None = None) -> str:
   environ = os.environ if values is None else values
-  return environ.get(
-      "CANON_P44_DEBUG_DIR"
-      if _mode(environ) == "p44"
-      else "CANON_P43_DEBUG_DIR",
-      "",
-  )
+  key = {
+      "onehost": "CANON_DEEPSWE_ONEHOST_DEBUG_DIR",
+      "p44": "CANON_P44_DEBUG_DIR",
+      "p43": "CANON_P43_DEBUG_DIR",
+  }[_mode(environ)]
+  return environ.get(key, "")
 
 
 def rollout_only(values: Mapping[str, str] | None = None) -> bool:
   environ = os.environ if values is None else values
-  key = (
-      "CANON_P44_ROLLOUT_ONLY"
-      if _mode(environ) == "p44"
-      else "CANON_P43_ROLLOUT_ONLY"
-  )
+  key = {
+      "onehost": "CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY",
+      "p44": "CANON_P44_ROLLOUT_ONLY",
+      "p43": "CANON_P43_ROLLOUT_ONLY",
+  }[_mode(environ)]
   raw = environ.get(key, "0")
   if raw not in ("0", "1"):
     raise ValueError(f"{key} must be exactly 0 or 1")
@@ -96,11 +125,22 @@ def rollout_only(values: Mapping[str, str] | None = None) -> bool:
 
 def marker_prefix(values: Mapping[str, str] | None = None) -> str:
   environ = os.environ if values is None else values
-  return "P44" if _mode(environ) == "p44" else "P43"
+  return {
+      "onehost": "DEEPSWE.ONEHOST",
+      "p44": "P44",
+      "p43": "P43",
+  }[_mode(environ)]
 
 
 def _schemas(values: Mapping[str, str]) -> tuple[str, str, str]:
-  if _mode(values) == "p44":
+  mode = _mode(values)
+  if mode == "onehost":
+    return (
+        ONEHOST_TRAJECTORY_SCHEMA,
+        ONEHOST_METRICS_SCHEMA,
+        ONEHOST_MANIFEST_SCHEMA,
+    )
+  if mode == "p44":
     return P44_TRAJECTORY_SCHEMA, P44_METRICS_SCHEMA, P44_MANIFEST_SCHEMA
   return TRAJECTORY_SCHEMA, METRICS_SCHEMA, MANIFEST_SCHEMA
 
@@ -207,7 +247,22 @@ def _manifest(
     values: Mapping[str, str], *, model_id: str, output_dir: Path
 ) -> dict[str, Any]:
   trajectory_schema, metrics_schema, manifest_schema = _schemas(values)
-  if _mode(values) == "p44":
+  mode = _mode(values)
+  if mode == "onehost":
+    if model_id != "Qwen/Qwen3-4B-Instruct-2507":
+      raise ValueError(
+          "one-host DeepSWE artifacts require "
+          "Qwen/Qwen3-4B-Instruct-2507"
+      )
+    contract_name = "local-qwen4b-dp1-tp4"
+    slice_topology = "direct-attached-v5p-4"
+    role_topology = {"dp": 1, "tp": 4, "devices": 4}
+    global_prompts = 1
+    generations = 2
+    max_turns = 2
+    max_response_length = 512
+    stage = values.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+  elif mode == "p44":
     topology = values.get("CANON_P44_TOPOLOGY", "")
     if topology == "64":
       contract_name = "p44-qwen4b-parity-64"
@@ -221,10 +276,20 @@ def _manifest(
       raise ValueError("P44 artifact topology must be exactly 64 or 256")
     if model_id != "Qwen/Qwen3-4B":
       raise ValueError("P44 artifacts require Qwen/Qwen3-4B")
+    global_prompts = 4
+    generations = 4
+    max_turns = 5
+    max_response_length = 4096
+    stage = values.get("CANON_P34_RUN_STAGE", "")
   else:
     contract_name = "p43-64chip-debug"
     slice_topology = "4x4x4"
     role_topology = {"dp": 4, "tp": 8, "devices": 32}
+    global_prompts = 4
+    generations = 4
+    max_turns = 5
+    max_response_length = 4096
+    stage = values.get("CANON_P34_RUN_STAGE", "")
   return {
       "schema": manifest_schema,
       "trajectory_schema": trajectory_schema,
@@ -233,16 +298,16 @@ def _manifest(
       "source_commit": values.get("CANON_EXPECT_COMMIT", ""),
       "source_branch": values.get("CANON_SOURCE_BRANCH", ""),
       "run_id": values.get("CANON_RUN_ID", ""),
-      "stage": values.get("CANON_P34_RUN_STAGE", ""),
+      "stage": stage,
       "model_id": model_id,
       "contract_name": contract_name,
       "slice_topology": slice_topology,
       "role_topology": role_topology,
-      "global_prompts": 4,
-      "generations": 4,
-      "global_trajectories": 16,
-      "max_turns": 5,
-      "max_response_length": 4096,
+      "global_prompts": global_prompts,
+      "generations": generations,
+      "global_trajectories": global_prompts * generations,
+      "max_turns": max_turns,
+      "max_response_length": max_response_length,
       "dataset_seed": 42,
       "artifact_directory": str(output_dir),
   }
@@ -295,18 +360,27 @@ def persist_batch(
     model_id: str,
     values: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-  """Persists one exact 4x4 real DeepSWE rollout batch and its metrics."""
+  """Persists one contract-sized real DeepSWE rollout batch and metrics."""
   if expected_step < 0:
     raise ValueError("P43 expected_step must be nonnegative")
-  if len(trajectories) != 16 or len(rewards) != 16 or len(advantages) != 16:
-    raise ValueError(
-        "P43 requires exactly 16 trajectories, rewards, and advantages"
-    )
+  environ = os.environ if values is None else values
   root = Path(output_dir)
+  manifest = ensure_manifest(root, model_id=model_id, values=environ)
+  expected_trajectories = int(manifest["global_trajectories"])
+  expected_groups = int(manifest["global_prompts"])
+  expected_generations = int(manifest["generations"])
+  if (
+      len(trajectories) != expected_trajectories
+      or len(rewards) != expected_trajectories
+      or len(advantages) != expected_trajectories
+  ):
+    raise ValueError(
+        "DeepSWE artifact batch requires exactly "
+        f"{expected_trajectories} trajectories, rewards, and advantages"
+    )
   trajectory_schema, metrics_schema, _ = _schemas(
-      os.environ if values is None else values
+      environ
   )
-  ensure_manifest(root, model_id=model_id, values=values)
 
   records = []
   groups: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
@@ -350,21 +424,29 @@ def persist_batch(
     records.append(record)
     groups[group_id].append(record)
 
-  if len(groups) != 4 or any(len(group) != 4 for group in groups.values()):
+  if len(groups) != expected_groups or any(
+      len(group) != expected_generations for group in groups.values()
+  ):
     sizes = {group_id: len(group) for group_id, group in groups.items()}
-    raise ValueError(f"P43 requires four groups of four trajectories: {sizes}")
+    raise ValueError(
+        "DeepSWE artifact group geometry changed: "
+        f"expected={expected_groups}x{expected_generations} actual={sizes}"
+    )
   if any(
-      sorted(record["pair_index"] for record in group) != [0, 1, 2, 3]
+      sorted(record["pair_index"] for record in group)
+      != list(range(expected_generations))
       for group in groups.values()
   ):
-    raise ValueError("P43 each group must contain pair indices 0,1,2,3")
+    raise ValueError(
+        "DeepSWE artifact pair indices must cover each generation exactly"
+    )
 
   group_records = []
   category_counts: collections.Counter[str] = collections.Counter()
   for group_id, group in sorted(groups.items()):
     complete_count = sum(record["complete"] for record in group)
     solved_count = sum(record["solved"] for record in group)
-    if complete_count != 4:
+    if complete_count != expected_generations:
       category = "incomplete"
     elif solved_count == 4:
       category = "all_solved"
@@ -391,17 +473,17 @@ def persist_batch(
       "schema": metrics_schema,
       "step": expected_step,
       "solve_definition": SOLVE_DEFINITION,
-      "trajectories": 16,
+      "trajectories": expected_trajectories,
       "complete_trajectories": complete_trajectories,
-      "incomplete_trajectories": 16 - complete_trajectories,
+      "incomplete_trajectories": expected_trajectories - complete_trajectories,
       "solved_trajectories": solved_trajectories,
-      "trajectory_solve_ratio": solved_trajectories / 16,
+      "trajectory_solve_ratio": solved_trajectories / expected_trajectories,
       "complete_trajectory_solve_ratio": (
           solved_trajectories / complete_trajectories
           if complete_trajectories
           else 0.0
       ),
-      "prompt_groups": 4,
+      "prompt_groups": expected_groups,
       "all_solved_prompt_groups": category_counts["all_solved"],
       "all_failed_prompt_groups": category_counts["all_failed"],
       "mixed_prompt_groups": category_counts["mixed"],
@@ -410,7 +492,7 @@ def persist_batch(
           item["nonzero_advantages"] > 0 for item in group_records
       ),
       "nonzero_advantages": nonzero_advantages,
-      "nonzero_advantage_ratio": nonzero_advantages / 16,
+      "nonzero_advantage_ratio": nonzero_advantages / expected_trajectories,
       "nonbinary_final_rewards": sum(
           record["raw_final_reward"] not in (0.0, 1.0) for record in records
       ),

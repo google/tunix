@@ -276,6 +276,22 @@ else:
   args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
+_ONEHOST_RAW = os.environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0")
+if _ONEHOST_RAW not in ("0", "1"):
+  raise ValueError("CANON_DEEPSWE_ONEHOST_SMOKE must be exactly 0 or 1")
+ONEHOST_SMOKE = _ONEHOST_RAW == "1"
+if ONEHOST_SMOKE and any(
+    os.environ.get(key, "0") == "1"
+    for key in (
+        "CANON_P34_DEEPSWE",
+        "CANON_P39_64CHIP_PILOT",
+        "CANON_P43_DEEPSWE_DEBUG",
+        "CANON_P44_DEEPSWE_PARITY",
+    )
+):
+  raise ValueError("one-host smoke cannot overlap P34/P39/P43/P44")
+if ONEHOST_SMOKE and os.environ.get("JAX_PLATFORMS", "") == "proxy":
+  raise ValueError("one-host smoke requires direct-attached TPU, not Pathways")
 
 
 # Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector.
@@ -318,7 +334,10 @@ def patch_kubernetes_runtime():
     print(f"[Monkeypatch] Failed to patch DockerRuntime: {e}")
 
 
-if os.environ.get("CANON_P34_DEEPSWE", "") != "1":
+if (
+    os.environ.get("CANON_P34_DEEPSWE", "") != "1"
+    and not ONEHOST_SMOKE
+):
   patch_kubernetes_runtime()
 
 # ====== Logging Configuration ======
@@ -419,25 +438,27 @@ DATASET_CACHE = os.getenv(
 )
 os.makedirs(DATASET_CACHE, exist_ok=True)
 
-os.environ["KUBECONFIG"] = "~/.kube/config"
-os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
-os.environ["NODE_SELECTOR_VAL"] = (
-    NODE_SELECTOR_VAL  # NB: change based on your node pool name
-)
-print(
-    "Using Kubernetes node selector:"
-    f" {os.environ['NODE_SELECTOR_KEY']}={os.environ['NODE_SELECTOR_VAL']}"
-)
+if not ONEHOST_SMOKE:
+  os.environ["KUBECONFIG"] = "~/.kube/config"
+  os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
+  os.environ["NODE_SELECTOR_VAL"] = (
+      NODE_SELECTOR_VAL  # NB: change based on your node pool name
+  )
+  print(
+      "Using Kubernetes node selector:"
+      f" {os.environ['NODE_SELECTOR_KEY']}={os.environ['NODE_SELECTOR_VAL']}"
+  )
 
 
 # Kubernetes Setup
-try:
-  if k8s_config is not None:
-    k8s_config.load_kube_config()
-    k8s_client = client.CoreV1Api()
-    # k8s_client.list_namespace(timeout_seconds=5)
-except Exception as e:
-  print(f"Warning: Kubernetes config loading failed: {e}")
+if not ONEHOST_SMOKE:
+  try:
+    if k8s_config is not None:
+      k8s_config.load_kube_config()
+      k8s_client = client.CoreV1Api()
+      # k8s_client.list_namespace(timeout_seconds=5)
+  except Exception as e:
+    print(f"Warning: Kubernetes config loading failed: {e}")
 
 if os.environ.get("CANON_P34_DEEPSWE", "") == "1":
   apply_repoenv_kubernetes_poll_patch()
@@ -670,6 +691,62 @@ if P34_DEEPSWE:
       flush=True,
   )
 
+if ONEHOST_SMOKE:
+  stage = os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+  if stage not in ("rollout-only", "backward-no-commit", "one-update"):
+    raise ValueError(
+        "CANON_DEEPSWE_ONEHOST_STAGE must be rollout-only, "
+        "backward-no-commit, or one-update"
+    )
+  no_commit = os.environ.get(
+      "CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0"
+  )
+  rollout_only = os.environ.get(
+      "CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY", "0"
+  )
+  if no_commit not in ("0", "1") or rollout_only not in ("0", "1"):
+    raise ValueError("one-host stage selectors must be exactly 0 or 1")
+  if (stage, no_commit, rollout_only) not in (
+      ("rollout-only", "0", "1"),
+      ("backward-no-commit", "1", "0"),
+      ("one-update", "0", "0"),
+  ):
+    raise ValueError("one-host stage selectors are inconsistent")
+  onehost_exact = {
+      "model_version": MODEL_VERSION == "Qwen3-4B-Instruct-2507",
+      "local_model": bool(MODEL_ABSOLUTE_PATH)
+      and os.path.isdir(MODEL_PATH),
+      "batch_size": BATCH_SIZE == 1,
+      "mini_batch_size": MINI_BATCH_SIZE == 1,
+      "train_micro_batch_size": TRAIN_MICRO_BATCH_SIZE == 1,
+      "compute_logps_micro_batch_size": COMPUTE_LOGPS_MICRO_BATCH_SIZE == 1,
+      "rollout_micro_batch_size": ROLLOUT_MICRO_BATCH_SIZE == 1,
+      "num_generations": NUM_GENERATIONS == 2,
+      "max_prompt_length": MAX_PROMPT_LENGTH == 3584,
+      "max_response_length": MAX_RESPONSE_LENGTH == 512,
+      "max_turns": MAX_TURNS == 2,
+      "max_steps": MAX_STEPS == 1,
+      "num_iterations": NUM_ITERATIONS == 1,
+      "rollout_engine": ROLLOUT_ENGINE == "vllm",
+      "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
+      "max_num_seqs": VLLM_MAX_NUM_SEQS == 2,
+      "max_batched_tokens": VLLM_MAX_BATCHED_TOKENS == 512,
+      "optimizer_device_resident": OPTIMIZER_OFFLOAD is False,
+      "checkpoint_disabled": CKPT_DIR is None,
+      "gold_whitelist": bool(args.gold_whitelist),
+      "dtype": DTYPE == jnp.bfloat16 and PARAM_DTYPE == jnp.bfloat16,
+  }
+  failures = [name for name, passed in onehost_exact.items() if not passed]
+  if failures:
+    raise ValueError(f"one-host DeepSWE CLI mismatch: {failures}")
+  print(
+      "[DEEPSWE.ONEHOST.CLI] PASS model=Qwen3-4B-Instruct-2507 "
+      f"stage={stage} prompts=1 generations=2 prompt=3584 response=512 "
+      "train_sequence=4096 turns=2 "
+      "optimizer=device checkpoint=off",
+      flush=True,
+  )
+
 
 # %%
 # ==========================================
@@ -696,7 +773,11 @@ if args.dataset_path:
     dataset = dataset["train"]
 else:
   dataset = datasets_lib.load_dataset(
-      "R2E-Gym/R2E-Gym-Subset",
+      (
+          "R2E-Gym/R2E-Gym-V1"
+          if ONEHOST_SMOKE
+          else "R2E-Gym/R2E-Gym-Subset"
+      ),
       split="train",
       cache_dir=DATASET_CACHE,
   )
@@ -716,6 +797,8 @@ dataset = dataset.map(
 
 if P34_DEEPSWE and not args.gold_whitelist:
   raise ValueError("P34 requires an explicit DeepSWE gold whitelist")
+if ONEHOST_SMOKE and not args.gold_whitelist:
+  raise ValueError("one-host DeepSWE requires an explicit gold whitelist")
 if args.gold_whitelist:
   whitelist_path = os.path.abspath(args.gold_whitelist)
   if not os.path.isfile(whitelist_path):
@@ -744,6 +827,25 @@ if args.gold_whitelist:
   print(
       f"[P34.DATASET] GOLD_FILTER_PASS rows={before}->{len(dataset)} "
       f"images={len(gold_images)}",
+      flush=True,
+  )
+
+if ONEHOST_SMOKE:
+  target_image = os.environ.get("CANON_DEEPSWE_ONEHOST_TASK_IMAGE", "")
+  if not target_image:
+    raise ValueError("CANON_DEEPSWE_ONEHOST_TASK_IMAGE is required")
+  dataset = dataset.filter(
+      lambda entry: entry.get("docker_image") == target_image,
+      keep_in_memory=True,
+  )
+  if len(dataset) != 1:
+    raise ValueError(
+        "one-host task selection must retain exactly one row, got "
+        f"{len(dataset)}"
+    )
+  print(
+      "[DEEPSWE.ONEHOST.DATASET] PASS rows=1 "
+      f"docker_image={target_image}",
       flush=True,
   )
 
@@ -854,6 +956,21 @@ if P34_DEEPSWE:
         f"DP{p34.dp_size}xTP{p34.tp_size}"
     )
   rollout_dims = [("dp", p34.dp_size), ("tp", p34.tp_size)]
+elif ONEHOST_SMOKE:
+  if rollout_fsdp is not None or args.train_mesh_fsdp is not None:
+    raise ValueError("one-host DeepSWE forbids FSDP")
+  if args.train_mesh_sp is not None:
+    raise ValueError("one-host DeepSWE forbids sequence parallelism")
+  if (rollout_dp, rollout_tp, args.train_mesh_dp, args.train_mesh_tp) != (
+      1,
+      4,
+      1,
+      4,
+  ):
+    raise ValueError(
+        "one-host DeepSWE requires shared rollout/trainer DP1xTP4"
+    )
+  rollout_dims = [("dp", 1), ("tp", 4)]
 elif rollout_fsdp is not None or rollout_tp is not None:
   rollout_dims = []
   if rollout_fsdp is not None:
@@ -877,6 +994,8 @@ train_sp = args.train_mesh_sp
 train_tp = args.train_mesh_tp
 if P34_DEEPSWE:
   train_dims = [("dp", p34.dp_size), ("tp", p34.tp_size)]
+elif ONEHOST_SMOKE:
+  train_dims = [("dp", 1), ("tp", 4)]
 elif any(v is not None for v in (train_fsdp, train_sp, train_tp)):
   train_dims = []
   train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
@@ -893,7 +1012,13 @@ else:
 num_train_devices = int(np.prod([d for _, d in train_dims]))
 
 # 3. Sanity Check
-if num_rollout_devices + num_train_devices > total_devices:
+if ONEHOST_SMOKE:
+  if total_devices != 4:
+    raise ValueError(
+        "one-host DeepSWE requires exactly four direct TPU devices, got "
+        f"{total_devices}"
+    )
+elif num_rollout_devices + num_train_devices > total_devices:
   raise ValueError(
       f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
       f"train devices, but cluster only has {total_devices} available."
@@ -934,6 +1059,15 @@ if P34_DEEPSWE:
       f"trainer_processes={placement_report['trainer_processes']}",
       flush=True,
   )
+elif ONEHOST_SMOKE:
+  shared_devices = np.asarray(devices, dtype=object).reshape((1, 4))
+  rollout_devices = shared_devices
+  train_devices = shared_devices
+  print(
+      "[DEEPSWE.ONEHOST.TOPOLOGY] PASS devices=4 "
+      "rollout=DP1xTP4 trainer=DP1xTP4 colocated=1 pathways=0",
+      flush=True,
+  )
 else:
   rollout_devices = np.array(devices[:num_rollout_devices]).reshape(
       rollout_shape
@@ -951,7 +1085,7 @@ print(
 )
 print(f"*** Train Mesh *** | dims: {train_dims} | Shape: {train_mesh.shape}")
 
-if P34_DEEPSWE:
+if P34_DEEPSWE or ONEHOST_SMOKE:
   dp_workloads.configure_replicated_parameter_sharding(
       config, data_axis="dp"
   )
@@ -1012,6 +1146,12 @@ else:
       jax.tree.map(jnp.copy, params),
   )
 sft_utils.show_hbm_usage()
+if ONEHOST_SMOKE:
+  print(
+      "[DEEPSWE.ONEHOST.MODEL] PASS reference=1 actor=1 "
+      "model=Qwen3-4B-Instruct-2507 dtype=bfloat16",
+      flush=True,
+  )
 
 # %%
 
@@ -1089,6 +1229,11 @@ vllm_rollout_dict = {
     },
 }
 
+if ONEHOST_SMOKE:
+  # Preserve the signed P34 production expression above; the local colocated
+  # smoke disables prefix caching through a separate default-off override.
+  vllm_rollout_dict["rollout_vllm_kwargs"]["enable_prefix_caching"] = False
+
 
 if ROLLOUT_ENGINE == "sglang_jax":
   rollout_engine_config = base_rollout.RolloutConfig(
@@ -1132,6 +1277,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
             p34.local_trajectories if P34_DEEPSWE else None
         ),
         optimizer_offload=OPTIMIZER_OFFLOAD,
+        # The colocated local smoke names its replicated batch axis ``dp``.
+        # Production role meshes retain Tunix's existing ``fsdp`` default.
+        data_sharding_axis=("dp",) if ONEHOST_SMOKE else ("fsdp",),
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -1184,6 +1332,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
+        **({"backend": "docker"} if ONEHOST_SMOKE else {}),
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
