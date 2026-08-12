@@ -1192,3 +1192,30 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - JAX initialized with single local CPU device on client session before Pathways 256-chip worker pool registration was fully mapped into IFRT device registry.
    - `split_4x8x8_role_devices` intercepted fail-closed: `ValueError: P34 physical half split crosses host boundaries: processes=[0]`.
 
+---
+
+## 46. Phase 42 Attempt `p42e2`: 64-Chip FrozenLake Full Convergence Training & Baseline Eval (Qwen3-8B DP16xTP4)
+
+- `debug_logs/p42_p42e2_frozenlake_eval.raw.log` (SHA-256: `e6e8b1982c1c5235cc1b18483f1126f3abfa67bad0e354dd29e84d95cf23e9ec`)
+- Target Commit: `4948e0f61e14e0297dec2893f50dc3a90a11ae92` (*Record P43 publication gates*)
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes, physical slice `671bae94`)
+
+### Execution & Diagnostic Summary:
+
+1. **Step 0 Baseline Evaluation (PASS)**:
+   - 100 benchmark prompts x 8 generations (800 trajectories) generated on TPU v5p.
+   - Prompt throughput reached up to 4,714 tokens/s.
+   - Trajectory log and summary metrics recorded to `/tmp/tunix-tb/frozenlake/trajectory_log_1786492642.csv`.
+
+2. **Step 1 Forward & 36-Layer Reverse VJP Execution (PASS)**:
+   - Pathways RM completed 36-layer Qwen3-8B XLA graph lowering and compilation (`BACKEND_PASSES stage duration: 15m34s`).
+   - 16 TPU workers executed forward and reverse VJP passes from Layer 35 down to Layer 0 on hardware with 6 cores / 128 GiB RAM per worker.
+   - All 36 layers generated valid non-zero gradients under fixed-order all-reduce trees (`CANON_FIXED_AR=1`).
+
+3. **DP Rank-Local Gradient Fingerprint Distinctness Interception**:
+   - `[P33.DP16] gradient_reducer_ready dp_axis=data dp_size=16`
+   - `dp_training.py:L675` in `FixedDPRankGradientReducer.finalize()` asserted `require_distinct_fingerprints=True`.
+   - In the discrete 4x4 FrozenLake grid environment, identical trajectories across different DP ranks produced identical rank-local gradient fingerprints, triggering fail-closed interception `ValueError: DP rank-local gradient fingerprints are not distinct`.
+
+
