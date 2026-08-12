@@ -5,6 +5,226 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
+## DO THIS NOW: rerun one P38s5 FrozenLake stock capture
+
+This section supersedes every older P38 serving-capture launch command below.
+The committed `p38_p38s4_frozenlake_stock.raw.log` is not a complete run log:
+it contains exactly 200 tail lines, starts inside layer 30, and ends after the
+final RMSNorm without a workload exit, serving capture, classifier, archive,
+or final postflight. It is `INCONCLUSIVE` and must not be used to select a
+repair.
+
+The operator's only job is to run one fresh **stock-only** P38 diagnostic and
+return the complete evidence bundle. Do not launch unified KV, FrozenLake full
+training, GSM8K, backward, or an optimizer commit.
+
+### 1. Fetch one immutable source and render
+
+Run every command block in this section sequentially in the same Bash shell
+from an existing clone of `google/tunix`. Use a new run ID if `p38s5` already
+exists. Do not reuse or overwrite an earlier output directory.
+
+```bash
+set -euo pipefail
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
+git merge-base --is-ancestor \
+  340b0e364f374fde8798d8f62331e6bc33e0e58a "$SOURCE_COMMIT"
+
+RUN_ID="p38s5"
+WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
+OUT="/tmp/p38-serving-$RUN_ID"
+EVIDENCE="/tmp/p38-return-$RUN_ID"
+test ! -e "$WORKTREE"
+test ! -e "$OUT"
+test ! -e "$EVIDENCE"
+git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
+cd "$WORKTREE"
+test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+test -z "$(git status --porcelain)"
+mkdir -p "$EVIDENCE"
+printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
+
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --output-dir "$OUT" | tee "$EVIDENCE/render.txt"
+
+STOCK="$OUT/jobset-p38-serving-stock.yaml"
+UNIFIED="$OUT/jobset-p38-serving-unified.yaml"
+cp "$STOCK" "$EVIDENCE/rendered-stock.yaml"
+kubectl apply --dry-run=server -f "$STOCK" | \
+  tee "$EVIDENCE/dry-run-stock.txt"
+kubectl apply --dry-run=server -f "$UNIFIED" | \
+  tee "$EVIDENCE/dry-run-unified.txt"
+```
+
+The renderer emits both YAML files, but the operator must apply **only**
+`$STOCK`. Before applying, verify that the stock YAML contains all of these
+literal values:
+
+```text
+CANON_KV_UNIFIED=0
+CANON_P38_PRECHECK_ONLY=1
+CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
+CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
+CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
+CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
+CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
+maxRestarts: 0
+```
+
+### 2. Apply stock only and start full-log collection immediately
+
+```bash
+set -euo pipefail
+kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
+
+JOBSET="canon-p38-fl-stock-${RUN_ID}-${SOURCE_COMMIT:0:8}"
+HEAD_JOB="${JOBSET}-pathways-head-0"
+POD=""
+for unused in $(seq 1 180); do
+  POD="$(kubectl get pods -n default -l "job-name=$HEAD_JOB" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$POD" ] && break
+  sleep 10
+done
+test -n "$POD"
+printf '%s\n' "$JOBSET" > "$EVIDENCE/jobset-name.txt"
+printf '%s\n' "$POD" > "$EVIDENCE/head-pod-name.txt"
+
+set +e
+kubectl logs -n default -f "$POD" -c jax-tpu | \
+  tee "$EVIDENCE/head.follow.log"
+follow_rc="${PIPESTATUS[0]}"
+set -e
+printf '%s\n' "$follow_rc" > "$EVIDENCE/log-follow-rc.txt"
+```
+
+Do not use `--tail`, `tail`, `grep`, or a UI copy buffer for the evidence log.
+Do not add `--timestamps` to the canonical raw log: the capsule and serving
+archive extractors require their `[CANON_...]` markers at column zero. A
+separate timestamped diagnostic copy is allowed, but it cannot replace
+`head.full.log`.
+
+The `kubectl logs -f` command ending does not by itself prove that the JobSet
+is terminal. Check the exact JobSet and pod until they are `Completed` or
+`Failed`. Do not delete either object. Once terminal, fetch the complete log
+again from byte zero:
+
+```bash
+set -euo pipefail
+kubectl get jobset -n default "$JOBSET" -o yaml > \
+  "$EVIDENCE/jobset.final.yaml"
+kubectl get pod -n default "$POD" -o yaml > \
+  "$EVIDENCE/head-pod.final.yaml"
+kubectl describe pod -n default "$POD" > \
+  "$EVIDENCE/head-pod.describe.txt"
+kubectl logs -n default "$POD" -c jax-tpu > \
+  "$EVIDENCE/head.full.log"
+kubectl logs -n default "$POD" -c pathways-proxy > \
+  "$EVIDENCE/pathways-proxy.log" 2>&1 || true
+kubectl logs -n default "$POD" -c pathways-rm > \
+  "$EVIDENCE/pathways-rm.log" 2>&1 || true
+kubectl logs -n default "$POD" -c jax-tpu --previous > \
+  "$EVIDENCE/head.previous.log" 2>&1 || true
+kubectl get events -n default \
+  --field-selector "involvedObject.name=$POD" \
+  --sort-by=.lastTimestamp > "$EVIDENCE/head-pod.events.txt"
+```
+
+If the pod disappears before the terminal fetch, preserve `head.follow.log`
+and all JobSet/events/proxy evidence and classify the run as infrastructure
+`INCONCLUSIVE`. Never replace a missing full log with its final 200 lines.
+
+### 3. Validate and recover the durable artifacts
+
+The unedited `head.full.log` must contain all of the following:
+
+1. exactly one `JOBSET_ATTEMPT 0 (first attempt)`;
+2. `[sync] HEAD=$SOURCE_COMMIT` and a clean sync verdict;
+3. four `pre` and four `post` `[CANON_P38_SERVING_CAPTURE]` records, one pair
+   for each registered prefix stratum;
+4. finite `S_decode_vs_S_prefill` red and exact `S_prefill_vs_T_old`;
+5. exactly one `[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD`;
+6. child `[run] exit=1` followed by
+   `[CANON_PRE_ALIGN_ARTIFACT]` and `[CANON_P38_CAPSULE_ARTIFACT]`;
+7. official `[CANON_P38_SERVING_CLASSIFICATION]` with JSON verdict `PASS` and
+   at least one exact request/token-history join;
+8. `[CANON_P38_SERVING_ARCHIVE]` and every base64 payload line;
+9. `[run] P38 serving expected precheck exit=1 accepted; backward=0
+   optimizer_commits=0`; and
+10. final `[run] PATHTRACE` with `p38_kv_unified=0`.
+
+Then recover the binaries from the unedited, non-timestamped complete log:
+
+```bash
+set -euo pipefail
+python3 \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
+  --log "$EVIDENCE/head.full.log" \
+  --output "$EVIDENCE/p38s5-mismatch-capsule.npz"
+python3 \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
+  --log "$EVIDENCE/head.full.log" \
+  --output "$EVIDENCE/p38s5-serving-capture.tar"
+sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
+  "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
+sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
+  "$EVIDENCE/head.full.log" > "$EVIDENCE/serving-classification.json"
+test -s "$EVIDENCE/pre-alignment.jsonl"
+test -s "$EVIDENCE/serving-classification.json"
+sha256sum \
+  "$EVIDENCE/head.full.log" \
+  "$EVIDENCE/p38s5-mismatch-capsule.npz" \
+  "$EVIDENCE/p38s5-serving-capture.tar" \
+  "$EVIDENCE/pre-alignment.jsonl" \
+  "$EVIDENCE/serving-classification.json" | \
+  tee "$EVIDENCE/SHA256SUMS"
+```
+
+If any required marker or extraction is missing, stop and return the failure
+package. Do not automatically relaunch and do not interpret partial numerical
+values.
+
+### 4. Return this exact bundle
+
+Return the entire `$EVIDENCE` directory, not screenshots or pasted tails. At a
+minimum it must contain:
+
+```text
+source_commit.txt
+render.txt
+rendered-stock.yaml
+dry-run-stock.txt
+dry-run-unified.txt
+apply.txt
+jobset-name.txt
+head-pod-name.txt
+head.full.log
+head.follow.log
+jobset.final.yaml
+head-pod.final.yaml
+head-pod.describe.txt
+head-pod.events.txt
+pathways-proxy.log
+pathways-rm.log
+head.previous.log
+p38s5-mismatch-capsule.npz
+p38s5-serving-capture.tar
+pre-alignment.jsonl
+serving-classification.json
+SHA256SUMS
+```
+
+The required ancestor `340b0e36` contains both the published P38.2g4 capture
+hardening (`b89435ca`) and the later FrozenLake segmented-engine global-M
+logging repair. The operator must also report in plain text: source SHA, run
+ID, JobSet name, pod name, final JobSet condition, pod exit reason/code,
+restart count, and
+whether all ten acceptance items above were present. The operator must not
+claim PASS from an A/B number alone.
+
 ## Purpose
 
 P38.2 separates two observed flag-on `S_decode_vs_S_prefill` signatures. GSM8K is a tail-aval

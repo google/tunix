@@ -90,10 +90,18 @@
   SHA `dae4e75d...` and is an exact duplicate of the older P38e1 capsule, not
   the logged p38s1 (`2dffb993...`) or p38u1 (`245a0c9b...`) artifact. The
   earlier stock-capture PASS wording is withdrawn.
+- P38s4 evidence correction: commit `819207bd` contains only a 200-line tail
+  beginning inside layer 30 and ending after final RMSNorm. It has no
+  source/Attempt-0 preamble, workload exit, serving-capture records, alignment
+  artifact, classifier, archive, or final postflight. P38s4 is therefore
+  `INCONCLUSIVE_TAIL_ONLY`, not a completed D1 attempt and not evidence of a
+  code failure.
 - Next action for the strict track: after separate resource approval, pull and
-  verify `b89435ca`, then render one fresh stock-only Attempt-0 diagnostic.
-  Preserve the
-  complete terminal head log through outer postflight and recover both the real
+  verify a clean remote source containing `340b0e36` (which descends from
+  `b89435ca`), then execute the P38s5
+  stock-only Attempt-0 run-and-return protocol at the top of `HANDOFF.md`.
+  Preserve the complete non-timestamped terminal head log through outer
+  postflight and return the exact evidence directory, including the real
   run-specific capsule and serving tar. Do not rerun U. P38.2g3 E0 remains
   blocked until the official stock capture passes an exact request/token-
   history join and whole-vector reproduction.
@@ -116,6 +124,7 @@
   `../../debug_logs/p38_p38s1_frozenlake_pre_alignment.jsonl`,
   `../../debug_logs/p38_p38u1_frozenlake_unified.raw.log`,
   `../../debug_logs/p38_p38u1_frozenlake_pre_alignment.jsonl`,
+  `../../debug_logs/p38_p38s4_frozenlake_stock.raw.log`,
   `artifacts/p38_2g_local_gate.md`,
   `artifacts/p38_2g_onehost_synthetic_0811.md`,
   `artifacts/p38_2g_onehost_target_row191_0811.md`,
@@ -128,7 +137,8 @@
   Qwen3-1.7B/Qwen3-8B overlay gates 14/14 each PASS, serving classifier 25/25,
   renderer 5/5, and postflight stock/U
   PATHTRACE negative controls PASS.
-- Updated: 2026-08-11 UTC when P38.2g4 D0 was published
+- Updated: 2026-08-12 UTC after classifying P38s4 as tail-only and adding the
+  complete P38s5 operator run-and-return contract
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,

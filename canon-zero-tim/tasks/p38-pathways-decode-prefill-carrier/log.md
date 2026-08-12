@@ -750,3 +750,46 @@
   all numerical/root-cause claims remain NOT RUN.
 - Next: with separate 64-chip approval, fetch and verify `b89435ca`, render a
   fresh stock-only Attempt-0 D1 manifest, and archive all required evidence.
+
+## 2026-08-12 UTC — P38s4 rejected as tail-only; P38s5 handoff hardened
+
+- Type: evidence correction and operator handoff hardening. No TPU/cloud run,
+  runtime-code change, backward, optimizer commit, commit, or push occurred.
+- Evidence: commit `819207bd` adds only
+  `debug_logs/p38_p38s4_frozenlake_stock.raw.log`, an exact 200-line/16,857-byte
+  tail with SHA-256
+  `181897dd682a06f0f08e1a54be74ccb9eff021afd733b077fad47cb0568d87f2`.
+- Result: the tail starts inside layer 30, reaches final RMSNorm, and ends on
+  an idle engine metric. It contains no traceback or runtime exit, but also no
+  source/Attempt-0 preamble, logprob/alignment record, serving capture,
+  classifier, archive, or postflight. Verdict is
+  `INCONCLUSIVE_TAIL_ONLY`; it is not a completed D1 run.
+- Action: added one superseding P38s5 stock-only operator protocol to the top
+  of `HANDOFF.md`. It pins an immutable source containing `340b0e36` and its
+  P38.2g4 ancestor `b89435ca`, renders
+  and server-dry-runs both generated manifests, applies stock only, starts
+  full-log collection immediately, refetches the complete non-timestamped log
+  after terminal state, preserves JobSet/pod/proxy/RM/events evidence,
+  recovers both binary artifacts, and requires one exact return bundle.
+- Footgun closed: `--tail` and pasted UI excerpts are forbidden. The canonical
+  raw log must also omit `--timestamps`, because both artifact extractors
+  require `[CANON_...]` markers at column zero.
+- Local validation: the live renderer produced stock name
+  `canon-p38-fl-stock-p38s5t-819207bd` with all seven registered capture
+  values, `maxRestarts=0`, and both job backoffs zero. Renderer tests passed
+  5/5, serving classifier tests 25/25, capsule extractor tests 2/2, serving
+  archive extractor tests 4/4, shell postflight passed, and every new Bash
+  block before the legacy handoff passed `bash -n`. The full historical
+  handoff still contains a pre-existing angle-bracket placeholder that is not
+  valid executable shell; the new section contains no such placeholder.
+- Hardware inventory: a minimal privileged fixed-image probe initialized the
+  local TPU backend with four devices `[0,1,2,3]`. This admits a future
+  one-host capture-wiring smoke, but no Qwen model, FrozenLake rollout,
+  serving capture, or E0 replay was run in this checkpoint. This host has no
+  local `kubectl`, so server-side dry-run and target execution remain remote
+  gates.
+- Rollback: documentation/task-state only; discard this checkpoint and the
+  new handoff section. Runtime behavior is unchanged.
+- Next: after publication and resource approval, the remote operator runs one
+  P38s5 stock-only Attempt-0 job and returns the complete directory specified
+  in `HANDOFF.md`. Do not rerun U or start FrozenLake full training.

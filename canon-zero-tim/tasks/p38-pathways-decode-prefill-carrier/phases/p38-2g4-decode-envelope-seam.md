@@ -175,3 +175,12 @@ This is a construction result only. Docker had no `/dev/vfio`, and no target
 TPU, Pathways, backward, optimizer, repair, or cloud launch was performed. The
 implementation was subsequently published as `b89435ca`. D1 remains blocked
 on separate resource approval.
+
+The later `p38s4` archive does not satisfy D1. Its only committed artifact is
+an exact 200-line tail that begins inside layer 30 and ends after final
+RMSNorm. It lacks the source/attempt preamble, all eight pre/post capture
+records, workload exit, run-specific capsule transport, serving classifier,
+serving archive, and final postflight. Classify it as
+`INCONCLUSIVE_TAIL_ONLY`; it neither proves a runtime failure nor advances E0.
+The next operator attempt is P38s5 stock only, following the exact command and
+return protocol at the top of `../HANDOFF.md`.
