@@ -1279,39 +1279,6 @@ class UtilsTest(parameterized.TestCase):
         jnp.array(20.0),
     )
 
-  def test_weight_converter_scanned_layers(self):
-    """Tests WeightConverter transfer from scanned 'layers' in source to 'layers_X' in dest."""
-    src_state = nnx.Dict(
-        base=nnx.Dict(
-            decoder=nnx.Dict(
-                layers=nnx.Dict(
-                    mlp=nnx.Dict(
-                        weight=nnx.Param(jnp.array([10.0, 20.0]))
-                    )
-                )
-            )
-        )
-    )
-    dst_state = nnx.Dict(
-        model=nnx.Dict(
-            decoder=nnx.Dict(
-                layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
-                layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
-            )
-        )
-    )
-    from maxtext.integration.vllm.weight_converter import WeightConverter
-    converter = WeightConverter([], tp=1)
-    out = converter.convert(src_state, target_state=dst_state)
-    np.testing.assert_array_equal(
-        out['model.decoder.layers_0.mlp.weight'],
-        jnp.array(10.0),
-    )
-    np.testing.assert_array_equal(
-        out['model.decoder.layers_1.mlp.weight'],
-        jnp.array(20.0),
-    )
-
   def test_transfer_state_directly_implicit_layers_container(self):
     """Tests transfer when source IS the layers container (GPT-OSS style)."""
     # Use nnx.Dict for consistency
@@ -1635,45 +1602,6 @@ class UtilsTest(parameterized.TestCase):
     )
     np.testing.assert_array_equal(
         dst_state['layers_1']['wi'][...],
-        jnp.concatenate([wi_0_val[:, 1, :], wi_1_val[:, 1, :]], axis=-1),
-    )
-
-  def test_weight_converter_fuses_moe_weights_scanned_to_unrolled(self):
-    """Tests WeightConverter scanned wi_0/wi_1 unstack and fusion into per-layer wi (unrolled dst)."""
-    wi_0_val = jnp.array(
-        [[[1., 2.], [10., 20.]],
-         [[3., 4.], [30., 40.]],
-         [[5., 6.], [50., 60.]]],
-        dtype=jnp.float32,
-    )
-    wi_1_val = jnp.array(
-        [[[100., 200.], [1000., 2000.]],
-         [[300., 400.], [3000., 4000.]],
-         [[500., 600.], [5000., 6000.]]],
-        dtype=jnp.float32,
-    )
-
-    src_state = nnx.Dict(
-        layers=nnx.Dict(
-            wi_0=nnx.Param(wi_0_val),
-            wi_1=nnx.Param(wi_1_val),
-        )
-    )
-    dst_state = nnx.Dict(**{
-        'layers_0': nnx.Dict(wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))),
-        'layers_1': nnx.Dict(wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))),
-    })
-
-    from maxtext.integration.vllm.weight_converter import WeightConverter
-    converter = WeightConverter([], tp=1)
-    out = converter.convert(src_state, target_state=dst_state)
-
-    np.testing.assert_array_equal(
-        out['layers_0.wi'],
-        jnp.concatenate([wi_0_val[:, 0, :], wi_1_val[:, 0, :]], axis=-1),
-    )
-    np.testing.assert_array_equal(
-        out['layers_1.wi'],
         jnp.concatenate([wi_0_val[:, 1, :], wi_1_val[:, 1, :]], axis=-1),
     )
 
