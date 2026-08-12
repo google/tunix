@@ -1345,3 +1345,37 @@ per-rank scheduler commit; preserve the r18 log and JSONL unchanged.
    - `[CANON_P38_SERVING_CAPTURE]` was not triggered because `_p38_serving_begin` filters scheduled decode prefixes against `_P38_SERVING_CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)`. In this 1-step FrozenLake rollout, active request lengths remained below the 1,536-token lower bound, resulting in empty `candidate_strata`.
    - As a consequence, `p38s6-mismatch-capsule.npz` and `p38s6-serving-capture.tar` were not generated.
    - Full raw log and SHA-256 digest are archived to branch. Node slice is transitioned to high-throughput `P45` DP8xTP8 Device-Resident full training (`canon-p45-fl-eval-p45r1`).
+
+## 52. P44 DeepSWE 256-Chip Qwen3-4B TP8 Parity Rollout (Attempt `r06` — Full 256-Chip Scale-Out)
+
+- `debug_logs/p44_p44r06_deepswe256_rollout.raw.log` (SHA-256: `da2349ca535c2f98cf7ceed30f7ffabbdb41db6ffd3830495cbbfa68adc8d795`)
+- Target Commit: `b26135f2a24e36df0a9a6616e47ac1f978578ed6`
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p-256`
+- Hardware: 256 TPU v5p chips (64 worker nodes, 4x8x8 mesh)
+
+### Execution & Diagnostic Summary:
+
+1. **256-Chip Topology & Initialization**:
+   - 65/65 Pods scheduled and executed cleanly; loaded Qwen3-4B weights in 51.21s.
+   - Sampling JIT compilation succeeded across DP16xTP8 partitioned topology.
+2. **Rollout Trajectory Generation**:
+   - Completed 16-way concurrent real SWE coding rollout with `[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS` hitting `rows=4096 rows_per_dp=256 canonical_rows=256`.
+   - Prompt throughput peaked at 1288.1 tokens/s; generation throughput averaged ~2.5 tokens/s on max-context long outputs.
+
+## 53. P45 FrozenLake DP8xTP8 Resident Training Carrier (Attempt `r3` — Qwen3-8B TP Contract Preflight)
+
+- `debug_logs/p45_p45r3_frozenlake_resident.raw.log` (SHA-256: `288d6deb016c6712812f16063165e479295299fee6e51741a547f3cca0f75b5c`)
+- Target Commit: `b26135f2a24e36df0a9a6616e47ac1f978578ed6`
+- Cluster: `gke_cloud-tpu-multipod-dev_europe-west4_mlperf-v5p`
+- Hardware: 64 TPU v5p chips (16 worker nodes on NodePool `f08313ee`)
+- WandB Run: https://wandb.ai/yuxzhang-google/zero-tim-frozenlake-dp8-tp8-resident/runs/an0bykth
+
+### Execution & Diagnostic Summary:
+
+1. **Hardware Allocation & Device Mesh**:
+   - 17/17 Pods scheduled and bound to Slice 3; established (8, 8) shared mesh across 64 TPU devices.
+   - Successfully loaded Qwen3-8B weights into TPU device HBM (1.9 GiB per device allocated).
+2. **Preflight Diagnostics**:
+   - Runtime failed in `p22xf_contract.validate_qwen8b_env` due to static `CANON_QWEN3_TP_SIZE=4` check vs P45 carrier setting `CANON_QWEN3_TP_SIZE=8`.
+   - Captured full raw execution trace and SHA-256 digest for audit.
+
