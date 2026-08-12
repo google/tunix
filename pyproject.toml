@@ -87,6 +87,7 @@ experimental = [
   "cloudpickle",  # serialization envelope for the remote-execution actor protocol
   "grpcio",  # transport for cross-process worker execution
   "pydantic",  # data modeling and serialization for agent trajectories
+  "simple_parsing",  # Argument parsing for CLI
 ]
 
 [project.urls]
