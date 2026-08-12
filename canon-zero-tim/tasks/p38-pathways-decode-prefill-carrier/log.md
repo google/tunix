@@ -793,3 +793,22 @@
 - Next: after publication and resource approval, the remote operator runs one
   P38s5 stock-only Attempt-0 job and returns the complete directory specified
   in `HANDOFF.md`. Do not rerun U or start FrozenLake full training.
+
+## 2026-08-12 UTC — P38s5 handoff published
+
+- Type: publication receipt. No TPU/cloud run, backward, optimizer commit, or
+  main-branch action occurred.
+- Action: created P38-only commit `89b67404`, fetched the concurrently advanced
+  operator branch, and replayed it without conflict onto evidence-only P44
+  commit `a9dc5f29`. The resulting publication commit is
+  `d5a0ac30bdc1ecdd4bf3c5948baf8e54c48502b5`.
+- Gates after replay: new handoff Bash blocks pass `bash -n`; renderer tests
+  pass 5/5; serving classifier tests pass 25/25; capsule extraction passes
+  2/2; serving-archive extraction passes 4/4; shell postflight passes; and
+  `git diff --check` is clean.
+- Push: normal non-force push advanced
+  `origin/yuxzhang/canon-zero-tim` from `a9dc5f29` to `d5a0ac30`. Main and all
+  unrelated worktrees remained untouched.
+- Next: the remote operator follows the P38s5 section at the top of
+  `HANDOFF.md`, applies stock only after resource approval, and returns the
+  complete evidence directory. Do not accept a tail-only log.

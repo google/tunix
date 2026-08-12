@@ -7,6 +7,10 @@ P39 evidence cannot promote P38.
 
 ## DO THIS NOW: rerun one P38s5 FrozenLake stock capture
 
+This operator contract was published in
+`d5a0ac30bdc1ecdd4bf3c5948baf8e54c48502b5` on
+`origin/yuxzhang/canon-zero-tim`.
+
 This section supersedes every older P38 serving-capture launch command below.
 The committed `p38_p38s4_frozenlake_stock.raw.log` is not a complete run log:
 it contains exactly 200 tail lines, starts inside layer 30, and ends after the

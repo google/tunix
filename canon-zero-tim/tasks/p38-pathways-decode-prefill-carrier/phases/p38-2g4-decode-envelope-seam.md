@@ -183,4 +183,4 @@ records, workload exit, run-specific capsule transport, serving classifier,
 serving archive, and final postflight. Classify it as
 `INCONCLUSIVE_TAIL_ONLY`; it neither proves a runtime failure nor advances E0.
 The next operator attempt is P38s5 stock only, following the exact command and
-return protocol at the top of `../HANDOFF.md`.
+return protocol at the top of `../HANDOFF.md`, published in `d5a0ac30`.

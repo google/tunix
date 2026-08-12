@@ -8,7 +8,10 @@
 - Task directory: `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`
 - Directory state: tracked. P38.2g4 D0 is published at
   `b89435ca7d64faa65c00b5a85152f71fdfc60167` on
-  `origin/yuxzhang/canon-zero-tim`. Main was not checked out or modified.
+  `origin/yuxzhang/canon-zero-tim`. The complete P38s5 operator
+  run-and-return contract is published at
+  `d5a0ac30bdc1ecdd4bf3c5948baf8e54c48502b5` on the same branch. Main was not
+  checked out or modified.
 - Current phases: two independent tracks are deliberately active. P38.2d has
   added and locally gated the user-requested GSM8K-full warning-only alignment
   override so the time-sensitive convergence campaign cannot be stopped by an
