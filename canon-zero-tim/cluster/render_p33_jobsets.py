@@ -45,7 +45,7 @@ class JobSpec:
   enable_evaluation: bool = False
   dp_size: int = 16
   tp_size: int = 4
-  optimizer_resident: bool = False
+  optimizer_resident: bool = True
 
   @property
   def filename(self) -> str:

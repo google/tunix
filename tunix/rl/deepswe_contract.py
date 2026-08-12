@@ -659,9 +659,12 @@ def validate_environment(values: Mapping[str, str]) -> None:
         "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
     })
   else:
+    # Operator decision 2026-08-12: production defaults to device-resident optimizer
+    # state (speed over the unverified 32K-context HBM margin). On OOM, flip these two
+    # expectations back to "0"/"1" together with the profile pins and relaunch.
     expected.update({
-        "CANON_OPT_STATE_RESIDENT": "0",
-        "CANON_P30_OPT_STATE_OFFLOAD": "1",
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
         "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
     })
   wrong = {

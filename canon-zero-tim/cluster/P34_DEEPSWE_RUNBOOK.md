@@ -14,12 +14,20 @@ that would otherwise depend on a Python default.
 This runbook renders manifests only. Do not apply a manifest until the implementation branch is
 committed, pushed, read back at the exact SHA, and the 256-device experiment is approved.
 
-The optional P39 64-chip resident-optimizer pilot is not a prerequisite for a
-256-chip run that retains pinned-host optimizer offload. When a complete 4x8x8
-slice is available, the operator may defer that pilot and exercise the actual
-DP16xTP8 production topology directly. This does not promote resident optimizer
-state: Qwen3-32B must keep `CANON_P30_OPT_STATE_OFFLOAD=1` until a separate
-capacity experiment passes its HBM gate.
+The optional P39 64-chip resident-optimizer pilot is not a prerequisite for the
+256-chip run. When a complete 4x8x8 slice is available, the operator may defer
+that pilot and exercise the actual DP16xTP8 production topology directly.
+
+Operator decision 2026-08-12: the production profile now defaults to
+device-resident optimizer state (`CANON_OPT_STATE_RESIDENT=1`,
+`CANON_P30_OPT_STATE_OFFLOAD=0`) for speed. The Qwen3-32B HBM margin is
+UNVERIFIED at 32K context (static ~72 GB/chip -- bf16 params 8 + fp32 actor 16 +
+accumulator 16 + optimizer 32 -- before activations); an OOM at admission or
+first commit is the expected failure mode, is classified INCONCLUSIVE (infra,
+not numerical), and the fallback is: flip the two profile pins back to
+offload, flip the matching production expectations in
+`tunix/rl/deepswe_contract.py`, and relaunch. Watch `[P41.OPTIMIZER]
+placement=` and the init `hbm=[(used, cap)]` lines on the first attempt.
 
 ## Required operator inputs
 
