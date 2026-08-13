@@ -1,7 +1,7 @@
-# P44 Qwen3-4B DeepSWE 64/256 parity-debug runbook
+# P44 Qwen3-4B DeepSWE 64/128 parity-debug runbook
 
 P44 is a fast DeepSWE systems-debug lane for either one 64-device `4x4x4`
-slice or one 256-device `4x8x8` slice. Both variants use
+slice or one 128-device `4x4x8` slice. Both variants use
 Qwen3-4B-Instruct-2507, TP8, four
 prompts, four generations per prompt, the same rollout bounds, GRPO logic,
 resident optimizer policy, durable trajectory schema, solve metrics, and
@@ -18,13 +18,12 @@ per-rank trajectory partitioning, and the DP-derived global carrier geometry:
 | Allocation | Role split | Mesh per role | Local trajectories | Global M | Workers |
 |---|---|---|---:|---:|---:|
 | 64 devices | 32 rollout + 32 trainer | DP4 x TP8 | 4 | 1024 | 16 |
-| 256 devices | 128 rollout + 128 trainer | DP16 x TP8 | 1 | 4096 | 64 |
+| 128 devices | 64 rollout + 64 trainer | DP8 x TP8 | 2 | 2048 | 32 |
 
 This is functional systems parity, not bitwise equivalence across topologies,
 performance parity, a model-quality comparison, zero-TIM proof, or admission
-of the Qwen3-32B production recipe. A nominal 257-device allocation still has
-an exact 256-device P44 target: the extra device is not part of the `4x8x8`
-Pathways mesh and must not change the rendered topology.
+of the Qwen3-32B production recipe. Q4 topology 256 is no longer admitted;
+Qwen3-32B retains its independent 64/256 contract in P46.
 
 The implementation agent does not apply these JobSets. Rendering, server-side
 dry-run, apply, and promotion are operator-owned actions that require launch
@@ -148,8 +147,8 @@ indefinitely at update zero.
 ## 3. Select one topology and render one stage
 
 Run the ladders independently. Do not use a PASS from one allocation to skip a
-stage on the other. Set `TOPOLOGY=64` for one `4x4x4` slice or `TOPOLOGY=256`
-for one `4x8x8` slice, then use the node pool that supplies exactly that slice.
+stage on the other. Set `TOPOLOGY=64` for one `4x4x4` slice or `TOPOLOGY=128`
+for one `4x4x8` slice, then use the node pool that supplies exactly that slice.
 
 ```bash
 TOPOLOGY=64
@@ -182,7 +181,7 @@ kubectl apply --server-side --dry-run=server -f "$OUTPUT"
 ```
 
 The renderer must end with
-`P44_PARITY_JOBSET_RENDER_PASS topology=<64|256>`. It rejects floating images,
+`P44_PARITY_JOBSET_RENDER_PASS topology=<64|128>`. It rejects floating images,
 unsupported topology/stage, Qwen3-4B or TP8 drift, mutable evidence paths,
 optimizer offload, and recipe mismatch. Never hand-edit the rendered YAML.
 
@@ -251,8 +250,8 @@ Before accepting any stage, require these exact runtime lines once per run:
 # TOPOLOGY=64
 [P34.DEVICE_INVENTORY] PASS devices=64 host_source=logical_task hosts=16 devices_per_host=4 rollout_hosts=8 trainer_hosts=8
 
-# TOPOLOGY=256
-[P34.DEVICE_INVENTORY] PASS devices=256 host_source=logical_task hosts=64 devices_per_host=4 rollout_hosts=32 trainer_hosts=32
+# TOPOLOGY=128
+[P34.DEVICE_INVENTORY] PASS devices=128 host_source=logical_task hosts=32 devices_per_host=4 rollout_hosts=16 trainer_hosts=16
 ```
 
 Require this line exactly once per completed batch (`1` for rollout-only and
@@ -314,7 +313,7 @@ Require `MATMUL_DIM_PADDING_PASS mode=tpu cases=5/5 ... devices=4` and
 target M=4096 and executes real Pallas forward plus the promoted custom VJP in
 all five unique Qwen3-4B TP8-local projection shapes, including both K/N
 padding directions. This is only a direct-attached matmul construction gate;
-it does not prove a model load, R2E trajectory, TP8, Pathways, 64/256 topology,
+it does not prove a model load, R2E trajectory, TP8, Pathways, 64/128 topology,
 backward across the model, optimizer state, or a completed P44 stage.
 
 For the real local DeepSWE integration smoke, use a clean checkout of the
@@ -357,7 +356,7 @@ The runner must return one of these outcomes:
 
 - `DEEPSWE_ONEHOST_BACKWARD_NO_COMMIT_PASS` with exit 0: gradient finite and
   nonzero, zero commits, train step unchanged, and no changed
-  model/reference/optimizer/accumulator paths.
+model/reference/optimizer/accumulator paths.
 - `DEEPSWE_ONEHOST_BACKWARD_INCONCLUSIVE_NO_SIGNAL` with exit 3: the real
   backward ran but the finite gradient was zero. Preserve the report and do
   not promote a one-update run.
@@ -368,7 +367,7 @@ optimizer memory kinds, and per-device HBM before/after/peak. The signed local
 geometry is Qwen3-4B, DP1 x TP4 colocated, one prompt x two generations,
 response 512, two turns, exact trainer sequence 4096, Docker R2E, prefix cache
 off, and device-resident optimizer state. Never use this local runner as proof
-of TP8, Pathways, role separation, DP4/DP16, 64/256 behavior, Qwen3-32B, or
+of TP8, Pathways, role separation, DP4/DP8, 64/128 behavior, Qwen3-32B, or
 zero-TIM. `DEEPSWE_ONEHOST_ALLOW_DIRTY=1` is for explicitly labeled local
 development evidence only and is forbidden for operator acceptance evidence.
 

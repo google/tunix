@@ -1,4 +1,4 @@
-"""Renderer contracts for all three P46 64/256 JobSet families."""
+"""Renderer contracts for the workload-specific P46 topology matrix."""
 
 from __future__ import annotations
 
@@ -47,9 +47,9 @@ class P46RendererTest(unittest.TestCase):
         **overrides,
     )
 
-  def test_all_three_families_render_on_both_topologies(self):
-    for workload in renderer.WORKLOADS:
-      for topology in renderer.TOPOLOGIES:
+  def test_all_three_families_render_on_their_signed_topologies(self):
+    for workload, topologies in renderer.WORKLOAD_TOPOLOGIES.items():
+      for topology in topologies:
         with self.subTest(workload=workload, topology=topology):
           document = self._render(workload, topology)
           self.assertEqual(
@@ -62,7 +62,7 @@ class P46RendererTest(unittest.TestCase):
           )
 
   def test_q4_debug_is_instruct_16k_three_update_one_hour(self):
-    for topology in renderer.TOPOLOGIES:
+    for topology in renderer.WORKLOAD_TOPOLOGIES["q4-debug"]:
       env = p34._env(self._render("q4-debug", topology))
       args = shlex.split(env["CANON_RUN_CMD"])
       for expected in (
@@ -94,7 +94,7 @@ class P46RendererTest(unittest.TestCase):
         self.assertIn(expected, args)
 
   def test_eval_is_not_a_training_job(self):
-    for topology in renderer.TOPOLOGIES:
+    for topology in renderer.WORKLOAD_TOPOLOGIES["q4-clean-eval"]:
       env = p34._env(self._render("q4-clean-eval", topology))
       self.assertEqual(
           env["CANON_RUN_CMD"],
@@ -140,7 +140,7 @@ class P46RendererTest(unittest.TestCase):
           "q4-clean-eval", "64", evaluation_mode="logprob_observer"
       )
     with self.assertRaisesRegex(ValueError, "topology 64"):
-      self._render("q4-clean-eval", "256", parity_canary=True)
+      self._render("q4-clean-eval", "128", parity_canary=True)
 
   def test_bad_workload_topology_and_eval_shard_fail_closed(self):
     common = dict(
@@ -158,6 +158,14 @@ class P46RendererTest(unittest.TestCase):
       renderer.render(self._base("64"), workload="bad", topology="64", **common)
     with self.assertRaisesRegex(ValueError, "topology"):
       renderer.render(self._base("64"), workload="q4-debug", topology="4", **common)
+    with self.assertRaisesRegex(ValueError, "q4-debug topology"):
+      renderer.render(self._base("256"), workload="q4-debug", topology="256", **common)
+    with self.assertRaisesRegex(ValueError, "q4-clean-eval topology"):
+      renderer.render(
+          self._base("256"), workload="q4-clean-eval", topology="256", **common
+      )
+    with self.assertRaisesRegex(ValueError, "q32-train topology"):
+      renderer.render(self._base("128"), workload="q32-train", topology="128", **common)
     with self.assertRaisesRegex(ValueError, "shard"):
       renderer.render(
           self._base("64"),

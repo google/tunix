@@ -31,7 +31,7 @@ import numpy as np
 
 
 CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v2"
-TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v3"
+TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v4"
 REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v3"
 SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v3"
 CAMPAIGN_SCHEMA = "canon.p46.deepswe-eval.campaign-summary.v1"
@@ -39,7 +39,35 @@ REWARD_ONLY = "reward_only"
 REWARD_ONLY_TRAJECTORY_MODE = "reward_only_no_logprobs"
 LOGPROB_OBSERVER = "logprob_observer"
 LOGPROB_OBSERVER_TRAJECTORY_MODE = "observer_with_sampled_logprobs"
-VALID_STATUSES = frozenset({"SUCCEEDED", "MAX_STEPS_REACHED"})
+# These are completed model outcomes under the signed evaluation budgets.  A
+# retry would resample the same identity after an observed failure and bias the
+# N16 solve rate. MODEL_TIMEOUT is also a completed unsolved result because the
+# signed campaign measures success under a fixed per-call wall-clock budget.
+# Env/reward failures remain invalid and retry.
+VALID_STATUSES = frozenset({
+    "SUCCEEDED",
+    "MAX_STEPS_REACHED",
+    "MAX_CONTEXT_LIMIT_REACHED",
+    "MODEL_TIMEOUT",
+    "TIMEOUT",
+})
+_TOOL_ADAPTER_OBSERVATION_ERROR = re.compile(
+    r"(?:"
+    r"(?:file_editor|search): error: unrecognized arguments:.*"
+    r"(?:--command(?:=|\s)|--(?:view|create|str_replace|insert|undo_edit)\b|"
+    r"<parameter=)"
+    r"|cannot open /parameter"
+    r")",
+    re.I,
+)
+_TOOL_ADAPTER_ACTION_ERROR = re.compile(
+    r"(?:"
+    r"<parameter\s*=\s*[A-Za-z_][A-Za-z0-9_-]*=[^>\r\n]+>"
+    r"|<function=file_editor>.*?"
+    r"<parameter\s*=\s*(?:view|create|str_replace|insert|undo_edit)\s*>"
+    r")",
+    re.I | re.S,
+)
 _SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DIGEST_IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
@@ -159,7 +187,7 @@ class EvalConfig:
     admitted_topologies = (
         ("4",)
         if self.onehost_probe
-        else (("64",) if self.parity_canary else ("64", "256"))
+        else (("64",) if self.parity_canary else ("64", "128"))
     )
     if self.topology not in admitted_topologies:
       raise ValueError(
@@ -321,6 +349,33 @@ def reward_only_trajectory(value: Any, *, key: str = "") -> Any:
   return value
 
 
+def trajectory_infrastructure_error(
+    trajectory: Mapping[str, Any],
+) -> str | None:
+  """Returns a fail-closed reason for a known harness-caused trajectory.
+
+  Seeing inline-valued XML survive into a stored action, or seeing XML syntax
+  leak into a tool CLI, proves that the harness adapter failed.  It is not a
+  valid model failure and must not enter solve-rate data.
+  """
+  steps = trajectory.get("steps", [])
+  if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+    return "malformed_steps"
+  for step in steps:
+    if not isinstance(step, Mapping):
+      continue
+    action = step.get("action")
+    if isinstance(action, str) and _TOOL_ADAPTER_ACTION_ERROR.search(action):
+      return "r2egym_action_parameter_adapter"
+    observation = step.get("observation")
+    if (
+        isinstance(observation, str)
+        and _TOOL_ADAPTER_OBSERVATION_ERROR.search(observation)
+    ):
+      return "r2egym_action_parameter_adapter"
+  return None
+
+
 def trajectory_record(
     config: EvalConfig,
     *,
@@ -349,6 +404,15 @@ def trajectory_record(
   if not math.isfinite(reward):
     raise ValueError("evaluation reward must be finite")
   key = task_key(entry)
+  infrastructure_error = trajectory_infrastructure_error(raw_trajectory)
+  status = str(status)
+  valid = status in VALID_STATUSES and infrastructure_error is None
+  if valid and status == "MODEL_TIMEOUT":
+    validity_reason = "completed_model_timeout"
+  elif valid:
+    validity_reason = "completed_under_signed_budget"
+  else:
+    validity_reason = infrastructure_error or "retryable_runtime_failure"
   return {
       "schema": TRAJECTORY_SCHEMA,
       "config_fingerprint": config.fingerprint,
@@ -363,10 +427,11 @@ def trajectory_record(
       "sample_index": sample_index,
       "attempt_index": attempt_index,
       "sample_nonce": config.sample_nonce(key, sample_index),
-      "status": str(status),
+      "status": status,
       "reward": reward,
-      "solved": str(status) in VALID_STATUSES and reward == 1.0,
-      "valid": str(status) in VALID_STATUSES,
+      "solved": valid and reward == 1.0,
+      "valid": valid,
+      "validity_reason": validity_reason,
       "elapsed_secs": float(elapsed_secs),
       "trajectory": serializable(raw_trajectory),
   }

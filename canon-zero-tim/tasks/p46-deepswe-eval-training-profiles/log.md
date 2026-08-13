@@ -270,3 +270,102 @@
   launch was performed by this publication step.
 - Next: read back the final operator HEAD, then remote execution starts a new
   fixed run id at l0/p0 and proceeds through the complete campaign.
+
+## 2026-08-13T21:52:44Z — P46.5: p46e25609 stop and trajectory root-cause repair
+
+- Type: returned-evidence audit, implementation, validation, and handoff
+- Source audit: Initially pulled evidence-bearing operator HEAD
+  `cc17378b7492d3b046d6b9c68b46df1b9da21647`, then fast-forwarded the dirty
+  worktree with autostash to current operator HEAD
+  `b4391703d6e1ec80b8da5589e02dfe72ba9a4a4e`; the intervening P38-only commit
+  does not overlap this fix. The newest returned artifact is a 256-chip DP32 x
+  TP8 run, not 64-chip; its exact in-artifact source is
+  `8c0e90f3b995f457c1dbb2199639f7f47962ed2b`.
+- Stop cause: all 64 physical identities were attempted. The evaluator then
+  returned nonzero at `P46_EVAL_PHYSICAL_INCOMPLETE` because it classified
+  four `MAX_CONTEXT_LIMIT_REACHED` outcomes and one `MODEL_TIMEOUT` as five
+  pending valid samples. The four signed context-budget outcomes should be
+  valid unsolved results; only the model timeout is retryable by status.
+- Trajectory audit: 64/64 unique task/sample identities, exact four tasks x
+  N16, 1,102 steps with nonempty actions and observations, null logprobs, and
+  verified archive digests. Terminal counts are 59 SUCCEEDED, four
+  MAX_CONTEXT_LIMIT_REACHED, one MODEL_TIMEOUT; total reward is zero.
+- Semantic failure: every trajectory contains at least one recognized leaked
+  R2E parameter tag. Counts are 347 `unrecognized arguments`, 363 file-editor
+  usage errors, 172 `/parameter` shell errors, and 40 missing-argument errors.
+  The dominant Q4 spelling `<parameter=command=view>` was parsed as a key and
+  emitted as invalid `--command=view`. The artifact proves durable capture,
+  not clean execution, solve rate, or washed data.
+- Action: Added a signed-tool action canonicalizer that repairs only the
+  observed inline-valued tags and file-editor command shorthand before the
+  pinned R2E parser. Raw model responses remain in trajectories; canonical
+  executed actions are stored. R2E installation now asserts the positional
+  file-editor command contract. Trajectory schema v4 invalidates any surviving
+  adapter signature with `validity_reason=r2egym_action_parameter_adapter`.
+  Max-step, max-context and whole-trajectory budget terminals now count as
+  completed unsolved results without biased resampling; per-turn runtime
+  failures still retry.
+- Validation: 40/40 P46 CPU tests pass. Three observed malformed action forms
+  were also normalized against the actual pinned R2E source at
+  `0d94c4eb9431cd195c55a7ea3abd54006c9a1735`, producing correct positional
+  bash commands. Evidence SHA-256 verification and `git diff --check` pass.
+  Direct-host inventory cannot initialize TPU because `libtpu.so` is absent,
+  so no one-host model/R2E trajectory was run and target behavior remains
+  unproven.
+- Publication: Local and unpublished. No commit, push, main-branch mutation,
+  TPU launch, Kubernetes launch, or secret access occurred.
+- Next: after explicit commit/push approval, publish only to
+  `yuxzhang/canon-zero-tim`, read back the exact SHA, then use a new run id to
+  rerun all 64 l0/p0 identities. Do not continue later shards or Q32 until the
+  repaired shard has real tool outputs and no adapter-invalid records.
+
+## 2026-08-13T22:01:34Z — P46.5: migrate Q4 large topology from 256 to 128 chips
+
+- Type: implementation, regression validation, and operator-handoff update
+- Decision: Q4 debug and clean evaluation now admit exactly 64-chip `4x4x4`
+  or 128-chip `4x4x8`; Q4 topology 256 is rejected. Qwen3-32B training remains
+  exactly 64/256 and rejects 128.
+- Q4 geometry: 128-chip debug is split host-completely into 64-device rollout
+  and trainer roles, each DP8 x TP8, global M2048, two local trajectories and
+  two per-DP scheduler slots. 128-chip evaluation uses all devices as DP16 x
+  TP8. The JobSet uses 32 four-chip workers and `tpuv5:4x4x8` for both resource
+  manager and workers.
+- Action: Added a signed `4x4x8` role splitter, migrated the P44 workload,
+  environment, artifact, classifier and renderer contracts to 64/128, and
+  added workload-specific P46 topology allowlists plus negative controls for
+  Q4-256 and Q32-128.
+- Validation: `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS` (41 cases) and
+  `P46_DEEPSWE_PROFILES_CPU_PASS cases=40` pass. No target TPU/Pathways launch
+  was performed, so the 128-chip topology remains unproven target behavior.
+- Publication: Local and unpublished. No commit, push, main-branch mutation,
+  Kubernetes launch, cloud-resource mutation, or secret access occurred.
+
+## 2026-08-13T22:21:59Z — P46.5: accept model timeout as a fixed-budget outcome
+
+- Type: evaluation-policy correction, implementation, regression validation,
+  and handoff update
+- Decision: `MODEL_TIMEOUT` now completes its task/sample identity as a valid
+  unsolved result under the signed evaluation wall-clock budget. It records
+  `validity_reason=completed_model_timeout`, remains reward zero, and is not
+  resampled. This measures success within the fixed budget rather than
+  unlimited model capability.
+- Fail-closed boundary: `ENV_TIMEOUT`, `REWARD_TIMEOUT`, `FAILED`, malformed
+  structure, and recognized adapter/parser corruption remain invalid and
+  retryable. The infrastructure/adaptor check runs independently of status and
+  overrides `MODEL_TIMEOUT`; a timeout carrying the observed R2E parameter leak
+  remains `r2egym_action_parameter_adapter` and cannot enter N16.
+- Historical evidence: This policy does not rewrite or resume `p46e25608` or
+  `p46e25609`. In particular, all 64 `p46e25609` records remain ineligible
+  because every trajectory has an adapter signature even though its terminal
+  statuses are now all accepted in isolation.
+- Validation: focused artifact tests pass 12/12;
+  `P46_DEEPSWE_PROFILES_CPU_PASS cases=40`,
+  `P34_STATIC_PASS suites=10`, and
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS` all pass. Runbook, handoff, state, plan,
+  and the active phase record the same policy.
+- Publication: Local and unpublished. No commit, push, main-branch mutation,
+  TPU launch, Kubernetes launch, cloud-resource mutation, or secret access
+  occurred.
+- Next: run final diff/static checks, then publish only after a separate
+  explicit user request. The first target rerun must use a new run id and must
+  prove zero adapter-invalid records before the campaign advances.

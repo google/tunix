@@ -6,7 +6,7 @@ The operator-facing source of truth is
 ## Objective
 
 Run the same Qwen3-4B DeepSWE functional recipe on either 64 devices
-(`4x4x4`, DP4 x TP8 per role) or 256 devices (`4x8x8`, DP16 x TP8 per role).
+(`4x4x4`, DP4 x TP8 per role) or 128 devices (`4x4x8`, DP8 x TP8 per role).
 Both allocations expose the same bounded stages, write the same
 real-trajectory schemas and grouped solve metrics, and are judged by one
 topology-aware classifier. For the current campaign a successful rollout
@@ -18,6 +18,10 @@ production workload and does not claim bitwise, performance, quality, or
 zero-TIM equivalence between allocations.
 
 ## Publication contract
+
+The 64/128 topology migration is local and unpublished. Do not launch until it
+has explicit publication approval and the exact operator-branch SHA is read
+back with Q4-256 rejection and the `4x4x8`/32-worker contract present.
 
 - Required remote branch: `yuxzhang/canon-zero-tim`
 - Repair development baseline: `7ea2176f807e3e13fde17499e15fef2bd497363b`
@@ -115,14 +119,15 @@ Do not launch a local development worktree or an unverified symbolic branch.
   The local P44.10 repair uses BN/BK128, pads only registered matmul K/N width
   `1216` to `1280`, slices output N back, and makes both directions mandatory
   classifier evidence. The implementation is committed, but it has no clean
-  post-publication or 64/256 execution evidence yet.
+  post-publication or current 64/128 execution evidence yet. The archived
+  256-device attempts remain historical evidence only.
 
 ## First operator action in the current P46 campaign
 
 Read `../p46-deepswe-eval-training-profiles/HANDOFF.md` first. Follow the
 runbook's fetch and immutable-input preflight, resolve the exact current remote
 HEAD, and require a clean detached checkout containing `e1b40093`. Use the
-available 64- or 256-device allocation: first inspect one Q4 clean-evaluation
+available 64- or 128-device allocation: first inspect one Q4 clean-evaluation
 shard, then render Q4-Instruct `q4-debug` three-update. Do not insert a separate
 one-update job by default. Both topologies use the same functional recipe but
 remain independent target evidence.
@@ -133,5 +138,5 @@ trajectory/metric batches and the complete failure package on any red or
 inconclusive result. Do not edit the recipe or train on a partial timed-out
 batch. Use a fresh run id, never an archived manifest.
 
-If 257 devices are available, P44 still renders an exact 256-device
-`4x8x8` target. The additional device is outside the mesh.
+P44 now rejects topology 256. Do not revive an archived 256-device manifest;
+Qwen3-32B retains its separate 64/256 P46 training contract.

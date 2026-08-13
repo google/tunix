@@ -93,6 +93,12 @@ class R2egymInstallStepContractTest(unittest.TestCase):
     digest = hashlib.sha256(PATCH.read_bytes()).hexdigest()
     self.assertEqual(digest, _PATCH_SHA256)
 
+  def test_install_verifies_file_editor_command_is_positional(self):
+    text = STEP.read_text()
+    self.assertIn("Action.from_string", text)
+    self.assertIn("file_editor view --path /testbed/example.py", text)
+    self.assertIn("file_editor positional command ok", text)
+
   def test_step_skips_when_disabled(self):
     result = _run_step(["export CANON_R2EGYM_INSTALL=0"])
     self.assertEqual(result.returncode, 0, result.stderr)

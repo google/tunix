@@ -78,7 +78,7 @@ class P44EnvironmentContractTest(unittest.TestCase):
       )
 
   def test_all_rendered_stages_pass_on_both_topologies(self):
-    for topology, dp in (("64", 4), ("256", 16)):
+    for topology, dp in (("64", 4), ("128", 8)):
       for stage in ("rollout-only", "one-update", "three-update"):
         with self.subTest(topology=topology, stage=stage):
           result = self._run(topology, stage)
@@ -90,7 +90,7 @@ class P44EnvironmentContractTest(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("role topology", result.stdout)
     result = self._run(
-        "256", override="export CANON_GLOBAL_TRAJECTORIES=64"
+        "128", override="export CANON_GLOBAL_TRAJECTORIES=64"
     )
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("trajectory geometry", result.stdout)

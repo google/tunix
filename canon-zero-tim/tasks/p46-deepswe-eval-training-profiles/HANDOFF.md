@@ -1,7 +1,8 @@
 # P46 remote-agent execution handoff
 
 Publication status: **P46.1-P46.5 AND INVALID-ATTEMPT/CAMPAIGN-FINALIZER FIX
-PUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
+PUBLISHED; P46E25609 ACTION-ADAPTER/STATUS FIX AND Q4 64/128 TOPOLOGY
+MIGRATION LOCAL AND UNPUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
 
 The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
 repair are anchored by implementation commit
@@ -21,8 +22,11 @@ behavior; do not launch from it. The invalid-attempt retry and campaign
 finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. Resolve and record the exact
 current 40-character operator HEAD, require `a642ab26` in its ancestry, and
-require `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, the 33-case P46 CPU
-gate and `finalize_deepswe_eval.py` before rendering.
+require `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, the 40-case P46 CPU
+gate, `r2egym_action_compat.py`, trajectory schema v4, Q4 topology 128 and
+`finalize_deepswe_eval.py` before rendering. Until the local correction is
+published and read back, stop before rendering; do not recreate it as a YAML
+or shell hot patch.
 
 The archived P34r03 Qwen3-32B run generated 64/64 rollout records, but every
 record ended as `ENV_TIMEOUT`. It then failed before forward/backward with
@@ -74,20 +78,53 @@ namanjain12/aiohttp_final:006fbe03fede4eaa1eeba7b8393cbf4d63cb44b6 sample=6
 namanjain12/aiohttp_final:04deab71cc804311016159548e5dcdfb9c2698d3 sample=5
 ```
 
-The old evaluator counted invalid records as completed resume identities and
-printed `P46_EVAL_SUBSHARD_PASS ... pending_logical_tasks=30`; revoke that
-claim. The fixed evaluator durably records every attempt but only a valid
-record completes an identity. It retries with consecutive `attempt_index`
-values, rejects attempts after a valid result, and returns nonzero with
-`P46_EVAL_PHYSICAL_INCOMPLETE` until the physical shard has exactly 64 valid
-identities. Because the fixed source SHA changes the fingerprint, start with a
-new run id and rerun all 64 l0/p0 identities; do not transplant the old 62.
+The old evaluator counted records that were invalid under its own policy as
+completed resume identities and printed
+`P46_EVAL_SUBSHARD_PASS ... pending_logical_tasks=30`; revoke that historical
+claim. The current policy deliberately counts `MODEL_TIMEOUT` as a valid
+unsolved result under the fixed call budget and records
+`validity_reason=completed_model_timeout`. This policy change does not
+reclassify the old run in place. The fixed evaluator durably records every
+attempt, allows only a valid record to complete an identity, retries actual
+environment/reward/harness failures with consecutive `attempt_index` values,
+and rejects attempts after a valid result. Because the fixed source SHA changes
+the fingerprint, start with a new run id and rerun all 64 l0/p0 identities; do
+not transplant the old records.
+
+Returned run `p46e25609` is a second failed 256-chip attempt, not a 64-chip
+run and not clean evaluation evidence. The exact artifact source provenance is
+`stock@8c0e90f3b995f457c1dbb2199639f7f47962ed2b`. It has four tasks x N16,
+64 unique identities, 1,102 nonempty action/observation steps, null logprobs,
+and terminal status 59 `SUCCEEDED`, four `MAX_CONTEXT_LIMIT_REACHED`, one
+`MODEL_TIMEOUT`; all rewards are zero. It stopped after the first wave because
+the evaluator counted the four signed context-budget outcomes as invalid,
+reported five pending identities, and correctly exited nonzero under that old
+classification.
+
+Full action/observation inspection changes the conclusion: Q4 repeatedly
+emitted inline-valued tags such as `<parameter=command=view>`. R2E parsed
+`command=view` as a key and passed `--command=view` to a positional CLI. The
+shard contains 347 `unrecognized arguments` observations, 363 editor usage
+errors, 172 `/parameter` shell errors, and 40 missing-argument errors; every
+trajectory contains a recognizable adapter leak. This proves streaming and
+schema capture, but **zero trajectories are eligible for curriculum
+classification**.
+
+The unpublished fix canonicalizes the observed dialect before R2E, preserves
+raw `model_response`, records the canonical executed action, and invalidates
+any surviving adapter signature as
+`validity_reason=r2egym_action_parameter_adapter`. It treats max-step,
+max-context, model-timeout and whole-trajectory budget terminals as completed
+unsolved model outcomes; model timeout is labeled
+`validity_reason=completed_model_timeout`. Environment/reward failures remain
+retryable, and recognized adapter/parser corruption overrides any accepted
+status. The first published fixed run must use a new run id and rerun all 64
+identities; never resume or reclassify `p46e25609` in place.
 
 The full secondary evaluation/data-washing campaign is not complete. It still
 requires 1851 x N16 = 29,616 valid trajectories, 58 logical reports and 463
-physical JobSets. `p46e25608` covered only logical 0/physical 0, and all 62
-valid rewards in that shard were zero. No candidate washed whitelist has been
-produced or approved.
+physical JobSets. Neither returned l0/p0 attempt is promotable. No candidate
+washed whitelist has been produced or approved.
 
 Before execution, read these files completely:
 
@@ -123,16 +160,25 @@ For P46.5, the exact detached publication must also contain all of:
 ```bash
 rg -n 'evaluation_mode=reward_only|prompt_logprobs = None|host_extraction' \
   canon-zero-tim examples/deepswe tunix/generate/vllm_sampler.py
+rg -n 'canonicalize_r2egym_action|DEEPSWE.R2E_ACTION_COMPAT' \
+  examples/deepswe/r2egym_action_compat.py examples/deepswe/swe_agent.py
+rg -n 'trajectory.v4|validity_reason|MAX_CONTEXT_LIMIT_REACHED' \
+  examples/deepswe/deepswe_eval_artifacts.py
 test -f examples/deepswe/probe_reward_only_v5p.py
 ```
 
 If those checks fail, reward-only is not published. Stop; do not reconstruct
 it with YAML or shell hot patches.
 
+Also require the read-back renderer to admit Q4 exactly on 64/128, emit
+`4x4x8` with 32 workers for topology 128, and reject Q4-256/Q32-128. Until the
+local topology migration is published, do not render a replacement manifest
+by hand.
+
 ## Gate 0 — reward-only publication and layered parity
 
-Require `a4d165e8` plus the later invalid-attempt repair in the exact read-back
-operator ancestry. Run the 33-case P46 CPU gate and the two
+Require `a4d165e8`, the invalid-attempt repair, and the later action-adapter
+repair in the exact read-back operator ancestry. Run the 40-case P46 CPU gate and the two
 targeted `VllmSamplerConfigTest` cases. If a direct four-chip v5p host is
 available, rerun the one-host command from a clean published checkout:
 
@@ -143,13 +189,15 @@ bash canon-zero-tim/tests/p46_deepswe_profiles/run_onehost_reward_only_v5p.sh
 Before any target manifest, require this audit too:
 
 ```bash
-rg -n 'attempt_index|P46_EVAL_PHYSICAL_INCOMPLETE|physical_pending' \
+rg -n 'attempt_index|P46_EVAL_PHYSICAL_INCOMPLETE|physical_pending|validity_reason' \
   examples/deepswe/deepswe_eval_artifacts.py \
   examples/deepswe/eval_deepswe.py
+rg -n 'canonicalize_r2egym_action|DEEPSWE.R2E_ACTION_COMPAT' \
+  examples/deepswe/r2egym_action_compat.py examples/deepswe/swe_agent.py
 test -f examples/deepswe/finalize_deepswe_eval.py
 ```
 
-Stop unless the CPU marker is exactly `cases=33` or if any repair/finalizer
+Stop unless the CPU marker is exactly `cases=40` or if any repair/finalizer
 marker is absent.
 
 L1 is a hard gate. L2 token identity is diagnostic; a clean
@@ -165,10 +213,10 @@ SHA.
 
 ## Gate 1 — one Q4 clean-evaluation physical shard
 
-Use whichever topology is available; 64 chips are not a prerequisite. Render
+Use whichever admitted Q4 topology is available; 64 chips are not a prerequisite. Render
 logical index 0, physical index 0 exactly as documented in
-`P46_DEEPSWE_PROFILES_RUNBOOK.md`. On 64 chips evaluation is DP8 x TP8; on 256
-chips it is DP32 x TP8. Both are Qwen3-4B-Instruct-2507, a 16,384-token total
+`P46_DEEPSWE_PROFILES_RUNBOOK.md`. On 64 chips evaluation is DP8 x TP8; on 128
+chips it is DP16 x TP8. Both are Qwen3-4B-Instruct-2507, a 16,384-token total
 response budget per trajectory, at most 50 environment/model steps, four tasks
 x 16 samples, concurrency 64, prefix cache off, complete trajectory streaming,
 and a one-hour physical-shard deadline. Keep one topology for a resumable
@@ -204,6 +252,14 @@ messages, terminal status, finite reward, elapsed time, source/data/model
 fingerprint and no credential material. Invalid retries remain visible as
 separate durable attempts; they do not count toward N16. A shard timeout is
 resumable evidence and a failed gate, even if some records were safely written.
+Every accepted record must have either
+`validity_reason=completed_under_signed_budget` or
+`validity_reason=completed_model_timeout`; any
+`r2egym_action_parameter_adapter`, stored inline-valued parameter tag,
+`cannot open /parameter`, or tool `unrecognized arguments` adapter signature
+blocks the shard. `[DEEPSWE.R2E_ACTION_COMPAT]` warnings are allowed because
+the raw response is preserved, but the stored executed action must be canonical
+and the resulting tool observation must be real output rather than CLI usage.
 
 Before handing evidence back, follow the return-package commands in the P46
 runbook. Return every trajectory JSONL absolute path, `wc -l`, per-file
@@ -214,7 +270,7 @@ insufficient to inspect action/observation/tool-call content.
 
 Only after Gate 1 passes, render a new `q4-debug` JobSet on whichever topology
 is available and obtain separate launch approval. The 64-chip form uses DP4 x
-TP8 per rollout/trainer role; the 256-chip form uses DP16 x TP8 per role. Both
+TP8 per rollout/trainer role; the 128-chip form uses DP8 x TP8 per role. Both
 keep Qwen3-4B-Instruct-2507, B4 x G4, 16 trajectories, 16K response, three
 updates and the one-hour shared rollout-batch boundary. Require:
 

@@ -788,7 +788,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "p34-production",
             "p43-64chip-debug",
             "p44-qwen4b-parity-64",
-            "p44-qwen4b-parity-256",
+            "p44-qwen4b-parity-128",
             "p46-qwen32b-train-64",
             "p46-qwen32b-train-256",
         ):

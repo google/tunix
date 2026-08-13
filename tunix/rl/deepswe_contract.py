@@ -107,8 +107,8 @@ class DeepSWEWorkload:
             "Qwen/Qwen3-4B-Instruct-2507", 4, 4, 4, 8, 32, 4, 1024, 4,
             16384, 50, 3,
         ),
-        "p44-qwen4b-parity-256": (
-            "Qwen/Qwen3-4B-Instruct-2507", 4, 4, 16, 8, 128, 1, 4096, 1,
+        "p44-qwen4b-parity-128": (
+            "Qwen/Qwen3-4B-Instruct-2507", 4, 4, 8, 8, 64, 2, 2048, 2,
             16384, 50, 3,
         ),
         "p46-qwen32b-train-64": (
@@ -311,13 +311,13 @@ P44_PARITY_64_WORKLOAD = DeepSWEWorkload(
     global_m=1024,
     max_num_seqs_per_dp=4,
 )
-P44_PARITY_256_WORKLOAD = dataclasses.replace(
+P44_PARITY_128_WORKLOAD = dataclasses.replace(
     P44_PARITY_64_WORKLOAD,
-    contract_name="p44-qwen4b-parity-256",
-    dp_size=16,
-    devices_per_role=128,
-    global_m=4096,
-    max_num_seqs_per_dp=1,
+    contract_name="p44-qwen4b-parity-128",
+    dp_size=8,
+    devices_per_role=64,
+    global_m=2048,
+    max_num_seqs_per_dp=2,
 )
 P46_Q32_64_WORKLOAD = dataclasses.replace(
     P34_WORKLOAD,
@@ -337,16 +337,16 @@ def p44_workload(topology: str) -> DeepSWEWorkload:
   """Returns one of the two exact Qwen3-4B parity topologies."""
   if topology == "64":
     return P44_PARITY_64_WORKLOAD
-  if topology == "256":
-    return P44_PARITY_256_WORKLOAD
-  raise ValueError("CANON_P44_TOPOLOGY must be exactly 64 or 256")
+  if topology == "128":
+    return P44_PARITY_128_WORKLOAD
+  raise ValueError("CANON_P44_TOPOLOGY must be exactly 64 or 128")
 
 
 def p44_recipe_signature(workload: DeepSWEWorkload) -> dict[str, Any]:
   """Normalizes a P44 workload by the preregistered topology allowlist."""
   if workload.contract_name not in (
       "p44-qwen4b-parity-64",
-      "p44-qwen4b-parity-256",
+      "p44-qwen4b-parity-128",
   ):
     raise ValueError("P44 recipe signature requires a P44 workload")
   workload.validate()
@@ -656,6 +656,74 @@ def split_4x4x4_role_devices(
   return rollout, trainer, report
 
 
+def split_4x4x8_role_devices(
+    devices: Sequence[Any],
+) -> tuple[tuple[Any, ...], tuple[Any, ...], dict[str, Any]]:
+  """Splits one 4x4x8 slice into two host-complete 2x4x8 role halves."""
+  if len(devices) != 128:
+    raise ValueError(
+        f"P44 128-chip parity requires 128 devices, got {len(devices)}"
+    )
+  placements = tuple(_as_device_placement(device) for device in devices)
+  ids = tuple(item.device_id for item in placements)
+  coords = tuple(item.coords for item in placements)
+  if len(set(ids)) != 128 or len(set(coords)) != 128:
+    raise ValueError(
+        "P44 128-chip devices must have unique ids and coordinates"
+    )
+  extents = tuple(len({coord[axis] for coord in coords}) for axis in range(3))
+  if extents != (4, 4, 8):
+    raise ValueError(
+        f"P44 128-chip parity expected a 4x4x8 slice, got extents={extents}"
+    )
+  by_id = {
+      placement.device_id: device
+      for placement, device in zip(placements, devices)
+  }
+  rollout_placements = tuple(item for item in placements if item.coords[0] < 2)
+  trainer_placements = tuple(item for item in placements if item.coords[0] >= 2)
+  if len(rollout_placements) != 64 or len(trainer_placements) != 64:
+    raise ValueError("P44 128-chip role halves must each contain 64 devices")
+  host_report = _validate_host_complete_roles(
+      rollout_placements,
+      trainer_placements,
+      expected_hosts=32,
+      expected_role_hosts=16,
+      contract_name="P44 128-chip parity",
+  )
+
+  def order_key(item):
+    core = item.coords[3] if len(item.coords) == 4 else 0
+    return (item.coords[1], item.coords[2], item.coords[0], core)
+
+  rollout_placements = tuple(sorted(rollout_placements, key=order_key))
+  trainer_placements = tuple(sorted(trainer_placements, key=order_key))
+  rollout = tuple(by_id[item.device_id] for item in rollout_placements)
+  trainer = tuple(by_id[item.device_id] for item in trainer_placements)
+  report = {
+      "devices": 128,
+      "slice_extents": extents,
+      "rollout_devices": 64,
+      "trainer_devices": 64,
+      "rollout_processes": host_report["rollout_hosts"],
+      "trainer_processes": host_report["trainer_hosts"],
+      "disjoint": not bool(
+          set(item.device_id for item in rollout_placements)
+          & set(item.device_id for item in trainer_placements)
+      ),
+      "exhaustive": len(set(ids)) == len(rollout) + len(trainer),
+      "host_complete": True,
+      "rollout_ids": tuple(item.device_id for item in rollout_placements),
+      "trainer_ids": tuple(item.device_id for item in trainer_placements),
+      **host_report,
+  }
+  if not report["disjoint"] or not report["exhaustive"]:
+    raise AssertionError(
+        "P44 128-chip role halves are not disjoint and exhaustive"
+    )
+  return rollout, trainer, report
+
+
 def validate_environment(values: Mapping[str, str]) -> None:
   """Validates the exact P34 profile without accepting implicit defaults."""
   workload = active_workload(values)
@@ -663,7 +731,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
   debug = workload.contract_name == "p43-64chip-debug"
   parity = workload.contract_name in (
       "p44-qwen4b-parity-64",
-      "p44-qwen4b-parity-256",
+      "p44-qwen4b-parity-128",
   )
   p46_train = workload.contract_name in (
       "p46-qwen32b-train-64",
@@ -823,7 +891,7 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
     if workload.contract_name not in (
         "p43-64chip-debug",
         "p44-qwen4b-parity-64",
-        "p44-qwen4b-parity-256",
+        "p44-qwen4b-parity-128",
     ):
       raise ValueError("rollout-only is admitted only for P43/P44 debug")
     expected_no_commit, steps = "1", 1
@@ -860,7 +928,7 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
     )
   if workload.contract_name in (
       "p44-qwen4b-parity-64",
-      "p44-qwen4b-parity-256",
+      "p44-qwen4b-parity-128",
   ) and stage not in (
       "rollout-only",
       "one-update",

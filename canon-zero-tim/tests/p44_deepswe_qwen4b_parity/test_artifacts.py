@@ -100,7 +100,7 @@ class P44ArtifactTest(unittest.TestCase):
 
   def test_both_topologies_write_the_same_artifact_schema(self):
     manifests = []
-    for topology in ("64", "256"):
+    for topology in ("64", "128"):
       with self.subTest(topology=topology), tempfile.TemporaryDirectory() as text:
         root = Path(text).resolve()
         metrics = artifacts.persist_batch(
@@ -133,7 +133,7 @@ class P44ArtifactTest(unittest.TestCase):
     self.assertEqual(manifests[0]["global_trajectories"], 16)
     self.assertEqual(manifests[1]["global_trajectories"], 16)
     self.assertEqual(manifests[0]["role_topology"]["dp"], 4)
-    self.assertEqual(manifests[1]["role_topology"]["dp"], 16)
+    self.assertEqual(manifests[1]["role_topology"]["dp"], 8)
 
   def test_mode_helpers_are_fail_closed(self):
     values = {
@@ -206,13 +206,13 @@ class P44ArtifactTest(unittest.TestCase):
             values=_values("64"),
         )
     with tempfile.TemporaryDirectory() as text:
-      with self.assertRaisesRegex(ValueError, "exactly 64 or 256"):
+      with self.assertRaisesRegex(ValueError, "exactly 64 or 128"):
         artifacts.persist_batch(
             *_batch(),
             expected_step=0,
             output_dir=Path(text).resolve(),
             model_id="Qwen/Qwen3-4B-Instruct-2507",
-            values=_values("128"),
+            values=_values("256"),
         )
 
 

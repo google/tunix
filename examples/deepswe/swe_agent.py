@@ -7,6 +7,13 @@ from typing import Optional, Union  # Added Union for pytype compatibility
 
 from absl import logging
 
+try:
+  from .r2egym_action_compat import canonicalize_r2egym_action
+except ImportError:
+  # ``eval_deepswe.py`` is also supported as a direct script, where its
+  # directory rather than the repository root is the import base.
+  from r2egym_action_compat import canonicalize_r2egym_action
+
 SWE_SYSTEM_PROMPT_FN_CALL = """You are a programming agent who is provided a github issue and repository bash environment and is tasked to solve certain tasks (e.g., file localization, testcase generation, code repair and editing etc) to resolve the issue.
 """
 
@@ -121,6 +128,8 @@ Reminder:
 - Required parameters MUST be specified
 - Only call one function at a time
 - VERY IMPORTANT: Each response must include both reasoning (as natural text) and function call (in above format) to solve the task.
+- Parameter values go between tags. Write <parameter=command>view</parameter>.
+  Never write <parameter=command=view>.
 </IMPORTANT>
 """
 
@@ -384,6 +393,14 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   # Strip leading/trailing whitespace
   thought = thought.strip()
   action = action.strip()
+
+  action, repair_count = canonicalize_r2egym_action(action)
+  if repair_count:
+    logging.warning(
+        "[DEEPSWE.R2E_ACTION_COMPAT] repaired %d inline-valued "
+        "R2E parameter tag(s)",
+        repair_count,
+    )
 
   # convert action to Action object
   action = _require_swe_action().from_string(action)

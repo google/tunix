@@ -309,12 +309,12 @@ def _manifest(
       contract_name = "p44-qwen4b-parity-64"
       slice_topology = "4x4x4"
       role_topology = {"dp": 4, "tp": 8, "devices": 32}
-    elif topology == "256":
-      contract_name = "p44-qwen4b-parity-256"
-      slice_topology = "4x8x8"
-      role_topology = {"dp": 16, "tp": 8, "devices": 128}
+    elif topology == "128":
+      contract_name = "p44-qwen4b-parity-128"
+      slice_topology = "4x4x8"
+      role_topology = {"dp": 8, "tp": 8, "devices": 64}
     else:
-      raise ValueError("P44 artifact topology must be exactly 64 or 256")
+      raise ValueError("P44 artifact topology must be exactly 64 or 128")
     if model_id != "Qwen/Qwen3-4B-Instruct-2507":
       raise ValueError(
           "P44 artifacts require Qwen/Qwen3-4B-Instruct-2507"

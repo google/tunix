@@ -27,13 +27,13 @@ _TOPOLOGIES = {
         "global_m": 1024,
         "max_num_seqs": 4,
     },
-    "256": {
-        "dp": 16,
-        "role_devices": 128,
-        "workers": 64,
-        "slice": "4x8x8",
-        "global_m": 4096,
-        "max_num_seqs": 1,
+    "128": {
+        "dp": 8,
+        "role_devices": 64,
+        "workers": 32,
+        "slice": "4x4x8",
+        "global_m": 2048,
+        "max_num_seqs": 2,
     },
 }
 
@@ -47,7 +47,7 @@ def _parity_command(
   try:
     topology_spec = _TOPOLOGIES[topology]
   except KeyError as exc:
-    raise ValueError("P44 topology must be exactly 64 or 256") from exc
+    raise ValueError("P44 topology must be exactly 64 or 128") from exc
   base_stage = "one-update" if stage == "rollout-only" else stage
   args = list(
       p34._command(base_stage, run_root=run_root, whitelist=whitelist)
@@ -120,7 +120,7 @@ def render(
   try:
     topology_spec = _TOPOLOGIES[topology]
   except KeyError as exc:
-    raise ValueError("P44 topology must be exactly 64 or 256") from exc
+    raise ValueError("P44 topology must be exactly 64 or 128") from exc
   if (
       whitelist != p34.P34_CLEAN_WHITELIST
       or whitelist_sha256 != p34.P34_CLEAN_WHITELIST_SHA256
@@ -312,7 +312,7 @@ def validate(
   try:
     topology_spec = _TOPOLOGIES[topology]
   except KeyError as exc:
-    raise ValueError("P44 topology must be exactly 64 or 256") from exc
+    raise ValueError("P44 topology must be exactly 64 or 128") from exc
   head = p34._head(document)
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")

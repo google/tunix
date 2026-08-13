@@ -424,16 +424,16 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         p34_expected_max_seqs=4
         p34_expected_mesh=4,8
         ;;
-      256)
-        p34_expected_dp=16
-        p34_expected_devices=128
-        p34_expected_local_trajectories=1
-        p34_expected_global_m=4096
-        p34_expected_max_seqs=1
-        p34_expected_mesh=16,8
+      128)
+        p34_expected_dp=8
+        p34_expected_devices=64
+        p34_expected_local_trajectories=2
+        p34_expected_global_m=2048
+        p34_expected_max_seqs=2
+        p34_expected_mesh=8,8
         ;;
       *)
-        echo "[env] P44 parity requires topology 64 or 256" >&2
+        echo "[env] P44 parity requires topology 64 or 128" >&2
         fail=1
         p34_expected_dp=0
         p34_expected_devices=0
@@ -801,8 +801,8 @@ case "${CANON_P46_EVALUATION:-0}" in
         fail=1
       }
     done
-    case "${CANON_P46_TOPOLOGY:-}" in 64|256) ;; *)
-      echo "[env] P46 evaluation topology must be 64 or 256" >&2; fail=1 ;;
+    case "${CANON_P46_TOPOLOGY:-}" in 64|128) ;; *)
+      echo "[env] P46 evaluation topology must be 64 or 128" >&2; fail=1 ;;
     esac
     case " ${CANON_RUN_CMD:-} " in
       *" examples/deepswe/eval_deepswe.py "*) ;;

@@ -70,7 +70,7 @@ class P44ContractTest(unittest.TestCase):
 
   def test_topologies_share_one_normalized_recipe(self):
     small = contract.P44_PARITY_64_WORKLOAD
-    large = contract.P44_PARITY_256_WORKLOAD
+    large = contract.P44_PARITY_128_WORKLOAD
     small.validate()
     large.validate()
     self.assertEqual(
@@ -92,11 +92,11 @@ class P44ContractTest(unittest.TestCase):
     self.assertEqual(small.global_trajectories, 16)
     self.assertEqual(large.global_trajectories, 16)
     self.assertEqual((small.dp_size, small.tp_size), (4, 8))
-    self.assertEqual((large.dp_size, large.tp_size), (16, 8))
+    self.assertEqual((large.dp_size, large.tp_size), (8, 8))
     self.assertEqual(small.local_trajectories, 4)
-    self.assertEqual(large.local_trajectories, 1)
+    self.assertEqual(large.local_trajectories, 2)
     self.assertEqual(small.global_m, 1024)
-    self.assertEqual(large.global_m, 4096)
+    self.assertEqual(large.global_m, 2048)
 
   def test_active_workload_requires_explicit_topology(self):
     common = {"CANON_P44_DEEPSWE_PARITY": "1"}
@@ -105,10 +105,10 @@ class P44ContractTest(unittest.TestCase):
         contract.P44_PARITY_64_WORKLOAD,
     )
     self.assertIs(
-        contract.active_workload({**common, "CANON_P44_TOPOLOGY": "256"}),
-        contract.P44_PARITY_256_WORKLOAD,
+        contract.active_workload({**common, "CANON_P44_TOPOLOGY": "128"}),
+        contract.P44_PARITY_128_WORKLOAD,
     )
-    with self.assertRaisesRegex(ValueError, "exactly 64 or 256"):
+    with self.assertRaisesRegex(ValueError, "exactly 64 or 128"):
       contract.active_workload(common)
 
   def test_p39_p43_p44_are_mutually_exclusive(self):
@@ -120,7 +120,7 @@ class P44ContractTest(unittest.TestCase):
       })
 
   def test_both_topologies_share_the_bounded_stage_ladder(self):
-    for topology in ("64", "256"):
+    for topology in ("64", "128"):
       common = {
           "CANON_P44_DEEPSWE_PARITY": "1",
           "CANON_P44_TOPOLOGY": topology,
@@ -157,6 +157,7 @@ class P44ContractTest(unittest.TestCase):
   def test_pathways_logical_tasks_admit_both_physical_topologies(self):
     cases = (
         ((4, 4, 4), contract.split_4x4x4_role_devices, 16, 8),
+        ((4, 4, 8), contract.split_4x4x8_role_devices, 32, 16),
         ((4, 8, 8), contract.split_4x8x8_role_devices, 64, 32),
     )
     for shape, split, hosts, role_hosts in cases:
@@ -171,8 +172,8 @@ class P44ContractTest(unittest.TestCase):
 
   def test_pathways_split_rejects_a_logical_task_crossing_roles(self):
     with self.assertRaisesRegex(ValueError, "crosses host boundaries"):
-      contract.split_4x8x8_role_devices(
-          _pathways_devices((4, 8, 8), cross_host=True)
+      contract.split_4x4x8_role_devices(
+          _pathways_devices((4, 4, 8), cross_host=True)
       )
 
   def test_pathways_split_rejects_missing_or_wrong_host_inventory(self):
@@ -181,8 +182,8 @@ class P44ContractTest(unittest.TestCase):
           _pathways_devices((4, 4, 4), expose_task=False)
       )
     with self.assertRaisesRegex(ValueError, "host inventory mismatch"):
-      contract.split_4x8x8_role_devices(
-          _pathways_devices((4, 8, 8), unique_hosts=True)
+      contract.split_4x4x8_role_devices(
+          _pathways_devices((4, 4, 8), unique_hosts=True)
       )
 
 

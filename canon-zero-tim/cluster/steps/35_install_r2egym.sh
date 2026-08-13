@@ -65,6 +65,16 @@ import r2egym
 from r2egym.agenthub.action import Action
 
 print("[r2egym] VERIFY import ok:", r2egym.__file__)
+action = Action.from_string(
+    "<function=file_editor>"
+    "<parameter=command>view</parameter>"
+    "<parameter=path>/testbed/example.py</parameter>"
+    "</function>"
+)
+command = action.to_bashcmd()
+if command != "file_editor view --path /testbed/example.py":
+  raise RuntimeError(f"R2E-Gym file_editor adapter drifted: {command!r}")
+print("[r2egym] VERIFY file_editor positional command ok:", command)
 PY
 echo "[r2egym] versions: $(pip3 show r2egym kubernetes 2>/dev/null | grep -E '^(Name|Version)' | tr '\n' ' ')"
 echo "[r2egym] installed at pinned $COMMIT"

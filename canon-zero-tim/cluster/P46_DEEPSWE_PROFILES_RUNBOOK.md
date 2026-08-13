@@ -1,17 +1,19 @@
 # P46 DeepSWE evaluation and training profiles
 
 P46 is the operator entrypoint for the current DeepSWE campaign. It maintains
-three immutable workload families, and renders each family for either a
-64-chip `4x4x4` slice or a 256-chip `4x8x8` slice. The renderer writes the
-signed parameters directly into the JobSet; do not add a second shell override
-layer.
+three immutable workload families with a workload-specific topology allowlist:
+Qwen3-4B debug/evaluation render on 64-chip `4x4x4` or 128-chip `4x4x8`, while
+Qwen3-32B training renders on 64-chip `4x4x4` or 256-chip `4x8x8`. The renderer
+writes the signed parameters directly into the JobSet; do not add a second
+shell override layer.
 
-This package has local CPU, direct one-host development evidence, and one
-returned 256-chip evaluation attempt. The returned attempt is not a physical
-shard PASS: it produced 62 valid results and two `MODEL_TIMEOUT` attempts, but
-the old evaluator incorrectly printed PASS. A rendered YAML or a cardinality
-marker is not a target PASS. Do not apply a new manifest until the exact
-invalid-attempt retry repair has been published to
+This package has local CPU, direct one-host development evidence, and returned
+256-chip evaluation attempts. Neither returned attempt is a physical-shard
+PASS: `p46e25608` exposed the old invalid-attempt resume bug, while
+`p46e25609` exposed a Q4-to-R2E action-tag adapter bug in every trajectory. A
+rendered YAML, cardinality marker, or `SUCCEEDED` status is not a target PASS.
+Do not apply a new manifest until the retry repair, action-adapter repair and
+Q4 64/128 topology migration have been published to
 `origin/yuxzhang/canon-zero-tim`, read back, and separately approved for
 launch.
 
@@ -37,7 +39,7 @@ finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. A remote agent must stop unless
 the exact read-back operator SHA contains that commit and all of
 `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, and
-`P46_DEEPSWE_PROFILES_CPU_PASS cases=33`, plus
+`P46_DEEPSWE_PROFILES_CPU_PASS cases=40`, plus
 `finalize_deepswe_eval.py`. Do not invent or substitute a repair SHA in
 advance.
 
@@ -106,6 +108,44 @@ must use a new run id and rerun all 64 `l0-p0` identities. Later relaunches of
 that same fixed SHA, run id, topology and shard may retry only the identities
 whose latest attempts remain invalid.
 
+The later returned run `p46e25609` is also not evaluation or data-washing
+evidence. It ran on **256 chips**, not 64: Qwen3-4B-Instruct-2507 at DP32 x
+TP8. Its artifact contains exactly four tasks x N16 = 64 unique identities and
+1,102 nonempty action/observation steps; all sampled logprobs are null. Those
+structural facts prove durable reward-only trajectory capture only.
+
+The terminal histogram is 59 `SUCCEEDED`, four
+`MAX_CONTEXT_LIMIT_REACHED`, and one `MODEL_TIMEOUT`, with total reward zero.
+The old evaluator stopped after the first 64-attempt wave because it treated
+all five signed budget terminals as retryable invalid records, then emitted
+`P46_EVAL_PHYSICAL_INCOMPLETE pending_valid_samples=5` and exited nonzero.
+Context, max-step, model-timeout, and whole-trajectory budget terminals are now
+completed unsolved evaluation outcomes under the fixed wall-clock contract;
+retrying them would resample a failed identity and bias N16. Model timeout is
+explicitly labeled `validity_reason=completed_model_timeout`. `ENV_TIMEOUT`,
+`REWARD_TIMEOUT`, `FAILED`, malformed structure, and known harness failures
+remain invalid and retryable; a harness failure overrides terminal status.
+
+More importantly, the full JSONL shows the Q4 model repeatedly used the hybrid
+tag form `<parameter=command=view>` instead of
+`<parameter=command>view</parameter>`. The pinned R2E parser accepted the text
+as a parameter named `command=view`, causing the CLI to receive
+`--command=view`. Across the shard there are 347 `unrecognized arguments`
+observations, 363 file-editor usage errors, 172 `/parameter` shell errors and
+40 missing-required-argument errors. Every one of the 64 trajectories contains
+at least one recognizable leaked parameter tag. Therefore none of this shard
+may be classified or promoted, even where the terminal status says
+`SUCCEEDED`.
+
+The correction canonicalizes only the observed R2E tool dialect before the
+pinned parser, keeps the raw model response in the artifact, records the
+canonical executed action, verifies the pinned file-editor positional contract
+during R2E installation, and marks any surviving adapter signature invalid
+with `validity_reason=r2egym_action_parameter_adapter`. The trajectory schema
+is `canon.p46.deepswe-eval.trajectory.v4`. Because source SHA is fingerprinted,
+the first published fixed run uses a new run id and reruns all 64 `l0/p0`
+identities; never resume or reclassify `p46e25609` in place.
+
 ## Workload matrix
 
 | Family | Model and purpose | Signed work | Hard batch boundary |
@@ -123,12 +163,13 @@ Training uses separated rollout and trainer roles:
 | Allocation | Per-role mesh | Per-role devices | Local trajectories | Global M |
 |---|---|---:|---:|---:|
 | 64 chips | DP4 x TP8 | 32 | Q4: 4; Q32: 16 | 1024 |
-| 256 chips | DP16 x TP8 | 128 | Q4: 1; Q32: 4 | 4096 |
+| 128 chips | DP8 x TP8 | 64 | Q4: 2; Q32: not admitted | 2048 |
+| 256 chips | DP16 x TP8 | 128 | Q4: not admitted; Q32: 4 | 4096 |
 
 Evaluation has no trainer role and uses every visible device: DP8 x TP8 on 64
-chips or DP32 x TP8 on 256 chips. Its semantic batch is still exactly four
+chips or DP16 x TP8 on 128 chips. Its semantic batch is still exactly four
 tasks x 16 samples = 64 trajectories. Prefer 64 chips for evaluation when both
-allocations are available; the 256-chip form exists so the same workload can
+allocations are available; the 128-chip form exists so the same workload can
 run when only that slice is schedulable.
 
 ## True reward-only evaluation candidate
@@ -327,14 +368,18 @@ Require `P46_DEEPSWE_PROFILES_CPU_PASS`. Also run the pinned-image gates named
 in the P34/P44 runbooks with the actual registry-digest client image. Do not
 print or modify `HF_TOKEN`, `WANDB_API_KEY`, or `.env`.
 
-For evaluation execution after the `p46e25608` correction, the marker must be
-exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=33`, and this source audit must
+For evaluation execution after the `p46e25609` action-adapter correction, the
+marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=40`, and this
+source audit must
 pass before rendering:
 
 ```bash
-rg -n 'attempt_index|P46_EVAL_PHYSICAL_INCOMPLETE|physical_pending' \
+rg -n 'attempt_index|P46_EVAL_PHYSICAL_INCOMPLETE|physical_pending|validity_reason' \
   examples/deepswe/deepswe_eval_artifacts.py \
   examples/deepswe/eval_deepswe.py
+rg -n 'canonicalize_r2egym_action|DEEPSWE.R2E_ACTION_COMPAT' \
+  examples/deepswe/r2egym_action_compat.py \
+  examples/deepswe/swe_agent.py
 test -f examples/deepswe/finalize_deepswe_eval.py
 ```
 
@@ -369,9 +414,14 @@ TPU_NODEPOOL=mlperf-v5p-64-np-0
 MODEL_PVC=haoyugao-cpu-np-pvc
 ```
 
-For 256 chips, set `TOPOLOGY=256`, use
-`canon-zero-tim/cluster/jobset-256cluster-64chip.yaml`, and select the `4x8x8`
-worker node pool.
+For Q4 on 128 chips, set `TOPOLOGY=128`, use
+`canon-zero-tim/cluster/jobset-256cluster-64chip.yaml` only as the structural
+Pathways template, and select the `4x4x8` worker node pool. The renderer
+rewrites the resource manager, worker topology and worker count to 32; verify
+those rendered fields before apply. Q4 explicitly rejects topology 256.
+
+For Q32 on 256 chips, reset `TOPOLOGY=256`, use the same structural template,
+and select the `4x8x8` worker node pool. Q32 explicitly rejects topology 128.
 
 Render Qwen3-4B three-update debug:
 
@@ -435,7 +485,7 @@ done
 ```
 
 The renderer rejects `logprob_observer` without `--parity-canary`, rejects the
-canary on 256 chips, and rejects evaluation-only controls on either training
+canary on 128 chips, and rejects evaluation-only controls on either training
 family. Apply each arm only with explicit launch approval. After both arms
 return, obtain their JobSet wall times from Kubernetes rather than summing
 per-trajectory latency, and build the promotion report:
@@ -482,11 +532,12 @@ still requires the operator's explicit launch approval.
 
 ## Promotion order and claim ceiling
 
-The remote agent must advance one gate at a time. Both 64 and 256 chips are
-first-class signed variants; use whichever allocation is available. Prefer 64
-only when both are simultaneously available because it is cheaper, not because
-it is a prerequisite. Keep one topology for a given resumable evaluation
-run-id because topology is part of its fingerprint.
+The remote agent must advance one gate at a time. Q4 has first-class 64/128
+variants; Q32 has first-class 64/256 variants. Use whichever admitted
+allocation is available. Prefer 64 only when both admitted allocations are
+simultaneously available because it is cheaper, not because it is a
+prerequisite. Keep one topology for a given resumable evaluation run-id because
+topology is part of its fingerprint.
 
 1. Before any full evaluation shard, require a clean published P46.5 SHA and
    complete the 64-chip paired N16 L3 canary. Compare identical task/sample
@@ -497,7 +548,7 @@ run-id because topology is part of its fingerprint.
    not use a historical solve rate as the control.
 2. Run one `q4-clean-eval` physical shard at logical index 0 and physical
    index 0 on the available topology. The 64-chip form is DP8 x TP8; the
-   256-chip form is DP32 x TP8. Both still evaluate exactly four tasks x N16
+   128-chip form is DP16 x TP8. Both still evaluate exactly four tasks x N16
    with concurrency 64 and a one-hour boundary. Require
    `P46_EVAL_SUBSHARD_PASS` and
    `[P46.EVAL.POSTFLIGHT] PASS`, exactly 64 unique valid
@@ -512,8 +563,8 @@ run-id because topology is part of its fingerprint.
    observations, statuses agree with terminal events, and reward 1.0 is used
    only for a valid solved trajectory. Summary-only JSONL is insufficient.
 4. Run `q4-debug` on the available topology for exactly three updates. The
-   64-chip form splits into DP4 x TP8 rollout/trainer roles; the 256-chip form
-   splits into DP16 x TP8 roles. Both retain B4 x G4, 16 trajectories and the
+   64-chip form splits into DP4 x TP8 rollout/trainer roles; the 128-chip form
+   splits into DP8 x TP8 roles. Both retain B4 x G4, 16 trajectories and the
    one-hour shared batch boundary. Require the `dp` data-axis marker once,
    three `P44.LOGPS_BATCH` markers, three trajectory files and digests, three
    batch-metrics rows, finite nonzero gradient activity, train steps
@@ -564,9 +615,10 @@ trajectory/report SHA-256 values, classifier JSON, optimizer placement, HBM
 evidence and the first fatal traceback. Applying any JobSet still requires the
 operator's explicit launch approval.
 
-A 64-chip PASS proves the DP4 training carrier or DP8 evaluation carrier that
-actually ran. A 256-chip PASS proves its DP16 training or DP32 evaluation
-carrier. Results are functionally comparable because model, data, sampler,
+A 64-chip PASS proves the DP4 Q4/Q32 training carrier or DP8 Q4 evaluation
+carrier that actually ran. A 128-chip Q4 PASS proves its DP8 training or DP16
+evaluation carrier. A 256-chip PASS is admitted only for Q32 and proves its
+DP16 training carrier. Results are functionally comparable because model, data, sampler,
 loss, optimizer, batch and deadline semantics are identical, but they are not
 bitwise or performance-equivalent across DP sizes. Local CPU gates and rendered
 YAML prove no TPU, Pathways, R2E, HBM, convergence, or zero-TIM claim.

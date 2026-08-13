@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Renders the three P46 DeepSWE workload families on 64 or 256 chips."""
+"""Renders the P46 DeepSWE workload families on their signed topologies."""
 
 from __future__ import annotations
 
@@ -21,7 +21,13 @@ EVAL_PHYSICAL_TASKS = 4
 EVALUATION_MODES = ("reward_only", "logprob_observer")
 TOPOLOGIES = {
     "64": {"instance": "4x4x4", "workers": 16, "dp": 4, "global_m": 1024},
+    "128": {"instance": "4x4x8", "workers": 32, "dp": 8, "global_m": 2048},
     "256": {"instance": "4x8x8", "workers": 64, "dp": 16, "global_m": 4096},
+}
+WORKLOAD_TOPOLOGIES = {
+    "q4-debug": ("64", "128"),
+    "q4-clean-eval": ("64", "128"),
+    "q32-train": ("64", "256"),
 }
 
 
@@ -526,8 +532,11 @@ def render(
 ) -> dict[str, Any]:
   if workload not in WORKLOADS:
     raise ValueError(f"unknown P46 workload: {workload}")
-  if topology not in TOPOLOGIES:
-    raise ValueError("P46 topology must be exactly 64 or 256")
+  if topology not in WORKLOAD_TOPOLOGIES[workload]:
+    allowed = " or ".join(WORKLOAD_TOPOLOGIES[workload])
+    raise ValueError(
+        f"P46 {workload} topology must be exactly {allowed}"
+    )
   if workload != "q4-clean-eval" and (
       evaluation_mode != "reward_only" or parity_canary
   ):

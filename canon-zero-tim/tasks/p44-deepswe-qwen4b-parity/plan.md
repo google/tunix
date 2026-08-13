@@ -3,7 +3,7 @@
 ## Outcome
 
 Add a separate Qwen3-4B parity-debug lane without weakening the existing P34
-Qwen3-32B production or P43 Qwen3-8B debug contracts. The 64-chip and 256-chip
+Qwen3-32B production or P43 Qwen3-8B debug contracts. The 64-chip and 128-chip
 variants must use the same model, prompt/generation workload, rollout limits,
 GRPO algorithm, optimizer placement policy, stage ladder, durable trajectory
 format, grouped solve metrics, and postflight semantics. Only physical topology,
@@ -19,13 +19,14 @@ differ.
 | P44.3 | Training-path integration and durable evidence parity | Both variants pass environment, CLI, topology, artifact, and stage negative controls | passed |
 | P44.4 | One dual-topology renderer, classifiers, and operator runbook | All six bounded JobSets render and normalized manifests differ only by the allowlist | passed |
 | P44.5 | Local release and adjacent regressions | P44 plus P43/P39/P34 and overlapping renderer gates pass from a clean diff | passed |
-| P44.6 | Target promotion ladder | 64 and 256 each classify rollout-only, one-update, and three-update as PASS | pending |
+| P44.6 | Historical target promotion ladder | 64 and 256 each classify rollout-only, one-update, and three-update as PASS | superseded by P44.13 after the Q4 256 allocation was withdrawn |
 | P44.7 | Repair the first target failure and preempt the next reviewed runtime faults | Pathways-style 64/256 host placement, single-conversation rollout batching, and 4-prompt x 4-generation logprob execution batching pass fail-closed tests and adjacent release gates | passed |
 | P44.8 | Optional direct-attached v5p Qwen3-4B one-host smoke | Hardware/dependency inventory is recorded; when prerequisites exist, real rollout through backward-no-commit passes without changing P34/P39/P44 production contracts | superseded by P44.11 after the full model/R2E prerequisites were located |
 | P44.9 | Repair the r04 TP8-local SwiGLU feature geometry without changing the BF256 kernel | Model-pinned 4B/32B padding passes exact forward/VJP probes; 8B remains unpadded; unknown widths and missing runtime evidence fail closed | passed; implementation commit `1a058b46` published to the operator branch |
 | P44.10 | Repair the r05 Mosaic matmul block geometry | Qwen3-4B uses BN/BK128 plus exact `1216->1280` K/N padding; target-shaped forward and canonical VJP pass on four real v5p devices; missing runtime traces fail closed | local and one-host v5p passed; implementation `29cea119` published; 64/256 target pending |
 | P44.11 | Real one-host Qwen3-4B DeepSWE integration | A default-off DP1 x TP4 colocated profile loads the model, executes real Docker R2E rollouts, persists trajectories/solve metrics, runs backward without an optimizer commit, records HBM/placement/state fingerprints, and preserves all production contracts | rollout integration passed; backward executed but `INCONCLUSIVE_NO_SIGNAL`; implementation `29cea119` published; clean-source repeat pending |
 | P44.12 | Lock the fast three-update YAML and bound every rollout/sandbox lifecycle | 64/256 normalized recipes match; request abort, trajectory/reward/cleanup/batch deadlines and R2E deletion pass frozen-image controls | published in `e1b40093`; target pending |
+| P44.13 | Replace the Q4 256-chip variant with 128-chip `4x4x8` | 64/128 normalized recipes match; 128 splits into host-complete DP8 x TP8 roles; Q4-256 fails closed; P44 and P46 CPU gates pass | local and unpublished; target pending |
 
 ## Decisions
 
@@ -34,12 +35,12 @@ differ.
 - Decision: Use 4 prompts x 4 generations, response length 4096, 5 turns, and the rollout-only/one-update/three-update ladder on both topologies.
 - Decision: Keep TP8 for communication-path fidelity even though a smaller TP may be faster for Qwen3-4B.
 - Decision: Use device-resident optimizer state and alignment warning-only on both parity-debug variants; retain hard stops for non-finite values, invalid B/C structure, replica failure, and OOM.
-- Decision: Treat DP4 versus DP16, local trajectory partitioning, worker count, physical placement, and DP-derived global M as allowed topology differences; do not claim bitwise or performance equivalence.
+- Decision: Treat DP4 versus DP8, local trajectory partitioning, worker count, physical placement, and DP-derived global M as allowed Q4 topology differences; do not claim bitwise or performance equivalence.
 - Decision: Preserve P34, P39, and P43 defaults and evidence boundaries unchanged.
 - Confirmed: `p44r02` reached 256 unique topology devices and failed only at host grouping; the identical one-device IFRT CPU diagnostic is present in earlier successful Pathways runs and is not sufficient evidence of incomplete TPU registration.
 - Decision: On Pathways, derive host identity from `(slice_id, logical_task)` rather than the virtual devices' degenerate `process_index`; keep exact host cardinality and host-complete role checks hard-failing on both topologies.
 - Decision: Selectively port main commits `38a6fbfc` and `7a15620d`; do not merge main or the workload-reference branches wholesale.
-- Decision: A direct-attached Qwen3-4B DP1xTP4 smoke, if runnable, proves only one-host frontend/rollout/trajectory/trainer integration and cannot promote TP8, role separation, DP4/DP16, Pathways, 64/256-chip, or Qwen3-32B claims.
+- Decision: A direct-attached Qwen3-4B DP1xTP4 smoke, if runnable, proves only one-host frontend/rollout/trajectory/trainer integration and cannot promote TP8, role separation, DP4/DP8, Pathways, 64/128-chip, or Qwen3-32B claims.
 - Confirmed: `p44r04` reached Qwen3-4B model execution and failed at the SwiGLU wrapper because TP8-local intermediate width `9728/8=1216` is not divisible by the unchanged kernel BF256. Qwen3-32B also has a latent non-divisible TP8-local width `25600/8=3200`; Qwen3-8B width `12288/4=3072` already satisfies BF256.
 - Decision: Preserve the BF256 kernel and custom VJP. Admit zero-padding only through exact model-overlay mappings (`1216->1280` for 4B and `3200->3328` for 32B), slice back to the semantic width, and reject every unregistered non-BF256 width. The P44 classifier must observe the 4B runtime feature-padding trace before accepting a stage.
 - Confirmed: `p44r05` proved the SwiGLU repair on all 36 layers, then Mosaic rejected the Qwen3-4B matmul `BN64/BK64` block specs because the trailing TPU sublane dimension must be 128-aligned. Merely changing BK is insufficient: gate/up have semantic `N=1216`, while down has semantic `K=1216`.
@@ -50,5 +51,6 @@ differ.
 - Decision: A no-commit PASS requires a finite nonzero gradient and unchanged model/reference/optimizer/accumulator state with zero commits. A finite zero gradient caused by an all-zero reward/advantage batch is `INCONCLUSIVE_NO_SIGNAL`, never PASS and never grounds a one-update promotion.
 - Confirmed: The actual one-host batch executed real R2E tool actions and the full trainer forward/backward call, but both trajectories hit the bounded context limit with reward zero. Peak HBM was about 35.92 GiB of 95.74 GiB per device and optimizer leaves were device-resident. This proves integration wiring and memory headroom only, not episode completion, learning signal, or target topology behavior.
 - Decision: For the current remote debug campaign, allow a successful rollout inspection to promote directly to the existing `three-update` stage; `one-update` remains available but is not a prerequisite.
-- Decision: Lock both 64/256 P44 renderings to B4/G4, response 4096, five turns, temperature 1.0, clean 1851-row whitelist, device optimizer and three updates. One complete rollout batch has a shared 3600-second deadline; one trajectory gets 3000 seconds plus 300 seconds confirmed cleanup, with 300-second model turns and 600-second step/reward limits.
+- Decision: Lock both 64/128 P44 renderings to B4/G4, response 16384, 50 turns, temperature 1.0, clean 1851-row whitelist, device optimizer and three updates. One complete rollout batch has a shared 3600-second deadline; one trajectory gets 3000 seconds plus 300 seconds confirmed cleanup, with 300-second model turns and 600-second step/reward limits.
+- Decision: The 128-chip Q4 target is one `4x4x8` slice with 32 four-chip workers, split host-completely into 64-device rollout and trainer roles. Each role is DP8 x TP8 with global M2048, two local trajectories and two per-DP scheduler request slots. Q4 topology 256 is rejected; Q32 remains independently 64/256.
 - Decision: Timeout is a failed/inconclusive attempt. Never train on a partial prompt batch, silently leave a vLLM request running, or continue while an R2E sandbox deletion is unconfirmed.

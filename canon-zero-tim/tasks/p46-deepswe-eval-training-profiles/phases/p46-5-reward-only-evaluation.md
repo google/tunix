@@ -33,7 +33,7 @@
    - L3 is target-only: paired N16 task arms must have solve-rate differences
      consistent with binomial uncertainty, followed by trajectories/hour.
 5. Provide a direct-attached one-host probe for the real request switch,
-   per-call latency and artifact-size delta. Do not promote it to 64/256 or R2E
+   per-call latency and artifact-size delta. Do not promote it to target Q4 or R2E
    throughput evidence.
 
 ## Exit gate
@@ -59,7 +59,7 @@ The reward-only implementation and local L1/L2 gates are published by
 - never serializes numeric fake logprobs, and carries
   `trajectory_mode=reward_only_no_logprobs`, `sampled_by=stock@<SHA>` and
   `sampling_rng_mode=engine_global_sequential` through every artifact; and
-- keeps the production 64/256 lifecycle, clean-data fingerprint, deadlines,
+- keeps the production Q4 64/128 lifecycle, clean-data fingerprint, deadlines,
   durability and cleanup behavior unchanged.
 
 CPU evidence is `P46_DEEPSWE_PROFILES_CPU_PASS cases=31`; the two direct
@@ -153,3 +153,58 @@ was not archived here. The next remote return must include the JSONL absolute
 paths, line counts, per-file SHA-256, compressed trajectory/log archive and
 archive SHA-256; a head log alone cannot prove action/observation/tool-call
 quality.
+
+## Returned 256-chip action-adapter correction
+
+Operator HEAD `cc17378b7492d3b046d6b9c68b46df1b9da21647` archives full
+`p46e25609` l0/p0 evidence. The artifact provenance names source
+`8c0e90f3b995f457c1dbb2199639f7f47962ed2b`; this was Qwen3-4B DP32 x
+TP8 on 256 chips, not 64 chips. All 64 unique identities and 1,102 steps were
+durably serialized with nonempty action/observation fields and null logprobs.
+Terminal status is 59 `SUCCEEDED`, four `MAX_CONTEXT_LIMIT_REACHED`, one
+`MODEL_TIMEOUT`, and reward sum zero.
+
+The nonzero stop was expected under the then-published validity table: it
+treated all five non-SUCCEEDED records as pending and emitted
+`P46_EVAL_PHYSICAL_INCOMPLETE`. That table was too strict for the fixed
+wall-clock evaluation contract. Max-step, max-context, model-timeout and
+whole-trajectory timeout are completed unsolved samples and must not be
+resampled. Model timeout is retained distinctly as
+`validity_reason=completed_model_timeout`; environment/reward errors and
+harness corruption remain invalid.
+
+The complete JSONL also proves a deeper failure. Every trajectory contains at
+least one inline-valued or shorthand R2E parameter tag. The pinned parser turns
+forms such as `<parameter=command=view>` into a parameter named
+`command=view`, so `file_editor` receives invalid `--command=view`. The shard
+contains 347 `unrecognized arguments` observations, 363 file-editor usage
+errors, 172 `/parameter` shell errors and 40 missing-argument errors. It proves
+trajectory capture only; no record is curriculum/data-washing evidence.
+
+The local correction adds a narrow signed-tool canonicalizer before R2E,
+preserves the raw `model_response`, stores the canonical executed action,
+asserts R2E's positional file-editor contract at install time, and advances
+the trajectory schema to v4. A surviving adapter signature is invalid with
+`validity_reason=r2egym_action_parameter_adapter` and blocks physical
+completion even when terminal status is otherwise accepted. P46 CPU evidence
+is 40/40 PASS, and the observed file-editor,
+search and edit-shorthand forms produce correct commands against the actual
+pinned R2E source. This repair is unpublished and has no target evidence yet.
+After publication/read-back approval, rerun all 64 identities under a new run
+id; do not resume or reclassify `p46e25609` in place.
+
+## Current Q4 topology migration
+
+The current unpublished Q4 launch contract replaces the unavailable 256-chip
+variant with a 128-chip `4x4x8` variant. Q4 clean evaluation now admits exactly
+64 chips at DP8 x TP8 or 128 chips at DP16 x TP8. Q4 three-update debug admits
+exactly 64 chips split into two DP4 x TP8 roles or 128 chips split into two
+host-complete DP8 x TP8 roles. The latter uses 32 four-chip workers, global
+M2048, two local trajectories per DP rank and two scheduler request slots per
+rank. Q4 topology 256 fails closed.
+
+Qwen3-32B is intentionally unchanged: its training renderer still admits 64
+or 256 chips and rejects 128. Historical Q4 256-chip artifacts remain immutable
+evidence, but cannot be resumed under the new source fingerprint/topology
+allowlist. P44 41/41 and P46 40/40 CPU gates pass locally; no TPU, Pathways or
+Kubernetes launch proves the new 128-chip target yet.

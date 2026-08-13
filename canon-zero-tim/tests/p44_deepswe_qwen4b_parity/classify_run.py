@@ -33,16 +33,16 @@ _TOPOLOGY = {
         "local_trajectories": 4,
         "reduction_rounds": 4,
     },
-    "256": {
-        "contract": "p44-qwen4b-parity-256",
-        "dp": 16,
-        "devices": 128,
-        "total_devices": 256,
-        "hosts": 64,
-        "role_hosts": 32,
-        "global_m": 4096,
-        "local_trajectories": 1,
-        "reduction_rounds": 8,
+    "128": {
+        "contract": "p44-qwen4b-parity-128",
+        "dp": 8,
+        "devices": 64,
+        "total_devices": 128,
+        "hosts": 32,
+        "role_hosts": 16,
+        "global_m": 2048,
+        "local_trajectories": 2,
+        "reduction_rounds": 6,
     },
 }
 
@@ -227,7 +227,7 @@ def classify(
   try:
     spec = _TOPOLOGY[topology]
   except KeyError as exc:
-    raise ValueError("P44 topology must be exactly 64 or 256") from exc
+    raise ValueError("P44 topology must be exactly 64 or 128") from exc
   expected_updates = _STAGE_UPDATES[stage]
   expected_batches = max(1, expected_updates)
   expected_alignment = expected_updates * spec["local_trajectories"]

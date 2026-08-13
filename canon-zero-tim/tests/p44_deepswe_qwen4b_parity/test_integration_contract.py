@@ -22,8 +22,11 @@ class P44IntegrationContractTest(unittest.TestCase):
 
   def test_training_selects_physical_split_from_role_size(self):
     text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
-    self.assertIn("if p34.devices_per_role == 32", text)
+    self.assertIn("32: deepswe_contract.split_4x4x4_role_devices", text)
+    self.assertIn("64: deepswe_contract.split_4x4x8_role_devices", text)
+    self.assertIn("128: deepswe_contract.split_4x8x8_role_devices", text)
     self.assertIn("deepswe_contract.split_4x4x4_role_devices", text)
+    self.assertIn("deepswe_contract.split_4x4x8_role_devices", text)
     self.assertIn("deepswe_contract.split_4x8x8_role_devices", text)
     self.assertIn("[P34.DEVICE_INVENTORY] PASS", text)
 
@@ -51,7 +54,7 @@ class P44IntegrationContractTest(unittest.TestCase):
     self.assertIn("output_dir=deepswe_debug.artifact_directory()", text)
     self.assertIn("deepswe_debug.rollout_only()", text)
     self.assertIn('"p44-qwen4b-parity-64",', text)
-    self.assertIn('"p44-qwen4b-parity-256",', text)
+    self.assertIn('"p44-qwen4b-parity-128",', text)
 
   def test_rollout_only_marker_and_alignment_are_shared(self):
     learner = (

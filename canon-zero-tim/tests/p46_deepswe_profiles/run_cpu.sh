@@ -12,6 +12,7 @@ bash -n \
 python3 -m py_compile \
   examples/deepswe/eval_deepswe.py \
   examples/deepswe/deepswe_eval_artifacts.py \
+  examples/deepswe/r2egym_action_compat.py \
   examples/deepswe/deepswe_reward_only_parity.py \
   examples/deepswe/probe_reward_only_v5p.py \
   tunix/generate/vllm_sampler.py \
@@ -22,4 +23,4 @@ python3 -m unittest discover \
   -p 'test_*.py' \
   -v
 
-echo "P46_DEEPSWE_PROFILES_CPU_PASS cases=33"
+echo "P46_DEEPSWE_PROFILES_CPU_PASS cases=40"

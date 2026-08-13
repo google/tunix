@@ -47,7 +47,7 @@ class EvalArtifactsTest(unittest.TestCase):
     self.config.validate()
     self.assertEqual(len(self.config.fingerprint), 64)
     self.assertIn(self.config.fingerprint[:16], self.config.run_tag)
-    other = dataclasses.replace(self.config, topology="256")
+    other = dataclasses.replace(self.config, topology="128")
     other.validate()
     self.assertNotEqual(self.config.fingerprint, other.fingerprint)
     self.assertEqual(self.config.evaluation_mode, "reward_only")
@@ -111,7 +111,7 @@ class EvalArtifactsTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "restricted"):
       dataclasses.replace(self.config, evaluation_mode="logprob_observer").validate()
     with self.assertRaisesRegex(ValueError, "topology"):
-      dataclasses.replace(observer, topology="256").validate()
+      dataclasses.replace(observer, topology="128").validate()
 
     entry = {"docker_image": "img-a"}
     record = artifacts.trajectory_record(
@@ -153,6 +153,65 @@ class EvalArtifactsTest(unittest.TestCase):
     )
     self.assertEqual(record["trajectory_mode"], "reward_only_no_logprobs")
     self.assertEqual(record["sampled_by"], "stock@" + "6" * 40)
+    self.assertEqual(
+        record["validity_reason"], "completed_under_signed_budget"
+    )
+
+  def test_signed_budget_terminals_are_valid_unsolved_without_retry(self):
+    entry = {"docker_image": "img-a"}
+    for status in (
+        "MAX_STEPS_REACHED",
+        "MAX_CONTEXT_LIMIT_REACHED",
+        "MODEL_TIMEOUT",
+        "TIMEOUT",
+    ):
+      with self.subTest(status=status):
+        record = artifacts.trajectory_record(
+            self.config,
+            entry=entry,
+            sample_index=0,
+            trajectory={"status": status, "reward": 0.0, "steps": []},
+            elapsed_secs=1.0,
+        )
+        self.assertTrue(record["valid"])
+        self.assertFalse(record["solved"])
+        expected_reason = (
+            "completed_model_timeout"
+            if status == "MODEL_TIMEOUT"
+            else "completed_under_signed_budget"
+        )
+        self.assertEqual(record["validity_reason"], expected_reason)
+
+  def test_known_file_editor_adapter_failure_is_invalid_and_retryable(self):
+    entry = {"docker_image": "img-a"}
+    for status in ("SUCCEEDED", "MODEL_TIMEOUT"):
+      with self.subTest(status=status):
+        record = artifacts.trajectory_record(
+            self.config,
+            entry=entry,
+            sample_index=0,
+            trajectory={
+                "status": status,
+                "reward": 0.0,
+                "steps": [{
+                    "observation": (
+                        "file_editor: error: unrecognized arguments: "
+                        "--command=view"
+                    )
+                }],
+            },
+            elapsed_secs=1.0,
+        )
+        self.assertFalse(record["valid"])
+        self.assertFalse(record["solved"])
+        self.assertEqual(
+            record["validity_reason"],
+            "r2egym_action_parameter_adapter",
+        )
+        remaining = artifacts.remaining_samples(
+            [entry], [record], config=self.config
+        )
+        self.assertEqual(remaining[0][1:], (0, 1))
 
   def test_reward_only_logprobs_are_absent_or_null_never_numeric(self):
     entry = {"docker_image": "img-a", "instance_id": "task-a"}
@@ -194,7 +253,7 @@ class EvalArtifactsTest(unittest.TestCase):
         entry=entry,
         sample_index=0,
         attempt_index=0,
-        trajectory={"status": "MODEL_TIMEOUT", "reward": 0.0, "steps": []},
+        trajectory={"status": "ENV_TIMEOUT", "reward": 0.0, "steps": []},
         elapsed_secs=1.0,
     )
     artifacts.append_record(path, invalid)
@@ -248,7 +307,7 @@ class EvalArtifactsTest(unittest.TestCase):
         entry={"docker_image": "img-a"},
         sample_index=0,
         attempt_index=1,
-        trajectory={"status": "MODEL_TIMEOUT", "reward": 0.0, "steps": []},
+        trajectory={"status": "ENV_TIMEOUT", "reward": 0.0, "steps": []},
         elapsed_secs=1.0,
     )
     artifacts.append_record(path, record)

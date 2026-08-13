@@ -102,7 +102,7 @@ class P46EnvironmentContractTest(unittest.TestCase):
         )
 
   def test_clean_evaluation_preflight_passes_without_trainer(self):
-    for topology in ("64", "256"):
+    for topology in ("64", "128"):
       with self.subTest(topology=topology):
         result = self._run("q4-clean-eval", topology)
         self.assertEqual(result.returncode, 0, result.stdout)

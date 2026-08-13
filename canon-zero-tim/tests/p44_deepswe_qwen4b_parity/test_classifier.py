@@ -211,7 +211,7 @@ class P44ClassifierTest(unittest.TestCase):
     )
 
   def test_rollout_and_three_update_pass_on_both_topologies(self):
-    for topology in ("64", "256"):
+    for topology in ("64", "128"):
       for stage in ("rollout-only", "three-update"):
         with self.subTest(topology=topology, stage=stage):
           with tempfile.TemporaryDirectory() as root_text:
@@ -227,7 +227,7 @@ class P44ClassifierTest(unittest.TestCase):
     with tempfile.TemporaryDirectory() as root_text:
       root = Path(root_text).resolve()
       self._artifacts(root, topology="64", stage="one-update", batches=1)
-      report = self._classify(root, topology="256", stage="one-update")
+      report = self._classify(root, topology="128", stage="one-update")
       self.assertIn("manifest_exact", report["failed"])
 
   def test_missing_runtime_batch_evidence_is_rejected(self):
@@ -253,7 +253,7 @@ class P44ClassifierTest(unittest.TestCase):
       self.assertIn("logps_batch_exact", report["failed"])
 
   def test_missing_swiglu_feature_padding_evidence_is_rejected(self):
-    topology = "256"
+    topology = "128"
     with tempfile.TemporaryDirectory() as root_text:
       root = Path(root_text).resolve()
       self._artifacts(root, topology=topology, stage="rollout-only", batches=1)
@@ -275,7 +275,7 @@ class P44ClassifierTest(unittest.TestCase):
       self.assertIn("swiglu_feature_padding_active", report["failed"])
 
   def test_missing_matmul_padding_evidence_is_rejected(self):
-    topology = "256"
+    topology = "128"
     markers = {
         "matmul_output_padding_active": (
             "[PATHTRACE] CANON_PALLAS_MPAD=1 M=4096 Mp=4096 padded=0 "
@@ -305,7 +305,7 @@ class P44ClassifierTest(unittest.TestCase):
         self.assertIn(check, report["failed"])
 
   def test_nonmonotonic_update_is_rejected(self):
-    topology = "256"
+    topology = "128"
     with tempfile.TemporaryDirectory() as root_text:
       root = Path(root_text).resolve()
       self._artifacts(root, topology=topology, stage="three-update", batches=3)

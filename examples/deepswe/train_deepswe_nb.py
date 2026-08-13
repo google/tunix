@@ -1128,11 +1128,17 @@ train_axis_names = tuple(name for name, _ in train_dims)
 train_shape = tuple(d for _, d in train_dims)
 
 if P34_DEEPSWE:
-  split_roles = (
-      deepswe_contract.split_4x4x4_role_devices
-      if p34.devices_per_role == 32
-      else deepswe_contract.split_4x8x8_role_devices
-  )
+  try:
+    split_roles = {
+        32: deepswe_contract.split_4x4x4_role_devices,
+        64: deepswe_contract.split_4x4x8_role_devices,
+        128: deepswe_contract.split_4x8x8_role_devices,
+    }[p34.devices_per_role]
+  except KeyError as exc:
+    raise ValueError(
+        "DeepSWE role placement has no signed physical slice for "
+        f"devices_per_role={p34.devices_per_role}"
+    ) from exc
   rollout_role, trainer_role, placement_report = split_roles(devices)
   print(
       "[P34.DEVICE_INVENTORY] PASS "

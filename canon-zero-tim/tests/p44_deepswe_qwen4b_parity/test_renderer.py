@@ -43,9 +43,9 @@ class P44RendererTest(unittest.TestCase):
     )
 
   def test_all_six_bounded_jobsets_render(self):
-    expected_workers = {"64": 16, "256": 64}
-    expected_dp = {"64": 4, "256": 16}
-    for topology in ("64", "256"):
+    expected_workers = {"64": 16, "128": 32}
+    expected_dp = {"64": 4, "128": 8}
+    for topology in ("64", "128"):
       for stage in ("rollout-only", "one-update", "three-update"):
         with self.subTest(topology=topology, stage=stage):
           document = self._render(topology, stage)
@@ -79,12 +79,12 @@ class P44RendererTest(unittest.TestCase):
     for stage in ("rollout-only", "one-update", "three-update"):
       with self.subTest(stage=stage):
         small = renderer.recipe_signature(self._render("64", stage))
-        large = renderer.recipe_signature(self._render("256", stage))
+        large = renderer.recipe_signature(self._render("128", stage))
         self.assertEqual(small, large)
 
   def test_invalid_topology_and_unbounded_stage_are_rejected(self):
-    with self.assertRaisesRegex(ValueError, "exactly 64 or 256"):
-      self._render("128")
+    with self.assertRaisesRegex(ValueError, "exactly 64 or 128"):
+      self._render("256")
     for stage in ("backward-no-commit", "full"):
       with self.subTest(stage=stage):
         with self.assertRaisesRegex(ValueError, "P44 parity admits"):
