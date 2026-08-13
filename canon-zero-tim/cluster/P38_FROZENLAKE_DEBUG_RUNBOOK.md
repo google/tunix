@@ -1,79 +1,116 @@
-# P38 FrozenLake P38s12a request-journal runbook
+# P38 FrozenLake: row-231 E0-lite and true P38s12b
 
-This runbook launches one strict 64-chip stock diagnostic. It does not launch
-full training, evaluation, backward, an optimizer commit, prefix cache, or
-unified KV. The complete return/admission contract is
-`../tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md`; stop if the two
-documents disagree.
+This runbook is diagnostic-only. It never launches FrozenLake full training,
+evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a
+separate workstream and waits for its DP16 resources.
 
-## Why this run exists
+## Current fact
 
-P38s11 already proved that the full 32-prompt / 256-trajectory stock workload
-is red while B-C remains exact. Its four global snapshots could be joined to
-rows 199 and 206 offline, but they did not observe the rows at the mismatch
-times. P38s12a keeps the known-red concurrency-256 workload and adds a bounded
-host-only per-request journal. It also expands the capsule to eight rows and
-uses four reachable bands: `1536,1664,1792,1920,2048`.
+The bundle published under `p38s12b` used `--max_concurrency=256`, so account
+it as P38s12a analysis-level evidence. It reproduced A-B red and exact B-C,
+but outer postflight saw `rc=137` and the infrastructure archive was
+incomplete. Do not call it the concurrency-32 arm and do not rerun it.
 
-The journal records host scheduler state only. Its page generations are
-observation generations, not allocator generations. This run cannot by itself
-prove stale KV, page reuse, RoPE, residual/cast, or another numerical cause.
+## A. Completed one-host row-231 E0-lite
 
-Do not rerun U/KV-unified; it was already materially red. Do not change
-concurrency to 32 in this run. P38s12b is a later, separate single-variable
-arm after this evidence is admitted.
+Do not rerun this arm. It completed with
+`E0_LITE_ENVELOPE_NOT_REPRODUCED`: REF reproduced all 566 production-B action
+values, while R0/R1 differed from production A at 470 values. The exact
+numbers and hashes are in
+`tasks/p38-pathways-decode-prefill-carrier/artifacts/p38_2j_row231_e0lite_0813.md`.
 
-## 1. Pin a clean published source
+The command below is retained only for provenance:
 
-Run from an existing clean `google/tunix` clone after the user has reviewed,
-committed, and published P38.2i:
+On the authorized v5p host, from a clean source containing P38.2j:
+
+```bash
+set -euo pipefail
+CAPSULE=/path/to/p38s12a-mismatch-capsule.npz
+bash \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
+  "$CAPSULE" p38s12a_row231_e0lite 231
+```
+
+Require equal actor/engine weights, exact repeated R0/R1/REF measurements, a
+working one-bit negative control, no backward, and zero optimizer commits.
+
+Interpret exactly one result:
+
+- `E0_LITE_REPRODUCED`: REF equals production B and R0 equals production A;
+  proceed to strict E0 construction/first-divergence instrumentation.
+- `E0_LITE_ENVELOPE_NOT_REPRODUCED`: REF equals B but R0 does not equal A;
+  do not interpret R0/R1 operator counterfactuals. Capture missing live state.
+- `E0_LITE_PREREQUISITE_FAILED`: source row/B-C/REF identity failed; repair the
+  input or weight/reference contract before continuing.
+
+E0-lite is mask-derived and never proves a production cause by itself. This
+result blocks R0/R1 operator interpretation and the first-divergence walk.
+
+## B. Pin one immutable source for P38s12b
 
 ```bash
 set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID="p38s12a"
+RUN_ID=p38s12b
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
+BASE_OUT="/tmp/p38-serving-${RUN_ID}-intent256"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
 test ! -e "$WORKTREE"
+test ! -e "$BASE_OUT"
 test ! -e "$OUT"
 test ! -e "$EVIDENCE"
 git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
 cd "$WORKTREE"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
-test -f \
-  canon-zero-tim/patches/tpu_inference/13-tpu-runner-p38-request-journal.patch
-test -f \
-  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/phases/p38-2i-request-journal-concurrency-discriminator.md
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 ```
 
-## 2. Render and dry-run stock only
+## C. Preflight intent-diff before apply
+
+Render a same-source, same-run-id concurrency-256 intent baseline and the
+concurrency-32 candidate. Never apply the baseline.
 
 ```bash
 python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
-  --source-commit "$SOURCE_COMMIT" \
-  --run-id "$RUN_ID" \
-  --output-dir "$OUT" \
-  --stock-only | tee "$EVIDENCE/render.txt"
+  --source-commit "$SOURCE_COMMIT" --run-id "$RUN_ID" \
+  --output-dir "$BASE_OUT" --stock-only --max-concurrency 256 \
+  > "$EVIDENCE/render-intent256.txt"
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" --run-id "$RUN_ID" \
+  --output-dir "$OUT" --stock-only --max-concurrency 32 | \
+  tee "$EVIDENCE/render.txt"
 
+BASELINE="$BASE_OUT/jobset-p38-serving-stock.yaml"
 STOCK="$OUT/jobset-p38-serving-stock.yaml"
-test -f "$STOCK"
-test ! -e "$OUT/jobset-p38-serving-unified.yaml"
+cp "$BASELINE" "$EVIDENCE/rendered-intent256.yaml"
+python3 \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/check_p38_intent_diff.py \
+  --baseline "$BASELINE" --candidate "$STOCK" \
+  --output "$EVIDENCE/intent-diff.json"
+grep -q '"verdict": "PASS"' "$EVIDENCE/intent-diff.json"
 cp "$STOCK" "$EVIDENCE/rendered-stock.yaml"
 kubectl apply --dry-run=server -f "$STOCK" | \
   tee "$EVIDENCE/dry-run-stock.txt"
 ```
 
-The YAML must have `CANON_KV_UNIFIED=0`, precheck-only, capsule rows 8,
-request journal inside the capture directory, the four bands above,
-`batch_size=32`, `mini_batch_size=4`, `num_generations=8`, `mesh_dp=16`, and
-`maxRestarts=0`. Stop rather than editing a rendered value.
+The intent gate permits only `--max_concurrency=256 -> 32` and its matching
+attestation label. The candidate must also pin:
 
-## 3. Apply and collect the full log
+- 32 prompts, mini-batch four, eight generations, DP16xTP4;
+- prefix cache disabled and stock `CANON_KV_UNIFIED=0`;
+- capsule row cap 16;
+- controlled diagnostic exit 42;
+- minimum action logical-KV 1686;
+- four bands `1536,1664,1792,1920,2048`;
+- Attempt 0 / `maxRestarts: 0`.
+
+Stop instead of editing rendered YAML.
+
+## D. Apply candidate only and preserve every artifact
 
 ```bash
 set -euo pipefail
@@ -97,74 +134,57 @@ printf '%s\n' "${PIPESTATUS[0]}" > "$EVIDENCE/log-follow-rc.txt"
 set -e
 ```
 
-Wait until that exact JobSet/pod is terminal. Do not delete it and do not use
-`--tail` or timestamps. Fetch again from byte zero:
+Wait for the exact JobSet/pod to become terminal; do not delete it. Then:
 
 ```bash
-kubectl get jobset -n default "$JOBSET" -o yaml > \
-  "$EVIDENCE/jobset.final.yaml"
-kubectl get pod -n default "$POD" -o yaml > \
-  "$EVIDENCE/head-pod.final.yaml"
-kubectl describe pod -n default "$POD" > \
-  "$EVIDENCE/head-pod.describe.txt"
-kubectl logs -n default "$POD" -c jax-tpu > \
-  "$EVIDENCE/head.full.log"
-kubectl logs -n default "$POD" -c pathways-proxy > \
-  "$EVIDENCE/pathways-proxy.log" 2>&1 || true
-kubectl logs -n default "$POD" -c pathways-rm > \
-  "$EVIDENCE/pathways-rm.log" 2>&1 || true
-kubectl logs -n default "$POD" -c jax-tpu --previous > \
-  "$EVIDENCE/head.previous.log" 2>&1 || true
+kubectl get jobset -n default "$JOBSET" -o yaml > "$EVIDENCE/jobset.final.yaml"
+kubectl get pod -n default "$POD" -o yaml > "$EVIDENCE/head-pod.final.yaml"
+kubectl describe pod -n default "$POD" > "$EVIDENCE/head-pod.describe.txt"
+kubectl logs -n default "$POD" -c jax-tpu > "$EVIDENCE/head.full.log"
+kubectl logs -n default "$POD" -c pathways-proxy > "$EVIDENCE/pathways-proxy.log" 2>&1 || true
+kubectl logs -n default "$POD" -c pathways-rm > "$EVIDENCE/pathways-rm.log" 2>&1 || true
+kubectl logs -n default "$POD" -c jax-tpu --previous > "$EVIDENCE/head.previous.log" 2>&1 || true
 kubectl get events -n default \
-  --field-selector "involvedObject.name=$POD" \
-  --sort-by=.lastTimestamp > "$EVIDENCE/head-pod.events.txt"
+  --field-selector "involvedObject.name=$POD" --sort-by=.lastTimestamp > \
+  "$EVIDENCE/head-pod.events.txt"
 ```
 
-## 4. Admit or reject the evidence
+Never substitute a tail/UI excerpt for `head.full.log`.
 
-Require all of these in `head.full.log`:
-
-- Attempt 0 and the exact source SHA;
-- one standard INIT, positive OBSERVE, zero CAPTURE_ERROR;
-- full 32-prompt / 256-trajectory coverage;
-- four pre/post pairs for the registered bands;
-- finite A-B red and exact B-C;
-- positive request-journal markers;
-- classifier PASS with every selected row journal-joined;
-- mismatch capsule, classifier JSON, and serving archive payloads;
-- terminal precheck accepted with backward=0 and optimizer_commits=0; and
-- final PATHTRACE with U=0, journal>0, and coverage=1.
-
-Anything missing is `INCONCLUSIVE`; do not relaunch automatically. A different
-A-B count is allowed because trajectories are stochastic. B-C red, invalid or
-nonfinite data, capture errors, missing coverage, backward, or optimizer
-commit is a hard failure.
-
-## 5. Extract and return everything
+## E. Extract, verify, and seal the whole bundle
 
 ```bash
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s12a-mismatch-capsule.npz"
+  --output "$EVIDENCE/${RUN_ID}-mismatch-capsule.npz"
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s12a-serving-capture.tar"
+  --output "$EVIDENCE/${RUN_ID}-serving-capture.tar"
 sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
 sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/serving-classification.json"
-test -s "$EVIDENCE/pre-alignment.jsonl"
-test -s "$EVIDENCE/serving-classification.json"
-tar -tf "$EVIDENCE/p38s12a-serving-capture.tar" | \
-  grep -q './p38_request_journal.jsonl'
-sha256sum "$EVIDENCE"/* | tee "$EVIDENCE/SHA256SUMS"
+bash \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
+  "$EVIDENCE" "$RUN_ID"
 ```
 
-Return the entire `$EVIDENCE` directory. The next action is review, then exact
-whole-vector E0 replay. Do not launch concurrency 32, RoPE repair, page poison,
-or another U arm until that review selects it.
+The sealer refuses missing Kubernetes/Pathways files, excludes `SHA256SUMS`
+from its own manifest, and immediately validates every digest.
 
-Rollback: leave all P38 capture variables unset. The diagnostic is
-default-off and does not change ordinary training or evaluation.
+## F. Verdict
+
+Require exact B-C, no capture errors, full 256-trajectory coverage, journal
+joins for every selected row, controlled exit 42 accepted, and
+`DEPTH_SUFFICIENCY min=1686 ... verdict=PASS`.
+
+- Red A-B: concurrency 32 is insufficient to remove the carrier.
+- Exact A-B: repeat one depth-sufficient concurrency-32 arm before claiming
+  concurrency/churn is necessary.
+- Depth below 1686, missing bundle items, `rc=137`, or failed intent-diff:
+  `INCONCLUSIVE`; do not relaunch automatically.
+
+Neither red nor repeated exact identifies RoPE, page lifecycle, cache content,
+or another operator. Leave all P38 variables unset to roll back the diagnostic.

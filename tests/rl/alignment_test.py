@@ -263,6 +263,44 @@ class AlignmentTest(absltest.TestCase):
       alignment.stop_after_diagnostic_precheck(record)
     self.assertIn("verdict=FAIL a_b_differing_bytes=3", stdout.getvalue())
 
+  def test_p38_diagnostic_precheck_uses_controlled_exit_when_requested(self):
+    record = {
+        "verdict": "FAIL",
+        "step": 0,
+        "N_action": 17,
+        "boundaries": {
+            "S_decode_vs_S_prefill": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 3,
+            },
+            "S_prefill_vs_T_old": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 0,
+            },
+        },
+    }
+    stdout = io.StringIO()
+    with mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRECHECK_ONLY_ENV: "1",
+            alignment.P38_CONTROLLED_EXIT_ENV: "1",
+        },
+        clear=False,
+    ), mock.patch.object(
+        alignment.os, "_exit", side_effect=RuntimeError("exit intercepted")
+    ) as exit_mock, contextlib.redirect_stdout(stdout), self.assertRaisesRegex(
+        RuntimeError, "exit intercepted"
+    ):
+      alignment.stop_after_diagnostic_precheck(record)
+    exit_mock.assert_called_once_with(alignment.P38_CONTROLLED_EXIT_CODE)
+    self.assertIn(
+        "[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0",
+        stdout.getvalue(),
+    )
+
   def test_p38_diagnostic_precheck_rejects_bc_red(self):
     record = {
         "verdict": "FAIL",
@@ -1039,6 +1077,38 @@ class AlignmentTest(absltest.TestCase):
       )
       self.assertEqual(result["mismatch_capsule"]["selected_rows"], [1])
       self.assertIn("[CANON_P38_CAPSULE]", stdout.getvalue())
+
+  def test_p38_mismatch_capsule_can_preserve_nine_red_rows(self):
+    wrapped = self._wrapped(rows=9)
+    drift = wrapped.s_prefill.copy()
+    drift[:, 0] = drift[:, 0] + np.float32(0.125)
+    wrapped = wrapped.replace(s_prefill=drift)
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+            alignment.P38_MISMATCH_CAPSULE_ENV: os.path.join(
+                tmpdir, "capsule.npz"
+            ),
+            alignment.P38_MISMATCH_CAPSULE_MAX_ROWS_ENV: "16",
+            "CANON_NUM_GENERATIONS": "8",
+        },
+        clear=False,
+    ):
+      result = alignment.check_pre_backward(
+          wrapped, step=0, fail_closed=False
+      )
+      with np.load(
+          os.path.join(tmpdir, "capsule.npz"), allow_pickle=False
+      ) as capsule:
+        self.assertEqual(capsule["selected_rows"].tolist(), list(range(9)))
+    self.assertEqual(
+        result["mismatch_capsule"]["selected_rows"], list(range(9))
+    )
+    self.assertGreaterEqual(
+        result["action_geometry"]["max_logical_kv_prefix_length"], 2
+    )
 
   def test_p38_mismatch_capsule_rejects_collision(self):
     wrapped = self._wrapped(rows=1)

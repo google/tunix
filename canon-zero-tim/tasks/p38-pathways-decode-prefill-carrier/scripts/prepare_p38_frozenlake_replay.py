@@ -28,14 +28,27 @@ def main() -> int:
   parser.add_argument("--capsule", type=Path, required=True)
   parser.add_argument("--output", type=Path, required=True)
   parser.add_argument("--row-index", type=int, default=0)
+  parser.add_argument("--source-row", type=int)
   parser.add_argument("--local-m", type=int, default=256)
   args = parser.parse_args()
   repo = Path(__file__).resolve().parents[4]
   replay = _load_module(repo)
   capsule = replay.load_verified_capsule(args.capsule)
-  if args.row_index < 0 or args.row_index >= len(capsule.rows):
-    raise ValueError(f"row index is out of range: {args.row_index}")
-  row = capsule.rows[args.row_index]
+  row_index = args.row_index
+  if args.source_row is not None:
+    matches = [
+        index for index, row in enumerate(capsule.rows)
+        if row.source_row == args.source_row
+    ]
+    if len(matches) != 1:
+      raise ValueError(
+          f"source row must identify exactly one capsule row: "
+          f"source_row={args.source_row} matches={matches}"
+      )
+    row_index = matches[0]
+  if row_index < 0 or row_index >= len(capsule.rows):
+    raise ValueError(f"row index is out of range: {row_index}")
+  row = capsule.rows[row_index]
   schedules = (
       replay.build_r0_mask_derived_schedule(row, local_m=args.local_m),
       replay.build_r1_continuous_decode_schedule(row, local_m=args.local_m),
@@ -44,6 +57,8 @@ def main() -> int:
       ),
   )
   report = replay.schedules_report(capsule, schedules)
+  report["selected_row_index"] = row_index
+  report["selected_source_row"] = row.source_row
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite {args.output}")
   args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -2373,6 +2373,31 @@ class Qwen3EngineForwardAdapter:
             row.s_prefill[action_indices], row.t_old[action_indices]
         ),
     }
+    captured_values = {
+        "S_decode": np.asarray(row.s_decode[action_indices]),
+        "S_prefill": np.asarray(row.s_prefill[action_indices]),
+        "T_old": np.asarray(row.t_old[action_indices]),
+    }
+    replay_vs_captured = {
+        arm: {
+            captured_name: _host_difference_summary(
+                values["logps"], captured_value
+            )
+            for captured_name, captured_value in captured_values.items()
+        }
+        for arm, values in arm_values.items()
+    }
+    prerequisites = (
+        captured["S_decode_vs_S_prefill"]["exact"] is False
+        and captured["S_prefill_vs_T_old"]["exact"] is True
+        and replay_vs_captured["REF"]["S_prefill"]["exact"] is True
+    )
+    if not prerequisites:
+      e0_lite_classification = "E0_LITE_PREREQUISITE_FAILED"
+    elif replay_vs_captured["R0"]["S_decode"]["exact"] is True:
+      e0_lite_classification = "E0_LITE_REPRODUCED"
+    else:
+      e0_lite_classification = "E0_LITE_ENVELOPE_NOT_REPRODUCED"
     report = {
         "schema": "p38-frozenlake-causal-replay-v1",
         "measurement_status": "COMPLETE",
@@ -2405,6 +2430,13 @@ class Qwen3EngineForwardAdapter:
             reference_schedule.as_dict(),
         ],
         "captured_boundaries": captured,
+        "replay_vs_captured": replay_vs_captured,
+        "e0_lite_classification": e0_lite_classification,
+        "e0_lite_claim_ceiling": (
+            "R0 remains mask-derived and does not contain the exact live "
+            "scheduler/cache state; only E0_LITE_REPRODUCED may promote the "
+            "row to strict E0 construction."
+        ),
         "comparisons": comparisons,
         "repeat_comparisons": repeat_comparisons,
         "negative_control": negative_control,
@@ -2412,9 +2444,10 @@ class Qwen3EngineForwardAdapter:
         "no_optimizer": True,
     }
     print(
-        "[CANON_P38_REPLAY] "
-        f"classification={classification} row={row.source_row} "
-        f"R0_vs_REF={comparisons['R0_vs_REF']['logps']['differing_elements']} "
+      "[CANON_P38_REPLAY] "
+      f"classification={classification} row={row.source_row} "
+      f"e0_lite={e0_lite_classification} "
+      f"R0_vs_REF={comparisons['R0_vs_REF']['logps']['differing_elements']} "
         f"R1_vs_REF={comparisons['R1_vs_REF']['logps']['differing_elements']}",
         flush=True,
     )

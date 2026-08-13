@@ -50,10 +50,27 @@ def classify(report: dict) -> dict:
   }
   if classification not in admitted:
     reasons.append(f"unexpected carrier classification: {classification!r}")
+  e0_lite = report.get("e0_lite_classification", "")
+  e0_lite_admitted = {
+      "E0_LITE_REPRODUCED",
+      "E0_LITE_ENVELOPE_NOT_REPRODUCED",
+      "E0_LITE_PREREQUISITE_FAILED",
+  }
+  if e0_lite not in e0_lite_admitted:
+    reasons.append(f"unexpected E0-lite classification: {e0_lite!r}")
+  comparisons = report.get("replay_vs_captured", {})
+  if set(comparisons) != {"R0", "R1", "REF"}:
+    reasons.append("replay-to-production comparisons are incomplete")
+  elif any(
+      set(values) != {"S_decode", "S_prefill", "T_old"}
+      for values in comparisons.values()
+  ):
+    reasons.append("replay-to-production boundary set is incomplete")
   return {
       "verdict": "PASS" if not reasons else "FAIL",
       "scope": "measurement-integrity-only",
       "carrier_classification": classification,
+      "e0_lite_classification": e0_lite,
       "production_repair_admitted": False,
       "reasons": reasons,
   }

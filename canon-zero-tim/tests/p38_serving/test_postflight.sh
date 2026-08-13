@@ -12,9 +12,12 @@ run_case() (
   export CANON_PKG="$ROOT"
   export CANON_STATE="$state"
   export CANON_RUN_LOG="$state/run.log"
+  export CANON_PRE_ALIGN_REPORT="$state/pre-alignment.jsonl"
   export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=0
   export CANON_P32_TRAIN_ADMITTED=0
   export CANON_P38_PRECHECK_ONLY=1
+  export CANON_P38_CONTROLLED_EXIT=1
+  export CANON_P38_MIN_ACTION_KV=1686
   export CANON_P38_SERVING_CAPTURE_DIR="$state/capture"
   export CANON_P38_REQUEST_JOURNAL="$state/capture/p38_request_journal.jsonl"
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
@@ -29,6 +32,11 @@ run_case() (
   if [ "$mode" = missing-journal ]; then
     command+=" --omit-request-journal"
   fi
+  depth=1700
+  if [ "$mode" = shallow ]; then
+    depth=1600
+  fi
+  command+="; printf '%s\\n' '{\"action_geometry\":{\"valid\":true,\"max_logical_kv_prefix_length\":$depth}}' > '$CANON_PRE_ALIGN_REPORT'"
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 expected_path=standard'"
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
   command+="; printf '%s\\n' '[CANON_P38_REQUEST_JOURNAL] record=1 request=request-0 prefix=1600 stratum=0 dp=0'"
@@ -37,7 +45,7 @@ run_case() (
   fi
   command+="; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
-  if [ "$mode" = exact ]; then
+  if [ "$mode" = exact ] || [ "$mode" = shallow ]; then
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   elif [ "$mode" = stock-hit ]; then
     command+="; printf '%s\\n' '[PATHTRACE] KV_UNIFIED_two_pass'"
@@ -53,19 +61,25 @@ run_case() (
   elif [ "$mode" = missing-coverage ]; then
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   fi
-  command+="; exit 1"
+  case "$mode" in
+    exact|shallow|unified-exact|capture-error|missing-coverage)
+      command+="; printf '%s\\n' '[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0'; exit 42"
+      ;;
+    *) command+="; exit 1" ;;
+  esac
   export CANON_RUN_CMD="$command"
   export -p > "$state/env.sh"
   rc=0
   bash "$ROOT/cluster/steps/90_run.sh" > "$state/driver.log" 2>&1 || rc=$?
   if [ "$mode" = exact ] || [ "$mode" = unified-exact ]; then
     [ "$rc" -eq 0 ]
-    grep -q 'P38 serving expected precheck exit=1 accepted' "$state/driver.log"
+    grep -q 'P38 serving controlled precheck accepted exit=42' "$state/driver.log"
+    grep -q '\[CANON_P38\] DEPTH_SUFFICIENCY min=1686 observed=1700 verdict=PASS' "$state/driver.log"
     grep -q '"verdict": "PASS"' "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
     test -s "$CANON_P38_SERVING_CAPTURE_ARCHIVE"
   else
     [ "$rc" -ne 0 ]
-    if grep -q 'P38 serving expected precheck exit=1 accepted' "$state/driver.log"; then
+    if grep -q 'P38 serving controlled precheck accepted' "$state/driver.log"; then
       echo "[P38.SERVING] postflight accepted capture without exact precheck" >&2
       exit 1
     fi
@@ -79,6 +93,8 @@ run_case() (
       grep -q 'P38 diagnostic did not attest full 32-prompt coverage: 0' "$state/driver.log"
     elif [ "$mode" = missing-journal ]; then
       grep -q 'P38 request journal is absent: markers=1' "$state/driver.log"
+    elif [ "$mode" = shallow ]; then
+      grep -q 'P38 depth sufficiency failed: min=1686 observed=1600' "$state/driver.log"
     fi
   fi
 )
@@ -91,4 +107,5 @@ run_case unified-exact
 run_case capture-error
 run_case missing-coverage
 run_case missing-journal
-echo "[P38.SERVING] POSTFLIGHT_PASS exact_stop=accepted red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected"
+run_case shallow
+echo "[P38.SERVING] POSTFLIGHT_PASS controlled_exact=accepted shallow=rejected red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected"

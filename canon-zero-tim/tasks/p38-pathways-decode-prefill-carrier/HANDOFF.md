@@ -5,11 +5,69 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## NEXT AFTER REVIEW/PUBLICATION: P38s12a stock request-journal capture
+## CURRENT: P38.2j row-231 E0-lite, then true P38s12b
 
-This section supersedes every older launch section below. The older P38s11
-instructions remain only as history. Do not launch this uncommitted worktree;
-the user will decide whether to commit and publish it.
+This section supersedes every launch section below it. The complete executable
+operator protocol is `cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
+
+### Account the returned bundle correctly
+
+Evidence commit `23bb2a3c` is named `p38s12b`, but its command used
+`--max_concurrency=256`. Account it as **P38s12a analysis-level evidence**:
+core numerical/capture artifacts are internally reproducible, A-B is red and
+B-C exact, but `rc=137`, missing infrastructure artifacts, one omitted ninth
+red row, and a stale `SHA256SUMS` self-entry prevent formal run admission.
+Do not relaunch this arm and do not cite it as concurrency 32.
+
+### Completed local action
+
+Source row 231 was run from the returned capsule on the authorized one-host
+v5p. Do not rerun it. The command is retained for provenance:
+
+```bash
+bash \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
+  /path/to/p38s12a-mismatch-capsule.npz \
+  p38s12a_row231_e0lite 231
+```
+
+The preregistered result landed in the second branch:
+
+- `E0_LITE_ENVELOPE_NOT_REPRODUCED`: REF reconstructed B/T-old exactly across
+  566 action values, but R0/R1 each missed production A at 470 values. R0/R1
+  and repeats were internally exact, and the negative control fired.
+
+Therefore stop interpreting mask-derived operator counterfactuals. Do not
+start the RoPE/RPA/residual first-divergence walk from this replay. Full values
+and SHA identities are in
+`artifacts/p38_2j_row231_e0lite_0813.md`.
+
+### Target next action after publication/resource approval
+
+Run one **stock-only concurrency-32** P38s12b. Before apply, render a same-source
+concurrency-256 baseline and require `check_p38_intent_diff.py` PASS. Apply
+only the concurrency-32 YAML. The new source also requires:
+
+- controlled target exit 42; `137` remains infrastructure-inconclusive;
+- capsule capacity 16;
+- host-derived logical-KV depth at least 1686;
+- the complete Kubernetes/Pathways bundle, including both rendered intents
+  and the intent-diff report; and
+- `seal_p38_evidence.sh` PASS, with no self-hash in `SHA256SUMS`.
+
+If concurrency 32 is exact and depth-sufficient, repeat it once. A red result
+only proves that small concurrency is insufficient; repeated exact only makes
+concurrency/churn a necessary trigger. Neither identifies an operator.
+
+P48 remains separate and waits for DP16 capacity. Do not borrow its evidence,
+resources, or admission claims for P38.
+
+---
+
+## HISTORY: P38s12a stock request-journal capture
+
+The section below is retained only as historical operator evidence. Do not run
+it now.
 
 ### Goal and non-goals
 

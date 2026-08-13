@@ -2479,6 +2479,17 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             temperature=1.0,
         )
     self.assertEqual(report["measurement_status"], "COMPLETE")
+    self.assertIn(
+        report["e0_lite_classification"],
+        {
+            "E0_LITE_REPRODUCED",
+            "E0_LITE_ENVELOPE_NOT_REPRODUCED",
+            "E0_LITE_PREREQUISITE_FAILED",
+        },
+    )
+    self.assertEqual(
+        set(report["replay_vs_captured"]), {"R0", "R1", "REF"}
+    )
     self.assertTrue(report["no_backward"])
     self.assertTrue(
         all(

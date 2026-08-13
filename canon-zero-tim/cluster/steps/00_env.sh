@@ -155,7 +155,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
            CANON_P38_SERVING_CAPTURE_CLASSIFICATION \
            CANON_P38_SERVING_CAPTURE_ARCHIVE \
            CANON_P38_MISMATCH_CAPSULE \
-           CANON_P38_PRECHECK_ONLY; do
+           CANON_P38_PRECHECK_ONLY \
+           CANON_P38_CONTROLLED_EXIT \
+           CANON_P38_MIN_ACTION_KV; do
     req "$k"
   done
   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] || {
@@ -174,6 +176,14 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   }
   [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] || {
     echo "[env] P38 serving capture must stop after an exact precheck" >&2
+    fail=1
+  }
+  [ "${CANON_P38_CONTROLLED_EXIT:-}" = "1" ] || {
+    echo "[env] P38 serving capture requires controlled diagnostic exit" >&2
+    fail=1
+  }
+  [ "${CANON_P38_MIN_ACTION_KV:-}" = "1686" ] || {
+    echo "[env] P38 serving capture depth-sufficiency contract drifted" >&2
     fail=1
   }
   [[ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" =~ ^[0-9]+$ ]] || {
@@ -203,7 +213,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
 elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
   echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
   fail=1
-elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_PRECHECK_ONLY:-}" ]; then
+elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_MIN_ACTION_KV:-}" ]; then
   echo "[env] partial P38 serving-capture configuration is not admitted" >&2
   fail=1
 fi
@@ -1033,7 +1043,7 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         req CANON_P38_MISMATCH_CAPSULE
         expected_p38_capsule_rows=2
         if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
-          expected_p38_capsule_rows=8
+          expected_p38_capsule_rows=16
         fi
         [ "${CANON_P38_MISMATCH_CAPSULE_MAX_ROWS:-}" = \
           "$expected_p38_capsule_rows" ] || {

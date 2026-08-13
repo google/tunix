@@ -1031,3 +1031,30 @@
 - Boundary: no cluster action, backward, optimizer commit, or training launch
   occurred. P38s12a/P38s12b are NOT RUN. The next action after publication is
   the stock-only P38s12a command in `HANDOFF.md`.
+
+## 2026-08-13 UTC — P38.2j local execution and true P38s12b construction
+
+- Accounted evidence commit `23bb2a3c` as P38s12a analysis-level evidence:
+  its command used concurrency 256 despite the `p38s12b` label. Core evidence
+  re-extracted cleanly, while `rc=137`, the incomplete infrastructure package,
+  omitted ninth red row, and stale self-hash prevent formal admission.
+- Ran source row 231 (capsule index 3) on the authorized one-host v5p. The
+  preregistered result was `E0_LITE_ENVELOPE_NOT_REPRODUCED`: captured A-B was
+  red at 19/566 elements (`max_abs=0.10391616821289062`), B-C was exact, REF
+  reproduced B/T-old exactly, and R0/R1 missed production A at 470/566 values.
+  All arm repeats were exact, the one-bit negative control fired, 399 mapped
+  model leaves were exact, and no backward/optimizer operation ran.
+- Hardened target completion with exit 42, a durable terminal marker, cap 16,
+  host-derived depth evidence with a KV>=1686 postflight gate, and full-bundle
+  SHA sealing that excludes and verifies `SHA256SUMS` correctly.
+- Added a true concurrency-32 renderer arm and same-source intent-diff gate.
+  An actual local render pair passed with no difference outside
+  `--max_concurrency=256 -> 32` and its attestation label.
+- Verification: complete pinned-image CPU gate PASS (81 workload, 34
+  alignment, 15 adjacent, and all focused P38 tests); exact-image Qwen3-1.7B
+  and Qwen3-8B overlays 23/23 each with all 29 manifest entries; Python/shell
+  syntax, `git diff --check`, postflight negatives, classifier negatives, and
+  evidence-seal negatives PASS.
+- Boundary: no cluster launch, backward, optimizer commit, commit, or push
+  occurred. True P38s12b is NOT RUN. P48 remains independent and waits for
+  DP16 capacity.

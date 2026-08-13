@@ -476,7 +476,7 @@ def validate_jobset(
       )
       == "p38-serving-capture"
   )
-  expected_capsule_rows = "8" if is_p38_capture else "2"
+  expected_capsule_rows = "16" if is_p38_capture else "2"
   expected = {
       "CANON_MODE": "run",
       "CANON_PROFILE_FILE": spec.profile,

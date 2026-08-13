@@ -60,8 +60,10 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
             "1536,1664,1792,1920,2048",
         )
         self.assertEqual(
-            env["CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"], "8"
+            env["CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"], "16"
         )
+        self.assertEqual(env["CANON_P38_CONTROLLED_EXIT"], "1")
+        self.assertEqual(env["CANON_P38_MIN_ACTION_KV"], "1686")
         self.assertEqual(
             env["CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER"], "5"
         )
@@ -79,10 +81,30 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertIn("--mini_batch_size=4", env["CANON_RUN_CMD"])
         self.assertIn("--num_generations=8", env["CANON_RUN_CMD"])
         self.assertIn("--mesh_dp=16", env["CANON_RUN_CMD"])
+        self.assertIn("--max_concurrency=256", env["CANON_RUN_CMD"])
         self.assertNotIn("--mini_batch_size=32", env["CANON_RUN_CMD"])
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])
         self.assertEqual(renderer._DIAGNOSTIC_UNITS, 8)
         self.assertEqual(renderer._COVERED_PROMPTS, 32)
+
+  def test_renders_preregistered_concurrency_32_arm(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      paths = renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tmp),
+          source_commit=_SOURCE,
+          run_id="p38s12b",
+          stock_only=True,
+          max_concurrency=32,
+      )
+      document = yaml.safe_load(paths[0].read_text())
+      env = _env(document)
+      self.assertIn("--max_concurrency=32", env["CANON_RUN_CMD"])
+      self.assertNotIn("--max_concurrency=256", env["CANON_RUN_CMD"])
+      self.assertEqual(
+          document["metadata"]["labels"]["canon.zero-tim/max-concurrency"],
+          "32",
+      )
 
   def test_stock_only_omits_the_already_falsified_unified_arm(self):
     with tempfile.TemporaryDirectory() as tmp:

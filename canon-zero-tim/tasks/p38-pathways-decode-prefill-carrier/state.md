@@ -6,11 +6,18 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2i, request journal and separate concurrency discriminator.
+- Active phase: P38.2j, P38s12a accounting, row-231 E0-lite, and true
+  concurrency-32 P38s12b.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
+
+- The evidence published under the `p38s12b` label actually used concurrency
+  256. Its core numerical/capture evidence is internally consistent and is
+  accounted as P38s12a analysis-level evidence. `rc=137`, an incomplete outer
+  bundle, an eight-row capsule cap that omitted row 255, and a stale self-hash
+  prevent formal target admission.
 
 - P38s11 is the first terminal full-coverage stock capture. It covered 32
   prompts / 256 trajectories, reproduced 27 differing A-B elements among
@@ -32,11 +39,26 @@
 
 ## Current local implementation
 
+- Row 231 E0-lite is complete. REF reproduced production B/T-old exactly, but
+  mask-derived R0/R1 missed production A at 470 / 566 action values. Verdict:
+  `E0_LITE_ENVELOPE_NOT_REPRODUCED`. Strict E0 and the first-divergence seam
+  walk remain blocked on missing live-serving state.
+- Target P38 diagnostics terminate with explicit exit 42 after the durable
+  pre-alignment record and terminal marker. Outer postflight accepts only that
+  exit and still rejects missing evidence or a shallow workload.
+- The capsule cap is 16, and every report records host-derived action-depth
+  geometry. P38 postflight requires logical KV at least 1686.
+- The evidence sealer requires the complete Kubernetes/Pathways package,
+  excludes `SHA256SUMS` from itself, and immediately validates every digest.
+- The renderer admits concurrency 256 or 32 explicitly. The intent-diff gate
+  compares same-source manifests and permits only the concurrency argument and
+  matching attestation-label change.
+
 - The classifier restores production block tables serialized as a flat array
   and accepts multiple unique row joins in one snapshot while rejecting an
   ambiguous request-to-row mapping.
-- The bounded mismatch capsule expands from two to eight selected red rows and
-  records prompt-group/generation identity.
+- The bounded mismatch capsule records prompt-group/generation identity and
+  now permits 16 selected red rows, covering the nine-row observed population.
 - P38 prefix bands are now `[1536,1664)`, `[1664,1792)`, `[1792,1920)`, and
   `[1920,2048)`, all reached by the known carrier domain.
 - Patch 13 adds a default-off host-only request journal. It records token
@@ -51,8 +73,19 @@
 
 ## Local gates at this checkpoint
 
+- Row-231 one-host Qwen3-8B DP1xTP4 E0-lite completed with repeat-exact arms,
+  a detected one-bit negative control, exact 399-leaf weight attestation, no
+  backward, and zero optimizer commits.
+- Actual same-source concurrency-256 versus concurrency-32 manifest intent
+  diff: PASS; no change outside `--max_concurrency` and its label.
+- Complete pinned-image P33 CPU/adjacent gate: PASS (81 workload tests, 34
+  alignment tests, 15 adjacent tests, all focused P38 tests, and terminal
+  marker `[P33.WORKLOAD] CPU_GATE PASS`).
+- Exact-image Qwen3-1.7B and Qwen3-8B overlays: 23/23 each; all 29 manifest
+  entries match; terminal marker `P33_EXACT_IMAGE_PASS`.
+
 - Classifier: 30 tests PASS.
-- Renderer: 7 tests PASS.
+- Renderer: 8 tests PASS.
 - Outer serving postflight: PASS, including red/U/error/coverage controls and
   a marker-present but journal-file-missing negative control.
 - Patch 13 applies to both pinned Qwen3-1.7B and Qwen3-8B overlays; each passes
@@ -66,20 +99,23 @@
   application: PASS. Patch 13 necessarily retains unified-diff blank-context
   prefix spaces and passes exact-image manifest identity.
 - Detailed local evidence is in `artifacts/p38_2i_local_gate_0813.md`.
-- No target P38s12a/P38s12b run occurred.
+- No new target cluster run occurred. The true concurrency-32 P38s12b remains
+  NOT RUN.
 
 ## Next action
 
 1. After user review, publication, and separate cluster approval, execute one
-   Attempt-0 **stock-only** P38s12a at concurrency 256 using the exact command
-   and return bundle in `HANDOFF.md` and
-   `cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
-2. Require the known red, exact B-C, four pre/post strata, a nonempty journal,
-   and journal joins for every selected row. Missing joins are inconclusive.
-3. If P38s12a is admitted, attempt strict whole-vector E0 replay. Do not call a
-   geometry-only approximation E0.
-4. Run P38s12b as a separate concurrency-32 arm only after P38s12a. Require at
-   least one trajectory to reach KV 1686; repeat a depth-sufficient exact arm.
+   Attempt-0 **stock-only** true P38s12b at concurrency 32 using the exact
+   runbook. Render a same-source concurrency-256 baseline for intent-diff only;
+   never apply it.
+2. Require exact B-C, full 256-trajectory coverage, logical KV at least 1686,
+   controlled exit 42, journal joins, the complete infrastructure bundle, and
+   SHA seal PASS. Any missing item is inconclusive.
+3. If A-B is exact, repeat one depth-sufficient concurrency-32 arm. If A-B is
+   red, conclude only that concurrency 32 is insufficient; neither result
+   identifies an operator.
+4. Do not repeat E0-lite or start the seam walk from R0/R1. Construct strict E0
+   only after an exact live-serving reconstruction becomes available.
 
 ## Claim ceiling and blockers
 
@@ -101,4 +137,5 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 default-off and does not change training, evaluation, prefix cache, precision,
 optimizer placement, or canonical kernels.
 
-- Updated: 2026-08-13 UTC; P38.2i locally complete, target NOT RUN.
+- Updated: 2026-08-13 UTC; P38.2j local gates and E0-lite complete, true
+  P38s12b target NOT RUN.

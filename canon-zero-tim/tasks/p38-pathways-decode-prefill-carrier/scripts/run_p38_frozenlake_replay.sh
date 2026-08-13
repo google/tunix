@@ -2,14 +2,19 @@
 # Run one bounded P38 FrozenLake R0/R1 replay on the authorized v5p host.
 set -euo pipefail
 
-capsule="${1:?usage: run_p38_frozenlake_replay.sh <capsule.npz> <unique-label>}"
-label="${2:?usage: run_p38_frozenlake_replay.sh <capsule.npz> <unique-label>}"
+capsule="${1:?usage: run_p38_frozenlake_replay.sh <capsule.npz> <unique-label> [source-row]}"
+label="${2:?usage: run_p38_frozenlake_replay.sh <capsule.npz> <unique-label> [source-row]}"
+source_row="${3:-}"
 case "$label" in
   *[!a-zA-Z0-9_-]*|'')
     echo "[P38.FL.REPLAY] REFUSING: invalid label: $label" >&2
     exit 2
     ;;
 esac
+if [ -n "$source_row" ] && ! [[ "$source_row" =~ ^[0-9]+$ ]]; then
+  echo "[P38.FL.REPLAY] REFUSING: source row must be a non-negative integer" >&2
+  exit 2
+fi
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo="$(git -C "$script_dir" rev-parse --show-toplevel)"
@@ -60,14 +65,20 @@ for path in "$state" "$raw" "$wrapper"; do
 done
 mkdir -p "$state"
 
+prepare_args=()
+if [ -n "$source_row" ]; then
+  prepare_args+=(--source-row "$source_row")
+fi
 python3 "$script_dir/prepare_p38_frozenlake_replay.py" \
   --capsule "$capsule" --output "$schedule_report" --local-m 256 \
+  "${prepare_args[@]}" \
   >"$wrapper"
+row_index="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected_row_index"])' "$schedule_report")"
 
 {
   echo "[P38.FL.REPLAY] source=$source_sha diff_sha256=$diff_sha image=$image"
   echo "[P38.FL.REPLAY] topology=DP1xTP4 model=Qwen3-8B local_m=256"
-  echo "[P38.FL.REPLAY] schedule=mask-derived-v1 prefix_cache=disabled runtime_kv_cache=enabled"
+  echo "[P38.FL.REPLAY] schedule=mask-derived-v1 source_row=${source_row:-auto} row_index=$row_index prefix_cache=disabled runtime_kv_cache=enabled"
   echo "[P38.FL.REPLAY] mutation=none no_backward=1 optimizer_commits=0 timeout=$timeout_seconds"
   sha256sum "$capsule" "$schedule_report" "$0" \
     "$script_dir/prepare_p38_frozenlake_replay.py" \
@@ -107,6 +118,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_ALIGNMENT_GATE=1 -e CANON_ALIGNMENT_GATE_ONLY=1 \
   -e CANON_ALIGNMENT_UPDATE_CANARY=0 -e CANON_ALIGNMENT_TRAIN=0 \
   -e CANON_P38_CAPSULE_INPUT="$capsule" \
+  -e CANON_P38_CAPSULE_ROW_INDEX="$row_index" \
   -e CANON_P38_REPLAY_REPORT="$report" \
   -e CANON_P38_EXPECTED_POLICY_VERSION=0 \
   -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 -e CANON_TARGET_M=256 \

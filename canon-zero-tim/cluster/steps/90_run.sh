@@ -204,6 +204,7 @@ n_p35_stage_begin=$(grep -ac '^\[CANON_P35.3C\] STAGE_BEGIN' "$LOG" || true)
 n_p35_stage_ready=$(grep -ac '^\[CANON_P35.3C\] STAGE_READY' "$LOG" || true)
 n_p35_stage_complete=$(grep -ac '^\[CANON_P35.3C\] STAGE_PROBE_COMPLETE .*NO_NUMERICAL_VERDICT' "$LOG" || true)
 n_p38_precheck=$(grep -ac '^\[CANON_P38\] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD' "$LOG" || true)
+n_p38_controlled_exit=$(grep -ac '^\[CANON_P38\] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0' "$LOG" || true)
 n_p38_kv_unified=$(grep -ac 'KV_UNIFIED_two_pass' "$LOG" || true)
 n_p38_capture_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\]' "$LOG" || true)
 n_p38_capture_observe=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\]' "$LOG" || true)
@@ -212,7 +213,7 @@ n_p38_request_journal=$(grep -ac '^\[CANON_P38_REQUEST_JOURNAL\]' "$LOG" || true
 n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_coverage=$n_p38_coverage"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_coverage=$n_p38_coverage"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
@@ -233,6 +234,12 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   fi
   if [ "$n_p38_coverage" -ne 1 ]; then
     echo "[run] FATAL: P38 diagnostic did not attest full 32-prompt coverage: $n_p38_coverage" >&2
+    exit 1
+  fi
+  if [ "$n_p38_precheck" -gt 0 ] && \
+     [ "${CANON_P38_CONTROLLED_EXIT:-0}" = "1" ] && \
+     [ "$n_p38_controlled_exit" -ne 1 ]; then
+    echo "[run] FATAL: P38 controlled-exit marker contract failed: $n_p38_controlled_exit" >&2
     exit 1
   fi
   if [ "${CANON_KV_UNIFIED:-0}" = "1" ] && [ "$n_p38_kv_unified" -le 0 ]; then
@@ -378,12 +385,43 @@ if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
   fi
 elif [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
      [ "$n_p38_precheck" -gt 0 ]; then
-  if [ "$rc" -ne 1 ] || [ "$n_p38_precheck" -ne 1 ] || \
-     [ "${p38_capture_rc:-1}" -ne 0 ]; then
-    echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset}" >&2
+  p38_expected_rc=1
+  if [ "${CANON_P38_CONTROLLED_EXIT:-0}" = "1" ]; then
+    p38_expected_rc=42
+  fi
+  p38_depth_rc=0
+  p38_depth_observed=""
+  p38_depth_observed="$(python3 - "$CANON_PRE_ALIGN_REPORT" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = [
+    line for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+if not lines:
+  raise SystemExit("empty P38 pre-alignment report")
+record = json.loads(lines[-1])
+geometry = record.get("action_geometry", {})
+if geometry.get("valid") is not True:
+  raise SystemExit(f"invalid P38 action geometry: {geometry}")
+print(int(geometry["max_logical_kv_prefix_length"]))
+PY
+)" || p38_depth_rc=$?
+  if [ "$p38_depth_rc" -eq 0 ] && \
+     [ "$p38_depth_observed" -ge "${CANON_P38_MIN_ACTION_KV:?}" ]; then
+    echo "[CANON_P38] DEPTH_SUFFICIENCY min=$CANON_P38_MIN_ACTION_KV observed=$p38_depth_observed verdict=PASS"
+  else
+    echo "[run] FATAL: P38 depth sufficiency failed: min=${CANON_P38_MIN_ACTION_KV:-unset} observed=${p38_depth_observed:-invalid}" >&2
     exit 1
   fi
-  echo "[run] P38 serving expected precheck exit=1 accepted; backward=0 optimizer_commits=0"
+  if [ "$rc" -ne "$p38_expected_rc" ] || [ "$n_p38_precheck" -ne 1 ] || \
+     [ "${p38_capture_rc:-1}" -ne 0 ]; then
+    echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc expected_rc=$p38_expected_rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset}" >&2
+    exit 1
+  fi
+  echo "[run] P38 serving controlled precheck accepted exit=$p38_expected_rc; backward=0 optimizer_commits=0"
   rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   if [ "${CANON_P46_DEEPSWE_TRAIN:-0}" = "1" ]; then

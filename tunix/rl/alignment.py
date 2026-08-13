@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 from typing import Any
 
@@ -40,6 +41,8 @@ REPORT_ENV = "CANON_ALIGN_REPORT"
 PRE_GATE_ENV = "CANON_PRE_ALIGN_GATE"
 PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
 PRECHECK_ONLY_ENV = "CANON_P38_PRECHECK_ONLY"
+P38_CONTROLLED_EXIT_ENV = "CANON_P38_CONTROLLED_EXIT"
+P38_CONTROLLED_EXIT_CODE = 42
 P38_MISMATCH_CAPSULE_ENV = "CANON_P38_MISMATCH_CAPSULE"
 P38_MISMATCH_CAPSULE_MAX_ROWS_ENV = "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"
 GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
@@ -63,6 +66,25 @@ class AlignmentGateError(RuntimeError):
 
 class PreAlignmentProbeComplete(RuntimeError):
   """Raised after an exact P38 precheck to stop before backward."""
+
+
+def _finish_p38_precheck(message: str) -> None:
+  """Terminate a target P38 diagnostic without waiting on backend threads."""
+  controlled = os.environ.get(P38_CONTROLLED_EXIT_ENV, "")
+  if controlled not in ("", "0", "1"):
+    raise AlignmentGateError(
+        f"{P38_CONTROLLED_EXIT_ENV} must be exactly 0 or 1, got {controlled!r}"
+    )
+  if controlled == "1":
+    print(
+        "[CANON_P38] CONTROLLED_EXIT "
+        f"code={P38_CONTROLLED_EXIT_CODE} backward=0 optimizer_commits=0",
+        flush=True,
+    )
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(P38_CONTROLLED_EXIT_CODE)  # pylint: disable=protected-access
+  raise PreAlignmentProbeComplete(message)
 
 
 @flax.struct.dataclass(frozen=True)
@@ -133,7 +155,7 @@ def stop_after_exact_precheck(record: dict[str, Any]) -> None:
       f"step={record.get('step')} N_action={record.get('N_action')}",
       flush=True,
   )
-  raise PreAlignmentProbeComplete(
+  _finish_p38_precheck(
       "P38 precheck-only diagnostic completed before backward"
   )
 
@@ -171,7 +193,7 @@ def stop_after_diagnostic_precheck(record: dict[str, Any]) -> None:
       f"a_b_differing_bytes={a_b.get('differing_bytes')}",
       flush=True,
   )
-  raise PreAlignmentProbeComplete(
+  _finish_p38_precheck(
       "P38 diagnostic precheck completed before backward"
   )
 
@@ -732,6 +754,31 @@ def _attach_sequence_context(
     difference["first_mismatch"] = difference["mismatches"][0]
 
 
+def _action_geometry(
+    *, prompt_mask: Any, action_mask: Any
+) -> dict[str, Any]:
+  """Summarize the logical-KV depth reached by all scored action tokens."""
+  prompt = np.asarray(prompt_mask, dtype=np.bool_)
+  action = np.asarray(action_mask, dtype=np.bool_)
+  if (
+      prompt.ndim != 2
+      or action.ndim != 2
+      or prompt.shape[0] != action.shape[0]
+  ):
+    return {"valid": False, "reason": "shape_mismatch"}
+  rows, positions = np.nonzero(action)
+  if rows.size == 0:
+    return {"valid": False, "reason": "no_action_tokens"}
+  prompt_lengths = prompt.sum(axis=1, dtype=np.int64)
+  logical_kv = prompt_lengths[rows] + positions
+  return {
+      "valid": True,
+      "min_logical_kv_prefix_length": int(logical_kv.min()),
+      "max_logical_kv_prefix_length": int(logical_kv.max()),
+      "rows_reaching_1686": int(np.unique(rows[logical_kv >= 1686]).size),
+  }
+
+
 def _max_abs_mismatch(a: Any, b: Any, mask: Any) -> dict[str, Any] | None:
   """Returns an exact record for the largest numerical masked mismatch."""
   aa = np.asarray(a)
@@ -804,9 +851,9 @@ def _persist_p38_mismatch_capsule(
     raise AlignmentGateError(
         f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be an integer"
     ) from exc
-  if max_rows < 1 or max_rows > 8:
+  if max_rows < 1 or max_rows > 16:
     raise AlignmentGateError(
-        f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be in [1, 8]"
+        f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be in [1, 16]"
     )
   rows = _p38_capsule_rows(record, max_rows)
   if not rows:
@@ -1032,6 +1079,10 @@ def check_pre_backward(
       "reported_reds": reported_reds,
       "admission_policy": policy,
       "N_action": n_action,
+      "action_geometry": _action_geometry(
+          prompt_mask=sidecar.prompt_mask,
+          action_mask=sidecar.action_mask,
+      ),
       "boundaries": boundaries,
       "hashes": {
           "S_decode": _hash(sd),

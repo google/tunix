@@ -23,6 +23,7 @@ def _report():
       "schema": "p38-frozenlake-causal-replay-v1",
       "measurement_status": "COMPLETE",
       "classification": "LOCAL_CARRIER_NOT_REPRODUCED",
+      "e0_lite_classification": "E0_LITE_ENVELOPE_NOT_REPRODUCED",
       "no_backward": True,
       "no_optimizer": True,
       "weight_attestation": {"equal": True},
@@ -36,6 +37,13 @@ def _report():
           arm: {"logps": dict(exact)} for arm in ("R0", "R1", "REF")
       },
       "negative_control": {"exact": False, "differing_elements": 1},
+      "replay_vs_captured": {
+          arm: {
+              boundary: dict(exact)
+              for boundary in ("S_decode", "S_prefill", "T_old")
+          }
+          for arm in ("R0", "R1", "REF")
+      },
   }
 
 
@@ -64,6 +72,16 @@ class ClassifyP38ReplayTest(unittest.TestCase):
   def test_rejects_weight_mismatch(self):
     report = _report()
     report["weight_attestation"]["equal"] = False
+    self.assertEqual(classifier.classify(report)["verdict"], "FAIL")
+
+  def test_rejects_missing_e0_lite_verdict(self):
+    report = _report()
+    del report["e0_lite_classification"]
+    self.assertEqual(classifier.classify(report)["verdict"], "FAIL")
+
+  def test_rejects_incomplete_production_comparisons(self):
+    report = _report()
+    del report["replay_vs_captured"]["R0"]["S_decode"]
     self.assertEqual(classifier.classify(report)["verdict"], "FAIL")
 
 
