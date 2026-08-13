@@ -83,6 +83,7 @@ class Step:
   env_tokens: Optional[np.ndarray] = None
   env_masks: Optional[np.ndarray] = None
   logprobs: Optional[np.ndarray] = None
+  policy_version: int = 0
 
 
 class TrajectoryStatus(Enum):
@@ -119,6 +120,7 @@ class Trajectory:
     env_time: Dictionary of environment latency metrics (reset_latency: float, step_latency: list[float] ordered by step index, close_latency: float).
   """
 
+  trajectory_id: str = ""
   task: Any = None
   steps: list[Step] = dataclasses.field(default_factory=list)
   reward: float = 0.0
@@ -136,6 +138,7 @@ class Trajectory:
       dict: Serializable dictionary representation of the trajectory.
     """
     return {
+        "trajectory_id": self.trajectory_id,
         "task": self.task,
         "steps": [dataclasses.asdict(step) for step in self.steps],
         "reward": float(self.reward),

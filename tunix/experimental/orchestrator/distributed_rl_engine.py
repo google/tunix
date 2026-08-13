@@ -40,11 +40,21 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
 
   if isinstance(resp, datatypes.RolloutResponse):
     prompt_id = resp.prompt_id or "default_prompt"
-    metadata = dict(resp.metadata) if resp.metadata else {}
-    group_id = metadata.get("group_id", prompt_id)
-    pair_index = metadata.get("pair_index", 0)
+    metadata = dict(resp.metadata) if getattr(resp, "metadata", None) else {}
     success_statuses = {"COMPLETED", "SUCCEEDED"}
+    group_offset_id = (
+        resp.group_offset_id
+        if resp.group_offset_id
+        else str(metadata.get("pair_index", metadata.get("group_offset_id", "")))
+    )
+    traj_id = (
+        resp.trajectory_id
+        or metadata.get("trajectory_id", "")
+        or resp.request_id
+        or (f"traj_{prompt_id}_{group_offset_id}" if group_offset_id else f"traj_{prompt_id}")
+    )
     traj = datatypes.Trajectory(
+        trajectory_id=traj_id,
         reward=resp.env_reward,
         status=(
             datatypes.TrajectoryStatus.SUCCEEDED
@@ -52,14 +62,22 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
             else datatypes.TrajectoryStatus.FAILED
         ),
     )
+    policy_versions = getattr(resp, "policy_versions", [])
+    if not policy_versions and getattr(resp, "segments", None):
+      policy_versions = [
+          seg.policy_version for seg in resp.segments if seg.source == "assistant"
+      ] or [resp.policy_version]
+
     item = datatypes.TrajectoryItem(
-        pair_index=pair_index,
-        group_id=group_id,
+        prompt_id=prompt_id,
+        group_offset_id=group_offset_id,
+        trajectory_id=traj_id,
         start_step=0,
         traj=traj,
         metadata=metadata,
         prompt_tokens=resp.prompt_tokens,
         policy_version=resp.policy_version,
+        policy_versions=policy_versions,
     )
 
     assistant_tokens = []
@@ -77,9 +95,12 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     return item
 
   if isinstance(resp, datatypes.Trajectory):
+    traj_id = getattr(resp, "trajectory_id", "") or "default_traj"
+    task_id = getattr(resp, "task", "") or "default_group"
     item = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id=getattr(resp, "task", "default_group"),
+        prompt_id=task_id,
+        group_offset_id="0",
+        trajectory_id=traj_id,
         start_step=0,
         traj=resp,
         policy_version=getattr(resp, "policy_version", 0),

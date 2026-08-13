@@ -120,6 +120,13 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: jax.Array | None = None
+  # Lineage tracking metadata (non-pytree fields ignored by JAX JIT).
+  trajectory_ids: tuple[str, ...] | None = flax.struct.field(
+      default=None, pytree_node=False
+  )
+  segment_lineage: dict[int, str] | None = flax.struct.field(
+      default=None, pytree_node=False
+  )
 
 
 def compute_kl_divergence(

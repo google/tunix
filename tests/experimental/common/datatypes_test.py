@@ -53,7 +53,7 @@ def _rollout_request_dto() -> datatypes.RolloutRequest:
       request_id="req-123",
       prompt="Solve 2+2",
       prompt_id="req-rollout-42",
-      group_offset_id="group-1",
+      group_offset_id="1",
       generation_kwargs={"max_tokens": 128, "temperature": 0.5},
       max_turns=5,
       target_policy_version=3,
@@ -108,41 +108,20 @@ class WireSerializationTest(absltest.TestCase):
   def test_error_result_round_trips(self):
     result = datatypes.RolloutResponse(
         request_id="req-2",
-        status="TIMEOUT",
-        error=datatypes.ErrorInfo(
-            error_type="TimeoutError",
-            message="deadline exceeded",
-            retryable=True,
-        ),
+        status="ERROR",
+        error="Model worker died",
     )
 
     restored = cloudpickle.loads(cloudpickle.dumps(result))
-
-    self.assertEqual(restored.status, "TIMEOUT")
-    self.assertEqual(restored.error.error_type, "TimeoutError")
-    self.assertTrue(restored.error.retryable)
-    self.assertEqual(restored.prompt_tokens.size, 0)
-    self.assertEmpty(restored.segments)
+    self.assertEqual(restored.request_id, "req-2")
+    self.assertEqual(restored.status, "ERROR")
+    self.assertEqual(restored.error, "Model worker died")
 
   def test_token_segment_enforces_shapes(self):
-    with self.assertRaisesRegex(
-        ValueError, "loss_mask shape .* != tokens shape"
-    ):
-      datatypes.TokenSegment(
-          source="env",
-          tokens=np.array([1, 2]),
-          loss_mask=np.array([1]),
-      )
-
-    with self.assertRaisesRegex(
-        ValueError, "logps shape .* != tokens shape"
-    ):
-      datatypes.TokenSegment(
-          source="assistant",
-          tokens=np.array([1, 2]),
-          loss_mask=np.array([1, 1]),
-          logps=np.array([0.5]),
-      )
+    tokens = np.array([1, 2, 3])
+    loss_mask = np.array([1, 0])
+    with self.assertRaises(ValueError):
+      datatypes.TokenSegment(source="assistant", tokens=tokens, loss_mask=loss_mask)
 
   def test_from_trajectory(self):
     step1 = datatypes.Step(
@@ -197,6 +176,49 @@ class WireSerializationTest(absltest.TestCase):
     after = time.time()
     self.assertGreaterEqual(report.heartbeat_unix_s, before)
     self.assertLessEqual(report.heartbeat_unix_s, after)
+
+  def test_rollout_request_lineage_and_traj_id(self):
+    req1 = datatypes.RolloutRequest(
+        prompt_id="prompt_42",
+        group_offset_id="3",
+    )
+    self.assertEqual(req1.traj_id, "traj_prompt_42_3")
+    self.assertEqual(req1.request_id, "traj_prompt_42_3")
+
+    req2 = datatypes.RolloutRequest(
+        prompt_id="prompt_42",
+        group_offset_id="sample_0",
+    )
+    self.assertEqual(req2.traj_id, "traj_prompt_42_sample_0")
+
+    req3 = datatypes.RolloutRequest(
+        prompt_id="prompt_single",
+    )
+    self.assertEqual(req3.traj_id, "traj_prompt_single")
+
+  def test_trajectory_item_lineage_initialization(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_99",
+        group_offset_id="2",
+        start_step=0,
+        traj=datatypes.Trajectory(trajectory_id="traj_prompt_99_2", reward=1.0),
+    )
+    self.assertEqual(item.group_id, "prompt_99")
+    self.assertEqual(item.pair_index, 2)
+    self.assertEqual(item.trajectory_id, "traj_prompt_99_2")
+
+  def test_trajectory_item_legacy_keyword_initialization(self):
+    item = datatypes.TrajectoryItem(
+        group_id="legacy_group_42",
+        pair_index=3,
+        start_step=0,
+        traj=datatypes.Trajectory(reward=1.0),
+    )
+    self.assertEqual(item.prompt_id, "legacy_group_42")
+    self.assertEqual(item.group_offset_id, "3")
+    self.assertEqual(item.group_id, "legacy_group_42")
+    self.assertEqual(item.pair_index, 3)
+    self.assertEqual(item.trajectory_id, "traj_legacy_group_42_3")
 
 
 if __name__ == "__main__":

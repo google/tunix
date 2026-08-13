@@ -101,10 +101,12 @@ class BatchAssemblyTest(absltest.TestCase):
         max_response_length=5,
         pad_id=0,
     )
+    payload.trajectory_ids = ["traj_prompt_1_0"]
     train_example = assembler.pack([payload])[0]
 
     self.assertEqual(train_example.prompt_ids.shape, (2, 4))
     self.assertEqual(train_example.completion_ids.shape, (2, 5))
+    self.assertEqual(train_example.trajectory_ids, ("traj_prompt_1_0", "__pad__"))
     np.testing.assert_array_equal(
         train_example.prompt_ids[0], np.array([0, 0, 10, 11])
     )
@@ -117,6 +119,30 @@ class BatchAssemblyTest(absltest.TestCase):
     np.testing.assert_array_equal(
         train_example.advantages[0], np.array([2, 2, 2, 0, 0])
     )
+
+  def test_sequence_packed_assembler_lineage(self):
+    payload1 = datatypes.RLTrainerPayload(
+        token_ids=np.array([1, 2, 3], dtype=np.int32),
+        token_mask=np.array([1, 1, 1], dtype=np.float32),
+        loss_mask=np.array([0, 1, 1], dtype=np.float32),
+        advantages=np.full(3, 1.0, dtype=np.float32),
+        trajectory_ids=["traj_p1_0"],
+    )
+    payload2 = datatypes.RLTrainerPayload(
+        token_ids=np.array([4, 5], dtype=np.int32),
+        token_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 2.0, dtype=np.float32),
+        trajectory_ids=["traj_p2_0"],
+    )
+
+    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=8)
+    payloads = assembler.pack([payload1, payload2])
+
+    self.assertLen(payloads, 1)
+    packed = payloads[0]
+    self.assertEqual(packed.trajectory_ids, ["traj_p1_0", "traj_p2_0"])
+    self.assertEqual(packed.segment_lineage, {1: "traj_p1_0", 2: "traj_p2_0"})
 
 
 if __name__ == "__main__":

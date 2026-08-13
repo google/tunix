@@ -36,15 +36,87 @@ Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
 
 
-# TODO: Unify this extended TrajectoryItem back into agent_types.TrajectoryItem
-# so that all agentic workflows share the same strict token array fields.
 @dataclasses.dataclass(kw_only=True)
-class TrajectoryItem(agent_types.TrajectoryItem):
-  """Extended TrajectoryItem for Orchestrator with token arrays."""
+class TrajectoryItem:
+  """Extended TrajectoryItem for Orchestrator with token arrays and lineage tracking.
+
+  Attributes:
+    prompt_id: Unique identifier for the prompt/task.
+    group_offset_id: String generation identifier/offset within the prompt's group.
+    trajectory_id: Semantic trajectory identifier.
+    start_step: Starting step index within the full trajectory.
+    traj: The underlying Trajectory object or dict.
+    prompt_tokens: Unpadded prompt token IDs.
+    completion_tokens: Unpadded completion token IDs.
+    action_mask: Binary mask indicating trainable token positions.
+    policy_version: Version of the policy used to sample the trajectory.
+    metadata: Additional metadata dictionary.
+  """
+
+  prompt_id: str = ""
+  group_offset_id: str = ""
+  trajectory_id: str = ""
+  start_step: int = 0
+  traj: Any = None
   prompt_tokens: np.ndarray | None = None
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
   policy_version: int = 0
+  policy_versions: list[int] = dataclasses.field(default_factory=list)
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  # InitVar compatibility for legacy constructor keywords
+  group_id: dataclasses.InitVar[str | None] = None
+  pair_index: dataclasses.InitVar[int | None] = None
+
+  # Aliases for backward compatibility with legacy queue managers / algorithms
+  @property
+  def group_id(self) -> str:
+    return self.prompt_id
+
+  @group_id.setter
+  def group_id(self, val: Any):
+    self.prompt_id = str(val)
+
+  @property
+  def pair_index(self) -> int:
+    try:
+      return int(self.group_offset_id)
+    except (ValueError, TypeError):
+      return 0
+
+  @pair_index.setter
+  def pair_index(self, val: int):
+    self.group_offset_id = str(val)
+
+  def __post_init__(
+      self,
+      group_id: str | None = None,
+      pair_index: int | None = None,
+  ):
+    if group_id is not None and not self.prompt_id:
+      self.prompt_id = str(group_id)
+    if pair_index is not None and not self.group_offset_id:
+      self.group_offset_id = str(pair_index)
+
+    if not self.policy_versions:
+      if hasattr(self.traj, "steps") and self.traj.steps:
+        self.policy_versions = [
+            getattr(step, "policy_version", self.policy_version)
+            for step in self.traj.steps
+        ]
+      elif self.policy_version is not None:
+        self.policy_versions = [self.policy_version]
+
+    if not self.trajectory_id:
+      if hasattr(self.traj, "trajectory_id") and self.traj.trajectory_id:
+        self.trajectory_id = str(self.traj.trajectory_id)
+      elif self.prompt_id:
+        self.trajectory_id = (
+            f"traj_{self.prompt_id}_{self.group_offset_id}"
+            if self.group_offset_id
+            else f"traj_{self.prompt_id}"
+        )
 
 class Role(str, enum.Enum):
   """Orchestrator worker roles."""
@@ -233,8 +305,8 @@ class RolloutRequest(Request):
     prompt: The prompt to generate from (e.g. formatted string, token array, or
       chat dictionary).
     prompt_id: Unique identifier for this prompt within a task or dataset.
-    group_offset_id: Optional identifier for grouping related rollout requests
-      (e.g. for GRPO).
+    group_offset_id: String generation identifier/offset within the prompt's group
+      (e.g. for GRPO generation "0".."G-1").
     generation_kwargs: Additional keyword arguments for generation (e.g.
       sampling parameters like max_tokens and temperature).
     max_turns: Maximum number of conversation turns for environment interaction.
@@ -249,14 +321,16 @@ class RolloutRequest(Request):
   max_turns: int = 10
   target_policy_version: int = 0
 
+  def __post_init__(self):
+    if not self.request_id:
+      self.request_id = self.traj_id
+
   @property
   def traj_id(self) -> str:
     """Standardized semantic trajectory identifier computed from prompt_id and group_offset_id."""
-    return (
-        f"traj_{self.prompt_id}_{self.group_offset_id}"
-        if self.group_offset_id
-        else f"traj_{self.prompt_id}"
-    )
+    if self.group_offset_id:
+      return f"traj_{self.prompt_id}_{self.group_offset_id}"
+    return f"traj_{self.prompt_id}"
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -272,12 +346,14 @@ class TokenSegment:
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
     logps: Array of per-token log-probabilities under the sampling distribution,
       or None for spans the model did not emit (e.g. env tokens).
+    policy_version: Weight version used to sample this specific segment.
   """
 
   source: str
   tokens: np.ndarray
   loss_mask: np.ndarray
   logps: np.ndarray | None = None
+  policy_version: int = 0
 
   def __post_init__(self):
     if self.loss_mask.shape != self.tokens.shape:
@@ -303,6 +379,8 @@ class RolloutResponse(Response):
 
   Attributes:
     prompt_id: Unique identifier for this prompt within a task or dataset.
+    group_offset_id: String generation identifier/offset within the prompt's group.
+    trajectory_id: Semantic trajectory identifier.
     status: Terminal status name (e.g. a rollout trajectory status, or
       "CANCELLED").
     prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
@@ -311,10 +389,13 @@ class RolloutResponse(Response):
       call) and environment; concatenated they form the full generated stream.
     env_reward: Scalar environment reward for the trajectory.
     policy_version: Weight version used to generate the trajectory.
+    policy_versions: Sequence of per-step policy versions across multi-turn interactions.
     error: Failure details when the request did not succeed, else None.
   """
 
   prompt_id: str = ""
+  group_offset_id: str = ""
+  trajectory_id: str = ""
   status: str
   prompt_tokens: np.ndarray = dataclasses.field(
       default_factory=lambda: np.zeros(0, dtype=np.int32)
@@ -322,6 +403,7 @@ class RolloutResponse(Response):
   segments: list[TokenSegment] = dataclasses.field(default_factory=list)
   env_reward: float = 0.0
   policy_version: int = 0
+  policy_versions: list[int] = dataclasses.field(default_factory=list)
   # TODO(b/532722981): capture rollout metrics, e.g., env time.
 
   @classmethod
@@ -331,6 +413,9 @@ class RolloutResponse(Response):
       traj: Trajectory,
       prompt_tokens: np.ndarray,
       policy_version: int,
+      prompt_id: str = "",
+      group_offset_id: str = "",
+      trajectory_id: str = "",
   ) -> "RolloutResponse":
     """Constructs a wire-safe RolloutResponse from an internal Trajectory.
 
@@ -342,6 +427,9 @@ class RolloutResponse(Response):
       traj: The internal trajectory to convert.
       prompt_tokens: Array of prompt token ids.
       policy_version: Weight version used to generate the trajectory.
+      prompt_id: Optional prompt identifier.
+      group_offset_id: Optional string offset identifier within group.
+      trajectory_id: Optional semantic trajectory identifier.
 
     Returns:
       A wire-safe RolloutResponse.
@@ -356,7 +444,11 @@ class RolloutResponse(Response):
       return None
 
     segments = []
+    step_policy_versions = []
     for step in traj.steps:
+      step_pv = _get_step_attr(step, "policy_version")
+      step_pv = int(step_pv) if step_pv is not None else policy_version
+      step_policy_versions.append(step_pv)
       assistant_tokens = _get_step_attr(step, "assistant_tokens")
       if assistant_tokens is not None:
         segments.append(
@@ -365,6 +457,7 @@ class RolloutResponse(Response):
                 tokens=assistant_tokens,
                 loss_mask=_get_step_attr(step, "assistant_masks"),
                 logps=_get_step_attr(step, "logprobs"),
+                policy_version=step_pv,
             )
         )
       env_tokens = _get_step_attr(step, "env_tokens")
@@ -375,19 +468,29 @@ class RolloutResponse(Response):
                 tokens=env_tokens,
                 loss_mask=_get_step_attr(step, "env_masks"),
                 logps=None,
+                policy_version=step_pv,
             )
         )
     if hasattr(traj, "status") and traj.status is not None:
       status_val = getattr(traj.status, "name", str(traj.status))
     else:
       status_val = "COMPLETED"
+    traj_id_val = (
+        trajectory_id
+        or getattr(traj, "trajectory_id", "")
+        or request_id
+    )
     return cls(
         request_id=request_id,
+        prompt_id=prompt_id or getattr(traj, "task", "") or "",
+        group_offset_id=group_offset_id,
+        trajectory_id=traj_id_val,
         status=status_val,
         prompt_tokens=prompt_tokens,
         segments=segments,
         env_reward=getattr(traj, "reward", 0.0) or 0.0,
         policy_version=policy_version,
+        policy_versions=step_policy_versions or [policy_version],
     )
 
 
@@ -524,6 +627,8 @@ class RLTrainerPayload(TrainerPayload):
   sampler_is_weights: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
+  trajectory_ids: list[str] = dataclasses.field(default_factory=list)
+  segment_lineage: dict[int, str] = dataclasses.field(default_factory=dict)
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
   # TODO: add ppo sepcific fields in a PPO specific fields in  PPORLTrainerPayload
 

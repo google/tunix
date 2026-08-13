@@ -152,7 +152,13 @@ class SequencePackedBatchAssembler:
       all_old_logprobs = []
       all_ref_logprobs = []
 
+      segment_lineage = {}
+      trajectory_ids = []
       for seg_idx, it in enumerate(b_items, start=1):
+        traj_id = (it.trajectory_ids[0] if it.trajectory_ids else "") or f"seg_{seg_idx}"
+        segment_lineage[seg_idx] = traj_id
+        trajectory_ids.append(traj_id)
+
         toks = (
             np.asarray(it.token_ids, dtype=np.int32).reshape(-1)
             if it.token_ids is not None
@@ -233,6 +239,8 @@ class SequencePackedBatchAssembler:
           ref_per_token_logps=batch_ref_lp,
           segment_ids=padded_segment_ids[np.newaxis, :],
           segment_positions=padded_segment_positions[np.newaxis, :],
+          trajectory_ids=trajectory_ids,
+          segment_lineage=segment_lineage,
       )
       payloads.append(payload)
 
@@ -288,7 +296,11 @@ class GRPOTrainExampleAssembler:
     has_ref_logps = any(x.ref_per_token_logps is not None for x in chunk)
     has_old_logps = any(x.old_per_token_logps is not None for x in chunk)
 
+    trajectory_ids = []
     for item in chunk:
+      traj_id = item.trajectory_ids[0] if item.trajectory_ids else ""
+      trajectory_ids.append(traj_id)
+
       p = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
       c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
       c_mask_src = (
@@ -355,6 +367,7 @@ class GRPOTrainExampleAssembler:
         )
 
     while len(prompt_ids) < self.batch_size:
+      trajectory_ids.append("__pad__")
       prompt_ids.append(np.full(self.max_prompt_length, self.pad_id, np.int32))
       prompt_mask.append(np.zeros(self.max_prompt_length, dtype=np.float32))
       completion_ids.append(
@@ -377,27 +390,33 @@ class GRPOTrainExampleAssembler:
         advantages=jnp.stack(advantages),
         ref_per_token_logps=jnp.stack(ref_logps) if has_ref_logps else None,
         old_per_token_logps=jnp.stack(old_logps) if has_old_logps else None,
+        trajectory_ids=tuple(trajectory_ids),
     )
 
 
-class PaddedBatchAssembler:
-  """Simple 2D Rectangular Batching: Pads sequences to standard [batch_size, max_seq_len] tensors."""
+class PaddedBatchAssembler(BatchAssembler):
+  """Pads payloads with uniform maximum sequence lengths into 2D rectangular batches."""
 
-  def __init__(self, batch_size: int = 4, max_seq_len: int = 2048, pad_id: int = 0):
-    self.batch_size = batch_size
+  def __init__(
+      self,
+      max_seq_len: int,
+      batch_size: int = 1,
+      pad_id: int = 0,
+  ):
     self.max_seq_len = max_seq_len
+    self.batch_size = batch_size
     self.pad_id = pad_id
 
-  def pack(self, items: Sequence[datatypes.RLTrainerPayload]) -> list[datatypes.RLTrainerPayload]:
-    """Pads items into rectangular 2D batches [B, max_seq_len]."""
-    if not items:
+  def pack(
+      self, payloads: Sequence[datatypes.RLTrainerPayload]
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Pads rows into uniform rectangular matrices with lineage retention."""
+    if not payloads:
       return []
 
-    item_list = list(items)
-    payloads: list[datatypes.RLTrainerPayload] = []
-
-    for i in range(0, len(item_list), self.batch_size):
-      chunk = item_list[i : i + self.batch_size]
+    result_payloads = []
+    for chunk_start in range(0, len(payloads), self.batch_size):
+      chunk = payloads[chunk_start : chunk_start + self.batch_size]
 
       b_tokens = []
       b_loss_masks = []
@@ -405,8 +424,12 @@ class PaddedBatchAssembler:
       b_advs = []
       b_old_lps = []
       b_ref_lps = []
+      b_traj_ids = []
 
       for it in chunk:
+        traj_id = it.trajectory_ids[0] if it.trajectory_ids else ""
+        b_traj_ids.append(traj_id)
+
         toks = (
             np.asarray(it.token_ids, dtype=np.int32).reshape(-1)
             if it.token_ids is not None
@@ -450,6 +473,7 @@ class PaddedBatchAssembler:
 
       # Pad rows up to batch_size
       while len(b_tokens) < self.batch_size:
+        b_traj_ids.append("__pad__")
         b_tokens.append(np.full(self.max_seq_len, self.pad_id, dtype=np.int32))
         b_loss_masks.append(np.zeros(self.max_seq_len, dtype=np.float32))
         b_action_masks.append(np.zeros(self.max_seq_len, dtype=np.float32))
@@ -467,7 +491,8 @@ class PaddedBatchAssembler:
           action_mask=np.stack(b_action_masks),
           old_per_token_logps=np.stack(b_old_lps) if b_old_lps else None,
           ref_per_token_logps=np.stack(b_ref_lps) if b_ref_lps else None,
+          trajectory_ids=b_traj_ids,
       )
-      payloads.append(payload)
+      result_payloads.append(payload)
 
-    return payloads
+    return result_payloads
