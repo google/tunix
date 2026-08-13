@@ -8,7 +8,8 @@ fail-closed guards without touching the network:
 
   * the DeepSWE profile pins a 40-hex commit and enables the step;
   * no P33 profile enables the step (scope guard);
-  * the entrypoint runs the step between install and overlay;
+  * the normal entrypoint runs the step between install and overlay, while
+    P46 stock evaluation runs only the pinned R2E install branch;
   * the vendored patch is byte-locked by SHA-256;
   * the step script skips cleanly when disabled and fails closed on a
     missing or malformed commit pin, before any network access.
@@ -68,19 +69,24 @@ class R2egymInstallStepContractTest(unittest.TestCase):
       )
 
   def test_entrypoint_orders_step_between_install_and_overlay(self):
-    lines = [
-        line.strip()
-        for line in ENTRYPOINT.read_text().splitlines()
-        if line.strip().startswith("step ")
-    ]
-    self.assertIn("step 35_install_r2egym.sh", lines)
+    text = ENTRYPOINT.read_text()
+    branch = text.index(
+        'if [ "${CANON_P46_EVALUATION:-0}" = "1" ]'
+    )
+    normal_start = text.index("\nelse\n", branch)
+    branch_end = text.index("\nfi\n", normal_start)
+    evaluation = text[branch:normal_start]
+    normal = text[normal_start:branch_end]
+    self.assertIn("step 35_install_r2egym.sh", evaluation)
+    self.assertNotIn("step 30_install_canon.sh", evaluation)
+    self.assertNotIn("step 40_overlay_engine.sh", evaluation)
     self.assertLess(
-        lines.index("step 30_install_canon.sh"),
-        lines.index("step 35_install_r2egym.sh"),
+        normal.index("step 30_install_canon.sh"),
+        normal.index("step 35_install_r2egym.sh"),
     )
     self.assertLess(
-        lines.index("step 35_install_r2egym.sh"),
-        lines.index("step 40_overlay_engine.sh"),
+        normal.index("step 35_install_r2egym.sh"),
+        normal.index("step 40_overlay_engine.sh"),
     )
 
   def test_vendored_patch_is_byte_locked(self):

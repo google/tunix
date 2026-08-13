@@ -23,7 +23,7 @@ import render_p46_deepswe_profiles as renderer  # pylint: disable=wrong-import-p
 
 class P46EnvironmentContractTest(unittest.TestCase):
 
-  def _render(self, workload: str, topology: str):
+  def _render(self, workload: str, topology: str, **overrides):
     base_name = (
         "jobset-64chip.yaml"
         if topology == "64"
@@ -44,12 +44,20 @@ class P46EnvironmentContractTest(unittest.TestCase):
         whitelist_sha256=p34.P34_CLEAN_WHITELIST_SHA256,
         logical_shard_index=0,
         physical_shard_index=0,
+        **overrides,
     )
 
-  def _run(self, workload: str, topology: str, override: str = ""):
+  def _run(
+      self,
+      workload: str,
+      topology: str,
+      override: str = "",
+      input_override: dict[str, str] | None = None,
+      render_overrides: dict[str, object] | None = None,
+  ):
     with tempfile.TemporaryDirectory() as root_text:
       root = Path(root_text)
-      document = self._render(workload, topology)
+      document = self._render(workload, topology, **(render_overrides or {}))
       environ = os.environ.copy()
       environ.update(p34._env(document))
       state = root / "state"
@@ -59,6 +67,7 @@ class P46EnvironmentContractTest(unittest.TestCase):
           "CANON_STATE": str(state),
           "INJECTED_WANDB_API_KEY": "test-only",
       })
+      environ.update(input_override or {})
       if override:
         original = Path(environ["CANON_PROFILE_FILE"])
         if not original.is_absolute():
@@ -100,6 +109,23 @@ class P46EnvironmentContractTest(unittest.TestCase):
         self.assertIn(
             f"P46 evaluation contract OK: topology={topology}", result.stdout
         )
+        self.assertIn(
+            "mode=reward_only parity=0 sampled_by=stock@", result.stdout
+        )
+
+  def test_64chip_observer_canary_preflight_is_isolated(self):
+    result = self._run(
+        "q4-clean-eval",
+        "64",
+        render_overrides={
+            "evaluation_mode": "logprob_observer",
+            "parity_canary": True,
+        },
+    )
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn(
+        "mode=logprob_observer parity=1 sampled_by=stock@", result.stdout
+    )
 
   def test_q32_topology_drift_and_eval_trainer_overlap_fail_closed(self):
     result = self._run(
@@ -112,6 +138,26 @@ class P46EnvironmentContractTest(unittest.TestCase):
     )
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("must not admit a trainer", result.stdout)
+    result = self._run(
+        "q4-clean-eval", "64", "export CANON_ALIGNMENT_GATE=1"
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("evaluation contradicts CANON_ALIGNMENT_GATE=1", result.stdout)
+    result = self._run(
+        "q4-clean-eval", "64", "export CANON_P46_EVALUATION_MODE=training"
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("unsupported P46 evaluation_mode", result.stdout)
+    result = self._run(
+        "q4-clean-eval",
+        "64",
+        input_override={"CANON_ALIGNMENT_TRAIN": "1"},
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn(
+        "evaluation caller contradictions: CANON_ALIGNMENT_TRAIN=1",
+        result.stdout,
+    )
 
 
 if __name__ == "__main__":

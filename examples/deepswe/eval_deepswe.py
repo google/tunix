@@ -50,7 +50,18 @@ def _int(name: str, default: int) -> int:
   return value
 
 
+def _bool01(name: str, default: str = "0") -> bool:
+  value = os.environ.get(name, default)
+  if value not in ("0", "1"):
+    raise ValueError(f"{name} must be exactly 0 or 1")
+  return value == "1"
+
+
 def _build_config() -> tuple[EvalConfig, int, Path]:
+  onehost_probe = _bool01("CANON_P46_ONEHOST_PROBE")
+  parity_canary = _bool01("CANON_P46_PARITY_CANARY")
+  if onehost_probe and parity_canary:
+    raise ValueError("one-host and 64-chip parity modes are mutually exclusive")
   model_id = os.environ.get(
       "MODEL_VERSION", "Qwen/Qwen3-4B-Instruct-2507"
   )
@@ -60,7 +71,12 @@ def _build_config() -> tuple[EvalConfig, int, Path]:
           "CANON_P46_MODEL_BASE_DIR", "/mnt/disks/linchai_data/models"
       ),
   )
-  model_path = Path(model_base) / model_id.removeprefix("Qwen/")
+  model_path = Path(
+      os.environ.get(
+          "MODEL_ABSOLUTE_PATH",
+          str(Path(model_base) / model_id.removeprefix("Qwen/")),
+      )
+  )
   whitelist_path = Path(
       _required("GOLD_JSONL", "CANON_P46_GOLD_JSONL")
   ).resolve()
@@ -86,23 +102,45 @@ def _build_config() -> tuple[EvalConfig, int, Path]:
       source_commit=_required("CANON_EXPECT_COMMIT"),
       client_image=_required("CANON_CLIENT_IMAGE"),
       topology=_required("CANON_P46_TOPOLOGY"),
-      max_model_len=_int("MAX_MODEL_LEN", 20_480),
-      max_response_length=_int("MAX_RESPONSE_LENGTH", 16_384),
-      max_steps=_int("MAX_STEPS", 50),
+      evaluation_mode=_required("CANON_P46_EVALUATION_MODE"),
+      onehost_probe=onehost_probe,
+      parity_canary=parity_canary,
+      max_model_len=_int("MAX_MODEL_LEN", 4096 if onehost_probe else 20_480),
+      max_response_length=_int(
+          "MAX_RESPONSE_LENGTH", 512 if onehost_probe else 16_384
+      ),
+      max_steps=_int("MAX_STEPS", 1 if onehost_probe else 50),
       temperature=float(os.environ.get("TEMPERATURE", "1.0")),
       top_p=float(os.environ.get("TOP_P", "1.0")),
       top_k=int(os.environ.get("TOP_K", "0")),
-      n_sample=_int("N_SAMPLE", 16),
-      logical_tasks=_int("EVAL_LOGICAL_TASKS", 32),
-      shard_tasks=_int("EVAL_SHARD_TASKS", 4),
+      n_sample=_int("N_SAMPLE", 1 if onehost_probe else 16),
+      logical_tasks=_int(
+          "EVAL_LOGICAL_TASKS", 1 if (onehost_probe or parity_canary) else 32
+      ),
+      shard_tasks=_int(
+          "EVAL_SHARD_TASKS", 1 if (onehost_probe or parity_canary) else 4
+      ),
       shard_index=_int("CANON_P46_LOGICAL_SHARD_INDEX", 0),
-      max_concurrency=_int("MAX_CONCURRENT", 64),
-      trajectory_timeout_secs=_int("TRAJECTORY_TIMEOUT_SECS", 3000),
+      max_concurrency=_int(
+          "MAX_CONCURRENT",
+          1 if onehost_probe else (16 if parity_canary else 64),
+      ),
+      trajectory_timeout_secs=_int(
+          "TRAJECTORY_TIMEOUT_SECS", 900 if onehost_probe else 3000
+      ),
       per_turn_timeout_secs=_int("PER_TURN_TIMEOUT_SECS", 300),
-      step_timeout_secs=_int("STEP_TIMEOUT_SECS", 600),
-      reward_timeout_secs=_int("REWARD_TIMEOUT_SECS", 600),
-      cleanup_timeout_secs=_int("CLEANUP_TIMEOUT_SECS", 300),
-      shard_timeout_secs=_int("SHARD_TIMEOUT_SECS", 3600),
+      step_timeout_secs=_int(
+          "STEP_TIMEOUT_SECS", 300 if onehost_probe else 600
+      ),
+      reward_timeout_secs=_int(
+          "REWARD_TIMEOUT_SECS", 300 if onehost_probe else 600
+      ),
+      cleanup_timeout_secs=_int(
+          "CLEANUP_TIMEOUT_SECS", 120 if onehost_probe else 300
+      ),
+      shard_timeout_secs=_int(
+          "SHARD_TIMEOUT_SECS", 1200 if onehost_probe else 3600
+      ),
       seed_base=_int("SEED_BASE", 42),
       prefix_cache=os.environ.get("ENABLE_PREFIX_CACHE", "0") == "1",
   )
@@ -198,6 +236,20 @@ def _select_shards(
   return logical, physical
 
 
+def _batch_entry_for_swe_env(
+    entry: Mapping[str, Any],
+) -> dict[str, list[Any]]:
+  """Add the singleton batch dimension expected by ``SWEEnv``.
+
+  The training data loader supplies a dict-of-batches to ``SWEEnv``.  This
+  evaluator iterates individual Hugging Face rows instead, and some row values
+  (for example ``modified_files``) are themselves legitimate multi-item
+  lists.  Wrapping every value once lets ``SWEEnv._unpack_entry`` remove only
+  the outer batch dimension while preserving those semantic lists.
+  """
+  return {key: [value] for key, value in entry.items()}
+
+
 class _Runtime:
   """Late-imported TPU/Kubernetes runtime so artifact tests stay CPU-only."""
 
@@ -218,8 +270,6 @@ class _Runtime:
     import jax
     import jax.numpy as jnp
     from jax.sharding import Mesh
-    from kubernetes import client
-    from kubernetes import config as k8s_config
     from transformers import AutoTokenizer
     from tunix.generate import mappings
     from tunix.generate import tokenizer_adapter as tok_adapter
@@ -229,21 +279,28 @@ class _Runtime:
     from tunix.rl.agentic.parser.chat_template_parser import parser
     import numpy as np
 
-    try:
-      k8s_config.load_incluster_config()
-    except k8s_config.config_exception.ConfigException:
-      k8s_config.load_kube_config()
-    client.CoreV1Api().list_namespace(timeout_seconds=5)
+    if not config.onehost_probe:
+      from kubernetes import client
+      from kubernetes import config as k8s_config
+
+      try:
+        k8s_config.load_incluster_config()
+      except k8s_config.config_exception.ConfigException:
+        k8s_config.load_kube_config()
+      client.CoreV1Api().list_namespace(timeout_seconds=5)
 
     devices = jax.devices()
     expected_devices = int(config.topology)
-    if len(devices) != expected_devices or len(devices) % 8:
+    tp_size = 4 if config.onehost_probe else 8
+    if len(devices) != expected_devices or len(devices) % tp_size:
       raise ValueError(
           "P46 evaluation device inventory mismatch: "
           f"expected={expected_devices} actual={len(devices)}"
       )
-    dp_size = len(devices) // 8
-    mesh = Mesh(np.array(devices).reshape(dp_size, 8), ("fsdp", "tp"))
+    dp_size = len(devices) // tp_size
+    mesh = Mesh(
+        np.array(devices).reshape(dp_size, tp_size), ("fsdp", "tp")
+    )
     self.tokenizer = AutoTokenizer.from_pretrained(
         config.model_path, local_files_only=True
     )
@@ -251,9 +308,10 @@ class _Runtime:
     self.chat_parser = parser.QwenChatTemplateParser(self.tokenizer)
     model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
     logger.info(
-        "Loading %s on evaluation mesh DP%dxTP8 from %s",
+        "Loading %s on evaluation mesh DP%dxTP%d from %s",
         config.model_id,
         dp_size,
+        tp_size,
         config.model_path,
     )
     model = params_lib.create_model_from_safe_tensors(
@@ -269,11 +327,13 @@ class _Runtime:
         init_with_random_weights=True,
         tpu_backend_type="jax",
         server_mode=True,
-        tensor_parallel_size=8,
+        tensor_parallel_size=tp_size,
         data_parallel_size=dp_size,
         mapping_config=mapping_config,
+        return_logprobs=config.collect_logprobs,
         engine_kwargs={
             "model": config.model_path,
+            "seed": config.seed_base,
             "max_model_len": config.max_model_len,
             "max_num_seqs": vllm_max_num_seqs,
             "max_num_batched_tokens": config.max_response_length,
@@ -289,9 +349,21 @@ class _Runtime:
 
     self.sampler.load_checkpoint(nnx.state(model))
     logger.info(
-        "P46 evaluation runtime PASS devices=%d dp=%d tp=8 prefix_cache=off",
+        "P46 evaluation runtime PASS devices=%d dp=%d tp=%d prefix_cache=off",
         len(devices),
         dp_size,
+        tp_size,
+    )
+    logger.info(
+        "[P46.EVALUATION_MODE] PASS evaluation_mode=%s trajectory_mode=%s "
+        "sampled_by=%s sampled_logprobs=%r prompt_logprobs=%r "
+        "host_extraction=%s trainer=0 alignment=0 optimizer=0",
+        config.evaluation_mode,
+        config.trajectory_mode,
+        config.sampled_by,
+        1 if config.collect_logprobs else None,
+        0 if config.collect_logprobs else None,
+        "active" if config.collect_logprobs else "skipped",
     )
 
   def model_call(
@@ -317,15 +389,36 @@ class _Runtime:
         max_generation_steps or config.max_response_length,
         remaining_context,
     )
-    return self.sampler(
+    if config.onehost_probe:
+      # Keep room in the 512-token smoke budget for parser/environment/final
+      # reward completion even when the model does not emit EOS promptly.
+      generation_steps = min(generation_steps, 256)
+    output = self.sampler(
         prompt,
         max_generation_steps=generation_steps,
         temperature=config.temperature,
         top_p=config.top_p,
         top_k=config.top_k,
-        seed=env.extra_kwargs["sample_seed"],
         echo=False,
         request_timeout_s=request_timeout_s,
+    )
+    if config.evaluation_mode == "reward_only" and output.logprobs is not None:
+      raise ValueError(
+          "reward-only evaluation received sampled-token logprobs"
+      )
+    # TrajectoryCollectEngine consumes the rollout-worker interface, while a
+    # direct stock VllmSampler returns the generate-layer interface.  Keep this
+    # adapter local to evaluation so canonical/training rollout behavior is
+    # unchanged.
+    from tunix.rl.rollout import base_rollout
+
+    return base_rollout.RolloutOutput(
+        text=output.text,
+        logits=output.logits,
+        tokens=list(output.tokens),
+        left_padded_prompt_tokens=output.padded_prompt_tokens,
+        logprobs=output.logprobs,
+        prompt_lengths=output.prompt_lengths,
     )
 
 async def _run_evaluation(
@@ -333,6 +426,8 @@ async def _run_evaluation(
     entries: Sequence[Mapping[str, Any]],
     pending: Sequence[tuple[Mapping[str, Any], int]],
     output_path: Path,
+    *,
+    runtime: _Runtime | None = None,
 ) -> tuple[int, bool]:
   from guarded_swe_env import GuardedSWEEnv
   from swe_agent import SWEAgent
@@ -342,7 +437,7 @@ async def _run_evaluation(
   from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
-  runtime = _Runtime(config)
+  runtime = runtime or _Runtime(config)
   enable_guard = os.environ.get("ENABLE_GUARD", "false").lower() == "true"
   plan = list(pending)
   started: dict[int, float] = {}
@@ -368,15 +463,16 @@ async def _run_evaluation(
     for pair_index, (entry, sample_index) in enumerate(plan):
       agent = SWEAgent()
       env = env_cls(
-          entry=dict(entry),
+          entry=_batch_entry_for_swe_env(entry),
           max_steps=config.max_steps,
           pair_index=pair_index,
           group_id=task_key(entry),
           step_timeout=config.step_timeout_secs,
           reward_timeout=config.reward_timeout_secs,
+          **({"backend": "docker"} if config.onehost_probe else {}),
       )
       env.extra_kwargs["sample_index"] = sample_index
-      env.extra_kwargs["sample_seed"] = config.sample_seed(
+      env.extra_kwargs["sample_nonce"] = config.sample_nonce(
           task_key(entry), sample_index
       )
       started[pair_index] = time.monotonic()

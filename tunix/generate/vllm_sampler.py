@@ -45,6 +45,24 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
+def _configure_logprob_request(
+    sampling_params: Any, *, return_logprobs: bool
+) -> None:
+  """Configures vLLM logprob fields without using zero as an off sentinel.
+
+  In vLLM, ``logprobs=0`` and ``prompt_logprobs=0`` still request the sampled
+  token and prompt-token logprobs respectively.  Absence is represented by
+  ``None``.  Keeping this distinction here prevents reward-only callers from
+  silently entering gather/device-to-host logprob paths.
+  """
+  if return_logprobs:
+    sampling_params.logprobs = 1  # b/428730696
+    sampling_params.prompt_logprobs = 0  # b/428730696
+  else:
+    sampling_params.logprobs = None
+    sampling_params.prompt_logprobs = None
+
+
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -381,9 +399,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         decoded_outputs[idx].append(
             self.tokenizer.decode(single_output.token_ids)
         )
-        logprobs = utils.get_logprobs_from_vllm_output(
-            list(single_output.token_ids), single_output.logprobs
-        )
+        logprobs = None
+        if self.config.return_logprobs:
+          logprobs = utils.get_logprobs_from_vllm_output(
+              list(single_output.token_ids), single_output.logprobs
+          )
         out_logprobs[idx].append(logprobs)
         logging.debug(
             "Prompt: %r\n\nGenerated text: %r\n\n ",
@@ -554,12 +574,19 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
-      if self.config.return_logprobs:
-        sampling_params.logprobs = 1  # b/428730696
-        sampling_params.prompt_logprobs = 0  # b/428730696
-      else:
-        sampling_params.logprobs = 0
-        sampling_params.prompt_logprobs = 0
+      _configure_logprob_request(
+          sampling_params, return_logprobs=self.config.return_logprobs
+      )
+      logging.log_first_n(
+          logging.INFO,
+          "[VLLM.LOGPROB_REQUEST] return_logprobs=%d sampled=%r prompt=%r "
+          "host_extraction=%s",
+          1,
+          int(self.config.return_logprobs),
+          sampling_params.logprobs,
+          sampling_params.prompt_logprobs,
+          "enabled" if self.config.return_logprobs else "skipped",
+      )
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
       # Keep the stop token in the returned ``token_ids`` so multi-turn

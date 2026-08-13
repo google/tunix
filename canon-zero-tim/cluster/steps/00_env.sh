@@ -14,6 +14,32 @@ PROFILE="${CANON_PROFILE_FILE:-cluster/profiles/qwen3-1p7b.env}"
 case "$PROFILE" in /*) PROFILE_ABS="$PROFILE";; *) PROFILE_ABS="$CANON_PKG/$PROFILE";; esac
 [ -f "$PROFILE_ABS" ] || { echo "profile not found: $PROFILE_ABS" >&2; exit 1; }
 
+# Preserve contradictory values supplied by the caller before the profile
+# derives reward-only invariants. Without this snapshot, sourcing the profile
+# could silently turn an explicit trainer/alignment request back to zero and
+# make a contradictory JobSet appear valid.
+_CANON_P46_INPUT_CONTRADICTIONS=()
+for _canon_p46_key in CANON_P46_DEEPSWE_TRAIN CANON_P34_DEEPSWE \
+    CANON_P34_TRAJECTORY_ADMITTED CANON_P34_UPDATE_ADMITTED \
+    CANON_P32_TRAIN_ADMITTED CANON_P33_WORKLOAD_LAUNCH_ADMITTED \
+    CANON_PROMPT_PROCESSED_LOGPROBS CANON_PALLAS_LOGSOFTMAX \
+    CANON_ENGINE_MODULE_C CANON_RPA_VJP2 CANON_ALIGNMENT_GATE \
+    CANON_ALIGNMENT_GATE_ONLY CANON_ALIGNMENT_UPDATE_CANARY \
+    CANON_ALIGNMENT_TRAIN CANON_PRE_ALIGN_GATE \
+    CANON_DEEPSWE_ALIGNMENT_WARN_ONLY CANON_P28_SEGMENTED_FORWARD \
+    CANON_P28_SEGMENTED_VJP CANON_P28_SEGMENTED_TRAIN \
+    CANON_P28_G6_UPDATE CANON_P29_FULL_TRAIN CANON_OPT_STATE_RESIDENT \
+    CANON_P30_SPARSE_GRAD_ASSEMBLY CANON_P30_FUSED_PAIR_ACCUMULATION \
+    CANON_P30_REUSE_SEGMENTED_ENGINE CANON_P30_RELEASE_CAPTURED_STATE \
+    CANON_P30_RESHARD_ACCUMULATOR; do
+  if [[ -v "$_canon_p46_key" && "${!_canon_p46_key}" != "0" ]]; then
+    _CANON_P46_INPUT_CONTRADICTIONS+=(
+      "${_canon_p46_key}=${!_canon_p46_key}"
+    )
+  fi
+done
+unset _canon_p46_key
+
 # shellcheck disable=SC1090
 set -a
 source "$CANON_PKG/cluster/profiles/_canonical_engine.env"
@@ -708,7 +734,8 @@ case "${CANON_P46_EVALUATION:-0}" in
              CANON_RUN_CMD CANON_RUN_LOG CANON_P46_OUTPUT_DIR \
              CANON_P46_GOLD_JSONL CANON_P46_GOLD_JSONL_SHA256 \
              CANON_P46_MODEL_BASE_DIR CANON_P46_LOGICAL_SHARD_INDEX \
-             CANON_P46_PHYSICAL_SHARD_INDEX; do
+             CANON_P46_PHYSICAL_SHARD_INDEX CANON_P46_EVALUATION_MODE \
+             CANON_P46_PARITY_CANARY; do
       req "$k"
     done
     [ "${CANON_MODE:-}" = "run" ] && \
@@ -719,6 +746,51 @@ case "${CANON_P46_EVALUATION:-0}" in
       echo "[env] P46 evaluation must not admit a trainer" >&2
       fail=1
     }
+    case "${CANON_P46_EVALUATION_MODE:-}" in
+      reward_only) ;;
+      logprob_observer)
+        [ "${CANON_P46_PARITY_CANARY:-0}" = "1" ] && \
+        [ "${CANON_P46_TOPOLOGY:-}" = "64" ] || {
+          echo "[env] logprob_observer requires the 64-chip parity canary" >&2
+          fail=1
+        }
+        ;;
+      *)
+        echo "[env] unsupported P46 evaluation_mode" >&2
+        fail=1
+        ;;
+    esac
+    case "${CANON_P46_PARITY_CANARY:-}" in 0|1) ;; *)
+      echo "[env] CANON_P46_PARITY_CANARY must be exactly 0 or 1" >&2
+      fail=1 ;;
+    esac
+    if [ "${CANON_P46_PARITY_CANARY:-0}" = "1" ] && \
+       [ "${CANON_P46_TOPOLOGY:-}" != "64" ]; then
+      echo "[env] P46 parity canary requires topology 64" >&2
+      fail=1
+    fi
+    if [ "${#_CANON_P46_INPUT_CONTRADICTIONS[@]}" -ne 0 ]; then
+      echo "[env] P46 evaluation caller contradictions: ${_CANON_P46_INPUT_CONTRADICTIONS[*]}" >&2
+      fail=1
+    fi
+    for k in CANON_P34_TRAJECTORY_CAPTURE \
+             CANON_PROMPT_PROCESSED_LOGPROBS CANON_PALLAS_LOGSOFTMAX \
+             CANON_ENGINE_MODULE_C CANON_RPA_VJP2 CANON_ALIGNMENT_GATE \
+             CANON_ALIGNMENT_GATE_ONLY CANON_ALIGNMENT_UPDATE_CANARY \
+             CANON_ALIGNMENT_TRAIN CANON_PRE_ALIGN_GATE \
+             CANON_DEEPSWE_ALIGNMENT_WARN_ONLY CANON_P28_SEGMENTED_FORWARD \
+             CANON_P28_SEGMENTED_VJP CANON_P28_SEGMENTED_TRAIN \
+             CANON_P28_G6_UPDATE CANON_P29_FULL_TRAIN \
+             CANON_OPT_STATE_RESIDENT CANON_P30_SPARSE_GRAD_ASSEMBLY \
+             CANON_P30_FUSED_PAIR_ACCUMULATION \
+             CANON_P30_REUSE_SEGMENTED_ENGINE \
+             CANON_P30_RELEASE_CAPTURED_STATE \
+             CANON_P30_RESHARD_ACCUMULATOR; do
+      [ "${!k:-}" = "0" ] || {
+        echo "[env] P46 evaluation contradicts $k=${!k:-unset}" >&2
+        fail=1
+      }
+    done
     case "${CANON_P46_TOPOLOGY:-}" in 64|256) ;; *)
       echo "[env] P46 evaluation topology must be 64 or 256" >&2; fail=1 ;;
     esac
@@ -726,7 +798,7 @@ case "${CANON_P46_EVALUATION:-0}" in
       *" examples/deepswe/eval_deepswe.py "*) ;;
       *) echo "[env] P46 evaluation command drifted" >&2; fail=1 ;;
     esac
-    echo "[env] P46 evaluation contract OK: topology=${CANON_P46_TOPOLOGY} logical=${CANON_P46_LOGICAL_SHARD_INDEX} physical=${CANON_P46_PHYSICAL_SHARD_INDEX}"
+    echo "[env] P46 evaluation contract OK: topology=${CANON_P46_TOPOLOGY} logical=${CANON_P46_LOGICAL_SHARD_INDEX} physical=${CANON_P46_PHYSICAL_SHARD_INDEX} mode=${CANON_P46_EVALUATION_MODE} parity=${CANON_P46_PARITY_CANARY} sampled_by=stock@${CANON_EXPECT_COMMIT}"
     ;;
   *)
     echo "[env] CANON_P46_EVALUATION must be exactly 0 or 1" >&2

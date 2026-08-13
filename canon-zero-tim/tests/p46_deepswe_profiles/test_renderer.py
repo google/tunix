@@ -28,7 +28,7 @@ class P46RendererTest(unittest.TestCase):
     name = "jobset-64chip.yaml" if topology == "64" else "jobset-256cluster-64chip.yaml"
     return yaml.safe_load((CLUSTER / name).read_text(encoding="utf-8"))
 
-  def _render(self, workload: str, topology: str):
+  def _render(self, workload: str, topology: str, **overrides):
     return renderer.render(
         self._base(topology),
         workload=workload,
@@ -44,6 +44,7 @@ class P46RendererTest(unittest.TestCase):
         whitelist_sha256=p34.P34_CLEAN_WHITELIST_SHA256,
         logical_shard_index=0,
         physical_shard_index=0,
+        **overrides,
     )
 
   def test_all_three_families_render_on_both_topologies(self):
@@ -100,11 +101,46 @@ class P46RendererTest(unittest.TestCase):
           "python3 -u examples/deepswe/eval_deepswe.py",
       )
       self.assertEqual(env["CANON_P46_EVALUATION"], "1")
+      self.assertEqual(env["CANON_P46_EVALUATION_MODE"], "reward_only")
       self.assertEqual(env["CANON_P46_DEEPSWE_TRAIN"], "0")
       self.assertEqual(env["CANON_P32_TRAIN_ADMITTED"], "0")
       self.assertEqual(env["CANON_P33_WORKLOAD_LAUNCH_ADMITTED"], "0")
       self.assertEqual(env["CANON_P46_LOGICAL_SHARD_INDEX"], "0")
       self.assertEqual(env["CANON_P46_PHYSICAL_SHARD_INDEX"], "0")
+      for key in (
+          "CANON_PROMPT_PROCESSED_LOGPROBS",
+          "CANON_PALLAS_LOGSOFTMAX",
+          "CANON_ENGINE_MODULE_C",
+          "CANON_RPA_VJP2",
+          "CANON_ALIGNMENT_GATE",
+          "CANON_ALIGNMENT_TRAIN",
+          "CANON_PRE_ALIGN_GATE",
+          "CANON_OPT_STATE_RESIDENT",
+      ):
+        self.assertEqual(env[key], "0", key)
+
+  def test_64chip_parity_canary_renders_exact_observer_and_reward_arms(self):
+    for mode in ("logprob_observer", "reward_only"):
+      document = self._render(
+          "q4-clean-eval",
+          "64",
+          evaluation_mode=mode,
+          parity_canary=True,
+      )
+      env = p34._env(document)
+      self.assertEqual(env["CANON_P46_EVALUATION_MODE"], mode)
+      self.assertEqual(env["CANON_P46_PARITY_CANARY"], "1")
+      self.assertIn(f"/parity/{mode}/", env["CANON_P46_OUTPUT_DIR"])
+      self.assertEqual(
+          document["metadata"]["labels"]["canon.zero-tim/parity-canary"],
+          "1",
+      )
+    with self.assertRaisesRegex(ValueError, "restricted"):
+      self._render(
+          "q4-clean-eval", "64", evaluation_mode="logprob_observer"
+      )
+    with self.assertRaisesRegex(ValueError, "topology 64"):
+      self._render("q4-clean-eval", "256", parity_canary=True)
 
   def test_bad_workload_topology_and_eval_shard_fail_closed(self):
     common = dict(

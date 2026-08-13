@@ -17,6 +17,7 @@ import asyncio
 import os
 import tempfile
 import time
+import types
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
@@ -591,6 +592,40 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sharding_strategy["expert_parallelism"], 1)
     self.assertEqual(sampler.args["tensor_parallel_size"], 8)
     self.assertEqual(sampler.args["data_parallel_size"], 1)
+
+  def test_false_logprob_request_uses_none_not_zero(self):
+    params = types.SimpleNamespace(logprobs=99, prompt_logprobs=99)
+    vllm_sampler._configure_logprob_request(  # pylint: disable=protected-access
+        params, return_logprobs=False
+    )
+    self.assertIsNone(params.logprobs)
+    self.assertIsNone(params.prompt_logprobs)
+
+    vllm_sampler._configure_logprob_request(  # pylint: disable=protected-access
+        params, return_logprobs=True
+    )
+    self.assertEqual(params.logprobs, 1)
+    self.assertEqual(params.prompt_logprobs, 0)
+
+  def test_detokenize_skips_logprob_extraction_when_disabled(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.config = vllm_sampler.VllmConfig(return_logprobs=False)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.return_value = "decoded"
+    completion = types.SimpleNamespace(
+        token_ids=[1, 2], logprobs=[{1: object()}, {2: object()}]
+    )
+    request = types.SimpleNamespace(outputs=[completion])
+    with mock.patch.object(
+        vllm_sampler.utils,
+        "get_logprobs_from_vllm_output",
+        side_effect=AssertionError("reward-only entered host extraction"),
+    ) as extract:
+      texts, logprobs, tokens = sampler.detokenize(["prompt"], [request])
+    extract.assert_not_called()
+    self.assertEqual(texts, [["decoded"]])
+    self.assertEqual(logprobs, [[None]])
+    np.testing.assert_array_equal(tokens[0][0], np.asarray([1, 2]))
 
 
 if __name__ == "__main__":

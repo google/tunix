@@ -18,6 +18,7 @@ WORKLOADS = ("q4-debug", "q4-clean-eval", "q32-train")
 EVAL_CLEAN_ROWS = p34.P34_CLEAN_ROWS
 EVAL_LOGICAL_TASKS = 32
 EVAL_PHYSICAL_TASKS = 4
+EVALUATION_MODES = ("reward_only", "logprob_observer")
 TOPOLOGIES = {
     "64": {"instance": "4x4x4", "workers": 16, "dp": 4, "global_m": 1024},
     "256": {"instance": "4x8x8", "workers": 64, "dp": 16, "global_m": 4096},
@@ -263,7 +264,15 @@ def render_q4_eval(
     whitelist_sha256: str,
     logical_shard_index: int,
     physical_shard_index: int,
+    evaluation_mode: str,
+    parity_canary: bool,
 ) -> dict[str, Any]:
+  if evaluation_mode not in EVALUATION_MODES:
+    raise ValueError("unsupported P46 evaluation mode")
+  if evaluation_mode == "logprob_observer" and not parity_canary:
+    raise ValueError("logprob_observer is restricted to the parity canary")
+  if parity_canary and topology != "64":
+    raise ValueError("P46 parity canary requires topology 64")
   document = _base_render(
       base,
       source_commit=source_commit,
@@ -276,32 +285,41 @@ def render_q4_eval(
       whitelist=whitelist,
       whitelist_sha256=whitelist_sha256,
   )
-  logical_shards = (
-      EVAL_CLEAN_ROWS + EVAL_LOGICAL_TASKS - 1
-  ) // EVAL_LOGICAL_TASKS
+  logical_tasks = 1 if parity_canary else EVAL_LOGICAL_TASKS
+  physical_tasks = 1 if parity_canary else EVAL_PHYSICAL_TASKS
+  logical_shards = (EVAL_CLEAN_ROWS + logical_tasks - 1) // logical_tasks
   if not 0 <= logical_shard_index < logical_shards:
     raise ValueError("P46 evaluation logical shard index is out of range")
   tasks_in_logical_shard = min(
-      EVAL_LOGICAL_TASKS,
-      EVAL_CLEAN_ROWS - logical_shard_index * EVAL_LOGICAL_TASKS,
+      logical_tasks,
+      EVAL_CLEAN_ROWS - logical_shard_index * logical_tasks,
   )
   physical_shards = (
-      tasks_in_logical_shard + EVAL_PHYSICAL_TASKS - 1
-  ) // EVAL_PHYSICAL_TASKS
+      tasks_in_logical_shard + physical_tasks - 1
+  ) // physical_tasks
   if not 0 <= physical_shard_index < physical_shards:
     raise ValueError("P46 evaluation shard indices are out of range")
+  lane = (
+      f"parity-{'obs' if evaluation_mode == 'logprob_observer' else 'reward'}"
+      if parity_canary
+      else "eval"
+  )
   name = (
-      f"canon-p46-eval-{topology}-{logical_shard_index}-"
+      f"canon-p46-{lane}-{topology}-{logical_shard_index}-"
       f"{physical_shard_index}-{run_id}"
   )
   if len(name) > 63:
     raise ValueError("rendered P46 evaluation JobSet name exceeds 63 characters")
   run_root = f"/mnt/disks/linchai_data/deepswe_eval/{run_id}"
+  if parity_canary:
+    run_root = f"{run_root}/parity/{evaluation_mode}"
   document["metadata"]["name"] = name
   document["metadata"]["labels"].update({
       "canon.zero-tim/phase": "p46",
       "canon.zero-tim/profile-family": "q4-clean-eval",
       "canon.zero-tim/topology": topology,
+      "canon.zero-tim/evaluation-mode": evaluation_mode,
+      "canon.zero-tim/parity-canary": "1" if parity_canary else "0",
   })
   _configure_topology(
       document,
@@ -321,14 +339,38 @@ def render_q4_eval(
       "CANON_CLIENT_IMAGE": client_image,
       "CANON_P46_DEEPSWE_TRAIN": "0",
       "CANON_P46_EVALUATION": "1",
+      "CANON_P46_EVALUATION_MODE": evaluation_mode,
+      "CANON_P46_PARITY_CANARY": "1" if parity_canary else "0",
       "CANON_P46_TOPOLOGY": topology,
       "CANON_P34_TOPOLOGY_ADMITTED": "0",
       "CANON_P34_TP8_ADMITTED": "0",
       "CANON_P34_TRAJECTORY_ADMITTED": "0",
       "CANON_P34_UPDATE_ADMITTED": "0",
+      "CANON_P34_TRAJECTORY_CAPTURE": "0",
       "CANON_P32_TRAIN_ADMITTED": "0",
       "CANON_P32_DP_REDUCTION_ADMITTED": "0",
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0",
+      "CANON_PROMPT_PROCESSED_LOGPROBS": "0",
+      "CANON_PALLAS_LOGSOFTMAX": "0",
+      "CANON_ENGINE_MODULE_C": "0",
+      "CANON_RPA_VJP2": "0",
+      "CANON_ALIGNMENT_GATE": "0",
+      "CANON_ALIGNMENT_GATE_ONLY": "0",
+      "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+      "CANON_ALIGNMENT_TRAIN": "0",
+      "CANON_PRE_ALIGN_GATE": "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
+      "CANON_P28_SEGMENTED_FORWARD": "0",
+      "CANON_P28_SEGMENTED_VJP": "0",
+      "CANON_P28_SEGMENTED_TRAIN": "0",
+      "CANON_P28_G6_UPDATE": "0",
+      "CANON_P29_FULL_TRAIN": "0",
+      "CANON_OPT_STATE_RESIDENT": "0",
+      "CANON_P30_SPARSE_GRAD_ASSEMBLY": "0",
+      "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
+      "CANON_P30_REUSE_SEGMENTED_ENGINE": "0",
+      "CANON_P30_RELEASE_CAPTURED_STATE": "0",
+      "CANON_P30_RESHARD_ACCUMULATOR": "0",
       "CANON_RUN_CMD": "python3 -u examples/deepswe/eval_deepswe.py",
       "CANON_RUN_LOG": (
           f"{run_root}/logs/l{logical_shard_index}-"
@@ -347,6 +389,8 @@ def render_q4_eval(
       source_commit=source_commit,
       client_image=client_image,
       topology=topology,
+      evaluation_mode=evaluation_mode,
+      parity_canary=parity_canary,
   )
   return document
 
@@ -417,7 +461,13 @@ def validate_q32(
 
 
 def validate_eval(
-    document: Mapping[str, Any], *, source_commit: str, client_image: str, topology: str
+    document: Mapping[str, Any],
+    *,
+    source_commit: str,
+    client_image: str,
+    topology: str,
+    evaluation_mode: str,
+    parity_canary: bool,
 ) -> None:
   _validate_topology(document, topology)
   env = p34._env(document)
@@ -428,8 +478,19 @@ def validate_eval(
       "CANON_P46_EVALUATION": "1",
       "CANON_P46_DEEPSWE_TRAIN": "0",
       "CANON_P46_TOPOLOGY": topology,
+      "CANON_P46_EVALUATION_MODE": evaluation_mode,
+      "CANON_P46_PARITY_CANARY": "1" if parity_canary else "0",
       "CANON_P32_TRAIN_ADMITTED": "0",
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0",
+      "CANON_P34_TRAJECTORY_CAPTURE": "0",
+      "CANON_PROMPT_PROCESSED_LOGPROBS": "0",
+      "CANON_PALLAS_LOGSOFTMAX": "0",
+      "CANON_ENGINE_MODULE_C": "0",
+      "CANON_RPA_VJP2": "0",
+      "CANON_ALIGNMENT_GATE": "0",
+      "CANON_ALIGNMENT_TRAIN": "0",
+      "CANON_PRE_ALIGN_GATE": "0",
+      "CANON_OPT_STATE_RESIDENT": "0",
       "CANON_RUN_CMD": "python3 -u examples/deepswe/eval_deepswe.py",
       "CANON_P46_GOLD_JSONL_SHA256": p34.P34_CLEAN_WHITELIST_SHA256,
   }
@@ -460,11 +521,17 @@ def render(
     whitelist_sha256: str,
     logical_shard_index: int = 0,
     physical_shard_index: int = 0,
+    evaluation_mode: str = "reward_only",
+    parity_canary: bool = False,
 ) -> dict[str, Any]:
   if workload not in WORKLOADS:
     raise ValueError(f"unknown P46 workload: {workload}")
   if topology not in TOPOLOGIES:
     raise ValueError("P46 topology must be exactly 64 or 256")
+  if workload != "q4-clean-eval" and (
+      evaluation_mode != "reward_only" or parity_canary
+  ):
+    raise ValueError("evaluation-only controls cannot modify a training workload")
   common = dict(
       source_commit=source_commit,
       source_branch=source_branch,
@@ -485,6 +552,8 @@ def render(
       base,
       logical_shard_index=logical_shard_index,
       physical_shard_index=physical_shard_index,
+      evaluation_mode=evaluation_mode,
+      parity_canary=parity_canary,
       **common,
   )
 
@@ -508,6 +577,10 @@ def main() -> None:
   )
   parser.add_argument("--logical-shard-index", type=int, default=0)
   parser.add_argument("--physical-shard-index", type=int, default=0)
+  parser.add_argument(
+      "--evaluation-mode", choices=EVALUATION_MODES, default="reward_only"
+  )
+  parser.add_argument("--parity-canary", action="store_true")
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -526,6 +599,8 @@ def main() -> None:
       whitelist_sha256=args.whitelist_sha256,
       logical_shard_index=args.logical_shard_index,
       physical_shard_index=args.physical_shard_index,
+      evaluation_mode=args.evaluation_mode,
+      parity_canary=args.parity_canary,
   )
   args.output.write_text(p34.dump_jobset(document), encoding="utf-8")
   print(

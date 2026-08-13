@@ -1,6 +1,7 @@
 # P46 remote-agent execution handoff
 
-Publication status: **IMPLEMENTATION PUBLISHED; TARGET CAMPAIGN NOT RUN**.
+Publication status: **P46.1-P46.4 PUBLISHED; P46.5 REWARD-ONLY UNPUBLISHED;
+TARGET CAMPAIGN NOT RUN**.
 
 The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
 repair are anchored by implementation commit
@@ -23,14 +24,41 @@ of 64 valid trajectories in P34r03. The eventual publication also contains the
 bounded request/trajectory/batch/cleanup lifecycle needed to prevent a sandbox
 step from running for hours after its deadline.
 
+P46.5 fixes a separate evaluation-only problem: vLLM integer zero still asks
+for logprobs. The unpublished path uses
+`evaluation_mode=reward_only` as its single source, sends
+`logprobs=None,prompt_logprobs=None`, skips host extraction, forbids numeric
+fake logprobs, and records
+`trajectory_mode=reward_only_no_logprobs` plus
+`sampled_by=stock@<SHA>`. Contradictory trainer/alignment/logprob/optimizer
+caller inputs fail closed. TPU/JAX rejects per-request seeds, so artifacts
+truthfully record `sampling_rng_mode=engine_global_sequential`; `sample_nonce`
+is identity metadata, not a replayable request seed.
+
+A dirty-worktree development run on one direct-attached v5p-8 host passed L1
+and L2 with Qwen3-4B DP1 x TP4, one pinned clean R2E Docker task, one real
+`search` action, final reward 0, a valid trajectory and no residual container:
+
+```text
+P46_REWARD_ONLY_ONEHOST_PASS l1=PASS l2=IDENTICAL_OBSERVER
+/mnt/disks/tunix-data/deepswe-reward-only-evidence/reward-only-onehost-20260813T061510Z-696010/report.json
+sha256=db3305413817ffe5c4d0085098475a12753cea6b698e15e4263b0c7d0835ba7c
+```
+
+This is not clean publication evidence and does not prove L3, Kubernetes or
+target throughput. The observer/reward-only diagnostic call medians were
+0.0330/0.0310 seconds and sampler payloads 117/70 bytes; do not advertise a
+cluster speedup from that micro-measurement.
+
 Before execution, read these files completely:
 
 1. `cluster/P46_DEEPSWE_PROFILES_RUNBOOK.md`
 2. `tasks/p46-deepswe-eval-training-profiles/state.md`
 3. `tasks/p46-deepswe-eval-training-profiles/plan.md`
 4. `tasks/p46-deepswe-eval-training-profiles/phases/p46-4-remote-execution.md`
-5. `cluster/P34_DEEPSWE_RUNBOOK.md`
-6. `cluster/P44_DEEPSWE_QWEN4B_PARITY_RUNBOOK.md`
+5. `tasks/p46-deepswe-eval-training-profiles/phases/p46-5-reward-only-evaluation.md`
+6. `cluster/P34_DEEPSWE_RUNBOOK.md`
+7. `cluster/P44_DEEPSWE_QWEN4B_PARITY_RUNBOOK.md`
 
 Then fetch the operator branch, detach at its exact remote SHA, require a clean
 checkout, and run:
@@ -50,6 +78,39 @@ rg -n 'training_data_sharding_axis|DEEPSWE.DATA_SHARDING' \
 The grep must show that `training_data_sharding_axis` comes from
 `train_axis_names[0]` and is passed into `RLTrainingConfig`. Stop if production
 still hard-codes `fsdp`.
+
+For P46.5, the exact detached publication must also contain all of:
+
+```bash
+rg -n 'evaluation_mode=reward_only|prompt_logprobs = None|host_extraction' \
+  canon-zero-tim examples/deepswe tunix/generate/vllm_sampler.py
+test -f examples/deepswe/probe_reward_only_v5p.py
+```
+
+If those checks fail, reward-only is not published. Stop; do not reconstruct
+it with YAML or shell hot patches.
+
+## Gate 0 — reward-only publication and layered parity
+
+First reconcile P46.5 onto the exact current operator branch, but commit/push
+only with explicit operator approval. Run the 31-case P46 CPU gate and the two
+targeted `VllmSamplerConfigTest` cases. If a direct four-chip v5p host is
+available, rerun the one-host command from a clean published checkout:
+
+```bash
+bash canon-zero-tim/tests/p46_deepswe_profiles/run_onehost_reward_only_v5p.sh
+```
+
+L1 is a hard gate. L2 token identity is diagnostic; a clean
+`LAW1_SUFFIX_DIVERGENCE` is recorded but does not block. Before reward-only
+becomes the Q4 clean-evaluation default, run the same N16 task/sample identities
+through the validation-only `logprob_observer` and `reward_only` canary arms on
+a 64-chip small shard. Render both manifests exactly as documented in
+`P46_DEEPSWE_PROFILES_RUNBOOK.md`; each arm is one clean task x N16 and neither
+is a production workload default. Require exact paired McNemar/binomial L3
+PASS, compare JobSet-level valid trajectories/hour, and prove Kubernetes
+cleanup in both arms. Never compare against a historical run or another source
+SHA.
 
 ## Gate 1 — one Q4 clean-evaluation physical shard
 

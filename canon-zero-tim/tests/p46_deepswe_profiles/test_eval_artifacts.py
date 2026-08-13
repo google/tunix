@@ -50,10 +50,82 @@ class EvalArtifactsTest(unittest.TestCase):
     other = dataclasses.replace(self.config, topology="256")
     other.validate()
     self.assertNotEqual(self.config.fingerprint, other.fingerprint)
+    self.assertEqual(self.config.evaluation_mode, "reward_only")
+    self.assertEqual(
+        self.config.trajectory_mode, "reward_only_no_logprobs"
+    )
+    self.assertEqual(self.config.sampled_by, "stock@" + "6" * 40)
+    self.assertEqual(
+        self.config.sampling_rng_mode, "engine_global_sequential"
+    )
+    self.assertFalse(self.config.collect_logprobs)
+    with self.assertRaisesRegex(ValueError, "restricted"):
+      dataclasses.replace(self.config, evaluation_mode="training").validate()
     with self.assertRaisesRegex(ValueError, "contract mismatch"):
       dataclasses.replace(self.config, max_response_length=4096).validate()
     with self.assertRaisesRegex(ValueError, "prefix cache"):
       dataclasses.replace(self.config, prefix_cache=True).validate()
+
+  def test_onehost_probe_is_exact_and_does_not_relax_production(self):
+    onehost = dataclasses.replace(
+        self.config,
+        topology="4",
+        onehost_probe=True,
+        max_model_len=4096,
+        max_response_length=512,
+        max_steps=1,
+        n_sample=1,
+        logical_tasks=1,
+        shard_tasks=1,
+        max_concurrency=1,
+        trajectory_timeout_secs=900,
+        step_timeout_secs=300,
+        reward_timeout_secs=300,
+        cleanup_timeout_secs=120,
+        shard_timeout_secs=1200,
+    )
+    onehost.validate()
+    self.assertIn("onehost", onehost.run_tag)
+    self.assertEqual(onehost.max_steps, 1)
+    self.assertEqual(self.config.max_steps, 50)
+    with self.assertRaisesRegex(ValueError, "topology"):
+      dataclasses.replace(self.config, topology="4").validate()
+    with self.assertRaisesRegex(ValueError, "contract mismatch"):
+      dataclasses.replace(onehost, n_sample=2).validate()
+
+  def test_logprob_observer_is_restricted_to_64chip_n16_canary(self):
+    observer = dataclasses.replace(
+        self.config,
+        parity_canary=True,
+        evaluation_mode="logprob_observer",
+        logical_tasks=1,
+        shard_tasks=1,
+        max_concurrency=16,
+    )
+    observer.validate()
+    self.assertTrue(observer.collect_logprobs)
+    self.assertEqual(
+        observer.trajectory_mode, "observer_with_sampled_logprobs"
+    )
+    self.assertIn("parity-logprob_observer", observer.run_tag)
+    with self.assertRaisesRegex(ValueError, "restricted"):
+      dataclasses.replace(self.config, evaluation_mode="logprob_observer").validate()
+    with self.assertRaisesRegex(ValueError, "topology"):
+      dataclasses.replace(observer, topology="256").validate()
+
+    entry = {"docker_image": "img-a"}
+    record = artifacts.trajectory_record(
+        observer,
+        entry=entry,
+        sample_index=0,
+        trajectory={
+            "status": "SUCCEEDED",
+            "reward": 0.0,
+            "steps": [{"logprobs": [-0.2]}],
+        },
+        elapsed_secs=1.0,
+    )
+    self.assertEqual(record["trajectory"]["steps"][0]["logprobs"], [-0.2])
 
   def test_record_is_complete_redacted_and_seeded(self):
     entry = {"docker_image": "img-a", "instance_id": "task-a"}
@@ -72,11 +144,46 @@ class EvalArtifactsTest(unittest.TestCase):
     self.assertTrue(record["solved"])
     self.assertEqual(record["sample_index"], 3)
     self.assertEqual(
-        record["sample_seed"], self.config.sample_seed("img-a", 3)
+        record["sample_nonce"], self.config.sample_nonce("img-a", 3)
     )
+    self.assertEqual(record["engine_seed"], 42)
+    self.assertEqual(record["sampling_rng_mode"], "engine_global_sequential")
     self.assertEqual(
         record["trajectory"]["steps"][0]["api_token"], "<redacted>"
     )
+    self.assertEqual(record["trajectory_mode"], "reward_only_no_logprobs")
+    self.assertEqual(record["sampled_by"], "stock@" + "6" * 40)
+
+  def test_reward_only_logprobs_are_absent_or_null_never_numeric(self):
+    entry = {"docker_image": "img-a", "instance_id": "task-a"}
+    record = artifacts.trajectory_record(
+        self.config,
+        entry=entry,
+        sample_index=0,
+        trajectory={
+            "status": "SUCCEEDED",
+            "reward": 0.0,
+            "steps": [{"action": "ok", "logprobs": []}],
+            "old_logprobs": None,
+        },
+        elapsed_secs=1.0,
+    )
+    self.assertIsNone(record["trajectory"]["steps"][0]["logprobs"])
+    self.assertIsNone(record["trajectory"]["old_logprobs"])
+    for payload in (0.0, [0.0], [-0.0001]):
+      with self.subTest(payload=payload):
+        with self.assertRaisesRegex(ValueError, "never numeric"):
+          artifacts.trajectory_record(
+              self.config,
+              entry=entry,
+              sample_index=0,
+              trajectory={
+                  "status": "SUCCEEDED",
+                  "reward": 0.0,
+                  "steps": [{"logprobs": payload}],
+              },
+              elapsed_secs=1.0,
+          )
 
   def test_resume_rejects_duplicates_and_fingerprint_drift(self):
     root = Path(self.temporary.name)
@@ -145,6 +252,13 @@ class EvalArtifactsTest(unittest.TestCase):
     summary = artifacts.write_reports(
         Path(self.temporary.name) / "reports", reports, config=self.config
     )
+    self.assertEqual(summary["trajectory_mode"], "reward_only_no_logprobs")
+    self.assertEqual(summary["sampled_by"], "stock@" + "6" * 40)
+    self.assertTrue(all(
+        item["trajectory_mode"] == "reward_only_no_logprobs"
+        and item["sampled_by"] == "stock@" + "6" * 40
+        for item in reports
+    ))
     q32_path = Path(summary["paths"]["q32_candidates"])
     q32_keys = {
         json.loads(line)["task_key"]

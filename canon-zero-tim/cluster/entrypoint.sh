@@ -78,6 +78,11 @@ else
 fi
 
 step 00_env.sh
+# Resolve branching decisions from the signed profile output, not from an
+# optional duplicate value in the raw JobSet environment. Secrets are excluded
+# from this file by 00_env.sh.
+# shellcheck disable=SC1090
+source "$CANON_STATE/env.sh"
 step 10_sync_repo.sh
 step 20_probe_image.sh
 step 25_rope_fix.sh
@@ -88,10 +93,18 @@ if [ "$MODE" = "probe-only" ]; then
   exit 0
 fi
 
-step 30_install_canon.sh
-step 35_install_r2egym.sh
-step 40_overlay_engine.sh
-step 50_verify_overlay.sh
+if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
+  # P46 clean evaluation and its observer-only parity canary both use the stock
+  # sampler. Keep the RoPE decision and pinned R2E install, but do not overlay
+  # the differentiable canonical chain used for training/alignment.
+  step 35_install_r2egym.sh
+  log "P46_EVALUATION_STOCK_PATH mode=$CANON_P46_EVALUATION_MODE source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
+else
+  step 30_install_canon.sh
+  step 35_install_r2egym.sh
+  step 40_overlay_engine.sh
+  step 50_verify_overlay.sh
+fi
 
 if [ "$MODE" = "install-only" ]; then
   log "mode=install-only -- chain installed and verified.  No TPU program was started."

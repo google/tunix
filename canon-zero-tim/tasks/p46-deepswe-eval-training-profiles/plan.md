@@ -17,7 +17,8 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
 | P46.1 | Hardened evaluator and frozen workload contracts | Evaluator unit tests prove config fingerprinting, exact-N resume, full trajectory serialization, invalid-sample isolation, and curriculum classification | completed |
 | P46.2 | Three dual-topology JobSet families | Six dummy manifests render; normalized 64/256 pairs differ only by the topology allowlist; Q4 uses 3600 s and Q32 uses 5400 s | completed |
 | P46.3 | Operator documentation and release regressions | New P46 CPU gate plus P44/P39/P34 adjacent gates and `git diff --check` pass | completed |
-| P46.4 | Remote execution campaign | Q4 evaluation smoke, Q4 three-update training, clean-data promotion, and Q32 training each return durable target evidence | active |
+| P46.4 | Remote execution campaign | Q4 evaluation smoke, Q4 three-update training, clean-data promotion, and Q32 training each return durable target evidence | pending |
+| P46.5 | True reward-only Q4 evaluation | L1 local and one-host gates prove real logprob-request/extraction bypass and artifact provenance; 64-chip paired N16 supplies L3 and trajectories/hour | active |
 
 ## Decisions
 
@@ -34,3 +35,30 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   `e1b4009394c49ea015919bda0cfdb97c12c221b5` is published to the operator
   branch. Remote execution resolves the current branch HEAD dynamically and
   requires this implementation commit in its ancestry.
+- Confirmed: the nominal no-logprob vLLM path currently passes integer zero for
+  both sampled and prompt logprobs and still calls host extraction. P46.5 must
+  use `None/None`; zero is a legal logprob value and is forbidden as a missing
+  value sentinel.
+- Decision: token identity in the one-host on/off pair is L2 diagnostic
+  evidence, not a hard gate. L3 paired N16 solve-rate consistency and valid
+  trajectories/hour remain 64-chip target evidence.
+- Confirmed: TPU/JAX vLLM rejects per-request sampling seeds. P46 records
+  `sampling_rng_mode=engine_global_sequential`; `sample_nonce` is a stable
+  task/sample identity and is never represented as an independently replayable
+  sampling seed. The one-host L2 diagnostic restores the exact idle engine RNG
+  key before each arm.
+- Confirmed: the unpublished one-host development gate passed on four direct
+  v5p devices with a real pinned clean R2E Docker task, a valid zero-reward
+  trajectory, and no residual containers. This completes local L1/L2 only;
+  it does not satisfy L3 or target throughput.
+- Decision: `logprob_observer` is not a fourth workload family and cannot be a
+  production evaluation default. The renderer admits it only as a 64-chip,
+  one-task x N16 parity canary. Both canary arms use the same source SHA,
+  engine seed, clean task/sample identities, 16K/50-turn limits and lifecycle;
+  only the sampled-logprob observation request differs. The artifact classifier
+  rejects any missing/invalid identity, cross-SHA comparison, observer arm
+  without sampled logprobs, or reward-only arm with numeric logprobs.
+- Publication status: P46.5 is not committed. The local base is
+  `e4d442bcc654938b5fcf437d901f6691265cb050`; the operator branch advanced
+  during execution and must be reconciled before publication. Never publish to
+  `main`.

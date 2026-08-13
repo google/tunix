@@ -30,10 +30,14 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 
-CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v1"
-TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v1"
-REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v1"
-SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v1"
+CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v2"
+TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v2"
+REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v2"
+SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v2"
+REWARD_ONLY = "reward_only"
+REWARD_ONLY_TRAJECTORY_MODE = "reward_only_no_logprobs"
+LOGPROB_OBSERVER = "logprob_observer"
+LOGPROB_OBSERVER_TRAJECTORY_MODE = "observer_with_sampled_logprobs"
 VALID_STATUSES = frozenset({"SUCCEEDED", "MAX_STEPS_REACHED"})
 _SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -44,6 +48,7 @@ _SENSITIVE_KEY = re.compile(
 _SECRET_VALUE = re.compile(
     r"(?:(?:ghp|github_pat|hf|sk)-[A-Za-z0-9_-]{12,})"
 )
+_LOGPROB_KEY = re.compile(r"log[_-]?probs?", re.I)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -62,6 +67,9 @@ class EvalConfig:
   source_commit: str
   client_image: str
   topology: str
+  evaluation_mode: str = REWARD_ONLY
+  onehost_probe: bool = False
+  parity_canary: bool = False
   max_model_len: int = 20_480
   max_response_length: int = 16_384
   max_steps: int = 50
@@ -89,19 +97,48 @@ class EvalConfig:
         "dataset_split": "train",
         "dataset_rows": 4578,
         "whitelist_rows": 1851,
-        "max_model_len": 20_480,
-        "max_response_length": 16_384,
-        "n_sample": 16,
-        "logical_tasks": 32,
-        "shard_tasks": 4,
-        "max_concurrency": 64,
-        "trajectory_timeout_secs": 3000,
-        "per_turn_timeout_secs": 300,
-        "step_timeout_secs": 600,
-        "reward_timeout_secs": 600,
-        "cleanup_timeout_secs": 300,
-        "shard_timeout_secs": 3600,
     }
+    if self.onehost_probe:
+      expected.update({
+          "evaluation_mode": REWARD_ONLY,
+          "parity_canary": False,
+          "max_model_len": 4096,
+          "max_response_length": 512,
+          "max_steps": 1,
+          "n_sample": 1,
+          "logical_tasks": 1,
+          "shard_tasks": 1,
+          "max_concurrency": 1,
+          "trajectory_timeout_secs": 900,
+          "per_turn_timeout_secs": 300,
+          "step_timeout_secs": 300,
+          "reward_timeout_secs": 300,
+          "cleanup_timeout_secs": 120,
+          "shard_timeout_secs": 1200,
+      })
+    else:
+      expected.update({
+          "max_model_len": 20_480,
+          "max_response_length": 16_384,
+          "max_steps": 50,
+          "n_sample": 16,
+          "logical_tasks": 1 if self.parity_canary else 32,
+          "shard_tasks": 1 if self.parity_canary else 4,
+          "max_concurrency": 16 if self.parity_canary else 64,
+          "trajectory_timeout_secs": 3000,
+          "per_turn_timeout_secs": 300,
+          "step_timeout_secs": 600,
+          "reward_timeout_secs": 600,
+          "cleanup_timeout_secs": 300,
+          "shard_timeout_secs": 3600,
+      })
+      if self.parity_canary:
+        if self.evaluation_mode not in (REWARD_ONLY, LOGPROB_OBSERVER):
+          raise ValueError("unsupported parity evaluation_mode")
+      elif self.evaluation_mode != REWARD_ONLY:
+        raise ValueError(
+            "logprob_observer is restricted to the 64-chip parity canary"
+        )
     actual = dataclasses.asdict(self)
     wrong = {
         key: actual[key]
@@ -118,8 +155,15 @@ class EvalConfig:
       raise ValueError("whitelist_sha256 must be a lowercase SHA-256 digest")
     if not _DIGEST_IMAGE.fullmatch(self.client_image):
       raise ValueError("client_image must be pinned by sha256 digest")
-    if self.topology not in ("64", "256"):
-      raise ValueError("evaluation topology must be exactly 64 or 256")
+    admitted_topologies = (
+        ("4",)
+        if self.onehost_probe
+        else (("64",) if self.parity_canary else ("64", "256"))
+    )
+    if self.topology not in admitted_topologies:
+      raise ValueError(
+          "evaluation topology does not match its production/one-host mode"
+      )
     if not os.path.isabs(self.model_path):
       raise ValueError("evaluation model_path must be absolute")
     if not os.path.isabs(self.whitelist_path):
@@ -149,7 +193,39 @@ class EvalConfig:
     return {
         "schema": CONFIG_SCHEMA,
         **dataclasses.asdict(self),
+        "trajectory_mode": self.trajectory_mode,
+        "sampled_by": self.sampled_by,
+        "sampling_rng_mode": self.sampling_rng_mode,
     }
+
+  @property
+  def trajectory_mode(self) -> str:
+    if self.evaluation_mode == REWARD_ONLY:
+      return REWARD_ONLY_TRAJECTORY_MODE
+    if self.evaluation_mode == LOGPROB_OBSERVER and self.parity_canary:
+      return LOGPROB_OBSERVER_TRAJECTORY_MODE
+    raise ValueError("unsupported DeepSWE evaluation_mode")
+
+  @property
+  def sampled_by(self) -> str:
+    # The standalone evaluator calls the stock vLLM sampler. The source SHA
+    # pins the exact Tunix request construction that selected that path.
+    return f"stock@{self.source_commit}"
+
+  @property
+  def sampling_rng_mode(self) -> str:
+    # The TPU/JAX vLLM backend rejects SamplingParams.seed. Sampling therefore
+    # uses the engine-level key and its ordered split stream; it is incorrect
+    # to claim independently replayable per-request seeds on this backend.
+    return "engine_global_sequential"
+
+  @property
+  def collect_logprobs(self) -> bool:
+    if self.evaluation_mode == REWARD_ONLY:
+      return False
+    if self.evaluation_mode == LOGPROB_OBSERVER and self.parity_canary:
+      return True
+    raise ValueError("unsupported DeepSWE evaluation_mode")
 
   @property
   def fingerprint(self) -> str:
@@ -160,9 +236,16 @@ class EvalConfig:
 
   @property
   def run_tag(self) -> str:
-    return f"q4i16k-n16-{self.topology}-{self.fingerprint[:16]}"
+    if self.onehost_probe:
+      prefix = "q4i512-n1-onehost"
+    elif self.parity_canary:
+      prefix = f"q4i16k-n16-parity-{self.evaluation_mode}"
+    else:
+      prefix = "q4i16k-n16"
+    return f"{prefix}-{self.topology}-{self.fingerprint[:16]}"
 
-  def sample_seed(self, task_key: str, sample_index: int) -> int:
+  def sample_nonce(self, task_key: str, sample_index: int) -> int:
+    """Stable identity nonce; deliberately not passed as a vLLM seed."""
     if not 0 <= sample_index < self.n_sample:
       raise ValueError("sample_index is outside the signed n-sample range")
     payload = f"{self.seed_base}:{task_key}:{sample_index}".encode("utf-8")
@@ -210,6 +293,33 @@ def serializable(value: Any, *, key: str = "") -> Any:
   return repr(value)
 
 
+def reward_only_trajectory(value: Any, *, key: str = "") -> Any:
+  """Normalizes absent logprob fields and rejects every numeric payload."""
+  if key and _LOGPROB_KEY.search(key):
+    if value is None:
+      return None
+    if isinstance(value, (list, tuple)) and not value:
+      return None
+    if isinstance(value, np.ndarray) and value.size == 0:
+      return None
+    raise ValueError(
+        "reward-only evaluation artifact contains a logprob payload; "
+        "missing logprobs must be absent or null, never numeric"
+    )
+  if dataclasses.is_dataclass(value):
+    value = dataclasses.asdict(value)
+  if isinstance(value, Mapping):
+    return {
+        str(item_key): reward_only_trajectory(
+            item_value, key=str(item_key)
+        )
+        for item_key, item_value in value.items()
+    }
+  if isinstance(value, (list, tuple)):
+    return [reward_only_trajectory(item, key=key) for item in value]
+  return value
+
+
 def trajectory_record(
     config: EvalConfig,
     *,
@@ -226,6 +336,8 @@ def trajectory_record(
     raw_trajectory = dict(trajectory)
   else:
     raise TypeError("evaluation trajectory must be a mapping or expose to_dict()")
+  if config.evaluation_mode == REWARD_ONLY:
+    raw_trajectory = reward_only_trajectory(raw_trajectory)
   status = raw_trajectory.get("status", "UNKNOWN")
   if isinstance(status, enum.Enum):
     status = status.name
@@ -237,11 +349,15 @@ def trajectory_record(
       "schema": TRAJECTORY_SCHEMA,
       "config_fingerprint": config.fingerprint,
       "run_tag": config.run_tag,
+      "trajectory_mode": config.trajectory_mode,
+      "sampled_by": config.sampled_by,
+      "sampling_rng_mode": config.sampling_rng_mode,
+      "engine_seed": config.seed_base,
       "task_key": key,
       "instance_id": entry.get("instance_id"),
       "docker_image": key,
       "sample_index": sample_index,
-      "sample_seed": config.sample_seed(key, sample_index),
+      "sample_nonce": config.sample_nonce(key, sample_index),
       "status": str(status),
       "reward": reward,
       "solved": str(status) in VALID_STATUSES and reward == 1.0,
@@ -360,6 +476,10 @@ def aggregate_tasks(
     reports.append({
         "schema": REPORT_SCHEMA,
         "config_fingerprint": config.fingerprint,
+        "trajectory_mode": config.trajectory_mode,
+        "sampled_by": config.sampled_by,
+        "sampling_rng_mode": config.sampling_rng_mode,
+        "engine_seed": config.seed_base,
         "task_key": key,
         "instance_id": entry.get("instance_id"),
         "docker_image": key,
@@ -434,6 +554,10 @@ def write_reports(
       "schema": SUMMARY_SCHEMA,
       "config": config.canonical_record(),
       "config_fingerprint": config.fingerprint,
+      "trajectory_mode": config.trajectory_mode,
+      "sampled_by": config.sampled_by,
+      "sampling_rng_mode": config.sampling_rng_mode,
+      "engine_seed": config.seed_base,
       "run_tag": config.run_tag,
       "tasks": len(reports),
       "category_counts": dict(sorted(by_category.items())),
