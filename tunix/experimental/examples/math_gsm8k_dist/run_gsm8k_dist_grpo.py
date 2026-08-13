@@ -51,7 +51,6 @@ from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
-from tunix.experimental.worker import abstract_worker  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 
@@ -137,99 +136,6 @@ def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
   return remote_execution.ActorHandle.from_address(
       f"grpc://{addr}", rpc_timeout_s=timeout_s
   )
-
-
-def _role_names(roles: Sequence[datatypes.Role | str]) -> frozenset[str]:
-  return frozenset(
-      role.value if isinstance(role, datatypes.Role) else role
-      for role in roles
-  )
-
-
-class _RemoteWorkerRef(abstract_worker.Worker):
-  """Local Orchestrator registry entry for a remote_execution actor handle."""
-
-  def __init__(
-      self,
-      *,
-      worker_id: str,
-      roles: Sequence[datatypes.Role | str],
-      handle: remote_execution.ActorHandle,
-      resources: dict[str, Any] | None = None,
-  ):
-    self._handle = handle
-    self._info = datatypes.WorkerInfo(
-        worker_id=worker_id,
-        roles=_role_names(roles),
-        resources={"remote": True, **dict(resources or {})},
-    )
-    self._state = datatypes.WorkerState.PENDING
-
-  def info(self) -> datatypes.WorkerInfo:
-    return self._info
-
-  @property
-  def actor_handle(self) -> remote_execution.ActorHandle:
-    return self._handle
-
-  def initialize(self) -> datatypes.Response:
-    self.state = datatypes.WorkerState.INITIALIZING
-    try:
-      response = self._handle.submit("initialize")
-    except Exception:
-      self.state = datatypes.WorkerState.ERROR
-      raise
-    self.state = datatypes.WorkerState.READY
-    return response
-
-  def compile(self, dummy_data: Any = None) -> datatypes.Response:
-    if self.state == datatypes.WorkerState.PENDING:
-      self.initialize()
-    self.state = datatypes.WorkerState.COMPILING
-    try:
-      response = self._handle.submit("compile", dummy_data)
-    except Exception:
-      self.state = datatypes.WorkerState.ERROR
-      raise
-    self.state = datatypes.WorkerState.READY
-    return response
-
-  def start(self) -> datatypes.Response:
-    if self.state == datatypes.WorkerState.PENDING:
-      self.initialize()
-    return self._handle.submit("start")
-
-  def stop(self) -> datatypes.Response:
-    response = self._handle.submit("stop")
-    self.state = datatypes.WorkerState.STOPPED
-    return response
-
-  def heartbeat(self) -> datatypes.HealthReport:
-    return self._handle.submit("heartbeat")
-
-  def submit(self, method_name: str | None = None, *args: Any, **kwargs: Any):
-    return self._handle.submit(method_name, *args, **kwargs)
-
-  async def asubmit(
-      self, method_name: str | None = None, *args: Any, **kwargs: Any
-  ):
-    return await self._handle.asubmit(method_name, *args, **kwargs)
-
-  async def dispatch_task(
-      self,
-      request_id: str | None = None,
-      method_name: str | None = None,
-      *args: Any,
-      **kwargs: Any,
-  ) -> str:
-    return await self._handle.dispatch_task(
-        request_id, method_name, *args, **kwargs
-    )
-
-  async def poll_responses(
-      self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
-  ) -> remote_execution.ExecutionResponse | None:
-    return await self._handle.poll_responses(timeout_s=timeout_s)
 
 
 def _build_prompt_groups(batch_size: int) -> tuple[list[str], list[str]]:
@@ -340,30 +246,24 @@ def _register_workers(
     inference_handle: remote_execution.ActorHandle | None,
 ) -> None:
   """Registers gRPC-backed workers in the Orchestrator V2 registry."""
-  cluster.register_worker(
-      _RemoteWorkerRef(
-          worker_id="trainer-0",
-          roles=[datatypes.Role.ACTOR],
-          handle=trainer_handle,
-          resources={"address": args.trainer_addr},
-      )
+  cluster.register_worker_handle(
+      worker_id="trainer-0",
+      roles=[datatypes.Role.ACTOR],
+      handle=trainer_handle,
+      resources={"address": args.trainer_addr},
   )
-  cluster.register_worker(
-      _RemoteWorkerRef(
-          worker_id="rollout-0",
-          roles=[datatypes.Role.ROLLOUT],
-          handle=rollout_handle,
-          resources={"address": args.rollout_addr},
-      )
+  cluster.register_worker_handle(
+      worker_id="rollout-0",
+      roles=[datatypes.Role.ROLLOUT],
+      handle=rollout_handle,
+      resources={"address": args.rollout_addr},
   )
   if inference_handle is not None:
-    cluster.register_worker(
-        _RemoteWorkerRef(
-            worker_id="reference-0",
-            roles=[datatypes.Role.REFERENCE],
-            handle=inference_handle,
-            resources={"address": args.inference_addr},
-        )
+    cluster.register_worker_handle(
+        worker_id="reference-0",
+        roles=[datatypes.Role.REFERENCE],
+        handle=inference_handle,
+        resources={"address": args.inference_addr},
     )
 
 
@@ -481,7 +381,7 @@ def main() -> None:
       rollout_handle=rollout_handle,
       inference_handle=inference_handle,
   )
-  logging.info("Registered Orchestrator V2 workers: %s", cluster.registry.infos())
+  logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
   program = rl_program.SyncRLProgram(
       algo=algo,
