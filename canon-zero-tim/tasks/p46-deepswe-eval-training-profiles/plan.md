@@ -76,3 +76,8 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   and the 1851 x N16 campaign finalizer are published by
   `a642ab267425a5b08b0cebb6e12c607f50f71831`. Remote execution requires this
   commit in the exact read-back operator ancestry before starting a new run id.
+- Publication status: the R2E action canonicalizer, trajectory-v4
+  fixed-budget terminal policy, and Q4 64/128 topology migration are published
+  by implementation commit
+  `267a35ef41198dab55fd892a681c3a34b9331a78`. Remote execution requires this
+  commit in the exact read-back operator ancestry and must use a new run id.

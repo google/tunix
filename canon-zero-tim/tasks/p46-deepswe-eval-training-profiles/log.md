@@ -369,3 +369,29 @@
 - Next: run final diff/static checks, then publish only after a separate
   explicit user request. The first target rerun must use a new run id and must
   prove zero adapter-invalid records before the campaign advances.
+
+## 2026-08-13T22:26:58Z — P46.5/P44.13 implementation publication
+
+- Type: publication
+- Authorization: The user explicitly requested commit and push. The only
+  target is `yuxzhang/canon-zero-tim`; `main` was not checked out, modified, or
+  targeted.
+- Remote audit: `origin/yuxzhang/canon-zero-tim` remained exactly
+  `b4391703d6e1ec80b8da5589e02dfe72ba9a4a4e`, matching the local baseline, so
+  no rebase or conflict resolution was required.
+- Implementation commit:
+  `267a35ef41198dab55fd892a681c3a34b9331a78`.
+- Published scope: narrow R2E action canonicalization and fail-closed adapter
+  detection; model-timeout-as-valid-unsolved fixed-budget semantics; Q4
+  64/128 topology contracts and negative controls; and synchronized P44/P46
+  runbook, handoff, state, plan, and phase records.
+- Pre-publication evidence: focused artifacts 12/12,
+  `P46_DEEPSWE_PROFILES_CPU_PASS cases=40`, `P34_STATIC_PASS suites=10`,
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`, Python compilation, and
+  `git diff --check` all pass.
+- Claim ceiling: publication contains no new TPU, Pathways, Kubernetes,
+  repaired R2E trajectory, HBM, throughput, backward, or optimizer-update
+  evidence. `p46e25609` remains wholly ineligible historical evidence.
+- Next: read back the exact final operator HEAD, then rerun Q4 evaluation
+  `l0/p0` under a new run id on an admitted 64/128 topology and require zero
+  adapter-invalid records before advancing.

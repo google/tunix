@@ -189,13 +189,14 @@ the trajectory schema to v4. A surviving adapter signature is invalid with
 completion even when terminal status is otherwise accepted. P46 CPU evidence
 is 40/40 PASS, and the observed file-editor,
 search and edit-shorthand forms produce correct commands against the actual
-pinned R2E source. This repair is unpublished and has no target evidence yet.
-After publication/read-back approval, rerun all 64 identities under a new run
-id; do not resume or reclassify `p46e25609` in place.
+pinned R2E source. This repair is published by
+`267a35ef41198dab55fd892a681c3a34b9331a78` but has no target evidence yet.
+After exact operator read-back, rerun all 64 identities under a new run id; do
+not resume or reclassify `p46e25609` in place.
 
 ## Current Q4 topology migration
 
-The current unpublished Q4 launch contract replaces the unavailable 256-chip
+The published Q4 launch contract replaces the unavailable 256-chip
 variant with a 128-chip `4x4x8` variant. Q4 clean evaluation now admits exactly
 64 chips at DP8 x TP8 or 128 chips at DP16 x TP8. Q4 three-update debug admits
 exactly 64 chips split into two DP4 x TP8 roles or 128 chips split into two

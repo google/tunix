@@ -1,8 +1,8 @@
 # P46 remote-agent execution handoff
 
-Publication status: **P46.1-P46.5 AND INVALID-ATTEMPT/CAMPAIGN-FINALIZER FIX
-PUBLISHED; P46E25609 ACTION-ADAPTER/STATUS FIX AND Q4 64/128 TOPOLOGY
-MIGRATION LOCAL AND UNPUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
+Publication status: **P46.1-P46.5, INVALID-ATTEMPT/CAMPAIGN-FINALIZER,
+P46E25609 ACTION-ADAPTER/FIXED-BUDGET STATUS FIX, AND Q4 64/128 TOPOLOGY
+MIGRATION PUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
 
 The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
 repair are anchored by implementation commit
@@ -22,11 +22,12 @@ behavior; do not launch from it. The invalid-attempt retry and campaign
 finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. Resolve and record the exact
 current 40-character operator HEAD, require `a642ab26` in its ancestry, and
+require implementation commit
+`267a35ef41198dab55fd892a681c3a34b9331a78` in its ancestry. Also
 require `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, the 40-case P46 CPU
 gate, `r2egym_action_compat.py`, trajectory schema v4, Q4 topology 128 and
-`finalize_deepswe_eval.py` before rendering. Until the local correction is
-published and read back, stop before rendering; do not recreate it as a YAML
-or shell hot patch.
+`finalize_deepswe_eval.py` before rendering. Do not recreate any of these as a
+YAML or shell hot patch.
 
 The archived P34r03 Qwen3-32B run generated 64/64 rollout records, but every
 record ended as `ENV_TIMEOUT`. It then failed before forward/backward with
@@ -110,7 +111,7 @@ trajectory contains a recognizable adapter leak. This proves streaming and
 schema capture, but **zero trajectories are eligible for curriculum
 classification**.
 
-The unpublished fix canonicalizes the observed dialect before R2E, preserves
+The published fix canonicalizes the observed dialect before R2E, preserves
 raw `model_response`, records the canonical executed action, and invalidates
 any surviving adapter signature as
 `validity_reason=r2egym_action_parameter_adapter`. It treats max-step,

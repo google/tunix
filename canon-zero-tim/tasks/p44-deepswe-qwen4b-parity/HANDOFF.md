@@ -19,9 +19,10 @@ zero-TIM equivalence between allocations.
 
 ## Publication contract
 
-The 64/128 topology migration is local and unpublished. Do not launch until it
-has explicit publication approval and the exact operator-branch SHA is read
-back with Q4-256 rejection and the `4x4x8`/32-worker contract present.
+The 64/128 topology migration is published by
+`267a35ef41198dab55fd892a681c3a34b9331a78`. Before launch, read back the
+exact operator-branch SHA and require this commit in its ancestry, Q4-256
+rejection, and the `4x4x8`/32-worker contract.
 
 - Required remote branch: `yuxzhang/canon-zero-tim`
 - Repair development baseline: `7ea2176f807e3e13fde17499e15fef2bd497363b`

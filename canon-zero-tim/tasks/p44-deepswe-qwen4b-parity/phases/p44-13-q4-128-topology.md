@@ -1,6 +1,6 @@
 # P44.13 — Q4 128-chip topology migration
 
-- Status: active; local CPU contracts pass, target not run
+- Status: active; implementation published, local CPU contracts pass, target not run
 
 ## Decision
 
@@ -39,7 +39,8 @@ Pathways, R2E, HBM, rollout, backward or optimizer-update behavior has run.
 
 ## Next action
 
-After explicit publication approval, read back the exact operator-branch SHA.
-Use an admitted 64/128 Q4 topology to rerun the repaired evaluation l0/p0 under
-a new run id. Only after real tool observations and zero adapter-invalid
-records may the operator run Q4 three-update and continue the washing campaign.
+Read back the exact operator-branch SHA and require implementation commit
+`267a35ef41198dab55fd892a681c3a34b9331a78` in its ancestry. Use an admitted
+64/128 Q4 topology to rerun the repaired evaluation l0/p0 under a new run id.
+Only after real tool observations and zero adapter-invalid records may the
+operator run Q4 three-update and continue the washing campaign.
