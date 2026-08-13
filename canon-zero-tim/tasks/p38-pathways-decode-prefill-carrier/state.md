@@ -13,6 +13,15 @@
 
 ## Latest target facts
 
+- P38s12d is infrastructure/configuration-inconclusive. Its rendered command
+  correctly selected concurrency 32, but source `bdc96818` still required 256
+  in the FrozenLake recipe and failed before rollout with
+  `P32 FrozenLake geometry mismatch: {'max_concurrency': 32}`. It produced no
+  carrier evidence. The local repair narrowly admits 32 only for the complete
+  stock P38 backward-no-commit capture envelope; production/full/eval and all
+  other diagnostics retain 256. Details are in
+  `artifacts/p38_2j_p38s12d_geometry_fix_0813.md`.
+
 - The evidence published under the `p38s12b` label actually used concurrency
   256. Its core numerical/capture evidence is internally consistent and is
   accounted as P38s12a analysis-level evidence. `rc=137`, an incomplete outer
@@ -104,10 +113,11 @@
 
 ## Next action
 
-1. After user review, publication, and separate cluster approval, execute one
-   Attempt-0 **stock-only** true P38s12b at concurrency 32 using the exact
-   runbook. Render a same-source concurrency-256 baseline for intent-diff only;
-   never apply it.
+1. After user review, publication, and separate cluster approval, fetch the
+   repaired source and execute one Attempt-0 **stock-only** true P38s12b at
+   concurrency 32 using the exact runbook. Render a same-source
+   concurrency-256 baseline for intent-diff only; never apply it. Do not reuse
+   P38s12d's source SHA or rendered YAML.
 2. Require exact B-C, full 256-trajectory coverage, logical KV at least 1686,
    controlled exit 42, journal joins, the complete infrastructure bundle, and
    SHA seal PASS. Any missing item is inconclusive.

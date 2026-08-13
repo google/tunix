@@ -354,6 +354,9 @@ if CANON_P32_WORKLOAD:
   # exactly divisible by DP16. The dataset/global batch remains 32 prompts and
   # every non-P38 training profile retains mini_batch_size=32.
   expected_mini_batch_size = 4 if CANON_P38_PRECHECK_ONLY else 32
+  dp_workloads.validate_frozenlake_max_concurrency(
+      P32_WORKLOAD, args.max_concurrency, os.environ
+  )
   expected_geometry = {
       "batch_size": (BATCH_SIZE, 32),
       "mini_batch_size": (MINI_BATCH_SIZE, expected_mini_batch_size),
@@ -364,7 +367,6 @@ if CANON_P32_WORKLOAD:
           MAX_RESPONSE_LENGTH,
           expected_response_length,
       ),
-      "max_concurrency": (args.max_concurrency, 256),
       "vllm_max_num_seqs": (
           VLLM_MAX_NUM_SEQS,
           P32_WORKLOAD.local_trajectories,

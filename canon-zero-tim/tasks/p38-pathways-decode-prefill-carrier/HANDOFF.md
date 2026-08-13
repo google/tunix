@@ -10,6 +10,19 @@ P39 evidence cannot promote P38.
 This section supersedes every launch section below it. The complete executable
 operator protocol is `cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
 
+### P38s12d is void; do not rerun its source
+
+P38s12d used concurrency 32 but source `bdc96818` retained the recipe's old
+hard-coded concurrency-256 assertion. It failed before rollout with
+`P32 FrozenLake geometry mismatch: {'max_concurrency': 32}`. Missing capture
+files and later stale-evidence messages are downstream symptoms. It has no
+numerical verdict.
+
+The repaired source admits concurrency 32 only for the exact stock P38
+backward-no-commit capture envelope. Full training, evaluation, DP8xTP8, and
+KV-unified paths still require concurrency 256. Fetch a commit containing
+`validate_frozenlake_max_concurrency`; never edit/reuse the P38s12d YAML.
+
 ### Account the returned bundle correctly
 
 Evidence commit `23bb2a3c` is named `p38s12b`, but its command used

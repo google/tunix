@@ -11,6 +11,12 @@ it as P38s12a analysis-level evidence. It reproduced A-B red and exact B-C,
 but outer postflight saw `rc=137` and the infrastructure archive was
 incomplete. Do not call it the concurrency-32 arm and do not rerun it.
 
+P38s12d then rendered concurrency 32 correctly but used source `bdc96818`,
+whose FrozenLake recipe still hard-required 256. It failed before rollout with
+`P32 FrozenLake geometry mismatch: {'max_concurrency': 32}` and has no
+numerical verdict. The source selected below must contain
+`validate_frozenlake_max_concurrency`; do not reuse P38s12d's YAML or SHA.
+
 ## A. Completed one-host row-231 E0-lite
 
 Do not rerun this arm. It completed with
@@ -65,6 +71,7 @@ git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
 cd "$WORKTREE"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
+rg -q '^def validate_frozenlake_max_concurrency' tunix/rl/dp_workloads.py
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 ```

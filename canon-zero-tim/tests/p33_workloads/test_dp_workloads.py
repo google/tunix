@@ -269,6 +269,89 @@ class DPWorkloadsTest(unittest.TestCase):
     self.assertNotIn("--vllm_max_num_seqs=256", command)
     self.assertNotIn("--vllm_max_num_batched_tokens=4096", command)
 
+  def test_frozenlake_max_concurrency_defaults_to_256(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    dp_workloads.validate_frozenlake_max_concurrency(
+        workload, 256, _environment("frozenlake")
+    )
+    with self.assertRaisesRegex(ValueError, "must be 256"):
+      dp_workloads.validate_frozenlake_max_concurrency(
+          workload, 32, _environment("frozenlake")
+      )
+
+  def test_frozenlake_p38_stock_capture_admits_concurrency_32(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    environ = _environment("frozenlake")
+    environ.update({
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_SERVING_CAPTURE_DIR": "/tmp/p38-capture",
+        "CANON_P38_REQUEST_JOURNAL": "/tmp/p38-capture/journal.jsonl",
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
+        "CANON_KV_UNIFIED": "0",
+    })
+    dp_workloads.validate_frozenlake_max_concurrency(
+        workload, 32, environ
+    )
+    dp_workloads.validate_frozenlake_max_concurrency(
+        workload, 256, environ
+    )
+
+  def test_frozenlake_p38_concurrency_32_scope_fails_closed(self):
+    workload = dp_workloads.get_workload("frozenlake")
+    environ = _environment("frozenlake")
+    environ.update({
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_SERVING_CAPTURE_DIR": "/tmp/p38-capture",
+        "CANON_P38_REQUEST_JOURNAL": "/tmp/p38-capture/journal.jsonl",
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
+        "CANON_KV_UNIFIED": "0",
+    })
+    guarded_names = (
+        "CANON_P33_RUN_STAGE",
+        "CANON_P33_NO_COMMIT",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED",
+        "CANON_P38_PRECHECK_ONLY",
+        "CANON_P38_CONTROLLED_EXIT",
+        "CANON_P38_SERVING_CAPTURE_DIR",
+        "CANON_P38_REQUEST_JOURNAL",
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH",
+        "CANON_KV_UNIFIED",
+    )
+    for name in guarded_names:
+      with self.subTest(missing=name):
+        candidate = dict(environ)
+        del candidate[name]
+        with self.assertRaisesRegex(ValueError, "bounded stock P38"):
+          dp_workloads.validate_frozenlake_max_concurrency(
+              workload, 32, candidate
+          )
+    with self.assertRaisesRegex(ValueError, "bounded stock P38"):
+      dp_workloads.validate_frozenlake_max_concurrency(
+          workload, 64, environ
+      )
+    with self.assertRaisesRegex(ValueError, "bounded stock P38"):
+      dp_workloads.validate_frozenlake_max_concurrency(
+          dp_workloads.get_workload("frozenlake-dp8-tp8"), 32, environ
+      )
+
+  def test_frozenlake_recipe_uses_scoped_concurrency_contract(self):
+    source = (
+        Path(__file__).parents[3]
+        / "examples/frozenlake/train_frozenlake_qwen3.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn("validate_frozenlake_max_concurrency(", source)
+    self.assertNotIn(
+        '"max_concurrency": (args.max_concurrency, 256)', source
+    )
+
   def test_frozenlake_command_disables_periodic_evaluation(self):
     command = dp_workloads.get_workload("frozenlake").command()
     self.assertFalse(

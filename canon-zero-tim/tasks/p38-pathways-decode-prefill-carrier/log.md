@@ -1058,3 +1058,20 @@
 - Boundary: no cluster launch, backward, optimizer commit, commit, or push
   occurred. True P38s12b is NOT RUN. P48 remains independent and waits for
   DP16 capacity.
+
+## 2026-08-13 UTC — P38s12d rejected by stale recipe geometry; local fix
+
+- Pulled target evidence commit `1ebe452f`. P38s12d used source `bdc96818`
+  and correctly passed `--max_concurrency=32`, but the recipe rejected it
+  before rollout because its canonical geometry still hard-coded 256.
+- The absent capture directory, zero capture markers, and later stale
+  `run.log` failures are downstream effects. P38s12d is configuration-
+  inconclusive and provides no numerical carrier result.
+- Added a shared fail-closed concurrency contract: 256 remains the universal
+  FrozenLake default; 32 is admitted only for the exact stock P38
+  backward-no-commit capture envelope. DP8xTP8, KV-unified, full training,
+  evaluation, partial capture configuration, and other concurrency values are
+  rejected.
+- Verification: pinned-image focused suite 59/59; complete pinned-image P33
+  CPU/adjacent gate PASS with workload 85/85, alignment 34/34, adjacent 15/15,
+  and all P38 negatives green. No cluster action, commit, or push occurred.

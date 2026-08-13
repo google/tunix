@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 import yaml
+from tunix.rl import dp_workloads
 
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -104,6 +105,9 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
       self.assertEqual(
           document["metadata"]["labels"]["canon.zero-tim/max-concurrency"],
           "32",
+      )
+      dp_workloads.validate_frozenlake_max_concurrency(
+          dp_workloads.get_workload("frozenlake"), 32, env
       )
 
   def test_stock_only_omits_the_already_falsified_unified_arm(self):

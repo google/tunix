@@ -333,6 +333,52 @@ def requested_max_steps(
   return steps
 
 
+def validate_frozenlake_max_concurrency(
+    workload: DPWorkloadSpec,
+    max_concurrency: int,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+  """Admits concurrency 32 only for the bounded stock P38 diagnostic.
+
+  Production FrozenLake, evaluation, alternate topologies, and all other
+  diagnostics retain the signed concurrency-256 geometry.  The narrow P38
+  exception is intentionally tied to the complete capture/no-commit envelope
+  so a stray command-line override cannot silently change a training run.
+  """
+  if max_concurrency == 256:
+    return
+  values = os.environ if environ is None else environ
+  required = {
+      "CANON_P33_RUN_STAGE": "backward-no-commit",
+      "CANON_P33_NO_COMMIT": "1",
+      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+      "CANON_P38_PRECHECK_ONLY": "1",
+      "CANON_P38_CONTROLLED_EXIT": "1",
+      "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
+      "CANON_KV_UNIFIED": "0",
+  }
+  wrong = {
+      name: values.get(name)
+      for name, expected in required.items()
+      if values.get(name) != expected
+  }
+  for name in (
+      "CANON_P38_SERVING_CAPTURE_DIR",
+      "CANON_P38_REQUEST_JOURNAL",
+  ):
+    if not values.get(name):
+      wrong[name] = values.get(name)
+  if workload.name != "frozenlake":
+    wrong["workload"] = workload.name
+  if max_concurrency != 32:
+    wrong["max_concurrency"] = max_concurrency
+  if wrong:
+    raise ValueError(
+        "FrozenLake max_concurrency must be 256 except for the bounded stock "
+        f"P38 serving-capture arm: {wrong}"
+    )
+
+
 def canonical_optimizer_placement(
     environ: Mapping[str, str] | None = None,
     *,
