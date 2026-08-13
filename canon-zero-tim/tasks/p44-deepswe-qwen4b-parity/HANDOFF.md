@@ -45,9 +45,9 @@ zero-TIM equivalence between allocations.
   resolved head in the rendered JobSet and returned evidence. The publication
   metadata commit may be newer than either implementation commit; do not
   silently substitute any SHA for another.
-- P44.12 bounded-lifecycle development base:
-  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`. The P44.12 changes are
-  unpublished and therefore have no implementation/publication SHA yet.
+- P44.12 bounded-lifecycle implementation commit:
+  `e1b4009394c49ea015919bda0cfdb97c12c221b5`. Resolve the exact current
+  operator HEAD dynamically and require this commit in its ancestry.
 - Local development branch: `codex/p46-deepswe-32b-full`
 - Remote execution owner: the launch agent/operator, not the implementation
   agent
@@ -117,14 +117,15 @@ Do not launch a local development worktree or an unverified symbolic branch.
   classifier evidence. The implementation is committed, but it has no clean
   post-publication or 64/256 execution evidence yet.
 
-## First operator action after P44.12 publication
+## First operator action in the current P46 campaign
 
-Follow the runbook's fetch and immutable-input preflight. Resolve the exact
-post-P44.12 remote HEAD and require a clean detached checkout. Use the
-available 64- or 256-device allocation to render `three-update` after the
-rollout path has been inspected; do not insert a separate one-update job by
-default. Both topologies use the same functional recipe but remain independent
-target evidence.
+Read `../p46-deepswe-eval-training-profiles/HANDOFF.md` first. Follow the
+runbook's fetch and immutable-input preflight, resolve the exact current remote
+HEAD, and require a clean detached checkout containing `e1b40093`. Use the
+available 64- or 256-device allocation: first inspect one Q4 clean-evaluation
+shard, then render Q4-Instruct `q4-debug` three-update. Do not insert a separate
+one-update job by default. Both topologies use the same functional recipe but
+remain independent target evidence.
 Require the exact `[P34.DEVICE_INVENTORY]`, SwiGLU feature-padding, both
 matmul-padding `[PATHTRACE]`, `[P44.LOGPS_BATCH]`, trajectory-batch,
 rollout-deadline and RepoEnv cleanup lines from the runbook. Return all three

@@ -1,6 +1,7 @@
 # P44.12 — bounded Qwen3-4B three-update defaults
 
-- Status: local frozen-image PASS; unpublished; 64/256 target NOT RUN
+- Status: published in `e1b4009394c49ea015919bda0cfdb97c12c221b5`;
+  local frozen-image PASS; 64/256 target NOT RUN
 - Development base:
   `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`
 

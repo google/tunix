@@ -30,7 +30,7 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
 - Decision: Qwen3-4B evaluation is curriculum evidence, not Qwen3-32B ground truth. Q4 all-fail tasks remain a separate Q32 hard tier rather than being deleted.
 - Confirmed: 1851 tasks at N16 and 64 trajectories per physical wave require 58 logical reports and 463 physical JobSets. The final logical report has 27 tasks and only physical indices 0-6.
 - Decision: P46 maintains parameterized JobSet renderers rather than checked-in launch YAML with stale source/image/node-pool pins. A remote agent renders concrete YAML only after reading back the publication SHA.
-- Publication status: unpublished. The non-overlapping data/log commits have
-  been fast-forwarded into the worktree base at
-  `99c3f7af761c859caa6c81ab509446cc3cc47dc0`; implementation changes remain
-  uncommitted and require explicit commit/push approval.
+- Publication status: implementation commit
+  `e1b4009394c49ea015919bda0cfdb97c12c221b5` is published to the operator
+  branch. Remote execution resolves the current branch HEAD dynamically and
+  requires this implementation commit in its ancestry.

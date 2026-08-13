@@ -1,7 +1,8 @@
 # P39.5 — bounded DeepSWE rollout lifecycle and locked YAML defaults
 
-- Status: implementation and local frozen-image gates PASS; unpublished;
-  target NOT RUN
+- Status: implementation published at
+  `e1b4009394c49ea015919bda0cfdb97c12c221b5`; local frozen-image gates PASS;
+  target retry NOT RUN
 - Development base: `yuxzhang/canon-zero-tim` at
   `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`
 
@@ -11,17 +12,23 @@ Attempt `p34r03`, source
 `65b0cd0a84807f2308409d1867022407ae53f8fb`, passed the 256-device
 host-complete split, Qwen3-32B initialization, the pinned dataset revision and
 the clean 4578-to-1851 join. Training began at update zero. The returned log
-then remained in rollout for more than four hours and ended with four active
-vLLM requests, no `P34.TRAJECTORY_BATCH`, no backward and no optimizer commit.
+then remained in rollout for more than four hours. All 64 trajectories returned
+as `ENV_TIMEOUT`; trainer setup subsequently raised `KeyError: 'fsdp'` before
+forward, backward or optimizer commit.
 
 The archived log is
 `debug_logs/p34_p34r03_deepswe_full.raw.log`, SHA-256
 `426019f66f812e0bb80874cbcfb19fe183846b6565251bb5f043d505425dd2a1`.
-It contains 60 `ENV_TIMEOUT` records, all reporting negative remaining time.
+It contains 64 `ENV_TIMEOUT` records, all reporting negative remaining time.
 This establishes a lifecycle bug: the old code could submit an environment
 step after the trajectory budget expired, did not abort unfinished vLLM
 requests, did not bound final reward or cleanup, and had no shared deadline
 for collecting one complete prompt batch.
+
+The same attempt also establishes a separate trainer wiring bug: the live
+training mesh is `('dp','tp')`, while the stale training-data sharding axis was
+`fsdp`. The published repair derives the data axis from the live mesh and
+emits `[DEEPSWE.DATA_SHARDING] PASS` before training.
 
 ## Repair
 
@@ -48,7 +55,7 @@ for collecting one complete prompt batch.
 | Field | Qwen3-4B debug | Qwen3-32B full |
 |---|---:|---:|
 | prompts x generations | 4 x 4 | 8 x 8 |
-| response / turns | 4096 / 5 | 32768 / 50 |
+| response / turns | 16384 / 5 | 16384 / 50 |
 | updates | 3 | 1000 |
 | temperature | 1.0 | 1.0 |
 | per turn | 300 s | 300 s |
@@ -61,7 +68,9 @@ for collecting one complete prompt batch.
 The Qwen3-4B recipe is identical on 64 and 256 devices except for registered
 topology, DP-local partitioning, worker count and DP-derived global carrier
 geometry. It uses the same reviewed clean whitelist as the 32B run and writes
-16 real trajectories plus grouped solve metrics per update.
+16 real trajectories plus grouped solve metrics per update. P46 also supplies
+a clean Qwen3-4B evaluation profile on both topologies: DP8 x TP8 or DP32 x
+TP8, always four tasks by 16 samples with a one-hour shard deadline.
 
 ## Local evidence
 
@@ -84,10 +93,11 @@ geometry. It uses the same reviewed clean whitelist as the 32B run and writes
 These tests prove local contracts and control flow only. They do not prove a
 real Qwen3-4B update, Qwen3-32B training, TP8 target execution, Pathways
 liveness, sandbox deletion against the real cluster, HBM capacity or model
-quality. No cloud action, commit or push occurred.
+quality. No target cloud retry occurred after the published repair.
 
-After publication approval, the launch agent must detach at the exact remote
-HEAD. Run the Qwen3-4B three-update debug profile on the available 64/256
-allocation, inspect every trajectory batch and cleanup marker, then start a
-fresh Qwen3-32B full attempt. A batch timeout is a failed/inconclusive attempt,
-not a reason to loosen the deadlines or train on partial data.
+The launch agent must detach at the exact remote HEAD containing the published
+repair and follow the P46 handoff. Run clean Qwen3-4B evaluation, then the
+Qwen3-4B-Instruct three-update debug profile on the available registered 64- or
+256-chip allocation, inspect every trajectory batch and cleanup marker, then
+start a fresh Qwen3-32B full attempt. A batch timeout is a failed/inconclusive
+attempt, not a reason to loosen the deadlines or train on partial data.

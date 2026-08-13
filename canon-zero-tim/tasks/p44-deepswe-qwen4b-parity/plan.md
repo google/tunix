@@ -25,7 +25,7 @@ differ.
 | P44.9 | Repair the r04 TP8-local SwiGLU feature geometry without changing the BF256 kernel | Model-pinned 4B/32B padding passes exact forward/VJP probes; 8B remains unpadded; unknown widths and missing runtime evidence fail closed | passed; implementation commit `1a058b46` published to the operator branch |
 | P44.10 | Repair the r05 Mosaic matmul block geometry | Qwen3-4B uses BN/BK128 plus exact `1216->1280` K/N padding; target-shaped forward and canonical VJP pass on four real v5p devices; missing runtime traces fail closed | local and one-host v5p passed; implementation `29cea119` published; 64/256 target pending |
 | P44.11 | Real one-host Qwen3-4B DeepSWE integration | A default-off DP1 x TP4 colocated profile loads the model, executes real Docker R2E rollouts, persists trajectories/solve metrics, runs backward without an optimizer commit, records HBM/placement/state fingerprints, and preserves all production contracts | rollout integration passed; backward executed but `INCONCLUSIVE_NO_SIGNAL`; implementation `29cea119` published; clean-source repeat pending |
-| P44.12 | Lock the fast three-update YAML and bound every rollout/sandbox lifecycle | 64/256 normalized recipes match; request abort, trajectory/reward/cleanup/batch deadlines and R2E deletion pass frozen-image controls | local PASS; unpublished; target pending |
+| P44.12 | Lock the fast three-update YAML and bound every rollout/sandbox lifecycle | 64/256 normalized recipes match; request abort, trajectory/reward/cleanup/batch deadlines and R2E deletion pass frozen-image controls | published in `e1b40093`; target pending |
 
 ## Decisions
 

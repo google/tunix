@@ -49,3 +49,12 @@
 - Command: `git diff --check`; two data-axis static suites; `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh`
 - Result: `git diff --check` passed, 16 data-axis/static cases passed, and `P46_DEEPSWE_PROFILES_CPU_PASS cases=17` passed. `START_HERE.md` now routes current DeepSWE execution agents to the P46 handoff before the historical P39 ledger.
 - Next: await explicit commit/push approval; no target launch is valid from the unpublished worktree.
+
+## 2026-08-13T03:54:03Z — P46.4: implementation publication
+
+- Type: implementation and handoff
+- Fact: The user explicitly approved commit and push to `yuxzhang/canon-zero-tim`; `main` remains forbidden. The remote operator branch was still exactly `99c3f7af761c859caa6c81ab509446cc3cc47dc0` before publication.
+- Action: Committed the bounded lifecycle, mesh-derived trainer data axis, full trajectory evaluator, three dual-topology profile families, tests, runbook and handoff.
+- Command: `git commit -m "deepswe: harden rollout lifecycle and add training profiles"`
+- Result: implementation commit `e1b4009394c49ea015919bda0cfdb97c12c221b5`; P34 static/trajectory/update, P39 15, P43 22, P44 41, P46 17 and `git diff --check` passed immediately before commit.
+- Next: remote execution reads back the exact operator HEAD containing `e1b40093`, then starts with one Q4 clean-evaluation shard on whichever 64/256 topology is available.

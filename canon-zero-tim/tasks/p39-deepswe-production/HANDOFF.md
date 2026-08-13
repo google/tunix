@@ -7,12 +7,19 @@ workstream's green result to promote the other.
 
 Read `plan.md`, then `state.md`, then `log.md`.
 
+P39 is now the historical production-contract ledger. The canonical launch
+handoff for the current clean evaluation, Qwen3-4B-Instruct debug training and
+Qwen3-32B campaign is
+`../p46-deepswe-eval-training-profiles/HANDOFF.md`; it supports either the
+registered 64-chip or 256-chip topology without making one a prerequisite for
+the other.
+
 ## Current revision
 
-- Latest operator-branch base used by this unpublished worktree:
-  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`
-- P39.5 bounded-lifecycle implementation: local changes only; no commit or
-  publication SHA exists yet
+- P39.5/P46 bounded-lifecycle and dual-topology implementation commit:
+  `e1b4009394c49ea015919bda0cfdb97c12c221b5`
+- Launch only from the exact current `origin/yuxzhang/canon-zero-tim` HEAD and
+  require that it contains the implementation commit above
 - P39.4 publication revision: the exact 40-character HEAD after pulling
   `yuxzhang/canon-zero-tim`; do not substitute the base SHA listed above
 - p34r02 mesh-admission repair commit:
@@ -68,17 +75,20 @@ publication HEAD.  Do not launch from this local branch or substitute an older S
     four-device `0,2,1,3` default into its 128-device Pathways rollout role;
     renderer validation and `00_env.sh` now enforce that before launch.
 12. Target `p34r03` proved real Qwen3-32B rollout entry but exposed an
-    unbounded lifecycle: 60 environment timeouts received negative remaining
-    time, update zero did not produce a trajectory batch, and four vLLM
-    requests were still active after more than four hours.
+    unbounded lifecycle: all 64 returned trajectories ended as `ENV_TIMEOUT`
+    with negative remaining time. Once collection returned, trainer setup then
+    raised `KeyError: 'fsdp'` because the live mesh axes are `('dp','tp')`
+    while the stale training-data sharding axis still named `fsdp`.
 13. P39.5 gives vLLM requests a real abort path, shares one wall clock across
     reset/model/step/reward, bounds cleanup, confirms R2E pod deletion, and
     gives the complete prompt batch one watchdog.
-14. The rendered defaults are now explicit: Qwen3-4B debug is B4/G4, 4096
-    response, five turns, three updates and a 3600-second rollout batch on
-    either 64 or 256 devices; Qwen3-32B full remains B8/G8, 32K response,
-    50 turns, 1000 updates and a 5400-second rollout batch. Both use
-    temperature 1.0, clean data, device optimizer and durable trajectories.
+14. P46 locks the current profiles on both 64 and 256 devices: Qwen3-4B clean
+    evaluation is four tasks by 16 samples; Qwen3-4B-Instruct debug training
+    is B4/G4, 16K response, three updates and a 3600-second rollout-batch
+    deadline; Qwen3-32B full is B8/G8, 16K response, 1000 updates and a
+    5400-second rollout-batch deadline. All use temperature 1.0, clean data,
+    device-resident optimizer state where training applies, and durable
+    trajectories.
 
 ## Reproduce local validation
 
@@ -123,17 +133,18 @@ mesh, Qwen3-32B initialization, online W&B and clean data before entering real
 rollout. Its complete returned log is
 `../../debug_logs/p34_p34r03_deepswe_full.raw.log`, SHA-256
 `426019f66f812e0bb80874cbcfb19fe183846b6565251bb5f043d505425dd2a1`.
-It is not a successful rollout: update zero ran for more than four hours, 60
-trajectories reported negative-remaining-time `ENV_TIMEOUT`, the final lines
-still showed four active vLLM requests, and there is no completed trajectory
-batch, backward or optimizer record. P39.5 repairs this locally; the target
-retry has not run.
+It is not a successful update: update zero ran for more than four hours and all
+64 trajectories returned as negative-remaining-time `ENV_TIMEOUT`. Collection
+then reached the trainer and failed on stale `fsdp` data sharding before
+forward, backward or optimizer commit. Commit
+`e1b4009394c49ea015919bda0cfdb97c12c221b5` bounds the lifecycle and derives
+the data axis from the live `('dp','tp')` mesh; the target retry has not run.
 
-After publication, resolve the exact new remote HEAD. First render the
-Qwen3-4B `three-update` debug recipe for the available 64/256 allocation and
-inspect its trajectory/deadline/cleanup evidence. Then render Qwen3-32B
-`full`. Do not launch from the unpublished local worktree and do not reuse the
-p34r03 manifest.
+Resolve the exact current remote HEAD, require it to contain the implementation
+commit above, and follow the P46 gates: Qwen3-4B clean evaluation, then
+Qwen3-4B-Instruct three-update debug training, then Qwen3-32B full. Each gate
+may use either its registered 64-chip or 256-chip manifest. Do not reuse the
+`p34r03` manifest.
 
 ## Stop conditions
 

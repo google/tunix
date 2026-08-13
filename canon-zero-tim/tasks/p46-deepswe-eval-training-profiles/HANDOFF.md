@@ -1,28 +1,29 @@
 # P46 remote-agent execution handoff
 
-Publication status: **UNPUBLISHED — DO NOT LAUNCH YET**.
+Publication status: **IMPLEMENTATION PUBLISHED; TARGET CAMPAIGN NOT RUN**.
 
-The implementation is complete and locally gated in the development worktree,
-but it has not been committed or pushed. The reconciled base SHA is
-`99c3f7af761c859caa6c81ab509446cc3cc47dc0`; do not use that SHA as the final
-publication because the lifecycle and trainer data-axis fixes are still dirty.
-The execution SHA must be read back from
-`origin/yuxzhang/canon-zero-tim` after an explicitly approved publication step.
-Never modify or push `main`.
+The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
+repair are anchored by implementation commit
+`e1b4009394c49ea015919bda0cfdb97c12c221b5`. The execution SHA must still be
+read back from the current `origin/yuxzhang/canon-zero-tim` because later
+documentation/evidence commits may advance the branch. Require that the exact
+read-back SHA contains `e1b40093`; never substitute the older reconciled base
+`99c3f7af761c859caa6c81ab509446cc3cc47dc0`. Never modify or push `main`.
 
 The archived P34r03 Qwen3-32B run generated 64/64 rollout records, but every
 record ended as `ENV_TIMEOUT`. It then failed before forward/backward with
 `KeyError: 'fsdp'`: the trainer mesh was `dp,tp` while the launcher passed a
 stale `fsdp` data-sharding axis. The current worktree derives the data axis from
 the trainer mesh and prints `[DEEPSWE.DATA_SHARDING] PASS` before rollout. Do
-not rerun from the reconciled base alone; use the eventual publication SHA.
+not rerun from the reconciled base alone; use the exact read-back operator SHA
+containing the implementation commit above.
 
 `observed_trajectories=64` is only a cardinality statement. It was not evidence
 of 64 valid trajectories in P34r03. The eventual publication also contains the
 bounded request/trajectory/batch/cleanup lifecycle needed to prevent a sandbox
 step from running for hours after its deadline.
 
-After publication, read these files completely:
+Before execution, read these files completely:
 
 1. `cluster/P46_DEEPSWE_PROFILES_RUNBOOK.md`
 2. `tasks/p46-deepswe-eval-training-profiles/state.md`
@@ -52,10 +53,13 @@ still hard-codes `fsdp`.
 
 ## Gate 1 — one Q4 clean-evaluation physical shard
 
-Prefer 64 chips. Render logical index 0, physical index 0 exactly as documented
-in `P46_DEEPSWE_PROFILES_RUNBOOK.md`. It is Qwen3-4B-Instruct-2507, 16K, four
-tasks x 16 samples, concurrency 64, prefix cache off, complete trajectory
-streaming, and a one-hour shard deadline. Server-side dry-run the rendered YAML
+Use whichever topology is available; 64 chips are not a prerequisite. Render
+logical index 0, physical index 0 exactly as documented in
+`P46_DEEPSWE_PROFILES_RUNBOOK.md`. On 64 chips evaluation is DP8 x TP8; on 256
+chips it is DP32 x TP8. Both are Qwen3-4B-Instruct-2507, 16K, four tasks x 16
+samples, concurrency 64, prefix cache off, complete trajectory streaming, and
+a one-hour shard deadline. Keep one topology for a resumable run-id because it
+is part of the evaluation fingerprint. Server-side dry-run the rendered YAML
 first. Apply it only after the operator explicitly approves the launch.
 
 Require both markers:
@@ -82,8 +86,11 @@ gate, even if some records were safely written.
 
 ## Gate 2 — Q4 three-update training
 
-Only after Gate 1 passes, render a new 64-chip `q4-debug` JobSet and obtain
-separate launch approval. Require:
+Only after Gate 1 passes, render a new `q4-debug` JobSet on whichever topology
+is available and obtain separate launch approval. The 64-chip form uses DP4 x
+TP8 per rollout/trainer role; the 256-chip form uses DP16 x TP8 per role. Both
+keep Qwen3-4B-Instruct-2507, B4 x G4, 16 trajectories, 16K response, three
+updates and the one-hour shared rollout-batch boundary. Require:
 
 - one `[DEEPSWE.DATA_SHARDING] PASS` with `axes=('dp',)` and a `dp,tp` mesh;
 - three `P44.LOGPS_BATCH` markers, three durable trajectory batches and three

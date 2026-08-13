@@ -11,6 +11,16 @@ Do not apply it until the exact implementation commit has been published to
 `origin/yuxzhang/canon-zero-tim`, read back, and separately approved for
 launch.
 
+Required implementation ancestry:
+
+```text
+e1b4009394c49ea015919bda0cfdb97c12c221b5
+```
+
+The remote branch may advance with documentation or returned evidence. Resolve
+and record its exact current 40-character HEAD at execution time, and require
+that the resolved HEAD contains the implementation commit above.
+
 ## Returned-run correction and required fix
 
 The archived Qwen3-32B P34r03 run is a failed attempt, not a rollout PASS. It
@@ -27,7 +37,7 @@ already become negative. The run then failed before forward/backward or an
 optimizer commit with `KeyError: 'fsdp'`. Its trainer mesh was named `dp,tp`,
 while `RLTrainingConfig.data_sharding_axis` still named `fsdp`.
 
-The unpublished repair has two parts:
+The published implementation repair has two parts:
 
 1. one shared rollout-batch deadline, per-trajectory deadline, bounded model
    request cancellation and bounded R2E cleanup; and
@@ -246,10 +256,17 @@ still requires the operator's explicit launch approval.
 
 ## Promotion order and claim ceiling
 
-The remote agent must advance one gate at a time:
+The remote agent must advance one gate at a time. Both 64 and 256 chips are
+first-class signed variants; use whichever allocation is available. Prefer 64
+only when both are simultaneously available because it is cheaper, not because
+it is a prerequisite. Keep one topology for a given resumable evaluation
+run-id because topology is part of its fingerprint.
 
-1. Run one 64-chip `q4-clean-eval` physical shard at logical index 0 and
-   physical index 0. Require `P46_EVAL_SUBSHARD_PASS` and
+1. Run one `q4-clean-eval` physical shard at logical index 0 and physical
+   index 0 on the available topology. The 64-chip form is DP8 x TP8; the
+   256-chip form is DP32 x TP8. Both still evaluate exactly four tasks x N16
+   with concurrency 64 and a one-hour boundary. Require
+   `P46_EVAL_SUBSHARD_PASS` and
    `[P46.EVAL.POSTFLIGHT] PASS`, 64 unique `(task, sample_index)` records, full
    redacted conversations, finite rewards, no duplicate identity, and proof
    that every R2E pod was deleted. A timeout preserves resumable records but is
@@ -258,12 +275,15 @@ The remote agent must advance one gate at a time:
    persistent JSONL. Confirm that assistant actions alternate with real R2E
    observations, statuses agree with terminal events, and reward 1.0 is used
    only for a valid solved trajectory. Summary-only JSONL is insufficient.
-3. Run 64-chip `q4-debug` for exactly three updates. Require the `dp` data-axis
-   marker once, three `P44.LOGPS_BATCH` markers, three trajectory files and
-   digests, three batch-metrics rows, finite nonzero gradient activity, train
-   steps `0->1->2->3`, exactly three commits, device-resident optimizer state,
-   at least 8 GiB classifier-observed HBM margin, and a P44 classifier JSON
-   whose `verdict` is `PASS`.
+3. Run `q4-debug` on the available topology for exactly three updates. The
+   64-chip form splits into DP4 x TP8 rollout/trainer roles; the 256-chip form
+   splits into DP16 x TP8 roles. Both retain B4 x G4, 16 trajectories and the
+   one-hour shared batch boundary. Require the `dp` data-axis marker once,
+   three `P44.LOGPS_BATCH` markers, three trajectory files and digests, three
+   batch-metrics rows, finite nonzero gradient activity, train steps
+   `0->1->2->3`, exactly three commits, device-resident optimizer state, at
+   least 8 GiB classifier-observed HBM margin, and a P44 classifier JSON whose
+   `verdict` is `PASS`.
 4. Complete all 58 logical N16 evaluation reports through 463 resumable
    physical JobSets only if the curriculum report is wanted. Never classify a
    task from a partial N16 sample set.

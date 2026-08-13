@@ -10,11 +10,11 @@ nonfinite, optimizer, replica and infrastructure contract remains fail-closed.
 
 ## Sources
 
-- Current P39.5 bounded-lifecycle development base after synchronization:
-  `yuxzhang/canon-zero-tim` at
-  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`. Implementation started from
-  `4e4ca2891a01448f09428affd1eb2434bbd61657`; the intervening operator commits
-  changed only FrozenLake/P38 files outside the P39.4 change set.
+- Current P39.5/P46 bounded-lifecycle and dual-topology implementation is
+  published in `e1b4009394c49ea015919bda0cfdb97c12c221b5`. Development synchronized
+  from `yuxzhang/canon-zero-tim` at
+  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`; launchers must resolve the exact
+  current remote HEAD and verify that the implementation commit is an ancestor.
 
 - Production-candidate hardening base: `yuxzhang/canon-zero-tim` at
   `5ee6dbfb5601cf1d1f864ccf6859764ba1f321fe`. P39 was developed from

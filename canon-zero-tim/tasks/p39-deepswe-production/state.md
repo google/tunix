@@ -2,12 +2,13 @@
 
 Updated: 2026-08-13 UTC
 
-Current phase: **P39.5 bounded DeepSWE lifecycle and dual debug/production
-defaults implemented; local frozen-image gates PASS; target retry NOT RUN.**
+Current phase: **P39.5/P46 bounded DeepSWE lifecycle and dual-topology profiles
+published in `e1b4009394c49ea015919bda0cfdb97c12c221b5`; target retry NOT RUN.**
 Attempt `p34r03` reached real Qwen3-32B rollout but never completed update zero:
-60 trajectories logged `ENV_TIMEOUT` with negative remaining time and four
-vLLM requests were still running at the end of the returned log. No trajectory
-batch artifact, backward, optimizer commit or convergence claim exists.
+all 64 trajectories returned `ENV_TIMEOUT` with negative remaining time, then
+trainer setup raised `KeyError: 'fsdp'` before forward/backward because its
+data-sharding axis did not match the live `('dp','tp')` mesh. No optimizer
+commit or convergence claim exists.
 
 | Ledger | Status | Detail |
 |---|---|---|
@@ -22,16 +23,16 @@ batch artifact, backward, optimizer commit or convergence claim exists.
 | P39 64-chip pilot implementation | PUBLISHED / LOCAL PASS | published at `7328cde7`; separate DP4xTP8 profile and renderer, one/three-update stages, resident-only optimizer contract, dedicated classifier and 15-test CPU gate |
 | P39 64-chip pilot target | DEFERRED / NOT RUN | the available 4x8x8 slice makes this capacity pilot optional; no resident-optimizer evidence exists |
 | P34 256-chip launch selection | ATTEMPTED / FAILED | `p34r02` stopped at `CANON_EXPECT_MODEL_MESH_IDS`; the local profile/renderer/preflight repair passes all affected gates, but has not run on the target |
-| P34 target Attempt `p34r03` | TARGET INCONCLUSIVE / UNBOUNDED ROLLOUT | source `65b0cd0a84807f2308409d1867022407ae53f8fb`; topology/model/clean data passed; update-zero rollout ran over four hours, emitted 60 negative-remaining-time `ENV_TIMEOUT` records, ended with four active vLLM requests and no completed batch |
-| P39.5 lifecycle repair | LOCAL PASS / UNPUBLISHED | true vLLM request abort; shared trajectory/batch deadlines; bounded reset/step/reward/cleanup; confirmed R2E pod deletion; locked Qwen3-4B three-update and Qwen3-32B full YAML defaults |
+| P34 target Attempt `p34r03` | TARGET INCONCLUSIVE / LIFECYCLE + SHARDING FAILURE | source `65b0cd0a84807f2308409d1867022407ae53f8fb`; topology/model/clean data passed; update-zero rollout ran over four hours; all 64 trajectories returned negative-remaining-time `ENV_TIMEOUT`; trainer setup then raised `KeyError: 'fsdp'` before forward/backward |
+| P39.5/P46 repair | PUBLISHED / LOCAL PASS | commit `e1b4009394c49ea015919bda0cfdb97c12c221b5`; true vLLM request abort; shared trajectory/batch deadlines; bounded reset/step/reward/cleanup; confirmed R2E pod deletion; training-data axis derived from the live mesh; clean evaluation, Qwen3-4B-Instruct debug and Qwen3-32B profiles on both 64 and 256 chips |
 | P39.5 exact image | CPU PASS | P34 55 unit cases plus P44 41 cases and new request-abort/trajectory-cleanup controls in pinned image `sha256:418dc632...d5e53a` |
 
-Next action: after explicit commit/push approval, publish only to
-`yuxzhang/canon-zero-tim`, read back its exact 40-character HEAD, and have the
-launch agent render the Qwen3-4B `three-update` debug JobSet for whichever
-64/256 allocation is available. Inspect its durable trajectories and deadline
-markers. Then render a fresh Qwen3-32B `full` manifest; update zero must either
-complete or terminate within the signed 5400-second rollout-batch boundary.
+Next action: fetch the exact `origin/yuxzhang/canon-zero-tim` HEAD, require it
+to contain `e1b4009394c49ea015919bda0cfdb97c12c221b5`, and follow the P46 handoff.
+Run clean Qwen3-4B evaluation, then Qwen3-4B-Instruct three-update debug
+training, then a fresh Qwen3-32B full manifest. Use whichever registered 64- or
+256-chip allocation is available and inspect durable trajectory, deadline,
+cleanup and data-sharding markers at every gate.
 
 ## First hard boundary
 

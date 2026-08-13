@@ -1,32 +1,32 @@
 # P46.4 — remote execution and evidence return
 
-- Status: active; remote data/log reconciliation is complete, and publication
-  still requires explicit approval
+- Status: active; implementation published, target campaign pending
 
 ## Entry gate
 
-1. Confirm the reconciled base and remote both equal
-   `99c3f7af761c859caa6c81ab509446cc3cc47dc0`.
-2. Commit and push only after explicit user approval; never target `main`.
-3. Read back the exact 40-character SHA from
+1. Read back the exact 40-character SHA from
    `origin/yuxzhang/canon-zero-tim` and require a clean detached execution
    checkout at that SHA.
-4. Run `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh` and the
+2. Require implementation commit
+   `e1b4009394c49ea015919bda0cfdb97c12c221b5` in that SHA's ancestry.
+3. Run `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh` and the
    topology/model-specific exact-image gates.
-5. Confirm `training_data_sharding_axis` is derived from
+4. Confirm `training_data_sharding_axis` is derived from
    `train_axis_names[0]`; reject a production hard-coded `fsdp` axis.
-6. Render through `cluster/render_p46_deepswe_profiles.py`; do not edit the
+5. Render through `cluster/render_p46_deepswe_profiles.py`; do not edit the
    rendered YAML or insert credential values.
 
 ## Ordered target campaign
 
-1. Prefer 64 chips and run logical shard 0, physical shard 0 of
-   `q4-clean-eval`. Require full trajectory records, confirmed R2E pod cleanup,
-   and `P46_EVAL_SUBSHARD_PASS`; this is not a full logical report.
-2. Run `q4-debug` for exactly three updates. Require three durable trajectory
-   batches, finite forward/backward evidence, three monotonic optimizer commits,
-   device-resident optimizer state, the `dp` data-sharding marker and P44
-   classifier PASS.
+1. On whichever allocation is available, run logical shard 0, physical shard 0
+   of `q4-clean-eval`: DP8 x TP8 on 64 chips or DP32 x TP8 on 256 chips.
+   Require full trajectory records, confirmed R2E pod cleanup, and
+   `P46_EVAL_SUBSHARD_PASS`; this is not a full logical report.
+2. Run `q4-debug` for exactly three updates on the available registered
+   topology: DP4 x TP8 per role on 64 chips or DP16 x TP8 per role on 256
+   chips. Require three durable trajectory batches, finite forward/backward
+   evidence, three monotonic optimizer commits, device-resident optimizer
+   state, the `dp` data-sharding marker and P44 classifier PASS.
 3. If the curriculum campaign is wanted, complete 58 logical reports through
    463 resumable physical JobSets. Never classify a task before exact N16.
 4. Run `q32-train` with Qwen3-32B, 16K, B8/G8, 1000 updates, the original

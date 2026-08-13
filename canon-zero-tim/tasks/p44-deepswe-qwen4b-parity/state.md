@@ -6,8 +6,8 @@
 - Task directory: `canon-zero-tim/tasks/p44-deepswe-qwen4b-parity/`
 - Directory state: tracked
 - Current phase: [P44.12 — bounded three-update debug defaults](phases/p44-12-bounded-three-update.md)
-- Last verified fact: From unpublished base `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`, both 64- and 256-device renderers emit the same Qwen3-4B B4/G4, clean-data, device-optimizer, three-update recipe with a shared 3600-second rollout-batch limit and durable trajectory capture. P44 CPU passes 41 cases and the pinned exact-image gate passes the new vLLM abort plus reset/model/reward/cleanup timeout controls. P43/P39/P34 regressions remain green. Main was untouched and no cloud job, commit or push occurred.
-- Next action: After explicit publication approval, have the launch agent detach at the exact read-back operator SHA and render `three-update` for whichever 64/256 allocation is available. Inspect all three trajectory batches and sandbox cleanup evidence before starting Qwen3-32B full training.
+- Last verified fact: P44.12 is included in published implementation commit `e1b4009394c49ea015919bda0cfdb97c12c221b5`. Both 64- and 256-device renderers emit the same Qwen3-4B B4/G4, clean-data, device-optimizer, three-update recipe with a shared 3600-second rollout-batch limit and durable trajectory capture. P44 CPU passes 41 cases; P43/P39/P34 regressions remain green. No target run occurred.
+- Next action: Follow the current P46 handoff: run Q4 clean evaluation on the available 64/256 topology, then render Q4-Instruct `q4-debug` three-update on the available topology and inspect all three trajectory batches plus sandbox cleanup before Qwen3-32B.
 - Blockers: TP8, Pathways role separation, real Kubernetes sandbox deletion and three optimizer updates remain target-unverified. The older one-host zero-signal result still does not promote a local update claim.
 - Key artifacts: `phases/p44-12-bounded-three-update.md`, `cluster/P44_DEEPSWE_QWEN4B_PARITY_RUNBOOK.md`, `tests/p44_deepswe_qwen4b_parity/run_exact_image.sh`, `plan.md`, `log.md`
-- Updated: 2026-08-13T01:00:00Z
+- Updated: 2026-08-13T03:54:03Z
