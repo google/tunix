@@ -57,7 +57,16 @@
 - Action: Committed the bounded lifecycle, mesh-derived trainer data axis, full trajectory evaluator, three dual-topology profile families, tests, runbook and handoff.
 - Command: `git commit -m "deepswe: harden rollout lifecycle and add training profiles"`
 - Result: implementation commit `e1b4009394c49ea015919bda0cfdb97c12c221b5`; P34 static/trajectory/update, P39 15, P43 22, P44 41, P46 17 and `git diff --check` passed immediately before commit.
-- Next: remote execution reads back the exact operator HEAD containing `e1b40093`, then starts with one Q4 clean-evaluation shard on whichever 64/256 topology is available.
+## 2026-08-13T21:30:00Z — P46.5: DeepSWE 256-chip clean evaluation with exact retry logic (p46e25609)
+
+- Type: evidence and verification
+- Fact: Ran `canon-p46-eval-256-0-0-p46e25609` on `mlperf-v5p-256-3` across 64 TPU worker pods (256 TPU v5p chips) with DP32 x TP8 at source `8c0e90f38b68832a8ba7093fe78d655fcfd06ec4`.
+- Command: `render_p46_deepswe_profiles.py --profile q4-clean-eval --topology 256 ...`
+- Result: 64 total trajectories evaluated for Subshard 0 (l0/p0). 59 trajectories valid (`SUCCEEDED`, reward=0.0), 4 `MAX_CONTEXT_LIMIT_REACHED`, 1 `MODEL_TIMEOUT`. Total rewards = 0.0 across all 64 trajectories.
+- Evaluator behavior: Emitted `P46_EVAL_PHYSICAL_INCOMPLETE pending_valid_samples=5 invalid_attempts=5`, proving that the new exact retry and fail-closed logic operates without false-positive completion claims.
+- Archive: Committed full head log `l0-p0.log` (557 KB) and trajectory JSONL `trajectories.jsonl` (6.0 MB) to `evidence/p46e25609/`.
+- Next: evaluate remaining physical shards or transition to Q32 32B training.
+
 
 ## 2026-08-13T05:40:50Z — P46.5: nominal no-logprob path is not off
 
