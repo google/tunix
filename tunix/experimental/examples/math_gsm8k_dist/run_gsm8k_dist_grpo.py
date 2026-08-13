@@ -180,7 +180,6 @@ def _grpo_model_input(
     algo_config: Any,
     pad_id: int,
     eos_id: int,
-    compute_logps_chunk_size: int,
 ) -> dict[str, Any]:
   """Maps a TrainExample microbatch to algo_core.grpo_loss_fn kwargs."""
   return {
@@ -188,7 +187,6 @@ def _grpo_model_input(
       "algo_config": algo_config,
       "pad_id": pad_id,
       "eos_id": eos_id,
-      "compute_logps_chunk_size": compute_logps_chunk_size,
   }
 
 
@@ -232,7 +230,6 @@ def _configure_trainer_loss(
           algo_config=grpo_config,
           pad_id=pad_id,
           eos_id=eos_id,
-          compute_logps_chunk_size=0,
       ),
   )
 
