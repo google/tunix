@@ -54,46 +54,59 @@ class YamlGeneratorTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       (
-          "tpu7x_small",
-          "tpu7x:4x4x4",
-          "test-tpu7x",
-          "tpu7x",
-      ),
-      (
-          "tpu7x_large",
-          "tpu7x:4x4x8",
-          "test-tpu7x-large",
-          "tpu7x",
-      ),
-      (
-          "tpuv5",
-          "tpuv5:2x2x2",
-          "test-tpuv5",
-          "tpu-v5p-slice",
-      ),
-      (
-          "tpuv5e",
-          "tpuv5e:2x4",
-          "test-tpuv5e",
-          "tpu-v5-lite-podslice",
-      ),
-      (
-          "tpuv6e",
-          "tpuv6e:2x4",
-          "test-tpuv6e",
-          "tpu-v6e-slice",
-      ),
-      (
-          "tpuv6ea",
-          "tpuv6ea:2x4",
-          "test-tpuv6ea",
-          "tpu-v6ea-slice",
-      ),
+          f"{tpl_label}_{name}",
+          tpl_file,
+          tpu_slice,
+          jobset_name,
+          expected_accelerator,
+      )
+      for tpl_label, tpl_file in (
+          ("pathways", "jobset.pathways.yaml"),
+          ("mcjax", "jobset.mcjax.yaml"),
+      )
+      for name, tpu_slice, jobset_name, expected_accelerator in (
+          (
+              "tpu7x_small",
+              "tpu7x:4x4x4",
+              "test-tpu7x",
+              "tpu7x",
+          ),
+          (
+              "tpu7x_large",
+              "tpu7x:4x4x8",
+              "test-tpu7x-large",
+              "tpu7x",
+          ),
+          (
+              "tpuv5",
+              "tpuv5:2x2x2",
+              "test-tpuv5",
+              "tpu-v5p-slice",
+          ),
+          (
+              "tpuv5e",
+              "tpuv5e:2x4",
+              "test-tpuv5e",
+              "tpu-v5-lite-podslice",
+          ),
+          (
+              "tpuv6e",
+              "tpuv6e:2x4",
+              "test-tpuv6e",
+              "tpu-v6e-slice",
+          ),
+          (
+              "tpuv6ea",
+              "tpuv6ea:2x4",
+              "test-tpuv6ea",
+              "tpu-v6ea-slice",
+          ),
+      )
   )
   def test_generate_tpu_slice(
-      self, tpu_slice, jobset_name, expected_accelerator
+      self, template_name, tpu_slice, jobset_name, expected_accelerator
   ):
-    template_file = _get_template_path("jobset.pathways.yaml")
+    template_file = _get_template_path(template_name)
     argv = [
         "yaml_generator.py",
         template_file,
@@ -108,19 +121,59 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn(jobset_name, rendered)
 
   @parameterized.named_parameters(
-      (
-          "unsupported_tpu_type",
-          "unknown_tpu:4x4",
-          ValueError,
-      ),
-      (
-          "invalid_num_chips",
-          "tpu7x:1x2",
-          AssertionError,
-      ),
+      ("pathways", "jobset.pathways.yaml"),
+      ("mcjax", "jobset.mcjax.yaml"),
   )
-  def test_invalid_slice_raises(self, tpu_slice, expected_exception):
-    template_file = _get_template_path("jobset.pathways.yaml")
+  def test_generate_worker_container_options(self, template_name):
+    template_file = _get_template_path(template_name)
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-job",
+        "--tpu_slice=tpuv6e:2x4",
+        "--worker_container_port=9999",
+        "--worker_container_name=test-worker",
+        "--worker_container_image=test-image:latest",
+        "--worker_startup_command=echo hello",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("test-job", rendered)
+        self.assertIn("9999", rendered)
+        self.assertIn("test-worker", rendered)
+        self.assertIn("test-image:latest", rendered)
+        self.assertIn("echo hello", rendered)
+
+  @parameterized.named_parameters(
+      (
+          f"{tpl_label}_{name}",
+          tpl_file,
+          tpu_slice,
+          expected_exception,
+      )
+      for tpl_label, tpl_file in (
+          ("pathways", "jobset.pathways.yaml"),
+          ("mcjax", "jobset.mcjax.yaml"),
+      )
+      for name, tpu_slice, expected_exception in (
+          (
+              "unsupported_tpu_type",
+              "unknown_tpu:4x4",
+              ValueError,
+          ),
+          (
+              "invalid_num_chips",
+              "tpu7x:1x2",
+              AssertionError,
+          ),
+      )
+  )
+  def test_invalid_slice_raises(
+      self, template_name, tpu_slice, expected_exception
+  ):
+    template_file = _get_template_path(template_name)
     argv = [
         "yaml_generator.py",
         template_file,

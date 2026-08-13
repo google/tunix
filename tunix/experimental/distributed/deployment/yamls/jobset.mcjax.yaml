@@ -1,0 +1,153 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: ${JOBSET_NAME}
+  namespace: default
+spec:
+  failurePolicy:
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: proc
+    template:
+      spec:
+        backoffLimit: 2048000
+        completionMode: Indexed
+        completions: ${COMPLETIONS}
+        parallelism: ${PARALLELISM}
+        template:
+          metadata:
+            annotations:
+              # # place on nodes in the same block
+              # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
+              # # place on nodes in the same slice
+              # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
+              # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
+          spec:
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 10
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+            affinity:
+              # place on nodes in the same nodepool
+              podAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: cloud.google.com/gke-nodepool
+                  labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: In
+                      values:
+                      - ${JOBSET_NAME}
+              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: cloud.google.com/gke-nodepool
+                  labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: Exists
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: NotIn
+                      values:
+                      - ${JOBSET_NAME}
+            # tolerations:
+            # - key: "google.com/tpu"
+            #   operator: "Equal"
+            #   value: "present"
+            #   effect: "NoSchedule"
+            containers:
+            - name: ${USER_CONTAINER}
+              image: ${USER_CONTAINER_IMAGE}
+              imagePullPolicy: Always
+              securityContext:
+                privileged: true
+              resources:
+                limits:
+                  google.com/tpu: "4"
+                requests:
+                  google.com/tpu: "4"
+              command:
+                - bash
+                - -c
+                - |
+                  # PID 1 wrapper: forwards SIGTERM to background child process so K8s
+                  # termination grace period shuts down workload cleanly without SIGKILL.
+                  # Polling sleep loop ensures bash wakes up promptly to run trap handler.
+
+                  echo "Program Start: $$(date)"
+                  _sigterm() (kill -SIGTERM $$! 2>/dev/null)
+                  trap _sigterm SIGTERM
+
+                  (
+                    ${STARTUP_COMMAND}
+                  ) & PID=$$!
+
+                  while kill -0 $$PID 2>/dev/null; do
+                    sleep 5
+                  done
+                  wait $$PID
+                  EXIT_CODE=$$?
+
+                  echo "Program End: $$(date)"
+                  echo "EXIT_CODE=$$EXIT_CODE"
+                  exit $$EXIT_CODE
+              env:
+              # Injects the JobSet Name
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
+              # Injects the Replicated Job Name
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-name']
+              # Injects the Job Index (which replica group)
+              - name: JOB_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              # Injects the local Pod Index (if you have multiple completions per job)
+              - name: POD_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+              - name: JAX_PLATFORMS
+                value: "tpu,cpu"
+              - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                value: "0"
+              ports:
+              - containerPort: ${USER_CONTAINER_PORT}
+                name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            volumes:
+            - name: shared-tmp
+              hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+  startupPolicy:
+    startupPolicyOrder: AnyOrder
+  successPolicy:
+    operator: All
