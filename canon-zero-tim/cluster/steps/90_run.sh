@@ -110,6 +110,7 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
 fi
 echo "[run] cmd: $CANON_RUN_CMD"
 echo "[run] log: $LOG"
+mkdir -p "$(dirname "$LOG")"
 cd "${CANON_RUN_CWD:-$CANON_PKG/..}"
 set -o pipefail
 bash -c "$CANON_RUN_CMD" 2>&1 | tee "$LOG"
