@@ -29,25 +29,6 @@ from tunix.experimental.common import datatypes
 from tunix.rl import algo_core
 
 
-def _grpo_loss_fn_for_trainer_v2(
-    model: Any,
-    train_example: Any,
-    algo_config: Any,
-    pad_id: int,
-    eos_id: int,
-    compute_logps_chunk_size: int = 0,
-) -> Any:
-  """GRPO loss wrapper with a concrete signature for NNX kwarg binding."""
-  return algo_core.grpo_loss_fn(
-      model,
-      train_example,
-      algo_config=algo_config,
-      pad_id=pad_id,
-      eos_id=eos_id,
-      compute_logps_chunk_size=compute_logps_chunk_size,
-  )
-
-
 class AlgorithmAdapter(abc.ABC):
   """Abstract algorithm adapter for returns math, advantages, and loss functions."""
 
@@ -86,7 +67,7 @@ class AlgorithmAdapter(abc.ABC):
 
   @abc.abstractmethod
   def loss_fn(self) -> Callable[..., Any]:
-    """Returns the JIT-compiled loss function executed on TrainerWorker."""
+    """Returns the loss function executed on TrainerWorker."""
     ...
 
 
@@ -172,8 +153,8 @@ class GRPOAdapter(AlgorithmAdapter):
     return payloads
 
   def loss_fn(self) -> Callable[..., Any]:
-    """GRPO loss function adapted to PeftTrainer V2's kwarg contract."""
-    return _grpo_loss_fn_for_trainer_v2
+    """GRPO loss function executed on TrainerWorker."""
+    return algo_core.grpo_loss_fn
 
 
 class PPOAdapter(AlgorithmAdapter):
