@@ -22,4 +22,4 @@ python3 -m unittest discover \
   -p 'test_*.py' \
   -v
 
-echo "P46_DEEPSWE_PROFILES_CPU_PASS cases=31"
+echo "P46_DEEPSWE_PROFILES_CPU_PASS cases=33"

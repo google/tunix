@@ -424,7 +424,7 @@ class _Runtime:
 async def _run_evaluation(
     config: EvalConfig,
     entries: Sequence[Mapping[str, Any]],
-    pending: Sequence[tuple[Mapping[str, Any], int]],
+    pending: Sequence[tuple[Mapping[str, Any], int, int]],
     output_path: Path,
     *,
     runtime: _Runtime | None = None,
@@ -460,7 +460,7 @@ async def _run_evaluation(
 
   def pairs_generator():
     env_cls = GuardedSWEEnv if enable_guard else SWEEnv
-    for pair_index, (entry, sample_index) in enumerate(plan):
+    for pair_index, (entry, sample_index, attempt_index) in enumerate(plan):
       agent = SWEAgent()
       env = env_cls(
           entry=_batch_entry_for_swe_env(entry),
@@ -472,6 +472,7 @@ async def _run_evaluation(
           **({"backend": "docker"} if config.onehost_probe else {}),
       )
       env.extra_kwargs["sample_index"] = sample_index
+      env.extra_kwargs["attempt_index"] = attempt_index
       env.extra_kwargs["sample_nonce"] = config.sample_nonce(
           task_key(entry), sample_index
       )
@@ -510,21 +511,23 @@ async def _run_evaluation(
     await asyncio.sleep(0)
     async for batch in orchestrator.yield_batches(batch_size=1):
       for item in batch:
-        entry, sample_index = plan[item.pair_index]
+        entry, sample_index, attempt_index = plan[item.pair_index]
         record = trajectory_record(
             config,
             entry=entry,
             sample_index=sample_index,
+            attempt_index=attempt_index,
             trajectory=item.traj,
             elapsed_secs=time.monotonic() - started[item.pair_index],
         )
         append_record(output_path, record)
         completed += 1
         logger.info(
-            "P46_EVAL_TRAJECTORY task=%s sample=%d status=%s reward=%s "
-            "completed=%d/%d",
+            "P46_EVAL_TRAJECTORY task=%s sample=%d attempt=%d status=%s "
+            "reward=%s completed=%d/%d",
             record["task_key"],
             sample_index,
+            attempt_index,
             record["status"],
             record["reward"],
             completed,
@@ -596,16 +599,34 @@ def main() -> int:
       config=config,
       allowed_task_keys=(task_key(entry) for entry in logical_entries),
   )
+  physical_pending = remaining_samples(
+      physical_entries, accumulated, config=config
+  )
+  physical_keys = {task_key(entry) for entry in physical_entries}
+  invalid_attempts = sum(
+      record.get("valid") is not True
+      and record.get("task_key") in physical_keys
+      for record in accumulated
+  )
   reports = aggregate_tasks(logical_entries, accumulated, config=config)
   incomplete = sum(item["category"] == "incomplete" for item in reports)
   logger.info(
-      "P46_EVAL_PROGRESS tag=%s trajectories=%d/%d incomplete_tasks=%d",
+      "P46_EVAL_PROGRESS tag=%s attempts=%d/%d "
+      "pending_physical_samples=%d incomplete_tasks=%d",
       config.run_tag,
       len(accumulated),
       len(logical_entries) * config.n_sample,
+      len(physical_pending),
       incomplete,
   )
-  if timed_out:
+  if timed_out or physical_pending:
+    print(
+        "P46_EVAL_PHYSICAL_INCOMPLETE "
+        f"tag={config.run_tag} physical_shard={physical_shard} "
+        f"pending_valid_samples={len(physical_pending)} "
+        f"invalid_attempts={invalid_attempts} timed_out={int(timed_out)}",
+        flush=True,
+    )
     return 2
   if incomplete:
     print(

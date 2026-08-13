@@ -175,3 +175,69 @@
   evaluation-campaign speedup claim.
 - Next: read back the exact operator remote SHA, then execute the two reviewed
   64-chip canary arms before default promotion.
+
+## 2026-08-13T09:05:17Z — P46.5: revoke false 256-chip shard PASS and repair resume
+
+- Type: returned-evidence correction, implementation, and handoff
+- Fact: `git pull --ff-only` advanced the operator-derived worktree to
+  `63b092b001864e4e9a4822b4354a665bb00b1c6b`. Archived run `p46e25608`
+  used source `bdc9681824743911d0691659604dec090dd42bc4`, initialized Qwen3-4B
+  reward-only DP32 x TP8, and attempted 64 l0/p0 identities. The exact unique
+  terminal audit is 62 `SUCCEEDED` plus two `MODEL_TIMEOUT`; the old evaluator
+  incorrectly emitted `P46_EVAL_SUBSHARD_PASS` and exit zero.
+- Root cause: resume considered any task/sample record complete. An invalid
+  timeout was therefore durable but unretryable, while the physical gate
+  checked only whether collection itself hit the wall-clock timeout.
+- Action: Added consecutive `attempt_index` records; valid-only identity
+  completion; retry after invalid-only attempts; duplicate rejection after the
+  first valid result; valid-retry selection in task/L3 aggregation; and
+  `P46_EVAL_PHYSICAL_INCOMPLETE` nonzero exit while a physical valid identity
+  is missing. Added a fail-closed campaign finalizer that requires all 58
+  summaries, 1851 unique tasks, exact valid N16 and referenced-file digests
+  before writing merged candidate manifests. Updated tests from 31 to 33 cases.
+- Campaign correction: l0/p0 is only a 64-identity smoke/resume unit. Full
+  data washing requires 29,616 valid identities, 58 logical reports and 463
+  sequential/resumable physical JobSets at Qwen3-4B, 16,384 total response
+  tokens, at most 50 environment/model steps and a 3600-second physical
+  deadline. Candidate whitelists remain advisory pending separate review.
+- Artifact correction: Persistent trajectories live below
+  `/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/trajectories/`, not
+  directly below the run root. The remote return package now requires JSONL
+  paths, line counts, per-file SHA-256 and a compressed trajectory/log archive;
+  the head log alone is insufficient.
+- Publication: The repair and documentation are local and unpublished. Because
+  source SHA is part of the fingerprint, the first fixed target attempt must
+  use a new run id and rerun all 64 l0/p0 identities rather than transplanting
+  the old 62. No commit, push, main-branch mutation or cloud launch occurred.
+- Next: finish local/adjacent gates, await explicit publication approval, then
+  rerun fixed l0/p0 and continue all remaining physical shards.
+
+## 2026-08-13T09:15:09Z — P46.5: retry/finalizer release gates pass locally
+
+- Type: local evidence and handoff validation
+- Commands: P46 CPU gate; P34 static/trajectory/update gates; P39 and P44 CPU
+  gates; Python compile for all changed evaluator/finalizer entrypoints;
+  finalizer `--help`; `git diff --check`.
+- Result: `P46_DEEPSWE_PROFILES_CPU_PASS cases=33`,
+  `P34_STATIC_PASS suites=10`, P34 trajectory/update 5/5 PASS,
+  `P39_DEEPSWE_PILOT_CPU_PASS`, `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`, Python
+  compile PASS and diff check PASS. The campaign-finalizer unit gate proves
+  missing summaries fail and a complete exact-N multi-shard fixture emits the
+  merged category manifests.
+- Dependency note: The two vLLM sampler request/extraction tests passed at the
+  published P46.5 commit and their implementation is unchanged here. The
+  current bare Python environment cannot rerun that module because
+  `transformers` is absent; the P46 static request/extraction contract still
+  passes. A clean publication environment should rerun the targeted sampler
+  pair before target launch.
+- Handoff result: The runbook and handoff now require a new fixed run id,
+  exact-valid physical retry, complete JSONL/digest return, all 463 sequential
+  physical JobSets, all 58 logical reports, and the final
+  `P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16
+  valid_trajectories=29616 logical_shards=58` marker. Sixty-four trajectories
+  are explicitly a physical resume unit, not a washing-completion claim.
+- Publication: No commit, push, main-branch mutation or cloud launch occurred.
+  The worktree remains intentionally dirty pending explicit user approval.
+- Next: publish only after approval, read back the exact operator SHA, then the
+  remote agent reruns l0/p0 and advances the full campaign one physical shard
+  at a time.

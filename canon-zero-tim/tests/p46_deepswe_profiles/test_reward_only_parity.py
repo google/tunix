@@ -57,6 +57,7 @@ class RewardOnlyParityTest(unittest.TestCase):
       common = {
           "task_key": "task-a",
           "sample_index": sample_index,
+          "attempt_index": 0,
           "sampled_by": "stock@" + "6" * 40,
           "valid": True,
           "solved": sample_index in (0, 1, 2, 3),
@@ -81,6 +82,22 @@ class RewardOnlyParityTest(unittest.TestCase):
     self.assertEqual(report["pairs"], 16)
     self.assertEqual(report["observer_valid_trajectories_per_hour"], 32)
     self.assertEqual(report["reward_only_valid_trajectories_per_hour"], 48)
+    observer.insert(0, {
+        **observer[0],
+        "attempt_index": 0,
+        "valid": False,
+        "solved": False,
+        "trajectory": {"steps": [], "status": "MODEL_TIMEOUT"},
+    })
+    observer[1]["attempt_index"] = 1
+    report = parity.build_l3_report(
+        observer,
+        reward_only,
+        observer_wall_secs=1800,
+        reward_only_wall_secs=1200,
+    )
+    self.assertEqual(report["observer_attempts"], 17)
+    self.assertEqual(report["observer_invalid_attempts"], 1)
     reward_only[0]["trajectory"] = {
         "steps": [{"logprobs": [None], "logprob_note": "absent"}]
     }

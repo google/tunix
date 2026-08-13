@@ -185,36 +185,76 @@ class EvalArtifactsTest(unittest.TestCase):
               elapsed_secs=1.0,
           )
 
-  def test_resume_rejects_duplicates_and_fingerprint_drift(self):
+  def test_resume_retries_invalid_but_rejects_attempts_after_valid(self):
     root = Path(self.temporary.name)
     path = root / "raw.jsonl"
     entry = {"docker_image": "img-a"}
-    record = artifacts.trajectory_record(
+    invalid = artifacts.trajectory_record(
         self.config,
         entry=entry,
         sample_index=0,
+        attempt_index=0,
+        trajectory={"status": "MODEL_TIMEOUT", "reward": 0.0, "steps": []},
+        elapsed_secs=1.0,
+    )
+    artifacts.append_record(path, invalid)
+    loaded = artifacts.load_records(
+        [path], config=self.config, allowed_task_keys={"img-a"}
+    )
+    remaining = artifacts.remaining_samples([entry], loaded, config=self.config)
+    self.assertEqual(len(remaining), 16)
+    self.assertEqual(remaining[0][1:], (0, 1))
+
+    valid_retry = artifacts.trajectory_record(
+        self.config,
+        entry=entry,
+        sample_index=0,
+        attempt_index=1,
         trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
         elapsed_secs=1.0,
     )
-    artifacts.append_record(path, record)
+    artifacts.append_record(path, valid_retry)
     loaded = artifacts.load_records(
         [path], config=self.config, allowed_task_keys={"img-a"}
     )
     remaining = artifacts.remaining_samples([entry], loaded, config=self.config)
     self.assertEqual(len(remaining), 15)
-    artifacts.append_record(path, record)
-    with self.assertRaisesRegex(ValueError, "duplicate"):
+    self.assertNotIn(0, {sample_index for _, sample_index, _ in remaining})
+    report = artifacts.aggregate_tasks([entry], loaded, config=self.config)[0]
+    self.assertEqual(report["attempts"], 2)
+    self.assertEqual(report["invalid_attempts"], 1)
+    self.assertEqual(report["valid_n"], 1)
+
+    duplicate_valid = dict(valid_retry, attempt_index=2)
+    artifacts.append_record(path, duplicate_valid)
+    with self.assertRaisesRegex(ValueError, "duplicate valid"):
       artifacts.load_records(
           [path], config=self.config, allowed_task_keys={"img-a"}
       )
 
     drift = root / "drift.jsonl"
-    changed = dict(record)
+    changed = dict(invalid)
     changed["config_fingerprint"] = "0" * 64
     artifacts.append_record(drift, changed)
     with self.assertRaisesRegex(ValueError, "fingerprint"):
       artifacts.load_records(
           [drift], config=self.config, allowed_task_keys={"img-a"}
+      )
+
+  def test_resume_rejects_nonconsecutive_attempt_indices(self):
+    path = Path(self.temporary.name) / "attempt-gap.jsonl"
+    record = artifacts.trajectory_record(
+        self.config,
+        entry={"docker_image": "img-a"},
+        sample_index=0,
+        attempt_index=1,
+        trajectory={"status": "MODEL_TIMEOUT", "reward": 0.0, "steps": []},
+        elapsed_secs=1.0,
+    )
+    artifacts.append_record(path, record)
+    with self.assertRaisesRegex(ValueError, "consecutive"):
+      artifacts.load_records(
+          [path], config=self.config, allowed_task_keys={"img-a"}
       )
 
   def test_exact_n_classification_and_q32_hard_tier(self):
@@ -293,6 +333,69 @@ class EvalArtifactsTest(unittest.TestCase):
     changed = [dict(reports[0], category="all_fail", k=0)]
     with self.assertRaisesRegex(ValueError, "differs from exact payload"):
       artifacts.write_reports(root, changed, config=self.config)
+
+  def test_campaign_finalizer_requires_every_exact_n_logical_summary(self):
+    summaries = []
+    for shard_index, keys in enumerate((("partial", "all-fail"), ("all-pass",))):
+      config = dataclasses.replace(self.config, shard_index=shard_index)
+      entries = [{"docker_image": key} for key in keys]
+      records = []
+      for entry in entries:
+        for sample_index in range(config.n_sample):
+          reward = float(
+              entry["docker_image"] == "all-pass"
+              or (
+                  entry["docker_image"] == "partial" and sample_index == 0
+              )
+          )
+          records.append(artifacts.trajectory_record(
+              config,
+              entry=entry,
+              sample_index=sample_index,
+              trajectory={
+                  "status": "SUCCEEDED",
+                  "reward": reward,
+                  "steps": [],
+              },
+              elapsed_secs=1.0,
+          ))
+      reports = artifacts.aggregate_tasks(entries, records, config=config)
+      summaries.append(artifacts.write_reports(
+          Path(self.temporary.name) / f"logical-{shard_index}",
+          reports,
+          config=config,
+      ))
+
+    with self.assertRaisesRegex(ValueError, "every logical summary"):
+      artifacts._finalize_campaign(  # pylint: disable=protected-access
+          [summaries[0]["summary_path"]],
+          Path(self.temporary.name) / "campaign",
+          expected_tasks=3,
+          expected_logical_shards=2,
+          tasks_per_logical_shard=2,
+      )
+    result = artifacts._finalize_campaign(  # pylint: disable=protected-access
+        [summary["summary_path"] for summary in reversed(summaries)],
+        Path(self.temporary.name) / "campaign",
+        expected_tasks=3,
+        expected_logical_shards=2,
+        tasks_per_logical_shard=2,
+    )
+    self.assertEqual(result["tasks"], 3)
+    self.assertEqual(result["valid_trajectories"], 48)
+    self.assertEqual(result["logical_shards"], 2)
+    self.assertEqual(result["category_counts"], {
+        "all_fail": 1,
+        "all_pass": 1,
+        "partial": 1,
+    })
+    q32_keys = {
+        json.loads(line)["task_key"]
+        for line in Path(result["paths"]["q32_candidates"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+    }
+    self.assertEqual(q32_keys, {"partial", "all-fail"})
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import math
 from pathlib import Path
@@ -166,25 +167,36 @@ def build_l3_report(
 
   def index(
       records: Sequence[Mapping[str, Any]], *, mode: str
-  ) -> dict[tuple[str, int], Mapping[str, Any]]:
+  ) -> tuple[dict[tuple[str, int], Mapping[str, Any]], int]:
     result: dict[tuple[str, int], Mapping[str, Any]] = {}
+    seen_valid: set[tuple[str, int]] = set()
+    attempt_counts: collections.Counter[tuple[str, int]] = collections.Counter()
+    invalid_attempts = 0
     for record in records:
       if record.get("trajectory_mode") != mode:
         raise ValueError(f"L3 {mode} provenance mismatch")
-      if record.get("valid") is not True:
-        raise ValueError("L3 requires 16 valid records in each arm")
       identity = (str(record.get("task_key", "")), record.get("sample_index"))
       if not identity[0] or not isinstance(identity[1], int):
         raise ValueError("L3 record identity is malformed")
-      if identity in result:
-        raise ValueError("L3 record identities must be unique")
-      result[identity] = record
-    return result
+      if identity in seen_valid:
+        raise ValueError("L3 contains an attempt after a valid identity")
+      attempt_index = record.get("attempt_index")
+      if not isinstance(attempt_index, int) or attempt_index < 0:
+        raise ValueError("L3 attempt index is malformed")
+      if attempt_index != attempt_counts[identity]:
+        raise ValueError("L3 attempt indices must be consecutive")
+      attempt_counts[identity] += 1
+      if record.get("valid") is True:
+        result[identity] = record
+        seen_valid.add(identity)
+      else:
+        invalid_attempts += 1
+    return result, invalid_attempts
 
-  observer = index(
+  observer, observer_invalid_attempts = index(
       observer_records, mode="observer_with_sampled_logprobs"
   )
-  reward_only = index(
+  reward_only, reward_only_invalid_attempts = index(
       reward_only_records, mode="reward_only_no_logprobs"
   )
   if len(observer) != 16 or set(observer) != set(reward_only):
@@ -226,6 +238,10 @@ def build_l3_report(
       ),
       "observer_wall_secs": observer_wall_secs,
       "reward_only_wall_secs": reward_only_wall_secs,
+      "observer_attempts": len(observer_records),
+      "reward_only_attempts": len(reward_only_records),
+      "observer_invalid_attempts": observer_invalid_attempts,
+      "reward_only_invalid_attempts": reward_only_invalid_attempts,
   })
   return report
 

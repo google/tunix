@@ -1,6 +1,7 @@
 # P46 remote-agent execution handoff
 
-Publication status: **P46.1-P46.5 PUBLISHED; TARGET CAMPAIGN NOT RUN**.
+Publication status: **P46.1-P46.5 PUBLISHED; INVALID-ATTEMPT RETRY FIX
+UNPUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
 
 The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
 repair are anchored by implementation commit
@@ -12,6 +13,14 @@ documentation/evidence commits may advance the branch. Require that the exact
 read-back SHA contains both `e1b40093` and `a4d165e8`; never substitute the
 older reconciled base
 `99c3f7af761c859caa6c81ab509446cc3cc47dc0`. Never modify or push `main`.
+
+The current operator HEAD at this handoff checkpoint is
+`63b092b001864e4e9a4822b4354a665bb00b1c6b`. It contains the returned
+`p46e25608` evidence and the old false-positive physical-shard completion
+behavior. Do not launch from it. Wait for a later explicitly published SHA
+that contains `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, the 33-case P46
+CPU gate and `finalize_deepswe_eval.py`; resolve and record that exact
+40-character SHA instead of guessing it.
 
 The archived P34r03 Qwen3-32B run generated 64/64 rollout records, but every
 record ended as `ENV_TIMEOUT`. It then failed before forward/backward with
@@ -51,6 +60,32 @@ This is not clean publication evidence and does not prove L3, Kubernetes or
 target throughput. The observer/reward-only diagnostic call medians were
 0.0330/0.0310 seconds and sampler payloads 117/70 bytes; do not advertise a
 cluster speedup from that micro-measurement.
+
+The first returned 256-chip reward-only physical shard is also not a PASS.
+Run `p46e25608`, source
+`bdc9681824743911d0691659604dec090dd42bc4`, initialized Qwen3-4B at DP32 x
+TP8 and attempted all 64 identities, but finished with 62 `SUCCEEDED` and two
+`MODEL_TIMEOUT` records:
+
+```text
+namanjain12/aiohttp_final:006fbe03fede4eaa1eeba7b8393cbf4d63cb44b6 sample=6
+namanjain12/aiohttp_final:04deab71cc804311016159548e5dcdfb9c2698d3 sample=5
+```
+
+The old evaluator counted invalid records as completed resume identities and
+printed `P46_EVAL_SUBSHARD_PASS ... pending_logical_tasks=30`; revoke that
+claim. The fixed evaluator durably records every attempt but only a valid
+record completes an identity. It retries with consecutive `attempt_index`
+values, rejects attempts after a valid result, and returns nonzero with
+`P46_EVAL_PHYSICAL_INCOMPLETE` until the physical shard has exactly 64 valid
+identities. Because the fixed source SHA changes the fingerprint, start with a
+new run id and rerun all 64 l0/p0 identities; do not transplant the old 62.
+
+The full secondary evaluation/data-washing campaign is not complete. It still
+requires 1851 x N16 = 29,616 valid trajectories, 58 logical reports and 463
+physical JobSets. `p46e25608` covered only logical 0/physical 0, and all 62
+valid rewards in that shard were zero. No candidate washed whitelist has been
+produced or approved.
 
 Before execution, read these files completely:
 
@@ -94,14 +129,26 @@ it with YAML or shell hot patches.
 
 ## Gate 0 — reward-only publication and layered parity
 
-Require `a4d165e8` in the exact read-back operator ancestry. Run the 31-case
-P46 CPU gate and the two
+Require `a4d165e8` plus the later invalid-attempt repair in the exact read-back
+operator ancestry. Run the 33-case P46 CPU gate and the two
 targeted `VllmSamplerConfigTest` cases. If a direct four-chip v5p host is
 available, rerun the one-host command from a clean published checkout:
 
 ```bash
 bash canon-zero-tim/tests/p46_deepswe_profiles/run_onehost_reward_only_v5p.sh
 ```
+
+Before any target manifest, require this audit too:
+
+```bash
+rg -n 'attempt_index|P46_EVAL_PHYSICAL_INCOMPLETE|physical_pending' \
+  examples/deepswe/deepswe_eval_artifacts.py \
+  examples/deepswe/eval_deepswe.py
+test -f examples/deepswe/finalize_deepswe_eval.py
+```
+
+Stop unless the CPU marker is exactly `cases=33` or if any repair/finalizer
+marker is absent.
 
 L1 is a hard gate. L2 token identity is diagnostic; a clean
 `LAW1_SUFFIX_DIVERGENCE` is recorded but does not block. Before reward-only
@@ -119,11 +166,13 @@ SHA.
 Use whichever topology is available; 64 chips are not a prerequisite. Render
 logical index 0, physical index 0 exactly as documented in
 `P46_DEEPSWE_PROFILES_RUNBOOK.md`. On 64 chips evaluation is DP8 x TP8; on 256
-chips it is DP32 x TP8. Both are Qwen3-4B-Instruct-2507, 16K, four tasks x 16
-samples, concurrency 64, prefix cache off, complete trajectory streaming, and
-a one-hour shard deadline. Keep one topology for a resumable run-id because it
-is part of the evaluation fingerprint. Server-side dry-run the rendered YAML
-first. Apply it only after the operator explicitly approves the launch.
+chips it is DP32 x TP8. Both are Qwen3-4B-Instruct-2507, a 16,384-token total
+response budget per trajectory, at most 50 environment/model steps, four tasks
+x 16 samples, concurrency 64, prefix cache off, complete trajectory streaming,
+and a one-hour physical-shard deadline. Keep one topology for a resumable
+run-id because it is part of the evaluation fingerprint. Server-side dry-run
+the rendered YAML first. Apply it only after the operator explicitly approves
+the launch.
 
 Require both markers:
 
@@ -132,20 +181,32 @@ P46_EVAL_SUBSHARD_PASS ...
 [P46.EVAL.POSTFLIGHT] PASS
 ```
 
+`P46_EVAL_PHYSICAL_INCOMPLETE` or any nonzero evaluator exit is a failed,
+resumable attempt. Relaunch the same fixed source SHA, run id, topology and
+l/p indices so only invalid identities receive their next consecutive
+`attempt_index`. Do not advance to the next physical shard until this one has
+its exact valid identity count.
+
 Return the rendered YAML and digest, full logs, JobSet events, cleanup evidence
 and the persistent files below:
 
 ```text
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/trajectories/
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/reports/
+/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/trajectories/
+/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/reports/
 /mnt/disks/linchai_data/deepswe_eval/<run-id>/logs/
 ```
 
-Inspect complete trajectory JSON, not only a sample/task summary. Verify 64
-unique identities, prompt plus alternating assistant/environment messages,
-terminal status, finite reward, elapsed time, source/data/model fingerprint and
-no credential material. A shard timeout is resumable evidence and a failed
-gate, even if some records were safely written.
+Inspect complete trajectory JSON, not only a sample/task summary. Verify the
+exact valid identity count, prompt plus alternating assistant/environment
+messages, terminal status, finite reward, elapsed time, source/data/model
+fingerprint and no credential material. Invalid retries remain visible as
+separate durable attempts; they do not count toward N16. A shard timeout is
+resumable evidence and a failed gate, even if some records were safely written.
+
+Before handing evidence back, follow the return-package commands in the P46
+runbook. Return every trajectory JSONL absolute path, `wc -l`, per-file
+SHA-256, the archive path/digest and full logs. The archived head log alone is
+insufficient to inspect action/observation/tool-call content.
 
 ## Gate 2 — Q4 three-update training
 
@@ -167,17 +228,57 @@ Any timeout, cleanup leak, malformed trajectory, OOM, IFRT, nonfinite value,
 zero gradient activity, optimizer transaction/placement failure or classifier
 failure stops promotion to Q32.
 
-## Gate 3 — optional full Q4 evaluation campaign
+## Gate 3 — complete the full Q4 evaluation/data-washing campaign
 
-Only if a new curriculum report is wanted, complete all 58 logical reports via
-463 resumable physical JobSets. A task may be categorized only after exact
-N16. `partial` and `all_fail` reports remain advisory and do not replace the
-original clean whitelist without a separate reviewed manifest and digest.
+The first 64-trajectory shard is a smoke and resume unit, not campaign
+completion. Continue the same fixed source SHA, topology and run id until all
+1851 clean tasks have exactly N16 valid trajectories: 29,616 valid identities,
+58 logical reports and 463 physical JobSets. Logical indices 0-56 each have
+physical indices 0-7; logical index 57 has physical indices 0-6. Every normal
+physical shard is four tasks x N16 = 64 valid identities; the final l57/p6
+shard is three tasks x N16 = 48.
+
+Render, server-side dry-run, launch and wait one physical index at a time under
+the operator's campaign approval. On `P46_EVAL_PHYSICAL_INCOMPLETE`, retry the
+same index until its exact valid count is complete; never fan out all 463
+JobSets at once, because sandbox/CPU-node pressure and cleanup are part of the
+gate. Advance only after postflight cleanup passes. At the last physical index
+of each logical shard, require `P46_EVAL_LOGICAL_REPORT_PASS`; after l57/p6,
+require all 58 immutable logical reports and verify their digests.
+
+Finalize the campaign only after all 58 summaries exist:
+
+```bash
+RUN_ROOT="/mnt/disks/linchai_data/deepswe_eval/$RUN_ID"
+python3 examples/deepswe/finalize_deepswe_eval.py \
+  --summary-json "$RUN_ROOT"/outputs/reports/*.summary.json \
+  --output-dir "$RUN_ROOT/outputs/campaign"
+```
+
+Require exactly:
+
+```text
+P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58 ...
+```
+
+The finalizer rejects missing/duplicate task identities, missing shards,
+digest drift, cross-shard contract changes, broken/incomplete reports or any
+task without exact valid N16. Return and archive `outputs/campaign` together
+with all trajectories, logical reports and logs.
+
+The production evaluator retains `max_response_length=16384`, `max_steps=50`,
+N16, temperature 1.0, top-p 1.0, top-k 0 and a 3600-second physical deadline.
+A task may be categorized only after exact valid N16. `partial`, `all_fail`
+and `all_pass` reports are the completed secondary-evaluation output; broken
+or incomplete tasks are never promoted. Candidate whitelists remain advisory
+and do not replace the original clean whitelist without a separate reviewed
+manifest, digest and operator decision.
 
 ## Gate 4 — Qwen3-32B training
 
-Only after Gate 2 passes, render `q32-train` for the available 64- or 256-chip
-topology and obtain explicit launch approval. Keep the signed profile unchanged:
+Only after Gate 2 and the required Gate 3 campaign pass, render `q32-train` for
+the available 64- or 256-chip topology and obtain explicit launch approval.
+Keep the signed profile unchanged:
 Qwen3-32B, original 1851-row clean whitelist, 16K response, B8 x G8, 64
 trajectories, maximum concurrency 64, 5400-second shared batch boundary, 1000
 updates and TPU-resident optimizer state. Require the `dp` data-axis marker

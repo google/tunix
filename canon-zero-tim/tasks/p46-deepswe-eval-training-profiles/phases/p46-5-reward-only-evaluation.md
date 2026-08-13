@@ -111,3 +111,44 @@ for `logprob_observer` and
 for `reward_only`; they are review evidence only, not launch artifacts.
 The one-host PASS is development evidence from a dirty
 worktree at the base SHA, not a clean publication claim.
+
+## Returned 256-chip correction
+
+Operator HEAD `63b092b001864e4e9a4822b4354a665bb00b1c6b` archives the first
+256-chip target attempt, `p46e25608`, run from source
+`bdc9681824743911d0691659604dec090dd42bc4`. Qwen3-4B reward-only DP32 x
+TP8 initialized and l0/p0 attempted all 64 identities. The unique terminal
+status audit is 62 `SUCCEEDED` and two `MODEL_TIMEOUT`; all 62 valid rewards
+are zero. The old evaluator nevertheless emitted
+`P46_EVAL_SUBSHARD_PASS ... pending_logical_tasks=30` and postflight returned
+zero because any durable record, including an invalid attempt, completed the
+resume identity. That PASS is revoked.
+
+The local unpublished repair adds consecutive `attempt_index` provenance.
+Invalid attempts remain immutable evidence but do not complete an identity;
+the next retry is admitted only before the first valid result. Nonconsecutive
+indices and attempts after a valid result fail closed. The physical evaluator
+recomputes missing valid identities after collection and emits
+`P46_EVAL_PHYSICAL_INCOMPLETE` with a nonzero exit until the exact shard count
+is valid. Task reports and L3 statistics select the valid retry while retaining
+attempt/invalid-attempt counts. A global finalizer additionally rejects
+missing/duplicate logical shards or tasks, digest drift, cross-shard contract
+changes and any non-exact N16 report before producing merged candidate
+manifests. Local P46 evidence is now 33/33 PASS.
+
+The fixed first target run must use a new run id and rerun all 64 l0/p0
+identities because the source SHA/fingerprint changes. After that smoke passes,
+the evaluation does not stop: complete all 1851 x N16 = 29,616 valid
+trajectories through 58 logical reports and 463 sequential/resumable physical
+JobSets. Each trajectory retains the 16,384-token total response budget and at
+most 50 environment/model steps; each physical JobSet remains bounded at 3600
+seconds. No washed candidate whitelist exists until all exact-N16 reports are
+complete and separately reviewed.
+
+Only the head log was returned in git. The persistent full trajectory location
+for the old run is expected at
+`/mnt/disks/linchai_data/deepswe_eval/p46e25608/outputs/trajectories/`, but it
+was not archived here. The next remote return must include the JSONL absolute
+paths, line counts, per-file SHA-256, compressed trajectory/log archive and
+archive SHA-256; a head log alone cannot prove action/observation/tool-call
+quality.

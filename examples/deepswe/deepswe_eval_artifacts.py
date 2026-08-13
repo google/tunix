@@ -31,9 +31,10 @@ import numpy as np
 
 
 CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v2"
-TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v2"
-REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v2"
-SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v2"
+TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v3"
+REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v3"
+SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v3"
+CAMPAIGN_SCHEMA = "canon.p46.deepswe-eval.campaign-summary.v1"
 REWARD_ONLY = "reward_only"
 REWARD_ONLY_TRAJECTORY_MODE = "reward_only_no_logprobs"
 LOGPROB_OBSERVER = "logprob_observer"
@@ -325,11 +326,14 @@ def trajectory_record(
     *,
     entry: Mapping[str, Any],
     sample_index: int,
+    attempt_index: int = 0,
     trajectory: Any,
     elapsed_secs: float,
 ) -> dict[str, Any]:
   """Builds one complete, redacted and resume-addressable trajectory record."""
   config.validate()
+  if attempt_index < 0:
+    raise ValueError("evaluation attempt_index must be nonnegative")
   if hasattr(trajectory, "to_dict"):
     raw_trajectory = trajectory.to_dict()
   elif isinstance(trajectory, Mapping):
@@ -357,6 +361,7 @@ def trajectory_record(
       "instance_id": entry.get("instance_id"),
       "docker_image": key,
       "sample_index": sample_index,
+      "attempt_index": attempt_index,
       "sample_nonce": config.sample_nonce(key, sample_index),
       "status": str(status),
       "reward": reward,
@@ -386,10 +391,17 @@ def load_records(
     config: EvalConfig,
     allowed_task_keys: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-  """Loads exact-fingerprint records and rejects ambiguous resume state."""
+  """Loads exact-fingerprint attempts and rejects ambiguous resume state.
+
+  An invalid attempt is durable evidence, but it does not complete its sample
+  identity. A later consecutive attempt may retry that identity. Once one
+  attempt is valid, every further attempt for the identity is rejected.
+  """
   allowed = None if allowed_task_keys is None else set(allowed_task_keys)
   records: list[dict[str, Any]] = []
-  seen: set[tuple[str, int]] = set()
+  attempts: dict[tuple[str, int], list[dict[str, Any]]] = (
+      collections.defaultdict(list)
+  )
   for path in sorted(Path(item) for item in paths):
     try:
       lines = path.read_text(encoding="utf-8").splitlines()
@@ -417,9 +429,20 @@ def load_records(
       if not 0 <= sample_index < config.n_sample:
         raise ValueError("evaluation resume sample index is out of range")
       identity = (key, sample_index)
-      if identity in seen:
-        raise ValueError(f"duplicate evaluation sample identity: {identity}")
-      seen.add(identity)
+      prior = attempts[identity]
+      attempt_index = record.get("attempt_index", 0)
+      if not isinstance(attempt_index, int) or attempt_index < 0:
+        raise ValueError(f"evaluation attempt index is malformed: {identity}")
+      if attempt_index != len(prior):
+        raise ValueError(
+            "evaluation attempt indices must be consecutive: "
+            f"identity={identity} expected={len(prior)} actual={attempt_index}"
+        )
+      if prior and prior[-1].get("valid") is True:
+        raise ValueError(
+            f"duplicate valid evaluation sample identity: {identity}"
+        )
+      prior.append(record)
       records.append(record)
   return records
 
@@ -429,17 +452,23 @@ def remaining_samples(
     records: Sequence[Mapping[str, Any]],
     *,
     config: EvalConfig,
-) -> list[tuple[Mapping[str, Any], int]]:
-  existing = {
+) -> list[tuple[Mapping[str, Any], int, int]]:
+  valid = {
       (str(record["task_key"]), int(record["sample_index"]))
       for record in records
+      if record.get("valid") is True
   }
+  attempts = collections.Counter(
+      (str(record["task_key"]), int(record["sample_index"]))
+      for record in records
+  )
   result = []
   for entry in entries:
     key = task_key(entry)
     for sample_index in range(config.n_sample):
-      if (key, sample_index) not in existing:
-        result.append((entry, sample_index))
+      identity = (key, sample_index)
+      if identity not in valid:
+        result.append((entry, sample_index, attempts[identity]))
   return result
 
 
@@ -456,7 +485,14 @@ def aggregate_tasks(
   reports = []
   for entry in entries:
     key = task_key(entry)
-    samples = sorted(by_task[key], key=lambda item: int(item["sample_index"]))
+    task_attempts = by_task[key]
+    by_sample: dict[int, Mapping[str, Any]] = {}
+    for record in task_attempts:
+      sample_index = int(record["sample_index"])
+      selected = by_sample.get(sample_index)
+      if selected is None or record.get("valid") is True:
+        by_sample[sample_index] = record
+    samples = [by_sample[index] for index in sorted(by_sample)]
     n = len(samples)
     valid = [item for item in samples if item.get("valid") is True]
     valid_n = len(valid)
@@ -488,10 +524,14 @@ def aggregate_tasks(
         "n": n,
         "valid_n": valid_n,
         "invalid_n": n - valid_n,
+        "attempts": len(task_attempts),
+        "invalid_attempts": sum(
+            item.get("valid") is not True for item in task_attempts
+        ),
         "missing_n": config.n_sample - n,
         "solve_ratio": k / valid_n if valid_n else None,
         "status_histogram": dict(sorted(collections.Counter(
-            str(item.get("status", "UNKNOWN")) for item in samples
+            str(item.get("status", "UNKNOWN")) for item in task_attempts
         ).items())),
     })
   return reports
@@ -550,6 +590,8 @@ def write_reports(
     digests[name] = _write_jsonl(path, items)
   valid_trajectories = sum(int(item["valid_n"]) for item in reports)
   solved_trajectories = sum(int(item["k"]) for item in reports)
+  attempts = sum(int(item["attempts"]) for item in reports)
+  invalid_attempts = sum(int(item["invalid_attempts"]) for item in reports)
   summary = {
       "schema": SUMMARY_SCHEMA,
       "config": config.canonical_record(),
@@ -563,6 +605,8 @@ def write_reports(
       "category_counts": dict(sorted(by_category.items())),
       "valid_trajectories": valid_trajectories,
       "solved_trajectories": solved_trajectories,
+      "attempts": attempts,
+      "invalid_attempts": invalid_attempts,
       "solve_ratio": (
           solved_trajectories / valid_trajectories
           if valid_trajectories
@@ -587,3 +631,289 @@ def write_reports(
   summary["summary_path"] = str(summary_path)
   summary["summary_sha256"] = hashlib.sha256(payload).hexdigest()
   return summary
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+  records = []
+  for line_number, line in enumerate(
+      path.read_text(encoding="utf-8").splitlines(), 1
+  ):
+    if not line.strip():
+      continue
+    try:
+      value = json.loads(line)
+    except json.JSONDecodeError as error:
+      raise ValueError(
+          f"invalid campaign report JSON at {path}:{line_number}"
+      ) from error
+    if not isinstance(value, dict):
+      raise ValueError(f"campaign report row is not an object: {path}")
+    records.append(value)
+  return records
+
+
+def _finalize_campaign(
+    summary_paths: Sequence[str | os.PathLike[str]],
+    output_dir: str | os.PathLike[str],
+    *,
+    expected_tasks: int,
+    expected_logical_shards: int,
+    tasks_per_logical_shard: int,
+) -> dict[str, Any]:
+  """Merges only a complete, exact-N, single-contract evaluation campaign."""
+  if (
+      expected_tasks <= 0
+      or expected_logical_shards <= 0
+      or tasks_per_logical_shard <= 0
+  ):
+    raise ValueError("campaign expectations must be positive")
+  if len(summary_paths) != expected_logical_shards:
+    raise ValueError(
+        "campaign requires every logical summary: "
+        f"expected={expected_logical_shards} actual={len(summary_paths)}"
+    )
+
+  summaries: dict[int, dict[str, Any]] = {}
+  common_config: dict[str, Any] | None = None
+  all_reports: list[dict[str, Any]] = []
+  input_evidence = []
+  seen_tasks: set[str] = set()
+  task_order: dict[str, tuple[int, int]] = {}
+  config_fields = {field.name for field in dataclasses.fields(EvalConfig)}
+
+  for item in summary_paths:
+    summary_path = Path(item).resolve()
+    summary_bytes = summary_path.read_bytes()
+    try:
+      summary = json.loads(summary_bytes)
+    except json.JSONDecodeError as error:
+      raise ValueError(f"invalid campaign summary JSON: {summary_path}") from error
+    if not isinstance(summary, dict) or summary.get("schema") != SUMMARY_SCHEMA:
+      raise ValueError(f"unexpected campaign input schema: {summary_path}")
+    config_record = summary.get("config")
+    if not isinstance(config_record, dict):
+      raise ValueError(f"campaign summary lacks config: {summary_path}")
+    try:
+      config = EvalConfig(**{
+          name: config_record[name] for name in config_fields
+      })
+    except (KeyError, TypeError) as error:
+      raise ValueError(
+          f"campaign summary config is malformed: {summary_path}"
+      ) from error
+    config.validate()
+    if config.onehost_probe or config.parity_canary:
+      raise ValueError("campaign finalization rejects probe/canary summaries")
+    shard_index = config.shard_index
+    if shard_index in summaries:
+      raise ValueError(f"duplicate campaign logical shard: {shard_index}")
+    normalized = config.canonical_record()
+    normalized.pop("shard_index")
+    if common_config is None:
+      common_config = normalized
+    elif normalized != common_config:
+      raise ValueError("campaign logical summaries changed evaluation contract")
+    if summary.get("config_fingerprint") != config.fingerprint:
+      raise ValueError("campaign summary config fingerprint mismatch")
+    for field_name, expected in (
+        ("trajectory_mode", config.trajectory_mode),
+        ("sampled_by", config.sampled_by),
+        ("sampling_rng_mode", config.sampling_rng_mode),
+        ("engine_seed", config.seed_base),
+    ):
+      if summary.get(field_name) != expected:
+        raise ValueError(f"campaign summary {field_name} mismatch")
+
+    expected_shard_tasks = min(
+        tasks_per_logical_shard,
+        expected_tasks - shard_index * tasks_per_logical_shard,
+    )
+    if expected_shard_tasks <= 0 or summary.get("tasks") != expected_shard_tasks:
+      raise ValueError(
+          f"campaign logical shard {shard_index} has wrong task count"
+      )
+    expected_valid = expected_shard_tasks * config.n_sample
+    attempts = summary.get("attempts")
+    invalid_attempts = summary.get("invalid_attempts")
+    if (
+        summary.get("valid_trajectories") != expected_valid
+        or not isinstance(attempts, int)
+        or not isinstance(invalid_attempts, int)
+        or attempts != expected_valid + invalid_attempts
+    ):
+      raise ValueError(
+          f"campaign logical shard {shard_index} is not exact valid N"
+      )
+    categories = summary.get("category_counts")
+    if not isinstance(categories, dict) or sum(categories.values()) != expected_shard_tasks:
+      raise ValueError("campaign category counts are malformed")
+    if categories.get("broken", 0) or categories.get("incomplete", 0):
+      raise ValueError("campaign contains broken or incomplete task reports")
+
+    paths = summary.get("paths")
+    digests = summary.get("sha256")
+    if not isinstance(paths, dict) or not isinstance(digests, dict):
+      raise ValueError("campaign summary lacks report evidence")
+    complete_path = Path(str(paths.get("complete", "")))
+    if not complete_path.is_absolute():
+      complete_path = summary_path.parent / complete_path
+    complete_path = complete_path.resolve()
+    complete_digest = str(digests.get("complete", ""))
+    if not _SHA256.fullmatch(complete_digest):
+      raise ValueError("campaign complete-report digest is malformed")
+    if sha256_file(complete_path) != complete_digest:
+      raise ValueError("campaign complete-report digest mismatch")
+    reports = _read_jsonl(complete_path)
+    if len(reports) != expected_shard_tasks:
+      raise ValueError("campaign complete-report task count mismatch")
+    report_categories: collections.Counter[str] = collections.Counter()
+    report_solved = 0
+    report_attempts = 0
+    report_invalid_attempts = 0
+    for local_index, report in enumerate(reports):
+      key = str(report.get("task_key", ""))
+      if not key or key in seen_tasks:
+        raise ValueError(f"campaign task identity is missing or duplicate: {key}")
+      seen_tasks.add(key)
+      if (
+          report.get("schema") != REPORT_SCHEMA
+          or report.get("config_fingerprint") != config.fingerprint
+          or report.get("valid_n") != config.n_sample
+          or report.get("n") != config.n_sample
+          or report.get("invalid_n") != 0
+          or report.get("missing_n") != 0
+          or report.get("category") not in ("partial", "all_fail", "all_pass")
+      ):
+        raise ValueError(f"campaign task report is not exact valid N: {key}")
+      k = report.get("k")
+      report_attempt_count = report.get("attempts")
+      report_invalid_count = report.get("invalid_attempts")
+      expected_category = (
+          "all_fail"
+          if k == 0
+          else ("all_pass" if k == config.n_sample else "partial")
+      )
+      if (
+          not isinstance(k, int)
+          or not 0 <= k <= config.n_sample
+          or report.get("category") != expected_category
+          or not isinstance(report_attempt_count, int)
+          or not isinstance(report_invalid_count, int)
+          or report_attempt_count != config.n_sample + report_invalid_count
+          or report.get("trajectory_mode") != config.trajectory_mode
+          or report.get("sampled_by") != config.sampled_by
+          or report.get("sampling_rng_mode") != config.sampling_rng_mode
+          or report.get("engine_seed") != config.seed_base
+      ):
+        raise ValueError(f"campaign task report metrics are inconsistent: {key}")
+      task_order[key] = (shard_index, local_index)
+      report_categories[str(report["category"])] += 1
+      report_solved += k
+      report_attempts += report_attempt_count
+      report_invalid_attempts += report_invalid_count
+    if (
+        dict(report_categories) != categories
+        or summary.get("solved_trajectories") != report_solved
+        or attempts != report_attempts
+        or invalid_attempts != report_invalid_attempts
+    ):
+      raise ValueError("campaign summary disagrees with complete task reports")
+    summaries[shard_index] = summary
+    all_reports.extend(reports)
+    input_evidence.append({
+        "logical_shard_index": shard_index,
+        "summary_path": str(summary_path),
+        "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+        "complete_path": str(complete_path),
+        "complete_sha256": complete_digest,
+    })
+
+  if set(summaries) != set(range(expected_logical_shards)):
+    raise ValueError("campaign logical shard indices are incomplete")
+  if len(all_reports) != expected_tasks or len(seen_tasks) != expected_tasks:
+    raise ValueError("campaign global task cardinality mismatch")
+
+  input_evidence.sort(key=lambda item: item["logical_shard_index"])
+  all_reports.sort(key=lambda item: task_order[str(item["task_key"])])
+  categories = collections.Counter(
+      str(report["category"]) for report in all_reports
+  )
+  sets = {
+      "complete": all_reports,
+      "q4_learnable": [
+          report for report in all_reports if report["category"] == "partial"
+      ],
+      "q32_candidates": [
+          report
+          for report in all_reports
+          if report["category"] in ("partial", "all_fail")
+      ],
+      "all_pass": [
+          report for report in all_reports if report["category"] == "all_pass"
+      ],
+      "all_fail": [
+          report for report in all_reports if report["category"] == "all_fail"
+      ],
+  }
+  root = Path(output_dir).resolve()
+  paths = {}
+  digests = {}
+  for name, reports in sets.items():
+    path = root / f"p46-campaign.{name}.jsonl"
+    paths[name] = str(path)
+    digests[name] = _write_jsonl(path, reports)
+
+  valid_trajectories = sum(
+      int(summary["valid_trajectories"]) for summary in summaries.values()
+  )
+  attempts = sum(int(summary["attempts"]) for summary in summaries.values())
+  invalid_attempts = sum(
+      int(summary["invalid_attempts"]) for summary in summaries.values()
+  )
+  solved = sum(int(report["k"]) for report in all_reports)
+  campaign = {
+      "schema": CAMPAIGN_SCHEMA,
+      "config_without_logical_shard_index": common_config,
+      "logical_shards": expected_logical_shards,
+      "tasks": expected_tasks,
+      "n_sample": 16,
+      "valid_trajectories": valid_trajectories,
+      "solved_trajectories": solved,
+      "attempts": attempts,
+      "invalid_attempts": invalid_attempts,
+      "solve_ratio": solved / valid_trajectories,
+      "category_counts": dict(sorted(categories.items())),
+      "input_summaries": input_evidence,
+      "paths": paths,
+      "sha256": digests,
+  }
+  summary_path = root / "p46-campaign.summary.json"
+  payload = (json.dumps(campaign, indent=2, sort_keys=True) + "\n").encode(
+      "utf-8"
+  )
+  summary_path.parent.mkdir(parents=True, exist_ok=True)
+  try:
+    with summary_path.open("xb") as output:
+      output.write(payload)
+      output.flush()
+      os.fsync(output.fileno())
+  except FileExistsError:
+    if summary_path.read_bytes() != payload:
+      raise ValueError("existing campaign summary differs from exact payload")
+  campaign["summary_path"] = str(summary_path)
+  campaign["summary_sha256"] = hashlib.sha256(payload).hexdigest()
+  return campaign
+
+
+def finalize_campaign(
+    summary_paths: Sequence[str | os.PathLike[str]],
+    output_dir: str | os.PathLike[str],
+) -> dict[str, Any]:
+  """Finalizes the signed 1851-task x N16 production evaluation campaign."""
+  return _finalize_campaign(
+      summary_paths,
+      output_dir,
+      expected_tasks=1851,
+      expected_logical_shards=58,
+      tasks_per_logical_shard=32,
+  )

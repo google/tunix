@@ -135,7 +135,7 @@ def main() -> int:
       eval_deepswe._run_evaluation(  # pylint: disable=protected-access
           config,
           physical_entries,
-          [(physical_entries[0], 0)],
+          [(physical_entries[0], 0, 0)],
           trajectory_path,
           runtime=runtime,
       )

@@ -34,6 +34,11 @@ class RewardOnlyContractTest(unittest.TestCase):
         "left_padded_prompt_tokens=output.padded_prompt_tokens", evaluator
     )
     self.assertIn("generation_steps = min(generation_steps, 256)", evaluator)
+    self.assertIn("if timed_out or physical_pending:", evaluator)
+    self.assertIn("P46_EVAL_PHYSICAL_INCOMPLETE", evaluator)
+    self.assertIn("pending_valid_samples=", evaluator)
+    finalizer = (ROOT / "examples/deepswe/finalize_deepswe_eval.py").read_text()
+    self.assertIn("P46_EVAL_CAMPAIGN_PASS", finalizer)
 
   def test_eval_adds_only_the_swe_env_batch_dimension(self):
     row = {
