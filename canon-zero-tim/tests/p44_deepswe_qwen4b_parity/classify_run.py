@@ -189,7 +189,7 @@ def _artifact_checks(
       "manifest_exact": (
           manifest.get("schema") == _MANIFEST_SCHEMA
           and manifest.get("stage") == stage
-          and manifest.get("model_id") == "Qwen/Qwen3-4B"
+          and manifest.get("model_id") == "Qwen/Qwen3-4B-Instruct-2507"
           and manifest.get("contract_name") == spec["contract"]
           and manifest.get("role_topology")
           == {"dp": spec["dp"], "tp": 8, "devices": spec["devices"]}

@@ -178,7 +178,7 @@ class P44ClassifierTest(unittest.TestCase):
           *_trajectory_batch(),
           expected_step=step,
           output_dir=root,
-          model_id="Qwen/Qwen3-4B",
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
           values={
               "CANON_P43_DEEPSWE_DEBUG": "0",
               "CANON_P44_DEEPSWE_PARITY": "1",

@@ -64,6 +64,13 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     self.assertIn("deepswe_contract.active_workload(os.environ)", text)
     self.assertIn("configure_replicated_parameter_sharding", text)
     self.assertIn("P34 forbids FSDP", text)
+    self.assertIn(
+        "training_data_sharding_axis = (train_axis_names[0],)", text
+    )
+    self.assertIn("[DEEPSWE.DATA_SHARDING] PASS", text)
+    self.assertIn(
+        "data_sharding_axis=training_data_sharding_axis", text
+    )
 
   def test_backward_no_commit_requires_full_array_repeat(self):
     adapter = (ROOT / "tunix/rl/canonical_qwen3_adapter.py").read_text()

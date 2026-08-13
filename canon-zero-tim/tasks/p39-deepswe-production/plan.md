@@ -10,9 +10,9 @@ nonfinite, optimizer, replica and infrastructure contract remains fail-closed.
 
 ## Sources
 
-- Current P39.4 operator-branch base after non-overlapping synchronization:
+- Current P39.5 bounded-lifecycle development base after synchronization:
   `yuxzhang/canon-zero-tim` at
-  `4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd`. Implementation started from
+  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`. Implementation started from
   `4e4ca2891a01448f09428affd1eb2434bbd61657`; the intervening operator commits
   changed only FrozenLake/P38 files outside the P39.4 change set.
 
@@ -38,7 +38,7 @@ nonfinite, optimizer, replica and infrastructure contract remains fail-closed.
 | Trajectory mini batch | 64 global trajectories |
 | Gradient trajectory micro batch | 4 global trajectories |
 | Prompt / response / turns | 4096 / 32768 / 50 |
-| Sampling | temperature 0.7, top-k disabled, top-p 1.0 |
+| Sampling | temperature 1.0, top-k disabled, top-p 1.0 |
 | GRPO | one iteration, beta 0, epsilon 0.2/0.28, off-policy steps 0 |
 | Loss | `sequence-mean-token-scale`, RLOO advantages |
 | Optimizer | AdamW, lr 1e-6, b1 0.9, b2 0.99, wd 0.01, grad norm 1.0 |
@@ -54,6 +54,7 @@ nonfinite, optimizer, replica and infrastructure contract remains fail-closed.
 | Trajectory capture | every batch, durable and fail-closed, with solve/group metrics |
 | Finite alignment residuals | warning-only for full convergence; nonfinite remains fatal |
 | Zero-signal batch | record and continue normal commit; never resample or inject signal |
+| Rollout lifecycle | turn 300 s; trajectory 4800 s; step/reward 1800 s; cleanup 300 s; R2E pod 5100 s; whole batch 5400 s |
 
 The older quality-fix launcher used FSDP-named axes and smaller defaults in
 some entry points. P39 does not copy those topology defaults. FSDP would add a
@@ -112,6 +113,14 @@ bucket remain rejected.
     nonempty P34 value during preflight.  After publication, retry the same
     signed 32B/data/topology/device-optimizer configuration; do not hard-code
     device IDs observed on a prior allocation.
+12. Attempt `p34r03` entered real 32B rollout but update zero remained active
+    for more than four hours. The old trajectory engine allowed negative
+    remaining time and lacked request, reward, cleanup and shared batch
+    deadlines. Add true vLLM abort, one trajectory wall clock, bounded reward
+    and cleanup, confirmed R2E pod deletion, and one 5400-second batch
+    watchdog. Lock a matching Qwen3-4B three-update debug recipe to a
+    3600-second batch budget on both 64 and 256 devices before the next 32B
+    target attempt.
 
 ## Rollback
 

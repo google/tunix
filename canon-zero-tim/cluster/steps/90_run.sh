@@ -115,6 +115,22 @@ set -o pipefail
 bash -c "$CANON_RUN_CMD" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 echo "[run] exit=$rc"
+if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
+  n_eval_subshard=$(grep -ac '^P46_EVAL_SUBSHARD_PASS ' "$LOG" || true)
+  n_eval_report=$(grep -ac '^P46_EVAL_LOGICAL_REPORT_PASS ' "$LOG" || true)
+  n_eval_timeout=$(grep -ac 'P46_EVAL_SHARD_TIMEOUT' "$LOG" || true)
+  echo "[P46.EVAL.POSTFLIGHT] rc=$rc subshard=$n_eval_subshard report=$n_eval_report timeout=$n_eval_timeout"
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  if [ "$((n_eval_subshard + n_eval_report))" -ne 1 ] || \
+     [ "$n_eval_timeout" -ne 0 ]; then
+    echo "[run] FATAL: P46 evaluation completion marker contract failed" >&2
+    exit 1
+  fi
+  echo "[P46.EVAL.POSTFLIGHT] PASS"
+  exit 0
+fi
 # A fail-closed numerical gate exits before the normal P33 classifier runs.  Preserve the
 # complete pre-backward record in the pod log, which is the only artifact guaranteed to survive
 # a deleted pod.  The report contains hashes and numerical diagnostics, never credentials.
@@ -363,7 +379,21 @@ elif [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
   echo "[run] P38 serving expected precheck exit=1 accepted; backward=0 optimizer_commits=0"
   rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
-  if [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ]; then
+  if [ "${CANON_P46_DEEPSWE_TRAIN:-0}" = "1" ]; then
+    classification="$CANON_STATE/p46_deepswe_q32_${CANON_P46_TOPOLOGY}_full.classification.json"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
+        --p46-profile \
+        --topology "$CANON_P46_TOPOLOGY" \
+        --stage full \
+        --run-log "$LOG" \
+        --debug-dir "$CANON_P34_DEBUG_DIR" \
+        --weight-report "$CANON_P34_WEIGHT_REPORT" \
+        --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
+        --update-report "$CANON_UPDATE_REPORT" \
+        --alignment-report "$CANON_ALIGN_REPORT" \
+        --output "$classification" || exit 1
+  elif [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ]; then
     classification="$CANON_STATE/p44_deepswe_${CANON_P44_TOPOLOGY}_${CANON_P34_RUN_STAGE}.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
       python3 "$CANON_PKG/tests/p44_deepswe_qwen4b_parity/classify_run.py" \

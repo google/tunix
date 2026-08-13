@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import time
 from typing import Any, Optional, cast
 import numpy as np
 
@@ -100,10 +102,28 @@ class SWEEnv(BaseTaskEnv):
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
 
+  @property
+  def _debug_prefix(self) -> str:
+    return (
+        "[SWEEnv "
+        f"group={self.extra_kwargs.get('group_id', '?')} "
+        f"pair={self.extra_kwargs.get('pair_index', '?')}]"
+    )
+
   def _initial_observation(self) -> Any:
     if not self.env:
       # Initialize environment if not created yet.
+      logging.info(
+          "%s creating RepoEnv backend=%s scaffold=%s step_timeout=%ss "
+          "reward_timeout=%ss",
+          self._debug_prefix,
+          self.backend,
+          self.scaffold,
+          self.step_timeout,
+          self.reward_timeout,
+      )
       env_args = EnvArgs(ds=self.entry)
+      started = time.perf_counter()
       self.env = RepoEnv(
           env_args,
           backend=self.backend,
@@ -111,7 +131,13 @@ class SWEEnv(BaseTaskEnv):
           reward_timeout=self.reward_timeout,
           verbose=self.verbose,
       )
+      logging.info(
+          "%s RepoEnv created in %.2fs",
+          self._debug_prefix,
+          time.perf_counter() - started,
+      )
     else:
+      logging.info("%s resetting existing RepoEnv", self._debug_prefix)
       self.env.reset()
     self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
@@ -121,7 +147,15 @@ class SWEEnv(BaseTaskEnv):
     self.total_steps = 0
 
     # Polls docker runtime to get task instruction.
-    return self.env.get_task_instruction()
+    started = time.perf_counter()
+    instruction = self.env.get_task_instruction()
+    logging.info(
+        "%s get_task_instruction done in %.2fs chars=%d",
+        self._debug_prefix,
+        time.perf_counter() - started,
+        len(str(instruction)),
+    )
+    return instruction
 
   def _step_impl(self, action: Any) -> EnvStepResult:
     if isinstance(action, str):
@@ -135,7 +169,22 @@ class SWEEnv(BaseTaskEnv):
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
       raise ValueError("Environment not initialized")
+    logging.info(
+        "%s env.step start step=%d function=%s",
+        self._debug_prefix,
+        self.total_steps,
+        getattr(action_obj, "function_name", None),
+    )
+    started = time.perf_counter()
     obs, reward, done, info = self.env.step(action_obj)
+    logging.info(
+        "%s env.step done in %.2fs done=%s reward=%s chars=%d",
+        self._debug_prefix,
+        time.perf_counter() - started,
+        done,
+        reward,
+        len(str(obs)),
+    )
 
     self.total_steps += 1
 
@@ -146,6 +195,7 @@ class SWEEnv(BaseTaskEnv):
   def close(self) -> None:
     """Close the environment and clean up resources."""
     if self.env is not None:
+      logging.info("%s closing RepoEnv", self._debug_prefix)
       self.env.close()
 
     if self.delete_image and self.env:

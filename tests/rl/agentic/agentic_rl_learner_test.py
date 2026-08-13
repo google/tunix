@@ -35,6 +35,40 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 class AgenticRLLearnerTest(parameterized.TestCase):
 
+  def test_rollout_batch_watchdog_fails_waiting_for_first_group(self):
+    class StalledOrchestrator:
+
+      async def run_producers_from_stream(self, **kwargs):
+        del kwargs
+        await asyncio.Event().wait()
+
+      async def yield_batches(self, batch_size):
+        del batch_size
+        await asyncio.Event().wait()
+        if False:
+          yield []
+
+    async def run():
+      learner = object.__new__(DummyLearner)
+      learner.loop = asyncio.get_running_loop()
+      learner.rl_cluster = mock.Mock(global_steps=0)
+      learner._full_batch_size = 1
+      learner._background_tasks = set()
+      learner.algo_config = agentic_rl_learner.AgenticRLConfig(
+          num_generations=2,
+          rollout_batch_timeout=0.01,
+      )
+      stream = learner._orchestrator_producer(
+          StalledOrchestrator(), iter(()), 2, "Token"
+      )
+      with self.assertRaisesRegex(
+          TimeoutError, "completed_prompt_groups=0/1"
+      ):
+        await anext(stream)
+      await stream.aclose()
+
+    asyncio.run(run())
+
   def test_p38_diagnostic_consumer_covers_all_prompt_groups(self):
     self.assertEqual(
         agentic_rl_learner._p38_diagnostic_consumer_contract(

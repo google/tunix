@@ -15,6 +15,7 @@
 """CPU contracts for canonical re-score through both in-process vLLM modes."""
 
 import os
+from itertools import count
 from absl.testing import absltest
 import numpy as np
 import types
@@ -108,6 +109,25 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         reset_prefix_cache=True,
         reset_timeout_s=300.0,
     )
+
+  def test_server_mode_deadline_aborts_unfinished_request(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.llm = None
+    sampler._request_counter = count()
+    sampler._driver = mock.Mock()
+    future = mock.Mock()
+    future.result.side_effect = TimeoutError()
+    future.done.return_value = False
+    sampler._driver.submit_requests.return_value = [future]
+
+    with self.assertRaisesRegex(TimeoutError, 'aborted 1 unfinished'):
+      sampler._generate_server_mode(
+          [{"prompt_token_ids": [1, 2]}],
+          object(),
+          request_timeout_s=0.01,
+      )
+
+    sampler._driver.cancel.assert_called_once_with("0")
 
   def test_prefill_rescore_uses_mode_independent_sampler_contract(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)

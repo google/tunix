@@ -275,3 +275,41 @@ change was performed.
 - Boundary: publication did not launch a JobSet or target retry.  The next
   operator must pull the branch into a clean worktree, record its exact HEAD
   and render a new manifest; the failed p34r02 manifest must not be reused.
+
+## 2026-08-13 UTC — P39.5 bound update-zero rollout time and lock YAML defaults
+
+- Type: target evidence diagnosis, implementation and local verification.
+- Source: synchronized unpublished worktree based on
+  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`; main was not touched.
+- Target evidence: `p34r03` source
+  `65b0cd0a84807f2308409d1867022407ae53f8fb`, raw log
+  `../../debug_logs/p34_p34r03_deepswe_full.raw.log`, SHA-256
+  `426019f66f812e0bb80874cbcfb19fe183846b6565251bb5f043d505425dd2a1`.
+  It passed 256-device topology, Qwen3-32B initialization, online W&B and the
+  clean 4578-to-1851 data join, then remained in update-zero rollout for more
+  than four hours. The log has 60 negative-remaining-time `ENV_TIMEOUT`
+  records, ends with four active vLLM requests, and has no completed
+  trajectory batch, backward or optimizer commit.
+- Action: threaded per-turn deadlines into the vLLM server driver and aborts;
+  applied one wall clock to trajectory reset/model/step/reward; bounded
+  cleanup; added a complete-batch watchdog; and made R2E pod cleanup
+  delete-and-confirm with labels, resources and an active deadline.
+- Action: locked renderer/YAML defaults. Qwen3-4B debug is B4/G4, 4096
+  response, five turns, temperature 1.0, three updates and a 3600-second
+  rollout batch on both 64 and 256 devices. Qwen3-32B full is B8/G8, 32K
+  response, 50 turns, temperature 1.0, 1000 updates and a 5400-second batch.
+  Both require the 1851-row clean whitelist, device-resident optimizer,
+  finite alignment warning-only and durable trajectory/solve metrics.
+- Verification: P34 static/trajectory/update, P39, P43 and the 41-case P44
+  CPU gates pass. P34 and P44 exact-image gates pass in pinned local image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`;
+  the latter includes model/reset/reward/cleanup deadline tests and an
+  unfinished vLLM request-abort test. Non-launchable P34 full and P44 64/256
+  three-update renders all emitted PASS markers with the signed defaults.
+- Boundary: no cloud resource, real target retry, credential, commit or push
+  occurred. Local frozen-image tests do not prove TP8/Pathways execution,
+  real sandbox deletion, optimizer updates, HBM capacity or training quality.
+- Next: after explicit publication approval, read back the exact operator
+  branch SHA, run Qwen3-4B three-update debug on the available 64/256 target,
+  inspect its trajectory/deadline/cleanup evidence, then start a fresh
+  Qwen3-32B full attempt. Never train a partial timed-out batch.

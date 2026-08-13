@@ -47,14 +47,17 @@ class DeepSWEWorkload:
   global_prompts: int = 8
   generations: int = 8
   max_prompt_length: int = 4096
-  max_response_length: int = 32768
+  max_response_length: int = 16384
   max_turns: int = 50
   max_steps: int = 1000
-  temperature: float = 0.7
+  temperature: float = 1.0
   per_turn_timeout_secs: int = 300
-  episode_timeout_secs: int = 5400
+  episode_timeout_secs: int = 4800
   step_timeout_secs: int = 1800
   reward_timeout_secs: int = 1800
+  cleanup_timeout_secs: int = 300
+  rollout_batch_timeout_secs: int = 5400
+  sandbox_active_deadline_secs: int = 5100
   num_iterations: int = 1
   beta: float = 0.0
   epsilon: float = 0.2
@@ -91,7 +94,7 @@ class DeepSWEWorkload:
     """Rejects any silent change to the first DeepSWE campaign."""
     expected_topology = {
         "p34-production": (
-            "Qwen/Qwen3-32B", 8, 8, 16, 8, 128, 4, 4096, 4, 32768, 50,
+            "Qwen/Qwen3-32B", 8, 8, 16, 8, 128, 4, 4096, 4, 16384, 50,
             1000,
         ),
         "p39-64chip-pilot": (
@@ -101,10 +104,20 @@ class DeepSWEWorkload:
             "Qwen/Qwen3-8B", 4, 4, 4, 8, 32, 4, 1024, 4, 4096, 5, 3,
         ),
         "p44-qwen4b-parity-64": (
-            "Qwen/Qwen3-4B", 4, 4, 4, 8, 32, 4, 1024, 4, 4096, 5, 3,
+            "Qwen/Qwen3-4B-Instruct-2507", 4, 4, 4, 8, 32, 4, 1024, 4,
+            16384, 50, 3,
         ),
         "p44-qwen4b-parity-256": (
-            "Qwen/Qwen3-4B", 4, 4, 16, 8, 128, 1, 4096, 1, 4096, 5, 3,
+            "Qwen/Qwen3-4B-Instruct-2507", 4, 4, 16, 8, 128, 1, 4096, 1,
+            16384, 50, 3,
+        ),
+        "p46-qwen32b-train-64": (
+            "Qwen/Qwen3-32B", 8, 8, 4, 8, 32, 16, 1024, 16, 16384, 50,
+            1000,
+        ),
+        "p46-qwen32b-train-256": (
+            "Qwen/Qwen3-32B", 8, 8, 16, 8, 128, 4, 4096, 4, 16384, 50,
+            1000,
         ),
     }
     try:
@@ -174,17 +187,35 @@ class DeepSWEWorkload:
       raise ValueError(
           f"{self.contract_name} signed context/response/turn limits changed"
       )
-    if self.max_steps != expected_steps or self.temperature != 0.7:
+    if self.max_steps != expected_steps or self.temperature != 1.0:
       raise ValueError(
           f"{self.contract_name} signed optimization campaign changed"
       )
+    parity = self.contract_name.startswith("p44-qwen4b-parity-")
+    expected_timeouts = (
+        (300, 3000, 600, 600, 300, 3600, 3300)
+        if parity
+        else (300, 4800, 1800, 1800, 300, 5400, 5100)
+    )
     if (
         self.per_turn_timeout_secs,
         self.episode_timeout_secs,
         self.step_timeout_secs,
         self.reward_timeout_secs,
-    ) != (300, 5400, 1800, 1800):
+        self.cleanup_timeout_secs,
+        self.rollout_batch_timeout_secs,
+        self.sandbox_active_deadline_secs,
+    ) != expected_timeouts:
       raise ValueError("P34 signed environment timeouts changed")
+    if (
+        self.episode_timeout_secs + self.cleanup_timeout_secs
+        != self.sandbox_active_deadline_secs
+        or self.sandbox_active_deadline_secs
+        >= self.rollout_batch_timeout_secs
+    ):
+      raise ValueError(
+          "DeepSWE timeout nesting must reserve a positive batch-abort margin"
+      )
     if (
         self.num_iterations,
         self.beta,
@@ -264,12 +295,17 @@ P43_DEBUG_WORKLOAD = DeepSWEWorkload(
 )
 P44_PARITY_64_WORKLOAD = DeepSWEWorkload(
     contract_name="p44-qwen4b-parity-64",
-    model_id="Qwen/Qwen3-4B",
+    model_id="Qwen/Qwen3-4B-Instruct-2507",
     global_prompts=4,
     generations=4,
-    max_response_length=4096,
-    max_turns=5,
+    max_response_length=16384,
+    max_turns=50,
     max_steps=3,
+    episode_timeout_secs=3000,
+    step_timeout_secs=600,
+    reward_timeout_secs=600,
+    rollout_batch_timeout_secs=3600,
+    sandbox_active_deadline_secs=3300,
     dp_size=4,
     devices_per_role=32,
     global_m=1024,
@@ -282,6 +318,18 @@ P44_PARITY_256_WORKLOAD = dataclasses.replace(
     devices_per_role=128,
     global_m=4096,
     max_num_seqs_per_dp=1,
+)
+P46_Q32_64_WORKLOAD = dataclasses.replace(
+    P34_WORKLOAD,
+    contract_name="p46-qwen32b-train-64",
+    dp_size=4,
+    devices_per_role=32,
+    global_m=1024,
+    max_num_seqs_per_dp=16,
+)
+P46_Q32_256_WORKLOAD = dataclasses.replace(
+    P34_WORKLOAD,
+    contract_name="p46-qwen32b-train-256",
 )
 
 
@@ -309,6 +357,15 @@ def p44_recipe_signature(workload: DeepSWEWorkload) -> dict[str, Any]:
   }
 
 
+def p46_q32_workload(topology: str) -> DeepSWEWorkload:
+  """Returns the exact 64/256 Qwen3-32B full-training topology."""
+  if topology == "64":
+    return P46_Q32_64_WORKLOAD
+  if topology == "256":
+    return P46_Q32_256_WORKLOAD
+  raise ValueError("CANON_P46_TOPOLOGY must be exactly 64 or 256")
+
+
 def active_workload(
     values: Mapping[str, str] | None = None,
 ) -> DeepSWEWorkload:
@@ -317,16 +374,25 @@ def active_workload(
   pilot_raw = environ.get("CANON_P39_64CHIP_PILOT", "0")
   debug_raw = environ.get("CANON_P43_DEEPSWE_DEBUG", "0")
   parity_raw = environ.get("CANON_P44_DEEPSWE_PARITY", "0")
+  p46_raw = environ.get("CANON_P46_DEEPSWE_TRAIN", "0")
   if pilot_raw not in ("0", "1"):
     raise ValueError("CANON_P39_64CHIP_PILOT must be exactly 0 or 1")
   if debug_raw not in ("0", "1"):
     raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
   if parity_raw not in ("0", "1"):
     raise ValueError("CANON_P44_DEEPSWE_PARITY must be exactly 0 or 1")
-  selected = sum(raw == "1" for raw in (pilot_raw, debug_raw, parity_raw))
+  if p46_raw not in ("0", "1"):
+    raise ValueError("CANON_P46_DEEPSWE_TRAIN must be exactly 0 or 1")
+  selected = sum(
+      raw == "1" for raw in (pilot_raw, debug_raw, parity_raw, p46_raw)
+  )
   if selected > 1:
-    raise ValueError("P39, P43, and P44 DeepSWE modes are mutually exclusive")
-  if parity_raw == "1":
+    raise ValueError(
+        "P39, P43, P44, and P46 DeepSWE modes are mutually exclusive"
+    )
+  if p46_raw == "1":
+    workload = p46_q32_workload(environ.get("CANON_P46_TOPOLOGY", ""))
+  elif parity_raw == "1":
     workload = p44_workload(environ.get("CANON_P44_TOPOLOGY", ""))
   elif debug_raw == "1":
     workload = P43_DEBUG_WORKLOAD
@@ -599,6 +665,10 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "p44-qwen4b-parity-64",
       "p44-qwen4b-parity-256",
   )
+  p46_train = workload.contract_name in (
+      "p46-qwen32b-train-64",
+      "p46-qwen32b-train-256",
+  )
   parity_topology = str(workload.devices_per_role * 2) if parity else "none"
   production_capture = bool(
       not pilot
@@ -637,7 +707,35 @@ def validate_environment(values: Mapping[str, str]) -> None:
       ),
       "CANON_P34_DATASET_SPLIT": "train",
       "CANON_P34_DATASET_ROWS": "4578",
-      "CANON_P34_CLEAN_ROWS": "1851" if production_capture else "0",
+      "CANON_P34_CLEAN_ROWS": (
+          "1851" if production_capture or parity else "0"
+      ),
+      "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": str(
+          workload.cleanup_timeout_secs
+      ),
+      "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": str(
+          workload.rollout_batch_timeout_secs
+      ),
+      "CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS": str(
+          workload.per_turn_timeout_secs
+      ),
+      "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS": str(
+          workload.episode_timeout_secs
+      ),
+      "CANON_DEEPSWE_STEP_TIMEOUT_SECS": str(
+          workload.step_timeout_secs
+      ),
+      "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": str(
+          workload.reward_timeout_secs
+      ),
+      "R2E_ACTIVE_DEADLINE_SECONDS": str(
+          workload.sandbox_active_deadline_secs
+      ),
+      "R2E_POD_DELETE_TIMEOUT_SECONDS": "300",
+      "R2E_K8S_CPU": "2",
+      "R2E_K8S_MEM": "4Gi",
+      "R2E_K8S_CPU_LIMIT": "4",
+      "R2E_K8S_MEM_LIMIT": "8Gi",
       "WANDB_MODE": "online",
       "CANON_P39_64CHIP_PILOT": "1" if pilot else "0",
       "CANON_P39_PILOT_ADMITTED": "1" if pilot else "0",
@@ -656,6 +754,10 @@ def validate_environment(values: Mapping[str, str]) -> None:
           if parity and values.get("CANON_P34_RUN_STAGE") == "rollout-only"
           else "0"
       ),
+      "CANON_P46_DEEPSWE_TRAIN": "1" if p46_train else "0",
+      "CANON_P46_TOPOLOGY": (
+          str(workload.devices_per_role * 2) if p46_train else "none"
+      ),
       "CANON_DP_SIZE": str(workload.dp_size),
       "CANON_TP_SIZE": str(workload.tp_size),
       "CANON_TOTAL_DEVICES": str(workload.devices_per_role),
@@ -671,7 +773,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
         "CANON_OPT_STATE_RESIDENT": "1",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
         "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
-            "1" if production_capture else "0"
+            "1" if parity or production_capture else "0"
         ),
     })
   else:

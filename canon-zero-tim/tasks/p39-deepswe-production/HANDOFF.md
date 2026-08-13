@@ -9,8 +9,10 @@ Read `plan.md`, then `state.md`, then `log.md`.
 
 ## Current revision
 
-- Latest operator-branch base used by this worktree:
-  `42139ffa9cf30b4f07cc9902896ab11294ac68d7`
+- Latest operator-branch base used by this unpublished worktree:
+  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`
+- P39.5 bounded-lifecycle implementation: local changes only; no commit or
+  publication SHA exists yet
 - P39.4 publication revision: the exact 40-character HEAD after pulling
   `yuxzhang/canon-zero-tim`; do not substitute the base SHA listed above
 - p34r02 mesh-admission repair commit:
@@ -65,6 +67,18 @@ publication HEAD.  Do not launch from this local branch or substitute an older S
     `CANON_EXPECT_MODEL_MESH_IDS`.  P34 must never inherit the legacy
     four-device `0,2,1,3` default into its 128-device Pathways rollout role;
     renderer validation and `00_env.sh` now enforce that before launch.
+12. Target `p34r03` proved real Qwen3-32B rollout entry but exposed an
+    unbounded lifecycle: 60 environment timeouts received negative remaining
+    time, update zero did not produce a trajectory batch, and four vLLM
+    requests were still active after more than four hours.
+13. P39.5 gives vLLM requests a real abort path, shares one wall clock across
+    reset/model/step/reward, bounds cleanup, confirms R2E pod deletion, and
+    gives the complete prompt batch one watchdog.
+14. The rendered defaults are now explicit: Qwen3-4B debug is B4/G4, 4096
+    response, five turns, three updates and a 3600-second rollout batch on
+    either 64 or 256 devices; Qwen3-32B full remains B8/G8, 32K response,
+    50 turns, 1000 updates and a 5400-second rollout batch. Both use
+    temperature 1.0, clean data, device optimizer and durable trajectories.
 
 ## Reproduce local validation
 
@@ -78,6 +92,10 @@ contract_cases=5 scheduler_cases=1 overlay=qwen32b`. It passed in the pinned
 image after the P39 changes. It must be rerun from the final publication SHA because shared
 alignment and agentic-learner code changed after the original P39 gate. A
 local pass does not promote target status.
+
+Also run the Qwen3-4B exact-image gate from the final publication SHA. It must
+end with `P44_EXACT_IMAGE_CPU_PASS overlay=qwen4b`; the gate includes the
+request-abort and reset/model/reward/cleanup deadline controls.
 
 ## Current target decision
 
@@ -99,15 +117,23 @@ Finite A-B, B-C and downstream alignment residuals are warning-only and remain
 fully recorded.  Do not hand-edit a rendered manifest.  Follow
 `../../cluster/P34_DEEPSWE_RUNBOOK.md` exactly.
 
-Attempt `p34r02` reached Qwen3-32B trainer-side loading and vLLM rollout-engine
-construction, then failed before rollout because the 128-device model mesh was
-compared with the stale one-host ID list `[0,2,1,3]`.  The complete raw log is
-`../../debug_logs/p34_p34r02_deepswe_full.raw.log`, SHA-256
-`6f1c446ad650acb1cf03c7bf9368c5dfbe78142689dbe6a358b11ab7c8097952`.
-The repair is published and all affected CPU/exact-image gates pass; a repaired
-target retry has not run.  Pull the operator branch and record its exact HEAD
-before rendering.  Do not hard-code the 128 IDs observed in p34r02 because they
-are allocation-specific.
+Attempt `p34r03` used source
+`65b0cd0a84807f2308409d1867022407ae53f8fb` and passed the repaired dynamic
+mesh, Qwen3-32B initialization, online W&B and clean data before entering real
+rollout. Its complete returned log is
+`../../debug_logs/p34_p34r03_deepswe_full.raw.log`, SHA-256
+`426019f66f812e0bb80874cbcfb19fe183846b6565251bb5f043d505425dd2a1`.
+It is not a successful rollout: update zero ran for more than four hours, 60
+trajectories reported negative-remaining-time `ENV_TIMEOUT`, the final lines
+still showed four active vLLM requests, and there is no completed trajectory
+batch, backward or optimizer record. P39.5 repairs this locally; the target
+retry has not run.
+
+After publication, resolve the exact new remote HEAD. First render the
+Qwen3-4B `three-update` debug recipe for the available 64/256 allocation and
+inspect its trajectory/deadline/cleanup evidence. Then render Qwen3-32B
+`full`. Do not launch from the unpublished local worktree and do not reuse the
+p34r03 manifest.
 
 ## Stop conditions
 

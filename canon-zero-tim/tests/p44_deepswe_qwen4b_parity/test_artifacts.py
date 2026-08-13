@@ -55,6 +55,13 @@ def _values(topology: str) -> dict[str, str]:
       "CANON_SOURCE_BRANCH": "yuxzhang/canon-zero-tim",
       "CANON_RUN_ID": f"artifact-{topology}",
       "CANON_P34_RUN_STAGE": "rollout-only",
+      "CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS": "3000",
+      "CANON_DEEPSWE_STEP_TIMEOUT_SECS": "600",
+      "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
+      "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "3600",
+      "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
   }
 
 
@@ -100,7 +107,7 @@ class P44ArtifactTest(unittest.TestCase):
             *_batch(),
             expected_step=0,
             output_dir=root,
-            model_id="Qwen/Qwen3-4B",
+            model_id="Qwen/Qwen3-4B-Instruct-2507",
             values=_values(topology),
         )
         manifest = json.loads((root / "run_manifest.json").read_text())
@@ -113,6 +120,15 @@ class P44ArtifactTest(unittest.TestCase):
         self.assertEqual(metrics["schema"], artifacts.P44_METRICS_SCHEMA)
         self.assertEqual(metrics["trajectories"], 16)
         self.assertEqual(metrics["prompt_groups"], 4)
+        self.assertEqual(manifest["timeouts_seconds"], {
+            "per_turn": "300",
+            "trajectory": "3000",
+            "step": "600",
+            "reward": "600",
+            "cleanup": "300",
+            "rollout_batch": "3600",
+            "sandbox_active_deadline": "3300",
+        })
     self.assertEqual(manifests[0]["model_id"], manifests[1]["model_id"])
     self.assertEqual(manifests[0]["global_trajectories"], 16)
     self.assertEqual(manifests[1]["global_trajectories"], 16)
@@ -181,7 +197,7 @@ class P44ArtifactTest(unittest.TestCase):
 
   def test_wrong_model_or_topology_is_rejected(self):
     with tempfile.TemporaryDirectory() as text:
-      with self.assertRaisesRegex(ValueError, "Qwen/Qwen3-4B"):
+      with self.assertRaisesRegex(ValueError, "Qwen/Qwen3-4B-Instruct-2507"):
         artifacts.persist_batch(
             *_batch(),
             expected_step=0,
@@ -195,7 +211,7 @@ class P44ArtifactTest(unittest.TestCase):
             *_batch(),
             expected_step=0,
             output_dir=Path(text).resolve(),
-            model_id="Qwen/Qwen3-4B",
+            model_id="Qwen/Qwen3-4B-Instruct-2507",
             values=_values("128"),
         )
 

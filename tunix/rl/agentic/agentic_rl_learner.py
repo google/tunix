@@ -334,6 +334,9 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
     num_generations: Number of samples per prompt.
     num_iterations: Number of iterations per batch.
     episode_timeout: Timeout for each episode in seconds.
+    per_turn_timeout: Hard timeout for one model generation in seconds.
+    cleanup_timeout: Maximum time allowed to close one environment.
+    rollout_batch_timeout: Hard wall-clock timeout for one prompt batch.
   """
 
   system_prompt: str = ""
@@ -346,6 +349,9 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   num_generations: int = 1
   num_iterations: int = 1
   episode_timeout: float = 1800.0
+  per_turn_timeout: float | None = None
+  cleanup_timeout: float = 150.0
+  rollout_batch_timeout: float | None = None
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
@@ -1608,6 +1614,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       chat_lists: List[Dict[str, str]],
       env: Any = None,
       max_generation_steps: int | None = None,
+      request_timeout_s: float | None = None,
   ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
     if env:
@@ -1637,6 +1644,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
+        request_timeout_s=request_timeout_s,
     )
 
     return result
@@ -1648,6 +1656,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,
+        per_turn_timeout=self.algo_config.per_turn_timeout,
+        cleanup_timeout=self.algo_config.cleanup_timeout,
         max_response_length=self.algo_config.max_response_length,
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
@@ -1735,12 +1745,51 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     async_generator = orchestrator.yield_batches(
         batch_size=self.algo_config.num_generations
     )
+    prompt_groups_in_batch = 0
+    batch_started = self.loop.time()
     try:
       async with contextlib.aclosing(async_generator) as stream:
-        async for group in stream:
+        while True:
+          timeout = self.algo_config.rollout_batch_timeout
+          if timeout is None:
+            remaining = None
+          else:
+            remaining = timeout - (self.loop.time() - batch_started)
+            if remaining <= 0:
+              raise TimeoutError(
+                  "rollout batch exceeded hard timeout before completion: "
+                  f"timeout={timeout:.1f}s "
+                  f"completed_prompt_groups={prompt_groups_in_batch}/"
+                  f"{self._full_batch_size}"
+              )
+          try:
+            if remaining is None:
+              group = await anext(stream)
+            else:
+              group = await asyncio.wait_for(anext(stream), timeout=remaining)
+          except StopAsyncIteration:
+            break
+          except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                "rollout batch exceeded hard timeout while waiting for "
+                f"trajectories: timeout={timeout:.1f}s "
+                f"completed_prompt_groups={prompt_groups_in_batch}/"
+                f"{self._full_batch_size}"
+            ) from exc
           if group:
             # Retrieve the original input embedded in the task.
             yield group
+            prompt_groups_in_batch += 1
+            if prompt_groups_in_batch == self._full_batch_size:
+              logging.info(
+                  "[DEEPSWE.ROLLOUT_DEADLINE] batch_complete "
+                  "prompt_groups=%d elapsed_secs=%.1f deadline_secs=%s",
+                  prompt_groups_in_batch,
+                  self.loop.time() - batch_started,
+                  timeout,
+              )
+              prompt_groups_in_batch = 0
+              batch_started = self.loop.time()
     except (GeneratorExit, asyncio.CancelledError):
       # This is the normal shutdown path for a generator.
       return

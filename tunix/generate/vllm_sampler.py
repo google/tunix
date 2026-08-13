@@ -15,10 +15,12 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import atexit
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import dataclasses
 import gc
 from itertools import count
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from absl import logging
@@ -397,10 +399,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       reset_prefix_cache: bool = False,
       reset_timeout_s: float = 300.0,
+      request_timeout_s: float | None = None,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
       raise RuntimeError("vLLM in-process driver is not initialized.")
+    if request_timeout_s is not None and request_timeout_s <= 0:
+      raise ValueError("request_timeout_s must be positive when set")
 
     requests = []
     for idx, prompt in enumerate(prompts):
@@ -415,20 +420,51 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       })
 
     if reset_prefix_cache:
-      futures = self._driver.submit_requests_after_idle_prefix_cache_reset(
-          requests, timeout_s=reset_timeout_s
+      request_futures = (
+          self._driver.submit_requests_after_idle_prefix_cache_reset(
+              requests, timeout_s=reset_timeout_s
+          )
       )
     else:
-      futures = self._driver.submit_requests(requests)
+      request_futures = self._driver.submit_requests(requests)
 
     outputs: List[RequestOutput] = []
-    for future in futures:
-      result = future.result()
-      if not isinstance(result, RequestOutput):
-        raise TypeError(
-            f"Expected RequestOutput from driver, received {type(result)}."
-        )
-      outputs.append(result)
+    deadline = (
+        None
+        if request_timeout_s is None
+        else time.monotonic() + request_timeout_s
+    )
+    try:
+      for future in request_futures:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+          raise FutureTimeoutError()
+        result = future.result(timeout=remaining)
+        if not isinstance(result, RequestOutput):
+          raise TypeError(
+              f"Expected RequestOutput from driver, received {type(result)}."
+          )
+        outputs.append(result)
+    except FutureTimeoutError as exc:
+      if request_timeout_s is None:
+        raise
+      pending_ids = [
+          request["request_id"]
+          for request, future in zip(requests, request_futures)
+          if not future.done()
+      ]
+      for request_id in pending_ids:
+        self._driver.cancel(request_id)
+      raise TimeoutError(
+          "vLLM request deadline exceeded; aborted "
+          f"{len(pending_ids)} unfinished request(s) after "
+          f"{request_timeout_s:.1f}s"
+      ) from exc
+    except BaseException:
+      for request, future in zip(requests, request_futures):
+        if not future.done():
+          self._driver.cancel(request["request_id"])
+      raise
     return outputs
 
   def reset_prefix_cache_when_idle(self) -> bool:
@@ -481,6 +517,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      request_timeout_s: float | None = None,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
@@ -572,7 +609,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
     )
     if self._driver is not None:
-      outputs = self._generate_server_mode(prompt_objects, sampling_params)
+      outputs = self._generate_server_mode(
+          prompt_objects,
+          sampling_params,
+          request_timeout_s=request_timeout_s,
+      )
     else:
       outputs = self.llm.generate(
           prompts=prompt_objects,

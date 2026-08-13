@@ -15,7 +15,7 @@ unrun; never promote a local package pass into a production numerical claim.
 It is packaging of work already done, not a new result. What is signed and what is not is in
 `EVIDENCE.md`; read that before repeating any claim from here.
 
-## Active handoff router (2026-08-11)
+## Active handoff router (2026-08-13)
 
 The current work is deliberately split into three evidence ledgers. Do not mix
 their manifests, artifacts, or promotion claims:
@@ -23,7 +23,8 @@ their manifests, artifacts, or promotion claims:
 | Workstream | Read first | Target allocation |
 |---|---|---|
 | P38 GSM8K/FrozenLake alignment | `tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md` | 64-chip Pathways |
-| P39 Qwen3-32B DeepSWE | `tasks/p39-deepswe-production/HANDOFF.md` | one 4x8x8 (256-device) Pathways slice |
+| P46 current DeepSWE evaluation/training campaign | `tasks/p46-deepswe-eval-training-profiles/HANDOFF.md` | 64- or 256-chip Pathways; follow Q4 eval -> Q4 three-update -> Q32 gates |
+| P39 historical Qwen3-32B DeepSWE production evidence | `tasks/p39-deepswe-production/HANDOFF.md` | one 4x8x8 (256-device) Pathways slice |
 | P43 Qwen3-8B DeepSWE debug | `tasks/p43-deepswe-64-debug/HANDOFF.md` | one 4x4x4 (64-device) Pathways slice |
 | P44 Qwen3-4B DeepSWE parity debug | `tasks/p44-deepswe-qwen4b-parity/HANDOFF.md` | one 4x4x4 (64-device) or one 4x8x8 (256-device) Pathways slice |
 
@@ -57,6 +58,7 @@ but every target JobSet must fetch an exact published commit from
 | P34 Qwen3-32B DeepSWE DP16×TP8 per role | **LOCAL PASS, TARGET NOT RUN** — role split, canonical M256 adapter, fixed DP16 reducer, renderer and classifier exist; no 4×8×8 workload artifact. |
 | P43 Qwen3-8B DeepSWE DP4×TP8 per role | **LOCAL + EXACT-IMAGE CPU PASS, TARGET NOT RUN** — rollout-only/one/three-update renderers, durable real-trajectory artifacts, grouped solve metrics, and a fail-closed classifier exist; no 4×4×4 workload artifact yet. |
 | P44 Qwen3-4B DeepSWE DP4×TP8 or DP16×TP8 per role | **LOCAL + EXACT-IMAGE CPU PASS, TARGET NOT RUN** — one shared functional recipe renders for 64 and 256 devices with durable trajectories, grouped solve metrics, and a topology-aware fail-closed classifier; neither target ladder has run. |
+| P46 DeepSWE evaluator + Q4/Q32 16K profiles | **LOCAL CPU PASS, TARGET NOT RUN** — one resumable N16 clean-data evaluator and three signed JobSet families render for 64/256 chips; Q4 is bounded to 1 hour and Q32 to 90 minutes. See `cluster/P46_DEEPSWE_PROFILES_RUNBOOK.md`. |
 
 **Do not spend another 64-chip run repeating the bounded P32 admission.** Its model-init,
 backward and three-update systems gates have already passed, but they used a dense synthetic

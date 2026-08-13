@@ -127,7 +127,7 @@ class RenderP34JobSetTest(unittest.TestCase):
         "--batch_size=8",
         "--num_generations=8",
         "--max_prompt_length=4096",
-        "--max_response_length=32768",
+        "--max_response_length=16384",
         "--max_steps=3",
         "--rollout_mesh_dp=16",
         "--rollout_mesh_tp=8",
@@ -145,9 +145,12 @@ class RenderP34JobSetTest(unittest.TestCase):
         "--epsilon_high=0.28",
         "--off_policy_steps=0",
         "--per_turn_timeout_secs=300",
-        "--episode_timeout_secs=5400",
+        "--episode_timeout_secs=4800",
         "--step_timeout_secs=1800",
         "--reward_timeout_secs=1800",
+        "--cleanup_timeout_secs=300",
+        "--rollout_batch_timeout_secs=5400",
+        "--temperature=1.0",
         "--loss_agg_mode=sequence-mean-token-scale",
         "--advantage_estimator=rloo",
         "--learning_rate=1e-6",
@@ -167,6 +170,10 @@ class RenderP34JobSetTest(unittest.TestCase):
     self.assertNotIn("--optimizer_offload", command)
     self.assertNotIn("--optimizer-offload", command)
     self.assertNotIn("fsdp", command)
+    self.assertEqual(env["R2E_ACTIVE_DEADLINE_SECONDS"], "5100")
+    self.assertEqual(
+        env["CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS"], "5400"
+    )
 
   def test_full_stage_pins_clean_data_capture_and_warning_policy(self):
     document = _render(

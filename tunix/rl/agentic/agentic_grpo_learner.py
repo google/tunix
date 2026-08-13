@@ -789,6 +789,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "p43-64chip-debug",
             "p44-qwen4b-parity-64",
             "p44-qwen4b-parity-256",
+            "p46-qwen32b-train-64",
+            "p46-qwen32b-train-256",
         ):
           raise ValueError(
               "DeepSWE artifacts require P34 production, P43, or P44"

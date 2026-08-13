@@ -392,3 +392,31 @@
 - Next: Resolve the latest remote SHA again at launch time, require the
   implementation commit as an ancestor, repeat clean-source one-host
   rollout-only, then enter the independent 64/256 promotion ladder.
+
+## 2026-08-13T01:00:00Z — P44.12: lock bounded three-update YAML defaults
+
+- Type: implementation and local verification.
+- Source: unpublished worktree based on operator SHA
+  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`; main was untouched.
+- Decision: after successful rollout inspection, the current campaign may
+  render `three-update` directly; `one-update` remains available but is not a
+  prerequisite.
+- Action: locked both 64/256 renderings to Qwen3-4B, B4/G4, 4096 response,
+  five turns, temperature 1.0, three updates, the reviewed 1851-image clean
+  whitelist, device optimizer and durable trajectory/solve metrics.
+- Action: set a shared one-hour prompt-batch limit with trajectory/model/
+  step/reward/cleanup budgets of 3000/300/600/600/300 seconds and an R2E pod
+  active deadline of 3300 seconds. Added true vLLM request abort, bounded
+  reset/reward/cleanup, producer cancellation, and confirmed Kubernetes pod
+  deletion with resource limits and run labels.
+- Evidence: P44 CPU PASS, 41 cases. P44 exact-image PASS in
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`,
+  including seven targeted agentic tests (five deadline/cleanup controls) and
+  one unfinished vLLM request abort. P43 22, P39 15 and P34
+  static/trajectory/update/exact-image gates
+  remain green. Dummy 64/256 three-update YAML renders emitted PASS markers.
+- Boundary: no remote allocation, real Kubernetes sandbox, optimizer update,
+  credential, commit or push occurred. Target behavior remains unverified.
+- Next: after publication approval, detach at the exact read-back operator
+  SHA, run `three-update` on the available topology, and return all three
+  trajectory/metrics batches plus deadline, cleanup and classifier evidence.

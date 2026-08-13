@@ -38,8 +38,8 @@ class P44RendererTest(unittest.TestCase):
         cpu_nodepool="cpu-pool",
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
-        whitelist="/data/gold.jsonl",
-        whitelist_sha256="3" * 64,
+        whitelist=renderer.p34.P34_CLEAN_WHITELIST,
+        whitelist_sha256=renderer.p34.P34_CLEAN_WHITELIST_SHA256,
     )
 
   def test_all_six_bounded_jobsets_render(self):
@@ -55,11 +55,25 @@ class P44RendererTest(unittest.TestCase):
           self.assertEqual(worker["parallelism"], expected_workers[topology])
           self.assertEqual(env["CANON_P44_TOPOLOGY"], topology)
           self.assertEqual(env["CANON_P44_DEEPSWE_PARITY"], "1")
-          self.assertIn("--model_version=Qwen3-4B", env["CANON_RUN_CMD"])
+          self.assertIn(
+              "--model_version=Qwen3-4B-Instruct-2507",
+              env["CANON_RUN_CMD"],
+          )
+          self.assertIn("--max_response_length=16384", env["CANON_RUN_CMD"])
+          self.assertIn("--max_turns=50", env["CANON_RUN_CMD"])
+          self.assertIn("--batch_size=4", env["CANON_RUN_CMD"])
+          self.assertIn("--num_generations=4", env["CANON_RUN_CMD"])
           self.assertIn(
               f"--rollout_mesh_dp={expected_dp[topology]}",
               env["CANON_RUN_CMD"],
           )
+          self.assertIn(
+              "--rollout_batch_timeout_secs=3600", env["CANON_RUN_CMD"]
+          )
+          self.assertIn(
+              "--expected_filtered_rows=1851", env["CANON_RUN_CMD"]
+          )
+          self.assertEqual(env["R2E_ACTIVE_DEADLINE_SECONDS"], "3300")
 
   def test_normalized_rendered_recipes_are_identical(self):
     for stage in ("rollout-only", "one-update", "three-update"):
@@ -83,7 +97,8 @@ class P44RendererTest(unittest.TestCase):
     for item in main["env"]:
       if item["name"] == "CANON_RUN_CMD":
         item["value"] = item["value"].replace(
-            "--model_version=Qwen3-4B", "--model_version=Qwen3-8B"
+            "--model_version=Qwen3-4B-Instruct-2507",
+            "--model_version=Qwen3-8B",
         )
     with self.assertRaisesRegex(ValueError, "lost a signed field"):
       renderer.validate(
@@ -92,6 +107,24 @@ class P44RendererTest(unittest.TestCase):
           client_image="registry.example/tunix@sha256:" + "2" * 64,
           stage="one-update",
           topology="64",
+      )
+
+  def test_non_clean_whitelist_is_rejected(self):
+    base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
+    with self.assertRaisesRegex(ValueError, "1851-image clean whitelist"):
+      renderer.render(
+          base,
+          source_commit="1" * 40,
+          source_branch="yuxzhang/canon-zero-tim",
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          run_id="parity-test",
+          stage="three-update",
+          topology="64",
+          cpu_nodepool="cpu-pool",
+          worker_nodepool="tpu-pool",
+          model_pvc="model-pvc",
+          whitelist="/data/unreviewed.jsonl",
+          whitelist_sha256="3" * 64,
       )
 
 

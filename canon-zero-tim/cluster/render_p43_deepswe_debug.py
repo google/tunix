@@ -39,7 +39,7 @@ def _debug_command(
           "--compute_logps_micro_batch_size=4"
       ),
       "--num_generations=8": "--num_generations=4",
-      "--max_response_length=32768": "--max_response_length=4096",
+      "--max_response_length=16384": "--max_response_length=4096",
       "--max_turns=50": "--max_turns=5",
       "--rollout_mesh_dp=16": "--rollout_mesh_dp=4",
       "--train_mesh_dp=16": "--train_mesh_dp=4",

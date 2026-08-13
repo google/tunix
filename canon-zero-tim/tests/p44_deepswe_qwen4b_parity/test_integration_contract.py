@@ -108,7 +108,11 @@ class P44IntegrationContractTest(unittest.TestCase):
     self.assertIn("--max_turns 2", runner)
     self.assertIn("--max_num_batched_tokens 512", runner)
     self.assertIn(
-        'data_sharding_axis=("dp",) if ONEHOST_SMOKE else ("fsdp",)',
+        "training_data_sharding_axis = (train_axis_names[0],)",
+        script,
+    )
+    self.assertIn(
+        "data_sharding_axis=training_data_sharding_axis",
         script,
     )
 

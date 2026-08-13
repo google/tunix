@@ -7,9 +7,11 @@ The operator-facing source of truth is
 
 Run the same Qwen3-4B DeepSWE functional recipe on either 64 devices
 (`4x4x4`, DP4 x TP8 per role) or 256 devices (`4x8x8`, DP16 x TP8 per role).
-Each allocation has its own `rollout-only` -> `one-update` -> `three-update`
-promotion ladder, but both write the same real-trajectory schemas and grouped
-solve metrics and are judged by one topology-aware classifier.
+Both allocations expose the same bounded stages, write the same
+real-trajectory schemas and grouped solve metrics, and are judged by one
+topology-aware classifier. For the current campaign a successful rollout
+inspection may go directly to `three-update`; `one-update` is not a
+prerequisite.
 
 This is a fast systems-debug lane. It does not replace or admit the Qwen3-32B
 production workload and does not claim bitwise, performance, quality, or
@@ -43,7 +45,10 @@ zero-TIM equivalence between allocations.
   resolved head in the rendered JobSet and returned evidence. The publication
   metadata commit may be newer than either implementation commit; do not
   silently substitute any SHA for another.
-- Local development branch: `codex/p43-deepswe-64-debug`
+- P44.12 bounded-lifecycle development base:
+  `6905ca7c8551eeb8be772c40213e57e91bcfb0a7`. The P44.12 changes are
+  unpublished and therefore have no implementation/publication SHA yet.
+- Local development branch: `codex/p46-deepswe-32b-full`
 - Remote execution owner: the launch agent/operator, not the implementation
   agent
 
@@ -56,7 +61,7 @@ Do not launch a local development worktree or an unverified symbolic branch.
 - P44 shared-recipe, Qwen3-4B TP8 overlay, both topology renderers/preflights,
   artifact schemas, both dataset entrypoints, Pathways `logical_task` host
   placement, prompt batching, trajectory-counted logprob batching, and
-  classifier controls plus the isolated one-host contract: PASS locally (40
+  classifier controls plus the isolated one-host contract: PASS locally (41
   tests). The cases require runtime
   evidence that TP8-local SwiGLU width `1216` is padded to `1280`, plus both
   matmul `K=1216 Kp=1280` and `N=1216 Np=1280` directions, and reject a run
@@ -72,6 +77,13 @@ Do not launch a local development worktree or an unverified symbolic branch.
   separately pinned `3200->3328` path. All three overlays reinstall 29/29 and
   pass exact forward/VJP image probes. This is local contract evidence, not a
   Qwen3-32B target execution claim.
+- P44.12 defaults are locked in the renderer: B4/G4, response 4096, five
+  turns, temperature 1.0, clean 1851-row whitelist, device optimizer and
+  three updates. One prompt batch has a shared 3600-second limit; the
+  trajectory/model/step/reward/cleanup budgets are 3000/300/600/600/300
+  seconds and the R2E pod active deadline is 3300 seconds. The frozen-image
+  gate covers unfinished-request abort plus reset/model/reward/cleanup
+  deadlines. No target has executed these changes.
 - Remote 64-device stages: NOT RUN.
 - Remote 256-device attempt `p44r02`: FAILED before mesh construction because
   the old splitter treated degenerate `process_index=0` as host identity. It
@@ -105,18 +117,20 @@ Do not launch a local development worktree or an unverified symbolic branch.
   classifier evidence. The implementation is committed, but it has no clean
   post-publication or 64/256 execution evidence yet.
 
-## First operator action after P44.10/P44.11 publication
+## First operator action after P44.12 publication
 
-Follow the runbook's fetch and immutable-input preflight. On an authorized
-direct-attached host, first repeat the one-host `rollout-only` command from the
-clean published checkout and return its persistent artifacts. Then start only
-the remote `rollout-only` stage on whichever exact allocation is available;
-64 and 256 use the same functional recipe but must promote independently.
+Follow the runbook's fetch and immutable-input preflight. Resolve the exact
+post-P44.12 remote HEAD and require a clean detached checkout. Use the
+available 64- or 256-device allocation to render `three-update` after the
+rollout path has been inspected; do not insert a separate one-update job by
+default. Both topologies use the same functional recipe but remain independent
+target evidence.
 Require the exact `[P34.DEVICE_INVENTORY]`, SwiGLU feature-padding, both
-matmul-padding `[PATHTRACE]`, and `[P44.LOGPS_BATCH]` lines from the runbook. Return the
-complete failure package on any red or inconclusive result; do not edit the
-recipe or immediately jump stages. Use a fresh run id (`p44r06` or later),
-never an archived r04/r05 manifest.
+matmul-padding `[PATHTRACE]`, `[P44.LOGPS_BATCH]`, trajectory-batch,
+rollout-deadline and RepoEnv cleanup lines from the runbook. Return all three
+trajectory/metric batches and the complete failure package on any red or
+inconclusive result. Do not edit the recipe or train on a partial timed-out
+batch. Use a fresh run id, never an archived manifest.
 
 If 257 devices are available, P44 still renders an exact 256-device
 `4x8x8` target. The additional device is outside the mesh.

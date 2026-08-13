@@ -1,10 +1,16 @@
 # P44 Qwen3-4B DeepSWE 64/256 parity-debug runbook
 
 P44 is a fast DeepSWE systems-debug lane for either one 64-device `4x4x4`
-slice or one 256-device `4x8x8` slice. Both variants use Qwen3-4B, TP8, four
+slice or one 256-device `4x8x8` slice. Both variants use
+Qwen3-4B-Instruct-2507, TP8, four
 prompts, four generations per prompt, the same rollout bounds, GRPO logic,
 resident optimizer policy, durable trajectory schema, solve metrics, and
 `rollout-only` -> `one-update` -> `three-update` stage ladder.
+
+For the current campaign, render `three-update` directly after a successful
+rollout inspection; `one-update` is available but is not a prerequisite. Each
+of the three updates has one bounded rollout batch and writes its trajectories
+before backward.
 
 The only admitted differences are physical topology, worker count, DP size,
 per-rank trajectory partitioning, and the DP-derived global carrier geometry:
@@ -58,7 +64,7 @@ Required terminal markers are `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`,
 `P43_DEEPSWE_DEBUG_CPU_PASS`, `P39_DEEPSWE_PILOT_CPU_PASS`, and
 `P34_STATIC_PASS suites=10`.
 
-The P44 gate must report 40 cases and includes negative controls for the
+The P44 gate must report 41 cases and includes negative controls for the
 Pathways `logical_task` host mapping, exact 4-device host cardinality,
 single-conversation generation batching, and trajectory-counted logprob
 microbatching. It also rejects missing Qwen3-4B `1216->1280` SwiGLU runtime
@@ -71,10 +77,13 @@ Required inputs:
 
 - a client image in registry-digest form `repository@sha256:<64 lowercase
   hex>`; a local Docker image ID is not a registry publication digest;
-- the Qwen3-4B checkpoint at
-  `/mnt/disks/linchai_data/models/Qwen3-4B` on the mounted model PVC;
-- the real DeepSWE gold whitelist and its lowercase SHA-256, computed from
-  the file visible through that same PVC;
+- the Qwen3-4B-Instruct-2507 checkpoint at
+  `/mnt/disks/linchai_data/models/Qwen3-4B-Instruct-2507` on the mounted model
+  PVC;
+- the reviewed clean whitelist at
+  `clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`,
+  SHA-256
+  `2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7`;
 - topology-matching CPU and TPU node pools;
 - existing `HF_TOKEN` and `WANDB_API_KEY` Kubernetes secret references; and
 - a `very-high` PriorityClass with value `1000` and policy
@@ -113,6 +122,29 @@ R2E-Gym cannot import, the gold set is empty, dataset construction still
 passes the removed `trust_remote_code` argument, or any immutable input does
 not match its recorded digest.
 
+## 2a. Locked Qwen3-4B debug defaults
+
+Both topology renderings carry exactly this non-topology recipe:
+
+| Field | Default |
+|---|---:|
+| prompts / generations / trajectories | 4 / 4 / 16 |
+| prompt / response / turns | 4096 / 16384 / 50 |
+| temperature / top-k / top-p | 1.0 / disabled / 1.0 |
+| per model turn | 300 s |
+| whole trajectory | 3000 s |
+| environment step / final reward | 600 s / 600 s |
+| sandbox cleanup | 300 s |
+| R2E pod active deadline | 3300 s |
+| whole rollout batch | 3600 s |
+| selected debug length | 3 optimizer updates |
+
+The 3600-second batch budget is shared across all four prompt groups. It is
+not multiplied by prompt count or generation count. A stuck vLLM request is
+aborted; reset, reward and environment calls are bounded; and sandbox cleanup
+must confirm pod deletion. The attempt may finish earlier, but cannot wait
+indefinitely at update zero.
+
 ## 3. Select one topology and render one stage
 
 Run the ladders independently. Do not use a PASS from one allocation to skip a
@@ -121,14 +153,14 @@ for one `4x8x8` slice, then use the node pool that supplies exactly that slice.
 
 ```bash
 TOPOLOGY=64
-STAGE=rollout-only
-RUN_ID=p44-t64-rollout-01
+STAGE=three-update
+RUN_ID=p44-t64-three-01
 CLIENT_IMAGE_DIGEST=registry.example/tunix@sha256:replace-with-real-digest
 CPU_NODEPOOL=replace-with-cpu-nodepool
 TPU_NODEPOOL=replace-with-topology-matching-tpu-nodepool
 MODEL_PVC=haoyugao-cpu-np-pvc
-WHITELIST=/mnt/disks/linchai_data/deepswe/gold.jsonl
-WHITELIST_SHA256=replace-with-real-lowercase-sha256
+WHITELIST=clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl
+WHITELIST_SHA256=2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7
 OUTPUT="/tmp/p44-${TOPOLOGY}-${STAGE}-${RUN_ID}.yaml"
 
 python3 canon-zero-tim/cluster/render_p44_deepswe_parity.py \
@@ -169,9 +201,11 @@ names and evidence counts are:
 | `one-update` | `canon-p44-ds4b-t${TOPOLOGY}-one-` | 1 | 1 |
 | `three-update` | `canon-p44-ds4b-t${TOPOLOGY}-three-` | 3 | 3 |
 
-Promote only after the current stage's classifier says `PASS`. A failed or
-inconclusive stage requires a fresh Attempt 0; do not reuse its run id or
-artifacts.
+For this campaign, a manually inspected successful rollout may be followed by
+the direct `three-update` stage; `one-update` need not consume another
+allocation. Accept the three-update result only after its classifier says
+`PASS`. A failed or inconclusive stage requires a fresh Attempt 0; do not
+reuse its run id or artifacts.
 
 ## 4. Inspect trajectories, solve metrics, and classification
 
@@ -183,6 +217,10 @@ Every completed batch writes under
   four prompts x four generations; and
 - `batch_metrics.jsonl` with trajectory solve ratio and all-solved,
   all-failed, mixed, incomplete, and effective-prompt group counts.
+
+P44 debug capture is enabled by `CANON_P44_DEEPSWE_PARITY=1` even though the
+mutually exclusive P34-only flag `CANON_P34_TRAJECTORY_CAPTURE` remains zero.
+Do not treat that P34 flag as evidence that P44 capture is disabled.
 
 The solve definition is `r2egym_final_reward_eq_1`: a trajectory is solved
 only when status is `SUCCEEDED` and its finite raw final reward is exactly
@@ -203,7 +241,7 @@ jq . "$RUN_ROOT/p44_deepswe_${TOPOLOGY}_${STAGE}.classification.json"
 Useful log scan:
 
 ```bash
-grep -aE '\[P34.CLI\]|\[P34.TOPOLOGY\]|\[P44\.|\[PATHTRACE\]|CANON_ALIGN_PRE_JSON|update_step_committed|Traceback|OOM|RESOURCE_EXHAUSTED|CANCELLED|IFRT' \
+grep -aE '\[P34.CLI\]|\[P34.TOPOLOGY\]|\[P44\.|\[DEEPSWE.ROLLOUT_DEADLINE\]|MODEL_TIMEOUT|ENV_TIMEOUT|REWARD_TIMEOUT|RepoEnv|\[PATHTRACE\]|CANON_ALIGN_PRE_JSON|update_step_committed|Traceback|OOM|RESOURCE_EXHAUSTED|CANCELLED|IFRT' \
   "$RUN_ROOT/run.log"
 ```
 

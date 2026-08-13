@@ -36,7 +36,17 @@ $DOCKER run --rm \
       cd tests/rl/agentic
       PYTHONPATH=/workspace python3 -m unittest \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_model_call_wraps_one_conversation_as_a_prompt_batch \
-        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_compute_logps_micro_batch_size
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_rollout_batch_watchdog_fails_waiting_for_first_group \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_compute_logps_micro_batch_size \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_model_timeout_aborts_turn_and_always_closes \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_timeout_still_closes_environment \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_final_reward_timeout_is_recorded_and_closes \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_cleanup_timeout_is_a_hard_error
+    )
+    (
+      cd tests/rl/rollout
+      PYTHONPATH=/workspace python3 -m unittest \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_server_mode_deadline_aborts_unfinished_request
     )
     echo "P44_EXACT_IMAGE_CPU_PASS overlay=qwen4b"
   '

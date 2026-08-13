@@ -22,6 +22,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if ROOT not in sys.path:
@@ -97,6 +98,92 @@ class R2egymOptionalContractTest(unittest.TestCase):
   def test_poll_patch_skips_without_r2egym(self):
     module = importlib.import_module(_PATCH_MODULE)
     self.assertEqual(module.apply_repoenv_kubernetes_poll_patch(), "")
+
+  def test_poll_patch_labels_bounds_and_confirms_pod_deletion(self):
+    class FakeApiException(Exception):
+
+      def __init__(self, status):
+        super().__init__(status)
+        self.status = status
+
+    class FakeDockerRuntime:
+
+      def stop(self):
+        self.original_stop_calls += 1
+
+    docker_mod = types.ModuleType("r2egym.agenthub.runtime.docker")
+    docker_mod.__file__ = "/fake/r2egym/docker.py"
+    docker_mod.DEFAULT_NAMESPACE = "default"
+    docker_mod.DOCKER_PATH = "/usr/local/bin:/usr/bin:/bin"
+    docker_mod.client = types.SimpleNamespace(ApiException=FakeApiException)
+    docker_mod.DockerRuntime = FakeDockerRuntime
+    runtime_pkg = types.ModuleType("r2egym.agenthub.runtime")
+    runtime_pkg.docker = docker_mod
+    agenthub = types.ModuleType("r2egym.agenthub")
+    agenthub.runtime = runtime_pkg
+    package = types.ModuleType("r2egym")
+    package.agenthub = agenthub
+    sys.modules.update({
+        "r2egym": package,
+        "r2egym.agenthub": agenthub,
+        "r2egym.agenthub.runtime": runtime_pkg,
+        "r2egym.agenthub.runtime.docker": docker_mod,
+    })
+
+    module = importlib.import_module(_PATCH_MODULE)
+    with mock.patch.dict(os.environ, {
+        "CANON_RUN_ID": "Test_Run/01",
+        "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
+        "R2E_POD_DELETE_TIMEOUT_SECONDS": "1",
+    }, clear=False):
+      self.assertEqual(
+          module.apply_repoenv_kubernetes_poll_patch(),
+          "/fake/r2egym/docker.py",
+      )
+
+      class FakeClient:
+
+        def __init__(self):
+          self.created = None
+          self.deleted = False
+          self.reads = 0
+
+        def read_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.reads += 1
+          if self.reads == 1 or self.deleted:
+            raise FakeApiException(404)
+          return types.SimpleNamespace(
+              metadata=types.SimpleNamespace(name="pod-1"),
+              status=types.SimpleNamespace(phase="Running"),
+          )
+
+        def create_namespaced_pod(self, **kwargs):
+          self.created = kwargs["body"]
+
+        def delete_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.deleted = True
+
+      runtime = FakeDockerRuntime()
+      runtime.client = FakeClient()
+      runtime.logger = mock.Mock()
+      runtime.container = None
+      runtime.original_stop_calls = 0
+      runtime._start_kubernetes_pod("image", "command", "pod-1")
+      body = runtime.client.created
+      self.assertEqual(body["spec"]["activeDeadlineSeconds"], 3300)
+      self.assertEqual(
+          body["metadata"]["labels"]["canon.zero-tim/run-id"],
+          "test_run-01",
+      )
+      self.assertEqual(
+          body["spec"]["containers"][0]["resources"]["requests"],
+          {"cpu": "2", "memory": "4Gi"},
+      )
+      runtime.stop()
+      self.assertTrue(runtime.client.deleted)
+      self.assertEqual(runtime.original_stop_calls, 1)
 
   def test_swe_agent_binds_action_when_r2egym_is_present(self):
     self._require_agent_import_chain()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -32,9 +31,6 @@ class P44EnvironmentContractTest(unittest.TestCase):
   def _run(self, topology: str, stage: str = "three-update", override: str = ""):
     with tempfile.TemporaryDirectory() as root_text:
       root = Path(root_text)
-      whitelist = root / "gold.jsonl"
-      whitelist.write_text('{"docker_image":"test-image"}\n')
-      digest = hashlib.sha256(whitelist.read_bytes()).hexdigest()
       document = renderer.render(
           yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text()),
           source_commit="1" * 40,
@@ -46,8 +42,8 @@ class P44EnvironmentContractTest(unittest.TestCase):
           cpu_nodepool="cpu-pool",
           worker_nodepool="tpu-pool",
           model_pvc="model-pvc",
-          whitelist=str(whitelist),
-          whitelist_sha256=digest,
+          whitelist=renderer.p34.P34_CLEAN_WHITELIST,
+          whitelist_sha256=renderer.p34.P34_CLEAN_WHITELIST_SHA256,
       )
       environ = os.environ.copy()
       environ.update(renderer.p34._env(document))

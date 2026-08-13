@@ -280,13 +280,26 @@ def _manifest(
   elif mode == "p34":
     if model_id != "Qwen/Qwen3-32B":
       raise ValueError("P34 production artifacts require Qwen/Qwen3-32B")
-    contract_name = "p34-production"
-    slice_topology = "4x8x8"
-    role_topology = {"dp": 16, "tp": 8, "devices": 128}
+    p46_train = values.get("CANON_P46_DEEPSWE_TRAIN", "0") == "1"
+    p46_topology = values.get("CANON_P46_TOPOLOGY", "none")
+    if p46_train and p46_topology == "64":
+      contract_name = "p46-qwen32b-train-64"
+      slice_topology = "4x4x4"
+      role_topology = {"dp": 4, "tp": 8, "devices": 32}
+    elif p46_train and p46_topology == "256":
+      contract_name = "p46-qwen32b-train-256"
+      slice_topology = "4x8x8"
+      role_topology = {"dp": 16, "tp": 8, "devices": 128}
+    elif p46_train:
+      raise ValueError("P46 Qwen3-32B artifact topology must be 64 or 256")
+    else:
+      contract_name = "p34-production"
+      slice_topology = "4x8x8"
+      role_topology = {"dp": 16, "tp": 8, "devices": 128}
     global_prompts = 8
     generations = 8
     max_turns = 50
-    max_response_length = 32768
+    max_response_length = 16384
     stage = values.get("CANON_P34_RUN_STAGE", "")
     if stage != "full":
       raise ValueError("P34 production artifacts require the full stage")
@@ -302,12 +315,14 @@ def _manifest(
       role_topology = {"dp": 16, "tp": 8, "devices": 128}
     else:
       raise ValueError("P44 artifact topology must be exactly 64 or 256")
-    if model_id != "Qwen/Qwen3-4B":
-      raise ValueError("P44 artifacts require Qwen/Qwen3-4B")
+    if model_id != "Qwen/Qwen3-4B-Instruct-2507":
+      raise ValueError(
+          "P44 artifacts require Qwen/Qwen3-4B-Instruct-2507"
+      )
     global_prompts = 4
     generations = 4
-    max_turns = 5
-    max_response_length = 4096
+    max_turns = 50
+    max_response_length = 16384
     stage = values.get("CANON_P34_RUN_STAGE", "")
   else:
     contract_name = "p43-64chip-debug"
@@ -342,6 +357,25 @@ def _manifest(
       "dataset_split": values.get("CANON_P34_DATASET_SPLIT", ""),
       "dataset_rows": values.get("CANON_P34_DATASET_ROWS", ""),
       "clean_rows": values.get("CANON_P34_CLEAN_ROWS", ""),
+      "timeouts_seconds": {
+          "per_turn": values.get(
+              "CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS", ""
+          ),
+          "trajectory": values.get(
+              "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS", ""
+          ),
+          "step": values.get("CANON_DEEPSWE_STEP_TIMEOUT_SECS", ""),
+          "reward": values.get("CANON_DEEPSWE_REWARD_TIMEOUT_SECS", ""),
+          "cleanup": values.get(
+              "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS", ""
+          ),
+          "rollout_batch": values.get(
+              "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS", ""
+          ),
+          "sandbox_active_deadline": values.get(
+              "R2E_ACTIVE_DEADLINE_SECONDS", ""
+          ),
+      },
       "whitelist_sha256": values.get("CANON_P34_WHITELIST_SHA256", ""),
       "artifact_directory": str(output_dir),
   }

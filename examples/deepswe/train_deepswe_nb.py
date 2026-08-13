@@ -149,9 +149,13 @@ parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 # DeepSWE Agentic Specifics
 parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
-parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
+parser.add_argument("--episode_timeout_secs", type=int, default=80 * 60)
 parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
+parser.add_argument("--cleanup_timeout_secs", type=int, default=5 * 60)
+parser.add_argument(
+    "--rollout_batch_timeout_secs", type=int, default=90 * 60
+)
 parser.add_argument("--max_concurrency", type=int, default=200)
 
 parser.add_argument(
@@ -567,6 +571,23 @@ PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
 EPISODE_TIMEOUT_SECS = args.episode_timeout_secs
 STEP_TIMEOUT_SECS = args.step_timeout_secs
 REWARD_TIMEOUT_SECS = args.reward_timeout_secs
+CLEANUP_TIMEOUT_SECS = args.cleanup_timeout_secs
+ROLLOUT_BATCH_TIMEOUT_SECS = args.rollout_batch_timeout_secs
+for timeout_name, timeout_value in (
+    ("per_turn_timeout_secs", PER_TURN_TIMEOUT_SECS),
+    ("episode_timeout_secs", EPISODE_TIMEOUT_SECS),
+    ("step_timeout_secs", STEP_TIMEOUT_SECS),
+    ("reward_timeout_secs", REWARD_TIMEOUT_SECS),
+    ("cleanup_timeout_secs", CLEANUP_TIMEOUT_SECS),
+    ("rollout_batch_timeout_secs", ROLLOUT_BATCH_TIMEOUT_SECS),
+):
+  if timeout_value <= 0:
+    raise ValueError(f"{timeout_name} must be positive")
+if EPISODE_TIMEOUT_SECS + CLEANUP_TIMEOUT_SECS >= ROLLOUT_BATCH_TIMEOUT_SECS:
+  raise ValueError(
+      "rollout_batch_timeout_secs must reserve time beyond trajectory and "
+      "cleanup deadlines"
+  )
 
 MAX_CONCURRENCY = args.max_concurrency
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
@@ -657,6 +678,12 @@ if P34_DEEPSWE:
       "reward_timeout_secs": (
           REWARD_TIMEOUT_SECS == p34.reward_timeout_secs
       ),
+      "cleanup_timeout_secs": (
+          CLEANUP_TIMEOUT_SECS == p34.cleanup_timeout_secs
+      ),
+      "rollout_batch_timeout_secs": (
+          ROLLOUT_BATCH_TIMEOUT_SECS == p34.rollout_batch_timeout_secs
+      ),
       "num_iterations": NUM_ITERATIONS == p34.num_iterations,
       "beta": BETA == p34.beta,
       "epsilon": EPSILON == p34.epsilon,
@@ -690,7 +717,7 @@ if P34_DEEPSWE:
       "dataset_source_rows": args.expected_source_rows == 4578,
       "clean_filtered_rows": (
           args.expected_filtered_rows == 1851
-          if p34_full
+          if p34_full or p34.contract_name.startswith("p44-")
           else args.expected_filtered_rows is None
       ),
       "rollout_max_num_seqs": (
@@ -708,6 +735,8 @@ if P34_DEEPSWE:
       f"prompts={p34.global_prompts} generations={p34.generations} "
       f"prompt={p34.max_prompt_length} "
       f"response={p34.max_response_length} turns={p34.max_turns} "
+      f"trajectory_deadline={p34.episode_timeout_secs}s "
+      f"batch_deadline={p34.rollout_batch_timeout_secs}s "
       f"scheduler_per_dp={p34.max_num_seqs_per_dp}/"
       f"{p34.max_num_batched_tokens_per_dp}",
       flush=True,
@@ -1147,11 +1176,33 @@ else:
 rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
 train_mesh = Mesh(train_devices, axis_names=train_axis_names)
 
+# The leading trainer-mesh axis is the batch/data axis for every supported
+# geometry above: ``dp`` for canonical P34/one-host DeepSWE and ``fsdp`` for
+# the legacy mesh builder.  Derive this value from the mesh instead of keeping
+# a second hand-written topology switch; a stale ``fsdp`` value previously let
+# a full P34 rollout finish before actor log-prob sharding failed.
+training_data_sharding_axis = (train_axis_names[0],)
+missing_data_axes = tuple(
+    axis
+    for axis in training_data_sharding_axis
+    if axis not in train_mesh.axis_names
+)
+if missing_data_axes:
+  raise ValueError(
+      "Trainer data-sharding axes are absent from the trainer mesh: "
+      f"axes={training_data_sharding_axis} mesh={train_mesh.axis_names}"
+  )
+
 
 print(
     f"*** Rollout Mesh *** | dims: {rollout_dims} | Shape: {rollout_mesh.shape}"
 )
 print(f"*** Train Mesh *** | dims: {train_dims} | Shape: {train_mesh.shape}")
+print(
+    "[DEEPSWE.DATA_SHARDING] PASS "
+    f"axes={training_data_sharding_axis} mesh={train_mesh.axis_names}",
+    flush=True,
+)
 
 if P34_DEEPSWE or ONEHOST_SMOKE:
   dp_workloads.configure_replicated_parameter_sharding(
@@ -1345,9 +1396,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
             p34.local_trajectories if P34_DEEPSWE else None
         ),
         optimizer_offload=OPTIMIZER_OFFLOAD,
-        # The colocated local smoke names its replicated batch axis ``dp``.
-        # Production role meshes retain Tunix's existing ``fsdp`` default.
-        data_sharding_axis=("dp",) if ONEHOST_SMOKE else ("fsdp",),
+        data_sharding_axis=training_data_sharding_axis,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -1380,6 +1429,9 @@ config_kwargs = {
     "epsilon_high": EPSILON_HIGH,
     "off_policy_steps": OFF_POLICY_STEPS,
     "episode_timeout": EPISODE_TIMEOUT_SECS,
+    "per_turn_timeout": PER_TURN_TIMEOUT_SECS,
+    "cleanup_timeout": CLEANUP_TIMEOUT_SECS,
+    "rollout_batch_timeout": ROLLOUT_BATCH_TIMEOUT_SECS,
     "overlong_filter": OVERLONG_FILTER,
     "filter_statuses": FILTER_STATUSES,
     "loss_agg_mode": LOSS_AGG_MODE,

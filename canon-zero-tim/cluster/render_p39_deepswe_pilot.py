@@ -22,7 +22,7 @@ def _pilot_command(
   """Returns the P34 algorithm with only the bounded pilot geometry changed."""
   args = list(p34._command(stage, run_root=run_root, whitelist=whitelist))
   replacements = {
-      "--max_response_length=32768": "--max_response_length=4096",
+      "--max_response_length=16384": "--max_response_length=4096",
       "--max_turns=50": "--max_turns=5",
       "--rollout_mesh_dp=16": "--rollout_mesh_dp=4",
       "--train_mesh_dp=16": "--train_mesh_dp=4",

@@ -29,6 +29,36 @@ _WHITELIST_SHA256 = (
     "2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7"
 )
 _SHA = re.compile(r"[0-9a-f]{40}")
+_TOPOLOGY = {
+    "64": {
+        "contract": "p46-qwen32b-train-64",
+        "slice": "4x4x4",
+        "dp": 4,
+        "devices": 32,
+        "global_m": 1024,
+        "local_trajectories": 16,
+        "reduction_rounds": 4,
+    },
+    "256": {
+        "contract": "p46-qwen32b-train-256",
+        "slice": "4x8x8",
+        "dp": 16,
+        "devices": 128,
+        "global_m": 4096,
+        "local_trajectories": 4,
+        "reduction_rounds": 8,
+    },
+}
+
+
+def _profile_spec(*, topology: str, p46_profile: bool) -> dict[str, Any]:
+  if topology not in _TOPOLOGY:
+    raise ValueError("Qwen3-32B topology must be exactly 64 or 256")
+  if not p46_profile and topology != "256":
+    raise ValueError("legacy P34 production is fixed to topology 256")
+  if p46_profile:
+    return _TOPOLOGY[topology]
+  return {**_TOPOLOGY["256"], "contract": "p34-production"}
 
 
 def _json_records(path: Path) -> list[dict[str, Any]]:
@@ -80,9 +110,13 @@ def _scheduler_measurements(
 
 
 def _artifact_checks(
-    debug_dir: Path, *, expected_batches: int
+    debug_dir: Path,
+    *,
+    expected_batches: int,
+    spec: dict[str, Any] | None = None,
 ) -> tuple[dict[str, bool], list[dict[str, Any]]]:
   """Validates durable full-training trajectories without judging quality."""
+  spec = _profile_spec(topology="256", p46_profile=False) if spec is None else spec
   manifest_path = debug_dir / "run_manifest.json"
   metrics_path = debug_dir / "batch_metrics.jsonl"
   manifest = (
@@ -178,10 +212,10 @@ def _artifact_checks(
           manifest.get("schema") == _MANIFEST_SCHEMA
           and manifest.get("stage") == "full"
           and manifest.get("model_id") == "Qwen/Qwen3-32B"
-          and manifest.get("contract_name") == "p34-production"
-          and manifest.get("slice_topology") == "4x8x8"
+          and manifest.get("contract_name") == spec["contract"]
+          and manifest.get("slice_topology") == spec["slice"]
           and manifest.get("role_topology")
-          == {"dp": 16, "tp": 8, "devices": 128}
+          == {"dp": spec["dp"], "tp": 8, "devices": spec["devices"]}
           and manifest.get("global_prompts") == 8
           and manifest.get("generations") == 8
           and manifest.get("global_trajectories") == 64
@@ -214,12 +248,17 @@ def classify(
     updates: list[dict[str, Any]],
     stage: str,
     debug_dir: Path | None = None,
+    topology: str = "256",
+    p46_profile: bool = False,
 ) -> dict[str, Any]:
   """Returns the complete verdict without synthesizing missing evidence."""
   if stage not in _STAGE_UPDATES:
     raise ValueError(f"unknown P34 stage: {stage!r}")
   expected_updates = _STAGE_UPDATES[stage]
-  expected_alignment = expected_updates * 4
+  spec = _profile_spec(topology=topology, p46_profile=p46_profile)
+  if p46_profile and stage != "full":
+    raise ValueError("P46 Qwen3-32B training admits only the full stage")
+  expected_alignment = expected_updates * spec["local_trajectories"]
   expected_commits = 0 if stage == "backward-no-commit" else expected_updates
   warning_only = stage == "full"
   scheduler_buckets, scheduler_precompiles = _scheduler_measurements(log_text)
@@ -251,9 +290,9 @@ def classify(
           "CANON_FIXED_AR_EMBED=1 fixed-order embed gather" in log_text
       ),
       "logprob_m_executed": "CANON_LOGPROB_M on" in log_text,
-      "scheduler_bucket_exact": scheduler_buckets == [[4096]],
+      "scheduler_bucket_exact": scheduler_buckets == [[spec["global_m"]]],
       "scheduler_precompile_exact": scheduler_precompiles
-      == [{"num_tokens": 4096, "num_reqs": 64}],
+      == [{"num_tokens": spec["global_m"], "num_reqs": 64}],
       "weight_attestation_marker_count": log_text.count(
           "[P34.WEIGHTS] EXACT"
       )
@@ -272,9 +311,9 @@ def classify(
           and isinstance(record.get("total_elements"), int)
           and record["total_elements"] > 0
           and record.get("mismatch_indices") == []
-          and record.get("mesh_shape") == {"dp": 16, "tp": 8}
-          and len(record.get("mesh_device_ids", [])) == 128
-          and len(set(record.get("mesh_device_ids", []))) == 128
+          and record.get("mesh_shape") == {"dp": spec["dp"], "tp": 8}
+          and len(record.get("mesh_device_ids", [])) == spec["devices"]
+          and len(set(record.get("mesh_device_ids", []))) == spec["devices"]
           for index, record in enumerate(weight_attestations)
       ),
       "pre_alignment_count": len(pre_alignment) == expected_updates,
@@ -368,9 +407,11 @@ def classify(
       ),
       "fixed_dp_transaction": all(
           record.get("dp_replicas_exact") is True
-          and record.get("dp_reduction_transactions") == 4
-          and record.get("dp_reduction_rounds_per_transaction") == 8
-          and record.get("dp_rank_pullbacks_per_transaction") == 16
+          and record.get("dp_reduction_transactions")
+          == spec["local_trajectories"]
+          and record.get("dp_reduction_rounds_per_transaction")
+          == spec["reduction_rounds"]
+          and record.get("dp_rank_pullbacks_per_transaction") == spec["dp"]
           for record in updates
       ),
       "optimizer_device_resident": all(
@@ -393,7 +434,7 @@ def classify(
       checks["trajectory_debug_dir_present"] = False
     else:
       artifact_checks, artifact_metrics = _artifact_checks(
-          debug_dir, expected_batches=expected_updates
+          debug_dir, expected_batches=expected_updates, spec=spec
       )
       checks.update(artifact_checks)
   if stage != "backward-no-commit":
@@ -430,6 +471,8 @@ def classify(
   return {
       "schema": "canon.p34.deepswe.run.v1",
       "stage": stage,
+      "profile": "p46-qwen32b" if p46_profile else "p34-production",
+      "topology": topology,
       "verdict": "PASS" if not failed else "FAIL",
       "claim_level": "convergence-only" if warning_only else "strict-diagnostic",
       "expected_updates": expected_updates,
@@ -449,6 +492,8 @@ def main() -> None:
   parser.add_argument("--stage", required=True, choices=tuple(_STAGE_UPDATES))
   parser.add_argument("--run-log", type=Path, required=True)
   parser.add_argument("--debug-dir", type=Path)
+  parser.add_argument("--topology", choices=("64", "256"), default="256")
+  parser.add_argument("--p46-profile", action="store_true")
   parser.add_argument("--weight-report", type=Path, required=True)
   parser.add_argument("--pre-alignment-report", type=Path, required=True)
   parser.add_argument("--alignment-report", type=Path, required=True)
@@ -463,6 +508,8 @@ def main() -> None:
       updates=_json_records(args.update_report),
       stage=args.stage,
       debug_dir=args.debug_dir,
+      topology=args.topology,
+      p46_profile=args.p46_profile,
   )
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite evidence: {args.output}")

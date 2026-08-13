@@ -53,7 +53,9 @@ def _parity_command(
       p34._command(base_stage, run_root=run_root, whitelist=whitelist)
   )
   replacements = {
-      "--model_version=Qwen3-32B": "--model_version=Qwen3-4B",
+      "--model_version=Qwen3-32B": (
+          "--model_version=Qwen3-4B-Instruct-2507"
+      ),
       "--batch_size=8": "--batch_size=4",
       "--mini_batch_size=8": "--mini_batch_size=4",
       "--train_micro_batch_size=8": "--train_micro_batch_size=4",
@@ -61,8 +63,12 @@ def _parity_command(
           "--compute_logps_micro_batch_size=4"
       ),
       "--num_generations=8": "--num_generations=4",
-      "--max_response_length=32768": "--max_response_length=4096",
-      "--max_turns=50": "--max_turns=5",
+      "--episode_timeout_secs=4800": "--episode_timeout_secs=3000",
+      "--step_timeout_secs=1800": "--step_timeout_secs=600",
+      "--reward_timeout_secs=1800": "--reward_timeout_secs=600",
+      "--rollout_batch_timeout_secs=5400": (
+          "--rollout_batch_timeout_secs=3600"
+      ),
       "--rollout_mesh_dp=16": (
           f"--rollout_mesh_dp={topology_spec['dp']}"
       ),
@@ -115,6 +121,14 @@ def render(
     topology_spec = _TOPOLOGIES[topology]
   except KeyError as exc:
     raise ValueError("P44 topology must be exactly 64 or 256") from exc
+  if (
+      whitelist != p34.P34_CLEAN_WHITELIST
+      or whitelist_sha256 != p34.P34_CLEAN_WHITELIST_SHA256
+  ):
+    raise ValueError(
+        "P44 parity requires the reviewed 1851-image clean whitelist path "
+        "and SHA-256"
+    )
   base_stage = "one-update" if stage == "rollout-only" else stage
   document = p34.render(
       base,
@@ -187,6 +201,14 @@ def render(
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+      "CANON_P34_CLEAN_ROWS": str(p34.P34_CLEAN_ROWS),
+      "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "3600",
+      "CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS": "3000",
+      "CANON_DEEPSWE_STEP_TIMEOUT_SECS": "600",
+      "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
+      "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "CANON_RUN_CMD": shlex.join(
           _parity_command(
               stage,
@@ -207,6 +229,11 @@ def render(
       "MIN_TOKEN_BUCKET": str(topology_spec["global_m"]),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
   })
+  command = shlex.split(p34._env(document)["CANON_RUN_CMD"])
+  expected_rows = f"--expected_filtered_rows={p34.P34_CLEAN_ROWS}"
+  if expected_rows not in command:
+    command.append(expected_rows)
+    p34._set_env(main, {"CANON_RUN_CMD": shlex.join(command)})
 
   worker = p34._worker(document)
   worker["completions"] = topology_spec["workers"]
@@ -315,6 +342,14 @@ def validate(
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+      "CANON_P34_CLEAN_ROWS": str(p34.P34_CLEAN_ROWS),
+      "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "3600",
+      "CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS": "3000",
+      "CANON_DEEPSWE_STEP_TIMEOUT_SECS": "600",
+      "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
+      "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "MIN_TOKEN_BUCKET": str(topology_spec["global_m"]),
       "CANON_LOGPROB_M": "256",
   }
@@ -326,7 +361,7 @@ def validate(
   if wrong:
     raise ValueError(f"P44 rendered environment mismatch: {wrong}")
   required_args = (
-      "--model_version=Qwen3-4B",
+      "--model_version=Qwen3-4B-Instruct-2507",
       "--batch_size=4",
       "--mini_batch_size=4",
       "--train_micro_batch_size=4",
@@ -338,11 +373,19 @@ def validate(
       "--train_mesh_tp=8",
       f"--rollout_vllm_max_num_seqs={topology_spec['max_num_seqs']}",
       "--max_num_batched_tokens=256",
-      "--max_response_length=4096",
-      "--max_turns=5",
+      "--max_response_length=16384",
+      "--max_turns=50",
+      "--per_turn_timeout_secs=300",
+      "--episode_timeout_secs=3000",
+      "--step_timeout_secs=600",
+      "--reward_timeout_secs=600",
+      "--cleanup_timeout_secs=300",
+      "--rollout_batch_timeout_secs=3600",
+      "--temperature=1.0",
       "--max_concurrency=16",
       "--no-optimizer-offload",
       f"--max_steps={_STAGE_STEPS[stage]}",
+      f"--expected_filtered_rows={p34.P34_CLEAN_ROWS}",
   )
   if any(value not in env["CANON_RUN_CMD"] for value in required_args):
     raise ValueError("P44 parity command lost a signed field")

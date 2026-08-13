@@ -99,7 +99,9 @@ class TrajectoryStatus(Enum):
   TIMEOUT = auto()  # corresponds to `timeout`
 
   # System Errors
+  MODEL_TIMEOUT = auto()  # model generation exceeded its hard deadline
   ENV_TIMEOUT = auto()  # env.step hang and is killed by asyncio.wait_for
+  REWARD_TIMEOUT = auto()  # final reward exceeded the episode budget
   FAILED = auto()
 
 

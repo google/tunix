@@ -250,6 +250,8 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P43_ROLLOUT_ONLY \
            CANON_P44_DEEPSWE_PARITY CANON_P44_PARITY_ADMITTED \
            CANON_P44_TOPOLOGY CANON_P44_ROLLOUT_ONLY \
+           CANON_P46_DEEPSWE_TRAIN CANON_P46_EVALUATION \
+           CANON_P46_TOPOLOGY \
            CANON_OPT_STATE_RESIDENT CANON_P30_OPT_STATE_OFFLOAD \
            CANON_DEEPSWE_ALIGNMENT_WARN_ONLY \
            CANON_TRAIN_DP_SHARDING FL_SHARED_MESH \
@@ -280,6 +282,13 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       fail=1
       ;;
   esac
+  case "${CANON_P46_DEEPSWE_TRAIN:-}" in
+    0|1) ;;
+    *)
+      echo "[env] CANON_P46_DEEPSWE_TRAIN must be exactly 0 or 1" >&2
+      fail=1
+      ;;
+  esac
   if [ "${CANON_P44_DEEPSWE_PARITY:-}" != "1" ]; then
     [ "${CANON_P44_PARITY_ADMITTED:-}" = "0" ] || {
       echo "[env] non-P44 runs require CANON_P44_PARITY_ADMITTED=0" >&2
@@ -294,7 +303,63 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       fail=1
     }
   fi
-  if [ "${CANON_P44_DEEPSWE_PARITY:-}" = "1" ]; then
+  if [ "${CANON_P46_DEEPSWE_TRAIN:-}" = "1" ]; then
+    [ "${CANON_P39_64CHIP_PILOT:-}:${CANON_P39_PILOT_ADMITTED:-}" = "0:0" ] && \
+    [ "${CANON_P43_DEEPSWE_DEBUG:-}:${CANON_P43_DEBUG_ADMITTED:-}" = "0:0" ] && \
+    [ "${CANON_P44_DEEPSWE_PARITY:-}:${CANON_P44_PARITY_ADMITTED:-}" = "0:0" ] || {
+      echo "[env] P46 Qwen3-32B training cannot overlap P39/P43/P44" >&2
+      fail=1
+    }
+    [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+    [ "${CANON_P34_TRAJECTORY_CAPTURE:-}" = "1" ] && \
+    [ "${CANON_P34_CLEAN_ROWS:-}" = "1851" ] || {
+      echo "[env] P46 Qwen3-32B training requires full capture on 1851 clean rows" >&2
+      fail=1
+    }
+    p34_expected_prompts=8
+    p34_expected_generations=8
+    p34_expected_global_trajectories=64
+    case "${CANON_P46_TOPOLOGY:-}" in
+      64)
+        p34_expected_dp=4
+        p34_expected_devices=32
+        p34_expected_local_trajectories=16
+        p34_expected_global_m=1024
+        p34_expected_max_seqs=16
+        p34_expected_mesh=4,8
+        ;;
+      256)
+        p34_expected_dp=16
+        p34_expected_devices=128
+        p34_expected_local_trajectories=4
+        p34_expected_global_m=4096
+        p34_expected_max_seqs=4
+        p34_expected_mesh=16,8
+        ;;
+      *)
+        echo "[env] P46 Qwen3-32B training requires topology 64 or 256" >&2
+        fail=1
+        p34_expected_dp=0
+        p34_expected_devices=0
+        p34_expected_local_trajectories=0
+        p34_expected_global_m=0
+        p34_expected_max_seqs=0
+        p34_expected_mesh=invalid
+        ;;
+    esac
+    [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
+      echo "[env] P46 training requires device-resident optimizer state" >&2
+      fail=1
+    }
+    [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
+      echo "[env] P46 training requires finite alignment warning-only" >&2
+      fail=1
+    }
+    case "${CANON_P34_DEBUG_DIR:-}" in
+      /*) ;;
+      *) echo "[env] P46 training artifact directory must be absolute" >&2; fail=1 ;;
+    esac
+  elif [ "${CANON_P44_DEEPSWE_PARITY:-}" = "1" ]; then
     [ "${CANON_P39_64CHIP_PILOT:-}:${CANON_P39_PILOT_ADMITTED:-}" = "0:0" ] && \
     [ "${CANON_P43_DEEPSWE_DEBUG:-}:${CANON_P43_DEBUG_ADMITTED:-}" = "0:0" ] && \
     [ "${CANON_P43_ROLLOUT_ONLY:-}" = "0" ] || {
@@ -421,10 +486,10 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
             *) echo "[env] P34 full artifact directory must be absolute" >&2; fail=1 ;;
           esac
         else
-          [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "0" ] && \
+          [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] && \
           [ "${CANON_P34_TRAJECTORY_CAPTURE:-}" = "0" ] && \
           [ "${CANON_P34_CLEAN_ROWS:-}" = "0" ] || {
-            echo "[env] P34 short diagnostic must remain strict without production capture" >&2
+            echo "[env] P34 short diagnostic requires warning-only alignment without production capture" >&2
             fail=1
           }
         fi
@@ -571,6 +636,11 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         ;;
     esac
   fi
+  if [ "${CANON_P46_DEEPSWE_TRAIN:-}" = "1" ] && \
+     [ "${CANON_P34_RUN_STAGE:-}" != "full" ]; then
+    echo "[env] P46 Qwen3-32B training admits only full" >&2
+    fail=1
+  fi
   if [ "${CANON_P43_DEEPSWE_DEBUG:-}" = "1" ]; then
     case "${CANON_P34_RUN_STAGE:-}:${CANON_P43_ROLLOUT_ONLY:-}" in
       rollout-only:1|one-update:0|three-update:0) ;;
@@ -624,6 +694,39 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   fi
   echo "[env] P34 contract OK: DP${CANON_DP_SIZE}xTP${CANON_TP_SIZE} per role, local M256, global M${MIN_TOKEN_BUCKET}"
 fi
+
+case "${CANON_P46_EVALUATION:-0}" in
+  0) ;;
+  1)
+    for k in CANON_P46_TOPOLOGY CANON_EXPECT_COMMIT CANON_CLIENT_IMAGE \
+             CANON_RUN_CMD CANON_RUN_LOG CANON_P46_OUTPUT_DIR \
+             CANON_P46_GOLD_JSONL CANON_P46_GOLD_JSONL_SHA256 \
+             CANON_P46_MODEL_BASE_DIR CANON_P46_LOGICAL_SHARD_INDEX \
+             CANON_P46_PHYSICAL_SHARD_INDEX; do
+      req "$k"
+    done
+    [ "${CANON_MODE:-}" = "run" ] && \
+    [ "${CANON_P34_DEEPSWE:-0}" = "0" ] && \
+    [ "${CANON_P46_DEEPSWE_TRAIN:-0}" = "0" ] && \
+    [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "0" ] && \
+    [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "0" ] || {
+      echo "[env] P46 evaluation must not admit a trainer" >&2
+      fail=1
+    }
+    case "${CANON_P46_TOPOLOGY:-}" in 64|256) ;; *)
+      echo "[env] P46 evaluation topology must be 64 or 256" >&2; fail=1 ;;
+    esac
+    case " ${CANON_RUN_CMD:-} " in
+      *" examples/deepswe/eval_deepswe.py "*) ;;
+      *) echo "[env] P46 evaluation command drifted" >&2; fail=1 ;;
+    esac
+    echo "[env] P46 evaluation contract OK: topology=${CANON_P46_TOPOLOGY} logical=${CANON_P46_LOGICAL_SHARD_INDEX} physical=${CANON_P46_PHYSICAL_SHARD_INDEX}"
+    ;;
+  *)
+    echo "[env] CANON_P46_EVALUATION must be exactly 0 or 1" >&2
+    fail=1
+    ;;
+esac
 
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
   for k in CANON_DP_SIZE CANON_TP_SIZE CANON_TOTAL_DEVICES CANON_ENGINE_DP_SIZE \

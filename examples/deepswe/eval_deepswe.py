@@ -1,718 +1,534 @@
-#!/usr/bin/env python
-"""DeepSWE evaluation with deepscaler-style task-level parallelism.
+#!/usr/bin/env python3
+"""Resumable Qwen3-4B-Instruct DeepSWE clean-data evaluation.
 
-This script intentionally does not modify the existing eval entrypoint.
-It runs one full SWE trajectory per task and uses RolloutOrchestrator to
-parallelize whole tasks, similar to how deepscaler training/eval relies on
-the framework orchestrator rather than a custom outer runner.
-
-Environment Variables:
-  DATASET_NAME: The HuggingFace dataset name (default:
-  "R2E-Gym/SWE-Bench-Verified").
-  DATASET_SPLIT: The split of the dataset to evaluate (default: "test").
-  DATASET_CACHE: Path to cache the downloaded dataset (default:
-  "/scratch/dataset_cache").
-  MODEL_VERSION: The model identifier on HuggingFace to evaluate (default:
-  "Qwen/Qwen3-32B").
-  MAX_STEPS: Maximum number of agent steps per task/trajectory (default: 30).
-  MAX_MODEL_LEN: Maximum context length of the LLM (default: 32768).
-  MAX_RESPONSE_LENGTH / MAX_GENERATION_STEPS: Maximum tokens the model can
-  generate in a single response (default: 8192).
-  MAX_CONCURRENT: Maximum number of concurrent tasks/trajectories to run in
-  parallel (default: 256).
-  TIMEOUT: Timeout in seconds for a single trajectory evaluation (default: 600).
-  TASKS_LIMIT: Maximum number of tasks to evaluate. 0 means all tasks (default:
-  0).
-  MAX_CONTEXT_LIMIT: Limit on the number of context tokens before terminating
-  the episode (default: MAX_MODEL_LEN - 256).
-  ENABLE_GUARD: Set to "true" to enable action guard via GuardedSWEEnv (default:
-  "false").
-  ROLLOUT_ENGINE: The underlying LLM engine to use. Choices are 'vanilla',
-  'vllm', or 'sglang_jax' (default: "vllm").
-  VLLM_HBM_UTILIZATION: HBM utilization ratio for vLLM engine (default: 0.4).
-  VLLM_INIT_RANDOM_WEIGHTS: Set to "true" to init vLLM with random weights and
-  sync later (default: "true").
-  VLLM_SERVER_MODE: Set to "true" to run vLLM in server mode (default: "true").
-  VLLM_MAX_NUM_SEQS: Maximum number of concurrent sequences in vLLM (default:
-  128).
-  VLLM_MAX_BATCHED_TOKENS: Maximum batched tokens for vLLM (default: 165888).
-  SGLANG_MEM_FRACTION_STATIC: Static memory fraction for SGLang (default: 0.4).
-  SGLANG_INIT_RANDOM_WEIGHTS: Set to "true" to init SGLang with random weights
-  and sync later (default: "true").
-  SGLANG_MAX_RUNNING_REQUESTS: Maximum running requests for SGLang (default: 1).
-  OUTPUT_DIR: Directory where the evaluation results JSONL file will be saved
-  (default: "eval_results").
-  JAX_PLATFORMS: If set to "proxy", initializes Pathways utils.
-
-Usage:
-  # Full evaluation with default settings:
-  #   - Qwen/Qwen3-32B
-  #   - vLLM sampler
-  #   - MAX_CONCURRENT=256
-  #   - ENABLE_GUARD=false
-  #   - full evaluation split
-  python3 examples/deepswe/eval_deepswe.py
+One logical report covers 32 clean tasks x 16 stochastic samples. Execution is
+deliberately split into eight 4-task x 16-sample physical shards so a shard is
+one 64-trajectory concurrency wave with a one-hour hard boundary. Every full
+trajectory is fsynced before another result is accepted. Reusing the same
+logical-shard index resumes only an exact configuration fingerprint.
 """
 
+from __future__ import annotations
+
 import asyncio
-import collections
+import glob
 import json
 import logging
 import os
+from pathlib import Path
 import sys
-import threading
 import time
+from typing import Any, Mapping, Sequence
 
-from datasets import load_dataset
-from guarded_swe_env import GuardedSWEEnv
-from huggingface_hub import snapshot_download
-import jax
-import jax.numpy as jnp
-from jax.sharding import Mesh
-from kubernetes import client
-from kubernetes import config as k8s_config
-import numpy as np
-from swe_agent import SWEAgent
-from swe_env import SWEEnv
-from transformers import AutoTokenizer
-from tunix.generate import tokenizer_adapter as tok_adapter
-from tunix.models.qwen3 import model as model_lib
-from tunix.models.qwen3 import params as params_lib
-from tunix.rl.agentic import utils as agentic_utils
-from tunix.rl.agentic.agents import agent_types
-from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
-from tunix.rl.agentic.trajectory import trajectory_collect_engine
-from tunix.sft import utils as sft_utils
+from deepswe_eval_artifacts import EvalConfig
+from deepswe_eval_artifacts import aggregate_tasks
+from deepswe_eval_artifacts import append_record
+from deepswe_eval_artifacts import load_records
+from deepswe_eval_artifacts import remaining_samples
+from deepswe_eval_artifacts import sha256_file
+from deepswe_eval_artifacts import task_key
+from deepswe_eval_artifacts import trajectory_record
+from deepswe_eval_artifacts import write_reports
 
-Counter = collections.Counter
 
-# ========================== Configuration ==========================
-
-sys.path.insert(0, "/usr/github/rllm")
-sys.path.insert(0, "/usr/github/pathways-utils")
-
-DATASET_NAME = os.getenv("DATASET_NAME", "R2E-Gym/SWE-Bench-Verified")
-DATASET_SPLIT = os.getenv("DATASET_SPLIT", "test")
-DATASET_CACHE = os.getenv("DATASET_CACHE", "/scratch/dataset_cache")
-
-MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
-MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
-
-MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
-MAX_MODEL_LEN = int(os.getenv("MAX_MODEL_LEN", "32768"))
-MAX_RESPONSE_LENGTH = int(
-    os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "8192"))
-)
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "256"))
-TIMEOUT = float(os.getenv("TIMEOUT", "600"))
-TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "0"))
-MAX_CONTEXT_LIMIT = int(
-    os.getenv("MAX_CONTEXT_LIMIT", str(max(1, MAX_MODEL_LEN - 256)))
-)
-
-ENABLE_GUARD = False
-if os.getenv("ENABLE_GUARD", "false").lower() == "true":
-  ENABLE_GUARD = True
-
-ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
-
-VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.4"))
-VLLM_INIT_RANDOM_WEIGHTS = (
-    os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
-)
-VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
-VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "128"))
-VLLM_MAX_BATCHED_TOKENS = int(os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888"))
-
-SGLANG_MEM_FRACTION_STATIC = float(
-    os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4")
-)
-SGLANG_INIT_RANDOM_WEIGHTS = (
-    os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
-)
-SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
-
-OUTPUT_DIR = os.getenv(
-    "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "eval_results")
-)
-ANSI_RED = "\033[31m"
-ANSI_RESET = "\033[0m"
-
-# ========================== Logging ==========================
-
-for handler in logging.root.handlers[:]:
-  logging.root.removeHandler(handler)
-
-logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger("deepswe_eval")
 
 
-# ========================== JAX / Pathways ==========================
+def _required(name: str, fallback: str | None = None) -> str:
+  value = os.environ.get(name, "")
+  if not value and fallback:
+    value = os.environ.get(fallback, "")
+  if not value:
+    raise ValueError(f"missing required environment variable {name}")
+  return value
 
-if os.getenv("JAX_PLATFORMS", None) == "proxy":
-  import pathwaysutils
 
-  pathwaysutils.initialize()
+def _int(name: str, default: int) -> int:
+  value = int(os.environ.get(name, str(default)))
+  if value < 0:
+    raise ValueError(f"{name} must be nonnegative")
+  return value
 
-os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-# ========================== Dataset ==========================
-
-logger.info("Loading dataset %s split=%s ...", DATASET_NAME, DATASET_SPLIT)
-dataset = load_dataset(
-    DATASET_NAME,
-    split=DATASET_SPLIT,
-    cache_dir=DATASET_CACHE,
-    num_proc=32,
-)
-
-entries = [e for e in dataset if "docker_image" in e]
-if TASKS_LIMIT > 0:
-  entries = entries[:TASKS_LIMIT]
-
-unique_images = set(e["docker_image"] for e in entries)
-logger.info(
-    "Loaded %d instances (%d unique Docker images)",
-    len(entries),
-    len(unique_images),
-)
-
-# ========================== Kubernetes ==========================
-
-os.environ.setdefault("KUBECONFIG", "~/.kube/config")
-os.environ.setdefault("NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool")
-os.environ.setdefault("NODE_SELECTOR_VAL", "deepswe-cpu-pool")
-
-k8s_config.load_kube_config()
-k8s_client = client.CoreV1Api()
-k8s_client.list_namespace(timeout_seconds=5)
-logger.info("Kubernetes connection verified.")
-
-# ========================== Model ==========================
-
-if not os.path.isdir(MODEL_PATH) or not os.listdir(MODEL_PATH):
-  os.makedirs(MODEL_PATH, exist_ok=True)
-  snapshot_download(
-      repo_id=MODEL_VERSION,
-      local_dir=MODEL_PATH,
-      local_dir_use_symlinks=False,
+def _build_config() -> tuple[EvalConfig, int, Path]:
+  model_id = os.environ.get(
+      "MODEL_VERSION", "Qwen/Qwen3-4B-Instruct-2507"
   )
-
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-tokenizer_for_agentic = tok_adapter.TokenizerAdapter(tokenizer)
-chat_parser = parser.QwenChatTemplateParser(tokenizer)
-qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
-
-devices = jax.devices()
-# Force pure tensor parallelism for eval: DP=1, TP=8.
-# Qwen3-32B has tensors such as (5120, 8, 128), so TP must not exceed 8 for
-# shardings that partition that dimension on the tp axis.
-TP_SIZE = 8
-mesh_devices = np.array(devices[:TP_SIZE]).reshape(1, TP_SIZE)
-mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
-logger.info(
-    "Using mesh shape fsdp=%d tp=%d (pure TP eval, total_devices=%d,"
-    " used_devices=%d)",
-    mesh.shape["fsdp"],
-    mesh.shape["tp"],
-    len(devices),
-    TP_SIZE,
-)
-
-if MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
-  model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
-elif MODEL_VERSION == "Qwen/Qwen3-32B":
-  model_config = model_lib.ModelConfig.qwen3_32b()
-else:
-  raise ValueError(f"Unsupported MODEL_VERSION: {MODEL_VERSION}")
-
-logger.info("Loading model weights from %s ...", MODEL_PATH)
-model = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, model_config, mesh, dtype=jnp.float32
-)
-sft_utils.show_hbm_usage()
-
-# ========================== Sampler ==========================
-
-logger.info("Creating sampler with engine=%s ...", ROLLOUT_ENGINE)
-
-if ROLLOUT_ENGINE == "vanilla":
-  from tunix.generate import sampler as sampler_lib
-
-  sampler = sampler_lib.Sampler(
-      model,
-      tokenizer,
-      sampler_lib.CacheConfig(
-          cache_size=16384,
-          num_layers=model_config.num_layers,
-          num_kv_heads=model_config.num_kv_heads,
-          head_dim=model_config.head_dim,
+  model_base = os.environ.get(
+      "MODEL_BASE_DIR",
+      os.environ.get(
+          "CANON_P46_MODEL_BASE_DIR", "/mnt/disks/linchai_data/models"
       ),
   )
-
-elif ROLLOUT_ENGINE == "vllm":
-  from tunix.generate import mappings
-  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
-
-  os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-
-  mapping_config = mappings.MappingConfig.build(
-      mapping_obj=None,
-      model=model,
-      backend="vllm_jax",
-  )
-  vllm_config = VllmConfig(
-      mesh=mesh,
-      hbm_utilization=VLLM_HBM_UTILIZATION,
-      init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
-      tpu_backend_type="jax",
-      server_mode=VLLM_SERVER_MODE,
-      tensor_parallel_size=mesh.shape["tp"],
-      data_parallel_size=mesh.shape["fsdp"],
-      mapping_config=mapping_config,
-      engine_kwargs={
-          "model": MODEL_PATH,
-          "max_model_len": MAX_MODEL_LEN,
-          "max_num_seqs": VLLM_MAX_NUM_SEQS,
-          "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-          "enable_prefix_caching": True,
-          "kv_cache_metrics": True,
-          "disable_log_stats": False,
-      },
-  )
-  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-
-  from flax import nnx
-
-  sampler.load_checkpoint(nnx.state(model))
-  logger.info("Synced model weights to vLLM engine.")
-
-elif ROLLOUT_ENGINE == "sglang_jax":
-  from tunix.generate import mappings
-  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
-
-  mapping_config = mappings.MappingConfig.build(
-      mapping_obj=None,
-      model=model,
-      backend="sglang_jax",
-  )
-  sampler = SglangJaxSampler(
-      tokenizer=tokenizer,
-      config=SglangJaxConfig(
-          mesh=mesh,
-          mapping_config=mapping_config,
-          model_version=MODEL_VERSION,
-          context_length=MAX_MODEL_LEN,
-          mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
-          init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
-          disable_radix_cache=True,
-          enable_deterministic_sampling=False,
-          precompile_token_paddings=[8192, 16384],
-          precompile_bs_paddings=[1],
-          max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
+  model_path = Path(model_base) / model_id.removeprefix("Qwen/")
+  whitelist_path = Path(
+      _required("GOLD_JSONL", "CANON_P46_GOLD_JSONL")
+  ).resolve()
+  output_dir = Path(
+      _required("OUTPUT_DIR", "CANON_P46_OUTPUT_DIR")
+  ).resolve()
+  config = EvalConfig(
+      model_id=model_id,
+      model_path=str(model_path.resolve()),
+      dataset_name=os.environ.get(
+          "DATASET_NAME", "R2E-Gym/R2E-Gym-Subset"
       ),
+      dataset_revision=os.environ.get(
+          "DATASET_REVISION", "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
+      ),
+      dataset_split=os.environ.get("DATASET_SPLIT", "train"),
+      dataset_rows=_int("EXPECTED_DATASET_ROWS", 4578),
+      whitelist_path=str(whitelist_path),
+      whitelist_sha256=_required(
+          "GOLD_JSONL_SHA256", "CANON_P46_GOLD_JSONL_SHA256"
+      ),
+      whitelist_rows=_int("EXPECTED_CLEAN_ROWS", 1851),
+      source_commit=_required("CANON_EXPECT_COMMIT"),
+      client_image=_required("CANON_CLIENT_IMAGE"),
+      topology=_required("CANON_P46_TOPOLOGY"),
+      max_model_len=_int("MAX_MODEL_LEN", 20_480),
+      max_response_length=_int("MAX_RESPONSE_LENGTH", 16_384),
+      max_steps=_int("MAX_STEPS", 50),
+      temperature=float(os.environ.get("TEMPERATURE", "1.0")),
+      top_p=float(os.environ.get("TOP_P", "1.0")),
+      top_k=int(os.environ.get("TOP_K", "0")),
+      n_sample=_int("N_SAMPLE", 16),
+      logical_tasks=_int("EVAL_LOGICAL_TASKS", 32),
+      shard_tasks=_int("EVAL_SHARD_TASKS", 4),
+      shard_index=_int("CANON_P46_LOGICAL_SHARD_INDEX", 0),
+      max_concurrency=_int("MAX_CONCURRENT", 64),
+      trajectory_timeout_secs=_int("TRAJECTORY_TIMEOUT_SECS", 3000),
+      per_turn_timeout_secs=_int("PER_TURN_TIMEOUT_SECS", 300),
+      step_timeout_secs=_int("STEP_TIMEOUT_SECS", 600),
+      reward_timeout_secs=_int("REWARD_TIMEOUT_SECS", 600),
+      cleanup_timeout_secs=_int("CLEANUP_TIMEOUT_SECS", 300),
+      shard_timeout_secs=_int("SHARD_TIMEOUT_SECS", 3600),
+      seed_base=_int("SEED_BASE", 42),
+      prefix_cache=os.environ.get("ENABLE_PREFIX_CACHE", "0") == "1",
   )
-  if SGLANG_INIT_RANDOM_WEIGHTS:
+  config.validate()
+  physical_shard = _int("CANON_P46_PHYSICAL_SHARD_INDEX", 0)
+  physical_shards = config.logical_tasks // config.shard_tasks
+  if physical_shard >= physical_shards:
+    raise ValueError(
+        f"EVAL_PHYSICAL_SHARD_INDEX must be below {physical_shards}"
+    )
+  return config, physical_shard, output_dir
+
+
+def _load_clean_entries(config: EvalConfig) -> list[dict[str, Any]]:
+  from datasets import load_dataset
+
+  whitelist_path = Path(config.whitelist_path)
+  actual_sha = sha256_file(whitelist_path)
+  if actual_sha != config.whitelist_sha256:
+    raise ValueError(
+        "clean whitelist SHA-256 mismatch: "
+        f"expected={config.whitelist_sha256} actual={actual_sha}"
+    )
+  wanted: set[str] = set()
+  with whitelist_path.open(encoding="utf-8") as source:
+    for line_number, line in enumerate(source, 1):
+      if not line.strip():
+        continue
+      record = json.loads(line)
+      image = record.get("docker_image")
+      if not isinstance(image, str) or not image:
+        raise ValueError(
+            f"clean whitelist line {line_number} lacks docker_image"
+        )
+      if image in wanted:
+        raise ValueError(f"duplicate docker_image in clean whitelist: {image}")
+      wanted.add(image)
+  if len(wanted) != config.whitelist_rows:
+    raise ValueError(
+        "clean whitelist row contract changed: "
+        f"expected={config.whitelist_rows} actual={len(wanted)}"
+    )
+
+  dataset = load_dataset(
+      config.dataset_name,
+      revision=config.dataset_revision,
+      split=config.dataset_split,
+      cache_dir=os.environ.get(
+          "DATASET_CACHE", "/mnt/disks/linchai_data/huggingface/datasets"
+      ),
+      num_proc=32,
+  )
+  if len(dataset) != config.dataset_rows:
+    raise ValueError(
+        "source dataset row contract changed: "
+        f"expected={config.dataset_rows} actual={len(dataset)}"
+    )
+  entries = [dict(entry) for entry in dataset if entry.get("docker_image") in wanted]
+  actual = {task_key(entry) for entry in entries}
+  if actual != wanted or len(entries) != config.whitelist_rows:
+    missing = sorted(wanted - actual)[:5]
+    raise ValueError(
+        "clean whitelist join is not exact: "
+        f"kept={len(entries)} unique={len(actual)} missing={missing}"
+    )
+  entries.sort(key=task_key)
+  logger.info(
+      "P46 clean-data gate PASS dataset=%d whitelist=%d sha256=%s",
+      len(dataset),
+      len(entries),
+      actual_sha,
+  )
+  return entries
+
+
+def _select_shards(
+    all_entries: Sequence[Mapping[str, Any]],
+    config: EvalConfig,
+    physical_shard: int,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+  logical_start = config.shard_index * config.logical_tasks
+  logical = list(all_entries[logical_start : logical_start + config.logical_tasks])
+  if not logical:
+    raise ValueError(
+        f"logical shard {config.shard_index} starts beyond the clean dataset"
+    )
+  physical_start = physical_shard * config.shard_tasks
+  physical = logical[physical_start : physical_start + config.shard_tasks]
+  if not physical:
+    raise ValueError(
+        "physical shard is empty for this final partial logical group"
+    )
+  return logical, physical
+
+
+class _Runtime:
+  """Late-imported TPU/Kubernetes runtime so artifact tests stay CPU-only."""
+
+  def __init__(self, config: EvalConfig):
+    self.config = config
+    model_path = Path(config.model_path)
+    if not model_path.is_dir() or not any(model_path.iterdir()):
+      raise FileNotFoundError(
+          "P46 evaluation requires an existing local checkpoint; refusing to "
+          f"download {config.model_path}"
+      )
+
+    if "proxy" in os.environ.get("JAX_PLATFORMS", ""):
+      import pathwaysutils
+
+      pathwaysutils.initialize()
+
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh
+    from kubernetes import client
+    from kubernetes import config as k8s_config
+    from transformers import AutoTokenizer
+    from tunix.generate import mappings
+    from tunix.generate import tokenizer_adapter as tok_adapter
+    from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+    from tunix.models.qwen3 import model as model_lib
+    from tunix.models.qwen3 import params as params_lib
+    from tunix.rl.agentic.parser.chat_template_parser import parser
+    import numpy as np
+
+    try:
+      k8s_config.load_incluster_config()
+    except k8s_config.config_exception.ConfigException:
+      k8s_config.load_kube_config()
+    client.CoreV1Api().list_namespace(timeout_seconds=5)
+
+    devices = jax.devices()
+    expected_devices = int(config.topology)
+    if len(devices) != expected_devices or len(devices) % 8:
+      raise ValueError(
+          "P46 evaluation device inventory mismatch: "
+          f"expected={expected_devices} actual={len(devices)}"
+      )
+    dp_size = len(devices) // 8
+    mesh = Mesh(np.array(devices).reshape(dp_size, 8), ("fsdp", "tp"))
+    self.tokenizer = AutoTokenizer.from_pretrained(
+        config.model_path, local_files_only=True
+    )
+    self.tokenizer_for_agentic = tok_adapter.TokenizerAdapter(self.tokenizer)
+    self.chat_parser = parser.QwenChatTemplateParser(self.tokenizer)
+    model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
+    logger.info(
+        "Loading %s on evaluation mesh DP%dxTP8 from %s",
+        config.model_id,
+        dp_size,
+        config.model_path,
+    )
+    model = params_lib.create_model_from_safe_tensors(
+        config.model_path, model_config, mesh, dtype=jnp.bfloat16
+    )
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=None, model=model, backend="vllm_jax"
+    )
+    vllm_max_num_seqs = max(1, config.max_concurrency // dp_size)
+    sampler_config = VllmConfig(
+        mesh=mesh,
+        hbm_utilization=float(os.environ.get("VLLM_HBM_UTILIZATION", "0.6")),
+        init_with_random_weights=True,
+        tpu_backend_type="jax",
+        server_mode=True,
+        tensor_parallel_size=8,
+        data_parallel_size=dp_size,
+        mapping_config=mapping_config,
+        engine_kwargs={
+            "model": config.model_path,
+            "max_model_len": config.max_model_len,
+            "max_num_seqs": vllm_max_num_seqs,
+            "max_num_batched_tokens": config.max_response_length,
+            "enable_prefix_caching": False,
+            "kv_cache_metrics": True,
+            "disable_log_stats": False,
+        },
+    )
+    self.sampler = VllmSampler(
+        tokenizer=self.tokenizer, config=sampler_config
+    )
     from flax import nnx
 
-    sampler.load_checkpoint(nnx.state(model))
-    logger.info("Synced model weights to sglang_jax engine.")
-
-else:
-  raise ValueError(
-      f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
-      "Choose from: 'vanilla', 'vllm', 'sglang_jax'"
-  )
-
-# ========================== Model Call ==========================
-
-sampler_lock = None
-if ROLLOUT_ENGINE == "vanilla" or (
-    ROLLOUT_ENGINE == "vllm" and not VLLM_SERVER_MODE
-):
-  sampler_lock = threading.Lock()
-
-
-class PromptTooLongError(ValueError):
-  """Raised when a prompt exceeds the model context limit before sampling."""
-
-
-def _is_prompt_overflow_error(exc: Exception) -> bool:
-  message = str(exc)
-  return (
-      "maximum input length" in message
-      or "context length is only" in message
-      or "Prompt too long before sampler call" in message
-      or "input_tokens" in message
-      and "max_model_len" in message
-  )
-
-
-def model_call(chat_completions, env_unused):
-  """Model inference via tunix sampler."""
-  pair_index = None
-  instance_id = "unknown"
-  if env_unused is not None:
-    pair_index = getattr(env_unused, "extra_kwargs", {}).get("pair_index")
-    instance_id = getattr(env_unused, "entry", {}).get("instance_id", "unknown")
-
-  prompt = chat_parser.parse(
-      chat_completions,
-      add_generation_prompt=True,
-      is_first_msg=True,
-  )
-  prompt_token_count = len(tokenizer.encode(prompt))
-  logger.info(
-      "[pair=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d"
-      " max_model_len=%d",
-      pair_index,
-      instance_id,
-      len(prompt),
-      prompt_token_count,
-      MAX_MODEL_LEN,
-  )
-  if prompt_token_count >= MAX_MODEL_LEN:
-    raise PromptTooLongError(
-        "Prompt too long before sampler call:"
-        f" prompt_tokens={prompt_token_count}, max_model_len={MAX_MODEL_LEN}"
+    self.sampler.load_checkpoint(nnx.state(model))
+    logger.info(
+        "P46 evaluation runtime PASS devices=%d dp=%d tp=8 prefix_cache=off",
+        len(devices),
+        dp_size,
     )
-  t0 = time.time()
-  try:
-    if sampler_lock is None:
-      out = sampler(
-          prompt,
-          max_generation_steps=MAX_RESPONSE_LENGTH,
-          echo=False,
-          eos_tokens=qwen_eos_tokens,
+
+  def model_call(
+      self,
+      chat_completions,
+      env,
+      *,
+      max_generation_steps=None,
+      request_timeout_s=None,
+      **unused_kwargs,
+  ):
+    config = self.config
+    prompt = self.chat_parser.parse(
+        chat_completions, add_generation_prompt=True, is_first_msg=True
+    )
+    prompt_tokens = len(self.tokenizer.encode(prompt))
+    remaining_context = config.max_model_len - prompt_tokens
+    if remaining_context <= 0:
+      raise ValueError(
+          f"prompt exceeds max_model_len: {prompt_tokens}/{config.max_model_len}"
       )
-    else:
-      with sampler_lock:
-        out = sampler(
-            prompt,
-            max_generation_steps=MAX_RESPONSE_LENGTH,
-            echo=False,
-            eos_tokens=qwen_eos_tokens,
-        )
-  except Exception as exc:
-    if _is_prompt_overflow_error(exc):
-      raise PromptTooLongError(str(exc)) from exc
-    raise
-  logger.info(
-      "[pair=%s instance=%s] model_call end response_chars=%d (%.1fs)",
-      pair_index,
-      instance_id,
-      len(out.text[0]) if out.text else 0,
-      time.time() - t0,
-  )
-  return out
+    generation_steps = min(
+        max_generation_steps or config.max_response_length,
+        remaining_context,
+    )
+    return self.sampler(
+        prompt,
+        max_generation_steps=generation_steps,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        top_k=config.top_k,
+        seed=env.extra_kwargs["sample_seed"],
+        echo=False,
+        request_timeout_s=request_timeout_s,
+    )
 
+async def _run_evaluation(
+    config: EvalConfig,
+    entries: Sequence[Mapping[str, Any]],
+    pending: Sequence[tuple[Mapping[str, Any], int]],
+    output_path: Path,
+) -> tuple[int, bool]:
+  from guarded_swe_env import GuardedSWEEnv
+  from swe_agent import SWEAgent
+  from swe_env import SWEEnv
+  from tunix.rl.agentic import utils as agentic_utils
+  from tunix.rl.agentic.agents import agent_types
+  from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
+  from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
-# ========================== Evaluation ==========================
+  runtime = _Runtime(config)
+  enable_guard = os.environ.get("ENABLE_GUARD", "false").lower() == "true"
+  plan = list(pending)
+  started: dict[int, float] = {}
 
-
-class EvalTrajectoryCollectEngine(
-    trajectory_collect_engine.TrajectoryCollectEngine
-):
-  """Trajectory engine that converts prompt overflows into per-trajectory termination."""
-
-  async def _one_step(self) -> bool:
-    try:
-      return await super()._one_step()
-    except PromptTooLongError as exc:
-      logger.warning(
-          "[pair=%s instance=%s] terminating trajectory due to prompt"
-          " overflow: %s",
-          self.env.extra_kwargs.get("pair_index"),
-          self.env.entry.get("instance_id", "unknown"),
-          exc,
-      )
-      self.agent.trajectory.status = (
-          agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
-      )
-      self._skip_final_reward = True
-      if self.agent.trajectory.steps:
-        self.agent.trajectory.steps[-1].done = True
-      return True
-
-  async def _append_final_reward(self):
-    if getattr(self, "_skip_final_reward", False):
-      return
-    await super()._append_final_reward()
-
-  def compute_trajectory_reward(self):
-    if getattr(self, "_skip_final_reward", False):
+  class EvalTrajectoryCollectEngine(
+      trajectory_collect_engine.TrajectoryCollectEngine
+  ):
+    async def collect(self, mode: str = "Conversation"):
+      try:
+        return await super().collect(mode)
+      except TimeoutError as exc:
+        if "cleanup" in str(exc).lower():
+          raise
+        logger.exception("isolating timed-out evaluation trajectory")
+      except Exception:
+        logger.exception("isolating failed evaluation trajectory")
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.FAILED
       self.agent.trajectory.reward = 0.0
       return self.agent.trajectory
-    return super().compute_trajectory_reward()
 
-
-class _EvalLoggingEnvMixin:
-  """Adds phase-level reset/step logs for eval debugging."""
-
-  def reset(self):
-    """Resets the environment and logs the timing.
-
-    This method calls the superclass's reset and logs the start and end of the
-    reset operation, including the time taken.
-
-    Returns:
-      The observation and info returned by the superclass's reset method.
-    """
-    pair_index = self.extra_kwargs.get("pair_index")
-    instance_id = self.entry.get("instance_id", "unknown")
-    logger.info("[pair=%s instance=%s] reset start", pair_index, instance_id)
-    t0 = time.time()
-    obs, info = super().reset()
-    logger.info(
-        "[pair=%s instance=%s] reset end (%.1fs)",
-        pair_index,
-        instance_id,
-        time.time() - t0,
-    )
-    return obs, info
-
-  def step(self, action):
-    """Steps the environment and logs the action and timing."""
-    pair_index = self.extra_kwargs.get("pair_index")
-    instance_id = self.entry.get("instance_id", "unknown")
-    step_idx = self.step_count + 1
-    action_name = action
-    if isinstance(action, str):
-      action_name = action.split("\n", 1)[0][:120]
-    logger.info(
-        "[pair=%s instance=%s] env.step start step=%s action=%s",
-        pair_index,
-        instance_id,
-        step_idx,
-        action_name,
-    )
-    t0 = time.time()
-    obs, reward, done, info = super().step(action)
-    logger.info(
-        "[pair=%s instance=%s] env.step end step=%s reward=%.1f done=%s"
-        " (%.1fs)",
-        pair_index,
-        instance_id,
-        step_idx,
-        reward,
-        done,
-        time.time() - t0,
-    )
-    return obs, reward, done, info
-
-
-class LoggedSWEEnv(_EvalLoggingEnvMixin, SWEEnv):
-  pass
-
-
-class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
-  pass
-
-
-def pairs_generator():
-  """Yield one full (agent, env) trajectory task per dataset entry."""
-  for pair_index, entry in enumerate(entries):
-    agent = SWEAgent()
-    env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
-    env = env_cls(
-        entry=entry,
-        max_steps=MAX_STEPS,
-        pair_index=pair_index,
-        group_id=pair_index,
-    )
-    yield agent, env
-
-
-async def run_evaluation():
-  """Run evaluation with orchestrator-managed task-level parallelism."""
-  os.makedirs(OUTPUT_DIR, exist_ok=True)
+  def pairs_generator():
+    env_cls = GuardedSWEEnv if enable_guard else SWEEnv
+    for pair_index, (entry, sample_index) in enumerate(plan):
+      agent = SWEAgent()
+      env = env_cls(
+          entry=dict(entry),
+          max_steps=config.max_steps,
+          pair_index=pair_index,
+          group_id=task_key(entry),
+          step_timeout=config.step_timeout_secs,
+          reward_timeout=config.reward_timeout_secs,
+      )
+      env.extra_kwargs["sample_index"] = sample_index
+      env.extra_kwargs["sample_seed"] = config.sample_seed(
+          task_key(entry), sample_index
+      )
+      started[pair_index] = time.monotonic()
+      yield agent, env
 
   orchestrator = RolloutOrchestrator(
       engine_cls=EvalTrajectoryCollectEngine,
-      engine_kwargs=dict(
-          model_call=model_call,
-          timeout=TIMEOUT,
-          max_context_limit=MAX_CONTEXT_LIMIT,
-          tokenizer=tokenizer_for_agentic,
-          chat_parser=chat_parser,
-      ),
-      max_concurrency=MAX_CONCURRENT,
+      engine_kwargs={
+          "model_call": runtime.model_call,
+          "timeout": config.trajectory_timeout_secs,
+          "per_turn_timeout": config.per_turn_timeout_secs,
+          "cleanup_timeout": config.cleanup_timeout_secs,
+          "max_response_length": config.max_response_length,
+          "tokenizer": runtime.tokenizer_for_agentic,
+          "chat_parser": runtime.chat_parser,
+      },
+      max_concurrency=config.max_concurrency,
       rollout_sync_lock=agentic_utils.RolloutSyncLock(),
   )
-
-  results = []
-  start_time = time.time()
-
   producer = asyncio.create_task(
       orchestrator.run_producers_from_stream(
-          pairs_stream=pairs_generator(),
+          pairs_generator(),
           group_size=1,
-          group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
+          group_key_fn=lambda i, env, traj: (
+              env.extra_kwargs["group_id"],
+              env.extra_kwargs["sample_index"],
+          ),
           collect_mode="Trajectory",
       )
   )
+  completed = 0
 
-  await asyncio.sleep(0)
+  async def consume() -> None:
+    nonlocal completed
+    await asyncio.sleep(0)
+    async for batch in orchestrator.yield_batches(batch_size=1):
+      for item in batch:
+        entry, sample_index = plan[item.pair_index]
+        record = trajectory_record(
+            config,
+            entry=entry,
+            sample_index=sample_index,
+            trajectory=item.traj,
+            elapsed_secs=time.monotonic() - started[item.pair_index],
+        )
+        append_record(output_path, record)
+        completed += 1
+        logger.info(
+            "P46_EVAL_TRAJECTORY task=%s sample=%d status=%s reward=%s "
+            "completed=%d/%d",
+            record["task_key"],
+            sample_index,
+            record["status"],
+            record["reward"],
+            completed,
+            len(plan),
+        )
+    await producer
 
-  async for batch in orchestrator.yield_batches(batch_size=1):
-    for item in batch:
-      traj = item.traj
-      entry = entries[item.pair_index]
-      guard_reasons = sorted({
-          (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
-          for step in traj.steps
-          if (getattr(step, "info", {}) or {}).get("guard_blocked")
-      })
-      result = {
-          "pair_index": item.pair_index,
-          "instance_id": entry.get("instance_id", item.pair_index),
-          "reward": float(traj.reward),
-          "num_steps": len(traj.steps),
-          "status": getattr(traj.status, "name", str(traj.status)),
-          "guard_blocked_steps": sum(
-              1
-              for step in traj.steps
-              if (getattr(step, "info", {}) or {}).get("guard_blocked")
-          ),
-          "guard_reasons": guard_reasons,
-      }
-      results.append(result)
-      elapsed = time.time() - start_time
-      logger.info(
-          "[%d/%d] Instance %s: reward=%.1f, steps=%d, status=%s (%.0fs"
-          " elapsed)",
-          len(results),
-          len(entries),
-          result["instance_id"],
-          result["reward"],
-          result["num_steps"],
-          result["status"],
-          elapsed,
-      )
-      logger.info(
-          "%s[%s] FINAL TRAJECTORY REWARD=%.1f%s",
-          ANSI_RED,
-          result["instance_id"],
-          result["reward"],
-          ANSI_RESET,
-      )
-
-  await producer
-  return results
+  timed_out = False
+  try:
+    await asyncio.wait_for(consume(), timeout=config.shard_timeout_secs)
+  except asyncio.TimeoutError:
+    timed_out = True
+    logger.error(
+        "P46_EVAL_SHARD_TIMEOUT completed=%d/%d deadline=%ds",
+        completed,
+        len(plan),
+        config.shard_timeout_secs,
+    )
+  finally:
+    if not producer.done():
+      producer.cancel()
+    await asyncio.gather(producer, return_exceptions=True)
+  return completed, timed_out
 
 
-# ========================== Results ==========================
-
-
-def compute_pass_at_k(results):
-  """Computes and logs evaluation metrics such as Pass@1 and average reward.
-
-  Args:
-    results: A list of dictionaries, where each dictionary contains the
-      evaluation results for a single instance, including 'reward', 'num_steps',
-      'status', 'guard_blocked_steps', and 'guard_reasons'.
-  """
-  total = len(results)
-  if total == 0:
-    logger.warning("No results to evaluate.")
-    return
-
-  correct = sum(1 for r in results if r["reward"] > 0)
-  total_reward = sum(float(r["reward"]) for r in results)
-  total_steps = sum(r["num_steps"] for r in results)
-  status_counts = Counter(r["status"] for r in results)
-
-  guard_blocked_trajectories = sum(
-      1 for r in results if r["guard_blocked_steps"] > 0
+def main() -> int:
+  logging.basicConfig(
+      stream=sys.stdout,
+      level=logging.INFO,
+      format="%(asctime)s %(levelname)s %(message)s",
   )
-  total_guard_blocks = sum(r["guard_blocked_steps"] for r in results)
-  guard_reason_counts = Counter()
-  for r in results:
-    for reason in r["guard_reasons"]:
-      guard_reason_counts[reason] += 1
-
-  avg_reward = total_reward / total
-  avg_steps = total_steps / total
-
-  logger.info("=" * 50)
-  logger.info("Evaluation Results")
-  logger.info("=" * 50)
-  logger.info("Total instances:  %d", total)
-  logger.info("Resolved:         %d", correct)
-  logger.info("Pass@1:           %.4f", correct / total)
-  logger.info("Avg reward:       %.4f", avg_reward)
-  logger.info("Avg steps:        %.2f", avg_steps)
-  logger.info("Status counts:    %s", dict(status_counts))
+  config, physical_shard, output_dir = _build_config()
+  all_entries = _load_clean_entries(config)
+  logical_entries, physical_entries = _select_shards(
+      all_entries, config, physical_shard
+  )
+  trajectory_dir = output_dir / "trajectories"
+  pattern = trajectory_dir / f"{config.run_tag}.*.jsonl"
+  existing = load_records(
+      glob.glob(str(pattern)),
+      config=config,
+      allowed_task_keys=(task_key(entry) for entry in logical_entries),
+  )
+  pending = remaining_samples(physical_entries, existing, config=config)
   logger.info(
-      "Guarded trajs:    %d/%d (%.2f%%)",
-      guard_blocked_trajectories,
-      total,
-      100.0 * guard_blocked_trajectories / total,
+      "P46_EVAL_START tag=%s logical_shard=%d physical_shard=%d "
+      "logical_tasks=%d physical_tasks=%d existing=%d pending=%d",
+      config.run_tag,
+      config.shard_index,
+      physical_shard,
+      len(logical_entries),
+      len(physical_entries),
+      len(existing),
+      len(pending),
   )
-  logger.info("Guard blocks:     %d", total_guard_blocks)
-  if guard_reason_counts:
-    logger.info("Guard reasons:    %s", dict(guard_reason_counts))
-  logger.info("=" * 50)
+  timed_out = False
+  if pending:
+    trajectory_dir.mkdir(parents=True, exist_ok=True)
+    output_path = trajectory_dir / (
+        f"{config.run_tag}.p{physical_shard}."
+        f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.jsonl"
+    )
+    _, timed_out = asyncio.run(
+        _run_evaluation(config, physical_entries, pending, output_path)
+    )
 
-
-def save_results(results):
-  """Saves the evaluation results to a JSONL file.
-
-  The results are saved in a timestamped file within the OUTPUT_DIR. Each line
-  in the file is a JSON object representing the evaluation outcome for a single
-  instance.
-
-  Args:
-    results: A list of dictionaries, where each dictionary contains the
-      evaluation results for a single instance, including 'pair_index',
-      'reward', 'num_steps', 'status', 'guard_blocked_steps', and
-      'guard_reasons'.
-
-  Returns:
-    The path to the saved JSONL file.
-  """
-  os.makedirs(OUTPUT_DIR, exist_ok=True)
-  timestamp = time.strftime("%Y%m%d_%H%M%S")
-  output_file = os.path.join(
-      OUTPUT_DIR, f"eval_deepscaler_style_{timestamp}.jsonl"
+  accumulated = load_records(
+      glob.glob(str(pattern)),
+      config=config,
+      allowed_task_keys=(task_key(entry) for entry in logical_entries),
   )
+  reports = aggregate_tasks(logical_entries, accumulated, config=config)
+  incomplete = sum(item["category"] == "incomplete" for item in reports)
+  logger.info(
+      "P46_EVAL_PROGRESS tag=%s trajectories=%d/%d incomplete_tasks=%d",
+      config.run_tag,
+      len(accumulated),
+      len(logical_entries) * config.n_sample,
+      incomplete,
+  )
+  if timed_out:
+    return 2
+  if incomplete:
+    print(
+        f"P46_EVAL_SUBSHARD_PASS tag={config.run_tag} "
+        f"physical_shard={physical_shard} pending_logical_tasks={incomplete}",
+        flush=True,
+    )
+    return 0
+  report_dir = output_dir / "reports"
+  summary = write_reports(report_dir, reports, config=config)
+  print(
+      "P46_EVAL_LOGICAL_REPORT_PASS "
+      f"tag={config.run_tag} tasks={summary['tasks']} "
+      f"solve_ratio={summary['solve_ratio']} "
+      f"summary_sha256={summary['summary_sha256']}",
+      flush=True,
+  )
+  return 0
 
-  with open(output_file, "w") as f:
-    for r in results:
-      entry = entries[r["pair_index"]]
-      record = {
-          "instance_id": entry.get("instance_id", r["instance_id"]),
-          "docker_image": entry.get("docker_image", ""),
-          "reward": r["reward"],
-          "num_steps": r["num_steps"],
-          "status": r["status"],
-          "guard_blocked_steps": r["guard_blocked_steps"],
-          "guard_reasons": r["guard_reasons"],
-      }
-      f.write(json.dumps(record) + "\n")
-
-  logger.info("Results saved to %s", output_file)
-  return output_file
-
-
-# ========================== Main ==========================
 
 if __name__ == "__main__":
-  logger.info(
-      "Starting deepscaler-style evaluation: %d instances, max_concurrent=%d, "
-      "max_steps=%d, engine=%s",
-      len(entries),
-      MAX_CONCURRENT,
-      MAX_STEPS,
-      ROLLOUT_ENGINE,
-  )
-
-  eval_results = asyncio.run(run_evaluation())
-  compute_pass_at_k(eval_results)
-  save_results(eval_results)
+  raise SystemExit(main())

@@ -106,6 +106,7 @@ class P34EnvironmentContractTest(unittest.TestCase):
     self.assertEqual(result.returncode, 0, result.stdout)
     self.assertIn("[env] P34 contract OK: DP16xTP8", result.stdout)
     self.assertIn("export CANON_PRE_ALIGN_GATE=1", resolved)
+    self.assertIn("export CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=1", resolved)
     self.assertIn("export CANON_EXPECT_MODEL_MESH_IDS=''", resolved)
     self.assertNotIn("test-only", resolved)
 

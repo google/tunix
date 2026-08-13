@@ -173,6 +173,7 @@ class VllmRollout(base_rollout.BaseRollout):
       self,
       prompts: list[str],
       rollout_config: base_rollout.RolloutConfig,
+      request_timeout_s: float | None = None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
@@ -196,6 +197,7 @@ class VllmRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,
         echo=False,
         pad_output=True,
+        request_timeout_s=request_timeout_s,
         **kwargs,
     )
 

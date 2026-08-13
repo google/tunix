@@ -916,6 +916,7 @@ class RLCluster:
       micro_batch_size: int | None = None,
       trace_tags: Mapping[str, Any] | None = None,
       max_generation_steps: int | None = None,
+      request_timeout_s: float | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -929,6 +930,9 @@ class RLCluster:
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
       trace_tags: Optional tags to add to the performance tracer.
+      max_generation_steps: Optional per-call generation-token ceiling.
+      request_timeout_s: Optional hard deadline for a vLLM request. On expiry,
+        the in-process driver aborts the unfinished request before raising.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -985,8 +989,16 @@ class RLCluster:
           tags=perf_tags,
       ) as span_v2:
         perf_info["rows"] = len(string_prompts)
+        rollout_kwargs = {}
+        if (
+            request_timeout_s is not None
+            and self.cluster_config.rollout_engine == "vllm"
+        ):
+          rollout_kwargs["request_timeout_s"] = request_timeout_s
         outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
+            self.rollout.generate(
+                string_prompts[s], rollout_config, **rollout_kwargs
+            )
             for s in rl_utils.chunk_slices_by_size(
                 stop=len(string_prompts), step=micro_batch_size
             )

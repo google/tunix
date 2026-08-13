@@ -1,8 +1,14 @@
 # P34 DeepSWE Qwen3-32B DP16xTP8 operator runbook
 
-Status: local package gates pass; target Attempt `p34r02` failed before its
-first rollout on a stale one-host mesh-ID assertion, and the repaired target
-retry has not run. The DP16
+Status: local package gates pass. Target Attempt `p34r03` passed topology,
+model, clean-data and rollout-engine initialization, then remained in update
+zero rollout for more than four hours because the old learner had no shared
+batch deadline and could pass negative remaining time into environment steps.
+It eventually returned 64 objects, but all 64 were clipped as `ENV_TIMEOUT`,
+then failed before forward/backward with `KeyError: 'fsdp'` because a `dp,tp`
+trainer mesh received a stale `fsdp` data-sharding axis. The bounded-lifecycle
+and mesh-derived data-axis repairs pass locally and have not run on the target.
+The DP16
 processed-logprob contract accepts only global compact M256 and global padded
 M4096. Both shard to the same local canonical M256 program; every other global
 row count fails closed.
@@ -24,10 +30,24 @@ Operator decision 2026-08-12: launch one real `full` run directly.  The
 production profile uses device-resident optimizer state
 (`CANON_OPT_STATE_RESIDENT=1`, `CANON_P30_OPT_STATE_OFFLOAD=0`) and the command
 uses the unambiguous `--no-optimizer-offload` flag.  There is no automatic host
-fallback.  Qwen3-32B HBM margin at 32K response length remains UNVERIFIED; an
+fallback.  Qwen3-32B HBM margin at 16K response length remains UNVERIFIED; an
 OOM is infrastructure-INCONCLUSIVE and a host-offload relaunch requires a new
 reviewed manifest.  Watch `[P41.OPTIMIZER] placement=device-resident` and the
-init/update HBM records.
+init/update HBM records. New 64/256-chip 16K manifests are maintained through
+`P46_DEEPSWE_PROFILES_RUNBOOK.md`; use this P34 entry only for historical
+evidence and its underlying gates.
+
+The replacement training process must print this before rollout:
+
+```text
+[DEEPSWE.DATA_SHARDING] PASS axes=('dp',) mesh=('dp', 'tp')
+```
+
+Missing `DEEPSWE.DATA_SHARDING`, `axes=('fsdp',)` on a P34/P46 canonical
+profile, any negative remaining timeout, or another `KeyError: 'fsdp'` proves
+the published fix was not used. Stop and archive source/manifest provenance.
+Do not interpret `observed_trajectories=64` alone as trajectory success; inspect
+the status histogram and full durable trajectory artifacts.
 
 Finite A-B, B-C and later alignment residuals are warning-only in `full` so
 that the convergence run continues.  The raw residuals, exact hashes and
@@ -35,6 +55,31 @@ warning counts remain evidence.  Shape-invalid or nonfinite alignment,
 topology, exact-weight, replica, optimizer transaction, artifact, OOM and IFRT
 failures still stop the run.  The claim level is convergence-only, never
 zero-TIM.
+
+## Locked Qwen3-32B defaults
+
+The renderer writes these values into the JobSet; do not add a second shell
+override layer:
+
+| Field | Default |
+|---|---:|
+| prompts / generations / trajectories | 8 / 8 / 64 |
+| prompt / response / turns | 4096 / 16384 / 50 |
+| temperature / top-k / top-p | 1.0 / disabled / 1.0 |
+| per model turn | 300 s |
+| whole trajectory | 4800 s |
+| environment step / final reward | 1800 s / 1800 s |
+| sandbox cleanup | 300 s |
+| R2E pod active deadline | 5100 s |
+| whole rollout batch | 5400 s |
+| training length | 1000 optimizer updates |
+
+The rollout-batch deadline covers all eight prompt groups together, not eight
+independent 90-minute waits. A per-turn expiry aborts the unfinished vLLM
+request. Trajectory reset/model/step/reward paths share one 4800-second wall
+clock, cleanup is bounded separately, and the R2E pod must be gone before the
+cleanup call can return. Exceeding a boundary ends the attempt; it does not
+continue to train on a partial batch.
 
 ## Required operator inputs
 
@@ -128,6 +173,10 @@ warnings.  They do not trigger resampling, signal injection or skip-commit.
 Artifact write failure is fatal.  The same metrics are sent to online W&B
 under `deepswe/*`.
 
+The manifest records every timeout above. Runtime logs use
+`[DEEPSWE.ROLLOUT_DEADLINE]`, `MODEL_TIMEOUT`, `ENV_TIMEOUT`,
+`REWARD_TIMEOUT`, and the per-sandbox RepoEnv reset/step/close timing lines.
+
 During the run, inspect without mutating artifacts:
 
 ```bash
@@ -165,6 +214,11 @@ unless the entire backward-no-commit contract completes.
   profiles skip the step entirely. Any drift -- wrong commit, missing patch,
   surviving source pins -- fails closed. The reference MLPerf launch cloned
   the floating upstream HEAD at runtime; the pin replaces that.
+- Each R2E pod is labeled with the DeepSWE run id, has explicit CPU/memory
+  requests and limits, and has an active deadline. Startup failure, terminal
+  phase, trajectory completion and error cleanup all issue deletion and wait
+  until Kubernetes reports the pod absent. A cleanup timeout is fatal because
+  continuing could exhaust the shared CPU sandbox pool.
 - Independently of provisioning, `swe_agent` imports without r2egym (parser
   fails closed at use with the exact remedy) and
   `apply_repoenv_kubernetes_poll_patch` logs a skip and returns an empty
@@ -200,7 +254,7 @@ Precompile worker0 backbone --> {'num_tokens': 4096, 'num_reqs': 64}
 
 Any additional prepared bucket, a different request capacity, or a runtime compile/cache miss for
 a larger backbone shape is a contract failure. `max_num_batched_tokens=256` limits one scheduler
-step per DP rank; it does not shorten the 4096-token prompt or 32768-token response because long
+step per DP rank; it does not shorten the 4096-token prompt or 16384-token response because long
 sequences use chunked prefill/decode steps.
 
 Before using target resources, reproduce the contract in the pinned local image:
