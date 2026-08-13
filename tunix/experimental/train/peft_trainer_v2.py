@@ -176,6 +176,33 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
+  """Returns the array dtype of every optimizer-state variable."""
+  return jax.tree_util.tree_map(
+      lambda value: value.get_value().dtype,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
+def _restore_opt_state_float_dtypes(
+    optimizer: nnx.Optimizer, dtypes: Any
+) -> None:
+  """Restores floating optimizer-state leaves to their pre-update dtypes."""
+
+  def _restore(value, dtype):
+    array = value.get_value()
+    if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
+      value.set_value(array.astype(dtype))
+
+  jax.tree_util.tree_map(
+      _restore,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      dtypes,
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -650,7 +677,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     norm = optax.global_norm(
         jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
     )
+    opt_state_dtypes = _opt_state_dtypes(optimizer)
     optimizer.update(model, acc_grads)
+    _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
     grad_accumulator.reset()
     return norm
 

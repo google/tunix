@@ -2002,6 +2002,88 @@ class OptimizerMemoryTest(parameterized.TestCase):
     # bf16 params -> bf16 moments on the cond path too.
     self.assertEqual(self._moment_float_dtypes(trainer), {'bfloat16'})
 
+  @parameterized.product(
+      optimizer_kind=('direct', 'injected'),
+      gradient_accumulation_steps=(1, 2),
+  )
+  def test_preserves_bf16_optimizer_state_dtypes_under_jit(
+      self, optimizer_kind, gradient_accumulation_steps
+  ):
+    """Jitted direct and conditional updates preserve optimizer-state dtypes."""
+    model = nnx.Linear(
+        in_features=4,
+        out_features=2,
+        rngs=nnx.Rngs(0),
+        param_dtype=jnp.bfloat16,
+    )
+    if optimizer_kind == 'direct':
+      tx = optax.adamw(
+          lambda _: jnp.asarray(0.1, dtype=jnp.float32),
+          mu_dtype=jnp.bfloat16,
+      )
+    else:
+      tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+          learning_rate=0.1
+      )
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+    trainer = peft_trainer.PeftTrainer(model, tx, config)
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
+
+    def opt_state_dtypes():
+      return jax.tree_util.tree_map(
+          lambda value: value[...].dtype,
+          nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+          is_leaf=lambda value: isinstance(value, nnx.Variable),
+      )
+
+    initial_opt_state_dtypes = opt_state_dtypes()
+    initial_params = jax.tree_util.tree_map(
+        lambda value: jnp.copy(value[...]),
+        nnx.state(model, nnx.Param),
+        is_leaf=lambda value: isinstance(value, nnx.Variable),
+    )
+    train_step, _ = trainer.jit_train_and_eval_step()
+    inputs = {
+        'x': jnp.ones((2, 4), dtype=jnp.bfloat16),
+        'y': jnp.ones((2, 2), dtype=jnp.bfloat16),
+    }
+
+    for micro_step in range(gradient_accumulation_steps):
+      is_update_step = micro_step == gradient_accumulation_steps - 1
+      _, _, grad_norm = train_step(
+          inputs, is_update_step=jnp.asarray(is_update_step)
+      )
+      self.assertEqual(grad_norm.dtype, jnp.float32)
+      if not is_update_step:
+        for before, after in zip(
+            jax.tree_util.tree_leaves(initial_params),
+            jax.tree_util.tree_leaves(
+                nnx.state(model, nnx.Param),
+                is_leaf=lambda value: isinstance(value, nnx.Variable),
+            ),
+        ):
+          np.testing.assert_array_equal(before, after[...])
+
+    self.assertEqual(opt_state_dtypes(), initial_opt_state_dtypes)
+    updated_params = nnx.state(model, nnx.Param)
+    self.assertTrue(
+        any(
+            not np.array_equal(before, after[...])
+            for before, after in zip(
+                jax.tree_util.tree_leaves(initial_params),
+                jax.tree_util.tree_leaves(
+                    updated_params,
+                    is_leaf=lambda value: isinstance(value, nnx.Variable),
+                ),
+            )
+        )
+    )
+    self.assertEqual(float(trainer.grad_accumulator.denom[...]), 0.0)
+
   def test_accumulator_grads_skipped_at_depth1(self):
     """At depth-1 (non-packing) the accumulator grad tree is not allocated."""
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
