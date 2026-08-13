@@ -5,10 +5,19 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## DO THIS NOW: run one P38s9 FrozenLake standard-path stock capture
+## NEXT AFTER REVIEW/PUBLICATION: run one P38s11 full-coverage stock capture
 
-Use the latest published `origin/yuxzhang/canon-zero-tim` containing
-`p38-2g7-dp-divisible-diagnostic-batch.md`. Do not relaunch the P38s7 source.
+Do not launch from the current remote until the local P38.2g9 changes are
+reviewed and published. The source used for P38s11 must contain
+`p38-2g9-full-coverage-key-capture.md`, patch 12, and the full-coverage consumer
+marker. Do not relaunch the P38s10 source.
+
+P38s10 reached a real terminal precheck and measured A-B=B-C=0, but only for
+the first four prompts (`32` trajectories, `N_action=2731`, solve ratio 1.0).
+P38s1/P38s2 measured all `256` trajectories and placed sparse red rows mostly
+outside that subset. P38s10 is therefore an exact subset PASS, not evidence
+that the carrier was repaired. It also emitted three typed-PRNG-key capture
+errors and returned no admitted serving archive.
 
 This is the first attempt whose operator contract treats one terminal,
 byte-zero log as a prerequisite instead of inferring a verdict from a pasted
@@ -52,7 +61,7 @@ P38 contract deliberately requires `backward-no-commit`,
 postflight. P45 is a warning-only committed-training profile. Combining them
 without a separately reviewed shadow-capture design would either fail the
 environment contract or let capture/postflight failure interrupt production.
-P38s9 is therefore the launchable diagnostic now; a nonblocking P45 shadow
+P38s11 is therefore the next diagnostic after publication; a nonblocking P45 shadow
 capture is a future code change, not an operator YAML edit.
 
 P38s6 is also inconclusive. It initialized the patched module but emitted zero
@@ -62,9 +71,10 @@ Its log also ends without alignment, terminal precheck, classifier, archive,
 or outer postflight. Lowering the prefix threshold cannot repair an unreachable
 hook. P38s7 then reached the real standard hook, but the 32-group diagnostic
 consumer accepted a five-group partial tail and passed 40 trajectories to the
-DP16 adapter. P38s9 uses a P38-only four-prompt mini-batch: 32 global prompts
-remain queued, but the first complete diagnostic unit is 4 x 8 = 32
-trajectories and is DP16-divisible. The operator's only job is to run one fresh
+DP16 adapter. P38s11 keeps each producer unit at 4 x 8 = 32 trajectories so
+every unit is DP16-divisible, but the consumer waits for all eight units before
+alignment. The measured batch is therefore all 32 prompts / 256 trajectories;
+a partial tail is rejected. The operator's only job is to run one fresh
 **stock-only** standard-path P38 diagnostic and return the complete evidence
 bundle. Do not launch unified
 KV, FrozenLake full training, GSM8K, backward, or an optimizer commit. Do not
@@ -73,7 +83,7 @@ force-enable continue-decode because that changes the program being diagnosed.
 ### 1. Fetch one immutable source and render
 
 Run every command block in this section sequentially in the same Bash shell
-from an existing clone of `google/tunix`. Use a new run ID if `p38s9` already
+from an existing clone of `google/tunix`. Use a new run ID if `p38s11` already
 exists. Do not reuse or overwrite an earlier output directory.
 
 ```bash
@@ -83,7 +93,7 @@ SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor \
   4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd "$SOURCE_COMMIT"
 
-RUN_ID="p38s9"
+RUN_ID="p38s11"
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -96,10 +106,14 @@ test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
 rg -q 'program_path="standard"' \
   canon-zero-tim/patches/tpu_inference/10-tpu-runner-p38-standard-capture.patch
+rg -q '_p38_capture_leaf' \
+  canon-zero-tim/patches/tpu_inference/12-tpu-runner-p38-prng-key-capture.patch
 rg -q 'CANON_P38_SERVING_CAPTURE_EXPECTED_PATH' \
   canon-zero-tim/cluster/render_p38_serving_jobsets.py
-rg -q '_DIAGNOSTIC_PROMPTS = 4' \
+rg -q '_DIAGNOSTIC_UNITS = 8' \
   canon-zero-tim/cluster/render_p38_serving_jobsets.py
+rg -q 'DIAGNOSTIC_COVERAGE_CONTRACT' \
+  tunix/rl/agentic/agentic_rl_learner.py
 rg -q 'stop_after_diagnostic_precheck' tunix/rl/alignment.py
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
@@ -213,18 +227,24 @@ The unedited `head.full.log` must contain all of the following:
    `"program_path": "standard"`;
 4. four `pre` and four `post` `[CANON_P38_SERVING_CAPTURE]` records, one pair
    for each registered prefix stratum;
-5. finite `S_decode_vs_S_prefill` red and exact `S_prefill_vs_T_old`;
-6. exactly one `[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD` carrying
-   `verdict=FAIL` and a positive `a_b_differing_bytes`;
-7. child `[run] exit=1` followed by
+5. finite `S_decode_vs_S_prefill` (red or exact) and exact
+   `S_prefill_vs_T_old`;
+6. exactly one `[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT` carrying
+   `prompt_groups=32`, `units=8`, `trajectories=256`, and
+   `partial_tail=reject verdict=PASS`;
+7. zero `[CANON_P38_SERVING_CAPTURE_ERROR]` records;
+8. exactly one `[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD` whose
+   verdict and byte count agree with item 5;
+9. child `[run] exit=1` followed by
    `[CANON_PRE_ALIGN_ARTIFACT]` and `[CANON_P38_CAPSULE_ARTIFACT]`;
-8. official `[CANON_P38_SERVING_CLASSIFICATION]` with JSON verdict `PASS` and
+10. official `[CANON_P38_SERVING_CLASSIFICATION]` with JSON verdict `PASS` and
    at least one exact request/token-history join;
-9. `[CANON_P38_SERVING_ARCHIVE]` and every base64 payload line;
-10. `[run] P38 serving expected precheck exit=1 accepted; backward=0
+11. `[CANON_P38_SERVING_ARCHIVE]` and every base64 payload line;
+12. `[run] P38 serving expected precheck exit=1 accepted; backward=0
    optimizer_commits=0`; and
-11. final `[run] PATHTRACE` with `p38_kv_unified=0`,
-    `p38_capture_init=1`, and positive `p38_capture_observe`.
+13. final `[run] PATHTRACE` with `p38_kv_unified=0`,
+    `p38_capture_init=1`, positive `p38_capture_observe`,
+    `p38_capture_error=0`, and `p38_coverage=1`.
 
 Classify an incomplete run from the terminal `head.full.log` only:
 
@@ -234,7 +254,7 @@ Classify an incomplete run from the terminal `head.full.log` only:
 | OBSERVE>0 and every observed maximum is below 1536 | `INCONCLUSIVE_PREFIX_RANGE_MISS` | choose one new bounded range from the recorded request prefixes |
 | OBSERVE crosses a registered stratum but no pre/post pair exists | `INCONCLUSIVE_SELECTION_OR_MAPPING` | fix request/packed-row selection; do not change the workload |
 | Four pre/post pairs exist but classifier/archive is missing | `INCONCLUSIVE_POSTFLIGHT` | preserve the records and fix artifact transport only |
-| All eleven items exist | `CAPTURE_ADMITTED` | extract artifacts, then start exact E0 replay |
+| All thirteen items exist | `CAPTURE_ADMITTED` | extract artifacts, then start exact E0 replay |
 
 If no stratum is captured, return the complete failure package including every
 `CANON_P38_SERVING_CAPTURE_OBSERVE` line. Do not lower the bounds or relaunch
@@ -248,11 +268,11 @@ set -euo pipefail
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s9-mismatch-capsule.npz"
+  --output "$EVIDENCE/p38s11-mismatch-capsule.npz"
 python3 \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
   --log "$EVIDENCE/head.full.log" \
-  --output "$EVIDENCE/p38s9-serving-capture.tar"
+  --output "$EVIDENCE/p38s11-serving-capture.tar"
 sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
 sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
@@ -261,8 +281,8 @@ test -s "$EVIDENCE/pre-alignment.jsonl"
 test -s "$EVIDENCE/serving-classification.json"
 sha256sum \
   "$EVIDENCE/head.full.log" \
-  "$EVIDENCE/p38s9-mismatch-capsule.npz" \
-  "$EVIDENCE/p38s9-serving-capture.tar" \
+  "$EVIDENCE/p38s11-mismatch-capsule.npz" \
+  "$EVIDENCE/p38s11-serving-capture.tar" \
   "$EVIDENCE/pre-alignment.jsonl" \
   "$EVIDENCE/serving-classification.json" | \
   tee "$EVIDENCE/SHA256SUMS"
@@ -295,8 +315,8 @@ head-pod.events.txt
 pathways-proxy.log
 pathways-rm.log
 head.previous.log
-p38s9-mismatch-capsule.npz
-p38s9-serving-capture.tar
+p38s11-mismatch-capsule.npz
+p38s11-serving-capture.tar
 pre-alignment.jsonl
 serving-classification.json
 SHA256SUMS
@@ -307,7 +327,7 @@ above are mandatory proof that the checked-out source also contains P38.2g6.
 The operator must report in plain text: source SHA, run
 ID, JobSet name, pod name, final JobSet condition, pod exit reason/code,
 restart count, and
-whether all eleven acceptance items above were present. The operator must not
+whether all thirteen acceptance items above were present. The operator must not
 claim PASS from an A/B number alone.
 
 ## Purpose

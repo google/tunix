@@ -61,6 +61,45 @@ from tunix.sft import utils as sft_utils
 ArrayLike = typing.ArrayLike
 
 
+def _p38_diagnostic_consumer_contract(
+    *,
+    enabled: bool,
+    full_batch_size: int,
+    mini_batch_size: int,
+    train_micro_batch_size: int,
+    num_generations: int,
+    process_in_consumer: bool,
+) -> tuple[int, bool, int]:
+  """Return the P38 full-coverage consumer geometry.
+
+  P38 keeps a four-prompt mini-batch so each diagnostic unit contains 32
+  trajectories and is divisible by DP16.  Numerical alignment, however, must
+  cover all 32 prompt groups from the production-shaped input batch.  Waiting
+  for the complete producer output before calling ``_process_results`` avoids
+  both the old five-group partial tail and the P38s10 first-four-prompt subset.
+  """
+  if not enabled:
+    return train_micro_batch_size, False, 0
+  expected = (32, 4, 8)
+  observed = (full_batch_size, mini_batch_size, num_generations)
+  if observed != expected:
+    raise ValueError(
+        "P38 diagnostic coverage geometry changed: "
+        f"observed={observed} expected={expected}"
+    )
+  if not process_in_consumer:
+    raise ValueError(
+        "P38 diagnostic coverage requires raw trajectories to be processed "
+        "in the consumer"
+    )
+  if full_batch_size % mini_batch_size:
+    raise ValueError(
+        "P38 diagnostic prompt coverage is not an integer number of units: "
+        f"{full_batch_size} vs {mini_batch_size}"
+    )
+  return full_batch_size, True, full_batch_size // mini_batch_size
+
+
 def _frozenlake_evaluation_metrics(
     rewards: Any, *, wall_seconds: float, policy_step: int
 ) -> dict[str, float | int]:
@@ -1822,7 +1861,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue.put(None)
 
   def _data_consumer_batch_generator(
-      self, queue: queue_lib.AbstractDataQueue, batch_size: int
+      self,
+      queue: queue_lib.AbstractDataQueue,
+      batch_size: int,
+      *,
+      require_full_batch: bool = False,
   ):
     """Yields micro-batches from a queue until a None is received."""
     item_iterator = iter(lambda: queue.get(block=True), None)
@@ -1830,6 +1873,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       batch = list(itertools.islice(item_iterator, batch_size))
       if not batch:
         return  # The iterator is exhausted.
+      if require_full_batch and len(batch) != batch_size:
+        raise RuntimeError(
+            "P38 diagnostic full-coverage consumer received a partial "
+            f"prompt batch: got={len(batch)} expected={batch_size}; "
+            "refusing subset alignment"
+        )
       yield batch
 
   def train(
@@ -1977,8 +2026,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
 
     # 2. Consume training examples and train.
+    p38_precheck_only = (
+        os.environ.get("CANON_P38_PRECHECK_ONLY", "0") == "1"
+    )
+    (
+        consumer_batch_size,
+        require_full_consumer_batch,
+        diagnostic_units,
+    ) = _p38_diagnostic_consumer_contract(
+        enabled=p38_precheck_only,
+        full_batch_size=full_batch_size,
+        mini_batch_size=mini_batch_size,
+        train_micro_batch_size=train_micro_batch_size,
+        num_generations=self._num_generations(),
+        process_in_consumer=self._process_in_consumer,
+    )
+    if p38_precheck_only:
+      print(
+          "[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT "
+          f"prompt_groups={full_batch_size} "
+          f"unit_prompts={mini_batch_size} units={diagnostic_units} "
+          f"generations={self._num_generations()} "
+          f"trajectories={full_batch_size * self._num_generations()} "
+          "partial_tail=reject verdict=PASS",
+          flush=True,
+      )
     train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue, train_micro_batch_size
+        train_data_queue,
+        consumer_batch_size,
+        require_full_batch=require_full_consumer_batch,
     )
     is_packed = self._training_config.max_seq_token_per_tpu is not None
     if is_packed:

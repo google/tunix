@@ -15,6 +15,7 @@
 """Tests for agentic_rl_learner."""
 
 import asyncio
+import queue
 from typing import Any
 from unittest import mock
 
@@ -33,6 +34,64 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 
 class AgenticRLLearnerTest(parameterized.TestCase):
+
+  def test_p38_diagnostic_consumer_covers_all_prompt_groups(self):
+    self.assertEqual(
+        agentic_rl_learner._p38_diagnostic_consumer_contract(
+            enabled=True,
+            full_batch_size=32,
+            mini_batch_size=4,
+            train_micro_batch_size=4,
+            num_generations=8,
+            process_in_consumer=True,
+        ),
+        (32, True, 8),
+    )
+
+  def test_p38_diagnostic_consumer_is_noop_when_disabled(self):
+    self.assertEqual(
+        agentic_rl_learner._p38_diagnostic_consumer_contract(
+            enabled=False,
+            full_batch_size=17,
+            mini_batch_size=5,
+            train_micro_batch_size=3,
+            num_generations=2,
+            process_in_consumer=False,
+        ),
+        (3, False, 0),
+    )
+
+  def test_p38_diagnostic_consumer_rejects_subset_geometry(self):
+    with self.assertRaisesRegex(ValueError, "coverage geometry changed"):
+      agentic_rl_learner._p38_diagnostic_consumer_contract(
+          enabled=True,
+          full_batch_size=32,
+          mini_batch_size=5,
+          train_micro_batch_size=5,
+          num_generations=8,
+          process_in_consumer=True,
+      )
+
+  def test_p38_diagnostic_consumer_rejects_partial_tail(self):
+    learner = object.__new__(DummyLearner)
+    data = queue.Queue()
+    for value in range(5):
+      data.put(value)
+    data.put(None)
+    batches = learner._data_consumer_batch_generator(
+        data, 32, require_full_batch=True
+    )
+    with self.assertRaisesRegex(RuntimeError, "refusing subset alignment"):
+      next(batches)
+
+  def test_normal_consumer_keeps_legacy_partial_tail_behavior(self):
+    learner = object.__new__(DummyLearner)
+    data = queue.Queue()
+    for value in range(5):
+      data.put(value)
+    data.put(None)
+    batches = learner._data_consumer_batch_generator(data, 32)
+    self.assertEqual(next(batches), list(range(5)))
 
   def test_model_call_wraps_one_conversation_as_a_prompt_batch(self):
     learner = object.__new__(DummyLearner)

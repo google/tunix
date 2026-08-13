@@ -73,6 +73,8 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertIn("--mesh_dp=16", env["CANON_RUN_CMD"])
         self.assertNotIn("--mini_batch_size=32", env["CANON_RUN_CMD"])
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])
+        self.assertEqual(renderer._DIAGNOSTIC_UNITS, 8)
+        self.assertEqual(renderer._COVERED_PROMPTS, 32)
 
   def test_rejects_capture_contract_drift(self):
     base = renderer.p33.load_base(_BASE)

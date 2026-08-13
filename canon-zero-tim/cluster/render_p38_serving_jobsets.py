@@ -25,6 +25,8 @@ _CAPTURE_RECORDS = len(_CAPTURE_PREFIX_BOUNDS) - 1
 _DIAGNOSTIC_PROMPTS = 4
 _NUM_GENERATIONS = 8
 _ENGINE_DATA_SIZE = 16
+_DIAGNOSTIC_UNITS = 8
+_COVERED_PROMPTS = _DIAGNOSTIC_PROMPTS * _DIAGNOSTIC_UNITS
 
 
 def _spec(*, unified: bool) -> Any:
@@ -36,11 +38,11 @@ def _spec(*, unified: bool) -> Any:
       profile="cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env",
       no_commit=True,
       job_prefix=f"canon-p38-fl-{suffix}",
-      # P38 stops after the first durable pre-backward diagnostic. Consume a
-      # complete four-prompt mini-batch instead of waiting for all 32 prompt
-      # groups. Four prompts x eight generations gives 32 trajectories, which
-      # remains exactly divisible by DP16. The workload's global input batch
-      # remains 32 prompts; production/full-training geometry is unchanged.
+      # Each four-prompt producer unit gives 32 trajectories and is divisible
+      # by DP16. The P38 consumer waits for all eight units before alignment,
+      # so the diagnostic covers the complete 32-prompt / 256-trajectory input
+      # batch without admitting a non-divisible partial tail. Production/full-
+      # training geometry is unchanged.
       command=p33._frozenlake_command(
           1, mini_batch_size=_DIAGNOSTIC_PROMPTS
       ),
@@ -120,6 +122,11 @@ def validate_capture_jobset(
   trajectories = mini_batch_size * num_generations
   if batch_size != 32:
     raise ValueError(f"P38 global prompt batch changed: {batch_size} != 32")
+  if batch_size != _COVERED_PROMPTS:
+    raise ValueError(
+        "P38 diagnostic does not cover the full prompt batch: "
+        f"{batch_size} vs {_COVERED_PROMPTS}"
+    )
   if (mini_batch_size, num_generations, mesh_dp) != (
       _DIAGNOSTIC_PROMPTS,
       _NUM_GENERATIONS,

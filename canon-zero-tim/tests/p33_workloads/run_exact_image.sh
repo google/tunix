@@ -27,6 +27,7 @@ $DOCKER run --rm \
     grep -Fq 'CANON_KV_UNIFIED' "$qwen1p7b_overlay/attn_iface_patched.py"
     grep -Fq 'KV_UNIFIED_two_pass' "$qwen1p7b_overlay/attn_iface_patched.py"
     grep -Fq 'CANON_P38_SERVING_CAPTURE_DIR' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_capture_leaf' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'tokens_indices_selector' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'implementation_identity' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Eq program_path=.standard. "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
@@ -39,11 +40,12 @@ $DOCKER run --rm \
     grep -Fq 'CANON_KV_UNIFIED' "$qwen8b_overlay/attn_iface_patched.py"
     grep -Fq 'KV_UNIFIED_two_pass' "$qwen8b_overlay/attn_iface_patched.py"
     grep -Fq 'CANON_P38_SERVING_CAPTURE_DIR' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_capture_leaf' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'tokens_indices_selector' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'implementation_identity' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Eq program_path=.standard. "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 -m py_compile "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"
-    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 serving_capture_cases=10 overlays=2"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 serving_capture_cases=12 overlays=2"
   '

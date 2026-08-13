@@ -38,3 +38,12 @@ original serving call boundaries, page tables, or request distributions. A
 schedule inferred from action and validity masks is useful as a controlled
 counterfactual, but it must carry an explicit claim ceiling and a local
 reproduction prerequisite. Do not rename derived metadata as captured truth.
+
+## 2026-08-13 — Divisibility is not diagnostic coverage
+
+A four-prompt unit solved the DP16 divisibility failure, but stopping after its
+32 trajectories silently changed a 256-trajectory experiment into a subset
+experiment. The subset was exactly aligned while prior full batches carried
+their sparse mismatches in later rows. Batch contracts must attest both local
+divisibility and complete source coverage; a partial tail is inconclusive and
+must be rejected rather than reported as a workload-wide PASS.

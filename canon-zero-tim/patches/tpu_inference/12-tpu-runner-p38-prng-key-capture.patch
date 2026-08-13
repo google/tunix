@@ -1,0 +1,47 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1019,6 +1019,28 @@
+     return {"value": x, "type": type(x).__name__}
+-
+-
++
++
++def _p38_capture_leaf(x):
++    """Materialise a P38 leaf without asking NumPy to decode typed keys."""
++    try:
++        is_typed_key = (
++            hasattr(x, "dtype")
++            and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
++        )
++    except TypeError:
++        is_typed_key = False
++    if not is_typed_key:
++        return _p18_leaf(x)
++
++    # Typed PRNG keys intentionally have no NumPy representation.  The capture
++    # records their public uint32 payload and logical key metadata, leaving the
++    # live key and the sampling program untouched.
++    raw_key = jax.random.key_data(x)
++    result = _p18_leaf(raw_key)
++    result["logical_dtype"] = str(x.dtype)
++    result["prng_key_impl"] = str(jax.random.key_impl(x))
++    return result
++
++
+ def _p18_dump(tag, payload, meta):
+     """Write one capture record. Arrays go to .npz, everything else to .json."""
+     import json as _json
+@@ -1558,10 +1580,10 @@
+         "md_request_distribution": _p18_leaf(
+             attn_metadata.request_distribution),
+         "tokens_indices_selector": _p18_leaf(capture_row_selector),
+-        "rng": _p18_leaf(runner.rng_params_for_sampling),
++        "rng": _p38_capture_leaf(runner.rng_params_for_sampling),
+     }
+     for index, leaf in enumerate(sampling_leaves):
+-        payload[f"sampling_leaf_{index:02d}"] = _p18_leaf(leaf)
++        payload[f"sampling_leaf_{index:02d}"] = _p38_capture_leaf(leaf)
+-
++
+     meta = {
+         **_p18_contract_meta(runner.mesh),

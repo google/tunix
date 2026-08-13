@@ -27,6 +27,9 @@ run_case() (
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 expected_path=standard'"
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
+  if [ "$mode" != missing-coverage ]; then
+    command+="; printf '%s\\n' '[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT prompt_groups=32 unit_prompts=4 units=8 generations=8 trajectories=256 partial_tail=reject verdict=PASS'"
+  fi
   command+="; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
   if [ "$mode" = exact ]; then
@@ -38,6 +41,11 @@ run_case() (
   elif [ "$mode" = unified-exact ]; then
     export CANON_KV_UNIFIED=1
     command+="; printf '%s\\n' '[PATHTRACE] KV_UNIFIED_two_pass'"
+    command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
+  elif [ "$mode" = capture-error ]; then
+    command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_ERROR] stage=begin error=TypeError: injected'"
+    command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
+  elif [ "$mode" = missing-coverage ]; then
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   fi
   command+="; exit 1"
@@ -60,6 +68,10 @@ run_case() (
       grep -q 'P38 stock arm executed KV_UNIFIED_two_pass' "$state/driver.log"
     elif [ "$mode" = unified-missing ]; then
       grep -q 'P38 U arm did not execute KV_UNIFIED_two_pass' "$state/driver.log"
+    elif [ "$mode" = capture-error ]; then
+      grep -q 'P38 serving capture reported internal errors: 1' "$state/driver.log"
+    elif [ "$mode" = missing-coverage ]; then
+      grep -q 'P38 diagnostic did not attest full 32-prompt coverage: 0' "$state/driver.log"
     fi
   fi
 )
@@ -69,4 +81,6 @@ run_case red
 run_case stock-hit
 run_case unified-missing
 run_case unified-exact
-echo "[P38.SERVING] POSTFLIGHT_PASS exact_stop=accepted red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted"
+run_case capture-error
+run_case missing-coverage
+echo "[P38.SERVING] POSTFLIGHT_PASS exact_stop=accepted red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected"

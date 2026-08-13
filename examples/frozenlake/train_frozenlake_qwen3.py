@@ -465,20 +465,26 @@ if CANON_P32_WORKLOAD:
   TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = args.train_trajectory_micro_batch_size
   if CANON_P38_PRECHECK_ONLY:
     p38_trajectories = MINI_BATCH_SIZE * NUM_GENERATIONS
+    p38_units = BATCH_SIZE // MINI_BATCH_SIZE
     if (
         P32_WORKLOAD is None
         or P32_WORKLOAD.name != "frozenlake"
         or p38_trajectories != 32
+        or p38_units != 8
+        or p38_units * p38_trajectories != 256
         or p38_trajectories % P32_WORKLOAD.dp_size
     ):
       raise ValueError(
-          "P38 diagnostic requires 4 prompts x 8 generations = 32 "
-          "trajectories divisible by FrozenLake DP16"
+          "P38 diagnostic requires eight 4-prompt units x 8 generations "
+          "= 256 covered trajectories, with every 32-trajectory unit "
+          "divisible by FrozenLake DP16"
       )
     print(
         "[CANON_P38] DIAGNOSTIC_BATCH_CONTRACT "
-        f"global_prompts={BATCH_SIZE} mini_prompts={MINI_BATCH_SIZE} "
-        f"generations={NUM_GENERATIONS} trajectories={p38_trajectories} "
+        f"global_prompts={BATCH_SIZE} unit_prompts={MINI_BATCH_SIZE} "
+        f"units={p38_units} generations={NUM_GENERATIONS} "
+        f"unit_trajectories={p38_trajectories} "
+        f"covered_trajectories={p38_units * p38_trajectories} "
         f"dp={P32_WORKLOAD.dp_size} verdict=PASS",
         flush=True,
     )

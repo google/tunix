@@ -968,3 +968,32 @@
   stock only and returns the entire terminal evidence directory. Do not rerun
   unified KV or infer a cause from a partial log.
 - Rollback: documentation-only; runtime behavior is unchanged.
+
+## 2026-08-13 UTC — P38s10 subset PASS audited; P38.2g9 locally complete
+
+- Type: evidence correction plus default-off diagnostic hardening. No target
+  TPU/Pathways launch, backward, optimizer commit, training launch, commit, or
+  push occurred.
+- Evidence: P38s10 processed four prompts / 32 trajectories
+  (`N_action=2731`, solve ratio 1.0) and reported exact A-B/B-C. Historical
+  P38s1/P38s2 processed 256 trajectories and carried sparse red rows mostly
+  outside this subset. P38s10 is a subset PASS, not a numerical repair.
+- Capture failure: P38s10 emitted three typed-PRNG-key NumPy conversion errors
+  and returned no admitted serving archive.
+- Implementation: the P38 consumer now waits for all 32 prompt groups (eight
+  DP16-divisible four-prompt units) before one 256-trajectory alignment call;
+  a partial tail is rejected. Typed keys are serialized through
+  `jax.random.key_data` only in the capture copy. Postflight requires exactly
+  one full-coverage marker and zero capture errors.
+- Focused gates: learner 14/14, renderer 6/6, serving postflight PASS including
+  capture-error and missing-coverage negative controls.
+- Exact-image gate: Qwen3-1.7B and Qwen3-8B each pass 22/22 tests with all
+  29 manifest entries matching. Installed runner SHA-256:
+  `d9c1bb63524271b484e96b04eb18005b8a0a49ee0e1a2b4b8c14d6db7fb1e211`.
+- Complete pinned-image CPU gate: PASS (81 workload tests, 32 alignment tests,
+  13 learner tests before the final no-op-only unit was added,
+  serving/classifier/adjacent regressions and negative
+  controls; terminal marker `[P33.WORKLOAD] CPU_GATE PASS`).
+- Claim ceiling: local construction and evidence coverage only. No carrier
+  cause or repair is claimed. P38s11 is NOT RUN and requires review,
+  publication, and separate resource approval.

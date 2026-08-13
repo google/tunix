@@ -35,23 +35,28 @@
   trajectories) into DP16. P38.2g7 keeps the global batch at 32 prompts while
   setting the P38-only consumer mini-batch to four prompts, giving a complete
   32-trajectory DP16-divisible diagnostic unit. The committed P38s8 file is an
-  interior compile excerpt and cannot validate that target gate. P38.2g8 is
-  active and requires one byte-zero terminal stock log before interpreting
-  reachability, prefix coverage, capture selection, or postflight.
-- Latest local gate: P38.2g7 is implemented locally. The renderer and recipe
-  require 32 global prompts, four diagnostic mini-batch prompts, eight
-  generations, and DP16; a five-prompt negative control is rejected. Full
-  FrozenLake and P45 training geometry remains unchanged. P38.2g6 capture is
+  interior compile excerpt and cannot validate that target gate. P38s10 later
+  reached a real terminal precheck, but it compared only one four-prompt unit
+  (`32` trajectories, `N_action=2731`) and hit three typed-PRNG-key capture
+  errors. Its exact A-B/B-C result is a subset PASS, not repair evidence.
+  P38.2g9 is active locally: it restores complete 32-prompt/256-trajectory
+  alignment coverage without losing DP16 divisibility and fixes capture-only
+  serialization of typed keys.
+- Latest local gate: P38.2g9 requires 32 global prompts, eight four-prompt
+  producer units, eight generations, and DP16. The consumer waits for all 32
+  prompt groups before one alignment call and rejects a partial tail. Normal
+  training consumer behavior is unchanged. P38.2g6 capture remains
   default-off and
   path-attested as `standard`; standard/mixed packed-token rows map by token
   offset, the capture sequence survives through unchanged sampling, and
   wrong-path plus async-scheduling controls fail closed. Qwen3-1.7B and
-  Qwen3-8B overlays each pass 20/20 exact-image tests with all 29 manifest
+  Qwen3-8B overlays each pass 22/22 exact-image tests with all 29 manifest
   entries matching. The complete pinned-image CPU gate passes 81 workload
   tests, 31 alignment tests, the 26-case serving classifier suite, and all
-  adjacent suites and negative controls. Renderer tests pass 5/5 and shell
-  postflight passes. The installed runner SHA-256 is
-  `a7bdc527182ad115385e60005cff8c4e135efd2714eb97a2e929dc3dbc45e890`.
+  adjacent suites and negative controls. Renderer tests pass 6/6 and shell
+  postflight rejects both capture errors and missing full coverage. The
+  installed runner SHA-256 is
+  `d9c1bb63524271b484e96b04eb18005b8a0a49ee0e1a2b4b8c14d6db7fb1e211`.
 - Prior local gate: P38.2g4 D0 completed. The real
   `continue_decode` capture now excludes
   live-but-unscheduled requests without compacting their physical scheduler
@@ -148,8 +153,9 @@
   postflight. It is `INCONCLUSIVE_PARTIAL_EXCERPT`. The claim that prefixes
   merely stayed below 1536 is withdrawn because the runner emits OBSERVE before
   applying the prefix filter.
-- Next action for the strict track: with separate resource approval, execute
-  the P38s9 stock-only Attempt-0 run-and-return protocol at the top of
+- Next action for the strict track: after review/publication and separate
+  resource approval, execute the P38s11 stock-only Attempt-0 run-and-return
+  protocol at the top of
   `HANDOFF.md` and in `../../cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
   Preserve the complete non-timestamped terminal head log through outer
   postflight and return the exact evidence directory, including the real
@@ -194,8 +200,8 @@
   entries, serving classifier 26/26, P38 renderer 6/6, P45 TP8 seven-site plus
   forward/VJP probes PASS, and postflight standard-path plus stock/U negative
   controls PASS.
-- Updated: 2026-08-12 UTC after rejecting the P38s8 partial excerpt and
-  preregistering the terminal P38s9 operator protocol.
+- Updated: 2026-08-13 UTC after reclassifying P38s10 as an exact subset PASS
+  with failed serving capture and implementing P38.2g9 locally.
 - Rollback: leave `CANON_P38_FROZENLAKE_REPLAY`,
   `CANON_P38_SERVING_CAPTURE_DIR`, and `CANON_KV_UNIFIED` unset. The published
   mechanisms are default-off; loss, precision, prefix cache, stock attention,

@@ -18,10 +18,16 @@ runbook and that handoff disagree, stop and use the handoff.
   state, classifier, archive, or postflight.
 - A zero-OBSERVE result cannot be blamed on `min_prefix=1536` unless it comes
   from a terminal byte-zero log. The observer runs before prefix filtering.
+- P38s10 reached a terminal numerical precheck, but it covered only four
+  prompts / 32 trajectories (`N_action=2731`, solve ratio 1.0). Its exact A-B
+  and B-C values are a subset PASS, not a carrier repair. Three typed-PRNG-key
+  capture errors prevented an admitted serving archive.
 
-The next unique run is `p38s9` and uses the published DP-divisible diagnostic
-geometry: 32 global prompts, four consumer prompts, eight generations, and
-DP16, yielding 32 trajectories.
+The next unique run is `p38s11`, after the local P38.2g9 changes are reviewed
+and published. It keeps four-prompt producer units so each unit is
+DP16-divisible, but the consumer waits for all eight units. Alignment therefore
+covers all 32 prompts / 256 trajectories and rejects a partial tail. Do not run
+the current unpublished worktree on the cluster.
 
 Two tempting substitutions are not admitted:
 
@@ -44,7 +50,7 @@ SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor \
   4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd "$SOURCE_COMMIT"
 
-RUN_ID="p38s9"
+RUN_ID="p38s11"
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -57,9 +63,12 @@ test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
 rg -q 'program_path="standard"' \
   canon-zero-tim/patches/tpu_inference/10-tpu-runner-p38-standard-capture.patch
-  canon-zero-tim/patches/tpu_inference/11-tpu-runner-p38-capture-hardening.patch
-rg -q '_DIAGNOSTIC_PROMPTS = 4' \
+rg -q '_p38_capture_leaf' \
+  canon-zero-tim/patches/tpu_inference/12-tpu-runner-p38-prng-key-capture.patch
+rg -q '_DIAGNOSTIC_UNITS = 8' \
   canon-zero-tim/cluster/render_p38_serving_jobsets.py
+rg -q 'DIAGNOSTIC_COVERAGE_CONTRACT' \
+  tunix/rl/agentic/agentic_rl_learner.py
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 ```
@@ -156,10 +165,14 @@ Use only `head.full.log` plus final JobSet/pod state:
 | INIT=1, OBSERVE=0 | standard hook was not reached; prefix threshold is not the explanation |
 | OBSERVE>0, observed maximum <1536 | current diagnostic traffic misses the registered prefix range |
 | OBSERVE crosses a registered range, capture=0 | request/packed-row selection or mapping failed |
+| any `CAPTURE_ERROR` | capture failed; numerical values do not admit D1 |
+| no full 32-prompt/256-trajectory coverage marker | subset result; numerical verdict is workload-inconclusive |
 | four pre/post pairs, no classifier/archive | capture worked; postflight/artifact transport failed |
 | four pairs + classifier PASS + archive + terminal postflight | serving capture is admitted; proceed to E0 replay |
 
-A numerical A-B red by itself is not a capture PASS. Missing evidence is
+A numerical A-B red or exact result by itself is not a capture PASS. Even a
+full-coverage exact result is one stochastic observation and must be repeated
+before a repair claim. Missing evidence is
 `INCONCLUSIVE`, never equality and never a root-cause finding. Page ownership,
 stale block tables, RoPE, residual/cast seams, and scheduler lifecycle remain
 hypotheses until the archive and exact replay localize the first divergence.

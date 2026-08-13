@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -78,6 +79,25 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
     self.assertEqual((rows, chunks), (17, 1))
     self.assertEqual(calls[0][0].shape, (256, 3))
     self.assertEqual(tensors.selected_token_ranks.shape, (17,))
+
+  def test_p38_capture_serializes_typed_prng_key_without_changing_bits(self):
+    key = jax.random.key(7)
+    captured = self.runner._p38_capture_leaf(key)
+    np.testing.assert_array_equal(
+        captured["array"], np.asarray(jax.random.key_data(key))
+    )
+    self.assertEqual(captured["dtype"], "uint32")
+    self.assertEqual(captured["shape"], (2,))
+    self.assertEqual(captured["logical_dtype"], "key<fry>")
+    self.assertEqual(
+        captured["prng_key_impl"], str(jax.random.key_impl(key))
+    )
+
+  def test_p38_capture_preserves_legacy_array_capture(self):
+    value = jnp.array([3, 5], dtype=jnp.uint32)
+    captured = self.runner._p38_capture_leaf(value)
+    np.testing.assert_array_equal(captured["array"], np.array([3, 5]))
+    self.assertNotIn("logical_dtype", captured)
 
   def test_mismatched_rows_fail_closed(self):
     with self.assertRaisesRegex(ValueError, "row mismatch"):
