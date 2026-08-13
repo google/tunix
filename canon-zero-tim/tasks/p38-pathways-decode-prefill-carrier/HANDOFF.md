@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2j row-231 E0-lite, then true P38s12b
+## CURRENT: discard mislabeled P38s12e, then run clean P38s12f
 
 This section supersedes every launch section below it. The complete executable
 operator protocol is `cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
@@ -22,6 +22,21 @@ The repaired source admits concurrency 32 only for the exact stock P38
 backward-no-commit capture envelope. Full training, evaluation, DP8xTP8, and
 KV-unified paths still require concurrency 256. Fetch a commit containing
 `validate_frozenlake_max_concurrency`; never edit/reuse the P38s12d YAML.
+
+### P38s12e is duplicated P38s12d evidence, not a target run
+
+The committed P38s12e directory is transport-complete but semantically wrong.
+All 365 `[sync] HEAD` records are source `bdc96818`; all JobSet/state paths say
+P38s12d. The file is exactly five copies of one 199-line pod log plus 360
+copies of one 113-line pod log. It contains five geometry failures followed by
+360 stale-`run.log` failures, an empty pre-alignment file, no capture, and five
+concatenated classification JSON objects. It cannot answer the concurrency
+question and must not be cited as a new experiment.
+
+Use a completely new run id, `p38s12f`. The updated runbook rejects an old
+source, an existing JobSet, duplicate source/command markers, old run ids,
+empty/multi-object JSON, and append-collected `head.full.log` evidence before
+sealing.
 
 ### Account the returned bundle correctly
 
@@ -57,7 +72,7 @@ and SHA identities are in
 
 ### Target next action after publication/resource approval
 
-Run one **stock-only concurrency-32** P38s12b. Before apply, render a same-source
+Run one **stock-only concurrency-32** P38s12f. Before apply, render a same-source
 concurrency-256 baseline and require `check_p38_intent_diff.py` PASS. Apply
 only the concurrency-32 YAML. The new source also requires:
 

@@ -1,6 +1,7 @@
-# P38.2j — P38s12a analysis, row-231 E0-lite, and true P38s12b
+# P38.2j — P38s12a analysis, row-231 E0-lite, and clean P38s12f
 
-- Status: active; local E0-lite complete, target P38s12b not run.
+- Status: active; local E0-lite complete; P38s12d/e invalid; clean target
+  P38s12f not run.
 
 ## Finding
 
@@ -62,7 +63,12 @@ live scheduler/cache state.
 4. The evidence sealer requires the full Kubernetes/Pathways bundle, excludes
    `SHA256SUMS` from its own manifest, and immediately runs `sha256sum -c`.
 
-## True P38s12b
+## Clean P38s12f
+
+P38s12d failed the stale recipe geometry before rollout. P38s12e contains
+duplicated P38s12d logs rather than a new source-pinned run. Neither is the
+concurrency discriminator. P38s12f uses a fresh run id and requires semantic
+provenance checks in addition to byte hashes.
 
 Render one source twice with the same run id: baseline concurrency 256 and
 candidate concurrency 32. `check_p38_intent_diff.py` must prove that the only
@@ -83,7 +89,7 @@ outcome identifies an operator.
 - One host: row 231 produces one complete E0-lite report with exact repeats,
   one-bit negative control, equal weights, no backward, and zero optimizer
   commits.
-- Target: P38s12b passes intent-diff before apply, reaches logical KV 1686,
+- Target: P38s12f passes intent-diff before apply, reaches logical KV 1686,
   returns the sealed full bundle, and exits through controlled code 42.
 
 ## Claim ceiling

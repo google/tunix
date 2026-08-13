@@ -6,12 +6,19 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2j, P38s12a accounting, row-231 E0-lite, and true
-  concurrency-32 P38s12b.
+- Active phase: P38.2j, P38s12a accounting, row-231 E0-lite, and clean
+  concurrency-32 P38s12f after invalid P38s12d/e attempts.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
+
+- P38s12e is not a new run. Its SHA-verified directory contains only repeated
+  P38s12d/source-`bdc96818` output: five copies of a 199-line geometry-failure
+  log and 360 copies of a 113-line stale-evidence log. `pre-alignment.jsonl`
+  is empty and `serving-classification.json` concatenates five JSON objects.
+  It has no rollout, capture, alignment, depth, or numerical verdict. Details
+  are in `artifacts/p38_2j_p38s12e_evidence_audit_0813.md`.
 
 - P38s12d is infrastructure/configuration-inconclusive. Its rendered command
   correctly selected concurrency 32, but source `bdc96818` still required 256
@@ -114,10 +121,10 @@
 ## Next action
 
 1. After user review, publication, and separate cluster approval, fetch the
-   repaired source and execute one Attempt-0 **stock-only** true P38s12b at
+   repaired source and execute one Attempt-0 **stock-only** P38s12f at
    concurrency 32 using the exact runbook. Render a same-source
    concurrency-256 baseline for intent-diff only; never apply it. Do not reuse
-   P38s12d's source SHA or rendered YAML.
+   P38s12d/e source SHAs, run ids, JobSets, pods, or rendered YAML.
 2. Require exact B-C, full 256-trajectory coverage, logical KV at least 1686,
    controlled exit 42, journal joins, the complete infrastructure bundle, and
    SHA seal PASS. Any missing item is inconclusive.
@@ -147,5 +154,5 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 default-off and does not change training, evaluation, prefix cache, precision,
 optimizer placement, or canonical kernels.
 
-- Updated: 2026-08-13 UTC; P38.2j local gates and E0-lite complete, true
-  P38s12b target NOT RUN.
+- Updated: 2026-08-13 UTC; P38s12e rejected as duplicated old evidence;
+  clean P38s12f target NOT RUN.

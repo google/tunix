@@ -1,4 +1,4 @@
-# P38 FrozenLake: row-231 E0-lite and true P38s12b
+# P38 FrozenLake: clean concurrency-32 P38s12f
 
 This runbook is diagnostic-only. It never launches FrozenLake full training,
 evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a
@@ -16,6 +16,13 @@ whose FrozenLake recipe still hard-required 256. It failed before rollout with
 `P32 FrozenLake geometry mismatch: {'max_concurrency': 32}` and has no
 numerical verdict. The source selected below must contain
 `validate_frozenlake_max_concurrency`; do not reuse P38s12d's YAML or SHA.
+
+The directory published as P38s12e is not a new run. Its `head.full.log`
+contains only P38s12d/source-`bdc96818` output: one 199-line pod log repeated
+five times and one 113-line pod log repeated 360 times. Its pre-alignment file
+is empty and its classification file concatenates five JSON objects. Checksums
+verify transport of those wrong files, not experiment validity. Do not reuse
+P38s12e artifacts, names, commands, pods, or conclusions.
 
 ## A. Completed one-host row-231 E0-lite
 
@@ -52,13 +59,13 @@ Interpret exactly one result:
 E0-lite is mask-derived and never proves a production cause by itself. This
 result blocks R0/R1 operator interpretation and the first-divergence walk.
 
-## B. Pin one immutable source for P38s12b
+## B. Pin one immutable source for P38s12f
 
 ```bash
 set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID=p38s12b
+RUN_ID=p38s12f
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 BASE_OUT="/tmp/p38-serving-${RUN_ID}-intent256"
 OUT="/tmp/p38-serving-$RUN_ID"
@@ -72,6 +79,7 @@ cd "$WORKTREE"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
 rg -q '^def validate_frozenlake_max_concurrency' tunix/rl/dp_workloads.py
+git merge-base --is-ancestor 6c3938a6f2fe "$SOURCE_COMMIT"
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 ```
@@ -121,9 +129,13 @@ Stop instead of editing rendered YAML.
 
 ```bash
 set -euo pipefail
-kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
 JOBSET="canon-p38-fl-stock-${RUN_ID}-${SOURCE_COMMIT:0:8}"
 HEAD_JOB="${JOBSET}-pathways-head-0"
+if kubectl get jobset -n default "$JOBSET" >/dev/null 2>&1; then
+  echo "refusing to reuse existing JobSet: $JOBSET" >&2
+  exit 1
+fi
+kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
 POD=""
 for unused in $(seq 1 180); do
   POD="$(kubectl get pods -n default -l "job-name=$HEAD_JOB" \
@@ -156,7 +168,10 @@ kubectl get events -n default \
   "$EVIDENCE/head-pod.events.txt"
 ```
 
-Never substitute a tail/UI excerpt for `head.full.log`.
+Never substitute a tail/UI excerpt for `head.full.log`. Never write
+`head.full.log` inside a polling loop and never append to it with `>>`.
+`head.follow.log` is the streaming view; `head.full.log` is fetched exactly
+once with `>` after the pod is terminal.
 
 ## E. Extract, verify, and seal the whole bundle
 
@@ -173,6 +188,44 @@ sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
 sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
   "$EVIDENCE/head.full.log" > "$EVIDENCE/serving-classification.json"
+
+# Semantic provenance gate. Byte hashes alone cannot detect a wrong run.
+test "$(rg -c '^\[entrypoint\] JOBSET_ATTEMPT ' \
+  "$EVIDENCE/head.full.log")" -eq 1
+test "$(rg -c '^\[sync\] HEAD=' "$EVIDENCE/head.full.log")" -eq 1
+grep -Fxq "[sync] HEAD=$SOURCE_COMMIT" "$EVIDENCE/head.full.log"
+test "$(rg -c '^\[run\] cmd:' "$EVIDENCE/head.full.log")" -eq 1
+rg -q '^\[run\] cmd: .*--max_concurrency=32( |$)' \
+  "$EVIDENCE/head.full.log"
+! rg -q 'p38s12[de]|bdc96818|P32 FrozenLake geometry mismatch|admitted P33 evidence path already exists' \
+  "$EVIDENCE/head.full.log"
+test -s "$EVIDENCE/pre-alignment.jsonl"
+test -s "$EVIDENCE/serving-classification.json"
+python3 - "$EVIDENCE/pre-alignment.jsonl" \
+  "$EVIDENCE/serving-classification.json" "$SOURCE_COMMIT" <<'PY'
+import json
+import pathlib
+import sys
+
+pre_path = pathlib.Path(sys.argv[1])
+classification_path = pathlib.Path(sys.argv[2])
+source = sys.argv[3]
+pre_records = [
+    json.loads(line)
+    for line in pre_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+if len(pre_records) != 1:
+  raise SystemExit(f"expected one pre-alignment record, got {len(pre_records)}")
+classification = json.loads(classification_path.read_text(encoding="utf-8"))
+if classification.get("verdict") != "PASS":
+  raise SystemExit(f"serving classification not PASS: {classification}")
+if classification.get("source_commit") != source:
+  raise SystemExit(
+      "classification source mismatch: "
+      f"{classification.get('source_commit')} != {source}"
+  )
+PY
 bash \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
   "$EVIDENCE" "$RUN_ID"

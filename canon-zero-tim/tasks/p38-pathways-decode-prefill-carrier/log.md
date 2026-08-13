@@ -1075,3 +1075,17 @@
 - Verification: pinned-image focused suite 59/59; complete pinned-image P33
   CPU/adjacent gate PASS with workload 85/85, alignment 34/34, adjacent 15/15,
   and all P38 negatives green. No cluster action, commit, or push occurred.
+
+## 2026-08-13 UTC — P38s12e rejected as duplicated P38s12d evidence
+
+- Pulled through `cc17378b` and audited the committed P38s12e directory.
+  Checksums pass, but every source, JobSet, state path, and failure belongs to
+  P38s12d/source `bdc96818`; repaired source `6c3938a6` never ran.
+- The 41,675-line log is five repeated copies of one 199-line pod log plus 360
+  repeated copies of one 113-line pod log. It contains five stale geometry
+  failures followed by 360 stale-`run.log` refusals, no numerical markers, an
+  empty pre-alignment file, and a five-object classification file.
+- Decision: P38s12e is `INCONCLUSIVE_WRONG_RUN_DUPLICATED`. Updated runbook,
+  handoff, state, plan, and active phase to use fresh P38s12f with semantic
+  provenance gates before sealing. No code, cluster action, commit, or push
+  occurred.
