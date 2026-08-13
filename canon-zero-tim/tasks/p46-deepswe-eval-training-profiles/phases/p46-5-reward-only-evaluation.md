@@ -48,9 +48,9 @@
 
 ## Result
 
-The reward-only implementation and local L1/L2 gates are complete in the
-unpublished worktree based on
-`e4d442bcc654938b5fcf437d901f6691265cb050`. The implementation:
+The reward-only implementation and local L1/L2 gates are published by
+`a4d165e854cc4c2320d8120e89aed185eaf61465`, rebased on operator commit
+`23bb2a3c1a77fa4037f3ec81b783e48d1af22951`. The implementation:
 
 - sends `logprobs=None,prompt_logprobs=None` to vLLM and bypasses host
   extraction entirely;

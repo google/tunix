@@ -154,3 +154,24 @@
 - Next: after explicit publication approval, reconcile and rerun clean gates;
   then launch exactly the two reviewed 64-chip canary arms and run the L3
   classifier before changing the Q4 clean-evaluation default.
+
+## 2026-08-13T06:46:31Z — P46.5: publication gates pass after reconcile
+
+- Type: publication
+- Authorization: The user explicitly requested commit and push. The only
+  target is `yuxzhang/canon-zero-tim`; `main` was not checked out, modified or
+  targeted.
+- Action: Created the reward-only implementation commit, rebased it without
+  conflict onto operator HEAD
+  `23bb2a3c1a77fa4037f3ec81b783e48d1af22951`, and preserved the remote P38
+  evidence plus both P46 single-session/log-directory corrections.
+- Implementation commit:
+  `a4d165e854cc4c2320d8120e89aed185eaf61465`.
+- Clean post-rebase gates: P46 31/31 PASS; `P34_STATIC_PASS suites=10`;
+  P34 trajectory/update 5/5 PASS; P39 15/15 PASS; P44 41/41 PASS; targeted
+  vLLM sampler tests 2/2 PASS; `git diff --check` PASS.
+- Claim ceiling: publication does not supply the real 64-chip L3 canary,
+  Kubernetes N16 cleanup/throughput, 256-chip target behavior or a full
+  evaluation-campaign speedup claim.
+- Next: read back the exact operator remote SHA, then execute the two reviewed
+  64-chip canary arms before default promotion.

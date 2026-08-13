@@ -16,18 +16,19 @@ Required implementation ancestry:
 
 ```text
 e1b4009394c49ea015919bda0cfdb97c12c221b5
+a4d165e854cc4c2320d8120e89aed185eaf61465
 ```
 
-P46.5 true reward-only evaluation is newer than that published ancestry and is
-currently **unpublished**. Do not infer its presence from `e1b40093`. Before
-using the reward-only instructions below, require a later explicitly published
-operator SHA containing `evaluation_mode=reward_only`, the true no-logprob
-request construction, and `probe_reward_only_v5p.py`. Never apply a manifest
-rendered from the dirty development worktree.
+P46.5 true reward-only evaluation is published by `a4d165e8`; do not infer its
+presence from `e1b40093` alone. Before using the reward-only instructions
+below, require an exact operator SHA containing `a4d165e8`,
+`evaluation_mode=reward_only`, the true no-logprob request construction, and
+`probe_reward_only_v5p.py`. Never apply a manifest rendered from the dirty
+development worktree.
 
 The remote branch may advance with documentation or returned evidence. Resolve
 and record its exact current 40-character HEAD at execution time, and require
-that the resolved HEAD contains the implementation commit above.
+that the resolved HEAD contains both implementation commits above.
 
 ## Returned-run correction and required fix
 

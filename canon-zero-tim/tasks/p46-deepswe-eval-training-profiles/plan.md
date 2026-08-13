@@ -35,10 +35,10 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   `e1b4009394c49ea015919bda0cfdb97c12c221b5` is published to the operator
   branch. Remote execution resolves the current branch HEAD dynamically and
   requires this implementation commit in its ancestry.
-- Confirmed: the nominal no-logprob vLLM path currently passes integer zero for
-  both sampled and prompt logprobs and still calls host extraction. P46.5 must
-  use `None/None`; zero is a legal logprob value and is forbidden as a missing
-  value sentinel.
+- Confirmed: before P46.5, the nominal no-logprob vLLM path passed integer zero
+  for both sampled and prompt logprobs and still called host extraction. The
+  published P46.5 path uses `None/None`; zero is a legal logprob value and is
+  forbidden as a missing-value sentinel.
 - Decision: token identity in the one-host on/off pair is L2 diagnostic
   evidence, not a hard gate. L3 paired N16 solve-rate consistency and valid
   trajectories/hour remain 64-chip target evidence.
@@ -58,7 +58,8 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   only the sampled-logprob observation request differs. The artifact classifier
   rejects any missing/invalid identity, cross-SHA comparison, observer arm
   without sampled logprobs, or reward-only arm with numeric logprobs.
-- Publication status: P46.5 is not committed. The local base is
-  `e4d442bcc654938b5fcf437d901f6691265cb050`; the operator branch advanced
-  during execution and must be reconciled before publication. Never publish to
+- Publication status: P46.5 implementation commit
+  `a4d165e854cc4c2320d8120e89aed185eaf61465` is published to the operator
+  branch on top of `23bb2a3c`. Remote execution resolves the current branch
+  HEAD dynamically and requires `a4d165e8` in its ancestry. Never publish to
   `main`.

@@ -1,31 +1,33 @@
 # P46 remote-agent execution handoff
 
-Publication status: **P46.1-P46.4 PUBLISHED; P46.5 REWARD-ONLY UNPUBLISHED;
-TARGET CAMPAIGN NOT RUN**.
+Publication status: **P46.1-P46.5 PUBLISHED; TARGET CAMPAIGN NOT RUN**.
 
 The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
 repair are anchored by implementation commit
-`e1b4009394c49ea015919bda0cfdb97c12c221b5`. The execution SHA must still be
-read back from the current `origin/yuxzhang/canon-zero-tim` because later
+`e1b4009394c49ea015919bda0cfdb97c12c221b5`; true reward-only evaluation is
+anchored by `a4d165e854cc4c2320d8120e89aed185eaf61465`. The execution SHA
+must still be read back from the current `origin/yuxzhang/canon-zero-tim`
+because later
 documentation/evidence commits may advance the branch. Require that the exact
-read-back SHA contains `e1b40093`; never substitute the older reconciled base
+read-back SHA contains both `e1b40093` and `a4d165e8`; never substitute the
+older reconciled base
 `99c3f7af761c859caa6c81ab509446cc3cc47dc0`. Never modify or push `main`.
 
 The archived P34r03 Qwen3-32B run generated 64/64 rollout records, but every
 record ended as `ENV_TIMEOUT`. It then failed before forward/backward with
 `KeyError: 'fsdp'`: the trainer mesh was `dp,tp` while the launcher passed a
-stale `fsdp` data-sharding axis. The current worktree derives the data axis from
-the trainer mesh and prints `[DEEPSWE.DATA_SHARDING] PASS` before rollout. Do
+stale `fsdp` data-sharding axis. The published implementation derives the data
+axis from the trainer mesh and prints `[DEEPSWE.DATA_SHARDING] PASS` before rollout. Do
 not rerun from the reconciled base alone; use the exact read-back operator SHA
 containing the implementation commit above.
 
 `observed_trajectories=64` is only a cardinality statement. It was not evidence
-of 64 valid trajectories in P34r03. The eventual publication also contains the
-bounded request/trajectory/batch/cleanup lifecycle needed to prevent a sandbox
+of 64 valid trajectories in P34r03. The published implementation also contains
+the bounded request/trajectory/batch/cleanup lifecycle needed to prevent a sandbox
 step from running for hours after its deadline.
 
 P46.5 fixes a separate evaluation-only problem: vLLM integer zero still asks
-for logprobs. The unpublished path uses
+for logprobs. The published path uses
 `evaluation_mode=reward_only` as its single source, sends
 `logprobs=None,prompt_logprobs=None`, skips host extraction, forbids numeric
 fake logprobs, and records
@@ -92,8 +94,8 @@ it with YAML or shell hot patches.
 
 ## Gate 0 — reward-only publication and layered parity
 
-First reconcile P46.5 onto the exact current operator branch, but commit/push
-only with explicit operator approval. Run the 31-case P46 CPU gate and the two
+Require `a4d165e8` in the exact read-back operator ancestry. Run the 31-case
+P46 CPU gate and the two
 targeted `VllmSamplerConfigTest` cases. If a direct four-chip v5p host is
 available, rerun the one-host command from a clean published checkout:
 
