@@ -248,6 +248,7 @@ parser.add_argument(
 parser.add_argument("--use_flash_attention", type=bool, default=True)
 parser.add_argument("--flash_attention_block_size", type=int, default=1024)
 parser.add_argument("--target_accuracy", type=float, default=0.69)
+parser.add_argument("--rcp_logging", type=bool, default=False)
 parser.add_argument("--metric_logger_dir", type=str, default=None)
 parser.add_argument(
     "--logging_level",
@@ -388,7 +389,8 @@ from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 from examples.deepswe import mllog_utils
 
-mllog_utils.init_start()
+if args.rcp_logging:
+  mllog_utils.init_start()
 
 # %%
 # ==========================================
@@ -560,6 +562,7 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 USE_ROLLOUT_LOGPS = args.use_rollout_logps
+RCP_LOGGING = args.rcp_logging
 
 
 # %%
@@ -1086,24 +1089,26 @@ except Exception as e:
   print(f"W&B initialization failed with error: {e}")
 
 
-mllog_utils.init_print(
-    args,
-    train_dataset=dataset,
-    rollout_mesh=rollout_mesh,
-    train_mesh=train_mesh,
-    total_devices=total_devices,
-)
-mllog_utils.init_stop()
-mllog_utils.run_start()
-mllog_utils.block_start(args)
+if RCP_LOGGING:
+  mllog_utils.init_print(
+      args,
+      train_dataset=dataset,
+      rollout_mesh=rollout_mesh,
+      train_mesh=train_mesh,
+      total_devices=total_devices,
+  )
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
+  mllog_utils.block_start(args)
 
 print("Starting training...", flush=True)
 agentic_grpo_learner.train(train_dataset=train_dataset)
 
-mllog_utils.run_stop(
-    status="success",
-    samples_count=MAX_STEPS * BATCH_SIZE * NUM_GENERATIONS,
-)
+if RCP_LOGGING:
+  mllog_utils.run_stop(
+      status="success",
+      samples_count=MAX_STEPS * BATCH_SIZE * NUM_GENERATIONS,
+  )
 
 
 # %%
