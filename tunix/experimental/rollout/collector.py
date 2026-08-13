@@ -88,12 +88,20 @@ class TrajectoryCollectorEngine:
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
+      prompt_tokens = np.asarray(
+          getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
+          dtype=np.int32,
+      ).reshape(-1)
+      if prompt_tokens.size:
+        prompt_tokens = prompt_tokens.reshape(1, -1)
+      else:
+        prompt_tokens = np.array([[0]], dtype=np.int32)
 
       return base_rollout.RolloutOutput(
           text=[text],
           logits=None,
           tokens=[tokens],
-          left_padded_prompt_tokens=np.array([[0]], dtype=np.int32),
+          left_padded_prompt_tokens=prompt_tokens,
           logprobs=[logprobs] if logprobs is not None else None,
       )
 
@@ -115,12 +123,28 @@ class TrajectoryCollectorEngine:
 
   def _convert_to_trajectory(self, rl_traj: Any) -> trajectory_lib.Trajectory:
     """Converts internal rollout trajectory to standardized Trajectory format."""
+    metadata = dict(self.request.metadata or {})
+    assistant_text = "\n".join(
+        str(getattr(step, "model_response", ""))
+        for step in getattr(rl_traj, "steps", [])
+        if getattr(step, "model_response", "")
+    )
+    metadata.setdefault("text", assistant_text)
+    metadata.setdefault("prompt_id", self.request.prompt_id)
+    metadata.setdefault("group_id", self.request.prompt_id)
+    metadata.setdefault("pair_index", self.request.group_offset_id or 0)
+    metadata["prompt_tokens"] = np.asarray(
+        getattr(rl_traj, "prompt_tokens", np.zeros(0, dtype=np.int32)),
+        dtype=np.int32,
+    )
+    metadata["reward"] = float(getattr(rl_traj, "reward", 0.0) or 0.0)
     trajectory = trajectory_lib.Trajectory(
         trajectory_id=self.traj_id,
         agent=trajectory_lib.Agent(
             name=getattr(self.agent, "name", "agent"),
             version="1.0",
         ),
+        extra=metadata,
     )
     if hasattr(rl_traj, "steps"):
       for step in rl_traj.steps:

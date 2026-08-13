@@ -14,6 +14,7 @@
 
 """Unit tests for synchronous RLProgram."""
 
+import asyncio
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -131,6 +132,54 @@ class RLProgramTest(absltest.TestCase):
     )
     self.mock_engine.train_step.assert_called_once()
     self.assertEqual(program.step, 1)
+
+  def test_run_uses_one_event_loop_for_all_async_engine_calls(self):
+    loop_ids = []
+    item = datatypes.TrajectoryItem(
+        pair_index=0,
+        group_id="prompt1",
+        start_step=0,
+        traj=datatypes.Trajectory(
+            reward=1.0,
+            status=datatypes.TrajectoryStatus.SUCCEEDED,
+        ),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.int32),
+    )
+
+    class LoopTrackingEngine:
+
+      def __init__(self):
+        self.policy_version = 0
+
+      async def generate(self, **kwargs):
+        del kwargs
+        loop_ids.append(id(asyncio.get_running_loop()))
+        return [item]
+
+      async def train_step(self, *args, **kwargs):
+        del args, kwargs
+        loop_ids.append(id(asyncio.get_running_loop()))
+        return "train"
+
+      async def sync_weights(self, **kwargs):
+        del kwargs
+        loop_ids.append(id(asyncio.get_running_loop()))
+        self.policy_version += 1
+        return self.policy_version
+
+    program = rl_program.SyncRLProgram(
+        engine=LoopTrackingEngine(),
+        algo=self.mock_algo,
+        assembler=self.assembler,
+    )
+    program.run(
+        train_dataset=[[self.mock_request], [self.mock_request]],
+        num_steps=2,
+    )
+    self.assertEqual(program.step, 2)
+    self.assertLen(set(loop_ids), 1)
 
   def test_eval_step_once_flow(self):
     program = rl_program.SyncRLProgram(

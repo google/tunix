@@ -43,11 +43,12 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     metadata = dict(resp.metadata) if resp.metadata else {}
     group_id = metadata.get("group_id", prompt_id)
     pair_index = metadata.get("pair_index", 0)
+    success_statuses = {"COMPLETED", "SUCCEEDED"}
     traj = datatypes.Trajectory(
         reward=resp.env_reward,
         status=(
             datatypes.TrajectoryStatus.SUCCEEDED
-            if resp.status == "COMPLETED"
+            if resp.status in success_statuses
             else datatypes.TrajectoryStatus.FAILED
         ),
     )

@@ -67,7 +67,7 @@ class AlgorithmAdapter(abc.ABC):
 
   @abc.abstractmethod
   def loss_fn(self) -> Callable[..., Any]:
-    """Returns the JIT-compiled loss function executed on TrainerWorker."""
+    """Returns the loss function executed on TrainerWorker."""
     ...
 
 
@@ -153,7 +153,7 @@ class GRPOAdapter(AlgorithmAdapter):
     return payloads
 
   def loss_fn(self) -> Callable[..., Any]:
-    """GRPO loss function delegating directly to `algo_core.grpo_loss_fn`."""
+    """GRPO loss function executed on TrainerWorker."""
     return algo_core.grpo_loss_fn
 
 

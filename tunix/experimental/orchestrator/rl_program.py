@@ -57,6 +57,13 @@ def _sync_or_async(coro: Any) -> Any:
   return coro
 
 
+async def _await_if_needed(value: Any) -> Any:
+  """Awaits async engine calls while still tolerating sync test doubles."""
+  if inspect.isawaitable(value):
+    return await value
+  return value
+
+
 @dataclasses.dataclass(frozen=True)
 class RLStepResult:
   """Summary for the most recent synchronous RL step."""
@@ -125,6 +132,23 @@ class SyncRLProgram:
       **kwargs: Any,
   ) -> Any:
     """Executes a single end-to-end RL training step."""
+    return _sync_or_async(
+        self.astep_once(
+            prompts=prompts,
+            generation_args=generation_args,
+            route_metadata=route_metadata,
+            **kwargs,
+        )
+    )
+
+  async def astep_once(
+      self,
+      prompts: Sequence[datatypes.RolloutRequest],
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Async implementation of one end-to-end RL training step."""
     active_engine = self._resolve_engine()
     current_step = self.policy_version
     if self.on_step_begin:
@@ -136,7 +160,7 @@ class SyncRLProgram:
       engine_call_kwargs["generation_args"] = generation_args
     if route_metadata is not None:
       engine_call_kwargs["route_metadata"] = route_metadata
-    rollouts = _sync_or_async(
+    rollouts = await _await_if_needed(
         active_engine.generate(prompts=prompts, **engine_call_kwargs)
     )
 
@@ -153,7 +177,7 @@ class SyncRLProgram:
     # 3. Create RLTrainerPayloads via AlgorithmAdapter
     ref_logps = None
     if getattr(self.algo, "requires_reference_kl", False):
-      ref_logps = _sync_or_async(
+      ref_logps = await _await_if_needed(
           active_engine.per_token_logps(datatypes.Role.REFERENCE, items=rollouts)
       )
     trainer_payloads = self.algo.create_trainer_payloads(
@@ -169,7 +193,7 @@ class SyncRLProgram:
     step_result = None
     for index, batch in enumerate(microbatches):
       is_last = index == len(microbatches) - 1
-      step_result = _sync_or_async(
+      step_result = await _await_if_needed(
           active_engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
@@ -180,7 +204,7 @@ class SyncRLProgram:
 
     # 6. Sync weights to rollout replicas
     if self.sync_weights:
-      new_version = _sync_or_async(
+      new_version = await _await_if_needed(
           active_engine.sync_weights(role=datatypes.Role.ACTOR)
       )
       if not isinstance(new_version, int) or new_version <= current_step:
@@ -215,13 +239,30 @@ class SyncRLProgram:
       **kwargs: Any,
   ) -> list[datatypes.RLTrainerPayload]:
     """Executes evaluation step without updating weights."""
+    return _sync_or_async(
+        self.aeval_step_once(
+            prompts=prompts,
+            generation_args=generation_args,
+            route_metadata=route_metadata,
+            **kwargs,
+        )
+    )
+
+  async def aeval_step_once(
+      self,
+      prompts: Sequence[datatypes.RolloutRequest],
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Async implementation of evaluation without updating weights."""
     active_engine = self._resolve_engine()
     engine_call_kwargs = dict(kwargs)
     if generation_args is not None:
       engine_call_kwargs["generation_args"] = generation_args
     if route_metadata is not None:
       engine_call_kwargs["route_metadata"] = route_metadata
-    rollouts = _sync_or_async(
+    rollouts = await _await_if_needed(
         active_engine.generate(prompts=prompts, **engine_call_kwargs)
     )
     rewards = [
@@ -242,6 +283,23 @@ class SyncRLProgram:
       **kwargs: Any,
   ) -> None:
     """Runs the RL program training loop over the dataset."""
+    return _sync_or_async(
+        self.arun(
+            engine=engine,
+            train_dataset=train_dataset,
+            num_steps=num_steps,
+            **kwargs,
+        )
+    )
+
+  async def arun(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine | None = None,
+      train_dataset: Iterable[Sequence[datatypes.RolloutRequest]] | None = None,
+      num_steps: int | None = None,
+      **kwargs: Any,
+  ) -> None:
+    """Async implementation of the RL program training loop."""
     active_engine = self._resolve_engine(engine)
     self.engine = active_engine
     if train_dataset is None:
@@ -250,4 +308,4 @@ class SyncRLProgram:
       if num_steps is not None and idx >= num_steps:
         break
       logging.info("RLProgram starting step %d", self.step)
-      self.step_once(prompts=prompt_batch, **kwargs)
+      await self.astep_once(prompts=prompt_batch, **kwargs)

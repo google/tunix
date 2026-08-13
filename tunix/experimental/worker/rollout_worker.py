@@ -292,16 +292,25 @@ class RolloutWorker(abstract_worker.Worker):
       )
     if isinstance(item, trajectory_lib.Trajectory):
       req_id = request_id or getattr(item, "trajectory_id", "default")
-      return datatypes.RolloutResponse.from_trajectory(
+      extra = getattr(item, "extra", None)
+      extra = extra if isinstance(extra, dict) else {}
+      if prompt_tokens is None:
+        prompt_tokens = np.asarray(
+            extra.get("prompt_tokens", np.zeros(0, dtype=np.int32)),
+            dtype=np.int32,
+        )
+      response = datatypes.RolloutResponse.from_trajectory(
           request_id=req_id,
           traj=item,  # pyrefly: ignore[bad-argument-type]
-          prompt_tokens=(
-              prompt_tokens
-              if prompt_tokens is not None
-              else np.zeros(0, dtype=np.int32)
-          ),
+          prompt_tokens=prompt_tokens,
           policy_version=policy_version,
       )
+      response.prompt_id = str(extra.get("prompt_id", response.prompt_id))
+      response.env_reward = float(extra.get("reward", response.env_reward))
+      response.metadata.update(
+          {k: v for k, v in extra.items() if k != "prompt_tokens"}
+      )
+      return response
     return item
 
   def _sampling_to_rollout_response(
@@ -416,18 +425,6 @@ class RolloutWorker(abstract_worker.Worker):
         and all(isinstance(req, str) for req in requests)
     ):
       return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
-    # if isinstance(requests, datatypes.RolloutRequest):
-    #   return (
-    #       await self._generate_rollout_requests_direct(
-    #           [requests], **generation_kwargs
-    #       )
-    #   )[0]
-    # if isinstance(requests, (list, tuple)) and all(
-    #     isinstance(req, datatypes.RolloutRequest) for req in requests
-    # ):
-    #   return await self._generate_rollout_requests_direct(
-    #       list(requests), **generation_kwargs
-    #   )
 
     cb = None
     if on_complete is not None:
