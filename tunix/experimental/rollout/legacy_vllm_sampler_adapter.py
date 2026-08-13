@@ -97,9 +97,27 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
   ) -> np.ndarray:
     """Returns request token ids directly when available, else sampler output."""
     prompt = req.prompt if hasattr(req, "prompt") else req
-    if not isinstance(prompt, str):
+    try:
       return np.asarray(prompt, dtype=np.int32).reshape(-1)
+    except (TypeError, ValueError):
+      pass
     return self._unpadded_prompt_tokens(fallback_padded_tokens)
+
+  def _prompt_to_input_string(self, prompt: Any) -> Any:
+    """Renders chat-message prompts to strings for Tunix VllmSampler."""
+    if isinstance(prompt, str):
+      return prompt
+    if isinstance(prompt, (list, tuple)) and all(
+        isinstance(message, dict) for message in prompt
+    ):
+      if hasattr(self.tokenizer, "apply_chat_template"):
+        return self.tokenizer.apply_chat_template(
+            list(prompt), tokenize=False, add_generation_prompt=True
+        )
+      return "\n".join(
+          str(message.get("content", "")) for message in prompt
+      )
+    return prompt
 
   # --- Lifecycle & Topology ---
   async def start(self, **kwargs) -> str | None | Any:
@@ -174,7 +192,7 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
 
     for req in requests:
       prompt = req.prompt if hasattr(req, "prompt") else req
-      prompts.append(prompt)
+      prompts.append(self._prompt_to_input_string(prompt))
       sp = (
           req.sampling_params
           if hasattr(req, "sampling_params") and req.sampling_params is not None
