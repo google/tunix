@@ -1,0 +1,2 @@
+[P38.SERVING.JOBSET] RENDERED arm=stock path=/tmp/p38-serving-p38s12f/jobset-p38-serving-stock.yaml max_concurrency=32
+[P38.SERVING.JOBSET] VERDICT PASS count=1 source=b4391703d6e1ec80b8da5589e02dfe72ba9a4a4e run_id=p38s12f

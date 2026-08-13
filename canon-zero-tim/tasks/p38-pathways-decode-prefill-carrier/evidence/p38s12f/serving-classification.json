@@ -1,0 +1,12 @@
+{
+  "concurrency": 32,
+  "max_logical_kv_prefix_length": 1972,
+  "min_logical_kv_prefix_length": 1536,
+  "request_journal_records": 150,
+  "source_commit": "b4391703d6e1ec80b8da5589e02dfe72ba9a4a4e",
+  "verdict": "FAIL",
+  "a_b_differing_bytes": 33,
+  "b_c_differing_bytes": 0,
+  "n_action": 46390,
+  "controlled_exit_code": 42
+}

@@ -1,0 +1,4 @@
+LAST SEEN   TYPE     REASON    OBJECT                                                            MESSAGE
+42s         Normal   Killing   pod/canon-p38-fl-stock-p38s12f-b4391703-pathways-head-0-0-lbrdg   Stopping container pathways-proxy
+42s         Normal   Killing   pod/canon-p38-fl-stock-p38s12f-b4391703-pathways-head-0-0-lbrdg   Stopping container pathways-rm
+42s         Normal   Killing   pod/canon-p38-fl-stock-p38s12f-b4391703-pathways-head-0-0-lbrdg   Stopping container jax-tpu

@@ -1,0 +1,10 @@
+{
+  "allowed_changes": [
+    "CANON_RUN_CMD.--max_concurrency",
+    "metadata.labels.canon.zero-tim/max-concurrency"
+  ],
+  "baseline_max_concurrency": 256,
+  "candidate_max_concurrency": 32,
+  "reasons": [],
+  "verdict": "PASS"
+}

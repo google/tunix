@@ -1089,3 +1089,17 @@
   handoff, state, plan, and active phase to use fresh P38s12f with semantic
   provenance gates before sealing. No code, cluster action, commit, or push
   occurred.
+
+## 2026-08-13 UTC — P38s12f executed: concurrency-32 carrier confirmed
+
+- Executed clean concurrency-32 diagnostic JobSet `canon-p38-fl-stock-p38s12f-b4391703` on `mlperf-v5p` (64 TPU v5p chips, DP16xTP4).
+- Attempt 0, valid source commit `b4391703d6e1ec80b8da5589e02dfe72ba9a4a4e`, intent-diff PASS.
+- Completed all 256 trajectories across 32 prompt groups, with 150 request journal records spanning 4 prefix strata (1536~2048).
+- Completed 36-layer VJP backward passes down to `model.norm`.
+- Measured pre-alignment on N_action=46,390 action tokens:
+  - S_prefill vs T_old: differing_bytes=0, differing_elements=0 (100% exact zero delta).
+  - S_decode vs S_prefill: differing_bytes=33, differing_elements=11 (delta=0.0177%).
+- Controlled diagnostic Exit 42 accepted; backward=0, optimizer_commits=0.
+- Verdict: FAIL (concurrency 32 is insufficient to remove the decode-prefill carrier).
+- Evidence packaged in `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s12f/`.
+

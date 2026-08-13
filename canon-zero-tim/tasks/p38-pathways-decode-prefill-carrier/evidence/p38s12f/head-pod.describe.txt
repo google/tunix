@@ -1,0 +1,7 @@
+Pod 'canon-p38-fl-stock-p38s12f-b4391703-pathways-head-0-0-lbrdg': error 'pods "canon-p38-fl-stock-p38s12f-b4391703-pathways-head-0-0-lbrdg" not found', but found events.
+Events:
+  Type    Reason   Age   From     Message
+  ----    ------   ----  ----     -------
+  Normal  Killing  34s   kubelet  spec.initContainers{pathways-proxy}: Stopping container pathways-proxy
+  Normal  Killing  34s   kubelet  spec.initContainers{pathways-rm}: Stopping container pathways-rm
+  Normal  Killing  34s   kubelet  spec.containers{jax-tpu}: Stopping container jax-tpu
