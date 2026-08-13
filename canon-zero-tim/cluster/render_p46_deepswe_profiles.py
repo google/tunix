@@ -238,7 +238,6 @@ def render_q32_train(
       "CANON_WANDB_PROJECT": "zero-tim-deepswe-qwen32b-16k",
       "CANON_WANDB_GROUP": f"qwen3-32b-16k-{topology}chip",
       "MIN_TOKEN_BUCKET": str(TOPOLOGIES[topology]["global_m"]),
-      "CANON_EXPECTED_SLICE_DEVICES": topology,
   })
   validate_q32(
       document,
@@ -341,7 +340,6 @@ def render_q4_eval(
       "CANON_P46_MODEL_BASE_DIR": "/mnt/disks/linchai_data/models",
       "CANON_P46_LOGICAL_SHARD_INDEX": str(logical_shard_index),
       "CANON_P46_PHYSICAL_SHARD_INDEX": str(physical_shard_index),
-      "CANON_EXPECTED_SLICE_DEVICES": topology,
       "NODE_SELECTOR_VAL": cpu_nodepool,
   })
   validate_eval(
