@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for AlgorithmAdapter (GRPOAdapter & PPOAdapter)."""
+import inspect
+from unittest import mock
 
 from absl.testing import absltest
 import numpy as np
@@ -61,7 +62,37 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertIsInstance(payloads[0], datatypes.RLTrainerPayload)
     self.assertLess(payloads[0].advantages[0], 0.0)
     self.assertGreater(payloads[1].advantages[0], 0.0)
-    self.assertEqual(adapter.loss_fn(), algo_core.grpo_loss_fn)
+    loss_fn = adapter.loss_fn()
+    loss_fn_params = inspect.signature(loss_fn).parameters
+    self.assertIn("compute_logps_chunk_size", loss_fn_params)
+    self.assertFalse(
+        any(
+            p.kind is inspect.Parameter.VAR_KEYWORD
+            for p in loss_fn_params.values()
+        )
+    )
+    with mock.patch.object(
+        algo_core, "grpo_loss_fn", return_value="loss"
+    ) as mock_grpo_loss_fn:
+      self.assertEqual(
+          loss_fn(
+              "model",
+              "train_example",
+              algo_config="config",
+              pad_id=0,
+              eos_id=1,
+              compute_logps_chunk_size=2,
+          ),
+          "loss",
+      )
+      mock_grpo_loss_fn.assert_called_once_with(
+          "model",
+          "train_example",
+          algo_config="config",
+          pad_id=0,
+          eos_id=1,
+          compute_logps_chunk_size=2,
+      )
 
   def test_ppo_advantages_and_trainer_payloads(self):
     adapter = algorithm_adapter.PPOAdapter(group_size=2, gamma=0.99, lam=0.95)

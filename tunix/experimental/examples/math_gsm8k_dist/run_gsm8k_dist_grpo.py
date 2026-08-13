@@ -168,6 +168,10 @@ class _RemoteWorkerRef(abstract_worker.Worker):
   def info(self) -> datatypes.WorkerInfo:
     return self._info
 
+  @property
+  def actor_handle(self) -> remote_execution.ActorHandle:
+    return self._handle
+
   def initialize(self) -> datatypes.Response:
     self.state = datatypes.WorkerState.INITIALIZING
     try:
@@ -397,6 +401,14 @@ def _build_step_requests(
                   "pair_index": generation_idx,
                   "gold_answer": gold_answer,
                   "prefix_hash": prompt_id,
+                  "env_config": {
+                      "prompt": prompt,
+                      "gold_answer": gold_answer,
+                      "group_id": prompt_id,
+                      "pair_index": generation_idx,
+                      "policy_version": step,
+                      "max_steps": 1,
+                  },
               },
           )
       )

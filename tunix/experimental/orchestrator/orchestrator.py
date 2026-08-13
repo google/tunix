@@ -34,6 +34,7 @@ from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import abstract_worker
+from tunix.experimental.worker import remote_execution
 
 
 class ClusterOrchestrator:
@@ -100,12 +101,44 @@ class ClusterOrchestrator:
       members = self.registry.group(role).members()
     return members
 
+  def _as_actor_handle(self, worker: Any) -> remote_execution.ActorHandle:
+    """Returns an ActorHandle for a registry member.
+
+    WorkerRegistry stores lifecycle workers, while DistributedRLEngine routes
+    compute through ActorHandle. Remote worker refs expose their underlying
+    handle; local workers are wrapped in an in-process handle for examples/tests.
+    """
+    if isinstance(worker, remote_execution.ActorHandle):
+      return worker
+    actor_handle = getattr(worker, "actor_handle", None)
+    if isinstance(actor_handle, remote_execution.ActorHandle):
+      return actor_handle
+    if callable(actor_handle):
+      actor_handle = actor_handle()
+    if isinstance(actor_handle, remote_execution.ActorHandle):
+      return actor_handle
+    return remote_execution.InProcessActorHandle(
+        remote_execution.InProcessRemoteExecutionServer(worker)
+    )
+
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
-    rollout_workers = self._get_role_members(datatypes.Role.ROLLOUT)
-    actor_workers = self._get_role_members(datatypes.Role.ACTOR)
-    critic_workers = self._get_role_members(datatypes.Role.CRITIC)
-    reference_workers = self._get_role_members(datatypes.Role.REFERENCE)
+    rollout_workers = [
+        self._as_actor_handle(worker)
+        for worker in self._get_role_members(datatypes.Role.ROLLOUT)
+    ]
+    actor_workers = [
+        self._as_actor_handle(worker)
+        for worker in self._get_role_members(datatypes.Role.ACTOR)
+    ]
+    critic_workers = [
+        self._as_actor_handle(worker)
+        for worker in self._get_role_members(datatypes.Role.CRITIC)
+    ]
+    reference_workers = [
+        self._as_actor_handle(worker)
+        for worker in self._get_role_members(datatypes.Role.REFERENCE)
+    ]
 
     trainer_workers = {}
     if actor_workers:

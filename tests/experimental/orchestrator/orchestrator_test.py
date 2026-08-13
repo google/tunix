@@ -21,6 +21,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
+from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.worker import abstract_worker
 
 
 class ClusterOrchestratorTest(absltest.TestCase):
@@ -85,6 +87,92 @@ class ClusterOrchestratorTest(absltest.TestCase):
         mock_critic,
     )
     self.assertIs(engine._inference_workers[datatypes.Role.REFERENCE], mock_ref)
+
+  def test_create_engine_unwraps_remote_worker_refs(self):
+    from tunix.experimental.worker import remote_execution
+
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    class RemoteWorkerRef(abstract_worker.Worker):
+
+      def __init__(self, worker_id, role, handle):
+        self._worker_id = worker_id
+        self._role = role
+        self.actor_handle = handle
+
+      def info(self):
+        return datatypes.WorkerInfo(
+            worker_id=self._worker_id, roles=frozenset({self._role})
+        )
+
+      def initialize(self):
+        return datatypes.Response()
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return datatypes.Response()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self):
+        return datatypes.Response()
+
+      def heartbeat(self):
+        return datatypes.HealthReport(state=datatypes.WorkerState.READY)
+
+    registry = worker_registry.WorkerRegistry()
+    registry.register(
+        RemoteWorkerRef("rollout-0", datatypes.Role.ROLLOUT, mock_rollout)
+    )
+    registry.register(
+        RemoteWorkerRef("actor-0", datatypes.Role.ACTOR, mock_actor)
+    )
+
+    orch = orchestrator.ClusterOrchestrator(registry=registry)
+    engine = orch._create_engine()
+    self.assertIs(engine._rollout_workers[0], mock_rollout)
+    self.assertIs(engine._trainer_workers[datatypes.Role.ACTOR], mock_actor)
+
+  def test_create_engine_wraps_local_workers_as_in_process_handles(self):
+    from tunix.experimental.worker import remote_execution
+
+    class LocalWorker(abstract_worker.Worker):
+
+      def info(self):
+        return datatypes.WorkerInfo(
+            worker_id="rollout-0", roles=frozenset({datatypes.Role.ROLLOUT})
+        )
+
+      def initialize(self):
+        return datatypes.Response()
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return datatypes.Response()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self):
+        return datatypes.Response()
+
+      def heartbeat(self):
+        return datatypes.HealthReport(state=datatypes.WorkerState.READY)
+
+      def generate(self, prompts):
+        del prompts
+        return []
+
+    registry = worker_registry.WorkerRegistry()
+    registry.register(LocalWorker())
+
+    orch = orchestrator.ClusterOrchestrator(registry=registry)
+    engine = orch._create_engine()
+    self.assertIsInstance(
+        engine._rollout_workers[0], remote_execution.InProcessActorHandle
+    )
 
   def test_run_managed_program_submission(self):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
