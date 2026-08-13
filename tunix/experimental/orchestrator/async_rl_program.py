@@ -153,14 +153,8 @@ class StandardRLProgram(AsyncRLProgram):
           r = getattr(item.traj, "reward", 0.0)
         rewards.append(float(r))
 
-      ref_logps = None
-      if getattr(self.algo, "requires_reference_kl", False):
-        ref_logps = await engine.per_token_logps(
-            datatypes.Role.REFERENCE, items=group
-        )
-
       trainer_payloads = self.algo.create_trainer_payloads(
-          group, rewards=rewards, ref_logps=ref_logps
+          group, rewards=rewards
       )
       for idx, payload in enumerate(trainer_payloads):
         adv = payload.advantages
@@ -200,6 +194,16 @@ class StandardRLProgram(AsyncRLProgram):
         payloads = [getattr(item, "payload", None) for item in scored_items]
         # TODO: Implement streaming microbatch assembly to overlap packing with trainer execution.
         microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
+        if getattr(self.algo, "requires_reference_kl", False):
+          scored_microbatches = []
+          for batch in microbatches:
+            ref_logps = await engine.per_token_logps(
+                datatypes.Role.REFERENCE, items=batch
+            )
+            scored_microbatches.append(
+                batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+            )
+          microbatches = scored_microbatches
 
         is_final = group_idx == self.mini_batch_size - 1
         for batch in microbatches:

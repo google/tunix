@@ -52,9 +52,9 @@ class AbstractRLEngine(Protocol):
     ...
 
   async def per_token_logps(
-      self, role: datatypes.Role, items: Sequence[Any], **kwargs: Any
+      self, role: datatypes.Role, items: Any, **kwargs: Any
   ) -> Any:
-    """Computes per-token log probabilities under a reference/actor model."""
+    """Computes per-token log probabilities for a padded batch/request."""
     ...
 
   async def train_step(

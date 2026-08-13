@@ -21,7 +21,6 @@ and results are returned as host numpy. This version hosts frozen weights only;
 there is no weight sync.
 """
 
-from collections.abc import Sequence
 from typing import Any, Protocol
 
 import jax
@@ -32,32 +31,6 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 
 WorkerState = datatypes.WorkerState
-
-
-def _left_pad_tokens(
-    values: Any,
-    length: int,
-    *,
-    pad_id: int,
-) -> np.ndarray:
-  arr = np.asarray(values, dtype=np.int32).reshape(-1)[-length:]
-  out = np.full(length, pad_id, dtype=np.int32)
-  if arr.size:
-    out[-arr.size:] = arr
-  return out
-
-
-def _right_pad_tokens(
-    values: Any,
-    length: int,
-    *,
-    pad_id: int,
-) -> np.ndarray:
-  arr = np.asarray(values, dtype=np.int32).reshape(-1)[:length]
-  out = np.full(length, pad_id, dtype=np.int32)
-  if arr.size:
-    out[:arr.size] = arr
-  return out
 
 
 class ReferenceScoringCore(Protocol):
@@ -116,10 +89,10 @@ class InferenceWorker(abstract_worker.Worker):
       eos_id: End-of-sequence token id.
       model_version: Version tag for the hosted weights; constant while frozen.
       chunk_size: Optional maximum batch size for scoring to reduce peak memory.
-      max_prompt_length: Optional fixed prompt length for role-oriented
-        per-token log-prob requests.
-      max_response_length: Optional fixed completion length for role-oriented
-        per-token log-prob requests.
+      max_prompt_length: Retained for launcher/config compatibility. Padding is
+        owned by the orchestrator BatchAssembler, not this worker.
+      max_response_length: Retained for launcher/config compatibility. Padding
+        is owned by the orchestrator BatchAssembler, not this worker.
       temperature: Default sampling temperature used for reference log-probs.
     """
     self._worker_id = worker_id
@@ -206,79 +179,36 @@ class InferenceWorker(abstract_worker.Worker):
 
   def per_token_logps(
       self,
-      items: Sequence[datatypes.TrajectoryItem],
+      items: Any,
       **kwargs: Any,
   ) -> np.ndarray:
-    """Scores reference log-probs for trajectory items.
+    """Scores reference log-probs for an already padded batch."""
+    if isinstance(items, datatypes.LogprobsRequest):
+      resp = self.compute_logps(items)
+      if resp.error is not None:
+        raise RuntimeError(resp.error.message)
+      return np.asarray(resp.per_token_logps, dtype=np.float32)
 
-    TrajectoryItem token arrays are produced by rollout and can be ragged. This
-    method pads them into the fixed-shape LogprobsRequest expected by
-    compute_logps().
-    """
-    item_list = list(items)
-    if not item_list:
-      response_len = kwargs.get(
-          "max_response_length", self._max_response_length or 0
+    prompt_ids = getattr(items, "prompt_ids", None)
+    completion_ids = getattr(items, "completion_ids", None)
+    if prompt_ids is not None and completion_ids is not None:
+      req = datatypes.LogprobsRequest(
+          request_id=str(kwargs.get("request_id", "reference_logps")),
+          prompt_tokens=np.asarray(prompt_ids, dtype=np.int32),
+          completion_tokens=np.asarray(completion_ids, dtype=np.int32),
+          temperature=float(kwargs.get("temperature", self._temperature)),
+          model_role=str(kwargs.get("model_role", "reference")),
       )
-      return np.zeros((0, response_len), dtype=np.float32)
+      resp = self.compute_logps(req)
+      if resp.error is not None:
+        raise RuntimeError(resp.error.message)
+      return np.asarray(resp.per_token_logps, dtype=np.float32)
 
-    max_prompt_length = kwargs.get(
-        "max_prompt_length", self._max_prompt_length
+    raise TypeError(
+        "InferenceWorker.per_token_logps expects a padded batch with "
+        "prompt_ids and completion_ids, or an explicit LogprobsRequest. "
+        "Pad trajectory items in BatchAssembler before scoring."
     )
-    if max_prompt_length is None:
-      max_prompt_length = max(
-          1,
-          max(
-              len(item.prompt_tokens)
-              if item.prompt_tokens is not None
-              else 0
-              for item in item_list
-          ),
-      )
-
-    max_response_length = kwargs.get(
-        "max_response_length", self._max_response_length
-    )
-    if max_response_length is None:
-      max_response_length = max(
-          1,
-          max(
-              len(item.completion_tokens)
-              if item.completion_tokens is not None
-              else 0
-              for item in item_list
-          ),
-      )
-
-    req = datatypes.LogprobsRequest(
-        request_id="reference_logps",
-        prompt_tokens=np.stack([
-            _left_pad_tokens(
-                item.prompt_tokens if item.prompt_tokens is not None else [],
-                int(max_prompt_length),
-                pad_id=self._pad_id,
-            )
-            for item in item_list
-        ]),
-        completion_tokens=np.stack([
-            _right_pad_tokens(
-                (
-                    item.completion_tokens
-                    if item.completion_tokens is not None
-                    else []
-                ),
-                int(max_response_length),
-                pad_id=self._pad_id,
-            )
-            for item in item_list
-        ]),
-        temperature=float(kwargs.get("temperature", self._temperature)),
-        model_role="reference",
-    )
-    resp = self.compute_logps(req)
-    if resp.error is not None:
-      raise RuntimeError(resp.error.message)
-    return np.asarray(resp.per_token_logps, dtype=np.float32)
 
   def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResponse:
     """Scores one scalar per row under a hosted (frozen) reward model."""

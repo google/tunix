@@ -22,6 +22,7 @@ custom objects with token arrays). Supports:
 # TODO: Align SequencePackedBatchAssembler with the rest of the ecosystem and potentially move to a common library.
 """
 
+import dataclasses
 from typing import Any, Generic, Protocol, Sequence, TypeVar
 import numpy as np
 from jax import numpy as jnp
@@ -105,6 +106,32 @@ def _completion_aligned(
       dtype=np.float32,
   )
   return out
+
+
+def with_ref_per_token_logps(batch: Any, ref_logps: Any) -> Any:
+  """Returns a trainer batch carrying ref logps aligned to completion_ids."""
+  if isinstance(ref_logps, datatypes.LogprobsResponse):
+    if ref_logps.error is not None:
+      raise RuntimeError(ref_logps.error.message)
+    ref_logps = ref_logps.per_token_logps
+
+  completion_ids = getattr(batch, "completion_ids", None)
+  if completion_ids is None:
+    raise ValueError(
+        "Reference logps require a padded batch with completion_ids."
+    )
+
+  ref_logps_arr = np.asarray(ref_logps, dtype=np.float32)
+  completion_shape = np.asarray(completion_ids).shape
+  if ref_logps_arr.shape != completion_shape:
+    raise ValueError(
+        "Reference logps shape must match padded completion_ids shape: "
+        f"got {ref_logps_arr.shape}, expected {completion_shape}."
+    )
+
+  if hasattr(batch, "replace"):
+    return batch.replace(ref_per_token_logps=ref_logps_arr)
+  return dataclasses.replace(batch, ref_per_token_logps=ref_logps_arr)
 
 
 class SequencePackedBatchAssembler:
