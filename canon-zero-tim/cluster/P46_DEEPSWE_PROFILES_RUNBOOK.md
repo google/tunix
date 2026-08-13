@@ -20,6 +20,7 @@ Required implementation ancestry:
 ```text
 e1b4009394c49ea015919bda0cfdb97c12c221b5
 a4d165e854cc4c2320d8120e89aed185eaf61465
+a642ab267425a5b08b0cebb6e12c607f50f71831
 ```
 
 P46.5 true reward-only evaluation is published by `a4d165e8`; do not infer its
@@ -29,11 +30,12 @@ below, require an exact operator SHA containing `a4d165e8`,
 `probe_reward_only_v5p.py`. Never apply a manifest rendered from the dirty
 development worktree.
 
-The current operator HEAD at the returned-evidence checkpoint is
-`63b092b001864e4e9a4822b4354a665bb00b1c6b`. It contains the archived
-`p46e25608` log and the false-positive behavior, not the invalid-attempt retry
-repair. That repair is currently **UNPUBLISHED**. A remote agent must stop
-until the exact read-back publication contains all three of
+Operator HEAD `63b092b001864e4e9a4822b4354a665bb00b1c6b` is the historical
+returned-evidence checkpoint. It contains the archived `p46e25608` log and the
+false-positive behavior, not the repair. The invalid-attempt retry and campaign
+finalizer are published by
+`a642ab267425a5b08b0cebb6e12c607f50f71831`. A remote agent must stop unless
+the exact read-back operator SHA contains that commit and all of
 `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, and
 `P46_DEEPSWE_PROFILES_CPU_PASS cases=33`, plus
 `finalize_deepswe_eval.py`. Do not invent or substitute a repair SHA in

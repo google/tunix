@@ -241,3 +241,23 @@
 - Next: publish only after approval, read back the exact operator SHA, then the
   remote agent reruns l0/p0 and advances the full campaign one physical shard
   at a time.
+
+## 2026-08-13T09:20:01Z — P46.5: exact retry and campaign finalizer publication
+
+- Type: publication
+- Authorization: The user explicitly requested commit and push. The only
+  publication target is `yuxzhang/canon-zero-tim`; `main` remains forbidden.
+- Remote audit: The operator branch remained exactly
+  `63b092b001864e4e9a4822b4354a665bb00b1c6b`, so no rebase or conflict
+  resolution was required.
+- Implementation commit:
+  `a642ab267425a5b08b0cebb6e12c607f50f71831`.
+- Published scope: consecutive invalid-attempt retry, valid-only physical
+  completion, nonzero `P46_EVAL_PHYSICAL_INCOMPLETE`, exact-N retry-aware L3,
+  complete trajectory return instructions, and the fail-closed 1851 x N16
+  campaign finalizer/merged learnable list.
+- Evidence before commit: P46 33/33, P34 static/trajectory/update, P39 and P44
+  CPU gates, Python compile and `git diff --check` passed. No TPU or cloud
+  launch was performed by this publication step.
+- Next: read back the final operator HEAD, then remote execution starts a new
+  fixed run id at l0/p0 and proceeds through the complete campaign.

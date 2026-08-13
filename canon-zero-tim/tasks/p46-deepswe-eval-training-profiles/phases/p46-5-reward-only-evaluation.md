@@ -124,7 +124,8 @@ are zero. The old evaluator nevertheless emitted
 zero because any durable record, including an invalid attempt, completed the
 resume identity. That PASS is revoked.
 
-The local unpublished repair adds consecutive `attempt_index` provenance.
+Published repair `a642ab267425a5b08b0cebb6e12c607f50f71831` adds consecutive
+`attempt_index` provenance.
 Invalid attempts remain immutable evidence but do not complete an identity;
 the next retry is admitted only before the first valid result. Nonconsecutive
 indices and attempts after a valid result fail closed. The physical evaluator

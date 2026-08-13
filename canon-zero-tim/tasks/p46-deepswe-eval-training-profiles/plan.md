@@ -68,3 +68,7 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   branch on top of `23bb2a3c`. Remote execution resolves the current branch
   HEAD dynamically and requires `a4d165e8` in its ancestry. Never publish to
   `main`.
+- Publication status: invalid-attempt retry, exact-valid physical completion
+  and the 1851 x N16 campaign finalizer are published by
+  `a642ab267425a5b08b0cebb6e12c607f50f71831`. Remote execution requires this
+  commit in the exact read-back operator ancestry before starting a new run id.

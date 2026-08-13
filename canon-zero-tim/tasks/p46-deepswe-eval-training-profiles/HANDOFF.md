@@ -1,7 +1,7 @@
 # P46 remote-agent execution handoff
 
-Publication status: **P46.1-P46.5 PUBLISHED; INVALID-ATTEMPT RETRY FIX
-UNPUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
+Publication status: **P46.1-P46.5 AND INVALID-ATTEMPT/CAMPAIGN-FINALIZER FIX
+PUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
 
 The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
 repair are anchored by implementation commit
@@ -14,13 +14,15 @@ read-back SHA contains both `e1b40093` and `a4d165e8`; never substitute the
 older reconciled base
 `99c3f7af761c859caa6c81ab509446cc3cc47dc0`. Never modify or push `main`.
 
-The current operator HEAD at this handoff checkpoint is
-`63b092b001864e4e9a4822b4354a665bb00b1c6b`. It contains the returned
+Historical operator HEAD
+`63b092b001864e4e9a4822b4354a665bb00b1c6b` contains the returned
 `p46e25608` evidence and the old false-positive physical-shard completion
-behavior. Do not launch from it. Wait for a later explicitly published SHA
-that contains `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, the 33-case P46
-CPU gate and `finalize_deepswe_eval.py`; resolve and record that exact
-40-character SHA instead of guessing it.
+behavior; do not launch from it. The invalid-attempt retry and campaign
+finalizer are published by
+`a642ab267425a5b08b0cebb6e12c607f50f71831`. Resolve and record the exact
+current 40-character operator HEAD, require `a642ab26` in its ancestry, and
+require `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, the 33-case P46 CPU
+gate and `finalize_deepswe_eval.py` before rendering.
 
 The archived P34r03 Qwen3-32B run generated 64/64 rollout records, but every
 record ended as `ENV_TIMEOUT`. It then failed before forward/backward with
