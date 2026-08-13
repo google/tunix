@@ -20,6 +20,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.worker import abstract_worker
 from tunix.rl.rollout import base_rollout
@@ -69,6 +70,7 @@ class RolloutWorker(abstract_worker.Worker):
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     super().__init__()
     self.worker_id = worker_id
@@ -87,6 +89,7 @@ class RolloutWorker(abstract_worker.Worker):
         max_concurrency=max_concurrency,
         tokenizer=tokenizer,
         chat_parser=chat_parser,
+        trajectory_store=trajectory_store,
     )
 
   @property
