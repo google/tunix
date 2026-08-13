@@ -111,6 +111,7 @@ def register(
     )
 
     delay = 1
+    count = 0
     while True:
       try:
         stub.Register(request)
@@ -118,7 +119,10 @@ def register(
       except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.UNAVAILABLE:  # pytype: disable=attribute-error
           time.sleep(delay)
-          delay = min(delay * 2, 300)
+          count += 1
+          if count >= 60:
+            delay = min(delay * 2, 300)
+            count = 0
           continue
         else:
           raise RuntimeError(
