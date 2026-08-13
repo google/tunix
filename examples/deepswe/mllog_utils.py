@@ -164,13 +164,14 @@ def check_eval(
     eval_accuracy: float,
     start_step: int = 0,
     target_accuracy: Optional[float] = None,
-):
+    validation_time: Optional[float] = None,
+) -> bool:
   """Logs an evaluation block completion, checks for early stopping, and handles next block."""
-  if not (_is_master_process() and mllogger is not None):
-    return
-
   target_acc = target_accuracy if target_accuracy is not None else getattr(args, "target_accuracy", 0.69)
   is_early_stop = (target_acc is not None) and (eval_accuracy >= target_acc)
+
+  if not (_is_master_process() and mllogger is not None):
+    return is_early_stop
 
   global_batch_size = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
   eval_interval = getattr(args, "eval_every_n_steps", 10)
@@ -180,13 +181,32 @@ def check_eval(
   mllogger.end(
       key=getattr(constants, "BLOCK_STOP", "block_stop"),
       metadata={
-          getattr(constants, "SAMPLES_COUNT", "samples_count"): eval_frequency_samples,
+          getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
           "step": int(step),
       },
   )
+  mllogger.start(
+      key=getattr(constants, "EVAL_START", "eval_start"),
+      metadata={
+          getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
+          "step": int(step),
+      },
+  )
+  if validation_time is not None:
+    mllogger.event(
+        key="tracked_stats",
+        value={"validation_time": float(validation_time)},
+        metadata={"step": int(step)},
+    )
   mllogger.event(
       key=getattr(constants, "EVAL_ACCURACY", "eval_accuracy"),
       value=float(eval_accuracy),
+      metadata={
+          getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
+      },
+  )
+  mllogger.end(
+      key=getattr(constants, "EVAL_STOP", "eval_stop"),
       metadata={
           getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
           "step": int(step),
@@ -213,6 +233,8 @@ def check_eval(
             "step": int(step),
         },
     )
+
+  return is_early_stop
 
 
 def log_tracked_stats(
