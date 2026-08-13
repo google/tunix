@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -388,21 +389,85 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
   def test_serving_capture_selects_each_prefix_stratum_once(self):
     self.assertEqual(
         [self.runner._p38_capture_stratum(value) for value in (
-            1535, 1536, 1791, 1792, 2047, 2048, 2303, 2304, 2559, 2560
+            1535, 1536, 1663, 1664, 1791, 1792, 1919, 1920, 2047,
+            2048,
         )],
         [
             None,
-            (0, 1536, 1792),
-            (0, 1536, 1792),
-            (1, 1792, 2048),
-            (1, 1792, 2048),
-            (2, 2048, 2304),
-            (2, 2048, 2304),
-            (3, 2304, 2560),
-            (3, 2304, 2560),
+            (0, 1536, 1664),
+            (0, 1536, 1664),
+            (1, 1664, 1792),
+            (1, 1664, 1792),
+            (2, 1792, 1920),
+            (2, 1792, 1920),
+            (3, 1920, 2048),
+            (3, 1920, 2048),
             None,
         ],
     )
+
+  def test_request_journal_uses_only_host_metadata(self):
+    token_ids = np.arange(1601, dtype=np.int32)[None, :]
+    runner = SimpleNamespace(
+        block_size=256,
+        input_batch=SimpleNamespace(
+            num_tokens=np.array([1601], dtype=np.int32),
+            num_prompt_tokens=np.array([100], dtype=np.int32),
+            token_ids_cpu=token_ids,
+        ),
+        requests={
+            "request-a": SimpleNamespace(
+                block_ids=[list(range(7, 14))]
+            )
+        },
+    )
+    original = {
+        "path": self.runner._P38_REQUEST_JOURNAL,
+        "bands": set(self.runner._P38_REQUEST_JOURNALED_BANDS),
+        "state": dict(self.runner._P38_REQUEST_JOURNAL_STATE),
+        "ownership": dict(self.runner._P38_PAGE_OWNERSHIP),
+    }
+    try:
+      with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "p38_request_journal.jsonl"
+        self.runner._P38_REQUEST_JOURNAL = str(path)
+        self.runner._P38_REQUEST_JOURNALED_BANDS.clear()
+        self.runner._P38_REQUEST_JOURNAL_STATE.update(
+            {"calls": 0, "records": 0}
+        )
+        self.runner._P38_PAGE_OWNERSHIP.clear()
+        with mock.patch.object(
+            self.runner.jax, "device_get",
+            side_effect=AssertionError("journal touched a device buffer"),
+        ):
+          self.runner._p38_request_journal(
+              runner,
+              SimpleNamespace(
+                  num_scheduled_tokens={"request-a": 1}
+              ),
+              {0: ["request-a"]},
+              [{
+                  "request_id": "request-a",
+                  "request_index": 0,
+                  "num_computed_tokens": 1600,
+              }],
+              "standard",
+          )
+        record = __import__("json").loads(path.read_text())
+        self.assertEqual(record["physical_pages"], list(range(7, 14)))
+        self.assertEqual(record["stratum"], [1536, 1664])
+        self.assertEqual(record["scheduled_request_count"], 1)
+        self.assertEqual(
+            record["page_generations"][0]["observation_generation"], 0
+        )
+    finally:
+      self.runner._P38_REQUEST_JOURNAL = original["path"]
+      self.runner._P38_REQUEST_JOURNALED_BANDS.clear()
+      self.runner._P38_REQUEST_JOURNALED_BANDS.update(original["bands"])
+      self.runner._P38_REQUEST_JOURNAL_STATE.clear()
+      self.runner._P38_REQUEST_JOURNAL_STATE.update(original["state"])
+      self.runner._P38_PAGE_OWNERSHIP.clear()
+      self.runner._P38_PAGE_OWNERSHIP.update(original["ownership"])
 
   def test_serving_capture_triggers_from_host_scheduler_prefix(self):
     runner = SimpleNamespace(
@@ -425,7 +490,7 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
         self.runner._p38_capture_stratum(
             prefixes[0]["num_computed_tokens"]
         ),
-        (1, 1792, 2048),
+        (2, 1792, 1920),
     )
 
   def test_serving_capture_observation_is_bounded_by_prefix_band(self):

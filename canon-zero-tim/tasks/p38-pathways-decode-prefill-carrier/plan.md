@@ -27,12 +27,13 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
 | P38.2g | FrozenLake single-row causal replay | Stock multi-turn replay reproduces the red before single-turn, MIXED-only KV-unified, and all-distribution KV-unified counterfactuals are interpreted | one-host target row 191 complete: local serving envelope not reproduced; R2/R3 stay gated; move shadow arms to Pathways |
 | P38.2g2 | Source-pinned Pathways serving capture and combined KV arm | Real continue-decode metadata is durable and stock is reproduced before the default-off all-cache-read arm is interpreted | target numerical runs exist: stock red and U red; serving postflight/archive missing, so `INCONCLUSIVE`; rerun stock only |
 | P38.2g3 | Exact-state physical-page and padding-boundary discriminator | The complete production action vector is first reproduced exactly, then real, relocated, contiguous, padding-sanitized, and padding-poison arms are compared with temporal page-content equivalence checks | pending; blocked on complete P38.2g2 stock archive and exact E0 reproduction |
-| P38.2g4 | Decode-envelope seam localization with stratified production capture | Four bounded prefix strata and implementation identity survive, at least one exact token-history join is admitted, E0 reproduces the complete A/B vectors, and the first A/B divergence is localized before any repair | active; D0 published at `b89435ca`, D1 target capture not run |
+| P38.2g4 | Decode-envelope seam localization with stratified production capture | Four bounded prefix strata and implementation identity survive, at least one exact token-history join is admitted, E0 reproduces the complete A/B vectors, and the first A/B divergence is localized before any repair | continued by P38.2i after P38s11 returned valid global snapshots but missed red-row incident times |
 | P38.2g5 | Request-anchored serving trigger and red-safe diagnostic stop | The installed runner attests module initialization and bounded scheduler-prefix observations, four request-anchored records survive, finite A-B red with exact B-C stops before backward, and outer postflight returns the real capsule/archive | superseded: P38s6 proved the hook was installed only in an unreachable continue-decode path |
 | P38.2g6 | Standard/mixed runner serving capture | `enable_continue_decode=False` reaches a path-attested capture after standard `_prepare_inputs`, mixed packed-token rows map exactly, capture completes after unchanged sampling, and wrong-path/async controls fail closed | locally complete; P38s7 reached the standard hook but stopped on a partial-batch DP-divisibility error |
 | P38.2g7 | DP-divisible diagnostic producer unit | Every four-prompt x eight-generation unit is 32 trajectories and DP16-divisible; full-training geometry remains 32 prompts x 8 | construction retained; P38s10 showed that one unit alone is an under-covered subset |
 | P38.2g8 | Terminal standard-path evidence capture | One byte-zero terminal stock log distinguishes hook reachability, prefix-range miss, selection/mapping failure, postflight failure, or an admitted serving archive without guessing from excerpts | superseded by P38.2g9 after P38s10 subset PASS plus typed-key capture errors |
-| P38.2g9 | Full-coverage alignment and typed-key capture | Consumer aligns all eight valid units (256 trajectories), rejects partial tails, serializes typed PRNG keys without changing the live key, and postflight rejects missing coverage/capture errors | implemented locally; P38s11 not run |
+| P38.2g9 | Full-coverage alignment and typed-key capture | Consumer aligns all eight valid units (256 trajectories), rejects partial tails, serializes typed PRNG keys without changing the live key, and postflight rejects missing coverage/capture errors | complete; P38s11 returned a terminal full-coverage red with exact B-C and admitted serving archive |
+| P38.2i | Red-row request journal and separate concurrency discriminator | P38s12a joins every selected red row to host-only request/page/co-batch events at concurrency 256; only then P38s12b changes concurrency to 32 with a depth-sufficiency guard | locally complete; P38s12a/P38s12b NOT RUN |
 | P38.2h | Candidate target backward-no-commit | The selected candidate first makes all forward boundaries exact, then passes actual-model gradient/DP-reducer gates with zero optimizer commits | pending; forbidden before P38.2g selects a candidate |
 
 ## Decisions
@@ -175,3 +176,25 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
   exactly four records, and classifier/archive admission. A nonblocking
   production shadow capture needs a separate default-off CL and tests; it is
   not an operator YAML override.
+- Evidence (2026-08-13): P38s11 is a terminal, full-coverage stock red. It
+  measured all 256 trajectories, retained exact B-C, and reproduced the
+  sparse/deep carrier. Offline token-prefix/SHA joins map rows 199 and 206 to
+  multiple valid serving requests and DP ranks. Global snapshot anchors did
+  not capture either row at its mismatch time, so the archive supports
+  provenance but not a causal page verdict.
+- Correction (2026-08-13): a production `md_block_tables` payload may be flat
+  and one snapshot may legitimately join several mismatch rows. Rejecting
+  either format is a classifier bug, not evidence that the serving capture is
+  invalid.
+- Decision (2026-08-13): P38s12a keeps concurrency 256 and the known-red
+  workload while changing only capture coverage. It journals request/token,
+  block mapping, co-batch, and explicitly observational page generations at
+  per-request prefix bands. It does not fetch or hash device KV content.
+- Decision (2026-08-13): concurrency 32 is a separate P38s12b arm after the
+  known-red capture is admitted. It must reach logical KV 1686, and an exact
+  result must repeat before concurrency is called a necessary trigger. Do not
+  fold capture-schema and concurrency changes into one experiment.
+- Claim boundary (2026-08-13): observation generations are not allocator
+  generations. A changed observed owner cannot prove an unobserved free/reuse,
+  and an unchanged value cannot prove page contents are equal. Exact E0 and an
+  observer-neutral content check remain mandatory before selecting a repair.

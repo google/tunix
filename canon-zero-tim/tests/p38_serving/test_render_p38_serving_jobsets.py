@@ -57,13 +57,21 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P38_SERVING_CAPTURE_MIN_PREFIX"], "1536")
         self.assertEqual(
             env["CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS"],
-            "1536,1792,2048,2304,2560",
+            "1536,1664,1792,1920,2048",
+        )
+        self.assertEqual(
+            env["CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"], "8"
         )
         self.assertEqual(
             env["CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER"], "5"
         )
         self.assertEqual(
             env["CANON_P38_SERVING_CAPTURE_EXPECTED_PATH"], "standard"
+        )
+        self.assertEqual(
+            env["CANON_P38_REQUEST_JOURNAL"],
+            env["CANON_P38_SERVING_CAPTURE_DIR"]
+            + "/p38_request_journal.jsonl",
         )
         self.assertTrue(env["CANON_P38_MISMATCH_CAPSULE"].endswith(".npz"))
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
@@ -75,6 +83,25 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])
         self.assertEqual(renderer._DIAGNOSTIC_UNITS, 8)
         self.assertEqual(renderer._COVERED_PROMPTS, 32)
+
+  def test_stock_only_omits_the_already_falsified_unified_arm(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      paths = renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tmp),
+          source_commit=_SOURCE,
+          run_id=_RUN_ID,
+          stock_only=True,
+      )
+      self.assertEqual(
+          [path.name for path in paths],
+          ["jobset-p38-serving-stock.yaml"],
+      )
+      document = yaml.safe_load(paths[0].read_text())
+      self.assertEqual(
+          document["metadata"]["labels"]["canon.zero-tim/kv-unified"],
+          "0",
+      )
 
   def test_rejects_capture_contract_drift(self):
     base = renderer.p33.load_base(_BASE)

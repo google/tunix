@@ -285,11 +285,12 @@ validate_p38_serving_preflight() (
   export CANON_ALIGN_REPORT="$state/alignment.jsonl"
   export CANON_UPDATE_REPORT="$state/updates.jsonl"
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
-  export CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=2
+  export CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=8
   export CANON_P38_SERVING_CAPTURE_DIR="$state/serving"
+  export CANON_P38_REQUEST_JOURNAL="$state/serving/p38_request_journal.jsonl"
   export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
   export CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
-  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
+  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
   export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
@@ -301,9 +302,10 @@ validate_p38_serving_preflight() (
   bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
   grep -q 'export CANON_KV_UNIFIED=1' "$state/env.sh"
   grep -q 'export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4' "$state/env.sh"
-  grep -Fq 'export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536\,1792\,2048\,2304\,2560' "$state/env.sh"
+  grep -Fq 'export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536\,1664\,1792\,1920\,2048' "$state/env.sh"
   grep -q 'export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5' "$state/env.sh"
   grep -q 'export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard' "$state/env.sh"
+  grep -Fq "export CANON_P38_REQUEST_JOURNAL=$state/serving/p38_request_journal.jsonl" "$state/env.sh"
 
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=continue_decode
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
@@ -317,7 +319,7 @@ validate_p38_serving_preflight() (
     echo "[P38.SERVING] preflight accepted drifted prefix strata" >&2
     exit 1
   fi
-  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
+  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
 
   unset CANON_P38_SERVING_CAPTURE_DIR
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then

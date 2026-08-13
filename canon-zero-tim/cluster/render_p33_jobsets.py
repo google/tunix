@@ -470,6 +470,13 @@ def validate_jobset(
     )
 
   env = _env_values(document)
+  is_p38_capture = (
+      document.get("metadata", {}).get("labels", {}).get(
+          "canon.zero-tim/diagnostic"
+      )
+      == "p38-serving-capture"
+  )
+  expected_capsule_rows = "8" if is_p38_capture else "2"
   expected = {
       "CANON_MODE": "run",
       "CANON_PROFILE_FILE": spec.profile,
@@ -510,7 +517,7 @@ def validate_jobset(
           and spec.stage == "backward-no-commit"
           else ""
       ),
-      "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "2",
+      "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": expected_capsule_rows,
   }
   wrong = {
       key: env.get(key)
@@ -544,8 +551,11 @@ def validate_jobset(
     )
     if has_eval_args != spec.enable_evaluation:
       raise ValueError("FrozenLake evaluation command drifted")
-  if env.get("CANON_P38_MISMATCH_CAPSULE_MAX_ROWS") != "2":
-    raise ValueError("P38 mismatch capsule must retain its two-row bound")
+  if env.get("CANON_P38_MISMATCH_CAPSULE_MAX_ROWS") != expected_capsule_rows:
+    raise ValueError(
+        "P38 mismatch capsule row bound drifted: "
+        f"expected {expected_capsule_rows}"
+    )
   main = _container(_head_pod(document)["containers"], "jax-tpu")
   secret_refs = {
       entry["name"]: entry.get("valueFrom", {}).get("secretKeyRef", {})

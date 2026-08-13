@@ -102,6 +102,7 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
       }],
       "req_id_to_index": {"request-0": 0},
       "scheduled_request_count": 1,
+      "dp_size": 1,
       "padded_rows_per_dp": 4,
       "max_attention_rows_per_dp": 4,
       "kv_caches_spec": [{"shape": [16, 256, 2, 1, 128]}],
@@ -203,6 +204,43 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
         ),
         **capsule_arrays,
     )
+  journal = {
+      "schema": "p38-request-journal-v1",
+      "call_index": 1,
+      "program_path": "standard",
+      "request_id": "request-0",
+      "request_index": 0,
+      "dp_rank": 0,
+      "local_scheduler_slot": 1,
+      "num_computed_tokens": 2,
+      "num_prompt_tokens": 2,
+      "num_tokens": 3,
+      "stratum_index": 0,
+      "stratum": [0, 4],
+      "block_size": 256,
+      "logical_blocks": 1,
+      "physical_pages": [7],
+      "page_generations": [{
+          "physical_page": 7,
+          "logical_page": 0,
+          "observation_generation": 0,
+          "previous_observed_request_id": None,
+          "previous_observed_logical_page": None,
+          "previous_observed_call": None,
+          "observed_owner_changed": True,
+      }],
+      "token_ids": [101, 102, 103],
+      "token_history_sha256": MODULE._token_history_sha256(
+          [101, 102, 103]
+      ),
+      "scheduled_request_count": 1,
+      "co_batch_request_ids": ["request-0"],
+      "one_token_decode_request_count": 1,
+      "one_token_decode_request_ids": ["request-0"],
+  }
+  (directory / "p38_request_journal.jsonl").write_text(
+      json.dumps(journal, sort_keys=True) + "\n"
+  )
   return holder
 
 
@@ -231,6 +269,113 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     self.assertEqual(report["verdict"], "PASS")
     self.assertEqual(
         report["records"][0]["mismatch_join"]["source_row"], 191
+    )
+    self.assertEqual(report["joined_source_rows"], [191])
+    self.assertEqual(report["request_journal_joined_source_rows"], [191])
+
+  def test_rejects_missing_request_journal(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    (Path(holder.name) / "p38_request_journal.jsonl").unlink()
+    with self.assertRaisesRegex(MODULE.CaptureError, "journal is absent"):
+      _classify(holder)
+
+  def test_accepts_flattened_production_block_table(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    directory = Path(holder.name)
+    json_path = directory / "p38_serving_0000_pre.json"
+    npz_path = directory / "p38_serving_0000_pre.npz"
+    with np.load(npz_path, allow_pickle=False) as archive:
+      arrays = {name: np.array(archive[name]) for name in archive.files}
+    arrays["md_block_tables"] = arrays["md_block_tables"].reshape(-1)
+    npz_path.unlink()
+    with npz_path.open("xb") as stream:
+      np.savez(stream, **arrays)
+    record = json.loads(json_path.read_text())
+    record["npz_sha256"] = hashlib.sha256(npz_path.read_bytes()).hexdigest()
+    json_path.write_text(json.dumps(record))
+    self.assertEqual(_classify(holder)["verdict"], "PASS")
+
+  def test_accepts_one_unique_request_per_source_row(self):
+    prompt_ids = np.array([[10, 11], [20, 21]], dtype=np.int32)
+    completion_ids = np.array([[12, 13], [22, 23]], dtype=np.int32)
+    capsule = {
+        "arrays": {
+            "selected_rows": np.array([199, 206], dtype=np.int32),
+            "prompt_ids": prompt_ids,
+            "prompt_mask": np.ones_like(prompt_ids, dtype=np.bool_),
+            "completion_ids": completion_ids,
+            "completion_valid_mask": np.ones_like(
+                completion_ids, dtype=np.bool_
+            ),
+        }
+    }
+    requests = [
+        {
+            "request_id": "request-199",
+            "token_ids": [10, 11, 12],
+            "token_history_sha256": MODULE._token_history_sha256(
+                [10, 11, 12]
+            ),
+        },
+        {
+            "request_id": "request-206",
+            "token_ids": [20, 21, 22],
+            "token_history_sha256": MODULE._token_history_sha256(
+                [20, 21, 22]
+            ),
+        },
+    ]
+    joins = MODULE._join_mismatch_capsule(requests, capsule, 2)
+    self.assertEqual(
+        [(item["source_row"], item["request_id"]) for item in joins],
+        [(199, "request-199"), (206, "request-206")],
+    )
+
+  def test_journal_accepts_multiple_turn_requests_for_one_source_row(self):
+    capsule = {
+        "arrays": {
+            "selected_rows": np.array([199], dtype=np.int32),
+            "prompt_ids": np.array([[10, 11]], dtype=np.int32),
+            "prompt_mask": np.array([[True, True]]),
+            "completion_ids": np.array([[12, 13, 14]], dtype=np.int32),
+            "completion_valid_mask": np.array([[True, True, True]]),
+        }
+    }
+    common = {
+        "source_row": 199,
+        "stratum_index": 0,
+        "dp_rank": 0,
+        "local_scheduler_slot": 0,
+        "physical_pages": [7],
+        "page_generations": [],
+        "scheduled_request_count": 1,
+    }
+    records = [
+        {
+            **common,
+            "request_id": "turn-3",
+            "token_ids": [10, 11, 12],
+            "num_computed_tokens": 2,
+            "token_history_sha256": MODULE._token_history_sha256(
+                [10, 11, 12]
+            ),
+        },
+        {
+            **common,
+            "request_id": "turn-4",
+            "token_ids": [10, 11, 12, 13],
+            "num_computed_tokens": 3,
+            "token_history_sha256": MODULE._token_history_sha256(
+                [10, 11, 12, 13]
+            ),
+        },
+    ]
+    joins = MODULE._join_journal_to_capsule(records, capsule)
+    self.assertEqual(
+        [(item["source_row"], item["request_id"]) for item in joins],
+        [(199, "turn-3"), (199, "turn-4")],
     )
 
   def test_rejects_missing_post_record(self):
@@ -541,7 +686,9 @@ class ClassifyServingCaptureTest(unittest.TestCase):
           ),
           **row_arrays,
       )
-    with self.assertRaisesRegex(MODULE.CaptureError, "found 2"):
+    with self.assertRaisesRegex(
+        MODULE.CaptureError, "ambiguously joins source rows"
+    ):
       _classify(holder)
 
 

@@ -20,7 +20,7 @@ p33 = importlib.util.module_from_spec(_P33_SPEC)
 sys.modules[_P33_SPEC.name] = p33
 _P33_SPEC.loader.exec_module(p33)
 
-_CAPTURE_PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)
+_CAPTURE_PREFIX_BOUNDS = (1536, 1664, 1792, 1920, 2048)
 _CAPTURE_RECORDS = len(_CAPTURE_PREFIX_BOUNDS) - 1
 _DIAGNOSTIC_PROMPTS = 4
 _NUM_GENERATIONS = 8
@@ -62,7 +62,11 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
   return {
       "CANON_KV_UNIFIED": "1" if unified else "0",
       "CANON_P38_PRECHECK_ONLY": "1",
+      "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "8",
       "CANON_P38_SERVING_CAPTURE_DIR": f"{state}/p38_serving_capture",
+      "CANON_P38_REQUEST_JOURNAL": (
+          f"{state}/p38_serving_capture/p38_request_journal.jsonl"
+      ),
       "CANON_P38_SERVING_CAPTURE_MAX_CALLS": str(_CAPTURE_RECORDS),
       "CANON_P38_SERVING_CAPTURE_MIN_PREFIX": str(
           _CAPTURE_PREFIX_BOUNDS[0]
@@ -90,6 +94,11 @@ def validate_capture_jobset(
     raise ValueError(f"P38 serving-capture environment drifted: {wrong}")
   if not env.get("CANON_P38_MISMATCH_CAPSULE", "").endswith(".npz"):
     raise ValueError("P38 serving capture requires a mismatch capsule path")
+  capture_dir = env["CANON_P38_SERVING_CAPTURE_DIR"].rstrip("/")
+  if env["CANON_P38_REQUEST_JOURNAL"] != (
+      f"{capture_dir}/p38_request_journal.jsonl"
+  ):
+    raise ValueError("P38 request journal must live in the capture directory")
   labels = document["metadata"].get("labels", {})
   if labels.get("canon.zero-tim/diagnostic") != "p38-serving-capture":
     raise ValueError("P38 serving-capture label is missing")
@@ -161,13 +170,15 @@ def render_jobset(
 
 
 def render_all(
-    *, base_path: Path, output_dir: Path, source_commit: str, run_id: str
+    *, base_path: Path, output_dir: Path, source_commit: str, run_id: str,
+    stock_only: bool = False,
 ) -> tuple[Path, ...]:
   base = p33.load_base(base_path)
   output_dir.mkdir(parents=True, exist_ok=True)
+  specs = _SPECS[:1] if stock_only else _SPECS
   outputs = tuple(
       output_dir / f"jobset-p38-serving-{'unified' if unified else 'stock'}.yaml"
-      for _, unified in _SPECS
+      for _, unified in specs
   )
   existing = [path for path in outputs if path.exists()]
   if existing:
@@ -175,7 +186,7 @@ def render_all(
         "refusing to overwrite rendered P38 JobSets: "
         + ", ".join(str(path) for path in existing)
     )
-  for (spec, unified), path in zip(_SPECS, outputs, strict=True):
+  for (spec, unified), path in zip(specs, outputs, strict=True):
     document = render_jobset(
         base, spec, source_commit, run_id, unified=unified
     )
@@ -199,6 +210,10 @@ def main() -> int:
   parser.add_argument("--run-id", required=True)
   parser.add_argument("--output-dir", required=True, type=Path)
   parser.add_argument(
+      "--stock-only", action="store_true",
+      help="render only the known-red stock arm; U was already falsified",
+  )
+  parser.add_argument(
       "--base",
       type=Path,
       default=Path(__file__).with_name("jobset-64chip.yaml"),
@@ -209,6 +224,7 @@ def main() -> int:
       output_dir=args.output_dir,
       source_commit=args.source_commit,
       run_id=args.run_id,
+      stock_only=args.stock_only,
   )
   print(
       "[P38.SERVING.JOBSET] VERDICT PASS "

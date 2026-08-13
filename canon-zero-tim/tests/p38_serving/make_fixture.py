@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 
-PREFIX_BOUNDS = (1536, 1792, 2048, 2304, 2560)
+PREFIX_BOUNDS = (1536, 1664, 1792, 1920, 2048)
 
 
 def _write(
@@ -47,6 +47,7 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--directory", required=True, type=Path)
   parser.add_argument("--mismatch-capsule", required=True, type=Path)
+  parser.add_argument("--omit-request-journal", action="store_true")
   args = parser.parse_args()
   args.directory.mkdir(parents=True, exist_ok=False)
   names = {
@@ -102,6 +103,7 @@ def main() -> int:
       }],
       "req_id_to_index": {"request-0": 0},
       "scheduled_request_count": 1,
+      "dp_size": 1,
       "padded_rows_per_dp": 4,
       "max_attention_rows_per_dp": 4,
       "kv_caches_spec": [{"shape": [16, 256, 2, 1, 128]}],
@@ -154,7 +156,7 @@ def main() -> int:
       for name in post_names
   }
   full_history = [101, 102, *range(103, 2662)]
-  for seq, observed_prefix in enumerate((1700, 1800, 2100, 2400)):
+  for seq, observed_prefix in enumerate((1600, 1700, 1850, 1980)):
     record_meta = copy.deepcopy(pre_meta)
     record_pre = {
         name: np.array(value, copy=True) for name, value in pre.items()
@@ -191,6 +193,50 @@ def main() -> int:
         "expected_max_records": 4,
         "program_path": "standard",
     }, seq)
+  journal_prefix = 1600
+  journal_tokens = full_history[:journal_prefix + 1]
+  journal_pages = list(range(7, 14))
+  journal = {
+      "schema": "p38-request-journal-v1",
+      "call_index": 1,
+      "program_path": "standard",
+      "request_id": "request-0",
+      "request_index": 0,
+      "dp_rank": 0,
+      "local_scheduler_slot": 0,
+      "num_computed_tokens": journal_prefix,
+      "num_prompt_tokens": 2,
+      "num_tokens": len(journal_tokens),
+      "stratum_index": 0,
+      "stratum": [1536, 1664],
+      "block_size": 256,
+      "logical_blocks": len(journal_pages),
+      "physical_pages": journal_pages,
+      "page_generations": [
+          {
+              "physical_page": physical_page,
+              "logical_page": logical_page,
+              "observation_generation": 0,
+              "previous_observed_request_id": None,
+              "previous_observed_logical_page": None,
+              "previous_observed_call": None,
+              "observed_owner_changed": True,
+          }
+          for logical_page, physical_page in enumerate(journal_pages)
+      ],
+      "token_ids": journal_tokens,
+      "token_history_sha256": hashlib.sha256(
+          np.asarray(journal_tokens, dtype="<i8").tobytes()
+      ).hexdigest(),
+      "scheduled_request_count": 1,
+      "co_batch_request_ids": ["request-0"],
+      "one_token_decode_request_count": 1,
+      "one_token_decode_request_ids": ["request-0"],
+  }
+  if not args.omit_request_journal:
+    (args.directory / "p38_request_journal.jsonl").write_text(
+        json.dumps(journal, sort_keys=True) + "\n", encoding="utf-8"
+    )
   prompt_ids = np.array([[101, 102]], dtype=np.int32)
   prompt_mask = np.array([[True, True]])
   completion_ids = np.asarray(full_history[2:], dtype=np.int32)[None, :]

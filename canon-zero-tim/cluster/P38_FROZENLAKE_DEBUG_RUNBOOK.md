@@ -1,56 +1,38 @@
-# P38 FrozenLake decode-versus-prefill debug runbook
+# P38 FrozenLake P38s12a request-journal runbook
 
-This runbook launches the strict 64-chip P38 serving-envelope diagnostic. It
-does **not** launch FrozenLake full training, evaluation, backward, an optimizer
-commit, or unified KV. The canonical evidence-return contract is
-`../tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md`; if this short
-runbook and that handoff disagree, stop and use the handoff.
+This runbook launches one strict 64-chip stock diagnostic. It does not launch
+full training, evaluation, backward, an optimizer commit, prefix cache, or
+unified KV. The complete return/admission contract is
+`../tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md`; stop if the two
+documents disagree.
 
-## Current status
+## Why this run exists
 
-- Stock P38s1 and unified-KV P38u1 both reproduced a sparse A-B red while B-C
-  remained exact. Unified KV is therefore not a sufficient repair and must not
-  be rerun.
-- P38s5 and P38s6 are nonterminal. The files re-added by `42139ffa` are exact
-  duplicates of those already audited logs.
-- P38s8 is only an interior compile excerpt. It proves module INIT but contains
-  no byte-zero preamble, OBSERVE, capture record, alignment result, terminal
-  state, classifier, archive, or postflight.
-- A zero-OBSERVE result cannot be blamed on `min_prefix=1536` unless it comes
-  from a terminal byte-zero log. The observer runs before prefix filtering.
-- P38s10 reached a terminal numerical precheck, but it covered only four
-  prompts / 32 trajectories (`N_action=2731`, solve ratio 1.0). Its exact A-B
-  and B-C values are a subset PASS, not a carrier repair. Three typed-PRNG-key
-  capture errors prevented an admitted serving archive.
+P38s11 already proved that the full 32-prompt / 256-trajectory stock workload
+is red while B-C remains exact. Its four global snapshots could be joined to
+rows 199 and 206 offline, but they did not observe the rows at the mismatch
+times. P38s12a keeps the known-red concurrency-256 workload and adds a bounded
+host-only per-request journal. It also expands the capsule to eight rows and
+uses four reachable bands: `1536,1664,1792,1920,2048`.
 
-The next unique run is `p38s11`, after the local P38.2g9 changes are reviewed
-and published. It keeps four-prompt producer units so each unit is
-DP16-divisible, but the consumer waits for all eight units. Alignment therefore
-covers all 32 prompts / 256 trajectories and rejects a partial tail. Do not run
-the current unpublished worktree on the cluster.
+The journal records host scheduler state only. Its page generations are
+observation generations, not allocator generations. This run cannot by itself
+prove stale KV, page reuse, RoPE, residual/cast, or another numerical cause.
 
-Two tempting substitutions are not admitted:
+Do not rerun U/KV-unified; it was already materially red. Do not change
+concurrency to 32 in this run. P38s12b is a later, separate single-variable
+arm after this evidence is admitted.
 
-- A local v5p RoPE decode-shape/prefill-shape probe is a cheap screen, not a
-  production-cause proof. It may prioritize the later seam walk but cannot
-  skip the exact E0 replay gate.
-- Do not add P38 variables to P45 full training. The current P38 environment
-  requires backward-no-commit, precheck-only stop, four complete records, and
-  fail-closed classifier/archive postflight. A production “shadow capture”
-  needs its own default-off, nonblocking CL and tests before it is safe.
+## 1. Pin a clean published source
 
-## 1. Fetch and pin the source
-
-Run from an existing `google/tunix` clone. Do not run from a dirty checkout.
+Run from an existing clean `google/tunix` clone after the user has reviewed,
+committed, and published P38.2i:
 
 ```bash
 set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-git merge-base --is-ancestor \
-  4a2cb8cd2bff2e1e9f5f82a6d2e0575d166759bd "$SOURCE_COMMIT"
-
-RUN_ID="p38s11"
+RUN_ID="p38s12a"
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -61,56 +43,41 @@ git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
 cd "$WORKTREE"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
-rg -q 'program_path="standard"' \
-  canon-zero-tim/patches/tpu_inference/10-tpu-runner-p38-standard-capture.patch
-rg -q '_p38_capture_leaf' \
-  canon-zero-tim/patches/tpu_inference/12-tpu-runner-p38-prng-key-capture.patch
-rg -q '_DIAGNOSTIC_UNITS = 8' \
-  canon-zero-tim/cluster/render_p38_serving_jobsets.py
-rg -q 'DIAGNOSTIC_COVERAGE_CONTRACT' \
-  tunix/rl/agentic/agentic_rl_learner.py
+test -f \
+  canon-zero-tim/patches/tpu_inference/13-tpu-runner-p38-request-journal.patch
+test -f \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/phases/p38-2i-request-journal-concurrency-discriminator.md
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 ```
 
-## 2. Render and dry-run both manifests
-
-The renderer produces stock and unified manifests so its paired contract can
-be validated. Only stock may be applied.
+## 2. Render and dry-run stock only
 
 ```bash
 python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
   --source-commit "$SOURCE_COMMIT" \
   --run-id "$RUN_ID" \
-  --output-dir "$OUT" | tee "$EVIDENCE/render.txt"
+  --output-dir "$OUT" \
+  --stock-only | tee "$EVIDENCE/render.txt"
 
 STOCK="$OUT/jobset-p38-serving-stock.yaml"
-UNIFIED="$OUT/jobset-p38-serving-unified.yaml"
+test -f "$STOCK"
+test ! -e "$OUT/jobset-p38-serving-unified.yaml"
 cp "$STOCK" "$EVIDENCE/rendered-stock.yaml"
 kubectl apply --dry-run=server -f "$STOCK" | \
   tee "$EVIDENCE/dry-run-stock.txt"
-kubectl apply --dry-run=server -f "$UNIFIED" | \
-  tee "$EVIDENCE/dry-run-unified.txt"
 ```
 
-Before apply, inspect the stock YAML and require:
+The YAML must have `CANON_KV_UNIFIED=0`, precheck-only, capsule rows 8,
+request journal inside the capture directory, the four bands above,
+`batch_size=32`, `mini_batch_size=4`, `num_generations=8`, `mesh_dp=16`, and
+`maxRestarts=0`. Stop rather than editing a rendered value.
 
-```text
-CANON_KV_UNIFIED=0
-CANON_P38_PRECHECK_ONLY=1
-CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
-CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
-CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
-CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
-CANON_RUN_CMD: batch_size=32, mini_batch_size=4, num_generations=8, mesh_dp=16
-maxRestarts: 0
-```
-
-## 3. Apply stock only and collect from process start
+## 3. Apply and collect the full log
 
 ```bash
+set -euo pipefail
 kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
-
 JOBSET="canon-p38-fl-stock-${RUN_ID}-${SOURCE_COMMIT:0:8}"
 HEAD_JOB="${JOBSET}-pathways-head-0"
 POD=""
@@ -123,18 +90,15 @@ done
 test -n "$POD"
 printf '%s\n' "$JOBSET" > "$EVIDENCE/jobset-name.txt"
 printf '%s\n' "$POD" > "$EVIDENCE/head-pod-name.txt"
-
 set +e
 kubectl logs -n default -f "$POD" -c jax-tpu | \
   tee "$EVIDENCE/head.follow.log"
-follow_rc="${PIPESTATUS[0]}"
+printf '%s\n' "${PIPESTATUS[0]}" > "$EVIDENCE/log-follow-rc.txt"
 set -e
-printf '%s\n' "$follow_rc" > "$EVIDENCE/log-follow-rc.txt"
 ```
 
-Do not use `--tail` or `--timestamps`. A stopped `kubectl logs -f` stream is
-not a terminal JobSet verdict. Wait until the exact JobSet/pod is Completed or
-Failed, do not delete it, then fetch the canonical log again from byte zero:
+Wait until that exact JobSet/pod is terminal. Do not delete it and do not use
+`--tail` or timestamps. Fetch again from byte zero:
 
 ```bash
 kubectl get jobset -n default "$JOBSET" -o yaml > \
@@ -156,64 +120,51 @@ kubectl get events -n default \
   --sort-by=.lastTimestamp > "$EVIDENCE/head-pod.events.txt"
 ```
 
-## 4. Read the result without guessing
+## 4. Admit or reject the evidence
 
-Use only `head.full.log` plus final JobSet/pod state:
+Require all of these in `head.full.log`:
 
-| Evidence | Meaning |
-|---|---|
-| INIT=1, OBSERVE=0 | standard hook was not reached; prefix threshold is not the explanation |
-| OBSERVE>0, observed maximum <1536 | current diagnostic traffic misses the registered prefix range |
-| OBSERVE crosses a registered range, capture=0 | request/packed-row selection or mapping failed |
-| any `CAPTURE_ERROR` | capture failed; numerical values do not admit D1 |
-| no full 32-prompt/256-trajectory coverage marker | subset result; numerical verdict is workload-inconclusive |
-| four pre/post pairs, no classifier/archive | capture worked; postflight/artifact transport failed |
-| four pairs + classifier PASS + archive + terminal postflight | serving capture is admitted; proceed to E0 replay |
+- Attempt 0 and the exact source SHA;
+- one standard INIT, positive OBSERVE, zero CAPTURE_ERROR;
+- full 32-prompt / 256-trajectory coverage;
+- four pre/post pairs for the registered bands;
+- finite A-B red and exact B-C;
+- positive request-journal markers;
+- classifier PASS with every selected row journal-joined;
+- mismatch capsule, classifier JSON, and serving archive payloads;
+- terminal precheck accepted with backward=0 and optimizer_commits=0; and
+- final PATHTRACE with U=0, journal>0, and coverage=1.
 
-A numerical A-B red or exact result by itself is not a capture PASS. Even a
-full-coverage exact result is one stochastic observation and must be repeated
-before a repair claim. Missing evidence is
-`INCONCLUSIVE`, never equality and never a root-cause finding. Page ownership,
-stale block tables, RoPE, residual/cast seams, and scheduler lifecycle remain
-hypotheses until the archive and exact replay localize the first divergence.
+Anything missing is `INCONCLUSIVE`; do not relaunch automatically. A different
+A-B count is allowed because trajectories are stochastic. B-C red, invalid or
+nonfinite data, capture errors, missing coverage, backward, or optimizer
+commit is a hard failure.
 
-## 5. Return the whole directory
+## 5. Extract and return everything
 
-Return `$EVIDENCE` without editing its logs. At minimum include:
-
-```text
-source_commit.txt
-render.txt
-rendered-stock.yaml
-dry-run-stock.txt
-dry-run-unified.txt
-apply.txt
-jobset-name.txt
-head-pod-name.txt
-head.follow.log
-head.full.log
-jobset.final.yaml
-head-pod.final.yaml
-head-pod.describe.txt
-head-pod.events.txt
-pathways-proxy.log
-pathways-rm.log
-head.previous.log
+```bash
+python3 \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
+  --log "$EVIDENCE/head.full.log" \
+  --output "$EVIDENCE/p38s12a-mismatch-capsule.npz"
+python3 \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
+  --log "$EVIDENCE/head.full.log" \
+  --output "$EVIDENCE/p38s12a-serving-capture.tar"
+sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
+  "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
+sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
+  "$EVIDENCE/head.full.log" > "$EVIDENCE/serving-classification.json"
+test -s "$EVIDENCE/pre-alignment.jsonl"
+test -s "$EVIDENCE/serving-classification.json"
+tar -tf "$EVIDENCE/p38s12a-serving-capture.tar" | \
+  grep -q './p38_request_journal.jsonl'
+sha256sum "$EVIDENCE"/* | tee "$EVIDENCE/SHA256SUMS"
 ```
 
-If classifier/archive markers exist, also run the two extractors and return the
-run-specific mismatch capsule, serving tar, classifier JSON, pre-alignment
-JSONL, and `SHA256SUMS` exactly as specified in `HANDOFF.md`.
+Return the entire `$EVIDENCE` directory. The next action is review, then exact
+whole-vector E0 replay. Do not launch concurrency 32, RoPE repair, page poison,
+or another U arm until that review selects it.
 
-## After P38s9
-
-- Admitted capture: run exact E0 replay against the same request and full
-  action vector; only then localize RoPE/RPA/residual/logits seams or inspect
-  page topology.
-- Incomplete capture: make exactly one change selected by the table above.
-  Do not rerun unified KV, lower the prefix bound speculatively, or start a
-  repair arm.
-
-Rollback is documentation-only. Runtime remains unchanged because all P38
-capture controls are default-off and this runbook changes no manifest or
-kernel.
+Rollback: leave all P38 capture variables unset. The diagnostic is
+default-off and does not change ordinary training or evaluation.

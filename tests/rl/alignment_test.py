@@ -1011,6 +1011,7 @@ class AlignmentTest(absltest.TestCase):
                 tmpdir, "capsule.npz"
             ),
             alignment.P38_MISMATCH_CAPSULE_MAX_ROWS_ENV: "1",
+            "CANON_NUM_GENERATIONS": "8",
         },
         clear=False,
     ), contextlib.redirect_stdout(stdout):
@@ -1027,6 +1028,15 @@ class AlignmentTest(absltest.TestCase):
         metadata = json.loads(capsule["metadata_json"].tobytes())
       self.assertEqual(metadata["schema"], "p38-frozenlake-mismatch-capsule-v1")
       self.assertEqual(metadata["selected_rows"], [1])
+      self.assertEqual(metadata["num_generations"], 8)
+      self.assertEqual(
+          metadata["row_identity"],
+          [{
+              "source_row": 1,
+              "batch_group_index": 0,
+              "generation_index": 1,
+          }],
+      )
       self.assertEqual(result["mismatch_capsule"]["selected_rows"], [1])
       self.assertIn("[CANON_P38_CAPSULE]", stdout.getvalue())
 
@@ -1045,6 +1055,7 @@ class AlignmentTest(absltest.TestCase):
               alignment.PRE_GATE_ENV: "1",
               alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
               alignment.P38_MISMATCH_CAPSULE_ENV: capsule_path,
+              "CANON_NUM_GENERATIONS": "8",
           },
           clear=False,
       ), self.assertRaisesRegex(

@@ -5,6 +5,200 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
+## NEXT AFTER REVIEW/PUBLICATION: P38s12a stock request-journal capture
+
+This section supersedes every older launch section below. The older P38s11
+instructions remain only as history. Do not launch this uncommitted worktree;
+the user will decide whether to commit and publish it.
+
+### Goal and non-goals
+
+P38s11 already reproduced the full-coverage stock carrier. P38s12a keeps that
+known-red environment unchanged at 32 prompts x 8 generations, engine DP16,
+and concurrency 256. It changes only evidence selection:
+
+- up to eight red rows instead of two;
+- four reachable request-prefix bands:
+  `1536,1664,1792,1920,2048`;
+- a host-only per-request journal containing exact token history, request/DP/
+  slot, physical blocks, co-batch membership, and observational page
+  generations;
+- exact journal joins for every selected red row.
+
+It does not fetch/hash device KV content, run backward, commit an optimizer,
+enable prefix cache, change precision/kernels, or rerun unified KV. Do not add
+any of those manually.
+
+### 1. Fetch one immutable source and render stock only
+
+Run these commands sequentially from an existing clean `google/tunix` clone:
+
+```bash
+set -euo pipefail
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
+RUN_ID="p38s12a"
+WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
+OUT="/tmp/p38-serving-$RUN_ID"
+EVIDENCE="/tmp/p38-return-$RUN_ID"
+test ! -e "$WORKTREE"
+test ! -e "$OUT"
+test ! -e "$EVIDENCE"
+git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
+cd "$WORKTREE"
+test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+test -z "$(git status --porcelain)"
+rg -q '_p38_request_journal' \
+  canon-zero-tim/patches/tpu_inference/13-tpu-runner-p38-request-journal.patch
+test -f \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/phases/p38-2i-request-journal-concurrency-discriminator.md
+rg -q 'CANON_P38_MISMATCH_CAPSULE_MAX_ROWS.*8' \
+  canon-zero-tim/cluster/render_p38_serving_jobsets.py
+mkdir -p "$EVIDENCE"
+printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
+
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --output-dir "$OUT" \
+  --stock-only | tee "$EVIDENCE/render.txt"
+
+STOCK="$OUT/jobset-p38-serving-stock.yaml"
+test -f "$STOCK"
+test ! -e "$OUT/jobset-p38-serving-unified.yaml"
+cp "$STOCK" "$EVIDENCE/rendered-stock.yaml"
+kubectl apply --dry-run=server -f "$STOCK" | \
+  tee "$EVIDENCE/dry-run-stock.txt"
+```
+
+The rendered stock YAML must contain these literal contracts:
+
+```text
+CANON_KV_UNIFIED=0
+CANON_P38_PRECHECK_ONLY=1
+CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=8
+CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
+CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
+CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
+CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
+CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
+CANON_P38_REQUEST_JOURNAL=<capture-dir>/p38_request_journal.jsonl
+CANON_RUN_CMD contains --batch_size=32
+CANON_RUN_CMD contains --mini_batch_size=4
+CANON_RUN_CMD contains --num_generations=8
+CANON_RUN_CMD contains --mesh_dp=16
+maxRestarts: 0
+```
+
+If any value differs, stop. Do not edit the YAML.
+
+### 2. Apply stock only and preserve a byte-zero terminal log
+
+```bash
+set -euo pipefail
+kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
+
+JOBSET="canon-p38-fl-stock-${RUN_ID}-${SOURCE_COMMIT:0:8}"
+HEAD_JOB="${JOBSET}-pathways-head-0"
+POD=""
+for unused in $(seq 1 180); do
+  POD="$(kubectl get pods -n default -l "job-name=$HEAD_JOB" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$POD" ] && break
+  sleep 10
+done
+test -n "$POD"
+printf '%s\n' "$JOBSET" > "$EVIDENCE/jobset-name.txt"
+printf '%s\n' "$POD" > "$EVIDENCE/head-pod-name.txt"
+
+set +e
+kubectl logs -n default -f "$POD" -c jax-tpu | \
+  tee "$EVIDENCE/head.follow.log"
+follow_rc="${PIPESTATUS[0]}"
+set -e
+printf '%s\n' "$follow_rc" > "$EVIDENCE/log-follow-rc.txt"
+```
+
+The end of `kubectl logs -f` is not a terminal verdict. Wait for the exact
+JobSet/pod to become `Completed` or `Failed`; do not delete it. Then fetch all
+evidence from byte zero:
+
+```bash
+set -euo pipefail
+kubectl get jobset -n default "$JOBSET" -o yaml > \
+  "$EVIDENCE/jobset.final.yaml"
+kubectl get pod -n default "$POD" -o yaml > \
+  "$EVIDENCE/head-pod.final.yaml"
+kubectl describe pod -n default "$POD" > \
+  "$EVIDENCE/head-pod.describe.txt"
+kubectl logs -n default "$POD" -c jax-tpu > \
+  "$EVIDENCE/head.full.log"
+kubectl logs -n default "$POD" -c pathways-proxy > \
+  "$EVIDENCE/pathways-proxy.log" 2>&1 || true
+kubectl logs -n default "$POD" -c pathways-rm > \
+  "$EVIDENCE/pathways-rm.log" 2>&1 || true
+kubectl logs -n default "$POD" -c jax-tpu --previous > \
+  "$EVIDENCE/head.previous.log" 2>&1 || true
+kubectl get events -n default \
+  --field-selector "involvedObject.name=$POD" \
+  --sort-by=.lastTimestamp > "$EVIDENCE/head-pod.events.txt"
+```
+
+Do not use `--tail`, timestamps, UI excerpts, or pasted terminal fragments as
+the canonical log. If the pod disappears, return the partial infrastructure
+package and classify it `INCONCLUSIVE`; do not relaunch automatically.
+
+### 3. Admission checklist
+
+The unedited `head.full.log` must contain all of the following:
+
+1. Attempt 0 and the exact source SHA;
+2. exactly one standard-path capture INIT and positive OBSERVE count;
+3. exactly four pre/post capture pairs, one per new prefix band;
+4. one full 32-prompt / 256-trajectory coverage PASS;
+5. finite A-B red and exact B-C;
+6. zero capture errors;
+7. one terminal `PRECHECK_COMPLETE STOP_BEFORE_BACKWARD`;
+8. positive `[CANON_P38_REQUEST_JOURNAL]` markers;
+9. classifier PASS with
+   `request_journal_joined_source_rows == selected_rows`;
+10. mismatch capsule, classification JSON, and serving archive base64;
+11. outer acceptance with backward=0 and optimizer_commits=0; and
+12. final PATHTRACE with `p38_kv_unified=0`, journal>0, and coverage=1.
+
+Missing row joins are `INCONCLUSIVE_CAPTURE_SELECTION`. A different A-B count
+is not by itself a failure because rollout trajectories are stochastic. B-C
+red, invalid/nonfinite data, missing coverage, capture errors, or any backward
+or optimizer commit are hard failures.
+
+### 4. Extract and return the exact bundle
+
+```bash
+set -euo pipefail
+python3 \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py \
+  --log "$EVIDENCE/head.full.log" \
+  --output "$EVIDENCE/p38s12a-mismatch-capsule.npz"
+python3 \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py \
+  --log "$EVIDENCE/head.full.log" \
+  --output "$EVIDENCE/p38s12a-serving-capture.tar"
+sed -n 's/^\[CANON_PRE_ALIGN_ARTIFACT_JSON\] //p' \
+  "$EVIDENCE/head.full.log" > "$EVIDENCE/pre-alignment.jsonl"
+sed -n 's/^\[CANON_P38_SERVING_CLASSIFICATION_JSON\] //p' \
+  "$EVIDENCE/head.full.log" > "$EVIDENCE/serving-classification.json"
+test -s "$EVIDENCE/pre-alignment.jsonl"
+test -s "$EVIDENCE/serving-classification.json"
+tar -tf "$EVIDENCE/p38s12a-serving-capture.tar" | \
+  grep -q './p38_request_journal.jsonl'
+sha256sum "$EVIDENCE"/* | tee "$EVIDENCE/SHA256SUMS"
+```
+
+Return the entire `$EVIDENCE` directory. Do not return screenshots or only the
+last 200 lines. Do not launch P38s12b yet. After this bundle is reviewed, the
+next gate is exact whole-vector E0 replay; concurrency 32 is a separate later
+arm with a KV>=1686 sufficiency check.
+
 ## NEXT AFTER REVIEW/PUBLICATION: run one P38s11 full-coverage stock capture
 
 Do not launch from the current remote until the local P38.2g9 changes are

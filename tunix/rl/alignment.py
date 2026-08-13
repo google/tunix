@@ -843,6 +843,16 @@ def _persist_p38_mismatch_capsule(
         f"P38 mismatch capsule contains non-batch-aligned arrays: {invalid}"
     )
   selected = np.asarray(rows, dtype=np.int32)
+  try:
+    num_generations = int(os.environ.get("CANON_NUM_GENERATIONS", "0"))
+  except ValueError as exc:
+    raise AlignmentGateError(
+        "CANON_NUM_GENERATIONS must be an integer for a P38 capsule"
+    ) from exc
+  if num_generations <= 0:
+    raise AlignmentGateError(
+        "P38 mismatch capsule requires positive CANON_NUM_GENERATIONS"
+    )
   captured = {
       name: np.ascontiguousarray(value[selected])
       for name, value in row_arrays.items()
@@ -854,6 +864,15 @@ def _persist_p38_mismatch_capsule(
       "schema": "p38-frozenlake-mismatch-capsule-v1",
       "step": int(record["step"]),
       "selected_rows": rows,
+      "num_generations": num_generations,
+      "row_identity": [
+          {
+              "source_row": row,
+              "batch_group_index": row // num_generations,
+              "generation_index": row % num_generations,
+          }
+          for row in rows
+      ],
       "source": sidecar.source_name,
       "record_sha256": hashlib.sha256(record_json.encode()).hexdigest(),
       "boundaries": {

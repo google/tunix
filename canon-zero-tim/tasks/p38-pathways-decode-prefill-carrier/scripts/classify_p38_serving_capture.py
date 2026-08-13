@@ -116,6 +116,34 @@ def _primary_block_ids(value: Any) -> list[int]:
   return [int(item) for item in value]
 
 
+def _block_table_matrix(
+    value: Any, meta: dict[str, Any], seq: int
+) -> np.ndarray:
+  """Restores the runner's logical block-table matrix.
+
+  The standard Pathways runner may serialize ``AttentionMetadata.block_tables``
+  as one flat device buffer even though the host request contract is a
+  ``[dp * rows_per_dp, max_blocks]`` matrix.  The capture metadata contains the
+  two dimensions needed to restore that view without guessing from request
+  contents.
+  """
+  block_tables = np.asarray(value)
+  if block_tables.ndim == 1:
+    dp_size = int(meta.get("dp_size", 0))
+    rows_per_dp = int(meta.get("max_attention_rows_per_dp", 0))
+    rows = dp_size * rows_per_dp
+    _require(
+        rows > 0 and block_tables.size % rows == 0,
+        f"sequence {seq} flattened block tables are not row-divisible",
+    )
+    block_tables = block_tables.reshape(rows, -1)
+  _require(
+      block_tables.ndim == 2,
+      f"sequence {seq} block tables are not rank two",
+  )
+  return block_tables
+
+
 def _load_mismatch_capsule(path: Path) -> dict[str, Any]:
   _require(path.is_file(), f"mismatch capsule does not exist: {path}")
   with np.load(path, allow_pickle=False) as archive:
@@ -169,8 +197,7 @@ def _validate_request_mapping(
   active = np.asarray(arrays["active_mask"], dtype=np.bool_).reshape(-1)
   seq_lens = np.asarray(arrays["md_seq_lens"]).reshape(-1)
   query_start = np.asarray(arrays["md_query_start_loc"]).reshape(-1)
-  block_tables = np.asarray(arrays["md_block_tables"])
-  _require(block_tables.ndim == 2, f"sequence {seq} block tables are not rank two")
+  block_tables = _block_table_matrix(arrays["md_block_tables"], meta, seq)
 
   seen_indices: set[int] = set()
   seen_slots: set[tuple[int, int]] = set()
@@ -226,10 +253,11 @@ def _validate_request_mapping(
 
 def _join_mismatch_capsule(
     requests: list[dict[str, Any]], capsule: dict[str, Any], seq: int
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
   arrays = capsule["arrays"]
   selected_rows = np.asarray(arrays["selected_rows"]).reshape(-1)
-  candidates = []
+  joins = []
+  joined_request_ids: set[str] = set()
   for capsule_index, source_row in enumerate(selected_rows):
     prompt = np.asarray(arrays["prompt_ids"][capsule_index])[
         np.asarray(arrays["prompt_mask"][capsule_index], dtype=np.bool_)
@@ -238,22 +266,181 @@ def _join_mismatch_capsule(
         np.asarray(arrays["completion_valid_mask"][capsule_index], dtype=np.bool_)
     ]
     full_history = np.concatenate((prompt, completion)).astype(np.int64, copy=False)
+    candidates = []
     for item in requests:
       captured = np.asarray(item["token_ids"], dtype=np.int64)
       if captured.size <= full_history.size and np.array_equal(captured, full_history[:captured.size]):
         candidates.append((item, int(source_row), full_history[:captured.size]))
-  if not candidates:
-    return None
-  _require(len(candidates) == 1, f"sequence {seq} mismatch token-history join expected at most one candidate, found {len(candidates)}")
-  item, source_row, matching_prefix = candidates[0]
-  prefix_sha = _token_history_sha256(matching_prefix)
-  _require(prefix_sha == item["token_history_sha256"], f"sequence {seq} mismatch join hash mismatch")
-  return {
-      "request_id": item["request_id"],
-      "source_row": source_row,
-      "captured_tokens": len(item["token_ids"]),
-      "token_history_sha256": prefix_sha,
-  }
+    if not candidates:
+      continue
+    _require(
+        len(candidates) == 1,
+        "sequence "
+        f"{seq} source row {int(source_row)} token-history join expected "
+        f"at most one candidate, found {len(candidates)}",
+    )
+    item, joined_row, matching_prefix = candidates[0]
+    request_id = str(item["request_id"])
+    _require(
+        request_id not in joined_request_ids,
+        f"sequence {seq} request {request_id} joins multiple source rows",
+    )
+    joined_request_ids.add(request_id)
+    prefix_sha = _token_history_sha256(matching_prefix)
+    _require(
+        prefix_sha == item["token_history_sha256"],
+        f"sequence {seq} mismatch join hash mismatch",
+    )
+    joins.append({
+        "request_id": request_id,
+        "source_row": joined_row,
+        "captured_tokens": len(item["token_ids"]),
+        "token_history_sha256": prefix_sha,
+    })
+  return joins
+
+
+def _load_request_journal(
+    directory: Path,
+    prefix_bounds: tuple[int, ...],
+    expected_program_path: str,
+) -> list[dict[str, Any]]:
+  path = directory / "p38_request_journal.jsonl"
+  _require(path.is_file() and path.stat().st_size > 0,
+           "P38 request journal is absent or empty")
+  records = []
+  seen: set[tuple[str, int]] = set()
+  for line_number, line in enumerate(
+      path.read_text(encoding="utf-8").splitlines(), start=1
+  ):
+    _require(line.strip(), f"request journal line {line_number} is empty")
+    try:
+      record = json.loads(line)
+    except json.JSONDecodeError as error:
+      raise CaptureError(
+          f"request journal line {line_number} is not JSON"
+      ) from error
+    _require(record.get("schema") == "p38-request-journal-v1",
+             f"request journal line {line_number} has an invalid schema")
+    _require(record.get("program_path") == expected_program_path,
+             f"request journal line {line_number} changed program path")
+    request_id = record.get("request_id")
+    _require(isinstance(request_id, str) and request_id,
+             f"request journal line {line_number} has no request ID")
+    stratum_index = int(record.get("stratum_index", -1))
+    _require(0 <= stratum_index < len(prefix_bounds) - 1,
+             f"request journal line {line_number} has an invalid stratum")
+    expected_stratum = [
+        prefix_bounds[stratum_index], prefix_bounds[stratum_index + 1]
+    ]
+    _require(record.get("stratum") == expected_stratum,
+             f"request journal line {line_number} has drifted bounds")
+    prefix = int(record.get("num_computed_tokens", -1))
+    _require(expected_stratum[0] <= prefix < expected_stratum[1],
+             f"request journal line {line_number} is outside its stratum")
+    key = (request_id, stratum_index)
+    _require(key not in seen,
+             f"request journal repeats request/stratum {key}")
+    seen.add(key)
+    token_ids = record.get("token_ids")
+    _require(isinstance(token_ids, list) and token_ids and
+             all(isinstance(token, int) for token in token_ids),
+             f"request journal line {line_number} has invalid tokens")
+    _require(len(token_ids) == int(record.get("num_tokens", -1)),
+             f"request journal line {line_number} token count drifted")
+    _require(record.get("token_history_sha256") ==
+             _token_history_sha256(token_ids),
+             f"request journal line {line_number} token SHA drifted")
+    block_size = int(record.get("block_size", 0))
+    logical_blocks = int(record.get("logical_blocks", 0))
+    _require(block_size > 0 and
+             logical_blocks == (prefix + 1 + block_size - 1) // block_size,
+             f"request journal line {line_number} block count drifted")
+    pages = record.get("physical_pages")
+    generations = record.get("page_generations")
+    _require(isinstance(pages, list) and len(pages) == logical_blocks and
+             all(isinstance(page, int) for page in pages),
+             f"request journal line {line_number} page list drifted")
+    _require(isinstance(generations, list) and
+             len(generations) == logical_blocks,
+             f"request journal line {line_number} generation list drifted")
+    for logical_page, (physical_page, generation) in enumerate(
+        zip(pages, generations, strict=True)
+    ):
+      _require(
+          isinstance(generation, dict) and
+          generation.get("logical_page") == logical_page and
+          generation.get("physical_page") == physical_page and
+          int(generation.get("observation_generation", -1)) >= 0,
+          f"request journal line {line_number} has invalid page provenance",
+      )
+    co_batch = record.get("co_batch_request_ids")
+    _require(isinstance(co_batch, list) and request_id in co_batch and
+             len(co_batch) == int(record.get("scheduled_request_count", -1)),
+             f"request journal line {line_number} co-batch contract drifted")
+    decode_batch = record.get("one_token_decode_request_ids")
+    _require(isinstance(decode_batch, list) and request_id in decode_batch and
+             set(decode_batch) <= set(co_batch) and
+             len(decode_batch) == int(
+                 record.get("one_token_decode_request_count", -1)
+             ),
+             f"request journal line {line_number} decode-batch contract drifted")
+    _require(int(record.get("call_index", 0)) > 0 and
+             int(record.get("dp_rank", -1)) >= 0 and
+             int(record.get("local_scheduler_slot", -1)) >= 0,
+             f"request journal line {line_number} scheduler identity drifted")
+    records.append(record)
+  return records
+
+
+def _join_journal_to_capsule(
+    records: list[dict[str, Any]], capsule: dict[str, Any]
+) -> list[dict[str, Any]]:
+  arrays = capsule["arrays"]
+  selected_rows = np.asarray(arrays["selected_rows"]).reshape(-1)
+  histories = []
+  for capsule_index, source_row in enumerate(selected_rows):
+    prompt = np.asarray(arrays["prompt_ids"][capsule_index])[
+        np.asarray(arrays["prompt_mask"][capsule_index], dtype=np.bool_)
+    ]
+    completion = np.asarray(arrays["completion_ids"][capsule_index])[
+        np.asarray(
+            arrays["completion_valid_mask"][capsule_index], dtype=np.bool_
+        )
+    ]
+    histories.append((
+        int(source_row),
+        np.concatenate((prompt, completion)).astype(np.int64, copy=False),
+    ))
+  joins = []
+  for record in records:
+    captured = np.asarray(record["token_ids"], dtype=np.int64)
+    candidates = [
+        source_row for source_row, history in histories
+        if captured.size <= history.size and
+        np.array_equal(captured, history[:captured.size])
+    ]
+    if not candidates:
+      continue
+    _require(
+        len(candidates) == 1,
+        "request journal token history ambiguously joins source rows "
+        f"{candidates}",
+    )
+    joins.append({
+        "request_id": record["request_id"],
+        "source_row": candidates[0],
+        "captured_tokens": len(record["token_ids"]),
+        "num_computed_tokens": int(record["num_computed_tokens"]),
+        "stratum_index": int(record["stratum_index"]),
+        "dp_rank": int(record["dp_rank"]),
+        "local_scheduler_slot": int(record["local_scheduler_slot"]),
+        "token_history_sha256": record["token_history_sha256"],
+        "physical_pages": record["physical_pages"],
+        "page_generations": record["page_generations"],
+        "scheduled_request_count": int(record["scheduled_request_count"]),
+    })
+  return joins
 
 
 def _load_stage(directory: Path, seq: int, stage: str) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
@@ -313,6 +500,30 @@ def classify(
   _require(
       capsule is not None or not require_mismatch_join,
       "required mismatch capsule is absent",
+  )
+  request_journal = _load_request_journal(
+      directory, prefix_bounds, expected_program_path
+  )
+  journal_joins = (
+      _join_journal_to_capsule(request_journal, capsule)
+      if capsule is not None else []
+  )
+  selected_source_rows = (
+      {
+          int(row) for row in np.asarray(
+              capsule["arrays"]["selected_rows"]
+          ).reshape(-1)
+      }
+      if capsule is not None else set()
+  )
+  journal_joined_source_rows = {
+      int(join["source_row"]) for join in journal_joins
+  }
+  _require(
+      not require_mismatch_join or
+      selected_source_rows <= journal_joined_source_rows,
+      "request journal did not join every selected mismatch row: missing "
+      f"{sorted(selected_source_rows - journal_joined_source_rows)}",
   )
   summaries = []
   captured_strata: set[int] = set()
@@ -407,10 +618,10 @@ def classify(
     _require(int(post_meta.get("completed_records", -1)) == seq + 1, f"sequence {seq} has a bad completed-record count")
     _require(int(post_meta.get("expected_max_records", -1)) >= expected_records, f"sequence {seq} reports an undersized record budget")
 
-    mismatch_join = None
+    mismatch_joins = []
     if capsule is not None:
-      mismatch_join = _join_mismatch_capsule(requests, capsule, seq)
-      successful_joins += int(mismatch_join is not None)
+      mismatch_joins = _join_mismatch_capsule(requests, capsule, seq)
+      successful_joins += len(mismatch_joins)
     summaries.append({
         "seq": seq,
         "requests": len(requests),
@@ -423,7 +634,12 @@ def classify(
         "capture_stratum": expected_stratum,
         "program_path": expected_program_path,
         "kv_unified": bool(meta.get("kv_unified")),
-        "mismatch_join": mismatch_join,
+        # Keep the singular field for old one-row fixtures while making the
+        # complete per-row evidence explicit for production captures.
+        "mismatch_join": (
+            mismatch_joins[0] if len(mismatch_joins) == 1 else None
+        ),
+        "mismatch_joins": mismatch_joins,
     })
 
   _require(captured_strata == set(range(expected_records)),
@@ -437,6 +653,16 @@ def classify(
       "prefix_bounds": list(prefix_bounds),
       "program_path": expected_program_path,
       "successful_mismatch_joins": successful_joins,
+      "request_journal_records": len(request_journal),
+      "request_journal_joins": journal_joins,
+      "request_journal_joined_source_rows": sorted(
+          journal_joined_source_rows
+      ),
+      "joined_source_rows": sorted({
+          int(join["source_row"])
+          for record in summaries
+          for join in record["mismatch_joins"]
+      }),
       "source_commit": source_commit,
       "records": summaries,
   }

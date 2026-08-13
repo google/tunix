@@ -125,6 +125,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
            CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER \
            CANON_P38_SERVING_CAPTURE_EXPECTED_PATH \
            CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS \
+           CANON_P38_REQUEST_JOURNAL \
            CANON_P38_SERVING_CAPTURE_CLASSIFICATION \
            CANON_P38_SERVING_CAPTURE_ARCHIVE \
            CANON_P38_MISMATCH_CAPSULE \
@@ -155,7 +156,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   }
   [ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" = "1536" ] && \
   [ "${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}" = \
-      "1536,1792,2048,2304,2560" ] || {
+      "1536,1664,1792,1920,2048" ] || {
     echo "[env] P38 serving capture prefix strata drifted" >&2
     fail=1
   }
@@ -167,11 +168,16 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 serving capture must target the standard runner path" >&2
     fail=1
   }
+  [ "${CANON_P38_REQUEST_JOURNAL:-}" = \
+      "${CANON_P38_SERVING_CAPTURE_DIR%/}/p38_request_journal.jsonl" ] || {
+    echo "[env] P38 request journal must live in the capture directory" >&2
+    fail=1
+  }
   echo "[env] P38 serving capture enabled: kv_unified=${CANON_KV_UNIFIED:-0} path=${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-missing}"
 elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
   echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
   fail=1
-elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_PRECHECK_ONLY:-}" ]; then
+elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_PRECHECK_ONLY:-}" ]; then
   echo "[env] partial P38 serving-capture configuration is not admitted" >&2
   fail=1
 fi
@@ -953,8 +959,13 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] && \
          [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
         req CANON_P38_MISMATCH_CAPSULE
-        [ "${CANON_P38_MISMATCH_CAPSULE_MAX_ROWS:-}" = "2" ] || {
-          echo "[env] FrozenLake replay capsule must retain exactly two rows" >&2
+        expected_p38_capsule_rows=2
+        if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+          expected_p38_capsule_rows=8
+        fi
+        [ "${CANON_P38_MISMATCH_CAPSULE_MAX_ROWS:-}" = \
+          "$expected_p38_capsule_rows" ] || {
+          echo "[env] FrozenLake replay capsule row bound drifted: expected=$expected_p38_capsule_rows" >&2
           fail=1
         }
       elif [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then

@@ -16,17 +16,22 @@ run_case() (
   export CANON_P32_TRAIN_ADMITTED=0
   export CANON_P38_PRECHECK_ONLY=1
   export CANON_P38_SERVING_CAPTURE_DIR="$state/capture"
+  export CANON_P38_REQUEST_JOURNAL="$state/capture/p38_request_journal.jsonl"
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
-  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1792,2048,2304,2560
+  export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
   export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$state/capture.json"
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$state/capture.tar"
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
   export CANON_KV_UNIFIED=0
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
+  if [ "$mode" = missing-journal ]; then
+    command+=" --omit-request-journal"
+  fi
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 expected_path=standard'"
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
+  command+="; printf '%s\\n' '[CANON_P38_REQUEST_JOURNAL] record=1 request=request-0 prefix=1600 stratum=0 dp=0'"
   if [ "$mode" != missing-coverage ]; then
     command+="; printf '%s\\n' '[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT prompt_groups=32 unit_prompts=4 units=8 generations=8 trajectories=256 partial_tail=reject verdict=PASS'"
   fi
@@ -72,6 +77,8 @@ run_case() (
       grep -q 'P38 serving capture reported internal errors: 1' "$state/driver.log"
     elif [ "$mode" = missing-coverage ]; then
       grep -q 'P38 diagnostic did not attest full 32-prompt coverage: 0' "$state/driver.log"
+    elif [ "$mode" = missing-journal ]; then
+      grep -q 'P38 request journal is absent: markers=1' "$state/driver.log"
     fi
   fi
 )
@@ -83,4 +90,5 @@ run_case unified-missing
 run_case unified-exact
 run_case capture-error
 run_case missing-coverage
-echo "[P38.SERVING] POSTFLIGHT_PASS exact_stop=accepted red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected"
+run_case missing-journal
+echo "[P38.SERVING] POSTFLIGHT_PASS exact_stop=accepted red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected"

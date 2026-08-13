@@ -997,3 +997,37 @@
 - Claim ceiling: local construction and evidence coverage only. No carrier
   cause or repair is claimed. P38s11 is NOT RUN and requires review,
   publication, and separate resource approval.
+
+## 2026-08-13 UTC — P38s11 audited; P38.2i request journal locally complete
+
+- Evidence: P38s11 is the first admitted full-coverage stock red. It covered
+  32 prompts / 256 trajectories, measured 27 differing A-B elements among
+  48,449 actions with maximum absolute difference about 0.1044, kept B-C
+  exact, emitted no capture errors, and stopped before backward.
+- Offline join: exact token-prefix/SHA joins associate capsule rows 199 and
+  206 with six serving snapshots across turns and DP ranks. The snapshots did
+  not observe those rows at their mismatch times, so they prove provenance,
+  not a page or operator cause.
+- Implementation: patch 13 adds a default-off, host-only per-request journal
+  at prefix bands `1536,1664,1792,1920,2048`. It records exact token history,
+  request/DP/slot, physical pages, full scheduled co-batch, one-token-decode
+  membership, and explicitly observational page generations. It never fetches
+  a device/KV buffer. The capsule bound is eight rows for this diagnostic only.
+- Classifier hardening: flattened production block tables are restored;
+  multiple unique source-row joins per snapshot are accepted; ambiguous joins,
+  an absent journal, or any selected row without a journal join are rejected.
+- Operator contract: the renderer can emit stock only. U/KV-unified is not
+  rerun because its production result was already red. P38s12a retains
+  concurrency 256; concurrency 32 is a later separate arm with a KV>=1686
+  depth guard and repeat requirement.
+- Local gates: classifier 30/30, renderer 7/7, outer postflight including the
+  missing-journal negative control, both pinned overlays 23/23 with 29/29
+  manifest identity, full pinned-image P33 CPU/adjacent gate, Python/shell
+  checks, executable-source ASCII scan, credential-pattern scan,
+  ordinary-source whitespace scan, patch application, and exact-image
+  manifest identity all PASS. Patch 13 retains the unified-diff format's
+  required blank-context prefix spaces. Installed runner SHA-256 is
+  `3a219b251020894ade2002e480aa8b3fef90ea62a70794116b143bad89b36b17`.
+- Boundary: no cluster action, backward, optimizer commit, or training launch
+  occurred. P38s12a/P38s12b are NOT RUN. The next action after publication is
+  the stock-only P38s12a command in `HANDOFF.md`.

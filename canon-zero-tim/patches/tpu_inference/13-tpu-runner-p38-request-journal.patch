@@ -1,0 +1,212 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -963,6 +963,10 @@
+     "lines": 0,
+     "prefix_bands": set(),
+ }
++_P38_REQUEST_JOURNAL = os.environ.get("CANON_P38_REQUEST_JOURNAL", "")
++_P38_REQUEST_JOURNALED_BANDS = set()
++_P38_REQUEST_JOURNAL_STATE = {"calls": 0, "records": 0}
++_P38_PAGE_OWNERSHIP = {}
+ 
+ if _P38_SERVING_CAPTURE_DIR and _P38_SERVING_CAPTURE_MAX_CALLS < 1:
+     raise RuntimeError(
+@@ -973,6 +977,14 @@
+     raise RuntimeError(
+         "P38 serving capture free-space multiplier must be at least five")
+ if _P38_SERVING_CAPTURE_DIR:
++    if not _P38_REQUEST_JOURNAL:
++        raise RuntimeError(
++            "P38 serving capture requires CANON_P38_REQUEST_JOURNAL")
++    capture_root = os.path.realpath(_P38_SERVING_CAPTURE_DIR)
++    journal_parent = os.path.realpath(os.path.dirname(_P38_REQUEST_JOURNAL))
++    if journal_parent != capture_root:
++        raise RuntimeError(
++            "P38 request journal must live directly in the capture directory")
+     if _P38_SERVING_CAPTURE_EXPECTED_PATH not in (
+             "standard", "continue_decode"):
+         raise RuntimeError(
+@@ -1201,6 +1213,163 @@
+     return prefixes
+ 
+ 
++def _p38_primary_pages(block_ids):
++    """Return the single Qwen KV-cache group's physical page IDs."""
++    value = _p38_jsonable(block_ids)
++    if not isinstance(value, list) or not value:
++        raise RuntimeError("P38 request has no physical page IDs")
++    if isinstance(value[0], list):
++        if len(value) != 1:
++            raise RuntimeError("P38 request has more than one KV cache group")
++        value = value[0]
++    if not all(isinstance(page, int) for page in value):
++        raise RuntimeError("P38 physical page IDs are not integers")
++    return [int(page) for page in value]
++
++
++def _p38_request_journal(
++        runner, scheduler_output, req_ids_dp, prefixes, program_path):
++    """Persist one host-only record per request and prefix stratum.
++
++    This observer reads scheduler-owned host metadata only.  It never fetches a
++    device buffer and therefore cannot insert a JAX program boundary into the
++    serving path.  Physical page generations are observation generations: they
++    advance when this hook first sees a page mapped to a different
++    request/logical-page owner on the same DP rank.  They are not allocator
++    generations and must not be interpreted as proof of an unobserved reuse.
++    """
++    import json as _json
++    import os as _os
++    from pathlib import Path as _Path
++
++    state = _P38_REQUEST_JOURNAL_STATE
++    state["calls"] += 1
++    call_index = int(state["calls"])
++    dp_slots = {
++        request_id: (int(dp_rank), int(local_slot))
++        for dp_rank, request_ids in req_ids_dp.items()
++        for local_slot, request_id in enumerate(request_ids)
++    }
++    co_batch = sorted(
++        str(request_id)
++        for request_id, scheduled_tokens in
++        scheduler_output.num_scheduled_tokens.items()
++        if int(scheduled_tokens) > 0
++    )
++    decode_batch = sorted(str(item["request_id"]) for item in prefixes)
++    records = []
++    for item in prefixes:
++        prefix = int(item["num_computed_tokens"])
++        stratum = _p38_capture_stratum(prefix)
++        if stratum is None:
++            continue
++        stratum_index, lower, upper = stratum
++        request_id = str(item["request_id"])
++        journal_key = (request_id, int(stratum_index))
++        if journal_key in _P38_REQUEST_JOURNALED_BANDS:
++            continue
++        if request_id not in dp_slots:
++            raise RuntimeError(
++                f"P38 journal request has no DP slot: {request_id}")
++        dp_rank, local_slot = dp_slots[request_id]
++        request_index = int(item["request_index"])
++        request_state = runner.requests.get(request_id)
++        pages = _p38_primary_pages(getattr(request_state, "block_ids", None))
++        logical_blocks = (prefix + 1 + runner.block_size - 1) // runner.block_size
++        pages = pages[:logical_blocks]
++        page_records = []
++        for logical_page, physical_page in enumerate(pages):
++            owner_key = (dp_rank, int(physical_page))
++            prior = _P38_PAGE_OWNERSHIP.get(owner_key)
++            changed = (
++                prior is None
++                or prior["request_id"] != request_id
++                or int(prior["logical_page"]) != logical_page
++            )
++            generation = (
++                0 if prior is None
++                else int(prior["observation_generation"]) + int(changed)
++            )
++            current = {
++                "request_id": request_id,
++                "logical_page": logical_page,
++                "observation_generation": generation,
++                "last_seen_call": call_index,
++            }
++            _P38_PAGE_OWNERSHIP[owner_key] = current
++            page_records.append({
++                "physical_page": int(physical_page),
++                "logical_page": logical_page,
++                "observation_generation": generation,
++                "previous_observed_request_id": (
++                    None if prior is None else prior["request_id"]
++                ),
++                "previous_observed_logical_page": (
++                    None if prior is None else int(prior["logical_page"])
++                ),
++                "previous_observed_call": (
++                    None if prior is None else int(prior["last_seen_call"])
++                ),
++                "observed_owner_changed": bool(changed),
++            })
++        num_tokens = int(runner.input_batch.num_tokens[request_index])
++        token_ids = [
++            int(token_id) for token_id in np.asarray(
++                runner.input_batch.token_ids_cpu[request_index, :num_tokens])
++        ]
++        record = {
++            "schema": "p38-request-journal-v1",
++            "call_index": call_index,
++            "program_path": program_path,
++            "request_id": request_id,
++            "request_index": request_index,
++            "dp_rank": dp_rank,
++            "local_scheduler_slot": local_slot,
++            "num_computed_tokens": prefix,
++            "num_prompt_tokens": int(
++                runner.input_batch.num_prompt_tokens[request_index]),
++            "num_tokens": num_tokens,
++            "stratum_index": int(stratum_index),
++            "stratum": [int(lower), int(upper)],
++            "block_size": int(runner.block_size),
++            "logical_blocks": logical_blocks,
++            "physical_pages": pages,
++            "page_generations": page_records,
++            "token_ids": token_ids,
++            "token_history_sha256": _p38_token_history_sha256(token_ids),
++            "scheduled_request_count": len(co_batch),
++            "co_batch_request_ids": co_batch,
++            "one_token_decode_request_count": len(decode_batch),
++            "one_token_decode_request_ids": decode_batch,
++        }
++        records.append((journal_key, record))
++    if records:
++        journal = _Path(_P38_REQUEST_JOURNAL)
++        journal.parent.mkdir(parents=True, exist_ok=True)
++        encoded = "".join(
++            _json.dumps(record, sort_keys=True) + "\n"
++            for _, record in records
++        ).encode()
++        descriptor = _os.open(
++            journal, _os.O_APPEND | _os.O_CREAT | _os.O_WRONLY, 0o600
++        )
++        try:
++            _os.write(descriptor, encoded)
++            _os.fsync(descriptor)
++        finally:
++            _os.close(descriptor)
++        for journal_key, record in records:
++            _P38_REQUEST_JOURNALED_BANDS.add(journal_key)
++            state["records"] += 1
++            print(
++                "[CANON_P38_REQUEST_JOURNAL] "
++                f"record={state['records']} request={record['request_id']} "
++                f"prefix={record['num_computed_tokens']} "
++                f"stratum={record['stratum_index']} dp={record['dp_rank']}",
++                flush=True,
++            )
++
++
+ def _p38_observe_scheduled_prefixes(prefixes, program_path):
+     """Emit bounded evidence that the runtime hook ran, even on a miss."""
+     import json as _json
+@@ -1494,8 +1663,6 @@
+     """Write the pre-dispatch record and return its sequence number."""
+     if not _P38_SERVING_CAPTURE_DIR:
+         return None
+-    if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
+-        return None
+     if program_path != _P38_SERVING_CAPTURE_EXPECTED_PATH:
+         raise RuntimeError(
+             "P38 serving capture reached an unexpected program path: "
+@@ -1509,6 +1676,10 @@
+     scheduled_prefixes = _p38_scheduled_decode_prefixes(
+         runner, scheduler_output)
+     _p38_observe_scheduled_prefixes(scheduled_prefixes, program_path)
++    _p38_request_journal(
++        runner, scheduler_output, req_ids_dp, scheduled_prefixes, program_path)
++    if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
++        return None
+     candidate_strata = []
+     for index, (lower, upper) in enumerate(zip(
+             _P38_SERVING_CAPTURE_PREFIX_BOUNDS,
