@@ -23,7 +23,9 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_aval_onehost.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
+  canon-zero-tim/tests/p38_serving/fake_gcloud.sh \
   canon-zero-tim/tests/p38_serving/test_evidence_seal.sh \
+  canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh \
   canon-zero-tim/tests/p38_serving/test_postflight.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env \
   canon-zero-tim/cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env \
@@ -74,6 +76,7 @@ python3 -m unittest discover \
   -s canon-zero-tim/tests/p38_serving \
   -p 'test_*.py'
 bash canon-zero-tim/tests/p38_serving/test_postflight.sh
+bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh
 python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py
 python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py
 python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_frozenlake_replay.py
@@ -300,6 +303,7 @@ validate_p38_serving_preflight() (
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$state/serving.json"
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$state/serving.tar"
+  export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/$(basename "$state")/attempt-0"
   export CANON_P38_PRECHECK_ONLY=1
   export CANON_P38_CONTROLLED_EXIT=1
   export CANON_P38_MIN_ACTION_KV=1686
@@ -313,6 +317,15 @@ validate_p38_serving_preflight() (
   grep -q 'export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard' "$state/env.sh"
   grep -q 'export CANON_P38_CONTROLLED_EXIT=1' "$state/env.sh"
   grep -q 'export CANON_P38_MIN_ACTION_KV=1686' "$state/env.sh"
+  grep -Fq "export CANON_P38_GCS_PREFIX=$CANON_P38_GCS_PREFIX" "$state/env.sh"
+
+  valid_p38_gcs_prefix="$CANON_P38_GCS_PREFIX"
+  export CANON_P38_GCS_PREFIX=gs://wrong-bucket/p38
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted a drifted GCS evidence prefix" >&2
+    exit 1
+  fi
+  export CANON_P38_GCS_PREFIX="$valid_p38_gcs_prefix"
   grep -Fq "export CANON_P38_REQUEST_JOURNAL=$state/serving/p38_request_journal.jsonl" "$state/env.sh"
 
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=continue_decode

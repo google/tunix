@@ -1,10 +1,104 @@
-# P38 FrozenLake: clean concurrency-32 P38s12f
+# P38 FrozenLake: P38s13a HOLD pending P38.2l instrument freeze
 
 This runbook is diagnostic-only. It never launches FrozenLake full training,
 evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a
 separate workstream and waits for its DP16 resources.
 
 ## Current fact
+
+P38s12f completed the concurrency discriminator: concurrency 32 remained red
+at 11 / 46,390 elements (`max_abs=0.16271209716796875`) with exact B-C and
+sufficient depth. Do not run concurrency 32 again. Its replay artifacts were
+not committed, so the current action is one stock concurrency-256 P38s13a with
+the same numerical path and new GCS durability only.
+
+P38.2k final-artifact GCS transport is locally green, but it uploads after the
+workload returns. Do not execute the operator sequence below until
+`phases/p38-2l-terminal-incident-capture.md` passes its mid-run snapshot and
+one-host dress-rehearsal gates.
+
+The frozen source must render this exact attempt-0 prefix:
+
+```text
+gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/<jobset>/attempt-0
+```
+
+Require `PREFLIGHT.json` before rollout. After the pod terminates, recover
+`COLLECTED.json`, `SHA256SUMS`, `mismatch-capsule.npz`, and
+`serving-capture.tar` directly from GCS. `COMPLETE.json` is written last and is
+the only GCS completion marker. This supersedes the P38s12f launch instructions
+below, which remain as historical provenance.
+
+## Current P38s13a operator sequence
+
+Run this only after P38.2l is locally complete, committed, and pushed. Do not
+edit the rendered YAML.
+
+```bash
+set -euo pipefail
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
+RUN_ID=p38s13a
+WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
+OUT="/tmp/p38-serving-$RUN_ID"
+EVIDENCE="/tmp/p38-return-$RUN_ID"
+test ! -e "$WORKTREE"
+test ! -e "$OUT"
+test ! -e "$EVIDENCE"
+git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
+cd "$WORKTREE"
+test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+test -z "$(git status --porcelain)"
+mkdir -p "$EVIDENCE"
+printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
+
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" --run-id "$RUN_ID" \
+  --output-dir "$OUT" --stock-only --max-concurrency 256 | \
+  tee "$EVIDENCE/render.txt"
+STOCK="$OUT/jobset-p38-serving-stock.yaml"
+JOBSET="canon-p38-fl-stock-${RUN_ID}-${SOURCE_COMMIT:0:8}"
+PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/$JOBSET/attempt-0"
+grep -Fq "value: $PREFIX" "$STOCK"
+kubectl apply --dry-run=server -f "$STOCK" | \
+  tee "$EVIDENCE/dry-run-stock.txt"
+kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
+```
+
+Prove GCS access before waiting for the expensive rollout:
+
+```bash
+for unused in $(seq 1 180); do
+  if gcloud storage ls "$PREFIX/PREFLIGHT.json" >/dev/null 2>&1; then
+    echo "P38_GCS_PREFLIGHT_PASS $PREFIX"
+    break
+  fi
+  sleep 10
+done
+gcloud storage ls "$PREFIX/PREFLIGHT.json"
+```
+
+After the JobSet becomes terminal, recover GCS independently of pod logs:
+
+```bash
+mkdir -p "$EVIDENCE/gcs"
+gcloud storage rsync -r "$PREFIX" "$EVIDENCE/gcs"
+test -s "$EVIDENCE/gcs/COLLECTED.json"
+(cd "$EVIDENCE/gcs" && sha256sum -c SHA256SUMS --quiet)
+if test -s "$EVIDENCE/gcs/COMPLETE.json"; then
+  echo P38_GCS_COMPLETE
+else
+  echo P38_GCS_COLLECTED_ONLY
+fi
+```
+
+Always collect the exact JobSet/pod YAML and events as a separate Kubernetes
+bundle. `COLLECTED_ONLY` is valuable failure evidence but is not target
+admission. A complete bundle must contain exact B-C, a successful journal
+join, sufficient depth, full trajectory coverage, and the controlled-exit
+contract before strict E0 begins.
+
+## Historical P38s12f instructions
 
 The bundle published under `p38s12b` used `--max_concurrency=256`, so account
 it as P38s12a analysis-level evidence. It reproduced A-B red and exact B-C,

@@ -1103,3 +1103,35 @@
 - Verdict: FAIL (concurrency 32 is insufficient to remove the decode-prefill carrier).
 - Evidence packaged in `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s12f/`.
 
+## 2026-08-13 UTC — P38.2k durable GCS evidence implementation
+
+- Reconciled P38s12f as a valid concurrency verdict but incomplete replay
+  bundle: A-B remained red at concurrency 32, while its capsule/archive and
+  terminal stdout did not survive.
+- Added default P38 evidence storage under
+  `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/<jobset>/attempt-0`.
+- Added write/read preflight before workload execution, SHA-sealed collection
+  before `COLLECTED.json`, and postflight-only `COMPLETE.json`. Upload, missing
+  artifact, prefix drift, and repeated completion fail closed.
+- Local fake-GCS persistence and existing P38 postflight suites pass. The
+  complete pinned-image CPU gate passed with 85 workload, 34 alignment, and
+  15 adjacent tests plus terminal marker `[P33.WORKLOAD] CPU_GATE PASS`.
+  Exact-image Qwen3-1.7B/Qwen3-8B overlays each passed 23 tests and all 29
+  manifest entries, ending in `P33_EXACT_IMAGE_PASS`.
+- Target P38s13a is not run. No real bucket write, cluster action, backward,
+  optimizer commit, W&B/HF change, commit, or push occurred.
+
+## 2026-08-14 UTC — Re-plan before P38.2k publication
+
+- Corrected the concurrency claim: concurrency 32 disproves 256 simultaneous
+  requests as a necessary condition, but does not eliminate sequential page
+  churn, changing co-batch composition, or live-serving state.
+- Kept row-231 E0-lite closed: it already failed to reproduce production A and
+  must not be repeated. The existing journal already has prefix-band co-batch
+  membership, but not exact mismatch-call state.
+- Split the remaining work into active P38.2l. It adds immutable mid-run
+  log/journal GCS snapshots, an all-red-row exact-call schema, a one-host dress
+  rehearsal, and an instrumentation freeze before P38s13a is admitted.
+- P38.2k remains a locally green final-artifact transport CL. No new runtime
+  instrumentation, real bucket write, cluster action, commit, or push occurred
+  in this checkpoint.

@@ -108,6 +108,13 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
     fi
   fi
 fi
+if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh" \
+    probe || {
+      echo "[run] FATAL: P38 GCS write/read preflight failed" >&2
+      exit 1
+    }
+fi
 echo "[run] cmd: $CANON_RUN_CMD"
 echo "[run] log: $LOG"
 mkdir -p "$(dirname "$LOG")"
@@ -180,6 +187,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       -cf "$CANON_P38_SERVING_CAPTURE_ARCHIVE" .
     p38_archive_sha="$(sha256sum "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | awk '{print $1}')"
     p38_archive_bytes="$(wc -c < "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | tr -d '[:space:]')"
+    p38_persist_rc=0
+    bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh" \
+      collect || p38_persist_rc=$?
     echo "[CANON_P38_SERVING_ARCHIVE] path=$CANON_P38_SERVING_CAPTURE_ARCHIVE bytes=$p38_archive_bytes sha256=$p38_archive_sha encoding=base64"
     base64 "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | \
       sed 's/^/[CANON_P38_SERVING_ARCHIVE_B64] /'
@@ -225,6 +235,10 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   fi
   if [ "$n_p38_capture_error" -ne 0 ]; then
     echo "[run] FATAL: P38 serving capture reported internal errors: $n_p38_capture_error" >&2
+    exit 1
+  fi
+  if [ "${p38_persist_rc:-1}" -ne 0 ]; then
+    echo "[run] FATAL: P38 GCS evidence collection failed: rc=${p38_persist_rc:-unset}" >&2
     exit 1
   fi
   if [ "$n_p38_request_journal" -le 0 ] || \
@@ -421,6 +435,11 @@ PY
     echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc expected_rc=$p38_expected_rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset}" >&2
     exit 1
   fi
+  bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh" \
+    complete || {
+      echo "[run] FATAL: P38 GCS completion marker failed" >&2
+      exit 1
+    }
   echo "[run] P38 serving controlled precheck accepted exit=$p38_expected_rc; backward=0 optimizer_commits=0"
   rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then

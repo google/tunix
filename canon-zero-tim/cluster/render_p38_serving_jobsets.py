@@ -31,6 +31,7 @@ _COVERED_PROMPTS = _DIAGNOSTIC_PROMPTS * _DIAGNOSTIC_UNITS
 _CAPSULE_MAX_ROWS = 16
 _MIN_ACTION_KV = 1686
 _ADMITTED_MAX_CONCURRENCY = (32, 256)
+_ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 
 
 def _spec(*, unified: bool) -> Any:
@@ -63,6 +64,7 @@ def _main_container(document: Mapping[str, Any]) -> dict[str, Any]:
 def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, str]:
   env = p33._env_values(document)
   state = env["CANON_STATE"]
+  jobset = document["metadata"]["name"]
   return {
       "CANON_KV_UNIFIED": "1" if unified else "0",
       "CANON_P38_PRECHECK_ONLY": "1",
@@ -87,6 +89,7 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
           f"{state}/p38_serving_capture.classification.json"
       ),
       "CANON_P38_SERVING_CAPTURE_ARCHIVE": f"{state}/p38_serving_capture.tar",
+      "CANON_P38_GCS_PREFIX": f"{_ARTIFACT_BUCKET}/{jobset}/attempt-0",
   }
 
 
@@ -95,6 +98,11 @@ def validate_capture_jobset(
 ) -> None:
   env = p33._env_values(document)
   expected = _capture_values(document, unified=unified)
+  expected_gcs = (
+      f"{_ARTIFACT_BUCKET}/{document['metadata']['name']}/attempt-0"
+  )
+  if env.get("CANON_P38_GCS_PREFIX") != expected_gcs:
+    raise ValueError("P38 GCS evidence prefix drifted")
   wrong = {name: env.get(name) for name, value in expected.items() if env.get(name) != value}
   if wrong:
     raise ValueError(f"P38 serving-capture environment drifted: {wrong}")

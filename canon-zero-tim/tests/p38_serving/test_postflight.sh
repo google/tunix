@@ -9,6 +9,11 @@ run_case() (
   local mode="$1" state command rc
   state="$(mktemp -d)"
   trap 'rm -r "$state"' EXIT
+  mkdir -p "$state/bin" "$state/fake-gcs"
+  cp "$ROOT/tests/p38_serving/fake_gcloud.sh" "$state/bin/gcloud"
+  chmod +x "$state/bin/gcloud"
+  export PATH="$state/bin:$PATH"
+  export FAKE_GCS_ROOT="$state/fake-gcs"
   export CANON_PKG="$ROOT"
   export CANON_STATE="$state"
   export CANON_RUN_LOG="$state/run.log"
@@ -26,6 +31,7 @@ run_case() (
   export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$state/capture.json"
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$state/capture.tar"
+  export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/postflight-$mode/attempt-0"
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
   export CANON_KV_UNIFIED=0
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"

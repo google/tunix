@@ -6,12 +6,24 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2j, P38s12a accounting, row-231 E0-lite, and clean
-  concurrency-32 P38s12f after invalid P38s12d/e attempts.
+- Active phase: P38.2l incident-durable terminal capture. P38.2k final-artifact
+  GCS durability is locally complete, but current P38s13a is held until
+  mid-run snapshots and the frozen incident schema pass locally.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
+
+- P38s12f is a valid Attempt-0 concurrency-32 numerical diagnostic from
+  source `b4391703`. It reached logical KV 1972 and measured A-B red at 11 /
+  46,390 elements (`33` bytes, `max_abs=0.16271209716796875`) while B-C stayed
+  exact. This falsifies concurrency 32 as a repair. Different trajectories
+  prevent treating its lower mismatch density as a causal speed/accuracy
+  improvement.
+- P38s12f did not return the replay payload. Its committed `head.full.log`
+  ends before the pre-align timestamp, JobSet termination reports a worker
+  failure, and neither the mismatch capsule nor serving archive is present.
+  The run answers the concurrency question but cannot construct strict E0.
 
 - P38s12e is not a new run. Its SHA-verified directory contains only repeated
   P38s12d/source-`bdc96818` output: five copies of a 199-line geometry-failure
@@ -55,6 +67,18 @@
 
 ## Current local implementation
 
+- P38 renderings now pin a unique attempt-0 evidence prefix under
+  `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/`.
+- A write/read `PREFLIGHT.json` occurs before the workload. Core artifacts and
+  `SHA256SUMS` are uploaded before `COLLECTED.json`; `COMPLETE.json` is written
+  only after the existing P38 postflight is accepted. Upload failures are
+  fail-closed.
+- This change is GCS durability only. No P38 PVC is mounted because the actual
+  claim name has not been supplied.
+- The current uploader collects core artifacts only after `CANON_RUN_CMD`
+  returns. It does not yet preserve an in-progress journal/log if the pod dies
+  during rollout. P38.2l owns that remaining durability gap.
+
 - Row 231 E0-lite is complete. REF reproduced production B/T-old exactly, but
   mask-derived R0/R1 missed production A at 470 / 566 action values. Verdict:
   `E0_LITE_ENVELOPE_NOT_REPRODUCED`. Strict E0 and the first-divergence seam
@@ -94,14 +118,14 @@
   backward, and zero optimizer commits.
 - Actual same-source concurrency-256 versus concurrency-32 manifest intent
   diff: PASS; no change outside `--max_concurrency` and its label.
-- Complete pinned-image P33 CPU/adjacent gate: PASS (81 workload tests, 34
+- Complete pinned-image P33 CPU/adjacent gate: PASS (85 workload tests, 34
   alignment tests, 15 adjacent tests, all focused P38 tests, and terminal
   marker `[P33.WORKLOAD] CPU_GATE PASS`).
 - Exact-image Qwen3-1.7B and Qwen3-8B overlays: 23/23 each; all 29 manifest
   entries match; terminal marker `P33_EXACT_IMAGE_PASS`.
 
 - Classifier: 30 tests PASS.
-- Renderer: 8 tests PASS.
+- Renderer: 9 tests PASS.
 - Outer serving postflight: PASS, including red/U/error/coverage controls and
   a marker-present but journal-file-missing negative control.
 - Patch 13 applies to both pinned Qwen3-1.7B and Qwen3-8B overlays; each passes
@@ -115,24 +139,20 @@
   application: PASS. Patch 13 necessarily retains unified-diff blank-context
   prefix spaces and passes exact-image manifest identity.
 - Detailed local evidence is in `artifacts/p38_2i_local_gate_0813.md`.
-- No new target cluster run occurred. The true concurrency-32 P38s12b remains
-  NOT RUN.
+- Local fake-GCS persistence and P38 postflight suites pass. The complete
+  pinned-image CPU gate and exact-image Qwen3-1.7B/Qwen3-8B overlay gate also
+  pass. P38.2k is locally complete and awaits review/publication approval.
 
 ## Next action
 
-1. After user review, publication, and separate cluster approval, fetch the
-   repaired source and execute one Attempt-0 **stock-only** P38s12f at
-   concurrency 32 using the exact runbook. Render a same-source
-   concurrency-256 baseline for intent-diff only; never apply it. Do not reuse
-   P38s12d/e source SHAs, run ids, JobSets, pods, or rendered YAML.
-2. Require exact B-C, full 256-trajectory coverage, logical KV at least 1686,
-   controlled exit 42, journal joins, the complete infrastructure bundle, and
-   SHA seal PASS. Any missing item is inconclusive.
-3. If A-B is exact, repeat one depth-sufficient concurrency-32 arm. If A-B is
-   red, conclude only that concurrency 32 is insufficient; neither result
-   identifies an operator.
-4. Do not repeat E0-lite or start the seam walk from R0/R1. Construct strict E0
-   only after an exact live-serving reconstruction becomes available.
+1. Publish the locally green P38.2k final-artifact durability CL.
+2. Implement P38.2l immutable mid-run log/journal snapshots and the bounded
+   exact-call incident schema.
+3. Run the complete pinned Qwen3-8B one-host dress rehearsal and freeze the
+   instrumentation surface. Do not require the carrier to reproduce locally.
+4. Only then execute one Attempt-0 stock P38s13a at concurrency 256 and use
+   its real capsule/archive for strict E0. Do not repeat concurrency 32,
+   E0-lite, or the KV-unified arm.
 
 ## Claim ceiling and blockers
 
@@ -154,5 +174,5 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 default-off and does not change training, evaluation, prefix cache, precision,
 optimizer placement, or canonical kernels.
 
-- Updated: 2026-08-13 UTC; P38s12e rejected as duplicated old evidence;
-  clean P38s12f target NOT RUN.
+- Updated: 2026-08-14 UTC; P38.2k is locally complete and pending publication;
+  P38.2l is active and P38s13a remains NOT ADMITTED.

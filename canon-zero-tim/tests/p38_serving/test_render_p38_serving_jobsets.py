@@ -76,6 +76,12 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
             env["CANON_P38_SERVING_CAPTURE_DIR"]
             + "/p38_request_journal.jsonl",
         )
+        self.assertEqual(
+            env["CANON_P38_GCS_PREFIX"],
+            "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
+            + document["metadata"]["name"]
+            + "/attempt-0",
+        )
         self.assertTrue(env["CANON_P38_MISMATCH_CAPSULE"].endswith(".npz"))
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
         self.assertIn("--batch_size=32", env["CANON_RUN_CMD"])
@@ -157,6 +163,21 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
     )
     entry["value"] = ""
     with self.assertRaisesRegex(ValueError, "requires a mismatch capsule"):
+      renderer.validate_capture_jobset(document, unified=unified)
+
+  def test_rejects_gcs_prefix_drift(self):
+    base = renderer.p33.load_base(_BASE)
+    spec, unified = renderer._SPECS[0]
+    document = renderer.render_jobset(
+        base, spec, _SOURCE, _RUN_ID, unified=unified
+    )
+    main = renderer._main_container(document)
+    entry = next(
+        item for item in main["env"]
+        if item["name"] == "CANON_P38_GCS_PREFIX"
+    )
+    entry["value"] = "gs://wrong-bucket/p38"
+    with self.assertRaisesRegex(ValueError, "GCS evidence prefix drifted"):
       renderer.validate_capture_jobset(document, unified=unified)
 
   def test_rejects_non_divisible_diagnostic_batch(self):
