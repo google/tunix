@@ -57,7 +57,12 @@ def _configure_logprob_request(
   """
   if return_logprobs:
     sampling_params.logprobs = 1  # b/428730696
-    sampling_params.prompt_logprobs = 0  # b/428730696
+    # None, not 0: on the TPU/JAX backend prompt_logprobs=0 still allocates
+    # and computes full prompt-logprob structures (and feeds -1 placeholder
+    # ids to the tokenizer when detokenize=True).  The rollout path never
+    # consumes prompt logprobs; the B-arm rescore requests them explicitly
+    # on its own path (vllm_rollout.get_prefill_rescore_logps).
+    sampling_params.prompt_logprobs = None
   else:
     sampling_params.logprobs = None
     sampling_params.prompt_logprobs = None

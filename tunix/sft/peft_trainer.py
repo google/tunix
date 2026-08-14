@@ -872,10 +872,25 @@ class PeftTrainer:
           "P28 G6 gradient microbatch cadence mismatch: "
           f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
       )
+    accumulate_start = time.perf_counter()
     norm = self._jitted_precomputed_gradient_step_fn(
         gradients
     )
+    accumulate_call_done = time.perf_counter()
     norm.block_until_ready()
+    if os.environ.get("CANON_PERF_LOG", "1") != "0":
+      accumulate_done = time.perf_counter()
+      print(
+          "[PERF] stage=grad_accumulate seconds=%.3f microbatch=%d"
+          " variant=plain call=%.3f block=%.3f"
+          % (
+              accumulate_done - accumulate_start,
+              microbatch_index,
+              accumulate_call_done - accumulate_start,
+              accumulate_done - accumulate_call_done,
+          ),
+          flush=True,
+      )
     self._iter_steps += 1
     self._p28_precomputed_microstep += 1
     return norm
@@ -911,10 +926,25 @@ class PeftTrainer:
           "P30 pair gradient microbatch cadence mismatch: "
           f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
       )
+    accumulate_start = time.perf_counter()
     norm = self._jitted_precomputed_gradient_pair_step_fn(
         left, right, jnp.asarray(multiplier, jnp.float32)
     )
+    accumulate_call_done = time.perf_counter()
     norm.block_until_ready()
+    if os.environ.get("CANON_PERF_LOG", "1") != "0":
+      accumulate_done = time.perf_counter()
+      print(
+          "[PERF] stage=grad_accumulate seconds=%.3f microbatch=%d"
+          " variant=pair call=%.3f block=%.3f"
+          % (
+              accumulate_done - accumulate_start,
+              microbatch_index,
+              accumulate_call_done - accumulate_start,
+              accumulate_done - accumulate_call_done,
+          ),
+          flush=True,
+      )
     self._iter_steps += 1
     self._p28_precomputed_microstep += 1
     return norm
@@ -950,10 +980,25 @@ class PeftTrainer:
           "P33 scaled gradient microbatch cadence mismatch: "
           f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
       )
+    accumulate_start = time.perf_counter()
     norm = self._jitted_precomputed_gradient_scaled_step_fn(
         gradients, jnp.asarray(multiplier, jnp.float32)
     )
+    accumulate_call_done = time.perf_counter()
     norm.block_until_ready()
+    if os.environ.get("CANON_PERF_LOG", "1") != "0":
+      accumulate_done = time.perf_counter()
+      print(
+          "[PERF] stage=grad_accumulate seconds=%.3f microbatch=%d"
+          " variant=scaled call=%.3f block=%.3f"
+          % (
+              accumulate_done - accumulate_start,
+              microbatch_index,
+              accumulate_call_done - accumulate_start,
+              accumulate_done - accumulate_call_done,
+          ),
+          flush=True,
+      )
     self._iter_steps += 1
     self._p28_precomputed_microstep += 1
     return norm
@@ -1009,10 +1054,26 @@ class PeftTrainer:
               self.grad_accumulator,
           )
       )
+    adam_jit_setup_seconds = time.perf_counter() - adam_commit_start
     norm, raw_evidence = self._jitted_precomputed_gradient_commit_fn()
+    adam_call_done = time.perf_counter()
     norm.block_until_ready()
+    adam_block_done = time.perf_counter()
     host_evidence = jax.device_get(raw_evidence)
     adam_commit_seconds = time.perf_counter() - adam_commit_start
+    if os.environ.get("CANON_PERF_LOG", "1") != "0":
+      print(
+          "[PERF] stage=adam_commit_detail seconds=%.3f jit_setup=%.3f"
+          " call=%.3f block=%.3f evidence_get=%.3f"
+          % (
+              adam_commit_seconds,
+              adam_jit_setup_seconds,
+              adam_call_done - adam_commit_start - adam_jit_setup_seconds,
+              adam_block_done - adam_call_done,
+              adam_commit_start + adam_commit_seconds - adam_block_done,
+          ),
+          flush=True,
+      )
 
     def _sum_counts(name: str) -> int:
       return sum(int(np.asarray(value)) for value in host_evidence[name])

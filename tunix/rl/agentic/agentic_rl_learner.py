@@ -824,6 +824,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "pad_id": self.rl_cluster.rollout.pad_id(),
           "eos_id": self.rl_cluster.rollout.eos_id(),
       }
+      value_and_grad_start = time.perf_counter()
       if canonical_workload:
         result = adapter.segmented_dp_grpo_value_and_grad(
             **common,
@@ -840,7 +841,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 consume_pair if fused_pair_accumulation else None
             ),
         )
+      value_and_grad_call_done = time.perf_counter()
     result["loss"].block_until_ready()
+    if perf_log.enabled():
+      value_and_grad_done = time.perf_counter()
+      print(
+          "[PERF] stage=segmented_value_and_grad seconds=%.3f call=%.3f"
+          " block=%.3f microbatches=%d"
+          % (
+              value_and_grad_done - value_and_grad_start,
+              value_and_grad_call_done - value_and_grad_start,
+              value_and_grad_done - value_and_grad_call_done,
+              int(result["gradient_microbatches"]),
+          ),
+          flush=True,
+      )
     if (
         result["gradient_microbatches"] != expected_microbatches
         or len(micro_norms) != expected_microbatches

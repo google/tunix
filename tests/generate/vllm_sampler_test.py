@@ -605,7 +605,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
         params, return_logprobs=True
     )
     self.assertEqual(params.logprobs, 1)
-    self.assertEqual(params.prompt_logprobs, 0)
+    self.assertIsNone(params.prompt_logprobs)
 
   def test_detokenize_skips_logprob_extraction_when_disabled(self):
     sampler = object.__new__(vllm_sampler.VllmSampler)

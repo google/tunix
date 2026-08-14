@@ -3934,6 +3934,7 @@ class Qwen3EngineForwardAdapter:
         )
         for index in range(expected_trajectories)
     )
+    vag_forward_start = time.perf_counter()
     forwards = tuple(
         self._p28_forward_sequence(
             segmented, engine_leaves, spec, keep_cache_inputs=False
@@ -3946,6 +3947,12 @@ class Qwen3EngineForwardAdapter:
     token_entropy = jnp.stack(
         tuple(result["entropy"] for result in forwards), axis=0
     ).astype(jnp.float32)
+    if os.environ.get("CANON_PERF_LOG", "1") != "0":
+      print(
+          "[PERF] stage=vag_forward seconds=%.3f trajectories=%d"
+          % (time.perf_counter() - vag_forward_start, expected_trajectories),
+          flush=True,
+      )
 
     from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
 
@@ -3968,16 +3975,49 @@ class Qwen3EngineForwardAdapter:
     pair_gradient = None
     emitted_microbatches = 0
     reports = []
+    vag_reverse_start = time.perf_counter()
+    vag_reverse_durations = []
+    vag_pre_sum = 0.0
+    vag_issue_sum = 0.0
+    vag_drain_sum = 0.0
+    # CANON_BATCHED_EVIDENCE=1 keeps every evidence VALUE identical (same
+    # per-leaf predicates, same python-side reductions) but collects them
+    # through one device_get per trajectory instead of two per leaf.  The
+    # per-leaf vectors are fetched raw and reduced on host with int64, so
+    # counts match the original python-int sums exactly.
+    batched_evidence = (
+        os.environ.get("CANON_BATCHED_EVIDENCE", "") == "1"
+    )
+
+    def _stacked_finite(leaves):
+      if not leaves:
+        return jnp.ones((0,), jnp.bool_)
+      return jnp.stack([jnp.all(jnp.isfinite(value)) for value in leaves])
+
+    def _stacked_nonzero(leaves):
+      if not leaves:
+        return jnp.zeros((0,), jnp.int32)
+      return jnp.stack([jnp.count_nonzero(value) for value in leaves])
     for index, spec in enumerate(specs):
+      vag_iter_start = time.perf_counter()
       loss_cotangent_leaves = (dlogps[index], dentropy[index])
-      loss_cotangent_finite = all(
-          bool(np.asarray(jnp.all(jnp.isfinite(value))))
-          for value in loss_cotangent_leaves
-      )
-      loss_cotangent_nonzero = sum(
-          int(np.asarray(jnp.count_nonzero(value)))
-          for value in loss_cotangent_leaves
-      )
+      if batched_evidence:
+        loss_cotangent_pending = (
+            _stacked_finite(loss_cotangent_leaves),
+            _stacked_nonzero(loss_cotangent_leaves),
+        )
+        loss_cotangent_finite = None
+        loss_cotangent_nonzero = None
+      else:
+        loss_cotangent_finite = all(
+            bool(np.asarray(jnp.all(jnp.isfinite(value))))
+            for value in loss_cotangent_leaves
+        )
+        loss_cotangent_nonzero = sum(
+            int(np.asarray(jnp.count_nonzero(value)))
+            for value in loss_cotangent_leaves
+        )
+      vag_pre_done = time.perf_counter()
       reverse = self._p28_reverse_sequence(
           segmented,
           engine_leaves,
@@ -3985,12 +4025,20 @@ class Qwen3EngineForwardAdapter:
           dlogps[index],
           dentropy[index],
       )
+      vag_call_done = time.perf_counter()
       if not bool(np.asarray(jnp.array_equal(
           reverse["replay_logps"], per_token_logps[index]
       ))):
         raise FunctionalMappingError(
             f"P28 G5c sequence {index} replay logprobs changed"
         )
+      # The replay-identity np.asarray above is the first existing barrier
+      # after the reverse dispatch chain: call-return minus it separates
+      # host issue time from device drain without adding any new sync.
+      vag_drain_done = time.perf_counter()
+      vag_pre_sum += vag_pre_done - vag_iter_start
+      vag_issue_sum += vag_call_done - vag_pre_done
+      vag_drain_sum += vag_drain_done - vag_call_done
       one_trainer_gradient = self.map_engine_cotangents_to_trainer_state(
           trainer_state, reverse["engine_gradients"]
       )
@@ -3998,14 +4046,22 @@ class Qwen3EngineForwardAdapter:
           lambda value: value.astype(jnp.float32), one_trainer_gradient
       )
       trainer_leaves = jax.tree.leaves(one_trainer_gradient)
-      trainer_finite = all(
-          bool(np.asarray(jnp.all(jnp.isfinite(value))))
-          for value in trainer_leaves
-      )
-      trainer_nonzero = sum(
-          int(np.asarray(jnp.count_nonzero(value)))
-          for value in trainer_leaves
-      )
+      if batched_evidence:
+        trainer_pending = (
+            _stacked_finite(trainer_leaves),
+            _stacked_nonzero(trainer_leaves),
+        )
+        trainer_finite = None
+        trainer_nonzero = None
+      else:
+        trainer_finite = all(
+            bool(np.asarray(jnp.all(jnp.isfinite(value))))
+            for value in trainer_leaves
+        )
+        trainer_nonzero = sum(
+            int(np.asarray(jnp.count_nonzero(value)))
+            for value in trainer_leaves
+        )
       engine_groups = {
           "embed": segmented._embed_full_indices,  # pylint: disable=protected-access
           "norm": segmented._norm_full_indices,  # pylint: disable=protected-access
@@ -4018,21 +4074,61 @@ class Qwen3EngineForwardAdapter:
           )
       })
       group_health = {}
+      group_pending = {}
       for label, indices in engine_groups.items():
         leaves = tuple(reverse["engine_gradients"][i] for i in indices)
-        group_health[label] = {
-            "finite": all(
-                bool(np.asarray(jnp.all(jnp.isfinite(value))))
-                for value in leaves
-            ),
-            "nonzero": sum(
-                int(np.asarray(jnp.count_nonzero(value)))
-                for value in leaves
-            ),
-        }
+        if batched_evidence:
+          group_pending[label] = (
+              _stacked_finite(leaves), _stacked_nonzero(leaves)
+          )
+        else:
+          group_health[label] = {
+              "finite": all(
+                  bool(np.asarray(jnp.all(jnp.isfinite(value))))
+                  for value in leaves
+              ),
+              "nonzero": sum(
+                  int(np.asarray(jnp.count_nonzero(value)))
+                  for value in leaves
+              ),
+          }
       cache_leaves = jax.tree.leaves(
           reverse["initial_cache_cotangents"]
       )
+      if batched_evidence:
+        fetched = jax.device_get({
+            "loss": loss_cotangent_pending,
+            "trainer": trainer_pending,
+            "groups": group_pending,
+            "cache": (
+                _stacked_finite(cache_leaves),
+                _stacked_nonzero(cache_leaves),
+            ),
+        })
+        loss_cotangent_finite = bool(np.all(fetched["loss"][0]))
+        loss_cotangent_nonzero = int(
+            np.sum(fetched["loss"][1], dtype=np.int64)
+        )
+        trainer_finite = bool(np.all(fetched["trainer"][0]))
+        trainer_nonzero = int(np.sum(fetched["trainer"][1], dtype=np.int64))
+        group_health = {
+            label: {
+                "finite": bool(np.all(pair[0])),
+                "nonzero": int(np.sum(pair[1], dtype=np.int64)),
+            }
+            for label, pair in fetched["groups"].items()
+        }
+        cache_finite = bool(np.all(fetched["cache"][0]))
+        cache_nonzero = int(np.sum(fetched["cache"][1], dtype=np.int64))
+      else:
+        cache_finite = all(
+            bool(np.asarray(jnp.all(jnp.isfinite(value))))
+            for value in cache_leaves
+        )
+        cache_nonzero = sum(
+            int(np.asarray(jnp.count_nonzero(value)))
+            for value in cache_leaves
+        )
       if gradient_microbatch_sink is None and gradient_pair_sink is None:
         trainer_gradients = (
             one_trainer_gradient
@@ -4089,16 +4185,31 @@ class Qwen3EngineForwardAdapter:
           },
           "engine_groups": group_health,
           "initial_cache_cotangent": {
-              "finite": all(
-                  bool(np.asarray(jnp.all(jnp.isfinite(value))))
-                  for value in cache_leaves
-              ),
-              "nonzero": sum(
-                  int(np.asarray(jnp.count_nonzero(value)))
-                  for value in cache_leaves
-              ),
+              "finite": cache_finite,
+              "nonzero": cache_nonzero,
           },
       })
+      vag_reverse_durations.append(time.perf_counter() - vag_iter_start)
+    if (
+        os.environ.get("CANON_PERF_LOG", "1") != "0"
+        and vag_reverse_durations
+    ):
+      vag_total = time.perf_counter() - vag_reverse_start
+      print(
+          "[PERF] stage=vag_reverse seconds=%.3f trajectories=%d"
+          " mean=%.3f max=%.3f pre=%.3f issue=%.3f drain=%.3f report=%.3f"
+          % (
+              vag_total,
+              len(vag_reverse_durations),
+              sum(vag_reverse_durations) / len(vag_reverse_durations),
+              max(vag_reverse_durations),
+              vag_pre_sum,
+              vag_issue_sum,
+              vag_drain_sum,
+              vag_total - vag_pre_sum - vag_issue_sum - vag_drain_sum,
+          ),
+          flush=True,
+      )
     if gradient_microbatch_sink is None:
       trainer_gradients = jax.tree.map(
           lambda value: value * scale, trainer_gradients

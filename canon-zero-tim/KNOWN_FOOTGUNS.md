@@ -186,3 +186,13 @@ Every production recipe now needs both layers: run the renderer output through
 the real environment preflight, and test the exact workload-specific policy
 with a neighboring negative control. A green manifest or overlay import alone
 is only `STATIC PASS`; it is not launch readiness.
+
+### 19. `envelope_probe` identifies A-records by a side effect the sampler no longer produces
+
+Since the rollout sampler requests `prompt_logprobs=None` (P47a, the c4ec573d semantics),
+A requests no longer allocate prompt-logprob structures. `tunix/rl/envelope_probe.py:362-366`
+still enumerates A request ids from the `num_prompt_logprobs` capture metadata — a byproduct
+of the old `=0` quirk — so its `native_A_observed` attestation goes **false-red** on any
+post-P47a capture. The B rescore path still requests `=0` and is untouched. Adapt the probe's
+A-identification (see `tasks/p35-envelope-discriminator/PRECONDITIONS.md`) before the next
+P35 envelope run; a red from this cause is a stale heuristic, not a boundary finding.

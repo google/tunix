@@ -1,5 +1,8 @@
 # P35 envelope discriminator state
 
+- **PRECONDITION(先读 `PRECONDITIONS.md` 再跑任何新 run,2026-08-13)**:
+  P47a 后 `envelope_probe.py` 的 A 识别启发式过时,`native_A_observed` 会假红;
+  未适配前的新 run 不可入证据链。
 - Status: active; P35.2 target complete, P35.3 target r29/r30 infrastructure-inconclusive
 - Active phase: P35.3c first-record stage localization; local gates complete, target not run
 - Task directory: `canon-zero-tim/tasks/p35-envelope-discriminator/`
