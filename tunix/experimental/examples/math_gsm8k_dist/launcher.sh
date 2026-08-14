@@ -18,7 +18,10 @@ set -Ee
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
+LOG_ROOT=${LOG_ROOT:-"${DIR}"}
 
+ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
+ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 INFERENCE_PORT=${INFERENCE_PORT:-20002}
@@ -45,15 +48,18 @@ WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
 WAIT_LOG_TAIL_LINES=${WAIT_LOG_TAIL_LINES:-40}
-TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
-ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
+
+TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1,2,3}
+TRAINER_FSDP=${TRAINER_FSDP:-4}
+ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-4,5,6,7}
 INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
-TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
+TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
-TRAINER_LOG="${DIR}/trainer.log"
-ROLLOUT_LOG="${DIR}/rollout.log"
-INFERENCE_LOG="${DIR}/inference.log"
-ORCHESTRATOR_LOG="${DIR}/orchestrator.log"
+
+TRAINER_LOG="${LOG_ROOT}/trainer.log"
+ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
+INFERENCE_LOG="${LOG_ROOT}/inference.log"
+ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
 
 print_section() {
   echo
@@ -300,6 +306,7 @@ echo "  orch log:       $ORCHESTRATOR_LOG"
 echo "=================================================="
 
 ensure_model_dir
+mkdir -p "${LOG_ROOT}"
 
 : > "$TRAINER_LOG"
 : > "$ROLLOUT_LOG"
@@ -321,53 +328,77 @@ print_port_debug "$ROLLOUT_PORT"
 print_port_debug "$INFERENCE_PORT"
 
 echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
-TRAINER_CMD=(
-  "$PYTHON_BIN" "${DIR}/run_trainer_node.py"
-  --port="$TRAINER_PORT"
-  --tpu_chips="$TRAINER_TPU_CHIPS"
-  --tpu_chips_per_host_bounds="$TPU_CHIPS_PER_HOST_BOUNDS"
-  --tpu_host_bounds="$TPU_HOST_BOUNDS"
-  --model_name="$MODEL_NAME"
-  --model_id="$MODEL_ID"
-  --model_dir="$MODEL_DIR"
-  --tokenizer_path="$TOKENIZER_PATH"
-  --max_prompt_length="$MAX_PROMPT_LENGTH"
-  --max_response_length="$MAX_RESPONSE_LENGTH"
-  --mini_batch_size="$MINI_BATCH_SIZE"
-  --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
-  --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
-  --lora_rank="$LORA_RANK"
-  --lora_alpha="$LORA_ALPHA"
-)
-if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
-  TRAINER_CMD+=(--use_lora)
-fi
-print_command "Trainer command" PYTHONUNBUFFERED=1 "${TRAINER_CMD[@]}"
-PYTHONUNBUFFERED=1 "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1 &
+(
+  TRAINER_CMD=(
+    "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+    --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main
+
+    --port="$TRAINER_PORT"
+    --mesh_fsdp="$TRAINER_FSDP"
+    --model_name="$MODEL_NAME"
+    --model_id="$MODEL_ID"
+    --model_dir="$MODEL_DIR"
+    --tokenizer_path="$TOKENIZER_PATH"
+    --max_prompt_length="$MAX_PROMPT_LENGTH"
+    --max_response_length="$MAX_RESPONSE_LENGTH"
+    --mini_batch_size="$MINI_BATCH_SIZE"
+    --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
+    --lora_rank="$LORA_RANK"
+    --lora_alpha="$LORA_ALPHA"
+  )
+  if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+    TRAINER_CMD+=(--use_lora)
+  fi
+
+  export JAX_PLATFORMS=tpu,cpu
+  export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
+  export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+  export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+  export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  export PYTHONUNBUFFERED=1
+  env | egrep 'JAX|TPU'
+  print_command "Trainer command" "${TRAINER_CMD[@]}"
+  exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
+) &
 TRAINER_PID=$!
 echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 print_process_debug "trainer" "$TRAINER_PID"
 
 echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
-ROLLOUT_CMD=(
-  "$PYTHON_BIN" "${DIR}/run_rollout_node.py"
-  --port="$ROLLOUT_PORT"
-  --tpu_chips="$ROLLOUT_TPU_CHIPS"
-  --tpu_chips_per_host_bounds="$TPU_CHIPS_PER_HOST_BOUNDS"
-  --tpu_host_bounds="$TPU_HOST_BOUNDS"
-  --model_id="$MODEL_ID"
-  --model_dir="$MODEL_DIR"
-  --tokenizer_path="$TOKENIZER_PATH"
-  --max_prompt_length="$MAX_PROMPT_LENGTH"
-  --max_response_length="$MAX_RESPONSE_LENGTH"
-  --lora_rank="$LORA_RANK"
-  --lora_alpha="$LORA_ALPHA"
-)
-if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
-  ROLLOUT_CMD+=(--use_lora)
-fi
-print_command "Rollout command" PYTHONUNBUFFERED=1 "${ROLLOUT_CMD[@]}"
-PYTHONUNBUFFERED=1 "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1 &
+(
+  ROLLOUT_CMD=(
+    "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+    --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main
+
+    --port="$ROLLOUT_PORT"
+    --model_id="$MODEL_ID"
+    --model_dir="$MODEL_DIR"
+    --tokenizer_path="$TOKENIZER_PATH"
+    --max_prompt_length="$MAX_PROMPT_LENGTH"
+    --max_response_length="$MAX_RESPONSE_LENGTH"
+    --lora_rank="$LORA_RANK"
+    --lora_alpha="$LORA_ALPHA"
+  )
+  if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+    ROLLOUT_CMD+=(--use_lora)
+  fi
+
+  export JAX_PLATFORMS=tpu,cpu
+  export SKIP_JAX_PRECOMPILE=1
+  export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
+  export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+  export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+  export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  export PYTHONUNBUFFERED=1
+  env | egrep 'JAX|TPU'
+  print_command "Rollout command" "${ROLLOUT_CMD[@]}"
+  exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
+) &
 ROLLOUT_PID=$!
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
@@ -387,22 +418,33 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     exit 1
   fi
   echo "Launching reference inference node on TPU chips $INFERENCE_TPU_CHIPS..."
-  INFERENCE_CMD=(
-    "$PYTHON_BIN" "${DIR}/run_inference_node.py"
-    --port="$INFERENCE_PORT"
-    --tpu_chips="$INFERENCE_TPU_CHIPS"
-    --tpu_chips_per_host_bounds="$TPU_CHIPS_PER_HOST_BOUNDS"
-    --tpu_host_bounds="$TPU_HOST_BOUNDS"
-    --model_name="$MODEL_NAME"
-    --model_id="$MODEL_ID"
-    --model_dir="$MODEL_DIR"
-    --tokenizer_path="$TOKENIZER_PATH"
-    --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
-    --max_prompt_length="$MAX_PROMPT_LENGTH"
-    --max_response_length="$MAX_RESPONSE_LENGTH"
-  )
-  print_command "Inference command" PYTHONUNBUFFERED=1 "${INFERENCE_CMD[@]}"
-  PYTHONUNBUFFERED=1 "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1 &
+  (
+    INFERENCE_CMD=(
+      "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+      --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+      --process_main=tunix.experimental.examples.math_gsm8k_dist.run_inference_node.main
+
+      --port="$INFERENCE_PORT"
+      --model_name="$MODEL_NAME"
+      --model_id="$MODEL_ID"
+      --model_dir="$MODEL_DIR"
+      --tokenizer_path="$TOKENIZER_PATH"
+      --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+      --max_prompt_length="$MAX_PROMPT_LENGTH"
+      --max_response_length="$MAX_RESPONSE_LENGTH"
+    )
+
+    export JAX_PLATFORMS=tpu,cpu
+    export TPU_VISIBLE_DEVICES=${INFERENCE_TPU_CHIPS}
+    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export PYTHONUNBUFFERED=1
+    env | egrep 'JAX|TPU'
+    print_command "Inference command" "${INFERENCE_CMD[@]}"
+    exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
+  ) &
   INFERENCE_PID=$!
   INFERENCE_ADDR="localhost:$INFERENCE_PORT"
   echo "Inference pid=$INFERENCE_PID log=$INFERENCE_LOG"
@@ -419,9 +461,11 @@ dump_debug_snapshot
 
 echo "Launching CPU orchestrator..."
 ORCHESTRATOR_CMD=(
-  "$PYTHON_BIN" "${DIR}/run_gsm8k_dist_grpo.py"
-  --trainer_addr="localhost:$TRAINER_PORT"
-  --rollout_addr="localhost:$ROLLOUT_PORT"
+  "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+  --discovery_id="${ORCHESTRATOR_ID}"
+  --discovery_port="${ORCHESTRATOR_PORT}"
+  --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main
+
   --model_id="$MODEL_ID"
   --tokenizer_path="$TOKENIZER_PATH"
   --batch_size="$BATCH_SIZE"
@@ -434,6 +478,8 @@ ORCHESTRATOR_CMD=(
 if [[ -n "$INFERENCE_ADDR" ]]; then
   ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
 fi
+export JAX_PLATFORMS=cpu
+env | egrep 'JAX|TPU'
 print_command "Orchestrator command" PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}"
 PYTHONUNBUFFERED=1 "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1 || {
   exit_code="$?"
