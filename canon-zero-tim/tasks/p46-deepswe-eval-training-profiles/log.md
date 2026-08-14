@@ -453,3 +453,17 @@
   launched or mutated.
 - Claim ceiling: commit and CPU/replay evidence do not prove target TPU,
   Kubernetes cleanup, throughput, or completed data washing.
+
+## 2026-08-14T00:00:02Z — P46.6 operator-branch read-back
+
+- Type: publication read-back.
+- Push result: `yuxzhang/canon-zero-tim` advanced from
+  `c33ba5f50d606210ca9f2c94fca003b63ea6e326` to
+  `9ec08b47b10f2663cc7649f6918627ff5d78a923` without force.
+- Read-back: a fresh fetch returned the same exact
+  `9ec08b47b10f2663cc7649f6918627ff5d78a923`; implementation
+  `a989af34054434e6567f88e99b45ed67faf15a44` and its handoff commit are both
+  ancestors. Local worktree was clean and had zero divergence afterward.
+- Target discipline: `main` was never a refspec or checkout target. No cluster
+  launch occurred. The next authorized action is to render the new-run-id
+  `--full-campaign` manifest and obtain separate launch approval.
