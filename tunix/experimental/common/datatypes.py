@@ -25,15 +25,16 @@ import time
 from typing import Any, Dict
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
 ##### Worker-internal datatypes #####
-
 
 # Worker-internal episode representation produced during rollout.
 Trajectory = agent_types.Trajectory
 Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
+Role = common_datatypes.Role
 
 
 # TODO: Unify this extended TrajectoryItem back into agent_types.TrajectoryItem
@@ -46,13 +47,6 @@ class TrajectoryItem(agent_types.TrajectoryItem):
   action_mask: np.ndarray | None = None
   policy_version: int = 0
 
-class Role(str, enum.Enum):
-  """Orchestrator worker roles."""
-  ACTOR = "actor"
-  CRITIC = "critic"
-  ROLLOUT = "rollout"
-  REFERENCE = "reference"
-  REWARD = "reward"
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -346,6 +340,7 @@ class RolloutResponse(Response):
     Returns:
       A wire-safe RolloutResponse.
     """
+
     def _get_step_attr(step, attr):
       val = getattr(step, attr, None)
       if val is not None:

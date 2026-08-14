@@ -605,7 +605,8 @@ class PPOLearnerTest(parameterized.TestCase):
             critic_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=12,
             max_steps=10,
-            gradient_accumulation_steps=gradient_accumulation_steps,
+            mini_batch_size=gradient_accumulation_steps,
+            train_micro_batch_size=1 if gradient_accumulation_steps else None,
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_tokens_to_generate=10,
