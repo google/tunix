@@ -141,16 +141,15 @@
 - Detailed local evidence is in `artifacts/p38_2i_local_gate_0813.md`.
 - Local fake-GCS persistence and P38 postflight suites pass. The complete
   pinned-image CPU gate and exact-image Qwen3-1.7B/Qwen3-8B overlay gate also
-  pass. P38.2k is locally complete and awaits review/publication approval.
+  pass. P38.2k is published at `246eeb87`.
 
 ## Next action
 
-1. Publish the locally green P38.2k final-artifact durability CL.
-2. Implement P38.2l immutable mid-run log/journal snapshots and the bounded
+1. Implement P38.2l immutable mid-run log/journal snapshots and the bounded
    exact-call incident schema.
-3. Run the complete pinned Qwen3-8B one-host dress rehearsal and freeze the
+2. Run the complete pinned Qwen3-8B one-host dress rehearsal and freeze the
    instrumentation surface. Do not require the carrier to reproduce locally.
-4. Only then execute one Attempt-0 stock P38s13a at concurrency 256 and use
+3. Only then execute one Attempt-0 stock P38s13a at concurrency 256 and use
    its real capsule/archive for strict E0. Do not repeat concurrency 32,
    E0-lite, or the KV-unified arm.
 
@@ -174,5 +173,5 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 default-off and does not change training, evaluation, prefix cache, precision,
 optimizer placement, or canonical kernels.
 
-- Updated: 2026-08-14 UTC; P38.2k is locally complete and pending publication;
-  P38.2l is active and P38s13a remains NOT ADMITTED.
+- Updated: 2026-08-14 UTC; P38.2k is published at `246eeb87`; P38.2l is active
+  and P38s13a remains NOT ADMITTED.

@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: publish P38.2k, then finish P38.2l before any target run
+## CURRENT: P38.2k published; finish P38.2l before any target run
 
 P38s12f is complete. It was a real concurrency-32 run, reached logical KV
 1972, kept B-C exact, and reproduced A-B red at 11 / 46,390 elements with
@@ -24,6 +24,8 @@ It uploads/readbacks `PREFLIGHT.json` before workload execution, uploads the
 core files plus SHA manifest before `COLLECTED.json`, and writes
 `COMPLETE.json` only after full local postflight acceptance. Never interpret
 `PREFLIGHT` as a numerical run or `COLLECTED` as a completed run.
+
+P38.2k is published at `246eeb87`.
 
 Do not launch P38s13a from the current source. P38.2k uploads the final bundle
 after the workload returns, so a mid-rollout pod death can still leave only

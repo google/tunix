@@ -1135,3 +1135,13 @@
 - P38.2k remains a locally green final-artifact transport CL. No new runtime
   instrumentation, real bucket write, cluster action, commit, or push occurred
   in this checkpoint.
+
+## 2026-08-14 UTC — P38.2k published; P38.2l remains active
+
+- Committed P38.2k final-artifact GCS durability plus the P38.2l frozen
+  incident-capture plan as `246eeb870ee73f5557534351168d09c57f8c0480`.
+- Fast-forward pushed `2c160bf9..246eeb87` to
+  `yuxzhang/canon-zero-tim` using the repository `.env` GitHub credential
+  without printing or persisting the token.
+- P38s13a remains NOT ADMITTED. The next executable work is P38.2l mid-run
+  snapshots and the pinned Qwen3-8B dress rehearsal; no target run occurred.
