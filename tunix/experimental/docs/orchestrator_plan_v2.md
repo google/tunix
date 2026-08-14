@@ -448,10 +448,14 @@ class PaddedBatchAssembler:
 | `prompt_ids` / `prompt_mask` | `[B, P]` | |
 | `completion_ids` / `completion_mask` | `[B, C]` | `completion_mask` excludes tool-observation tokens |
 | `advantages` | `[B, C]` | scalar advantages are broadcast over the completion |
-| `ref_/old_per_token_logps`, `returns`, `old_values`, `sampler_is_weights` | `[B, C]` | emitted for the whole batch as soon as **any** row carries them; rows that do not are zero-filled so row `b` always describes item `b` |
+| `ref_/old_per_token_logps`, `returns`, `old_values`, `sampler_is_weights` | `[B, C]` or `None` | **all-or-nothing per microbatch** — see below |
 | `metadata["num_real_rows"]` | `int` | rows before trailing zero padding |
 
 `segment_ids` / `segment_positions` stay `None`: they describe 1D packing segments and carry no meaning for rectangular batches.
+
+**Optional per-token fields are all-or-nothing.** A field no item carries stays `None`, so a GRPO batch never allocates — or ships to the accelerator — the PPO-only `returns` / `old_values` / `old_per_token_logps` buffers. A field only *some* items carry raises `ValueError` instead of being zero-filled: zero is not a neutral value for these quantities (a zero log-prob means `exp(0) == 1`), so a fabricated row would distort the KL and importance-ratio terms rather than drop out of them. These fields come from batched scoring passes, so partial presence indicates a caller bug.
+
+**Buffer aliasing.** A packed row is backed by three `[B, P + C]` buffers (`token_ids`, `token_mask`, `loss_mask`); `prompt_*` and `completion_*` are returned as views into them. This is one allocation per token-space tensor rather than one per segment plus a stack and a concat, and it makes trailing-row padding free — the buffers already hold `pad_id` / `0`. Treat packed payloads as read-only: mutating a view mutates the buffer it aliases.
 
 #### Reusing `BatchAssembler` Across Different Paradigms:
 ```python

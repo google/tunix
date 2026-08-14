@@ -33,6 +33,17 @@ T = TypeVar("T")
 
 _logger = logging.getLogger(__name__)
 
+# Per-token payload fields that are only meaningful for some algorithms. They
+# are emitted all-or-nothing per microbatch and left as None when unused, so a
+# GRPO batch never allocates PPO-only buffers.
+_OPTIONAL_PER_TOKEN_FIELDS = (
+    "ref_per_token_logps",
+    "old_per_token_logps",
+    "returns",
+    "old_values",
+    "sampler_is_weights",
+)
+
 
 class BatchAssembler(Generic[T], Protocol):
   """Universal batch assembly protocol for microbatch packing."""
@@ -73,6 +84,48 @@ def _right_pad(
   return out, mask
 
 
+def _completion_values(
+    values: Any | None,
+    completion_len: int,
+    *,
+    fill_value: float = 0.0,
+    prompt_len: int | None = None,
+    full_completion_len: int | None = None,
+) -> np.ndarray:
+  """Resolves a source array onto exactly `completion_len` completion columns.
+
+  Accepts sources laid out over the completion (`[C]`), over the whole
+  prompt+completion sequence (`[P + C]`), or as a single per-sequence scalar.
+
+  Args:
+    values: Source array, scalar, or None.
+    completion_len: Number of valid (post-truncation) completion tokens.
+    fill_value: Value used when `values` is None.
+    prompt_len: Length of the unpadded prompt, used to detect and strip a
+      sequence-aligned source.
+    full_completion_len: Length of the completion before truncation, used to
+      detect a sequence-aligned source.
+
+  Returns:
+    A `[completion_len]` float32 array.
+  """
+  if values is None:
+    return np.full(completion_len, fill_value, dtype=np.float32)
+  arr = np.asarray(values, dtype=np.float32).reshape(-1)
+  if arr.size == 1:
+    # Per-sequence scalar (e.g. a GRPO advantage): broadcast over completion.
+    return np.full(completion_len, float(arr[0]), dtype=np.float32)
+  if prompt_len is not None and arr.size in (
+      prompt_len + (full_completion_len or 0),
+      prompt_len + completion_len,
+  ):
+    # Sequence-aligned `[P + C]` source: slice out the completion span.
+    arr = arr[prompt_len:]
+  if arr.size >= completion_len:
+    return arr[:completion_len]
+  return np.pad(arr, (0, completion_len - arr.size), constant_values=0.0)
+
+
 def _completion_aligned(
     values: Any | None,
     completion_len: int,
@@ -82,45 +135,14 @@ def _completion_aligned(
     prompt_len: int | None = None,
     full_completion_len: int | None = None,
 ) -> np.ndarray:
-  """Projects a value array onto right-padded completion columns.
-
-  Accepts sources laid out over the completion (`[C]`), over the whole
-  prompt+completion sequence (`[P + C]`), or as a single per-sequence scalar,
-  and always returns a `[max_response_length]` float32 row whose first
-  `completion_len` entries hold the (possibly truncated) completion values.
-
-  Args:
-    values: Source array, scalar, or None.
-    completion_len: Number of valid (post-truncation) completion tokens.
-    max_response_length: Width of the returned row.
-    fill_value: Value used when `values` is None.
-    prompt_len: Length of the unpadded prompt, used to detect and strip a
-      sequence-aligned source.
-    full_completion_len: Length of the completion before truncation, used to
-      detect a sequence-aligned source.
-
-  Returns:
-    A `[max_response_length]` float32 array.
-  """
-  if values is None:
-    arr = np.full(completion_len, fill_value, dtype=np.float32)
-  else:
-    arr = np.asarray(values, dtype=np.float32).reshape(-1)
-    if arr.size == 1:
-      # Per-sequence scalar (e.g. a GRPO advantage): broadcast over completion.
-      arr = np.full(completion_len, float(arr[0]), dtype=np.float32)
-    elif prompt_len is not None and arr.size in (
-        prompt_len + (full_completion_len or 0),
-        prompt_len + completion_len,
-    ):
-      # Sequence-aligned `[P + C]` source: slice out the completion span.
-      arr = arr[prompt_len:]
-    if arr.size >= completion_len:
-      arr = arr[:completion_len]
-    else:
-      arr = np.pad(
-          arr, (0, completion_len - arr.size), constant_values=0.0
-      )
+  """Right-pads `_completion_values` out to a full `[max_response_length]` row."""
+  arr = _completion_values(
+      values,
+      completion_len,
+      fill_value=fill_value,
+      prompt_len=prompt_len,
+      full_completion_len=full_completion_len,
+  )
   out, _ = _right_pad(
       arr,
       max_response_length,
@@ -469,6 +491,16 @@ class PaddedBatchAssembler:
 
   Trailing rows of the final chunk are zero-filled with `token_mask = 0` and
   `loss_mask = 0`; `metadata["num_real_rows"]` records how many rows are real.
+
+  Optional per-token fields (`ref_per_token_logps`, `old_per_token_logps`,
+  `returns`, `old_values`, `sampler_is_weights`) are all-or-nothing per
+  microbatch: left as `None` when no item carries them, and rejected when only
+  some items do. Nothing is materialised for an algorithm that does not use it.
+
+  Memory note: `prompt_ids` / `completion_ids` are views into `token_ids`, and
+  `prompt_mask` / `completion_mask` are views into `token_mask` / `loss_mask`.
+  Reading them is free; mutating one in place also mutates the other, so treat
+  a packed payload as read-only.
   """
 
   def __init__(
@@ -512,63 +544,105 @@ class PaddedBatchAssembler:
       payloads.append(self._pack_chunk(item_list[i : i + self.batch_size]))
     return payloads
 
+  def _carried_optional_fields(
+      self, chunk: Sequence[datatypes.RLTrainerPayload]
+  ) -> tuple[str, ...]:
+    """Returns the optional per-token fields carried by every row of a chunk.
+
+    Optional fields are all-or-nothing within a microbatch. A field absent from
+    every row stays `None` on the output payload rather than being materialised
+    as a dense zero tensor, so a GRPO batch never allocates (or ships to the
+    accelerator) `returns` / `old_values` / `old_per_token_logps` buffers it has
+    no use for.
+
+    A field present on only *some* rows is rejected instead of zero-filled.
+    Zero is not a neutral value for the quantities involved: a zero
+    log-probability means `exp(0) == 1`, so a fabricated row would silently
+    distort the KL and importance-ratio terms rather than drop out of them.
+
+    Args:
+      chunk: The items about to be packed into one microbatch.
+
+    Returns:
+      Names of the optional fields to emit, in declaration order.
+
+    Raises:
+      ValueError: If an optional field is set on some but not all items.
+    """
+    carried = []
+    for name in _OPTIONAL_PER_TOKEN_FIELDS:
+      populated = [getattr(item, name) is not None for item in chunk]
+      if all(populated):
+        carried.append(name)
+      elif any(populated):
+        missing = [i for i, has_value in enumerate(populated) if not has_value]
+        raise ValueError(
+            f"'{name}' is set on some but not all items of a microbatch"
+            f" (missing on rows {missing}). Optional per-token fields must be"
+            " supplied for every item or for none; zero-filling the gaps would"
+            " silently corrupt the loss."
+        )
+    return tuple(carried)
+
   def _pack_chunk(
       self, chunk: Sequence[datatypes.RLTrainerPayload]
   ) -> datatypes.RLTrainerPayload:
     """Pads a single `<= batch_size` chunk into one rectangular payload."""
-    num_real_rows = len(chunk)
-    # Optional per-token fields are emitted for the whole batch as soon as any
-    # row carries them; rows that do not are zero-filled so that row `b` of
-    # every tensor always describes item `b`.
-    optional_fields = (
-        "ref_per_token_logps",
-        "old_per_token_logps",
-        "returns",
-        "old_values",
-        "sampler_is_weights",
-    )
-    present = {
-        name: any(getattr(it, name) is not None for it in chunk)
-        for name in optional_fields
+    rows = self.batch_size
+    p_width = self.max_prompt_length
+    c_width = self.max_response_length
+
+    # Three `[B, P + C]` buffers back every token-space tensor; `prompt_*` and
+    # `completion_*` are returned as VIEWS into them. That is one allocation per
+    # token-space tensor instead of one per segment plus a stack and a concat,
+    # and it makes the trailing-row padding free: the buffers already hold
+    # `pad_id` / 0, so short chunks need no explicit fill pass at all.
+    token_ids = np.full((rows, p_width + c_width), self.pad_id, dtype=np.int32)
+    token_mask = np.zeros((rows, p_width + c_width), dtype=np.float32)
+    loss_mask = np.zeros((rows, p_width + c_width), dtype=np.float32)
+    prompt_ids = token_ids[:, :p_width]
+    completion_ids = token_ids[:, p_width:]
+    prompt_mask = token_mask[:, :p_width]
+    completion_valid = token_mask[:, p_width:]
+    # The prompt half of `loss_mask` is never written, so it stays zero by
+    # construction: exactly the "no loss on the prompt" contract.
+    completion_mask = loss_mask[:, p_width:]
+
+    advantages = np.zeros((rows, c_width), dtype=np.float32)
+    optional = {
+        name: np.zeros((rows, c_width), dtype=np.float32)
+        for name in self._carried_optional_fields(chunk)
     }
 
-    prompt_ids, prompt_mask = [], []
-    completion_ids, completion_mask, completion_valid = [], [], []
-    advantages = []
-    optional_rows: dict[str, list[np.ndarray]] = {
-        name: [] for name, is_present in present.items() if is_present
-    }
     truncated_prompts = truncated_completions = 0
-
-    for item in chunk:
+    for row, item in enumerate(chunk):
       p_full, c_full = _split_prompt_completion(item)
-      truncated_prompts += p_full.size > self.max_prompt_length
-      truncated_completions += c_full.size > self.max_response_length
-      c = c_full[: self.max_response_length]
+      truncated_prompts += p_full.size > p_width
+      truncated_completions += c_full.size > c_width
+      p = p_full[-p_width:]
+      c = c_full[:c_width]
 
-      p_ids, p_default_mask = _left_pad(
-          p_full, self.max_prompt_length, pad_id=self.pad_id
-      )
-      c_ids, c_valid = _right_pad(
-          c, self.max_response_length, pad_value=self.pad_id, dtype=np.int32
-      )
-      prompt_ids.append(p_ids)
-      completion_ids.append(c_ids)
-      completion_valid.append(c_valid)
+      if p.size:
+        prompt_ids[row, p_width - p.size :] = p
+        prompt_mask[row, p_width - p.size :] = 1.0
+      if c.size:
+        completion_ids[row, : c.size] = c
+        completion_valid[row, : c.size] = 1.0
 
       # A caller-supplied prompt mask is prompt-aligned, so it must be
       # left-padded exactly like the prompt ids to stay in register. If its
-      # length disagrees with the prompt the alignment is undefined, so fall
-      # back to the validity mask derived from the ids themselves.
-      p_mask = p_default_mask
+      # length disagrees with the prompt the alignment is undefined, so keep the
+      # validity mask derived from the ids themselves.
       if item.prompt_mask is not None:
         src = np.asarray(item.prompt_mask, dtype=np.float32).reshape(-1)
         if src.size == p_full.size:
-          src = src[-self.max_prompt_length :]
-          p_mask = np.zeros(self.max_prompt_length, dtype=np.float32)
+          src = src[-p_width:]
+          prompt_mask[row, :] = 0.0
           if src.size:
-            p_mask[-src.size :] = src
-      prompt_mask.append(p_mask)
+            prompt_mask[row, p_width - src.size :] = src
+
+      if not c.size:
+        continue
 
       # Action mask over the completion: prefer an explicit action_mask, fall
       # back to completion_mask, then to "every generated token is an action".
@@ -578,38 +652,29 @@ class PaddedBatchAssembler:
           else item.completion_mask
       )
       if action_source is None:
-        c_mask = c_valid.copy()
+        completion_mask[row, : c.size] = 1.0
       else:
-        c_mask = _completion_aligned(
+        completion_mask[row, : c.size] = _completion_values(
             action_source,
             c.size,
-            self.max_response_length,
             prompt_len=p_full.size,
             full_completion_len=c_full.size,
         )
-      completion_mask.append(c_mask)
 
-      advantages.append(
-          _completion_aligned(
-              item.advantages,
-              c.size,
-              self.max_response_length,
-              fill_value=0.0,
-              prompt_len=p_full.size,
-              full_completion_len=c_full.size,
-          )
+      advantages[row, : c.size] = _completion_values(
+          item.advantages,
+          c.size,
+          fill_value=0.0,
+          prompt_len=p_full.size,
+          full_completion_len=c_full.size,
       )
-
-      for name in optional_rows:
-        optional_rows[name].append(
-            _completion_aligned(
-                getattr(item, name),
-                c.size,
-                self.max_response_length,
-                fill_value=0.0,
-                prompt_len=p_full.size,
-                full_completion_len=c_full.size,
-            )
+      for name, buffer in optional.items():
+        buffer[row, : c.size] = _completion_values(
+            getattr(item, name),
+            c.size,
+            fill_value=0.0,
+            prompt_len=p_full.size,
+            full_completion_len=c_full.size,
         )
 
     if truncated_prompts or truncated_completions:
@@ -618,52 +683,21 @@ class PaddedBatchAssembler:
           "completion(s) to %d tokens; raise max_prompt_length / "
           "max_response_length to avoid dropping training signal.",
           truncated_prompts,
-          self.max_prompt_length,
+          p_width,
           truncated_completions,
-          self.max_response_length,
+          c_width,
       )
-
-    # Zero-pad trailing rows so every chunk yields a static [B, ...] shape.
-    while len(prompt_ids) < self.batch_size:
-      prompt_ids.append(
-          np.full(self.max_prompt_length, self.pad_id, dtype=np.int32)
-      )
-      prompt_mask.append(np.zeros(self.max_prompt_length, dtype=np.float32))
-      completion_ids.append(
-          np.full(self.max_response_length, self.pad_id, dtype=np.int32)
-      )
-      completion_mask.append(np.zeros(self.max_response_length, np.float32))
-      completion_valid.append(np.zeros(self.max_response_length, np.float32))
-      advantages.append(np.zeros(self.max_response_length, dtype=np.float32))
-      for rows in optional_rows.values():
-        rows.append(np.zeros(self.max_response_length, dtype=np.float32))
-
-    batched_prompt_ids = np.stack(prompt_ids)
-    batched_prompt_mask = np.stack(prompt_mask)
-    batched_completion_ids = np.stack(completion_ids)
-    batched_completion_mask = np.stack(completion_mask)
-    batched_completion_valid = np.stack(completion_valid)
-
-    token_ids = np.concatenate(
-        [batched_prompt_ids, batched_completion_ids], axis=1
-    )
-    token_mask = np.concatenate(
-        [batched_prompt_mask, batched_completion_valid], axis=1
-    )
-    loss_mask = np.concatenate(
-        [np.zeros_like(batched_prompt_mask), batched_completion_mask], axis=1
-    )
 
     return datatypes.RLTrainerPayload(
         token_ids=token_ids,
         token_mask=token_mask,
         loss_mask=loss_mask,
         action_mask=loss_mask,
-        advantages=np.stack(advantages),
-        prompt_ids=batched_prompt_ids,
-        prompt_mask=batched_prompt_mask,
-        completion_ids=batched_completion_ids,
-        completion_mask=batched_completion_mask,
-        metadata={"num_real_rows": num_real_rows},
-        **{name: np.stack(rows) for name, rows in optional_rows.items()},
+        advantages=advantages,
+        prompt_ids=prompt_ids,
+        prompt_mask=prompt_mask,
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        metadata={"num_real_rows": len(chunk)},
+        **optional,
     )

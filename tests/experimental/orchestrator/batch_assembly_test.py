@@ -208,20 +208,16 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         payload.ref_per_token_logps[1], [-0.2, -0.2, 0.0, 0.0, 0.0]
     )
 
-  def test_partially_present_optional_fields_stay_row_aligned(self):
-    # Regression: appending only for items that carried the field shifted the
-    # surviving rows onto the wrong sequences.
+  def test_partially_present_optional_field_is_rejected(self):
+    # Zero is not a neutral log-probability (exp(0) == 1), so a half-populated
+    # field must fail loudly rather than be silently zero-filled.
     items = [
         _make_payload(2, 3),
         _make_payload(2, 3, old_logps=np.full(3, -0.7, dtype=np.float32)),
     ]
-    payload = self._assembler().pack(items)[0]
 
-    self.assertEqual(payload.old_per_token_logps.shape, (2, 5))
-    np.testing.assert_allclose(payload.old_per_token_logps[0], np.zeros(5))
-    np.testing.assert_allclose(
-        payload.old_per_token_logps[1], [-0.7, -0.7, -0.7, 0.0, 0.0]
-    )
+    with self.assertRaisesRegex(ValueError, "old_per_token_logps"):
+      self._assembler().pack(items)
 
   def test_optional_fields_absent_everywhere_stay_none(self):
     payload = self._assembler().pack([_make_payload(2, 3)])[0]
@@ -229,6 +225,45 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     self.assertIsNone(payload.ref_per_token_logps)
     self.assertIsNone(payload.old_per_token_logps)
     self.assertIsNone(payload.returns)
+    self.assertIsNone(payload.old_values)
+    self.assertIsNone(payload.sampler_is_weights)
+
+  def test_unused_optional_fields_allocate_nothing(self):
+    # A GRPO-shaped batch must not ship PPO-only buffers to the accelerator.
+    items = [
+        _make_payload(2, 3, ref_logps=np.full(3, -0.1, dtype=np.float32))
+        for _ in range(2)
+    ]
+    payload = self._assembler().pack(items)[0]
+
+    per_token_bytes = sum(
+        getattr(payload, name).nbytes
+        for name in (
+            "ref_per_token_logps",
+            "old_per_token_logps",
+            "returns",
+            "old_values",
+            "sampler_is_weights",
+        )
+        if getattr(payload, name) is not None
+    )
+    # Only ref_per_token_logps: [2, 5] float32.
+    self.assertEqual(per_token_bytes, 2 * 5 * 4)
+
+  def test_segment_tensors_are_views_into_the_row_buffers(self):
+    payload = self._assembler().pack([_make_payload(2, 3)])[0]
+
+    self.assertIs(payload.prompt_ids.base, payload.token_ids)
+    self.assertIs(payload.completion_ids.base, payload.token_ids)
+    self.assertIs(payload.prompt_mask.base, payload.token_mask)
+    self.assertIs(payload.completion_mask.base, payload.loss_mask)
+    # Views must still agree with the buffers they alias.
+    np.testing.assert_array_equal(
+        payload.token_ids[:, :4], payload.prompt_ids
+    )
+    np.testing.assert_array_equal(
+        payload.token_ids[:, 4:], payload.completion_ids
+    )
 
   def test_returns_field_is_propagated(self):
     payload = self._assembler().pack([_make_payload(2, 3, returns=4.0)])[0]
