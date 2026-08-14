@@ -760,47 +760,161 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(
-        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
         TEST_LEARNING_RATE,
     )
 
-  def test_parity_with_v1_trainer(self):
-    train_ds = dummy_datasets(batch_size=4, repeat=1)
 
-    # v1
-    rngs_v1 = nnx.Rngs(0)
-    model_v1 = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs_v1)
-    optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
-        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+class V1ParityTest(parameterized.TestCase):
+  """Parity tests for PeftTrainerV2 against PeftTrainer before the migration to v2 is fully done."""
+
+  def _make_trainer_v2(self, model, accum_steps=None, max_steps=4):
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=max_steps,
+        gradient_accumulation_steps=accum_steps,
     )
-    config_v1 = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
-    trainer_v1 = peft_trainer.PeftTrainer(model_v1, optimizer_v1, config_v1)
-    trainer_v1 = trainer_v1.with_gen_model_input_fn(dummy_gen_model_input_fn)
-    trainer_v1.train(train_ds, None)
-
-    # v2
-    rngs_v2 = nnx.Rngs(0)
-    model_v2 = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs_v2)
-    optimizer_v2 = optax.inject_hyperparams(optax.sgd)(
-        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+    trainer = peft_trainer_v2.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
     )
-    config_v2 = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
-    trainer_v2 = peft_trainer_v2.PeftTrainer(model_v2, optimizer_v2, config_v2)
-    trainer_v2 = trainer_v2.with_gen_model_input_fn(dummy_gen_model_input_fn)
-    trainer_v2.train(train_ds, None)
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    model_state_v1 = nnx.state(model_v1)
-    model_state_v2 = nnx.state(model_v2)
-    jax.tree.map_with_path(tc.assert_close, model_state_v1, model_state_v2)
+  def _two_identical_models(self):
+    graphdef, state = nnx.split(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    )
+    state = jax.tree.map(lambda x: x.astype(jnp.float32), state)
+    return (
+        nnx.merge(graphdef, jax.tree.map(jnp.copy, state)),
+        nnx.merge(graphdef, jax.tree.map(jnp.copy, state)),
+    )
 
-    opt_state_v1 = nnx.state(trainer_v1.optimizer)
-    opt_state_v2 = nnx.state(trainer_v2.optimizer)
-    jax.tree.map_with_path(tc.assert_close, opt_state_v1, opt_state_v2)
+  def _make_v1_trainer(self, model, accum_steps=None):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=1,
+        gradient_accumulation_steps=accum_steps,
+    )
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
+    )
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
+  def _assert_fp32_weights_close(self, weights_v1, weights_v2):
+    """Checks the scale-relative weight difference used by the debug run."""
+    max_relative_difference = 1e-6
+
+    def assert_leaf_close(path, v1, v2):
+      v1 = np.asarray(jax.device_get(v1))
+      v2 = np.asarray(jax.device_get(v2))
+      self.assertEqual(v1.dtype, np.dtype(np.float32), f'v1 dtype at {path}')
+      self.assertEqual(v2.dtype, np.dtype(np.float32), f'v2 dtype at {path}')
+      difference = float(np.max(np.abs(v1.astype(np.float64) - v2)))
+      scale = float(np.max(np.abs(v1.astype(np.float64))))
+      if scale == 0.0:
+        self.assertEqual(difference, 0.0, f'mismatch at zero leaf {path}')
+      else:
+        self.assertLessEqual(
+            difference / scale,
+            max_relative_difference,
+            f'weight difference exceeds tolerance at {path}',
+        )
+
+    jax.tree.map_with_path(assert_leaf_close, weights_v1, weights_v2)
+
+  def _assert_weights_changed(self, initial_weights, updated_weights):
+    initial_leaves = jax.tree_util.tree_leaves(jax.device_get(initial_weights))
+    updated_leaves = jax.tree_util.tree_leaves(jax.device_get(updated_weights))
+    self.assertTrue(
+        any(
+            np.any(np.asarray(initial) != np.asarray(updated))
+            for initial, updated in zip(initial_leaves, updated_leaves)
+        ),
+        'the optimizer update did not change any weight',
+    )
+
+  def test_fp32_single_step_parity_with_v1(self):
+    model_v1, model_fused = self._two_identical_models()
+    initial_weights = jax.tree.map(
+        jnp.copy, nnx.state(model_v1, nnx.Param)
+    )
+    trainer_v1 = self._make_v1_trainer(model_v1)
+    trainer_fused = self._make_trainer_v2(model_fused, max_steps=1)
+    batch = dummy_datasets(batch_size=4)[0]
+
+    trainer_v1.train([batch])
+    trainer_fused.train([batch])
+
+    weights_v1 = nnx.state(model_v1, nnx.Param)
+    weights_fused = nnx.state(model_fused, nnx.Param)
+    self.assertEqual(trainer_v1.train_steps, 1)
+    self.assertEqual(trainer_fused.train_steps, 1)
+    self.assertEqual(float(trainer_v1.grad_accumulator.denom[...]), 0.0)
+    self.assertEqual(float(trainer_fused.grad_accumulator.denom[...]), 0.0)
+    self._assert_weights_changed(initial_weights, weights_v1)
+    self._assert_weights_changed(initial_weights, weights_fused)
+    self._assert_fp32_weights_close(weights_v1, weights_fused)
+    jax.tree.map_with_path(
+        tc.assert_close,
+        nnx.state(trainer_v1.optimizer),
+        nnx.state(trainer_fused.optimizer),
+    )
     loss_v1 = trainer_v1.metrics_logger.get_metric('', 'loss', 'train')
-    loss_v2 = trainer_v2.metrics_logger.get_metric('', 'loss', 'train')
+    loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
+    np.testing.assert_allclose(loss_v1, loss_fused, atol=1e-5)
 
-    np.testing.assert_allclose(loss_v1, loss_v2, atol=1e-5)
+  def test_fp32_multiple_step_parity_with_v1(self):
+    accum_steps = 4
+    batches = dummy_datasets(batch_size=4, repeat=2)[:accum_steps]
+    self.assertLen(batches, accum_steps)
+    model_v1, model_split = self._two_identical_models()
+    initial_weights = jax.tree.map(
+        jnp.copy, nnx.state(model_v1, nnx.Param)
+    )
+    trainer_v1 = self._make_v1_trainer(model_v1, accum_steps=accum_steps)
+    trainer_split = self._make_trainer_v2(
+        model_split, accum_steps=accum_steps, max_steps=1
+    )
+
+    trainer_v1.train(batches)
+    for batch in batches:
+      trainer_split.fwd_bwd(batch)
+    self.assertEqual(trainer_split.train_steps, 0)
+    self.assertEqual(
+        float(trainer_split.grad_accumulator.denom[...]), accum_steps
+    )
+    trainer_split.update()
+
+    weights_v1 = nnx.state(model_v1, nnx.Param)
+    weights_split = nnx.state(model_split, nnx.Param)
+    self.assertEqual(trainer_v1.train_steps, 1)
+    self.assertEqual(trainer_split.train_steps, 1)
+    self.assertEqual(float(trainer_v1.grad_accumulator.denom[...]), 0.0)
+    self.assertEqual(float(trainer_split.grad_accumulator.denom[...]), 0.0)
+    self._assert_weights_changed(initial_weights, weights_v1)
+    self._assert_weights_changed(initial_weights, weights_split)
+    self._assert_fp32_weights_close(weights_v1, weights_split)
+
+  def test_fused_unavailable_when_accumulating(self):
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer_v2(model, accum_steps=2)
+    trainer.jit_fwd_bwd_update_and_eval_step()
+    self.assertIsNone(trainer._jitted_train_step_fn)
+    with self.assertRaisesRegex(ValueError, 'one micro-batch per update'):
+      trainer.train_step(dummy_datasets(batch_size=4)[0])
+
+  def test_train_uses_fused_path_at_depth1(self):
+    """`train()` must route through the fused step, not fwd_bwd + update."""
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer_v2(model)
+    with mock.patch.object(
+        trainer, 'train_step', wraps=trainer.train_step
+    ) as fused, mock.patch.object(
+        trainer, 'update', wraps=trainer.update
+    ) as split:
+      trainer.train(dummy_datasets(batch_size=4))
+    self.assertGreater(fused.call_count, 0)
+    split.assert_not_called()
 
 
 if __name__ == '__main__':

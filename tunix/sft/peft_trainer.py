@@ -94,7 +94,6 @@ class TrainingConfig:
   max_segments_per_packed_row: int | None = None
 
 
-
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -246,8 +245,6 @@ class GradientAccumulator(nnx.Module):
       model: nnx.Module,
       wrt: type[nnx.Variable],
       *,
-<<<<<<< HEAD
-<<<<<<< HEAD
       allocate_grads: bool = True,
       accumulator_dtype: DTypeLike = jnp.float32,
   ):
@@ -288,68 +285,6 @@ class GradientAccumulator(nnx.Module):
       # compilation unchanged).
       self.grads = nnx.data({})
       self._param_dtypes = nnx.data({})
-=======
-      allocate: bool = True,
-  ):
-    # Static (non-array) attribute: decides whether the buffer is a long-lived
-    # accumulation target that must be zeroed between updates, or a scratch slot
-    # that `set()` overwrites wholesale and `reset()` can simply drop.
-    self.persistent = allocate
-    if allocate:
-      state = nnx.state(model, wrt)
-      self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
-    else:
-      # When every update consumes exactly one micro-batch, `_train_step`
-      # applies `grads` directly and never touches the accumulator -- `add`,
-      # `get` and `reset` all live on the accumulating branch. Allocating the
-      # buffer anyway costs a full zero copy of the parameter tree (~3.5 GiB per
-      # device for gemma4-e2b at 12 layers in fp32) that is resident for the
-      # whole run and never read.
-      self.grads = nnx.data({})
->>>>>>> 539bc31a (snapshot)
-    self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
-=======
-      allocate_grads: bool = True,
-      accumulator_dtype: DTypeLike = jnp.float32,
-  ):
-    """Initializes the gradient accumulator.
->>>>>>> 77f25797 (snapshot)
-
-    Args:
-      model: The model whose state to accumulate gradients for.
-      wrt: The target variable type (e.g., `nnx.Param` or `nnx.LoRAParam`).
-      allocate_grads: Whether to allocate an accumulated gradient buffer
-        matching the model's parameter structure. When `False` (used on depth-1
-        fast paths where accumulation is skipped), an empty dictionary is
-        allocated to save HBM without altering the JIT signature.
-      accumulator_dtype: The dtype used for accumulated gradient buffers.
-        Defaults to `jnp.float32` to prevent low-precision underflow and
-        rounding errors during multi-step accumulation. When returning
-        accumulated gradients via `get`, they are cast back to the model's
-        native parameter dtypes (e.g. `bfloat16`). Using lower-precision dtypes
-        saves HBM but incurs numerical precision trade-offs without upcasting
-        for large gradients.
-    """
-    state = nnx.state(model, wrt)
-    self._param_dtypes = nnx.data(
-        jax.tree_util.tree_map(
-            lambda x: getattr(x, "dtype", None),
-            state,
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
-    )
-    if allocate_grads:
-      self.grads = nnx.data(
-          jax.tree_util.tree_map(
-              lambda x: jnp.zeros(x.shape, dtype=accumulator_dtype), state
-          )
-      )
-    else:
-      # Fast path never reads the accumulator: skip the model-sized grad-tree
-      # allocation. Empty grads keep it a valid tiny jit arg (signature and
-      # compilation unchanged).
-      self.grads = nnx.data({})
-      self._param_dtypes = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
   def add(self, grads: Any, denom: jax.Array | None = None):
@@ -375,10 +310,6 @@ class GradientAccumulator(nnx.Module):
 
   def get(self):
     scale = _zero_safe_reciprocal(self.denom[...])
-
-    def _scale_and_cast(v, target_dtype):
-      res = v[...] * scale.astype(v[...].dtype)
-      return type(v)(res.astype(target_dtype) if target_dtype else res)
 
     def _scale_and_cast(v, target_dtype):
       res = v[...] * scale.astype(v[...].dtype)
@@ -462,16 +393,6 @@ class PeftTrainer:
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
         and self.config.max_seq_token_per_tpu is None
     )
-<<<<<<< HEAD
-    self.grad_accumulator = GradientAccumulator(
-        self.model, wrt_target, allocate_grads=_uses_cond_path
-=======
-    # Promote floating-point leaves to float32 in-place to match the dtype of
-    # the optimizer update function branch (which is float32 due to
-    # `optax.inject_hyperparams`).
-    _promote_opt_state_floats_to_float32(self.optimizer)
-=======
->>>>>>> 77f25797 (snapshot)
     self.grad_accumulator = GradientAccumulator(
         self.model, wrt_target, allocate_grads=_uses_cond_path
     )
@@ -685,16 +606,10 @@ class PeftTrainer:
     # True, so update directly from `grads` (no per-leaf accumulator writes,
     # no XLA Conditional, accumulator shardings untouched); sequence packing
     # keeps the cond path since its cadence comes from `is_update_step`.
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 77f25797 (snapshot)
     if (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
         and self.config.max_seq_token_per_tpu is None
     ):
-<<<<<<< HEAD
       if isinstance(aux, utils.LossOutput):
         denom = jnp.asarray(aux.primary_loss.denominator, dtype=jnp.float32)
         scale = _zero_safe_reciprocal(denom)
