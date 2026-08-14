@@ -467,3 +467,79 @@
 - Target discipline: `main` was never a refspec or checkout target. No cluster
   launch occurred. The next authorized action is to render the new-run-id
   `--full-campaign` manifest and obtain separate launch approval.
+
+## 2026-08-14T00:00:03Z — P46.6 crash-safe resume-tag hardening
+
+- Type: local implementation and recovery evidence; uncommitted and unpushed.
+- Fact: the existing evaluator fsynced completed trajectory rows and recovered
+  identities, but the JobSet layer still fetched a moving branch tip, reused
+  setup state, overwrote `campaign.log`, accepted only legacy single-wave PASS
+  markers, and did not reconcile R2E sandboxes after coordinator death.
+- Action: separated stable `resume_tag` from per-launch `run_id`; added an
+  immutable config-v4/trajectory-v6 resume contract, nonblocking single-writer
+  lease, launch-isolated setup state, unique trajectory files, immutable
+  attempt logs, exact full-campaign postflight, original-SHA checkout after
+  ancestry verification, bounded R2E lifecycle patch activation in evaluation,
+  same-tag orphan sandbox deletion, and runbook/handoff instructions.
+- Recovery semantics: complete fsynced identities are skipped. Invalid
+  infrastructure attempts retry consecutively. A trajectory killed before a
+  complete row restarts from its beginning; no token-level continuation is
+  claimed. Contract/source/topology drift and concurrent same-tag writers fail
+  closed.
+- Evidence: `P46_DEEPSWE_PROFILES_CPU_PASS cases=60`. Tests cover a first
+  launch preserving 17/64 identities and a second launch running exactly the
+  missing 47, torn-tail recovery across unique files, contract drift,
+  exclusive lease, stable tag across distinct launch ids, pinned-SHA rendering,
+  immutable attempt logs, legacy marker compatibility and exact 58-logical/
+  29,616-identity campaign postflight.
+- Adjacent gates: `P34_STATIC_PASS suites=10`,
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`, Python compilation, shell syntax and
+  `git diff --check` all pass.
+- Claim ceiling: CPU evidence does not prove PVC locking semantics, Kubernetes
+  orphan cleanup or a target 64/128-chip resume. No cluster action, commit or
+  push occurred.
+- Next: run adjacent P34/P44 and diff gates, then wait for explicit commit/push
+  approval before any remote executor uses the new resume tag.
+
+## 2026-08-14T09:23:34Z — P46.6 crash-safe resume and legacy-v5 adoption commit
+
+- Type: implementation, transition decision, validation and publication
+  preparation under explicit user commit/push approval.
+- Remote audit: a fresh fetch found local base and
+  `origin/yuxzhang/canon-zero-tim` exactly aligned at
+  `2ec1cb768c7454c7d0ecf798ff1a5aff890ceae7` with divergence `0/0`. Main was
+  neither checked out nor targeted.
+- Operator constraint: do not stop the already running legacy-v5
+  `p46e12805` campaign. No Kubernetes, JobSet, pod, PVC or cloud mutation was
+  performed. Its archived first wave has 64 valid records, ten reward-one and
+  54 reward-zero, at sampler source
+  `18d5d2ac1603a26a221af9d5fc430b084ec002df`; the archived log reached the
+  second physical wave. Current live cardinality is unknown.
+- Implementation commit:
+  `c3a960acdc94173440144559bb95f1de36d31537`.
+- Resume action: stable `resume_tag` and per-launch `run_id`; immutable resume
+  contract; single-writer lease; fsynced unique trajectory files; launch-local
+  setup state; immutable attempt logs; exact full-campaign postflight; pinned
+  checkout after branch-ancestry verification; and same-tag orphan sandbox
+  cleanup.
+- Legacy transition: a terminal v5 producer is copied, never moved, into
+  `<resume-tag>/imports/<legacy-run-id>/`; `SHA256SUMS` freezes every JSONL.
+  The importer verifies the derived v3 fingerprint for each logical shard,
+  clean task order, sample nonce, attempt sequence, reward-only payload and
+  provenance. It writes immutable v6 rows and an import receipt while
+  preserving the old sampler SHA and separately pinning the new harness SHA.
+  Live directories, cross-contract rows and imports after target evidence
+  fail closed.
+- Evidence: `P46_DEEPSWE_PROFILES_CPU_PASS cases=65`,
+  `P34_STATIC_PASS suites=10`, and
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS` all pass. Python compilation, shell
+  syntax and `git diff --check` pass. Tests include 17/64 + missing-47 resume,
+  torn-tail recovery, contract/lease/attempt-log gates, exact 58-logical
+  postflight, frozen snapshot digest/drift rejection, idempotent adoption, and
+  per-logical-shard fingerprint preservation.
+- Claim ceiling: no real 64/128-chip controlled kill/restart or legacy import
+  has run. CPU evidence does not prove PVC `flock`, Kubernetes orphan cleanup,
+  import throughput or completion of the 29,616-identity wash.
+- Next: commit the synchronized runbook/handoff, push both commits only to
+  `yuxzhang/canon-zero-tim`, and read back the exact remote SHA. Leave
+  `p46e12805` untouched until natural termination.

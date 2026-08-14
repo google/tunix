@@ -3,11 +3,10 @@
 ## Current status
 
 The next Q4 target run is the complete data-washing campaign, not another
-standalone `l0/p0` smoke. The implementation commit is
-`a989af34054434e6567f88e99b45ed67faf15a44` on baseline
-`c33ba5f50d606210ca9f2c94fca003b63ea6e326`. A remote executor must fetch
-`yuxzhang/canon-zero-tim`, record its exact current HEAD, and require that
-`a989af34` is in its ancestry. Never modify or push `main`.
+standalone `l0/p0` smoke. Resume-tag hardening and frozen legacy-v5 adoption
+are committed as `c3a960acdc94173440144559bb95f1de36d31537`. A remote executor
+must not launch until that commit is an ancestor of an exact read-back of
+`origin/yuxzhang/canon-zero-tim`. Never modify or push `main`.
 
 No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
 within the operator's explicit instruction.
@@ -43,6 +42,23 @@ canon-zero-tim/tasks/p46-deepswe-eval-training-profiles/evidence/p46e12804/SHA25
 
 This is returned debug evidence, not a washed list.
 
+The later 128-chip `p46e12805` campaign uses source
+`18d5d2ac1603a26a221af9d5fc430b084ec002df`, config-v3/trajectory-v5 and the
+fixed `q4_r2egym_xml_v2` adapter. The repository archive contains its first
+64 valid identities: ten reward one and 54 reward zero. Its head log reached
+`logical_shard=0 physical_shard=1`, so it had started the next wave. The
+operator reports the remote job is still running. **Do not stop it and do not
+snapshot its live directory.** Repository evidence does not establish its
+current live row count.
+
+Archived transition evidence:
+
+```text
+canon-zero-tim/tasks/p46-deepswe-eval-training-profiles/evidence/p46e12805/head.full.log
+canon-zero-tim/tasks/p46-deepswe-eval-training-profiles/evidence/p46e12805/q4i16k-n16-128-0d06152434768e31.p0.20260814T020445Z.jsonl
+canon-zero-tim/tasks/p46-deepswe-eval-training-profiles/evidence/p46e12805/SHA256SUMS
+```
+
 ## P46.6 semantics
 
 Q4 evaluation explicitly sets:
@@ -51,6 +67,7 @@ Q4 evaluation explicitly sets:
 action_compat_mode=q4_r2egym_xml_v2
 evaluation_mode=reward_only
 trajectory_mode=reward_only_no_logprobs
+resume_tag=<stable campaign identity>
 ```
 
 Compatibility v2 performs only deterministic repairs seen in returned data:
@@ -96,8 +113,27 @@ training geometry.
 The full campaign mode does not enlarge concurrency or weaken the one-hour
 physical boundary. It only avoids initializing/compiling Q4 separately for
 each group of 64. Every trajectory is appended, flushed, and fsynced before
-the next result is accepted. A pod/job interruption is resumed by relaunching
-the same published source SHA, topology, and run id.
+the next result is accepted. `resume_tag` identifies the durable campaign;
+`run_id` identifies one Kubernetes launch. A pod/job interruption is resumed
+with the same resume tag, harness SHA, sampling-source SHA, topology,
+model/data/sampling contract, and either the original manifest or a new launch
+run id. A complete fsynced trajectory is skipped. A trajectory interrupted
+before its complete JSONL row
+is durable restarts from the beginning; token-by-token continuation is not
+claimed.
+
+The evaluator writes an immutable `resume_contract.json` before TPU model
+initialization and holds an exclusive `flock` lease for the campaign. A second
+writer with the same tag fails closed. Each launch gets isolated setup state
+and an immutable attempt log. Before a resumed full campaign creates new
+sandboxes, it deletes and confirms only R2E pods carrying the same resume-tag
+label. The original harness SHA is checked out even if the operator branch has
+advanced, after proving it remains in that branch's ancestry.
+
+For a reviewed legacy adoption, `source_commit` remains the old sampling
+lineage and `sampled_by=stock@<old-sha>`; `harness_commit` is the exact new
+resume-capable checkout. Both are fingerprinted. This is the only admitted
+cross-schema path and does not authorize arbitrary cross-SHA mixing.
 
 ## Publication/read-back gate
 
@@ -108,10 +144,12 @@ git fetch origin yuxzhang/canon-zero-tim
 git switch --detach origin/yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse HEAD)"
 test "$(git status --porcelain)" = ""
+git merge-base --is-ancestor \
+  c3a960acdc94173440144559bb95f1de36d31537 "$SOURCE_SHA"
 
 rg -n 'q4_r2egym_xml_v2|strict_xml|CANON_P46_FULL_CAMPAIGN' \
   examples/deepswe canon-zero-tim/cluster
-rg -n 'trajectory.v5|config.v3|model_action_errors' \
+rg -n 'trajectory.v6|config.v4|resume_tag|model_action_errors' \
   examples/deepswe/deepswe_eval_artifacts.py
 bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh
 ```
@@ -119,23 +157,67 @@ bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh
 Required CPU marker:
 
 ```text
-P46_DEEPSWE_PROFILES_CPU_PASS cases=40
+P46_DEEPSWE_PROFILES_CPU_PASS cases=65
 ```
 
-The suite now contains 49 unittest cases even though the retained stable
-release marker remains `cases=40`. It includes a complete-scale orchestration
-test proving one runtime, 463 waves, 29,616 identities, and the final 48-row
-wave. CPU PASS is not TPU/Kubernetes or campaign-completion evidence.
+The suite includes complete-scale orchestration, torn-tail recovery,
+17-of-64 interruption followed by a 47-identity resume, immutable contract,
+single-writer lease, attempt-log, full-campaign postflight, and digest/fingerprint
+checked v5-to-v6 adoption across logical shards. CPU PASS is not
+TPU/Kubernetes or campaign-completion evidence.
+
+## Transition `p46e12805` without stopping it
+
+The old job remains authoritative while it is running. Wait for natural
+termination, archive JobSet status/events, and prove no producer/sandbox pod
+remains. Then copy, never move, its complete trajectory tree into the exact
+staging path below under a **fresh** resume tag:
+
+```text
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/p46e12805/trajectories/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/p46e12805/SHA256SUMS
+```
+
+The copy/seal commands and terminal-state checklist are in
+`canon-zero-tim/cluster/P46_DEEPSWE_PROFILES_RUNBOOK.md` under “Preserve and
+adopt the running p46e12805 campaign”. Do not place v5 JSONL directly in the
+new `outputs/trajectories/` directory. Do not use a resume tag that already has
+v6 trajectory evidence.
+
+The first adoption manifest must use exactly:
+
+```text
+--source-commit c3a960acdc94173440144559bb95f1de36d31537
+--sampling-source-commit 18d5d2ac1603a26a221af9d5fc430b084ec002df
+--legacy-import-id p46e12805
+--resume-tag <fresh stable tag>
+--full-campaign
+```
+
+Before TPU initialization it must emit:
+
+```text
+[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12805 records=<n> valid_records=<n> manifest_sha256=<sha256> receipt=<absolute-path>
+```
+
+Any manifest, fingerprint, task-order, identity, attempt, logprob or provenance
+mismatch is a hard stop. The importer does not reclassify or rewrite the old
+files; it writes immutable v6 copies with per-row `imported_from` provenance
+and a receipt. Later relaunches omit `--legacy-import-id` but keep both exact
+source SHAs, the resume tag, topology, image, model, data and sampling fields.
 
 ## Render the next full 128-chip washing JobSet
 
-Use a new run id because config-v3/trajectory-v5 and the source fingerprint
-must not resume v4 evidence:
+For a from-scratch config-v4/trajectory-v6 campaign, use a new resume tag and
+keep it stable for the whole washing campaign; a launch run id may change
+after interruption. To preserve `p46e12805`, use the transition procedure
+above instead of this from-scratch command:
 
 ```bash
 TOPOLOGY=128
 BASE=canon-zero-tim/cluster/jobset-256cluster-64chip.yaml
-RUN_ID="p46q4wash-$(date -u +%Y%m%dT%H%M%SZ)"
+RESUME_TAG="p46q4wash01"
+RUN_ID="p46r01a0"
 CPU_NODEPOOL=deepswe-cpu-pool
 TPU_NODEPOOL=<actual-4x4x8-nodepool>
 MODEL_PVC=haoyugao-cpu-np-pvc
@@ -149,6 +231,7 @@ python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --source-branch yuxzhang/canon-zero-tim \
   --client-image "$CLIENT_IMAGE_DIGEST" \
   --run-id "$RUN_ID" \
+  --resume-tag "$RESUME_TAG" \
   --cpu-nodepool "$CPU_NODEPOOL" \
   --worker-nodepool "$TPU_NODEPOOL" \
   --model-pvc "$MODEL_PVC" \
@@ -160,11 +243,12 @@ Before apply, verify the rendered manifest contains:
 ```text
 canon.zero-tim/full-campaign: "1"
 CANON_P46_FULL_CAMPAIGN=1
+CANON_P46_RESUME_TAG=p46q4wash01
 CANON_P46_EVALUATION_MODE=reward_only
 CANON_P46_TOPOLOGY=128
 CANON_P46_LOGICAL_SHARD_INDEX=0
 CANON_P46_PHYSICAL_SHARD_INDEX=0
-state-campaign
+state-launches/p46r01a0
 logs/campaign.log
 4x4x8
 32 Pathways workers
@@ -174,12 +258,47 @@ The renderer rejects parity plus full campaign, nonzero externally supplied
 shard indices, Q4 topology 256, Q32 topology 128, floating images, or an
 unreviewed whitelist digest. Do not hot-patch the YAML.
 
+## Resume after interruption
+
+The simplest recovery is to delete only the failed JobSet object and reapply
+the original rendered YAML. If a new Kubernetes name is required, render from
+the original published source checkout with a new short launch id and the same
+resume tag:
+
+```bash
+ORIGINAL_SOURCE_SHA=<sha recorded by the first manifest>
+RESUME_TAG=p46q4wash01
+RUN_ID=p46r01a1
+
+python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
+  --base "$BASE" \
+  --output "/tmp/p46-q4-wash-resume-${RUN_ID}.yaml" \
+  --workload q4-clean-eval \
+  --topology "$TOPOLOGY" \
+  --source-commit "$ORIGINAL_SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$RUN_ID" \
+  --resume-tag "$RESUME_TAG" \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC" \
+  --full-campaign
+```
+
+Do not replace `ORIGINAL_SOURCE_SHA` with the branch's newer HEAD. The launch
+will fetch the branch, prove the original SHA is still in its ancestry, and
+check out the original SHA. Contract drift fails before model initialization.
+
 ## Runtime interpretation
 
 Healthy progress markers are:
 
 ```text
 P46_EVAL_CAMPAIGN_WAVE_START ... pending=64 runtime_reused=1
+[P46.RESUME] LEASE_ACQUIRED resume_tag=... launch_id=... contract_sha256=...
+[P46.RESUME] LEGACY_IMPORT_PASS ...  # first adopted launch only
+[P46.RESUME] ORPHAN_SANDBOX_CLEANUP_PASS ... remaining=0
 P46_EVAL_TRAJECTORY ... completed=<n>/<wave-size>
 P46_EVAL_CAMPAIGN_LOGICAL_PASS ... runtime_reused=1
 P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58 ...
@@ -189,14 +308,19 @@ P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_s
 The following stop nonzero and preserve already fsynced artifacts:
 
 ```text
-P46_EVAL_CAMPAIGN_WAVE_TIMEOUT ... resume_same_run_id=1
+P46_EVAL_CAMPAIGN_WAVE_TIMEOUT ... resume_tag=... resume_same_tag=1
 P46_EVAL_CAMPAIGN_LOGICAL_INCOMPLETE ...
 ```
 
-On a wave timeout, first archive the full log and Kubernetes events and verify
-sandbox cleanup. Relaunch the same manifest/run id only after the cause is
-understood; exact completed identities will be skipped. Never change topology,
-source SHA, model, sampling, or run id while calling it a resume.
+On a wave timeout, first archive Kubernetes events and identify the immutable
+attempt log printed by `[P46.RESUME] ATTEMPT_LOG`. After the cause is
+understood, either reapply the original manifest or render a new launch run id
+with the **same** resume tag, harness SHA and sampling-source SHA. Exact
+completed identities will be skipped. Never change either SHA, resume tag,
+topology, model, data, or sampling while calling it a resume. An adopted
+campaign keeps the sampling-source commit
+`18d5d2ac1603a26a221af9d5fc430b084ec002df` on every later render, but omits
+`--legacy-import-id` after the receipt exists.
 
 `MAX_CONTEXT_LIMIT_REACHED`, `MAX_STEPS_REACHED`, `MODEL_TIMEOUT`, and signed
 trajectory `TIMEOUT` are valid unsolved fixed-budget outcomes. They do not
@@ -209,10 +333,14 @@ model's solve-rate measurement.
 Persistent root:
 
 ```text
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/trajectories/
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/reports/
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/campaign/
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/logs/campaign.log
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/resume_contract.json
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/resume_lease.json
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/<legacy-run-id>/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/imports/<legacy-run-id>.receipt.json
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/trajectories/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/reports/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/campaign/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/logs/campaign.attempt-*.log
 ```
 
 The final washed lists are:

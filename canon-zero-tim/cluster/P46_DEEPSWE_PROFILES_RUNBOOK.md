@@ -12,31 +12,35 @@ shell override layer.
 This section supersedes the legacy shard-by-shard promotion sequence later in
 this document. The next Q4 run is full clean-data washing through one
 persistent runtime, not another standalone `l0/p0` test. Returned 128-chip run
-`p46e12804` already proved real rollout/reward capture and exposed both the old
-greedy action-tag bug and the cost of repeating model init/JIT for every 64
-trajectories.
+`p46e12804` exposed the old greedy action-tag bug and the cost of repeating
+model init/JIT. The later legacy-v5 campaign `p46e12805` ran the fixed action
+adapter at sampler source `18d5d2ac1603a26a221af9d5fc430b084ec002df`.
+Its archived first wave contains 64 valid identities and ten reward-one
+outcomes, and its log reached the second wave. The operator reports that job is
+still running: do not stop, delete, relabel, or copy its live output.
 
 P46.6 makes the Q4 repairer explicit as
 `action_compat_mode=q4_r2egym_xml_v2`; ordinary agents and Qwen3-32B training
 remain `strict_xml`. Deterministically repaired Q4 syntax and rejected model
 tool calls are model outcomes, not retryable infrastructure. Raw response,
 canonical action, repair count, and model-action-error count are persisted in
-config-v3/trajectory-v5. Only malformed harness structure or a repairer-created
+config-v4/trajectory-v6. Only malformed harness structure or a repairer-created
 corruption is a harness failure.
 
 Production washing is rendered with `--full-campaign`. It initializes Q4/vLLM
 once, then runs 463 sequential waves under the unchanged per-wave contract:
 four tasks x N16, concurrency 64, 16,384 response tokens, at most 50 steps,
 and a 3600-second deadline. Every trajectory is fsynced immediately. Relaunch
-the same published SHA, topology, and run id to resume after interruption.
+with the same explicit resume tag, published SHA, topology and evaluation
+contract to resume after interruption; the Kubernetes run id may be new.
 Completion still requires 1851 tasks, 29,616 valid identities, 58 logical
 summaries, all referenced digests, postflight cleanup, and the global
 `P46_EVAL_CAMPAIGN_PASS` marker.
 
-P46.6 is implemented by `a989af34054434e6567f88e99b45ed67faf15a44`.
-Require that commit in the exact read-back
-`origin/yuxzhang/canon-zero-tim` ancestry. Never launch from a dirty worktree
-and never modify or push `main`.
+Resume-tag hardening and frozen legacy-v5 adoption are implemented by
+`c3a960acdc94173440144559bb95f1de36d31537`. Do not launch until this commit is
+present in an exact read-back of `origin/yuxzhang/canon-zero-tim`. Never launch
+from a dirty worktree and never modify or push `main`.
 
 This package has local CPU, direct one-host development evidence, and returned
 256-chip evaluation attempts. Neither returned attempt is a physical-shard
@@ -54,6 +58,7 @@ Required implementation ancestry:
 e1b4009394c49ea015919bda0cfdb97c12c221b5
 a4d165e854cc4c2320d8120e89aed185eaf61465
 a642ab267425a5b08b0cebb6e12c607f50f71831
+c3a960acdc94173440144559bb95f1de36d31537
 ```
 
 P46.5 true reward-only evaluation is published by `a4d165e8`; do not infer its
@@ -70,7 +75,7 @@ finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. A remote agent must stop unless
 the exact read-back operator SHA contains that commit and all of
 `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, and
-`P46_DEEPSWE_PROFILES_CPU_PASS cases=40`, plus
+`P46_DEEPSWE_PROFILES_CPU_PASS cases=65`, plus
 `finalize_deepswe_eval.py`. Do not invent or substitute a repair SHA in
 advance.
 
@@ -327,20 +332,50 @@ source SHA, data revision, whitelist digest, client-image digest, topology,
 model and sampling fingerprint. Only a valid record completes an identity.
 Resume accepts only an identical fingerprint, permits the next consecutive
 attempt after an invalid record, and rejects nonconsecutive attempts or any
-attempt after the first valid result. A timed-out wave returns nonzero after
-preserving every attempt; relaunch the same full-campaign manifest, run id,
-topology and source SHA to retry only missing identities. Genuine
+attempt after the first valid result. A full campaign additionally binds an
+explicit lowercase `resume_tag` to one immutable `resume_contract.json` and
+holds a kernel-released exclusive lease, so two launches cannot write the same
+campaign concurrently. A timed-out wave returns nonzero after preserving every
+complete attempt; reapply the original manifest or use a new launch run id with
+the same resume tag, topology, harness SHA and sampling-source SHA to retry only
+missing identities.
+An in-flight trajectory with no complete fsynced row restarts from its
+beginning; token-level continuation is not supported. Genuine
 infrastructure failures retry in-process only within that wave's shared
 3600-second wall-clock budget.
+
+Each resumed launch checks out the original manifest SHA even if the branch has
+advanced, after proving that SHA remains in the fetched branch ancestry. Setup
+state is isolated by launch run id. Before generating new trajectories, the
+exclusive owner removes and confirms only R2E sandbox pods labelled with the
+same resume tag. Each launch writes a new immutable attempt log, so an old
+timeout remains available but cannot poison the current postflight grep.
+
+A legacy config-v3/trajectory-v5 campaign is never read from its live output
+directory. After that JobSet reaches a natural terminal state and no producer
+pod remains, an operator may copy its trajectory tree once into
+`<resume-root>/imports/<legacy-run-id>/trajectories/` and seal the copy with
+`SHA256SUMS`. Under the new campaign lease, the importer verifies every file
+digest, exact derived v5 fingerprint, ordered clean task, sample nonce,
+attempt sequence, outcome, reward-only logprob absence, and per-logical-shard
+provenance. It then emits immutable v6 rows plus an import receipt before TPU
+initialization. The old sampler SHA remains `sampled_by`; the new checkout SHA
+is recorded separately as `harness_commit`. Directly copying v5 rows into
+`outputs/trajectories/`, importing a live directory, or changing any signed
+model/data/sampling/topology field is forbidden and fails closed.
 
 Reports are immutable and digest-bearing. Concurrent final shard writers are
 accepted only when their bytes are identical; any content drift is a hard
 failure. Durable output is under the mounted disk at:
 
 ```text
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/trajectories/
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/reports/
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/logs/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/resume_contract.json
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/resume_lease.json
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/<legacy-run-id>/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/imports/*.receipt.json
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/trajectories/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/reports/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/logs/campaign.attempt-*.log
 ```
 
 The useful terminal markers are:
@@ -403,7 +438,7 @@ in the P34/P44 runbooks with the actual registry-digest client image. Do not
 print or modify `HF_TOKEN`, `WANDB_API_KEY`, or `.env`.
 
 For evaluation execution after the `p46e25609` action-adapter correction, the
-marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=40`, and this
+marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=65`, and this
 source audit must
 pass before rendering:
 
@@ -443,6 +478,7 @@ Set operator-specific inputs without embedding credential values:
 TOPOLOGY=64
 BASE=canon-zero-tim/cluster/jobset-64chip.yaml
 RUN_ID=p46q4d01
+RESUME_TAG=p46q4wash01
 CPU_NODEPOOL=deepswe-cpu-pool
 TPU_NODEPOOL=mlperf-v5p-64-np-0
 MODEL_PVC=haoyugao-cpu-np-pvc
@@ -475,7 +511,9 @@ python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
 ```
 
 Render the production Qwen3-4B full washing campaign. This is the next launch
-path; use a new run id and do not also pass shard indices:
+path. Choose the campaign resume tag once and keep it unchanged; run id names
+this Kubernetes attempt and may change on a later resume. Do not also pass
+shard indices:
 
 ```bash
 python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
@@ -487,15 +525,100 @@ python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --source-branch yuxzhang/canon-zero-tim \
   --client-image "$CLIENT_IMAGE_DIGEST" \
   --run-id "$RUN_ID" \
+  --resume-tag "$RESUME_TAG" \
   --cpu-nodepool "$CPU_NODEPOOL" \
   --worker-nodepool "$TPU_NODEPOOL" \
   --model-pvc "$MODEL_PVC" \
   --full-campaign
 ```
 
-The renderer writes `CANON_P46_FULL_CAMPAIGN=1`, one campaign state directory,
-and one campaign log. On 128 chips it must render `4x4x8`, 32 workers, and an
-evaluation mesh of DP16 x TP8.
+The renderer writes `CANON_P46_FULL_CAMPAIGN=1`,
+`CANON_P46_RESUME_TAG=$RESUME_TAG`, launch-isolated setup state, one shared
+artifact root and immutable per-attempt logs. On 128 chips it must render
+`4x4x8`, 32 workers, and an evaluation mesh of DP16 x TP8.
+
+## Preserve and adopt the running `p46e12805` campaign
+
+Do not stop the existing `p46e12805` JobSet. It is a legacy-v5 producer and
+must keep writing only its current root:
+
+```text
+/mnt/disks/linchai_data/deepswe_eval/p46e12805/
+```
+
+Wait for it to terminate naturally. Before copying anything, archive its final
+JobSet status/events and prove that its coordinator and sandbox producer pods
+are no longer running. A live JobSet, a terminating pod, or an output file that
+is still growing means **wait**. Never point `--legacy-import-id` at this live
+root.
+
+After terminal-state proof, create a new, write-once snapshot under a fresh
+resume tag. These commands copy; they do not move or delete the old evidence:
+
+```bash
+LEGACY_RUN_ID=p46e12805
+LEGACY_ROOT=/mnt/disks/linchai_data/deepswe_eval/$LEGACY_RUN_ID
+RESUME_TAG=p46q4wash01
+RESUME_ROOT=/mnt/disks/linchai_data/deepswe_eval/$RESUME_TAG
+SNAPSHOT_ROOT=$RESUME_ROOT/imports/$LEGACY_RUN_ID
+
+test -d "$LEGACY_ROOT/outputs/trajectories"
+test ! -e "$SNAPSHOT_ROOT"
+test -z "$(find "$LEGACY_ROOT/outputs/trajectories" -type l -print -quit)"
+install -d "$SNAPSHOT_ROOT/trajectories"
+cp -a "$LEGACY_ROOT/outputs/trajectories/." "$SNAPSHOT_ROOT/trajectories/"
+(
+  cd "$SNAPSHOT_ROOT"
+  find trajectories -type f -name '*.jsonl' -print0 \
+    | LC_ALL=C sort -z \
+    | xargs -0 -r sha256sum > SHA256SUMS.tmp
+  test -s SHA256SUMS.tmp
+  mv SHA256SUMS.tmp SHA256SUMS
+)
+chmod -R a-w "$SNAPSHOT_ROOT"
+```
+
+Use a fresh resume tag with no existing target trajectory files. The first
+resume-capable launch pins the new harness commit separately from the old
+sampling lineage and performs the import before model initialization:
+
+```bash
+HARNESS_SHA=c3a960acdc94173440144559bb95f1de36d31537
+SAMPLING_SOURCE_SHA=18d5d2ac1603a26a221af9d5fc430b084ec002df
+RUN_ID=p46r01a0
+
+python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
+  --base "$BASE" \
+  --output "/tmp/p46-eval-adopt-${TOPOLOGY}-${RUN_ID}.yaml" \
+  --workload q4-clean-eval \
+  --topology "$TOPOLOGY" \
+  --source-commit "$HARNESS_SHA" \
+  --sampling-source-commit "$SAMPLING_SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$RUN_ID" \
+  --resume-tag "$RESUME_TAG" \
+  --legacy-import-id "$LEGACY_RUN_ID" \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC" \
+  --full-campaign
+```
+
+Required pre-TPU marker:
+
+```text
+[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12805 records=<n> valid_records=<n> manifest_sha256=<sha256> receipt=<absolute-path>
+```
+
+The exact receipt is
+`<resume-root>/outputs/imports/p46e12805.receipt.json`. If fingerprint,
+manifest, task order, identity, provenance, or attempt validation fails, stop;
+do not edit either the old trajectories or the receipt. Subsequent relaunches
+omit `--legacy-import-id` but retain the same `HARNESS_SHA`,
+`SAMPLING_SOURCE_SHA`, resume tag, topology, client image, and all evaluation
+fields. The evaluator will skip imported valid identities and retry only
+missing or policy-invalid ones.
 
 Render one Qwen3-4B physical shard only for a separately requested diagnostic,
 not for the P46.6 production washing launch:
@@ -595,7 +718,8 @@ sequence before washing. After P46.6 is published and separately approved for
 cluster launch, render the single `--full-campaign` JobSet above. Monitor each
 bounded wave and inspect trajectories during the run; do not wait for the end
 to discover malformed artifacts. On interruption, preserve logs/events,
-verify cleanup, and resume the same manifest/run id. The numbered legacy
+verify cleanup, and resume with the same tag and source contract. The numbered
+legacy
 sequence below remains historical rationale and claim ceilings; it is not the
 current launch order.
 
@@ -615,7 +739,7 @@ The remote agent must advance one gate at a time. Q4 has first-class 64/128
 variants; Q32 has first-class 64/256 variants. Use whichever admitted
 allocation is available. Prefer 64 only when both admitted allocations are
 simultaneously available because it is cheaper, not because it is a
-prerequisite. Keep one topology for a given resumable evaluation run-id because
+prerequisite. Keep one topology for a given resumable evaluation tag because
 topology is part of its fingerprint.
 
 1. Before any full evaluation shard, require a clean published P46.5 SHA and
