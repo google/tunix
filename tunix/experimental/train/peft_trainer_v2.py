@@ -30,7 +30,6 @@ import jax.numpy as jnp
 import jax.sharding as shd
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
-from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -177,7 +176,6 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -274,11 +272,6 @@ class GradientAccumulator(nnx.Module):
       self.grads = nnx.data({})
       self._param_dtypes = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
-
-  @property
-  def allocated(self) -> bool:
-    """Whether a parameter-sized gradient buffer is currently held."""
-    return bool(jax.tree_util.tree_leaves(self.grads))
 
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
@@ -595,7 +588,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     Returns:
       A tuple containing the loss, and auxiliary data (or None if has_aux is
-      False). Gradients are left in `grad_accumulator`.
+      False).
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -626,6 +619,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     # TODO(b/491970038): update denom for sequence packing.
     grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+
     if isinstance(aux, utils.LossOutput):
       return loss_val, aux.aux_metrics
     elif self._has_aux:
@@ -650,16 +644,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       The gradient norm.
     """
     acc_grads = grad_accumulator.get()
+    # Compute the norm in float32. For production-size models the sum-of-squares
+    # over bf16 grads quickly exhausts bf16, and float32 is needed for numerical
+    # stability.
     norm = optax.global_norm(
         jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
     )
     optimizer.update(model, acc_grads)
-    # Unconditional: `reset()` itself decides between zeroing the buffer and
-    # dropping it, based on whether the accumulator is persistent. Zeroing an
-    # overwrite-only buffer would write a full parameter-sized copy per step
-    # whose lifetime overlaps `acc_grads` (still being read by
-    # `optimizer.update`), so XLA could not even alias it onto the donated
-    # input and the steady state would carry two gradient trees.
     grad_accumulator.reset()
     return norm
 
@@ -805,12 +796,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         donate_argnames = ("grad_accumulator",)
       self._jitted_fwd_bwd_step_fn = nnx.jit(
           fwd_bwd_step, donate_argnames=donate_argnames,
-          fwd_bwd_step, donate_argnames=donate_argnames,
       )
-      # Donating `grad_accumulator` is sound again now that `reset()` always
-      # writes it: the donated input has a matching output to alias onto. In the
-      # non-persistent case that output is the empty tree, i.e. the buffer is
-      # released rather than rewritten.
       self._jitted_update_step_fn = nnx.jit(
           update_step, donate_argnames=("optimizer", "grad_accumulator")
       )
@@ -1185,32 +1171,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       *,
       cache_nnx_graph: bool = True,
   ) -> None:
-    """Training loop.
-
-    Args:
-      train_ds: Training dataset.
-      eval_ds: Optional evaluation dataset.
-      skip_jit: If True, the step functions are not JITed.
-      cache_nnx_graph: Wrap the step functions with `nnx.cached_partial`, which
-        caches the split state of the bound modules so nnx does not re-flatten
-        them on every call. Two consequences worth knowing:
-
-        Memory. The cache holds Python references to the parameter and
-        optimizer arrays, which makes those buffers non-donatable, so the
-        updated values cannot alias onto the inputs and both versions stay
-        resident. Measured on gemma-2b (2.506B params, bfloat16, fsdp=2 x tp=2,
-        one parameter tree = 1.17 GiB per device), turning it on cost 2.35 GiB
-        of heap -- exactly two parameter trees. Leave it off when memory-bound.
-
-        Correctness. Because the graphdef is frozen at wrap time, a step that
-        changes a bound module's pytree STRUCTURE cannot hand that change to a
-        later executable: the change is silently discarded. That is why the
-        split path with a lazily-allocated gradient accumulator (`add()` adopts
-        the tree, growing it from `{}`) fails here with "Mismatch custom node
-        data: ('embedder', ...) != (); value: State({})". The fused path is
-        unaffected because the accumulator ends each call with the same
-        structure it started with.
-    """
+    """Training loop."""
     logging.log_first_n(
         logging.INFO,
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
@@ -1458,7 +1419,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       )
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
-      eval_loss = None
 
 
 def _default_loss_fn(
