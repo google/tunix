@@ -6,12 +6,15 @@ separate workstream and waits for its DP16 resources.
 
 ## Current fact
 
-P38s13a/source `d3e6c1b0` and P38s14/source `ac2c31bc` both reproduced A-B red
-with exact B-C, but both predate P38.2l. They ran one round, emitted no
-exact-call incident ledger or immutable live snapshots, and returned no
-complete GCS bundle. They are numerical evidence only and cannot construct
-strict E0. Do not reuse those sources or run ids. Do not run concurrency 32 or
-KV-unified again.
+P38s15/source `58a0ed84` successfully executed all three Frozen-Weight
+diagnostic rounds (768 trajectories total, 51,330 action tokens) on 64 TPU
+(`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
+controlled exit 42. It measured exact B-C (0 mismatches, bitwise identical)
+and measured A-B red at 20 / 51,330 elements (`33` differing bytes,
+`max_abs=0.203777`). Mismatch rows `rows=[215, 223, 231, 254, 255]` were
+captured along with 1,915 incident ledger records (53.3 MB). Evidence is
+archived under `evidence/p38s15/`. The next step is single-host strict E0
+replay on rows 215 / 223.
 
 P38.2l is locally green. It adds immutable live GCS snapshots, three
 frozen-weight diagnostic rounds, all-red-row capsules, and a round-scoped

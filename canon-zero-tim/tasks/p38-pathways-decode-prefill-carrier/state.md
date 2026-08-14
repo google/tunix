@@ -6,14 +6,25 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2l incident-durable terminal capture is published at
-  `bd309015`. P38s15 is the next target action and pins source `dc529871d765`;
-  no valid target run has occurred from P38.2l.
+- Active phase: P38s15 3-round Frozen-Weight diagnostic completed from source
+  `58a0ed847770`. Next target action is single-host strict E0 replay and First
+  Divergence Seam Walk on rows `[215, 223, 231, 254, 255]`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
 
+- P38s15/source `58a0ed84` completed all 3 Frozen-Weight diagnostic rounds
+  (768 trajectories total, 51,330 action tokens) with zero backward and zero
+  optimizer commits, exiting with controlled code 42. It measured exact B-C
+  (0 mismatches, bitwise identical `S_prefill` vs `T_old` hash
+  `4ee783597573623391cdf65917990963dab4d85960080d396465a454c7003dd3`),
+  and measured A-B red at 20 / 51,330 elements (`33` differing bytes,
+  `max_abs=0.20377731323242188` at row 215 pos 689). Mismatch rows
+  `[215, 223, 231, 254, 255]` were captured in capsule sha256
+  `9a7d6caf0125b0798a7745ae82882132115b1721414ecf6e1f3bde18c2d27c35`
+  with incident ledger (1,915 records / 2,465 calls / 53.3 MB). Evidence
+  is committed under `evidence/p38s15/`.
 - P38s13a/source `d3e6c1b0` reproduced A-B red at 39 / 48,043 elements
   (`58` bytes, `max_abs=0.28188323974609375`) with exact B-C, but it was a
   pre-P38.2l single-round run. Its committed evidence omits the capsule,
@@ -23,9 +34,6 @@
   pre-P38.2l single-round run: no round markers, incident ledger, live GCS
   snapshots, `COLLECTED`, or `COMPLETE` survived. It cannot construct strict
   E0. Its SHA-verified stdout is under `evidence/p38s14/`.
-- The first valid P38.2l target is therefore P38s15. It must pin source
-  `dc529871d7654ad1ec2cdefe1e4d50e07824393c`; that source contains
-  `bd309015`, and its later changes are evidence-only.
 
 - P38s12f is a valid Attempt-0 concurrency-32 numerical diagnostic from
   source `b4391703`. It reached logical KV 1972 and measured A-B red at 11 /

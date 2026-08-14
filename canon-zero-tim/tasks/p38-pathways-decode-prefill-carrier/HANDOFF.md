@@ -5,83 +5,40 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: run P38s15 from pinned source `dc529871d765`
+## CURRENT: P38s15 completed; execute single-host strict E0 replay
 
-P38s13a and P38s14 both reproduced the carrier but used pre-P38.2l sources.
-P38s13a/source `d3e6c1b0` measured A-B red at 39 / 48,043 elements with
-`max_abs=0.281883`; P38s14/source `ac2c31bc` measured 26 / 47,076 with
-`max_abs=0.253220`. Both kept B-C exact. Both were single-round runs without
-the exact-call incident ledger, immutable live snapshots, or a complete GCS
-bundle, so neither can construct strict E0. Do not reuse either run id or
-source.
+P38s15/source `58a0ed847770` completed all three Frozen-Weight diagnostic
+rounds (768 trajectories total, 51,330 action tokens) on 64 TPU (`DP16xTP4`,
+concurrency 256) with zero backward, zero optimizer commits, and controlled
+exit 42.
 
-The remaining defect is evidence transport. P38s12f's stdout ended before the
-pre-align timestamp and its committed bundle omitted the mismatch capsule and
-serving archive. Source containing P38.2k writes to:
+Key numerical facts:
+- B-C boundary (`S_prefill` vs `T_old`): **0 mismatches (STRICT EXACT 0)**,
+  bitwise identical hashes `4ee783597573623391cdf65917990963dab4d85960080d396465a454c7003dd3`.
+- A-B boundary (`S_decode` vs `S_prefill`): **20 differing elements / 33 bytes**,
+  `max_abs=0.20377731323242188` (at row 215 pos 689).
+- Mismatch rows: `rows=[215, 223, 231, 254, 255]`.
+- Capsule SHA256: `9a7d6caf0125b0798a7745ae82882132115b1721414ecf6e1f3bde18c2d27c35`.
+- Incident ledger: 1,915 records / 2,465 calls / 53.3 MB.
+- Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s15/`.
 
-```text
-gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/<jobset>/attempt-0
-```
+### Next Operator Step: Single-Host Strict E0 Replay
 
-It uploads/readbacks `PREFLIGHT.json` before workload execution, uploads the
-core files plus SHA manifest before `COLLECTED.json`, and writes
-`COMPLETE.json` only after full local postflight acceptance. Never interpret
-`PREFLIGHT` as a numerical run or `COLLECTED` as a completed run.
-
-P38.2k is published at `246eeb87`. P38.2l is published at `bd309015`. It adds immutable mid-run snapshots,
-three frozen-weight rounds, all-red-row capsules, and a round-scoped exact-call
-incident ledger. Real Qwen3-8B capture-on/off rehearsals were bitwise identical;
-the on arm produced 729 ledger records / 2,118,899 bytes. Evidence is in
-`artifacts/p38_2l_onehost_rehearsal_0814.md`.
-
-Do not launch from a dirty worktree. The next run pins source
-`dc529871d7654ad1ec2cdefe1e4d50e07824393c`, whose only changes after
-`bd309015` are archived evidence. The controlling phase is:
-
-`phases/p38-2l-terminal-incident-capture.md`
-
-Use run id `p38s15`, stock only, concurrency 256.
-This is the known-red capture carrier, not another concurrency experiment. It
-runs three frozen-weight rollout/alignment rounds (768 trajectories total),
-never backward or optimizer, and exits with controlled code 42:
+The next action is single-host deterministic replay on the captured rows
+(e.g., row 215 and row 223) to construct R0 (first replay), R1 (repeat replay),
+and REF (clean prefill reference without serving):
 
 ```bash
-python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
-  --source-commit "$SOURCE_COMMIT" --run-id p38s15 \
-  --output-dir "$OUT" --stock-only --max-concurrency 256
+bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/evidence/p38s15/p38_frozenlake_mismatch_capsule.npz \
+  p38s15_replay_row215 215
 ```
 
-Before waiting for rollout, require:
+If Strict E0 reproduces the online A value (`-2.244888` at pos 684), proceed
+with the First Divergence Seam Walk across RoPE -> RPA -> Residual -> Logits
+for code-level carrier remediation.
 
-```bash
-PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/$(basename "$(sed -n 's/^  name: //p' "$OUT/jobset-p38-serving-stock.yaml" | head -n 1)")/attempt-0"
-gcloud storage ls "$PREFIX/PREFLIGHT.json"
-```
-
-After termination, retrieve the bucket independently of pod logs:
-
-```bash
-mkdir -p "$EVIDENCE/gcs"
-gcloud storage rsync -r "$PREFIX" "$EVIDENCE/gcs"
-test -s "$EVIDENCE/gcs/COLLECTED.json"
-(cd "$EVIDENCE/gcs" && sha256sum -c SHA256SUMS --quiet)
-```
-
-`COMPLETE.json` is required for target admission. The bucket also contains
-immutable `live/NNNNNN/LIVE.json` snapshots; they preserve partial evidence but
-never substitute for `COMPLETE`. If only `COLLECTED.json`
-exists, retain and analyze the raw failure evidence but do not claim a
-complete run. Return `run.log`, all three pre-alignment rows, every per-round
-capsule, the stable capsule alias, `serving-classification.json`,
-`serving-capture.tar`, the incident ledger, `SHA256SUMS`, `COLLECTED.json`, and
-`COMPLETE.json`. Use the round-scoped capsule/ledger joins to build strict E0;
-do not return to mask-derived E0-lite, KV-unified, or concurrency 32.
-
-The current P38 JobSet still uses node-local `/tmp` during execution. P38.2k
-protects completed postflight artifacts; P38.2l adds immutable live snapshots.
-PVC integration is intentionally out of scope.
-
-## HISTORY: discarded P38s12e and completed P38s12f
+## HISTORY: completed P38s15, P38s14, P38s13a, P38s12f
 
 This section is retained for provenance only. The current executable operator
 protocol is the P38s15 section at the top of

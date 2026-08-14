@@ -1187,3 +1187,24 @@
   `dc529871d7654ad1ec2cdefe1e4d50e07824393c`; reject launch unless the log
   attests the pinned source, live worker, incident ledger, three frozen rounds,
   and completion-last GCS contract.
+
+## 2026-08-14 UTC — P38s15 diagnostic run completed on 64 TPU with controlled exit 42
+
+- Type: target execution and verification
+- Fact: P38s15 was launched from source `58a0ed847770` with `--stock-only` and
+  `--max-concurrency 256` on 64 TPU (`DP16xTP4`).
+- Fact: all three frozen-weight diagnostic rounds (768 trajectories total,
+  51,330 action tokens) ran successfully with 0 backward and 0 optimizer commits.
+- Fact: B-C boundary (`S_prefill` vs `T_old`) measured STRICT EXACT 0 (0 mismatches,
+  identical hash `4ee783597573623391cdf65917990963dab4d85960080d396465a454c7003dd3`).
+- Fact: A-B boundary (`S_decode` vs `S_prefill`) measured 20 differing elements /
+  33 differing bytes with `max_abs=0.20377731323242188` (at row 215 pos 689).
+  First mismatch occurred at row 215 pos 684 (`abs_delta=0.09749`).
+- Fact: Mismatch rows `rows=[215, 223, 231, 254, 255]` were saved in capsule
+  `p38_frozenlake_mismatch_capsule.round-000002.npz` (sha256: `9a7d6caf0125...`).
+- Fact: Exact-call incident ledger recorded 1,915 records / 2,465 calls / 53.3 MB.
+- Fact: Head process exited with controlled code 42.
+- Files/artifacts: `evidence/p38s15/head.full.log`, `evidence/p38s15/pre_alignment.json`,
+  `evidence/p38s15/source_commit.txt`, `evidence/p38s15/SHA256SUMS`.
+- Next: Single-host strict E0 replay and First Divergence Seam Walk.
+
