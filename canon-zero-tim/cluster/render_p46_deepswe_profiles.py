@@ -272,6 +272,7 @@ def render_q4_eval(
     physical_shard_index: int,
     evaluation_mode: str,
     parity_canary: bool,
+    full_campaign: bool,
 ) -> dict[str, Any]:
   if evaluation_mode not in EVALUATION_MODES:
     raise ValueError("unsupported P46 evaluation mode")
@@ -279,6 +280,10 @@ def render_q4_eval(
     raise ValueError("logprob_observer is restricted to the parity canary")
   if parity_canary and topology != "64":
     raise ValueError("P46 parity canary requires topology 64")
+  if full_campaign and parity_canary:
+    raise ValueError("P46 full campaign cannot be a parity canary")
+  if full_campaign and (logical_shard_index or physical_shard_index):
+    raise ValueError("P46 full campaign owns all shard indices")
   document = _base_render(
       base,
       source_commit=source_commit,
@@ -308,12 +313,14 @@ def render_q4_eval(
   lane = (
       f"parity-{'obs' if evaluation_mode == 'logprob_observer' else 'reward'}"
       if parity_canary
-      else "eval"
+      else ("eval-campaign" if full_campaign else "eval")
   )
-  name = (
-      f"canon-p46-{lane}-{topology}-{logical_shard_index}-"
-      f"{physical_shard_index}-{run_id}"
-  )
+  name = f"canon-p46-{lane}-{topology}-{run_id}"
+  if not full_campaign:
+    name = (
+        f"canon-p46-{lane}-{topology}-{logical_shard_index}-"
+        f"{physical_shard_index}-{run_id}"
+    )
   if len(name) > 63:
     raise ValueError("rendered P46 evaluation JobSet name exceeds 63 characters")
   run_root = f"/mnt/disks/linchai_data/deepswe_eval/{run_id}"
@@ -326,6 +333,7 @@ def render_q4_eval(
       "canon.zero-tim/topology": topology,
       "canon.zero-tim/evaluation-mode": evaluation_mode,
       "canon.zero-tim/parity-canary": "1" if parity_canary else "0",
+      "canon.zero-tim/full-campaign": "1" if full_campaign else "0",
   })
   _configure_topology(
       document,
@@ -340,13 +348,18 @@ def render_q4_eval(
           "cluster/profiles/qwen3-4b-dp-parity-deepswe-eval.env"
       ),
       "CANON_MODE": "run",
-      "CANON_STATE": f"{run_root}/state-l{logical_shard_index}-p{physical_shard_index}",
+      "CANON_STATE": (
+          f"{run_root}/state-campaign"
+          if full_campaign
+          else f"{run_root}/state-l{logical_shard_index}-p{physical_shard_index}"
+      ),
       "CANON_RUN_ID": run_id,
       "CANON_CLIENT_IMAGE": client_image,
       "CANON_P46_DEEPSWE_TRAIN": "0",
       "CANON_P46_EVALUATION": "1",
       "CANON_P46_EVALUATION_MODE": evaluation_mode,
       "CANON_P46_PARITY_CANARY": "1" if parity_canary else "0",
+      "CANON_P46_FULL_CAMPAIGN": "1" if full_campaign else "0",
       "CANON_P46_TOPOLOGY": topology,
       "CANON_P34_TOPOLOGY_ADMITTED": "0",
       "CANON_P34_TP8_ADMITTED": "0",
@@ -379,8 +392,12 @@ def render_q4_eval(
       "CANON_P30_RESHARD_ACCUMULATOR": "0",
       "CANON_RUN_CMD": "python3 -u examples/deepswe/eval_deepswe.py",
       "CANON_RUN_LOG": (
-          f"{run_root}/logs/l{logical_shard_index}-"
-          f"p{physical_shard_index}.log"
+          f"{run_root}/logs/campaign.log"
+          if full_campaign
+          else (
+              f"{run_root}/logs/l{logical_shard_index}-"
+              f"p{physical_shard_index}.log"
+          )
       ),
       "CANON_P46_OUTPUT_DIR": f"{run_root}/outputs",
       "CANON_P46_GOLD_JSONL": whitelist,
@@ -397,6 +414,7 @@ def render_q4_eval(
       topology=topology,
       evaluation_mode=evaluation_mode,
       parity_canary=parity_canary,
+      full_campaign=full_campaign,
   )
   return document
 
@@ -474,6 +492,7 @@ def validate_eval(
     topology: str,
     evaluation_mode: str,
     parity_canary: bool,
+    full_campaign: bool,
 ) -> None:
   _validate_topology(document, topology)
   env = p34._env(document)
@@ -486,6 +505,7 @@ def validate_eval(
       "CANON_P46_TOPOLOGY": topology,
       "CANON_P46_EVALUATION_MODE": evaluation_mode,
       "CANON_P46_PARITY_CANARY": "1" if parity_canary else "0",
+      "CANON_P46_FULL_CAMPAIGN": "1" if full_campaign else "0",
       "CANON_P32_TRAIN_ADMITTED": "0",
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0",
       "CANON_P34_TRAJECTORY_CAPTURE": "0",
@@ -529,6 +549,7 @@ def render(
     physical_shard_index: int = 0,
     evaluation_mode: str = "reward_only",
     parity_canary: bool = False,
+    full_campaign: bool = False,
 ) -> dict[str, Any]:
   if workload not in WORKLOADS:
     raise ValueError(f"unknown P46 workload: {workload}")
@@ -539,6 +560,7 @@ def render(
     )
   if workload != "q4-clean-eval" and (
       evaluation_mode != "reward_only" or parity_canary
+      or full_campaign
   ):
     raise ValueError("evaluation-only controls cannot modify a training workload")
   common = dict(
@@ -563,6 +585,7 @@ def render(
       physical_shard_index=physical_shard_index,
       evaluation_mode=evaluation_mode,
       parity_canary=parity_canary,
+      full_campaign=full_campaign,
       **common,
   )
 
@@ -590,6 +613,7 @@ def main() -> None:
       "--evaluation-mode", choices=EVALUATION_MODES, default="reward_only"
   )
   parser.add_argument("--parity-canary", action="store_true")
+  parser.add_argument("--full-campaign", action="store_true")
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -610,6 +634,7 @@ def main() -> None:
       physical_shard_index=args.physical_shard_index,
       evaluation_mode=args.evaluation_mode,
       parity_canary=args.parity_canary,
+      full_campaign=args.full_campaign,
   )
   args.output.write_text(p34.dump_jobset(document), encoding="utf-8")
   print(

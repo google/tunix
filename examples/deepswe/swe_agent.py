@@ -8,10 +8,16 @@ from typing import Optional, Union  # Added Union for pytype compatibility
 from absl import logging
 
 try:
+  from .r2egym_action_compat import ACTION_COMPAT_MODES
+  from .r2egym_action_compat import Q4_R2EGYM_COMPAT_MODE
+  from .r2egym_action_compat import STRICT_XML_MODE
   from .r2egym_action_compat import canonicalize_r2egym_action
 except ImportError:
   # ``eval_deepswe.py`` is also supported as a direct script, where its
   # directory rather than the repository root is the import base.
+  from r2egym_action_compat import ACTION_COMPAT_MODES
+  from r2egym_action_compat import Q4_R2EGYM_COMPAT_MODE
+  from r2egym_action_compat import STRICT_XML_MODE
   from r2egym_action_compat import canonicalize_r2egym_action
 
 SWE_SYSTEM_PROMPT_FN_CALL = """You are a programming agent who is provided a github issue and repository bash environment and is tasked to solve certain tasks (e.g., file localization, testcase generation, code repair and editing etc) to resolve the issue.
@@ -371,7 +377,9 @@ def parse_oai_response(response: Any):
   return thought, action
 
 
-def parse_xml_response(response_text: str) -> tuple[str, Any]:
+def parse_xml_response(
+    response_text: str, *, action_compat_mode: str = STRICT_XML_MODE
+) -> tuple[str, Any]:
   """Extracts:
 
   - thought: everything before the first <function=...> block
@@ -394,16 +402,33 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   thought = thought.strip()
   action = action.strip()
 
-  action, repair_count = canonicalize_r2egym_action(action)
-  if repair_count:
-    logging.warning(
-        "[DEEPSWE.R2E_ACTION_COMPAT] repaired %d inline-valued "
-        "R2E parameter tag(s)",
-        repair_count,
+  if action_compat_mode not in ACTION_COMPAT_MODES:
+    raise ValueError(
+        f"unsupported R2E action compatibility mode: {action_compat_mode}"
     )
+  if action_compat_mode == Q4_R2EGYM_COMPAT_MODE:
+    action, repair_count = canonicalize_r2egym_action(action)
+    if repair_count:
+      logging.warning(
+          "[DEEPSWE.R2E_ACTION_COMPAT] mode=%s repairs=%d",
+          action_compat_mode,
+          repair_count,
+      )
 
   # convert action to Action object
-  action = _require_swe_action().from_string(action)
+  swe_action = _require_swe_action()
+  if action_compat_mode == STRICT_XML_MODE:
+    action = swe_action.from_string(action)
+  else:
+    try:
+      action = swe_action.from_string(action)
+    except Exception:  # A malformed Q4 tool call is a model outcome, not infra.
+      logging.warning(
+          "[DEEPSWE.MODEL_ACTION_INVALID] mode=%s",
+          action_compat_mode,
+          exc_info=True,
+      )
+      action = swe_action(function_name="", parameters={})
 
   return thought, action
 
@@ -418,9 +443,15 @@ class SWEAgent(ConversationAgentBase):
       use_fn_calling: bool = False,
       format_model_response: bool = False,
       scaffold: str = "r2egym",
+      action_compat_mode: str = STRICT_XML_MODE,
   ):
     self.use_fn_calling = use_fn_calling
     self.format_model_response = format_model_response
+    if action_compat_mode not in ACTION_COMPAT_MODES:
+      raise ValueError(
+          f"unsupported R2E action compatibility mode: {action_compat_mode}"
+      )
+    self.action_compat_mode = action_compat_mode
     assert scaffold in [
         "r2egym",
         "sweagent",
@@ -509,7 +540,9 @@ class SWEAgent(ConversationAgentBase):
     if self.use_fn_calling:
       thought, action = parse_oai_response(response)
     else:
-      thought, action = parse_xml_response(response)
+      thought, action = parse_xml_response(
+          response, action_compat_mode=self.action_compat_mode
+      )
     action_str = action.to_xml_string()
 
     # Update Trajectory

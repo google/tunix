@@ -29,9 +29,16 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+try:
+  from .r2egym_action_compat import Q4_R2EGYM_COMPAT_MODE
+  from .r2egym_action_compat import canonicalize_r2egym_action
+except ImportError:
+  from r2egym_action_compat import Q4_R2EGYM_COMPAT_MODE
+  from r2egym_action_compat import canonicalize_r2egym_action
 
-CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v2"
-TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v4"
+
+CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v3"
+TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v5"
 REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v3"
 SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v3"
 CAMPAIGN_SCHEMA = "canon.p46.deepswe-eval.campaign-summary.v1"
@@ -51,7 +58,7 @@ VALID_STATUSES = frozenset({
     "MODEL_TIMEOUT",
     "TIMEOUT",
 })
-_TOOL_ADAPTER_OBSERVATION_ERROR = re.compile(
+_MODEL_ACTION_OBSERVATION_ERROR = re.compile(
     r"(?:"
     r"(?:file_editor|search): error: unrecognized arguments:.*"
     r"(?:--command(?:=|\s)|--(?:view|create|str_replace|insert|undo_edit)\b|"
@@ -60,7 +67,7 @@ _TOOL_ADAPTER_OBSERVATION_ERROR = re.compile(
     r")",
     re.I,
 )
-_TOOL_ADAPTER_ACTION_ERROR = re.compile(
+_MODEL_ACTION_SYNTAX = re.compile(
     r"(?:"
     r"<parameter\s*=\s*[A-Za-z_][A-Za-z0-9_-]*=[^>\r\n]+>"
     r"|<function=file_editor>.*?"
@@ -118,6 +125,7 @@ class EvalConfig:
   shard_timeout_secs: int = 3600
   seed_base: int = 42
   prefix_cache: bool = False
+  action_compat_mode: str = Q4_R2EGYM_COMPAT_MODE
 
   def validate(self) -> None:
     expected = {
@@ -144,6 +152,7 @@ class EvalConfig:
           "reward_timeout_secs": 300,
           "cleanup_timeout_secs": 120,
           "shard_timeout_secs": 1200,
+          "action_compat_mode": Q4_R2EGYM_COMPAT_MODE,
       })
     else:
       expected.update({
@@ -160,6 +169,7 @@ class EvalConfig:
           "reward_timeout_secs": 600,
           "cleanup_timeout_secs": 300,
           "shard_timeout_secs": 3600,
+          "action_compat_mode": Q4_R2EGYM_COMPAT_MODE,
       })
       if self.parity_canary:
         if self.evaluation_mode not in (REWARD_ONLY, LOGPROB_OBSERVER):
@@ -352,28 +362,38 @@ def reward_only_trajectory(value: Any, *, key: str = "") -> Any:
 def trajectory_infrastructure_error(
     trajectory: Mapping[str, Any],
 ) -> str | None:
-  """Returns a fail-closed reason for a known harness-caused trajectory.
-
-  Seeing inline-valued XML survive into a stored action, or seeing XML syntax
-  leak into a tool CLI, proves that the harness adapter failed.  It is not a
-  valid model failure and must not enter solve-rate data.
-  """
+  """Returns a reason only for structurally malformed harness output."""
   steps = trajectory.get("steps", [])
   if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
     return "malformed_steps"
+  return None
+
+
+def trajectory_action_diagnostics(
+    trajectory: Mapping[str, Any],
+) -> tuple[int, int]:
+  """Counts deterministic repairs and model-visible tool syntax failures."""
+  repairs = 0
+  model_action_errors = 0
+  steps = trajectory.get("steps", [])
+  if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+    return repairs, model_action_errors
   for step in steps:
     if not isinstance(step, Mapping):
       continue
-    action = step.get("action")
-    if isinstance(action, str) and _TOOL_ADAPTER_ACTION_ERROR.search(action):
-      return "r2egym_action_parameter_adapter"
+    response = step.get("model_response")
+    if isinstance(response, str):
+      _, count = canonicalize_r2egym_action(response)
+      repairs += count
+      if _MODEL_ACTION_SYNTAX.search(response):
+        model_action_errors += 1
     observation = step.get("observation")
     if (
         isinstance(observation, str)
-        and _TOOL_ADAPTER_OBSERVATION_ERROR.search(observation)
+        and _MODEL_ACTION_OBSERVATION_ERROR.search(observation)
     ):
-      return "r2egym_action_parameter_adapter"
-  return None
+      model_action_errors += 1
+  return repairs, model_action_errors
 
 
 def trajectory_record(
@@ -405,12 +425,19 @@ def trajectory_record(
     raise ValueError("evaluation reward must be finite")
   key = task_key(entry)
   infrastructure_error = trajectory_infrastructure_error(raw_trajectory)
+  action_compat_repairs, model_action_errors = trajectory_action_diagnostics(
+      raw_trajectory
+  )
   status = str(status)
   valid = status in VALID_STATUSES and infrastructure_error is None
   if valid and status == "MODEL_TIMEOUT":
     validity_reason = "completed_model_timeout"
   elif valid:
-    validity_reason = "completed_under_signed_budget"
+    validity_reason = (
+        "completed_with_model_action_errors"
+        if model_action_errors
+        else "completed_under_signed_budget"
+    )
   else:
     validity_reason = infrastructure_error or "retryable_runtime_failure"
   return {
@@ -418,6 +445,9 @@ def trajectory_record(
       "config_fingerprint": config.fingerprint,
       "run_tag": config.run_tag,
       "trajectory_mode": config.trajectory_mode,
+      "action_compat_mode": config.action_compat_mode,
+      "action_compat_repairs": action_compat_repairs,
+      "model_action_errors": model_action_errors,
       "sampled_by": config.sampled_by,
       "sampling_rng_mode": config.sampling_rng_mode,
       "engine_seed": config.seed_base,

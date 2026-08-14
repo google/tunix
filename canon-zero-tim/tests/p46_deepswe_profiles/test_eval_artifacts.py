@@ -59,6 +59,9 @@ class EvalArtifactsTest(unittest.TestCase):
         self.config.sampling_rng_mode, "engine_global_sequential"
     )
     self.assertFalse(self.config.collect_logprobs)
+    self.assertEqual(
+        self.config.action_compat_mode, "q4_r2egym_xml_v2"
+    )
     with self.assertRaisesRegex(ValueError, "restricted"):
       dataclasses.replace(self.config, evaluation_mode="training").validate()
     with self.assertRaisesRegex(ValueError, "contract mismatch"):
@@ -182,7 +185,7 @@ class EvalArtifactsTest(unittest.TestCase):
         )
         self.assertEqual(record["validity_reason"], expected_reason)
 
-  def test_known_file_editor_adapter_failure_is_invalid_and_retryable(self):
+  def test_model_tool_syntax_failure_is_valid_unsolved_without_retry(self):
     entry = {"docker_image": "img-a"}
     for status in ("SUCCEEDED", "MODEL_TIMEOUT"):
       with self.subTest(status=status):
@@ -202,16 +205,48 @@ class EvalArtifactsTest(unittest.TestCase):
             },
             elapsed_secs=1.0,
         )
-        self.assertFalse(record["valid"])
+        self.assertTrue(record["valid"])
         self.assertFalse(record["solved"])
         self.assertEqual(
             record["validity_reason"],
-            "r2egym_action_parameter_adapter",
+            (
+                "completed_model_timeout"
+                if status == "MODEL_TIMEOUT"
+                else "completed_with_model_action_errors"
+            ),
         )
+        self.assertEqual(record["model_action_errors"], 1)
         remaining = artifacts.remaining_samples(
             [entry], [record], config=self.config
         )
-        self.assertEqual(remaining[0][1:], (0, 1))
+        self.assertEqual(len(remaining), 15)
+        self.assertNotIn((entry, 0, 1), remaining)
+
+  def test_q4_action_repair_provenance_is_recorded(self):
+    record = artifacts.trajectory_record(
+        self.config,
+        entry={"docker_image": "img-a"},
+        sample_index=0,
+        trajectory={
+            "status": "SUCCEEDED",
+            "reward": 0.0,
+            "steps": [{
+                "model_response": (
+                    "thinking\n<function=execute_bash>"
+                    "<parameter=cmd=ls</parameter></function>"
+                ),
+                "action": (
+                    "<function=execute_bash>"
+                    "<parameter=cmd>ls</parameter></function>"
+                ),
+                "observation": "ok",
+            }],
+        },
+        elapsed_secs=1.0,
+    )
+    self.assertTrue(record["valid"])
+    self.assertEqual(record["action_compat_mode"], "q4_r2egym_xml_v2")
+    self.assertEqual(record["action_compat_repairs"], 1)
 
   def test_reward_only_logprobs_are_absent_or_null_never_numeric(self):
     entry = {"docker_image": "img-a", "instance_id": "task-a"}

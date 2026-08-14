@@ -395,3 +395,41 @@
 - Next: read back the exact final operator HEAD, then rerun Q4 evaluation
   `l0/p0` under a new run id on an admitted 64/128 topology and require zero
   adapter-invalid records before advancing.
+
+## 2026-08-14T00:00:00Z — P46.6 persistent full-washing implementation
+
+- Type: returned-evidence diagnosis, replan, implementation, and local
+  validation. No cluster launch, commit, push, or main-branch mutation.
+- Baseline: clean operator worktree at
+  `c33ba5f50d606210ca9f2c94fca003b63ea6e326` before local edits.
+- Returned evidence: `p46e12804`, source
+  `2c160bf931d4d94756f5200472de8070615c0e9f`, Qwen3-4B-Instruct-2507,
+  128 chips, DP16 x TP8, four clean tasks x N16. Exact status was 54
+  `SUCCEEDED`, nine `MAX_CONTEXT_LIMIT_REACHED`, one `MODEL_TIMEOUT`; rewards
+  were seven solved and 57 unsolved. Fifty-nine records were accepted and five
+  rejected by the old adapter policy.
+- Root cause: `_INLINE_PARAMETER` greedily consumed the real tail closing tag
+  in `<parameter=cmd=ls</parameter>` and synthesized
+  `</parameter</parameter>`. Returned data also contains nested
+  `parameter=path`, top-level editor command shorthands, and one accepted
+  `--parameter path` tool error. The first is our harness bug; the latter forms
+  are Q4 model dialect/capability outcomes and must not cause resampling bias.
+- Action fix: compatibility v2 repairs only exact observed forms, leaves
+  contradictory commands untouched, and records action mode/repair/error
+  provenance. Q4 eval opts in; default `SWEAgent()` and Q32 remain
+  `strict_xml`. Model tool errors are valid outcomes. Adapter-created
+  corruption is a hard failure. Schemas advance to config-v3/trajectory-v5.
+- Throughput finding: the returned job took about 21 minutes and paid roughly
+  ten minutes of model initialization/JIT for one 64-trajectory shard.
+  Repeating that across 463 JobSets is rejected.
+- Campaign implementation: `--full-campaign` creates one resident Q4 runtime
+  and processes all 58 logical shards / 463 sequential one-hour waves. Every
+  trajectory remains fsynced; real infrastructure failures retry only inside
+  the current wave's shared one-hour budget; timeout stops nonzero and resumes
+  with the same run id. Finalization remains exact 1851 x N16 = 29,616.
+- Local evidence: P46 CPU suite passes. Its complete-scale fake-runtime test
+  observes exactly one runtime, 463 waves, 29,616 identities, and a final
+  48-identity wave. This is orchestration evidence only, not target washing.
+- Operator decision: P46.5 L3 is deferred without being declared passed. The
+  next target run, after publication and separate launch approval, is one
+  admitted-topology full-washing campaign rather than another l0/p0 smoke.

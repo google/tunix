@@ -110,8 +110,24 @@ class P46EnvironmentContractTest(unittest.TestCase):
             f"P46 evaluation contract OK: topology={topology}", result.stdout
         )
         self.assertIn(
-            "mode=reward_only parity=0 sampled_by=stock@", result.stdout
+            "mode=reward_only parity=0 campaign=0 sampled_by=stock@",
+            result.stdout,
         )
+
+  def test_full_campaign_preflight_is_explicit_and_shard_owning(self):
+    result = self._run(
+        "q4-clean-eval", "128", render_overrides={"full_campaign": True}
+    )
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn("parity=0 campaign=1", result.stdout)
+    result = self._run(
+        "q4-clean-eval",
+        "128",
+        override="export CANON_P46_PHYSICAL_SHARD_INDEX=1",
+        render_overrides={"full_campaign": True},
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("owns all shards", result.stdout)
 
   def test_64chip_observer_canary_preflight_is_isolated(self):
     result = self._run(
@@ -124,7 +140,8 @@ class P46EnvironmentContractTest(unittest.TestCase):
     )
     self.assertEqual(result.returncode, 0, result.stdout)
     self.assertIn(
-        "mode=logprob_observer parity=1 sampled_by=stock@", result.stdout
+        "mode=logprob_observer parity=1 campaign=0 sampled_by=stock@",
+        result.stdout,
     )
 
   def test_q32_topology_drift_and_eval_trainer_overlap_fail_closed(self):

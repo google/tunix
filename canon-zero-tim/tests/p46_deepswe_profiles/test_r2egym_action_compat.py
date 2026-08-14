@@ -55,6 +55,35 @@ class R2egymActionCompatTest(unittest.TestCase):
         "<parameter=path>aiohttp/connector.py</parameter>", canonical
     )
 
+  def test_inline_value_with_tail_closing_does_not_double_close(self):
+    action = (
+        "<function=execute_bash>"
+        "<parameter=cmd=ls</parameter>"
+        "</function>"
+    )
+    canonical, repairs = canonicalize_r2egym_action(action)
+    self.assertEqual(repairs, 1)
+    self.assertEqual(
+        canonical,
+        "<function=execute_bash>"
+        "<parameter=cmd>ls</parameter>"
+        "</function>",
+    )
+    self.assertNotIn("</parameter</parameter>", canonical)
+
+  def test_nested_parameter_key_is_canonicalized(self):
+    action = (
+        "<function=search>"
+        "<parameter=parameter=path>aiohttp/client.py</parameter>"
+        "</function>"
+    )
+    canonical, repairs = canonicalize_r2egym_action(action)
+    self.assertEqual(repairs, 1)
+    self.assertIn(
+        "<parameter=path>aiohttp/client.py</parameter>", canonical
+    )
+    self.assertNotIn("<parameter=parameter>", canonical)
+
   def test_file_editor_command_shorthand_is_canonicalized(self):
     action = (
         "<function=file_editor>"
@@ -67,6 +96,28 @@ class R2egymActionCompatTest(unittest.TestCase):
     self.assertIn(
         "<parameter=command>str_replace</parameter>", canonical
     )
+
+  def test_top_level_file_editor_command_is_narrowly_mapped(self):
+    action = (
+        "<function=create>"
+        "<parameter=path=a.py>"
+        "<parameter=file_text=hello>"
+        "</function>"
+    )
+    canonical, repairs = canonicalize_r2egym_action(action)
+    self.assertEqual(repairs, 4)
+    self.assertIn("<function=file_editor>", canonical)
+    self.assertIn("<parameter=command>create</parameter>", canonical)
+    self.assertIn("<parameter=path>a.py</parameter>", canonical)
+
+  def test_contradictory_top_level_command_is_not_guessed(self):
+    action = (
+        "<function=create>"
+        "<parameter=command>view</parameter>"
+        "<parameter=path>a.py</parameter>"
+        "</function>"
+    )
+    self.assertEqual(canonicalize_r2egym_action(action), (action, 0))
 
   def test_unknown_tools_are_not_rewritten(self):
     action = (

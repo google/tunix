@@ -1,355 +1,248 @@
-# P46 remote-agent execution handoff
+# P46 full-washing execution handoff
 
-Publication status: **P46.1-P46.5, INVALID-ATTEMPT/CAMPAIGN-FINALIZER,
-P46E25609 ACTION-ADAPTER/FIXED-BUDGET STATUS FIX, AND Q4 64/128 TOPOLOGY
-MIGRATION PUBLISHED; TARGET CAMPAIGN INCOMPLETE**.
+## Current status
 
-The bounded lifecycle, evaluator, dual-topology profiles and trainer data-axis
-repair are anchored by implementation commit
-`e1b4009394c49ea015919bda0cfdb97c12c221b5`; true reward-only evaluation is
-anchored by `a4d165e854cc4c2320d8120e89aed185eaf61465`. The execution SHA
-must still be read back from the current `origin/yuxzhang/canon-zero-tim`
-because later
-documentation/evidence commits may advance the branch. Require that the exact
-read-back SHA contains both `e1b40093` and `a4d165e8`; never substitute the
-older reconciled base
-`99c3f7af761c859caa6c81ab509446cc3cc47dc0`. Never modify or push `main`.
+The next Q4 target run is the complete data-washing campaign, not another
+standalone `l0/p0` smoke. The implementation is currently local on base
+`c33ba5f50d606210ca9f2c94fca003b63ea6e326` and is **not yet committed or
+published**. Do not launch until the operator explicitly approves commit/push,
+the change is pushed to `yuxzhang/canon-zero-tim`, and the remote checkout reads
+back that exact published SHA. Never modify or push `main`.
 
-Historical operator HEAD
-`63b092b001864e4e9a4822b4354a665bb00b1c6b` contains the returned
-`p46e25608` evidence and the old false-positive physical-shard completion
-behavior; do not launch from it. The invalid-attempt retry and campaign
-finalizer are published by
-`a642ab267425a5b08b0cebb6e12c607f50f71831`. Resolve and record the exact
-current 40-character operator HEAD, require `a642ab26` in its ancestry, and
-require implementation commit
-`267a35ef41198dab55fd892a681c3a34b9331a78` in its ancestry. Also
-require `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, the 40-case P46 CPU
-gate, `r2egym_action_compat.py`, trajectory schema v4, Q4 topology 128 and
-`finalize_deepswe_eval.py` before rendering. Do not recreate any of these as a
-YAML or shell hot patch.
+No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
+within the operator's explicit instruction.
 
-The archived P34r03 Qwen3-32B run generated 64/64 rollout records, but every
-record ended as `ENV_TIMEOUT`. It then failed before forward/backward with
-`KeyError: 'fsdp'`: the trainer mesh was `dp,tp` while the launcher passed a
-stale `fsdp` data-sharding axis. The published implementation derives the data
-axis from the trainer mesh and prints `[DEEPSWE.DATA_SHARDING] PASS` before rollout. Do
-not rerun from the reconciled base alone; use the exact read-back operator SHA
-containing the implementation commit above.
+## What the returned run proved
 
-`observed_trajectories=64` is only a cardinality statement. It was not evidence
-of 64 valid trajectories in P34r03. The published implementation also contains
-the bounded request/trajectory/batch/cleanup lifecycle needed to prevent a sandbox
-step from running for hours after its deadline.
+Evidence `p46e12804` ran source
+`2c160bf931d4d94756f5200472de8070615c0e9f` on 128 TPU chips, Qwen3-4B-
+Instruct-2507, DP16 x TP8. It passed the exact 1851-row clean-data join and
+captured four tasks x N16 = 64 unique reward-only trajectories:
 
-P46.5 fixes a separate evaluation-only problem: vLLM integer zero still asks
-for logprobs. The published path uses
-`evaluation_mode=reward_only` as its single source, sends
-`logprobs=None,prompt_logprobs=None`, skips host extraction, forbids numeric
-fake logprobs, and records
-`trajectory_mode=reward_only_no_logprobs` plus
-`sampled_by=stock@<SHA>`. Contradictory trainer/alignment/logprob/optimizer
-caller inputs fail closed. TPU/JAX rejects per-request seeds, so artifacts
-truthfully record `sampling_rng_mode=engine_global_sequential`; `sample_nonce`
-is identity metadata, not a replayable request seed.
+- 54 `SUCCEEDED`, nine `MAX_CONTEXT_LIMIT_REACHED`, one `MODEL_TIMEOUT`;
+- seven reward-one and 57 reward-zero outcomes;
+- 59 records accepted and five rejected by the old adapter policy; and
+- about 21 minutes end to end, roughly ten minutes of which was repeated model
+  initialization/JIT.
 
-A dirty-worktree development run on one direct-attached v5p-8 host passed L1
-and L2 with Qwen3-4B DP1 x TP4, one pinned clean R2E Docker task, one real
-`search` action, final reward 0, a valid trajectory and no residual container:
+The trajectory itself showed two separate classes of behavior:
+
+1. Q4 generated nonstandard tool syntax. That is model behavior and must count
+   as an unsolved N16 outcome rather than trigger resampling.
+2. Our greedy compatibility regex converted
+   `<parameter=cmd=ls</parameter>` into a malformed double closing tag. That is
+   a harness bug and is fixed in P46.6.
+
+Absolute archived evidence:
 
 ```text
-P46_REWARD_ONLY_ONEHOST_PASS l1=PASS l2=IDENTICAL_OBSERVER
-/mnt/disks/tunix-data/deepswe-reward-only-evidence/reward-only-onehost-20260813T061510Z-696010/report.json
-sha256=db3305413817ffe5c4d0085098475a12753cea6b698e15e4263b0c7d0835ba7c
+canon-zero-tim/tasks/p46-deepswe-eval-training-profiles/evidence/p46e12804/head.full.log
+canon-zero-tim/tasks/p46-deepswe-eval-training-profiles/evidence/p46e12804/q4i16k-n16-128-eaa3d1e7f2987b72.p0.20260814T000028Z.jsonl
+canon-zero-tim/tasks/p46-deepswe-eval-training-profiles/evidence/p46e12804/SHA256SUMS
 ```
 
-This is not clean publication evidence and does not prove L3, Kubernetes or
-target throughput. The observer/reward-only diagnostic call medians were
-0.0330/0.0310 seconds and sampler payloads 117/70 bytes; do not advertise a
-cluster speedup from that micro-measurement.
+This is returned debug evidence, not a washed list.
 
-The first returned 256-chip reward-only physical shard is also not a PASS.
-Run `p46e25608`, source
-`bdc9681824743911d0691659604dec090dd42bc4`, initialized Qwen3-4B at DP32 x
-TP8 and attempted all 64 identities, but finished with 62 `SUCCEEDED` and two
-`MODEL_TIMEOUT` records:
+## P46.6 semantics
+
+Q4 evaluation explicitly sets:
 
 ```text
-namanjain12/aiohttp_final:006fbe03fede4eaa1eeba7b8393cbf4d63cb44b6 sample=6
-namanjain12/aiohttp_final:04deab71cc804311016159548e5dcdfb9c2698d3 sample=5
+action_compat_mode=q4_r2egym_xml_v2
+evaluation_mode=reward_only
+trajectory_mode=reward_only_no_logprobs
 ```
 
-The old evaluator counted records that were invalid under its own policy as
-completed resume identities and printed
-`P46_EVAL_SUBSHARD_PASS ... pending_logical_tasks=30`; revoke that historical
-claim. The current policy deliberately counts `MODEL_TIMEOUT` as a valid
-unsolved result under the fixed call budget and records
-`validity_reason=completed_model_timeout`. This policy change does not
-reclassify the old run in place. The fixed evaluator durably records every
-attempt, allows only a valid record to complete an identity, retries actual
-environment/reward/harness failures with consecutive `attempt_index` values,
-and rejects attempts after a valid result. Because the fixed source SHA changes
-the fingerprint, start with a new run id and rerun all 64 l0/p0 identities; do
-not transplant the old records.
+Compatibility v2 performs only deterministic repairs seen in returned data:
 
-Returned run `p46e25609` is a second failed 256-chip attempt, not a 64-chip
-run and not clean evaluation evidence. The exact artifact source provenance is
-`stock@8c0e90f3b995f457c1dbb2199639f7f47962ed2b`. It has four tasks x N16,
-64 unique identities, 1,102 nonempty action/observation steps, null logprobs,
-and terminal status 59 `SUCCEEDED`, four `MAX_CONTEXT_LIMIT_REACHED`, one
-`MODEL_TIMEOUT`; all rewards are zero. It stopped after the first wave because
-the evaluator counted the four signed context-budget outcomes as invalid,
-reported five pending identities, and correctly exited nonzero under that old
-classification.
+- inline values with or without a real tail closing tag;
+- nested `parameter=path` key spelling; and
+- top-level `view/create/str_replace/insert/undo_edit` mapped to
+  `file_editor` plus the same command.
 
-Full action/observation inspection changes the conclusion: Q4 repeatedly
-emitted inline-valued tags such as `<parameter=command=view>`. R2E parsed
-`command=view` as a key and passed `--command=view` to a positional CLI. The
-shard contains 347 `unrecognized arguments` observations, 363 editor usage
-errors, 172 `/parameter` shell errors, and 40 missing-argument errors; every
-trajectory contains a recognizable adapter leak. This proves streaming and
-schema capture, but **zero trajectories are eligible for curriculum
-classification**.
+Contradictory commands are not guessed. Every trajectory stores raw
+`model_response`, canonical executed `action`, repair count, action mode, and
+model-action-error count. A malformed/ambiguous model tool call is a completed
+model outcome, usually reward zero; it does not get a fresh sample. Genuine
+`ENV_TIMEOUT`, `REWARD_TIMEOUT`, `FAILED`, or malformed trajectory structure
+may retry only within the current wave's shared one-hour wall-clock budget.
+Compatibility-layer-created corruption is a hard job failure.
 
-The published fix canonicalizes the observed dialect before R2E, preserves
-raw `model_response`, records the canonical executed action, and invalidates
-any surviving adapter signature as
-`validity_reason=r2egym_action_parameter_adapter`. It treats max-step,
-max-context, model-timeout and whole-trajectory budget terminals as completed
-unsolved model outcomes; model timeout is labeled
-`validity_reason=completed_model_timeout`. Environment/reward failures remain
-retryable, and recognized adapter/parser corruption overrides any accepted
-status. The first published fixed run must use a new run id and rerun all 64
-identities; never resume or reclassify `p46e25609` in place.
+Qwen3-32B is deliberately different: ordinary `SWEAgent()` and
+`train_deepswe_nb.py` keep `action_compat_mode=strict_xml`. P46.6 does not
+change Q32 parsing, sampler semantics, loss, reward, precision, optimizer, or
+training geometry.
 
-The full secondary evaluation/data-washing campaign is not complete. It still
-requires 1851 x N16 = 29,616 valid trajectories, 58 logical reports and 463
-physical JobSets. Neither returned l0/p0 attempt is promotable. No candidate
-washed whitelist has been produced or approved.
+## Full campaign contract
 
-Before execution, read these files completely:
+| Field | Exact value |
+|---|---|
+| Model | `Qwen/Qwen3-4B-Instruct-2507` |
+| Admitted topology | 64-chip `4x4x4` or 128-chip `4x4x8` |
+| Preferred next allocation | available admitted topology; current handoff example is 128 |
+| Evaluation mesh on 128 | DP16 x TP8, all devices |
+| Source tasks | reviewed 1851-row clean whitelist |
+| Sampling | N16, temperature 1.0, top-p 1.0, top-k 0 |
+| Context | max model length 20,480; response budget 16,384 |
+| Agent budget | at most 50 model/environment steps |
+| Physical wave | four tasks x N16 = 64 concurrent trajectories |
+| Wave deadline | 3600 seconds, including cleanup margin contract |
+| Runtime | one resident Q4/vLLM runtime across all waves |
+| Campaign size | 58 logical shards, 463 waves, 29,616 identities |
+| Last wave | three tasks x N16 = 48 identities |
+| Logprobs/trainer/optimizer | absent; this is stock reward-only evaluation |
+| Prefix cache | disabled |
 
-1. `cluster/P46_DEEPSWE_PROFILES_RUNBOOK.md`
-2. `tasks/p46-deepswe-eval-training-profiles/state.md`
-3. `tasks/p46-deepswe-eval-training-profiles/plan.md`
-4. `tasks/p46-deepswe-eval-training-profiles/phases/p46-4-remote-execution.md`
-5. `tasks/p46-deepswe-eval-training-profiles/phases/p46-5-reward-only-evaluation.md`
-6. `cluster/P34_DEEPSWE_RUNBOOK.md`
-7. `cluster/P44_DEEPSWE_QWEN4B_PARITY_RUNBOOK.md`
+The full campaign mode does not enlarge concurrency or weaken the one-hour
+physical boundary. It only avoids initializing/compiling Q4 separately for
+each group of 64. Every trajectory is appended, flushed, and fsynced before
+the next result is accepted. A pod/job interruption is resumed by relaunching
+the same published source SHA, topology, and run id.
 
-Then fetch the operator branch, detach at its exact remote SHA, require a clean
-checkout, and run:
+## Publication/read-back gate
+
+From a clean checkout after publication:
 
 ```bash
 git fetch origin yuxzhang/canon-zero-tim
 git switch --detach origin/yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse HEAD)"
-REMOTE_SHA="$(git ls-remote origin refs/heads/yuxzhang/canon-zero-tim | awk '{print $1}')"
-test "$SOURCE_SHA" = "$REMOTE_SHA"
-test -z "$(git status --porcelain)"
-bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh
-rg -n 'training_data_sharding_axis|DEEPSWE.DATA_SHARDING' \
-  examples/deepswe/train_deepswe_nb.py
-```
+test "$(git status --porcelain)" = ""
 
-The grep must show that `training_data_sharding_axis` comes from
-`train_axis_names[0]` and is passed into `RLTrainingConfig`. Stop if production
-still hard-codes `fsdp`.
-
-For P46.5, the exact detached publication must also contain all of:
-
-```bash
-rg -n 'evaluation_mode=reward_only|prompt_logprobs = None|host_extraction' \
-  canon-zero-tim examples/deepswe tunix/generate/vllm_sampler.py
-rg -n 'canonicalize_r2egym_action|DEEPSWE.R2E_ACTION_COMPAT' \
-  examples/deepswe/r2egym_action_compat.py examples/deepswe/swe_agent.py
-rg -n 'trajectory.v4|validity_reason|MAX_CONTEXT_LIMIT_REACHED' \
+rg -n 'q4_r2egym_xml_v2|strict_xml|CANON_P46_FULL_CAMPAIGN' \
+  examples/deepswe canon-zero-tim/cluster
+rg -n 'trajectory.v5|config.v3|model_action_errors' \
   examples/deepswe/deepswe_eval_artifacts.py
-test -f examples/deepswe/probe_reward_only_v5p.py
+bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh
 ```
 
-If those checks fail, reward-only is not published. Stop; do not reconstruct
-it with YAML or shell hot patches.
-
-Also require the read-back renderer to admit Q4 exactly on 64/128, emit
-`4x4x8` with 32 workers for topology 128, and reject Q4-256/Q32-128. Until the
-local topology migration is published, do not render a replacement manifest
-by hand.
-
-## Gate 0 — reward-only publication and layered parity
-
-Require `a4d165e8`, the invalid-attempt repair, and the later action-adapter
-repair in the exact read-back operator ancestry. Run the 40-case P46 CPU gate and the two
-targeted `VllmSamplerConfigTest` cases. If a direct four-chip v5p host is
-available, rerun the one-host command from a clean published checkout:
-
-```bash
-bash canon-zero-tim/tests/p46_deepswe_profiles/run_onehost_reward_only_v5p.sh
-```
-
-Before any target manifest, require this audit too:
-
-```bash
-rg -n 'attempt_index|P46_EVAL_PHYSICAL_INCOMPLETE|physical_pending|validity_reason' \
-  examples/deepswe/deepswe_eval_artifacts.py \
-  examples/deepswe/eval_deepswe.py
-rg -n 'canonicalize_r2egym_action|DEEPSWE.R2E_ACTION_COMPAT' \
-  examples/deepswe/r2egym_action_compat.py examples/deepswe/swe_agent.py
-test -f examples/deepswe/finalize_deepswe_eval.py
-```
-
-Stop unless the CPU marker is exactly `cases=40` or if any repair/finalizer
-marker is absent.
-
-L1 is a hard gate. L2 token identity is diagnostic; a clean
-`LAW1_SUFFIX_DIVERGENCE` is recorded but does not block. Before reward-only
-becomes the Q4 clean-evaluation default, run the same N16 task/sample identities
-through the validation-only `logprob_observer` and `reward_only` canary arms on
-a 64-chip small shard. Render both manifests exactly as documented in
-`P46_DEEPSWE_PROFILES_RUNBOOK.md`; each arm is one clean task x N16 and neither
-is a production workload default. Require exact paired McNemar/binomial L3
-PASS, compare JobSet-level valid trajectories/hour, and prove Kubernetes
-cleanup in both arms. Never compare against a historical run or another source
-SHA.
-
-## Gate 1 — one Q4 clean-evaluation physical shard
-
-Use whichever admitted Q4 topology is available; 64 chips are not a prerequisite. Render
-logical index 0, physical index 0 exactly as documented in
-`P46_DEEPSWE_PROFILES_RUNBOOK.md`. On 64 chips evaluation is DP8 x TP8; on 128
-chips it is DP16 x TP8. Both are Qwen3-4B-Instruct-2507, a 16,384-token total
-response budget per trajectory, at most 50 environment/model steps, four tasks
-x 16 samples, concurrency 64, prefix cache off, complete trajectory streaming,
-and a one-hour physical-shard deadline. Keep one topology for a resumable
-run-id because it is part of the evaluation fingerprint. Server-side dry-run
-the rendered YAML first. Apply it only after the operator explicitly approves
-the launch.
-
-Require both markers:
+Required CPU marker:
 
 ```text
-P46_EVAL_SUBSHARD_PASS ...
+P46_DEEPSWE_PROFILES_CPU_PASS cases=40
+```
+
+The suite now contains 49 unittest cases even though the retained stable
+release marker remains `cases=40`. It includes a complete-scale orchestration
+test proving one runtime, 463 waves, 29,616 identities, and the final 48-row
+wave. CPU PASS is not TPU/Kubernetes or campaign-completion evidence.
+
+## Render the next full 128-chip washing JobSet
+
+Use a new run id because config-v3/trajectory-v5 and the source fingerprint
+must not resume v4 evidence:
+
+```bash
+TOPOLOGY=128
+BASE=canon-zero-tim/cluster/jobset-256cluster-64chip.yaml
+RUN_ID="p46q4wash-$(date -u +%Y%m%dT%H%M%SZ)"
+CPU_NODEPOOL=deepswe-cpu-pool
+TPU_NODEPOOL=<actual-4x4x8-nodepool>
+MODEL_PVC=haoyugao-cpu-np-pvc
+
+python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
+  --base "$BASE" \
+  --output "/tmp/p46-q4-wash-128-${RUN_ID}.yaml" \
+  --workload q4-clean-eval \
+  --topology "$TOPOLOGY" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$RUN_ID" \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC" \
+  --full-campaign
+```
+
+Before apply, verify the rendered manifest contains:
+
+```text
+canon.zero-tim/full-campaign: "1"
+CANON_P46_FULL_CAMPAIGN=1
+CANON_P46_EVALUATION_MODE=reward_only
+CANON_P46_TOPOLOGY=128
+CANON_P46_LOGICAL_SHARD_INDEX=0
+CANON_P46_PHYSICAL_SHARD_INDEX=0
+state-campaign
+logs/campaign.log
+4x4x8
+32 Pathways workers
+```
+
+The renderer rejects parity plus full campaign, nonzero externally supplied
+shard indices, Q4 topology 256, Q32 topology 128, floating images, or an
+unreviewed whitelist digest. Do not hot-patch the YAML.
+
+## Runtime interpretation
+
+Healthy progress markers are:
+
+```text
+P46_EVAL_CAMPAIGN_WAVE_START ... pending=64 runtime_reused=1
+P46_EVAL_TRAJECTORY ... completed=<n>/<wave-size>
+P46_EVAL_CAMPAIGN_LOGICAL_PASS ... runtime_reused=1
+P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58 ...
 [P46.EVAL.POSTFLIGHT] PASS
 ```
 
-`P46_EVAL_PHYSICAL_INCOMPLETE` or any nonzero evaluator exit is a failed,
-resumable attempt. Relaunch the same fixed source SHA, run id, topology and
-l/p indices so only invalid identities receive their next consecutive
-`attempt_index`. Do not advance to the next physical shard until this one has
-its exact valid identity count.
+The following stop nonzero and preserve already fsynced artifacts:
 
-Return the rendered YAML and digest, full logs, JobSet events, cleanup evidence
-and the persistent files below:
+```text
+P46_EVAL_CAMPAIGN_WAVE_TIMEOUT ... resume_same_run_id=1
+P46_EVAL_CAMPAIGN_LOGICAL_INCOMPLETE ...
+```
+
+On a wave timeout, first archive the full log and Kubernetes events and verify
+sandbox cleanup. Relaunch the same manifest/run id only after the cause is
+understood; exact completed identities will be skipped. Never change topology,
+source SHA, model, sampling, or run id while calling it a resume.
+
+`MAX_CONTEXT_LIMIT_REACHED`, `MAX_STEPS_REACHED`, `MODEL_TIMEOUT`, and signed
+trajectory `TIMEOUT` are valid unsolved fixed-budget outcomes. They do not
+block washing and must not be resampled. A raw bad Q4 action also does not
+block the campaign merely because the tool rejected it; that is part of the
+model's solve-rate measurement.
+
+## Outputs and completion
+
+Persistent root:
 
 ```text
 /mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/trajectories/
 /mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/reports/
-/mnt/disks/linchai_data/deepswe_eval/<run-id>/logs/
+/mnt/disks/linchai_data/deepswe_eval/<run-id>/outputs/campaign/
+/mnt/disks/linchai_data/deepswe_eval/<run-id>/logs/campaign.log
 ```
 
-Inspect complete trajectory JSON, not only a sample/task summary. Verify the
-exact valid identity count, prompt plus alternating assistant/environment
-messages, terminal status, finite reward, elapsed time, source/data/model
-fingerprint and no credential material. Invalid retries remain visible as
-separate durable attempts; they do not count toward N16. A shard timeout is
-resumable evidence and a failed gate, even if some records were safely written.
-Every accepted record must have either
-`validity_reason=completed_under_signed_budget` or
-`validity_reason=completed_model_timeout`; any
-`r2egym_action_parameter_adapter`, stored inline-valued parameter tag,
-`cannot open /parameter`, or tool `unrecognized arguments` adapter signature
-blocks the shard. `[DEEPSWE.R2E_ACTION_COMPAT]` warnings are allowed because
-the raw response is preserved, but the stored executed action must be canonical
-and the resulting tool observation must be real output rather than CLI usage.
-
-Before handing evidence back, follow the return-package commands in the P46
-runbook. Return every trajectory JSONL absolute path, `wc -l`, per-file
-SHA-256, the archive path/digest and full logs. The archived head log alone is
-insufficient to inspect action/observation/tool-call content.
-
-## Gate 2 — Q4 three-update training
-
-Only after Gate 1 passes, render a new `q4-debug` JobSet on whichever topology
-is available and obtain separate launch approval. The 64-chip form uses DP4 x
-TP8 per rollout/trainer role; the 128-chip form uses DP8 x TP8 per role. Both
-keep Qwen3-4B-Instruct-2507, B4 x G4, 16 trajectories, 16K response, three
-updates and the one-hour shared rollout-batch boundary. Require:
-
-- one `[DEEPSWE.DATA_SHARDING] PASS` with `axes=('dp',)` and a `dp,tp` mesh;
-- three `P44.LOGPS_BATCH` markers, three durable trajectory batches and three
-  matching batch-metrics rows;
-- finite nonzero gradient activity and train steps `0->1->2->3`;
-- exactly three optimizer commits with `optimizer_placement=device-resident`;
-- no host optimizer round trip and at least 8 GiB classified HBM margin; and
-- a generated P44 classification JSON with `"verdict": "PASS"`.
-
-Any timeout, cleanup leak, malformed trajectory, OOM, IFRT, nonfinite value,
-zero gradient activity, optimizer transaction/placement failure or classifier
-failure stops promotion to Q32.
-
-## Gate 3 — complete the full Q4 evaluation/data-washing campaign
-
-The first 64-trajectory shard is a smoke and resume unit, not campaign
-completion. Continue the same fixed source SHA, topology and run id until all
-1851 clean tasks have exactly N16 valid trajectories: 29,616 valid identities,
-58 logical reports and 463 physical JobSets. Logical indices 0-56 each have
-physical indices 0-7; logical index 57 has physical indices 0-6. Every normal
-physical shard is four tasks x N16 = 64 valid identities; the final l57/p6
-shard is three tasks x N16 = 48.
-
-Render, server-side dry-run, launch and wait one physical index at a time under
-the operator's campaign approval. On `P46_EVAL_PHYSICAL_INCOMPLETE`, retry the
-same index until its exact valid count is complete; never fan out all 463
-JobSets at once, because sandbox/CPU-node pressure and cleanup are part of the
-gate. Advance only after postflight cleanup passes. At the last physical index
-of each logical shard, require `P46_EVAL_LOGICAL_REPORT_PASS`; after l57/p6,
-require all 58 immutable logical reports and verify their digests.
-
-Finalize the campaign only after all 58 summaries exist:
-
-```bash
-RUN_ROOT="/mnt/disks/linchai_data/deepswe_eval/$RUN_ID"
-python3 examples/deepswe/finalize_deepswe_eval.py \
-  --summary-json "$RUN_ROOT"/outputs/reports/*.summary.json \
-  --output-dir "$RUN_ROOT/outputs/campaign"
-```
-
-Require exactly:
+The final washed lists are:
 
 ```text
-P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58 ...
+outputs/campaign/p46-campaign.q4_learnable.jsonl
+  exactly tasks with solved count 1/16 through 15/16
+
+outputs/campaign/p46-campaign.q32_candidates.jsonl
+  Q4 partial plus Q4 all-fail tasks; advisory input for later Q32 review
+
+outputs/campaign/p46-campaign.all_pass.jsonl
+outputs/campaign/p46-campaign.all_fail.jsonl
+outputs/campaign/p46-campaign.summary.json
 ```
 
-The finalizer rejects missing/duplicate task identities, missing shards,
-digest drift, cross-shard contract changes, broken/incomplete reports or any
-task without exact valid N16. Return and archive `outputs/campaign` together
-with all trajectories, logical reports and logs.
+Do not declare washing complete from a 64-row trajectory file, a logical
+summary, or `SUCCEEDED` counts. Completion requires the exact global PASS
+marker, 29,616 valid identities, 1851 unique tasks, 58 immutable logical
+summaries, verified referenced SHA-256 digests, and cleanup PASS.
 
-The production evaluator retains `max_response_length=16384`, `max_steps=50`,
-N16, temperature 1.0, top-p 1.0, top-k 0 and a 3600-second physical deadline.
-A task may be categorized only after exact valid N16. `partial`, `all_fail`
-and `all_pass` reports are the completed secondary-evaluation output; broken
-or incomplete tasks are never promoted. Candidate whitelists remain advisory
-and do not replace the original clean whitelist without a separate reviewed
-manifest, digest and operator decision.
+Return the absolute trajectory/report/campaign paths, `wc -l`, SHA-256 for
+every final manifest and summary, the complete campaign log, JobSet events,
+and cleanup evidence. Preserve real trajectories so model/tool behavior can be
+audited later.
 
-## Gate 4 — Qwen3-32B training
+## Claim ceiling
 
-Only after Gate 2 and the required Gate 3 campaign pass, render `q32-train` for
-the available 64- or 256-chip topology and obtain explicit launch approval.
-Keep the signed profile unchanged:
-Qwen3-32B, original 1851-row clean whitelist, 16K response, B8 x G8, 64
-trajectories, maximum concurrency 64, 5400-second shared batch boundary, 1000
-updates and TPU-resident optimizer state. Require the `dp` data-axis marker
-before the first rollout. Do not reuse the P34r03 manifest.
-
-At each gate, report the exact publication SHA and image digest, manifest
-SHA-256, persistent run directory, trajectory/report digests, head/worker/R2E
-logs, cleanup state, HBM, optimizer placement, classifier JSON and first fatal
-traceback. A missing prerequisite is `INCONCLUSIVE`; a violated signed contract
-is `FAIL`.
-
-Do not add host optimizer fallback, relax the one-hour/ninety-minute deadlines,
-change the clean whitelist, classify partial N16 tasks, hide trajectories,
-emulate a missing topology, or edit a rendered JobSet. Missing prerequisites or
-target failure are INCONCLUSIVE/FAIL as appropriate, never PASS.
+A successful Q4 campaign proves only Qwen3-4B clean-data evaluation under this
+fixed budget and produces an advisory curriculum list. It does not prove
+Qwen3-32B training, training/rollout alignment, optimizer correctness, or
+production zero-TIM. Q32 remains a separate explicitly approved launch after
+the washed list and its digests are reviewed.

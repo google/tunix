@@ -7,6 +7,36 @@ Qwen3-32B training renders on 64-chip `4x4x4` or 256-chip `4x8x8`. The renderer
 writes the signed parameters directly into the JobSet; do not add a second
 shell override layer.
 
+## P46.6 current launch path
+
+This section supersedes the legacy shard-by-shard promotion sequence later in
+this document. The next Q4 run is full clean-data washing through one
+persistent runtime, not another standalone `l0/p0` test. Returned 128-chip run
+`p46e12804` already proved real rollout/reward capture and exposed both the old
+greedy action-tag bug and the cost of repeating model init/JIT for every 64
+trajectories.
+
+P46.6 makes the Q4 repairer explicit as
+`action_compat_mode=q4_r2egym_xml_v2`; ordinary agents and Qwen3-32B training
+remain `strict_xml`. Deterministically repaired Q4 syntax and rejected model
+tool calls are model outcomes, not retryable infrastructure. Raw response,
+canonical action, repair count, and model-action-error count are persisted in
+config-v3/trajectory-v5. Only malformed harness structure or a repairer-created
+corruption is a harness failure.
+
+Production washing is rendered with `--full-campaign`. It initializes Q4/vLLM
+once, then runs 463 sequential waves under the unchanged per-wave contract:
+four tasks x N16, concurrency 64, 16,384 response tokens, at most 50 steps,
+and a 3600-second deadline. Every trajectory is fsynced immediately. Relaunch
+the same published SHA, topology, and run id to resume after interruption.
+Completion still requires 1851 tasks, 29,616 valid identities, 58 logical
+summaries, all referenced digests, postflight cleanup, and the global
+`P46_EVAL_CAMPAIGN_PASS` marker.
+
+These changes are not launchable until their explicitly approved commit is
+pushed to `origin/yuxzhang/canon-zero-tim` and read back exactly. Never launch
+from a dirty worktree and never modify or push `main`.
+
 This package has local CPU, direct one-host development evidence, and returned
 256-chip evaluation attempts. Neither returned attempt is a physical-shard
 PASS: `p46e25608` exposed the old invalid-attempt resume bug, while
@@ -279,13 +309,14 @@ with its exact SHA-256.
 
 ## Evaluation lifecycle and artifacts
 
-One logical report covers 32 tasks x 16 samples. It is executed as eight
-physical JobSets, each four tasks x 16 samples with concurrency 64. The final
-logical shard contains 27 tasks and therefore has only physical indices 0-6.
-The full 1851-task campaign is 58 logical shards and 463 physical JobSets.
+One logical report covers 32 tasks x 16 samples. Full-campaign mode executes it
+as eight physical waves inside one resident-runtime JobSet, each four tasks x
+16 samples with concurrency 64. The final logical shard contains 27 tasks and
+its last wave is three tasks x N16 = 48. The full 1851-task campaign is 58
+logical shards and 463 physical waves in one resumable JobSet.
 It requires 29,616 valid task/sample identities. The evaluator keeps a
 16,384-token total response budget, at most 50 environment/model steps and a
-3600-second deadline for every physical JobSet. Sixty-four is only the normal
+3600-second deadline for every physical wave. Sixty-four is only the normal
 physical-shard size, not the evaluation stopping condition.
 
 Every trajectory attempt is appended and fsynced before another result is
@@ -295,9 +326,11 @@ source SHA, data revision, whitelist digest, client-image digest, topology,
 model and sampling fingerprint. Only a valid record completes an identity.
 Resume accepts only an identical fingerprint, permits the next consecutive
 attempt after an invalid record, and rejects nonconsecutive attempts or any
-attempt after the first valid result. A timed-out or physically incomplete
-shard returns nonzero after preserving every attempt; relaunch the same fixed
-run id, topology and logical/physical indices to retry only invalid identities.
+attempt after the first valid result. A timed-out wave returns nonzero after
+preserving every attempt; relaunch the same full-campaign manifest, run id,
+topology and source SHA to retry only missing identities. Genuine
+infrastructure failures retry in-process only within that wave's shared
+3600-second wall-clock budget.
 
 Reports are immutable and digest-bearing. Concurrent final shard writers are
 accepted only when their bytes are identical; any content drift is a hard
@@ -440,7 +473,31 @@ python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --model-pvc "$MODEL_PVC"
 ```
 
-Render one Qwen3-4B evaluation physical shard:
+Render the production Qwen3-4B full washing campaign. This is the next launch
+path; use a new run id and do not also pass shard indices:
+
+```bash
+python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
+  --base "$BASE" \
+  --output "/tmp/p46-eval-campaign-${TOPOLOGY}-${RUN_ID}.yaml" \
+  --workload q4-clean-eval \
+  --topology "$TOPOLOGY" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$RUN_ID" \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC" \
+  --full-campaign
+```
+
+The renderer writes `CANON_P46_FULL_CAMPAIGN=1`, one campaign state directory,
+and one campaign log. On 128 chips it must render `4x4x8`, 32 workers, and an
+evaluation mesh of DP16 x TP8.
+
+Render one Qwen3-4B physical shard only for a separately requested diagnostic,
+not for the P46.6 production washing launch:
 
 ```bash
 python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
@@ -531,6 +588,27 @@ server-side dry-run these files after pulling the publication; applying them
 still requires the operator's explicit launch approval.
 
 ## Promotion order and claim ceiling
+
+P46.6 operator decision: do not repeat the standalone parity/l0-p0/three-update
+sequence before washing. After P46.6 is published and separately approved for
+cluster launch, render the single `--full-campaign` JobSet above. Monitor each
+bounded wave and inspect trajectories during the run; do not wait for the end
+to discover malformed artifacts. On interruption, preserve logs/events,
+verify cleanup, and resume the same manifest/run id. The numbered legacy
+sequence below remains historical rationale and claim ceilings; it is not the
+current launch order.
+
+The full JobSet must finish with both:
+
+```text
+P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58 ...
+[P46.EVAL.POSTFLIGHT] PASS
+```
+
+Final outputs are written directly under
+`outputs/campaign/p46-campaign.{q4_learnable,q32_candidates,all_pass,all_fail}.jsonl`.
+`q4_learnable` is exactly reward counts 1/16 through 15/16. Q32 remains a
+separate later launch after these manifests and digests are reviewed.
 
 The remote agent must advance one gate at a time. Q4 has first-class 64/128
 variants; Q32 has first-class 64/256 variants. Use whichever admitted

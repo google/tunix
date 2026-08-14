@@ -1,6 +1,7 @@
 # P46.5 — true reward-only DeepSWE evaluation
 
-- Status: active
+- Status: deferred by operator on 2026-08-14; L3 remains unproven and is not
+  retroactively passed. P46.6 is the active full-washing phase.
 
 ## Finding
 
@@ -96,7 +97,7 @@ the outer singleton batch dimension expected by `SWEEnv`; direct
 turn at 256 tokens inside its 512-token total budget so parser, tool, final
 reward and cleanup all execute. Production remains 16K and 50 turns.
 
-P46.5 stays active. L3 paired N16 solve-rate consistency and
+P46.5 is deferred by the operator, not passed. L3 paired N16 solve-rate consistency and
 valid-trajectories/hour on one 64-chip small shard are not run and remain the
 promotion gate. A validation-only renderer now emits exact 64-chip, one-task x
 N16 `logprob_observer` and `reward_only` arms from the same SHA; observer mode

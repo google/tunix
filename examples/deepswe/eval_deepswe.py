@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Resumable Qwen3-4B-Instruct DeepSWE clean-data evaluation.
 
-One logical report covers 32 clean tasks x 16 stochastic samples. Execution is
-deliberately split into eight 4-task x 16-sample physical shards so a shard is
-one 64-trajectory concurrency wave with a one-hour hard boundary. Every full
-trajectory is fsynced before another result is accepted. Reusing the same
-logical-shard index resumes only an exact configuration fingerprint.
+One logical report covers 32 clean tasks x 16 stochastic samples. A physical
+wave is four tasks x 16 samples with a one-hour hard boundary. Production
+campaign mode keeps one Q4 runtime resident across all 463 sequential waves;
+single-wave mode remains available for diagnostics. Every full trajectory is
+fsynced before another result is accepted, and resume requires the exact
+configuration fingerprint.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import glob
 import json
 import logging
@@ -23,6 +25,7 @@ from typing import Any, Mapping, Sequence
 from deepswe_eval_artifacts import EvalConfig
 from deepswe_eval_artifacts import aggregate_tasks
 from deepswe_eval_artifacts import append_record
+from deepswe_eval_artifacts import finalize_campaign
 from deepswe_eval_artifacts import load_records
 from deepswe_eval_artifacts import remaining_samples
 from deepswe_eval_artifacts import sha256_file
@@ -152,6 +155,16 @@ def _build_config() -> tuple[EvalConfig, int, Path]:
         f"EVAL_PHYSICAL_SHARD_INDEX must be below {physical_shards}"
     )
   return config, physical_shard, output_dir
+
+
+def _full_campaign_requested() -> bool:
+  requested = _bool01("CANON_P46_FULL_CAMPAIGN")
+  if requested and (
+      _bool01("CANON_P46_ONEHOST_PROBE")
+      or _bool01("CANON_P46_PARITY_CANARY")
+  ):
+    raise ValueError("full campaign is incompatible with probe/parity modes")
+  return requested
 
 
 def _load_clean_entries(config: EvalConfig) -> list[dict[str, Any]]:
@@ -428,8 +441,10 @@ async def _run_evaluation(
     output_path: Path,
     *,
     runtime: _Runtime | None = None,
+    timeout_secs: float | None = None,
 ) -> tuple[int, bool]:
   from guarded_swe_env import GuardedSWEEnv
+  from r2egym_action_compat import ActionCompatibilityInternalError
   from swe_agent import SWEAgent
   from swe_env import SWEEnv
   from tunix.rl.agentic import utils as agentic_utils
@@ -438,6 +453,13 @@ async def _run_evaluation(
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
   runtime = runtime or _Runtime(config)
+  deadline_secs = (
+      float(config.shard_timeout_secs)
+      if timeout_secs is None
+      else float(timeout_secs)
+  )
+  if deadline_secs <= 0:
+    raise ValueError("evaluation wave timeout must be positive")
   enable_guard = os.environ.get("ENABLE_GUARD", "false").lower() == "true"
   plan = list(pending)
   started: dict[int, float] = {}
@@ -448,6 +470,9 @@ async def _run_evaluation(
     async def collect(self, mode: str = "Conversation"):
       try:
         return await super().collect(mode)
+      except ActionCompatibilityInternalError:
+        logger.exception("hard failure in Q4 action compatibility layer")
+        raise
       except TimeoutError as exc:
         if "cleanup" in str(exc).lower():
           raise
@@ -461,7 +486,7 @@ async def _run_evaluation(
   def pairs_generator():
     env_cls = GuardedSWEEnv if enable_guard else SWEEnv
     for pair_index, (entry, sample_index, attempt_index) in enumerate(plan):
-      agent = SWEAgent()
+      agent = SWEAgent(action_compat_mode=config.action_compat_mode)
       env = env_cls(
           entry=_batch_entry_for_swe_env(entry),
           max_steps=config.max_steps,
@@ -537,20 +562,148 @@ async def _run_evaluation(
 
   timed_out = False
   try:
-    await asyncio.wait_for(consume(), timeout=config.shard_timeout_secs)
+    await asyncio.wait_for(consume(), timeout=deadline_secs)
   except asyncio.TimeoutError:
     timed_out = True
     logger.error(
         "P46_EVAL_SHARD_TIMEOUT completed=%d/%d deadline=%ds",
         completed,
         len(plan),
-        config.shard_timeout_secs,
+        int(deadline_secs),
     )
   finally:
     if not producer.done():
       producer.cancel()
     await asyncio.gather(producer, return_exceptions=True)
   return completed, timed_out
+
+
+def _load_logical_records(
+    config: EvalConfig,
+    logical_entries: Sequence[Mapping[str, Any]],
+    trajectory_dir: Path,
+) -> list[dict[str, Any]]:
+  pattern = trajectory_dir / f"{config.run_tag}.*.jsonl"
+  return load_records(
+      glob.glob(str(pattern)),
+      config=config,
+      allowed_task_keys=(task_key(entry) for entry in logical_entries),
+  )
+
+
+async def _run_full_campaign(
+    base_config: EvalConfig,
+    all_entries: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+) -> int:
+  """Runs every clean-data wave while keeping one TPU runtime resident."""
+  trajectory_dir = output_dir / "trajectories"
+  report_dir = output_dir / "reports"
+  trajectory_dir.mkdir(parents=True, exist_ok=True)
+  logical_shards = (
+      len(all_entries) + base_config.logical_tasks - 1
+  ) // base_config.logical_tasks
+  runtime = _Runtime(base_config)
+  summary_paths: list[str] = []
+
+  for logical_index in range(logical_shards):
+    config = dataclasses.replace(base_config, shard_index=logical_index)
+    config.validate()
+    logical_start = logical_index * config.logical_tasks
+    logical_entries = list(
+        all_entries[logical_start : logical_start + config.logical_tasks]
+    )
+    physical_shards = (
+        len(logical_entries) + config.shard_tasks - 1
+    ) // config.shard_tasks
+    for physical_shard in range(physical_shards):
+      physical_start = physical_shard * config.shard_tasks
+      physical_entries = logical_entries[
+          physical_start : physical_start + config.shard_tasks
+      ]
+      wave_started = time.monotonic()
+      while True:
+        existing = _load_logical_records(
+            config, logical_entries, trajectory_dir
+        )
+        pending = remaining_samples(
+            physical_entries, existing, config=config
+        )
+        if not pending:
+          break
+        remaining_wave_secs = (
+            config.shard_timeout_secs - (time.monotonic() - wave_started)
+        )
+        if remaining_wave_secs <= 0:
+          print(
+              "P46_EVAL_CAMPAIGN_WAVE_TIMEOUT "
+              f"logical_shard={logical_index} "
+              f"physical_shard={physical_shard} "
+              f"pending={len(pending)} resume_same_run_id=1",
+              flush=True,
+          )
+          return 2
+        output_path = trajectory_dir / (
+            f"{config.run_tag}.p{physical_shard}."
+            f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.jsonl"
+        )
+        logger.info(
+            "P46_EVAL_CAMPAIGN_WAVE_START logical_shard=%d/%d "
+            "physical_shard=%d/%d pending=%d runtime_reused=1",
+            logical_index,
+            logical_shards,
+            physical_shard,
+            physical_shards,
+            len(pending),
+        )
+        _, timed_out = await _run_evaluation(
+            config,
+            physical_entries,
+            pending,
+            output_path,
+            runtime=runtime,
+            timeout_secs=remaining_wave_secs,
+        )
+        if timed_out:
+          print(
+              "P46_EVAL_CAMPAIGN_WAVE_TIMEOUT "
+              f"logical_shard={logical_index} "
+              f"physical_shard={physical_shard} resume_same_run_id=1",
+              flush=True,
+          )
+          return 2
+
+    accumulated = _load_logical_records(
+        config, logical_entries, trajectory_dir
+    )
+    reports = aggregate_tasks(logical_entries, accumulated, config=config)
+    if any(item["category"] in ("incomplete", "broken") for item in reports):
+      print(
+          "P46_EVAL_CAMPAIGN_LOGICAL_INCOMPLETE "
+          f"logical_shard={logical_index}",
+          flush=True,
+      )
+      return 2
+    summary = write_reports(report_dir, reports, config=config)
+    summary_paths.append(summary["summary_path"])
+    print(
+        "P46_EVAL_CAMPAIGN_LOGICAL_PASS "
+        f"logical_shard={logical_index} tasks={summary['tasks']} "
+        f"valid_trajectories={summary['valid_trajectories']} "
+        f"runtime_reused=1",
+        flush=True,
+    )
+
+  campaign = finalize_campaign(summary_paths, output_dir / "campaign")
+  print(
+      "P46_EVAL_CAMPAIGN_PASS "
+      f"tasks={campaign['tasks']} n_sample={campaign['n_sample']} "
+      f"valid_trajectories={campaign['valid_trajectories']} "
+      f"logical_shards={campaign['logical_shards']} "
+      f"summary_sha256={campaign['summary_sha256']}",
+      flush=True,
+  )
+  return 0
 
 
 def main() -> int:
@@ -561,6 +714,8 @@ def main() -> int:
   )
   config, physical_shard, output_dir = _build_config()
   all_entries = _load_clean_entries(config)
+  if _full_campaign_requested():
+    return asyncio.run(_run_full_campaign(config, all_entries, output_dir))
   logical_entries, physical_entries = _select_shards(
       all_entries, config, physical_shard
   )

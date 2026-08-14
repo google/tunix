@@ -751,7 +751,7 @@ case "${CANON_P46_EVALUATION:-0}" in
              CANON_P46_GOLD_JSONL CANON_P46_GOLD_JSONL_SHA256 \
              CANON_P46_MODEL_BASE_DIR CANON_P46_LOGICAL_SHARD_INDEX \
              CANON_P46_PHYSICAL_SHARD_INDEX CANON_P46_EVALUATION_MODE \
-             CANON_P46_PARITY_CANARY; do
+             CANON_P46_PARITY_CANARY CANON_P46_FULL_CAMPAIGN; do
       req "$k"
     done
     [ "${CANON_MODE:-}" = "run" ] && \
@@ -780,6 +780,18 @@ case "${CANON_P46_EVALUATION:-0}" in
       echo "[env] CANON_P46_PARITY_CANARY must be exactly 0 or 1" >&2
       fail=1 ;;
     esac
+    case "${CANON_P46_FULL_CAMPAIGN:-}" in 0|1) ;; *)
+      echo "[env] CANON_P46_FULL_CAMPAIGN must be exactly 0 or 1" >&2
+      fail=1 ;;
+    esac
+    if [ "${CANON_P46_FULL_CAMPAIGN:-0}" = "1" ]; then
+      [ "${CANON_P46_PARITY_CANARY:-0}" = "0" ] && \
+      [ "${CANON_P46_LOGICAL_SHARD_INDEX:-}" = "0" ] && \
+      [ "${CANON_P46_PHYSICAL_SHARD_INDEX:-}" = "0" ] || {
+        echo "[env] P46 full campaign owns all shards and rejects parity" >&2
+        fail=1
+      }
+    fi
     if [ "${CANON_P46_PARITY_CANARY:-0}" = "1" ] && \
        [ "${CANON_P46_TOPOLOGY:-}" != "64" ]; then
       echo "[env] P46 parity canary requires topology 64" >&2
@@ -814,7 +826,7 @@ case "${CANON_P46_EVALUATION:-0}" in
       *" examples/deepswe/eval_deepswe.py "*) ;;
       *) echo "[env] P46 evaluation command drifted" >&2; fail=1 ;;
     esac
-    echo "[env] P46 evaluation contract OK: topology=${CANON_P46_TOPOLOGY} logical=${CANON_P46_LOGICAL_SHARD_INDEX} physical=${CANON_P46_PHYSICAL_SHARD_INDEX} mode=${CANON_P46_EVALUATION_MODE} parity=${CANON_P46_PARITY_CANARY} sampled_by=stock@${CANON_EXPECT_COMMIT}"
+    echo "[env] P46 evaluation contract OK: topology=${CANON_P46_TOPOLOGY} logical=${CANON_P46_LOGICAL_SHARD_INDEX} physical=${CANON_P46_PHYSICAL_SHARD_INDEX} mode=${CANON_P46_EVALUATION_MODE} parity=${CANON_P46_PARITY_CANARY} campaign=${CANON_P46_FULL_CAMPAIGN} sampled_by=stock@${CANON_EXPECT_COMMIT}"
     ;;
   *)
     echo "[env] CANON_P46_EVALUATION must be exactly 0 or 1" >&2

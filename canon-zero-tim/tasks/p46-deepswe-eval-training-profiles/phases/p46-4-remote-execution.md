@@ -1,6 +1,6 @@
 # P46.4 — remote execution and evidence return
 
-- Status: active; implementation published, target campaign pending
+- Status: pending target evidence; P46.6 is the sole active phase
 
 ## Entry gate
 
