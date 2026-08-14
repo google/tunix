@@ -52,6 +52,7 @@ from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import remote_scheduler_router  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
@@ -109,6 +110,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Trainer DP mesh dimension size for sequence packing pack_size"
           " computation."
+      ),
+  )
+  parser.add_argument(
+      "--scheduler_url",
+      type=str,
+      default="",
+      help=(
+          "Optional py-inference-scheduler sidecar URL (e.g."
+          " http://localhost:8100). When set, rollout requests are routed by"
+          " the sidecar instead of prefix-hash/round-robin."
       ),
   )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
@@ -464,6 +475,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.exception("FATAL: StandardRLProgram execution failed: %s", exc)
     raise
   finally:
+    if rollout_router is not None:
+      rollout_router.stop()
     program.close()
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
