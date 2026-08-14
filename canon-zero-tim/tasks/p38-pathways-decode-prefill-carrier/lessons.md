@@ -47,3 +47,12 @@ experiment. The subset was exactly aligned while prior full batches carried
 their sparse mismatches in later rows. Batch contracts must attest both local
 divisibility and complete source coverage; a partial tail is inconclusive and
 must be rejected rather than reported as a workload-wide PASS.
+
+## 2026-08-14 — Scheduler occupancy is not a compiled aval
+
+A production call with one active request can still execute through the same
+fixed padded input shape used by a large live co-batch. Replacing it with a
+DP1, batch-size-one local replay changes DP geometry and input avals, so it
+cannot establish production program identity. Record the padded shape, dtype,
+sharding, and canonical-M contract at the incident call; label shape-changing
+replays as counterfactuals rather than strict reproduction.

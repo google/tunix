@@ -21,6 +21,7 @@ $DOCKER run --rm \
     export CANON_P38_INCIDENT_MIN_PREFIX=1400
     export CANON_P38_INCIDENT_MAX_PREFIX=3072
     export CANON_P38_INCIDENT_MAX_BYTES=134217728
+    export CANON_LOGPROB_M=256
     export CANON_P38_DIAGNOSTIC_ROUND_FILE=/tmp/p38-exact-image-round
     printf "0\n" > "$CANON_P38_DIAGNOSTIC_ROUND_FILE"
     export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
@@ -39,6 +40,7 @@ $DOCKER run --rm \
     grep -Fq 'implementation_identity' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_request_journal' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_incident_ledger' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_aval_contract' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Eq program_path=.standard. "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     python3 -m py_compile "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
@@ -54,9 +56,10 @@ $DOCKER run --rm \
     grep -Fq 'implementation_identity' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_request_journal' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_incident_ledger' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_aval_contract' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Eq program_path=.standard. "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 -m py_compile "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"
-    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 serving_capture_cases=13 overlays=2"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 serving_capture_cases=15 overlays=2"
   '

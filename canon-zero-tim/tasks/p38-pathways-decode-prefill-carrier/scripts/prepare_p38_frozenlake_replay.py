@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify a P38 capsule and emit its mask-derived R0/R1 schedule contract."""
+"""Verify a P38 capsule and emit its E0-lite mask-derived schedule contract.
+
+This tool does not consume the production incident ledger and therefore cannot
+construct strict E0. Its output is a bounded counterfactual only.
+"""
 
 from __future__ import annotations
 

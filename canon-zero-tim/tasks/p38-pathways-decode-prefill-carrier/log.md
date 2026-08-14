@@ -1206,5 +1206,32 @@
 - Fact: Head process exited with controlled code 42.
 - Files/artifacts: `evidence/p38s15/head.full.log`, `evidence/p38s15/pre_alignment.json`,
   `evidence/p38s15/source_commit.txt`, `evidence/p38s15/SHA256SUMS`.
-- Next: Single-host strict E0 replay and First Divergence Seam Walk.
+- Historical next step was written as strict E0 replay; P38.2m corrects that
+  label because the existing runner changes the production shape.
 
+## 2026-08-14 UTC — P38.2m fixed-M single-active discriminator locally complete
+
+- Reconciled all three P38s15 rounds: 64 mismatch elements join to 61 exact
+  serving calls, including six naturally single-active calls. These calls are
+  scheduler occupancy one, not shape one; production run-wide markers retain
+  fixed padding and canonical M.
+- Added patch 15 after the exact-call ledger patch. It records host-visible
+  DP/padded-row/canonical-M and input/attention shape-dtype-sharding contracts
+  without `jax.device_get`. Naturally single-active records include exact
+  token IDs; multi-request records remain hash-only.
+- Added fail-closed classifier and exact-image controls. A shape-one input is
+  rejected even when the scheduled request count is one, token hashes are
+  checked, and device-fetch attempts fail the unit test.
+- Relabeled the DP1/batch-size-one local replay E0-lite in code, phase, state,
+  and handoff. It remains a useful counterfactual but cannot unlock a
+  production first-divergence repair.
+- Local verification: focused classifier 36/36, replay classifier 7/7,
+  pinned-image exact-image Qwen3-1.7B/Qwen3-8B 25/25 each with all 29 manifest
+  entries, complete pinned-image P33 CPU/adjacent gate (85 workload and 37
+  alignment tests) with terminal `CPU_GATE PASS`, shell/Python syntax, and
+  `git diff --check` PASS. A direct host invocation lacked `datasets` and
+  `metrax`; it was not counted, and the same gate passed in the pinned image.
+- No cluster launch, backward, or optimizer commit occurred. Commit/push was
+  withheld until explicit approval after all gates passed. Root cause remains
+  open; the next decisive observer must compare live KV content neutrally or
+  localize the first divergent decode seam.

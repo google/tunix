@@ -1,0 +1,119 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1402,7 +1402,8 @@
+ 
+ def _p38_incident_ledger(
+         runner, scheduler_output, req_ids_dp, prefixes, program_path,
+-        call_index):
++        call_index, input_ids, input_positions, attn_metadata,
++        padded_rows_per_dp):
+     """Append one bounded exact-call record using host scheduler metadata."""
+     import json as _json
+     import os as _os
+@@ -1435,6 +1436,37 @@
+         scheduler_output.num_scheduled_tokens.items()
+         if int(scheduled_tokens) > 0
+     )
++    canonical_logprob_rows = _canon_logprob_m()
++    compile_geometry = {
++        "dp_size": int(runner.dp_size),
++        "max_num_reqs": int(runner.max_num_reqs),
++        "padded_rows_per_dp": int(padded_rows_per_dp),
++        "global_padded_rows": int(runner.dp_size) * int(padded_rows_per_dp),
++        "canonical_logprob_rows": canonical_logprob_rows,
++        "input_ids": _p38_aval_contract(input_ids),
++        "input_positions": _p38_aval_contract(input_positions),
++        "block_tables": _p38_aval_contract(attn_metadata.block_tables),
++        "seq_lens": _p38_aval_contract(attn_metadata.seq_lens),
++        "query_start_loc": _p38_aval_contract(
++            attn_metadata.query_start_loc),
++        "request_distribution": _p38_aval_contract(
++            attn_metadata.request_distribution),
++    }
++    if canonical_logprob_rows is None:
++        raise RuntimeError(
++            "P38 fixed-M attestation requires CANON_LOGPROB_M")
++    input_row_count = int(compile_geometry["input_ids"]["shape"][0])
++    position_row_count = int(
++        compile_geometry["input_positions"]["shape"][0])
++    if input_row_count != compile_geometry["global_padded_rows"]:
++        raise RuntimeError(
++            "P38 fixed-M geometry drifted: "
++            f"input_rows={input_row_count} "
++            f"global_padded_rows={compile_geometry['global_padded_rows']}")
++    if position_row_count != input_row_count:
++        raise RuntimeError(
++            "P38 fixed-M input/position aval rows differ: "
++            f"input_rows={input_row_count} position_rows={position_row_count}")
+     request_records = []
+     for item in incidents:
+         request_id = str(item["request_id"])
+@@ -1482,7 +1514,7 @@
+                 "observed_request_id": str(owner["request_id"]),
+                 "observed_logical_page": int(owner["logical_page"]),
+             })
+-        request_records.append({
++        request_record = {
+             "request_id": request_id,
+             "request_index": request_index,
+             "dp_rank": dp_rank,
+@@ -1494,7 +1526,13 @@
+             "logical_blocks": logical_blocks,
+             "physical_pages": pages,
+             "page_generations": page_generations,
+-        })
++        }
++        if len(co_batch) == 1:
++            if co_batch != [request_id]:
++                raise RuntimeError(
++                    "P38 single-active incident request identity drifted")
++            request_record["single_active_token_ids"] = token_ids
++        request_records.append(request_record)
+     record = {
+         "schema": "p38-incident-ledger-v1",
+         "diagnostic_round": diagnostic_round,
+@@ -1503,6 +1541,7 @@
+         "scheduled_request_count": len(co_batch),
+         "co_batch_request_ids": co_batch,
+         "one_token_decode_request_count": len(prefixes),
++        "compile_geometry": compile_geometry,
+         "incident_min_prefix": _P38_INCIDENT_MIN_PREFIX,
+         "incident_max_prefix": _P38_INCIDENT_MAX_PREFIX,
+         "requests": request_records,
+@@ -1655,6 +1694,26 @@
+     return _hashlib.sha256(values.tobytes()).hexdigest()
+ 
+ 
++def _p38_aval_contract(value):
++    """Describe one program input without materialising its device buffer."""
++    if value is None:
++        return None
++    shape = getattr(value, "shape", None)
++    dtype = getattr(value, "dtype", None)
++    if shape is None or dtype is None:
++        raise RuntimeError(
++            "P38 fixed-M attestation requires shaped, typed program inputs")
++    try:
++        sharding = str(getattr(value, "sharding", None))
++    except Exception:
++        sharding = "unknown"
++    return {
++        "shape": [int(dimension) for dimension in shape],
++        "dtype": str(dtype),
++        "sharding": sharding,
++    }
++
++
+ def _p38_serving_request_meta(
+         runner, scheduler_output, req_ids_dp, tokens_indices_selector,
+         padded_rows_per_dp, input_positions, active_mask, md_block_tables,
+@@ -1846,7 +1905,8 @@
+         runner, scheduler_output, req_ids_dp, scheduled_prefixes, program_path)
+     _p38_incident_ledger(
+         runner, scheduler_output, req_ids_dp, scheduled_prefixes, program_path,
+-        call_index)
++        call_index, input_ids, input_positions, attn_metadata,
++        padded_num_scheduled_tokens_per_dp_rank)
+     if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
+         return None
+     candidate_strata = []

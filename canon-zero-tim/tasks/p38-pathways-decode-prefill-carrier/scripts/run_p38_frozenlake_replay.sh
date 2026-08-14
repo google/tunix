@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Run one bounded P38 FrozenLake R0/R1 replay on the authorized v5p host.
+# Run one bounded P38 FrozenLake E0-lite replay on the authorized v5p host.
+#
+# This DP1 mask-derived counterfactual deliberately does not claim a strict
+# production replay. In particular, scheduled_request_count=1 in a production
+# fixed-M call must not be confused with this script's batch-size-one program.
 set -euo pipefail
 
 capsule="${1:?usage: run_p38_frozenlake_replay.sh <capsule.npz> <unique-label> [source-row]}"
@@ -77,8 +81,8 @@ row_index="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["se
 
 {
   echo "[P38.FL.REPLAY] source=$source_sha diff_sha256=$diff_sha image=$image"
-  echo "[P38.FL.REPLAY] topology=DP1xTP4 model=Qwen3-8B local_m=256"
-  echo "[P38.FL.REPLAY] schedule=mask-derived-v1 source_row=${source_row:-auto} row_index=$row_index prefix_cache=disabled runtime_kv_cache=enabled"
+  echo "[P38.FL.REPLAY] scope=E0-lite production_proof=0 topology=DP1xTP4 model=Qwen3-8B local_m=256"
+  echo "[P38.FL.REPLAY] schedule=e0-lite-mask-derived-v1 source_row=${source_row:-auto} row_index=$row_index prefix_cache=disabled runtime_kv_cache=enabled"
   echo "[P38.FL.REPLAY] mutation=none no_backward=1 optimizer_commits=0 timeout=$timeout_seconds"
   sha256sum "$capsule" "$schedule_report" "$0" \
     "$script_dir/prepare_p38_frozenlake_replay.py" \

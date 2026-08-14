@@ -316,6 +316,64 @@ class ClassifyServingCaptureTest(unittest.TestCase):
         report["incident_exact_joins"][0]["num_computed_tokens"], 2
     )
 
+  def test_accepts_fixed_m_single_active_incident(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name) / "p38_incident_ledger.jsonl"
+    record = json.loads(path.read_text())
+    aval = lambda shape: {
+        "shape": shape,
+        "dtype": "int32",
+        "sharding": "NamedSharding(mesh=Mesh('data': 2), spec=P())",
+    }
+    record["compile_geometry"] = {
+        "dp_size": 2,
+        "max_num_reqs": 8,
+        "padded_rows_per_dp": 128,
+        "global_padded_rows": 256,
+        "canonical_logprob_rows": 256,
+        "input_ids": aval([256]),
+        "input_positions": aval([256]),
+        "block_tables": aval([8, 8]),
+        "seq_lens": aval([8]),
+        "query_start_loc": aval([10]),
+        "request_distribution": aval([3]),
+    }
+    record["requests"][0]["single_active_token_ids"] = [101, 102, 103]
+    path.write_text(json.dumps(record, sort_keys=True) + "\n")
+    report = _classify(holder)
+    join = report["incident_exact_joins"][0]
+    self.assertEqual(join["compile_geometry"]["global_padded_rows"], 256)
+    self.assertTrue(join["single_active_token_ids_present"])
+
+  def test_rejects_shape_one_fixed_m_substitution(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name) / "p38_incident_ledger.jsonl"
+    record = json.loads(path.read_text())
+    aval = lambda shape: {
+        "shape": shape,
+        "dtype": "int32",
+        "sharding": "NamedSharding(mesh=Mesh('data': 2), spec=P())",
+    }
+    record["compile_geometry"] = {
+        "dp_size": 2,
+        "max_num_reqs": 8,
+        "padded_rows_per_dp": 128,
+        "global_padded_rows": 256,
+        "canonical_logprob_rows": 256,
+        "input_ids": aval([1]),
+        "input_positions": aval([1]),
+        "block_tables": aval([8, 8]),
+        "seq_lens": aval([8]),
+        "query_start_loc": aval([10]),
+        "request_distribution": aval([3]),
+    }
+    record["requests"][0]["single_active_token_ids"] = [101, 102, 103]
+    path.write_text(json.dumps(record, sort_keys=True) + "\n")
+    with self.assertRaisesRegex(MODULE.CaptureError, "fixed-M input aval"):
+      _classify(holder)
+
   def test_rejects_missing_request_journal(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)

@@ -469,6 +469,123 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
       self.runner._P38_PAGE_OWNERSHIP.clear()
       self.runner._P38_PAGE_OWNERSHIP.update(original["ownership"])
 
+  def _fixed_m_incident_case(self):
+    token_ids = np.arange(1601, dtype=np.int32)[None, :]
+    runner = SimpleNamespace(
+        dp_size=2,
+        max_num_reqs=8,
+        block_size=256,
+        input_batch=SimpleNamespace(
+            num_tokens=np.array([1601], dtype=np.int32),
+            token_ids_cpu=token_ids,
+        ),
+        requests={
+            "request-a": SimpleNamespace(
+                block_ids=[list(range(7, 14))]
+            )
+        },
+    )
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={"request-a": 1}
+    )
+    prefixes = [{
+        "request_id": "request-a",
+        "request_index": 0,
+        "num_computed_tokens": 1600,
+    }]
+    attention = SimpleNamespace(
+        block_tables=jnp.zeros((8, 8), dtype=jnp.int32),
+        seq_lens=jnp.zeros((8,), dtype=jnp.int32),
+        query_start_loc=jnp.zeros((10,), dtype=jnp.int32),
+        request_distribution=jnp.zeros((3,), dtype=jnp.int32),
+    )
+    return runner, scheduler, prefixes, attention
+
+  def test_incident_attests_fixed_m_and_embeds_single_active_tokens(self):
+    runner, scheduler, prefixes, attention = self._fixed_m_incident_case()
+    original = {
+        "path": self.runner._P38_INCIDENT_LEDGER,
+        "round": self.runner._P38_DIAGNOSTIC_ROUND_FILE,
+        "state": dict(self.runner._P38_INCIDENT_STATE),
+        "ownership": dict(self.runner._P38_PAGE_OWNERSHIP),
+    }
+    try:
+      with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        ledger = tmp_path / "p38_incident_ledger.jsonl"
+        round_file = tmp_path / "p38_diagnostic_round"
+        round_file.write_text("0\n", encoding="utf-8")
+        self.runner._P38_INCIDENT_LEDGER = str(ledger)
+        self.runner._P38_DIAGNOSTIC_ROUND_FILE = str(round_file)
+        self.runner._P38_INCIDENT_STATE.update({"records": 0, "bytes": 0})
+        self.runner._P38_PAGE_OWNERSHIP.clear()
+        with mock.patch.object(
+            self.runner.jax, "device_get",
+            side_effect=AssertionError("incident attestation fetched a device buffer"),
+        ):
+          self.runner._p38_incident_ledger(
+              runner,
+              scheduler,
+              {0: ["request-a"], 1: []},
+              prefixes,
+              "standard",
+              1,
+              jnp.zeros((256,), dtype=jnp.int32),
+              jnp.zeros((256,), dtype=jnp.int32),
+              attention,
+              128,
+          )
+        record = __import__("json").loads(ledger.read_text())
+        geometry = record["compile_geometry"]
+        self.assertEqual(geometry["dp_size"], 2)
+        self.assertEqual(geometry["padded_rows_per_dp"], 128)
+        self.assertEqual(geometry["global_padded_rows"], 256)
+        self.assertEqual(geometry["canonical_logprob_rows"], 256)
+        self.assertEqual(geometry["input_ids"]["shape"], [256])
+        self.assertEqual(
+            record["requests"][0]["single_active_token_ids"],
+            list(range(1601)),
+        )
+    finally:
+      self.runner._P38_INCIDENT_LEDGER = original["path"]
+      self.runner._P38_DIAGNOSTIC_ROUND_FILE = original["round"]
+      self.runner._P38_INCIDENT_STATE.clear()
+      self.runner._P38_INCIDENT_STATE.update(original["state"])
+      self.runner._P38_PAGE_OWNERSHIP.clear()
+      self.runner._P38_PAGE_OWNERSHIP.update(original["ownership"])
+
+  def test_incident_rejects_shape_one_program_substitution(self):
+    runner, scheduler, prefixes, attention = self._fixed_m_incident_case()
+    original = {
+        "path": self.runner._P38_INCIDENT_LEDGER,
+        "round": self.runner._P38_DIAGNOSTIC_ROUND_FILE,
+    }
+    try:
+      with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        round_file = tmp_path / "p38_diagnostic_round"
+        round_file.write_text("0\n", encoding="utf-8")
+        self.runner._P38_INCIDENT_LEDGER = str(
+            tmp_path / "p38_incident_ledger.jsonl"
+        )
+        self.runner._P38_DIAGNOSTIC_ROUND_FILE = str(round_file)
+        with self.assertRaisesRegex(RuntimeError, "fixed-M geometry drifted"):
+          self.runner._p38_incident_ledger(
+              runner,
+              scheduler,
+              {0: ["request-a"], 1: []},
+              prefixes,
+              "standard",
+              1,
+              jnp.zeros((1,), dtype=jnp.int32),
+              jnp.zeros((1,), dtype=jnp.int32),
+              attention,
+              128,
+          )
+    finally:
+      self.runner._P38_INCIDENT_LEDGER = original["path"]
+      self.runner._P38_DIAGNOSTIC_ROUND_FILE = original["round"]
+
   def test_serving_capture_triggers_from_host_scheduler_prefix(self):
     runner = SimpleNamespace(
         input_batch=SimpleNamespace(

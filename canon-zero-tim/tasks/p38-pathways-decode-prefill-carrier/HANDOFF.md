@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s15 completed; execute single-host strict E0 replay
+## CURRENT: P38.2m fixed-M single-active discriminator; do not run DP1 as strict E0
 
 P38s15/source `58a0ed847770` completed all three Frozen-Weight diagnostic
 rounds (768 trajectories total, 51,330 action tokens) on 64 TPU (`DP16xTP4`,
@@ -22,21 +22,38 @@ Key numerical facts:
 - Incident ledger: 1,915 records / 2,465 calls / 53.3 MB.
 - Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s15/`.
 
-### Next Operator Step: Single-Host Strict E0 Replay
+Across all three rounds, the 64 mismatch elements joined to 61 exact serving
+calls. Six mismatch calls occurred when only one request was scheduled. That
+does **not** mean the compiled batch shape became one: production continued to
+use fixed padding (`decode_rows=16`, canonical logprob rows 256, adapter
+global/local M 4096/256).
 
-The next action is single-host deterministic replay on the captured rows
-(e.g., row 215 and row 223) to construct R0 (first replay), R1 (repeat replay),
-and REF (clean prefill reference without serving):
+The command below is retained only as an E0-lite counterfactual. It uses DP1,
+`batch_size=1`, and `max_concurrency=1`; it changes the executable geometry and
+must not be described as strict E0 or production proof:
 
 ```bash
 bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/evidence/p38s15/p38_frozenlake_mismatch_capsule.npz \
-  p38s15_replay_row215 215
+  p38s15_replay_row215_e0lite 215
 ```
 
-If Strict E0 reproduces the online A value (`-2.244888` at pos 684), proceed
-with the First Divergence Seam Walk across RoPE -> RPA -> Residual -> Logits
-for code-level carrier remediation.
+### Next operator step after review and publication approval
+
+1. Use a new production-shape stock acquisition to obtain a naturally
+   single-active mismatch record with patch 15's fixed-M geometry and exact
+   token history. Do not change concurrency, DP/TP, canonical M, or padding.
+2. Reject any record whose input aval collapses to one row. This is a different
+   executable, even if its scheduler occupancy is one.
+3. Treat the new record as a discriminator, not a root-cause result. Choose
+   exactly one decisive observer next: neutral live-KV content comparison, or
+   (if KV is exact) the first-divergence seam walk from q_norm through the
+   normalizer.
+4. Do not rerun concurrency 32, KV-unified, or the DP1 E0-lite arm.
+
+No target launch is authorized by this handoff. Publication of the locally
+gated implementation was approved separately; its contract is described in
+`phases/p38-2m-fixed-m-single-active-discriminator.md`.
 
 ## HISTORY: completed P38s15, P38s14, P38s13a, P38s12f
 

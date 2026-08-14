@@ -511,6 +511,49 @@ def _load_incident_ledger(
         and len(co_batch) == len(set(co_batch)),
         f"incident ledger line {line_number} has an invalid co-batch",
     )
+    compile_geometry = record.get("compile_geometry")
+    if compile_geometry is not None:
+      _require(
+          isinstance(compile_geometry, dict),
+          f"incident ledger line {line_number} has invalid compile geometry",
+      )
+      dp_size = int(compile_geometry.get("dp_size", 0))
+      padded_rows = int(compile_geometry.get("padded_rows_per_dp", 0))
+      global_rows = int(compile_geometry.get("global_padded_rows", 0))
+      canonical_rows = int(
+          compile_geometry.get("canonical_logprob_rows", 0)
+      )
+      _require(
+          dp_size > 0
+          and padded_rows > 0
+          and global_rows == dp_size * padded_rows
+          and canonical_rows > 0,
+          f"incident ledger line {line_number} fixed-M scalars drifted",
+      )
+      for name in (
+          "input_ids",
+          "input_positions",
+          "block_tables",
+          "seq_lens",
+          "query_start_loc",
+          "request_distribution",
+      ):
+        aval = compile_geometry.get(name)
+        _require(
+            isinstance(aval, dict)
+            and isinstance(aval.get("shape"), list)
+            and aval["shape"]
+            and all(int(dimension) >= 0 for dimension in aval["shape"])
+            and isinstance(aval.get("dtype"), str)
+            and aval["dtype"],
+            f"incident ledger line {line_number} has invalid {name} aval",
+        )
+      _require(
+          int(compile_geometry["input_ids"]["shape"][0]) == global_rows
+          and compile_geometry["input_positions"]["shape"]
+          == compile_geometry["input_ids"]["shape"],
+          f"incident ledger line {line_number} fixed-M input aval drifted",
+      )
     requests = record.get("requests")
     _require(
         isinstance(requests, list) and requests,
@@ -541,6 +584,20 @@ def _load_incident_ledger(
           and all(character in "0123456789abcdef" for character in token_sha),
           f"incident ledger line {line_number} token SHA is invalid",
       )
+      single_active_tokens = request.get("single_active_token_ids")
+      if compile_geometry is not None and len(co_batch) == 1:
+        _require(
+            isinstance(single_active_tokens, list)
+            and len(single_active_tokens) == num_tokens
+            and all(isinstance(token, int) for token in single_active_tokens)
+            and _token_history_sha256(single_active_tokens) == token_sha,
+            f"incident ledger line {line_number} single-active tokens drifted",
+        )
+      if compile_geometry is not None and len(co_batch) != 1:
+        _require(
+            single_active_tokens is None,
+            f"incident ledger line {line_number} leaked non-single tokens",
+        )
       block_size = int(request.get("block_size", 0))
       logical_blocks = int(request.get("logical_blocks", 0))
       pages = request.get("physical_pages")
@@ -572,6 +629,7 @@ def _load_incident_ledger(
           "diagnostic_round": diagnostic_round,
           "co_batch_request_ids": co_batch,
           "scheduled_request_count": len(co_batch),
+          "compile_geometry": compile_geometry,
       })
   return entries
 
@@ -665,6 +723,10 @@ def _join_incident_to_capsule(
         "page_generations": entry["page_generations"],
         "scheduled_request_count": int(entry["scheduled_request_count"]),
         "co_batch_request_ids": entry["co_batch_request_ids"],
+        "compile_geometry": entry.get("compile_geometry"),
+        "single_active_token_ids_present": (
+            "single_active_token_ids" in entry
+        ),
     })
   return joins, missing
 

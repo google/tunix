@@ -6,9 +6,10 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38s15 3-round Frozen-Weight diagnostic completed from source
-  `58a0ed847770`. Next target action is single-host strict E0 replay and First
-  Divergence Seam Walk on rows `[215, 223, 231, 254, 255]`.
+- Active phase: P38.2m fixed-M single-active discriminator. P38s15 completed
+  from source `58a0ed847770`; its existing DP1/batch-size-one replay is now
+  explicitly E0-lite, not strict E0. The next target acquisition must preserve
+  the production padded aval while recording a naturally single-active call.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -25,6 +26,16 @@
   `9a7d6caf0125b0798a7745ae82882132115b1721414ecf6e1f3bde18c2d27c35`
   with incident ledger (1,915 records / 2,465 calls / 53.3 MB). Evidence
   is committed under `evidence/p38s15/`.
+- Across all three P38s15 rounds, 64 A-B mismatch elements joined exactly to
+  61 serving calls. Six mismatch calls had exactly one scheduled request, and
+  every joined request used local scheduler slot 0. This disproves a required
+  large live co-batch and the earlier slot-15 reading, but it does not imply a
+  shape-one executable: the run-wide contracts still report fixed production
+  padding (`decode_rows=16`, canonical logprob rows 256, adapter global/local
+  M 4096/256).
+- No joined mismatch call contains a simultaneous same-DP physical-page alias.
+  Sequential page reuse remains visible, but observation generations do not
+  prove stale KV bytes or an allocator lifecycle violation.
 - P38s13a/source `d3e6c1b0` reproduced A-B red at 39 / 48,043 elements
   (`58` bytes, `max_abs=0.28188323974609375`) with exact B-C, but it was a
   pre-P38.2l single-round run. Its committed evidence omits the capsule,
@@ -145,8 +156,25 @@
 - The postflight requires nonempty journal and incident ledger, three round
   markers, the final published round, full coverage, controlled exit, and
   successful transport/persistence before acceptance.
+- Patch 15 extends each incident record with the production fixed-M contract:
+  DP size, padded rows, canonical logprob rows, and shape/dtype/sharding for
+  model inputs and attention metadata. It never fetches device arrays. A
+  naturally single-active call additionally carries exact token IDs; a
+  one-row input substitution fails closed.
+- The old DP1 replay scripts and reports are explicitly labeled E0-lite. They
+  remain useful counterfactuals but cannot establish production program
+  identity or unlock the first-divergence seam walk.
 
 ## Local gates at this checkpoint
+
+- P38.2m focused classifiers: serving capture 36/36 and replay 7/7 PASS.
+- Complete pinned-image P33 CPU/adjacent gate: PASS with workload 85/85,
+  alignment 37/37, and terminal marker `[P33.WORKLOAD] CPU_GATE PASS`.
+- Exact-image Qwen3-1.7B/Qwen3-8B overlays: 25/25 each; all 29 manifest
+  entries match; terminal marker `P33_EXACT_IMAGE_PASS`.
+- Patch 15 installed runner SHA-256 is
+  `f6273f9aa9d9b066b3ccba13760e2dbddeea633846fd37bfeaf9ae1e731d4acc`.
+  Shell/Python syntax and `git diff --check` PASS.
 
 - Real Qwen3-8B DP1xTP4 three-round rehearsal: capture-on and capture-off both
   PASS with no backward/commit. Per-round token, action-mask, S_decode,
@@ -193,12 +221,18 @@
 
 ## Next action
 
-1. Render from the exact clean source containing P38.2l. Do not mutate the
-   instrumentation except to fix a failing gate.
-2. Execute one Attempt-0 stock P38s15 at concurrency 256 from pinned source
-   `dc529871d765`. Retrieve live and
-   final GCS artifacts and use its round-scoped capsule/incident ledger for
-   strict E0. Do not repeat concurrency 32, E0-lite, or KV-unified.
+1. P38.2m publication is approved. Do not launch a target acquisition until
+   the published source is pinned and separately approved.
+2. Do not run `run_p38_frozenlake_replay.sh` as strict E0; it is a DP1,
+   batch-size-one E0-lite counterfactual and changes the executable geometry.
+3. After publication approval, one production-shape stock acquisition may be
+   used only to obtain an exact mismatch join carrying the new fixed-M fields
+   and exact single-active token history. Patch 15 alone does not identify the
+   carrier.
+4. Once that join exists, add exactly one observer with its own neutrality
+   gate: live KV page content versus deterministic recomputation, or—if KV is
+   exact—the first-divergence seam walk. Do not rerun concurrency 32 or
+   KV-unified.
 
 ## Claim ceiling and blockers
 
@@ -207,8 +241,12 @@
 - Full device KV content hashing is intentionally absent from P38s12a because
   it can perturb the program. Add it only for an exactly joined red request and
   only with observer-neutrality evidence.
-- Exact E0 remains the hard gate before the RoPE/RPA/residual/logits seam walk
-  or any repair.
+- Fixed-M attestation proves that scheduler occupancy one did not collapse the
+  production input aval. It does not fingerprint a compiled executable and it
+  does not prove equal KV content.
+- Exact production-envelope reproduction, or an in-situ first-divergence
+  observer with neutrality evidence, remains the hard gate before a RoPE/RPA/
+  residual/logits repair claim.
 - P38 capture is diagnostic-only and must not be injected into P45 committed
   training. GSM8K/DeepSWE warning-only campaigns are separate workstreams and
   do not promote P38.
@@ -220,5 +258,5 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 default-off and does not change training, evaluation, prefix cache, precision,
 optimizer placement, or canonical kernels.
 
-- Updated: 2026-08-14 UTC; P38.2l is published at `bd309015`; P38s13a and
-  P38s14 are pre-P38.2l numerical-only evidence; P38s15 remains NOT RUN.
+- Updated: 2026-08-14 UTC; P38s15 is complete; P38.2m is implemented, locally
+  gated, and approved for publication. No target run occurred in P38.2m.
