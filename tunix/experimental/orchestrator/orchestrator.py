@@ -50,14 +50,25 @@ class ClusterOrchestrator:
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
+      rollout_router: Any = None,
   ):
-    """Initializes ClusterOrchestrator."""
+    """Initializes ClusterOrchestrator.
+
+    Args:
+      config: Optional opaque orchestrator config.
+      registry: Worker registry; created if not provided.
+      lifecycle_driver: Lifecycle driver; created if not provided.
+      monitor: Health monitor; created if not provided.
+      rollout_router: Optional rollout worker picker forwarded to the engine's
+        RoutingActorPool (e.g. remote_scheduler_router.RemoteSchedulerRouter).
+    """
     self.config = config
     self.registry = registry or worker_registry.WorkerRegistry()
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
+    self.rollout_router = rollout_router
     self._remote_worker_handles: dict[
         str, list[remote_execution.ActorHandle]
     ] = collections.defaultdict(list)
@@ -273,6 +284,7 @@ class ClusterOrchestrator:
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
+        router=self.rollout_router,
         weight_sync_coordinator=coordinator,
     )
 

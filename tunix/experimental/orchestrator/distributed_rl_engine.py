@@ -126,10 +126,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
       weight_sync_coordinator: Any = None,
+      router: Any | None = None,
   ):
     self._rollout_workers = list(rollout_workers)
     self._rollout_pool = remote_execution.RoutingActorPool(
-        self._rollout_workers
+        self._rollout_workers, router=router
     )
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
@@ -170,8 +171,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           req.request_id,
       )
       route_key = (req.metadata or {}).get("prefix_hash", req.prompt_id)
+      # Local routing hints only: this kwargs dict is consumed by the pool's
+      # router hook and never forwarded to the remote call.
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
+          method_name="generate",
+          kwargs={
+              "route_key": route_key,
+              "request_id": req.request_id,
+              "prompt": req.prompt,
+          },
       )
       res = worker.dispatch_task(method_name="generate", requests=[req])
       if inspect.isawaitable(res):
@@ -403,7 +411,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     for req in requests:
       route_key = req.metadata.get("prefix_hash", req.prompt_id)
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
+            method_name="generate",
+            kwargs={
+                "route_key": route_key,
+                "request_id": req.request_id,
+                "prompt": req.prompt,
+            },
       )
       worker_to_requests[worker].append(req)
 

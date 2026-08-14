@@ -375,9 +375,25 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_actor_pool_add_invalid_type_raises(self):
     pool = remote_lib.RoutingActorPool()
     with self.assertRaisesRegex(
-        TypeError, "Expected str or ActorHandle, got <class 'int'>"
+        TypeError, "Expected str or ActorHandle-like object, got <class 'int'>"
     ):
       pool.add_actor(123)  # type: ignore
+
+  def test_actor_pool_accepts_duck_typed_handle(self):
+    """Registry Worker adapters that wrap handles must be routable."""
+
+    class _DuckHandle:
+
+      def submit(self, method_name=None, *args, **kwargs):
+        return None
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        return None
+
+    pool = remote_lib.RoutingActorPool()
+    duck = _DuckHandle()
+    pool.add_actor(duck)
+    self.assertIs(pool._get_next_actor("generate"), duck)
 
   def test_ray_style_remote_decorators(self):
     """Verifies @remote, @grpc, and @stubby decorators turning classes/funcs into actors."""
