@@ -3,11 +3,11 @@
 ## Current status
 
 The next Q4 target run is the complete data-washing campaign, not another
-standalone `l0/p0` smoke. The implementation is currently local on base
-`c33ba5f50d606210ca9f2c94fca003b63ea6e326` and is **not yet committed or
-published**. Do not launch until the operator explicitly approves commit/push,
-the change is pushed to `yuxzhang/canon-zero-tim`, and the remote checkout reads
-back that exact published SHA. Never modify or push `main`.
+standalone `l0/p0` smoke. The implementation commit is
+`a989af34054434e6567f88e99b45ed67faf15a44` on baseline
+`c33ba5f50d606210ca9f2c94fca003b63ea6e326`. A remote executor must fetch
+`yuxzhang/canon-zero-tim`, record its exact current HEAD, and require that
+`a989af34` is in its ancestry. Never modify or push `main`.
 
 No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
 within the operator's explicit instruction.

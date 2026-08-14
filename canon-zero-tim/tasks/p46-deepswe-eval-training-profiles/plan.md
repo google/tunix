@@ -85,6 +85,7 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   `267a35ef41198dab55fd892a681c3a34b9331a78`. Remote execution requires this
   commit in the exact read-back operator ancestry and must use a new run id.
 - Publication status: P46.6 action compatibility v2, config-v3/trajectory-v5,
-  model-outcome validity, and `--full-campaign` are local and uncommitted on
-  base `c33ba5f50d606210ca9f2c94fca003b63ea6e326`. Never tell a remote agent to
-  launch until an explicitly approved commit is pushed and read back.
+  model-outcome validity, and `--full-campaign` are committed as
+  `a989af34054434e6567f88e99b45ed67faf15a44` on base
+  `c33ba5f50d606210ca9f2c94fca003b63ea6e326`. Remote execution requires this
+  implementation commit in the exact read-back operator ancestry.

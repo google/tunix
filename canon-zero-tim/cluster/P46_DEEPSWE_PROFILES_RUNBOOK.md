@@ -33,9 +33,10 @@ Completion still requires 1851 tasks, 29,616 valid identities, 58 logical
 summaries, all referenced digests, postflight cleanup, and the global
 `P46_EVAL_CAMPAIGN_PASS` marker.
 
-These changes are not launchable until their explicitly approved commit is
-pushed to `origin/yuxzhang/canon-zero-tim` and read back exactly. Never launch
-from a dirty worktree and never modify or push `main`.
+P46.6 is implemented by `a989af34054434e6567f88e99b45ed67faf15a44`.
+Require that commit in the exact read-back
+`origin/yuxzhang/canon-zero-tim` ancestry. Never launch from a dirty worktree
+and never modify or push `main`.
 
 This package has local CPU, direct one-host development evidence, and returned
 256-chip evaluation attempts. Neither returned attempt is a physical-shard

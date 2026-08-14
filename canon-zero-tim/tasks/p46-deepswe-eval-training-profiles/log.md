@@ -433,3 +433,23 @@
 - Operator decision: P46.5 L3 is deferred without being declared passed. The
   next target run, after publication and separate launch approval, is one
   admitted-topology full-washing campaign rather than another l0/p0 smoke.
+
+## 2026-08-14T00:00:01Z — P46.6 implementation commit
+
+- Type: publication preparation under explicit user commit/push approval.
+- Remote precondition: freshly fetched
+  `origin/yuxzhang/canon-zero-tim` remained exactly
+  `c33ba5f50d606210ca9f2c94fca003b63ea6e326`; local and remote divergence was
+  `0/0`, so no rebase or conflict resolution was required.
+- Implementation commit:
+  `a989af34054434e6567f88e99b45ed67faf15a44`.
+- Validated scope: P46 49/49 unittest PASS with stable release marker
+  `P46_DEEPSWE_PROFILES_CPU_PASS cases=40`; P34 static suites=10 PASS; P44
+  41/41 PASS; returned-artifact replay covered 1,076 responses and 1,521
+  deterministic repairs with zero introduced double closing tags; and
+  `git diff --check` passed.
+- Safety: only `yuxzhang/canon-zero-tim` is the approved push target. `main`
+  was not checked out, modified, merged, or targeted. No cluster resource was
+  launched or mutated.
+- Claim ceiling: commit and CPU/replay evidence do not prove target TPU,
+  Kubernetes cleanup, throughput, or completed data washing.
