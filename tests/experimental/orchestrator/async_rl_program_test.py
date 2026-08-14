@@ -76,8 +76,10 @@ class AsyncRLProgramTest(absltest.TestCase):
     self.mock_algo.requires_reference_kl = False
 
     mock_payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
         loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
         advantages=np.full(4, 1.0, dtype=np.float32),
         action_mask=np.array([0, 0, 1, 1], dtype=np.float32),

@@ -24,20 +24,8 @@ from tunix.experimental.orchestrator import batch_assembly
 class BatchAssemblyTest(absltest.TestCase):
 
   def test_sequence_packed_assembler_with_trainer_payload(self):
-    payload1 = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        advantages=np.full(4, 1.5, dtype=np.float32),
-    )
-    payload2 = datatypes.RLTrainerPayload(
-        token_ids=np.array([5, 6, 7, 8], dtype=np.int32),
-        token_mask=np.array([0, 0, 0, 1], dtype=np.float32),
-        loss_mask=np.array([0, 0, 0, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 0, 1], dtype=np.float32),
-        advantages=np.full(4, -0.5, dtype=np.float32),
-    )
+    payload1 = _make_payload(2, 2, advantage=1.5)
+    payload2 = _make_payload(3, 1, advantage=-0.5)
 
     assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
     payloads = assembler.pack([payload1, payload2])
@@ -45,28 +33,56 @@ class BatchAssemblyTest(absltest.TestCase):
     self.assertLen(payloads, 1)
     payload = payloads[0]
     self.assertEqual(payload.token_ids.shape, (1, 16))
+    self.assertEqual(payload.token_mask.shape, (1, 16))
     self.assertEqual(payload.loss_mask.shape, (1, 16))
     self.assertEqual(payload.segment_ids.shape, (1, 16))
     self.assertEqual(payload.segment_positions.shape, (1, 16))
     self.assertEqual(payload.advantages.shape, (1, 16))
 
-    # Check segment boundaries
+    # Both sequences are 4 tokens long, so the decreasing sort is a no-op and
+    # the stable order is preserved: payload1 is segment 1, payload2 segment 2.
     seg_ids = payload.segment_ids[0]
     self.assertTrue(np.all(seg_ids[:4] == 1))
     self.assertTrue(np.all(seg_ids[4:8] == 2))
     self.assertTrue(np.all(seg_ids[8:] == 0))
+    # Positions restart at 0 within each segment.
+    np.testing.assert_array_equal(
+        payload.segment_positions[0][:8], [0, 1, 2, 3, 0, 1, 2, 3]
+    )
+    # token_mask marks real tokens, NOT segment ids, and is 0 in the slack.
+    np.testing.assert_array_equal(
+        payload.token_mask[0], [1] * 8 + [0] * 8
+    )
+    # payload1 (prompt 2, completion 2) then payload2 (prompt 3, completion 1):
+    # loss applies to completion positions only, per segment.
+    np.testing.assert_array_equal(
+        payload.loss_mask[0], [0, 0, 1, 1, 0, 0, 0, 1] + [0] * 8
+    )
+    # Advantages sit on completion positions only, and each segment keeps its
+    # own value rather than bleeding across the packing boundary.
+    np.testing.assert_allclose(
+        payload.advantages[0], [0, 0, 1.5, 1.5, 0, 0, 0, -0.5] + [0] * 8
+    )
+
+  def test_sequence_packed_assembler_rejects_partial_optional_fields(self):
+    items = [
+        _make_payload(2, 2),
+        _make_payload(2, 2, ref_logps=np.full(2, -0.3, dtype=np.float32)),
+    ]
+    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
+
+    with self.assertRaisesRegex(ValueError, "ref_per_token_logps"):
+      assembler.pack(items)
 
   def test_grpo_train_example_assembler(self):
     payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([10, 11, 20, 21, 22], dtype=np.int32),
-        token_mask=np.ones(5, dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
-        advantages=np.array([0, 0, 2, 2, 2], dtype=np.float32),
         prompt_ids=np.array([10, 11], dtype=np.int32),
         prompt_mask=np.ones(2, dtype=np.float32),
         completion_ids=np.array([20, 21, 22], dtype=np.int32),
         completion_mask=np.array([1, 1, 0], dtype=np.float32),
+        loss_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
+        action_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
+        advantages=np.array([0, 0, 2, 2, 2], dtype=np.float32),
     )
 
     assembler = batch_assembly.GRPOTrainExampleAssembler(
@@ -103,25 +119,26 @@ def _make_payload(
     returns=None,
     action_mask=None,
 ):
-  """Builds an unbatched payload shaped like `AlgorithmAdapter` output."""
+  """Builds an unbatched payload shaped like `AlgorithmAdapter` output.
+
+  Unbatched payloads carry no concatenated `token_ids`: prompt/completion is
+  the canonical RL representation and the token stream is built by assembly.
+  """
   prompt = np.arange(1, prompt_len + 1, dtype=np.int32)
   completion = np.arange(101, 101 + completion_len, dtype=np.int32)
-  tokens = np.concatenate([prompt, completion])
   if action_mask is None:
     action_mask = np.ones(completion_len, dtype=np.float32)
   seq_loss_mask = np.concatenate(
       [np.zeros(prompt_len, dtype=np.float32), action_mask]
   )
   return datatypes.RLTrainerPayload(
-      token_ids=tokens,
-      token_mask=np.ones_like(tokens, dtype=np.float32),
-      loss_mask=seq_loss_mask,
-      action_mask=seq_loss_mask,
-      advantages=advantage,
       prompt_ids=prompt,
       prompt_mask=np.ones(prompt_len, dtype=np.float32),
       completion_ids=completion,
       completion_mask=action_mask,
+      loss_mask=seq_loss_mask,
+      action_mask=seq_loss_mask,
+      advantages=advantage,
       ref_per_token_logps=ref_logps,
       old_per_token_logps=old_logps,
       returns=returns,
@@ -331,19 +348,20 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     for p in payloads:
       self.assertEqual(p.token_ids.shape, (2, 9))
 
-  def test_infers_prompt_boundary_from_loss_mask_when_split_fields_absent(self):
-    item = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3], dtype=np.int32),
-        token_mask=np.ones(3, dtype=np.float32),
-        loss_mask=np.array([0, 0, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 1], dtype=np.float32),
-        advantages=np.full(3, 2.0, dtype=np.float32),
+  def test_prompt_completion_boundary_is_explicit_not_inferred(self):
+    # A completion whose first token is a tool observation (action_mask[0] == 0)
+    # used to be misfiled into the prompt when the boundary was inferred from
+    # where loss_mask becomes non-zero. It is now read off the required fields.
+    item = _make_payload(
+        2, 3, action_mask=np.array([0, 1, 1], dtype=np.float32)
     )
     payload = self._assembler().pack([item])[0]
 
     np.testing.assert_array_equal(payload.prompt_ids[0], [0, 0, 1, 2])
-    np.testing.assert_array_equal(payload.completion_ids[0], [3, 0, 0, 0, 0])
-    np.testing.assert_allclose(payload.advantages[0], [2, 0, 0, 0, 0])
+    np.testing.assert_array_equal(
+        payload.completion_ids[0], [101, 102, 103, 0, 0]
+    )
+    np.testing.assert_array_equal(payload.completion_mask[0], [0, 1, 1, 0, 0])
 
 
 if __name__ == "__main__":

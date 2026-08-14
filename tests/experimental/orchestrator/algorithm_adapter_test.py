@@ -57,8 +57,14 @@ class AlgorithmAdapterTest(absltest.TestCase):
     payloads = adapter.create_trainer_payloads([item1, item2], rewards=[1.0, 2.0])
     self.assertLen(payloads, 2)
     self.assertIsInstance(payloads[0], datatypes.RLTrainerPayload)
-    self.assertLess(payloads[0].advantages[0], 0.0)
-    self.assertGreater(payloads[1].advantages[0], 0.0)
+    # GRPO advantages are per-sequence scalars; batch assembly broadcasts them
+    # across the completion columns.
+    self.assertLess(float(payloads[0].advantages), 0.0)
+    self.assertGreater(float(payloads[1].advantages), 0.0)
+    # Unbatched payloads stay in the prompt/completion representation.
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [1, 2])
+    np.testing.assert_array_equal(payloads[0].completion_ids, [3, 4])
+    self.assertIsNone(payloads[0].token_ids)
     self.assertEqual(adapter.loss_fn(), algo_core.grpo_loss_fn)
 
   def test_ppo_advantages_and_trainer_payloads(self):
@@ -74,8 +80,8 @@ class AlgorithmAdapterTest(absltest.TestCase):
 
     payloads = adapter.create_trainer_payloads([item], rewards=[2.0], values=[1.0])
     self.assertLen(payloads, 1)
-    self.assertAlmostEqual(payloads[0].advantages[0], 1.0)
-    self.assertAlmostEqual(payloads[0].returns[0], 2.0)
+    self.assertAlmostEqual(float(payloads[0].advantages), 1.0)
+    self.assertAlmostEqual(float(payloads[0].returns), 2.0)
     self.assertEqual(adapter.loss_fn(), algo_core.ppo_policy_loss_fn)
 
 

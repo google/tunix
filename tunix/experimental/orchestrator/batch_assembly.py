@@ -155,12 +155,12 @@ def _completion_aligned(
 def _split_prompt_completion(
     item: datatypes.RLTrainerPayload,
 ) -> tuple[np.ndarray, np.ndarray]:
-  """Recovers the unpadded prompt / completion spans of an unbatched payload.
+  """Returns the unpadded prompt / completion spans of an unbatched payload.
 
-  Prefers the explicit `prompt_ids` / `completion_ids` fields. When a payload
-  only carries a concatenated `token_ids` stream (as `SequencePackedBatchAssembler`
-  consumers do), the boundary is inferred from the first position where
-  `loss_mask` becomes non-zero, which is where the trainable completion starts.
+  `prompt_ids` and `completion_ids` are required fields on `RLTrainerPayload`,
+  so the boundary is always explicit -- it never has to be guessed from where
+  `loss_mask` becomes non-zero, which would misfile a leading tool-observation
+  token into the prompt.
 
   Args:
     item: Unbatched RL trainer payload.
@@ -168,30 +168,92 @@ def _split_prompt_completion(
   Returns:
     A `(prompt_tokens, completion_tokens)` pair of 1D int32 arrays.
   """
-  if item.prompt_ids is not None or item.completion_ids is not None:
-    prompt = (
-        np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
-        if item.prompt_ids is not None
-        else np.zeros(0, dtype=np.int32)
-    )
-    completion = (
-        np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
-        if item.completion_ids is not None
-        else np.zeros(0, dtype=np.int32)
-    )
-    return prompt, completion
-
-  tokens = (
-      np.asarray(item.token_ids, dtype=np.int32).reshape(-1)
-      if item.token_ids is not None
-      else np.zeros(0, dtype=np.int32)
+  return (
+      np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1),
+      np.asarray(item.completion_ids, dtype=np.int32).reshape(-1),
   )
-  if item.loss_mask is None:
-    return tokens, np.zeros(0, dtype=np.int32)
-  loss_mask = np.asarray(item.loss_mask, dtype=np.float32).reshape(-1)
-  trainable = np.flatnonzero(loss_mask[: tokens.size])
-  split = int(trainable[0]) if trainable.size else tokens.size
-  return tokens[:split], tokens[split:]
+
+
+def _stream_aligned(
+    values: Any | None,
+    prompt_len: int,
+    completion_len: int,
+    *,
+    fill_value: float = 0.0,
+) -> np.ndarray:
+  """Places a completion-aligned value array onto a `[P + C]` token stream.
+
+  Prompt positions get 0: advantages, log-probs and loss weights are defined
+  over generated tokens only, and prompt positions are excluded from the loss
+  by `loss_mask` anyway.
+
+  Args:
+    values: Source array, scalar, or None, in any layout `_completion_values`
+      accepts.
+    prompt_len: Length of the prompt span of the stream.
+    completion_len: Length of the completion span of the stream.
+    fill_value: Value used over the completion when `values` is None.
+
+  Returns:
+    A `[prompt_len + completion_len]` float32 array.
+  """
+  completion = _completion_values(
+      values,
+      completion_len,
+      fill_value=fill_value,
+      prompt_len=prompt_len,
+      full_completion_len=completion_len,
+  )
+  return np.concatenate(
+      [np.zeros(prompt_len, dtype=np.float32), completion]
+  )
+
+
+def _carried_optional_fields(
+    chunk: Sequence[datatypes.RLTrainerPayload],
+) -> tuple[str, ...]:
+  """Returns the optional per-token fields carried by every item of a chunk.
+
+  Optional fields are all-or-nothing within a microbatch:
+
+  - set on every row: emitted as a dense tensor;
+  - set on no row: left as `None`, so nothing is allocated or shipped to the
+    accelerator for an algorithm that does not use the field (a GRPO batch
+    carries no `returns` / `old_values` / `old_per_token_logps` buffers);
+  - set on only some rows: rejected.
+
+  The last case is an error rather than a zero-fill because zero is not a
+  neutral value for the quantities involved -- a zero log-probability means
+  `exp(0) == 1`, so a fabricated row would distort the KL and importance-ratio
+  terms instead of dropping out of them. It is also not silently dropped, since
+  that would deactivate the consuming loss term for the whole microbatch. These
+  fields come from batched scoring passes, so partial presence indicates a
+  caller bug.
+
+  Args:
+    chunk: The items about to be packed together.
+
+  Returns:
+    Names of the optional fields to emit, in declaration order.
+
+  Raises:
+    ValueError: If an optional field is set on some but not all items.
+  """
+  carried = []
+  for name in _OPTIONAL_PER_TOKEN_FIELDS:
+    populated = [getattr(item, name) is not None for item in chunk]
+    if all(populated):
+      carried.append(name)
+    elif any(populated):
+      missing = [i for i, has_value in enumerate(populated) if not has_value]
+      raise ValueError(
+          f"'{name}' is set on some but not all items packed together"
+          f" (missing on rows {missing}). Optional per-token fields must be"
+          " supplied for every item or for none: zero-filling the gaps would"
+          " corrupt the loss, and dropping the field would silently"
+          " deactivate the loss term that consumes it."
+      )
+  return tuple(carried)
 
 
 class SequencePackedBatchAssembler:
@@ -206,10 +268,12 @@ class SequencePackedBatchAssembler:
     if not items:
       return []
 
-    # Calculate token lengths from explicit fields
+    # Token lengths come from the prompt/completion representation: unbatched
+    # payloads carry no concatenated `token_ids`, that stream is built here.
     item_lengths = []
     for it in items:
-      item_lengths.append(len(it.token_ids) if it.token_ids is not None else 0)  # pyrefly: ignore[bad-argument-type]
+      prompt, completion = _split_prompt_completion(it)
+      item_lengths.append(prompt.size + completion.size)
 
     item_list = sorted(zip(items, item_lengths), key=lambda x: x[1], reverse=True)
 
@@ -230,96 +294,88 @@ class SequencePackedBatchAssembler:
 
     payloads: list[datatypes.RLTrainerPayload] = []
     for b_items in bins:
+      carried = _carried_optional_fields(b_items)
+
       all_tokens = []
+      all_token_masks = []
       all_loss_masks = []
       all_action_masks = []
       all_segment_ids = []
       all_segment_positions = []
       all_advantages = []
-      all_old_logprobs = []
-      all_ref_logprobs = []
+      all_optional: dict[str, list[np.ndarray]] = {n: [] for n in carried}
 
       for seg_idx, it in enumerate(b_items, start=1):
-        toks = (
-            np.asarray(it.token_ids, dtype=np.int32).reshape(-1)
-            if it.token_ids is not None
-            else np.zeros(0, dtype=np.int32)
-        )
-        seq_len = len(toks)
+        prompt, completion = _split_prompt_completion(it)
+        toks = np.concatenate([prompt, completion])
+        seq_len = toks.size
 
         all_tokens.append(toks)
-
-        loss_mask = (
-            it.loss_mask
-            if it.loss_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_loss_masks.append(np.asarray(loss_mask, dtype=np.float32).reshape(-1))
-
-        action_mask = (
-            it.action_mask
-            if it.action_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_action_masks.append(
-            np.asarray(action_mask, dtype=np.float32).reshape(-1)
-        )
-
-        adv_arr = (
-            np.asarray(it.advantages, dtype=np.float32).reshape(-1)
-            if it.advantages is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_advantages.append(adv_arr)
-
+        # Every position of a segment is a real token; padding only ever
+        # appears in the trailing slack of the packed buffer.
+        all_token_masks.append(np.ones(seq_len, dtype=np.float32))
         all_segment_ids.append(np.full(seq_len, seg_idx, dtype=np.int32))
         all_segment_positions.append(np.arange(seq_len, dtype=np.int32))
 
-        if it.old_per_token_logps is not None:
-          all_old_logprobs.append(
-              np.asarray(it.old_per_token_logps, dtype=np.float32).reshape(-1)
+        all_loss_masks.append(
+            _stream_aligned(it.loss_mask, prompt.size, completion.size)
+        )
+        action_source = (
+            it.action_mask if it.action_mask is not None else it.completion_mask
+        )
+        all_action_masks.append(
+            _stream_aligned(action_source, prompt.size, completion.size)
+        )
+        all_advantages.append(
+            _stream_aligned(it.advantages, prompt.size, completion.size)
+        )
+        for name in carried:
+          all_optional[name].append(
+              _stream_aligned(
+                  getattr(it, name), prompt.size, completion.size
+              )
           )
 
-        if it.ref_per_token_logps is not None:
-          all_ref_logprobs.append(
-              np.asarray(it.ref_per_token_logps, dtype=np.float32).reshape(-1)
-          )
+      def _packed(rows: list[np.ndarray], pad_value: float | int, dtype: Any):
+        """Concatenates segment rows into one padded `[1, max_packed_len]` row."""
+        concat = np.concatenate(rows) if rows else np.zeros(0, dtype=dtype)
+        out = np.full(self.max_packed_len, pad_value, dtype=dtype)
+        keep = min(concat.size, self.max_packed_len)
+        if keep:
+          out[:keep] = concat[:keep]
+        return out[np.newaxis, :]
 
-      concat_tokens = np.concatenate(all_tokens)
-      concat_loss_masks = np.concatenate(all_loss_masks)
-      concat_action_masks = np.concatenate(all_action_masks)
-      concat_segment_ids = np.concatenate(all_segment_ids)
-      concat_segment_positions = np.concatenate(all_segment_positions)
-      concat_advantages = np.concatenate(all_advantages)
-
-      pad_len = max(0, self.max_packed_len - len(concat_tokens))
-      padded_tokens = np.pad(concat_tokens[: self.max_packed_len], (0, pad_len), constant_values=self.pad_id)
-      padded_loss_mask = np.pad(concat_loss_masks[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-      padded_action_mask = np.pad(concat_action_masks[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-      padded_segment_ids = np.pad(concat_segment_ids[: self.max_packed_len], (0, pad_len), constant_values=0)
-      padded_segment_positions = np.pad(concat_segment_positions[: self.max_packed_len], (0, pad_len), constant_values=0)
-      padded_advantages = np.pad(concat_advantages[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-
-      batch_old_lp = None
-      if all_old_logprobs:
-        concat_old = np.concatenate(all_old_logprobs)
-        batch_old_lp = np.pad(concat_old[: self.max_packed_len], (0, pad_len), constant_values=0.0)[np.newaxis, :]
-
-      batch_ref_lp = None
-      if all_ref_logprobs:
-        concat_ref = np.concatenate(all_ref_logprobs)
-        batch_ref_lp = np.pad(concat_ref[: self.max_packed_len], (0, pad_len), constant_values=0.0)[np.newaxis, :]
+      padded_tokens = _packed(all_tokens, self.pad_id, np.int32)
+      padded_token_mask = _packed(all_token_masks, 0.0, np.float32)
+      padded_loss_mask = _packed(all_loss_masks, 0.0, np.float32)
+      padded_action_mask = _packed(all_action_masks, 0.0, np.float32)
+      padded_advantages = _packed(all_advantages, 0.0, np.float32)
 
       payload = datatypes.RLTrainerPayload(
-          token_ids=padded_tokens[np.newaxis, :],
-          token_mask=padded_segment_ids[np.newaxis, :],
-          loss_mask=padded_loss_mask[np.newaxis, :],
-          advantages=padded_advantages[np.newaxis, :],
-          action_mask=padded_action_mask[np.newaxis, :],
-          old_per_token_logps=batch_old_lp,
-          ref_per_token_logps=batch_ref_lp,
-          segment_ids=padded_segment_ids[np.newaxis, :],
-          segment_positions=padded_segment_positions[np.newaxis, :],
+          # A packed row interleaves whole sequences, so it has no single
+          # prompt/completion boundary: the per-sequence structure lives in
+          # `segment_ids`, and which positions are trainable lives in
+          # `loss_mask`. The row is therefore exposed as one completion span,
+          # which keeps the completion-aligned tensors (advantages, log-probs)
+          # in register with `completion_ids`.
+          # TODO: give the packed path its own payload type so that
+          # prompt_ids/prompt_mask do not have to be degenerate here.
+          prompt_ids=np.zeros((1, 0), dtype=np.int32),
+          prompt_mask=np.zeros((1, 0), dtype=np.float32),
+          completion_ids=padded_tokens,
+          completion_mask=padded_action_mask,
+          token_ids=padded_tokens,
+          token_mask=padded_token_mask,
+          loss_mask=padded_loss_mask,
+          advantages=padded_advantages,
+          action_mask=padded_action_mask,
+          segment_ids=_packed(all_segment_ids, 0, np.int32),
+          segment_positions=_packed(all_segment_positions, 0, np.int32),
+          metadata={"num_segments": len(b_items)},
+          **{
+              name: _packed(rows, 0.0, np.float32)
+              for name, rows in all_optional.items()
+          },
       )
       payloads.append(payload)
 
@@ -545,52 +601,6 @@ class PaddedBatchAssembler:
       payloads.append(self._pack_chunk(item_list[i : i + self.batch_size]))
     return payloads
 
-  def _carried_optional_fields(
-      self, chunk: Sequence[datatypes.RLTrainerPayload]
-  ) -> tuple[str, ...]:
-    """Returns the optional per-token fields carried by every row of a chunk.
-
-    Optional fields are all-or-nothing within a microbatch:
-
-    - set on every row: emitted as a dense `[B, C]` tensor;
-    - set on no row: left as `None`, so nothing is allocated or shipped to the
-      accelerator for an algorithm that does not use the field (a GRPO batch
-      carries no `returns` / `old_values` / `old_per_token_logps` buffers);
-    - set on only some rows: rejected.
-
-    The last case is an error rather than a zero-fill because zero is not a
-    neutral value for the quantities involved — a zero log-probability means
-    `exp(0) == 1`, so a fabricated row would distort the KL and
-    importance-ratio terms instead of dropping out of them. It is also not
-    silently dropped, since that would deactivate the consuming loss term for
-    the whole microbatch. These fields come from batched scoring passes, so
-    partial presence indicates a caller bug.
-
-    Args:
-      chunk: The items about to be packed into one microbatch.
-
-    Returns:
-      Names of the optional fields to emit, in declaration order.
-
-    Raises:
-      ValueError: If an optional field is set on some but not all items.
-    """
-    carried = []
-    for name in _OPTIONAL_PER_TOKEN_FIELDS:
-      populated = [getattr(item, name) is not None for item in chunk]
-      if all(populated):
-        carried.append(name)
-      elif any(populated):
-        missing = [i for i, has_value in enumerate(populated) if not has_value]
-        raise ValueError(
-            f"'{name}' is set on some but not all items of a microbatch"
-            f" (missing on rows {missing}). Optional per-token fields must be"
-            " supplied for every item or for none: zero-filling the gaps would"
-            " corrupt the loss, and dropping the field would silently"
-            " deactivate the loss term that consumes it."
-        )
-    return tuple(carried)
-
   def _pack_chunk(
       self, chunk: Sequence[datatypes.RLTrainerPayload]
   ) -> datatypes.RLTrainerPayload:
@@ -618,7 +628,7 @@ class PaddedBatchAssembler:
     advantages = np.zeros((rows, c_width), dtype=np.float32)
     optional = {
         name: np.zeros((rows, c_width), dtype=np.float32)
-        for name in self._carried_optional_fields(chunk)
+        for name in _carried_optional_fields(chunk)
     }
 
     truncated_prompts = truncated_completions = 0

@@ -471,39 +471,44 @@ class WeightSyncMetadata:
 
 @dataclasses.dataclass(kw_only=True)
 class TrainerPayload:
-  """Generic trainer payload.
+  """Marker base for anything handed to a trainer / TrainerWorker.
 
-  Attributes:
-    token_ids: [B, T] token IDs for a batched trainer payload. By default,
-      each row is structured as left-padded prompt tokens concatenated with
-      right-padded completion tokens.
-    token_mask: [B, T] token mask to differentiate padding tokens from valid
-      tokens.
-    segment_ids: Optional [B, T] packing segment ids.
-    segment_positions: Optional [B, T] position indices within each segment.
+  Intentionally carries no fields. Trainers never read payload attributes
+  directly: `fwd_bwd` shards the payload and passes it through
+  `gen_model_input_fn` to the loss function, so the concrete field set is owned
+  by the algorithm-specific subclass rather than by this shared contract.
+  Keeping the base empty means a paradigm (RL, SFT, preference) never has to
+  materialise token tensors it has no use for just to satisfy the type.
   """
-
-  token_ids: ArrayLike
-  token_mask: ArrayLike
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
 
 
 # TODO: Introduce PPOTrainerPayload to replace generic RLTrainerPayload when PPO specific fields are needed.
 @dataclasses.dataclass(kw_only=True)
 class RLTrainerPayload(TrainerPayload):
-  """RL training payload.
+  """RL training payload, in the prompt/completion representation.
+
+  Prompt and completion are the canonical RL layout: it is what the GRPO / PPO
+  losses consume, and it is the only representation in which completion-aligned
+  tensors (advantages, per-token log-probs, returns) are unambiguously in
+  register. Unbatched payloads carry 1D unpadded rows; batch assembly pads them
+  to [B, P] / [B, C].
 
   Attributes:
+    prompt_ids: Prompt token ids, [P] unbatched or [B, P] batched.
+    prompt_mask: Prompt mask, 1 on real (non-pad) prompt tokens.
+    completion_ids: Completion token ids, [C] unbatched or [B, C] batched.
+    completion_mask: Completion/action mask, 0 on tokens excluded from the loss
+      (padding and, for tool-using rollouts, observation tokens).
     advantages: [B] or [B, C] advantages.
-    loss_mask: [B, T], 1 where the position contributes to the loss.
-    action_mask: Optional [B, T] or [B, C] mask of policy actions.
-    prompt_ids: Optional prompt token ids for GRPO-style losses. Unbatched
-      payloads may carry 1D unpadded rows; batch assembly pads them to [B, P].
-    prompt_mask: Optional [B, P] prompt mask.
-    completion_ids: Optional completion token ids. Unbatched payloads may carry
-      1D unpadded rows; batch assembly pads them to [B, C].
-    completion_mask: Optional [B, C] completion/action mask.
+    loss_mask: 1 where the position contributes to the loss.
+    action_mask: Optional mask of policy actions.
+    token_ids: Optional concatenated token stream. Only set by assemblers that
+      produce one (2D padding exposes it as a view over prompt ++ completion;
+      1D sequence packing produces it natively). Consumers that need a single
+      model-input tensor read this; the RL losses do not.
+    token_mask: Optional mask over `token_ids`, 1 on real (non-pad) tokens.
+    segment_ids: Optional packing segment ids, set by 1D sequence packing.
+    segment_positions: Optional position indices within each packed segment.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
@@ -512,13 +517,17 @@ class RLTrainerPayload(TrainerPayload):
     metadata: Extra payload metadata dictionary.
   """
 
+  prompt_ids: ArrayLike
+  prompt_mask: ArrayLike
+  completion_ids: ArrayLike
+  completion_mask: ArrayLike
   advantages: ArrayLike
   loss_mask: ArrayLike
   action_mask: ArrayLike | None = None
-  prompt_ids: ArrayLike | None = None
-  prompt_mask: ArrayLike | None = None
-  completion_ids: ArrayLike | None = None
-  completion_mask: ArrayLike | None = None
+  token_ids: ArrayLike | None = None
+  token_mask: ArrayLike | None = None
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None

@@ -437,6 +437,26 @@ class PaddedBatchAssembler:
     ...
 ```
 
+#### Payload types
+
+`TrainerPayload` is an **empty marker base**. Trainers never read payload attributes directly — `fwd_bwd` shards the payload and passes it through `gen_model_input_fn` to the loss function — so the concrete field set belongs to the algorithm-specific subclass. Keeping the base empty means no paradigm has to materialise token tensors it does not use just to satisfy the type.
+
+`RLTrainerPayload(TrainerPayload)` is the **prompt/completion** representation, which is what the GRPO / PPO losses actually consume and the only layout in which completion-aligned tensors are unambiguously in register:
+
+```python
+class RLTrainerPayload(TrainerPayload):
+  # required — the canonical RL representation
+  prompt_ids, prompt_mask, completion_ids, completion_mask
+  advantages, loss_mask
+  # optional
+  action_mask
+  token_ids, token_mask                 # concatenated stream, set by assembly only
+  segment_ids, segment_positions        # set by 1D sequence packing only
+  ref_/old_per_token_logps, sampler_is_weights, returns, old_values, metadata
+```
+
+Unbatched payloads from `AlgorithmAdapter` carry **only** prompt/completion — building the concatenated stream there would allocate a second copy of every trajectory. `token_ids` is populated by batch assembly, where 2D padding exposes it as the backing buffer that `prompt_ids`/`completion_ids` view into, so it costs nothing extra.
+
 #### `PaddedBatchAssembler` output field shapes
 
 | Field | Shape | Semantics |

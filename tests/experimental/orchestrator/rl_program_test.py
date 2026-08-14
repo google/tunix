@@ -53,10 +53,12 @@ class RLProgramTest(absltest.TestCase):
 
     self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     mock_payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
         loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        advantages=np.full(4, 1.0, dtype=np.float32),
+        advantages=np.float32(1.0),
         action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
     )
     self.mock_algo.create_trainer_payloads.return_value = [mock_payload]

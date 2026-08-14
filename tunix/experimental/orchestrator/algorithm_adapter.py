@@ -133,20 +133,19 @@ class GRPOAdapter(AlgorithmAdapter):
       c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
       act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
 
-      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
+      # Unbatched payloads stay in the prompt/completion representation: the
+      # concatenated token stream is a batch-assembly concern, and building it
+      # here would allocate a second copy of every trajectory.
       seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
-      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
 
       payload = datatypes.RLTrainerPayload(
-          token_ids=seq_tokens,
-          token_mask=np.ones_like(seq_tokens, dtype=np.float32),
-          loss_mask=seq_loss_mask,
-          advantages=seq_adv,
-          action_mask=seq_loss_mask,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
+          loss_mask=seq_loss_mask,
+          advantages=np.float32(adv_val),
+          action_mask=seq_loss_mask,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
       )
       payloads.append(payload)
@@ -234,23 +233,21 @@ class PPOAdapter(AlgorithmAdapter):
       c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
       act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
 
-      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
+      # Unbatched payloads stay in the prompt/completion representation; the
+      # concatenated token stream is a batch-assembly concern.
       seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
-      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
 
       payload = datatypes.RLTrainerPayload(
-          token_ids=seq_tokens,
-          token_mask=np.ones_like(seq_tokens, dtype=np.float32),
-          loss_mask=seq_loss_mask,
-          advantages=seq_adv,
-          action_mask=seq_loss_mask,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
+          loss_mask=seq_loss_mask,
+          advantages=np.float32(adv_val),
+          action_mask=seq_loss_mask,
           old_per_token_logps=np.asarray(old_lp, dtype=np.float32) if old_lp is not None else None,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
-          returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),
+          returns=np.float32(vt_val),
       )
       payloads.append(payload)
     return payloads
