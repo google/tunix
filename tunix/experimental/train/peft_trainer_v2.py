@@ -252,7 +252,9 @@ class GradientAccumulator(nnx.Module):
     state = nnx.state(model, wrt)
     self._param_dtypes = nnx.data(
         jax.tree_util.tree_map(
-            lambda x: getattr(x, "dtype", None),
+            lambda x: getattr(
+                x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+            ),
             state,
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
@@ -410,6 +412,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+    self._align_opt_state_dtypes(wrt_target)
     self.grad_accumulator = GradientAccumulator(
         self.model, wrt_target, allocate_grads=not self._is_single_microstep()
     )
@@ -485,6 +488,39 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
+
+  def _align_opt_state_dtypes(self, wrt: type[nnx.Variable]) -> None:
+    """Aligns the dtypes of the optimizer state to the model parameters.
+
+    Args:
+      wrt: The target variable type (e.g., `nnx.Param` or `nnx.LoRAParam`).
+    """
+    is_var = lambda x: isinstance(x, nnx.Variable)
+    unwrap = lambda t: jax.tree.map(
+        lambda x: x[...] if is_var(x) else x, t, is_leaf=is_var
+    )
+    pure_params = unwrap(nnx.state(self.model, wrt))
+    pure_opt_state = unwrap(self.optimizer.opt_state)
+    try:
+      _, probed = jax.eval_shape(
+          self.optimizer.tx.update, pure_params, pure_opt_state, pure_params
+      )
+    except (TypeError, ValueError, AttributeError):
+      return
+    if jax.tree.structure(probed) != jax.tree.structure(pure_opt_state):
+      return
+
+    def _maybe_cast(var, probe_leaf):
+      if is_var(var) and var[...].dtype != probe_leaf.dtype:
+        var.set_value(var[...].astype(probe_leaf.dtype))
+      return var
+
+    jax.tree.map(
+        _maybe_cast,
+        self.optimizer.opt_state,
+        probed,
+        is_leaf=is_var,
+    )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
