@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -36,8 +37,10 @@ class EvalArtifactsTest(unittest.TestCase):
         ),
         whitelist_rows=1851,
         source_commit="6" * 40,
+        harness_commit="6" * 40,
         client_image="example.invalid/tunix@sha256:" + "7" * 64,
         topology="64",
+        resume_tag="eval-resume-test",
     )
 
   def tearDown(self):
@@ -62,6 +65,7 @@ class EvalArtifactsTest(unittest.TestCase):
     self.assertEqual(
         self.config.action_compat_mode, "q4_r2egym_xml_v2"
     )
+    self.assertEqual(self.config.resume_tag, "eval-resume-test")
     with self.assertRaisesRegex(ValueError, "restricted"):
       dataclasses.replace(self.config, evaluation_mode="training").validate()
     with self.assertRaisesRegex(ValueError, "contract mismatch"):
@@ -155,6 +159,7 @@ class EvalArtifactsTest(unittest.TestCase):
         record["trajectory"]["steps"][0]["api_token"], "<redacted>"
     )
     self.assertEqual(record["trajectory_mode"], "reward_only_no_logprobs")
+    self.assertEqual(record["resume_tag"], "eval-resume-test")
     self.assertEqual(record["sampled_by"], "stock@" + "6" * 40)
     self.assertEqual(
         record["validity_reason"], "completed_under_signed_budget"
@@ -350,6 +355,231 @@ class EvalArtifactsTest(unittest.TestCase):
       artifacts.load_records(
           [path], config=self.config, allowed_task_keys={"img-a"}
       )
+
+  def test_resume_ignores_only_a_torn_tail_and_loads_the_next_file(self):
+    root = Path(self.temporary.name)
+    first = root / "a.jsonl"
+    second = root / "b.jsonl"
+    records = []
+    for sample_index, path in ((0, first), (1, second)):
+      record = artifacts.trajectory_record(
+          self.config,
+          entry={"docker_image": "img-a"},
+          sample_index=sample_index,
+          trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
+          elapsed_secs=1.0,
+      )
+      artifacts.append_record(path, record)
+      records.append(record)
+    with first.open("ab") as output:
+      output.write(b'{"torn":')
+      output.flush()
+    loaded = artifacts.load_records(
+        [first, second], config=self.config, allowed_task_keys={"img-a"}
+    )
+    self.assertEqual(
+        [(item["sample_index"], item["valid"]) for item in loaded],
+        [(0, True), (1, True)],
+    )
+
+  def test_resume_contract_and_single_writer_lease_fail_closed(self):
+    root = Path(self.temporary.name) / "campaign"
+    first = artifacts.ensure_resume_contract(root, config=self.config)
+    second = artifacts.ensure_resume_contract(root, config=self.config)
+    self.assertEqual(first["sha256"], second["sha256"])
+    with artifacts.campaign_lease(
+        root, config=self.config, launch_id="launch-a"
+    ):
+      lease = json.loads((root / "resume_lease.json").read_text())
+      self.assertEqual(lease["state"], "active")
+      with self.assertRaisesRegex(RuntimeError, "active writer"):
+        with artifacts.campaign_lease(
+            root, config=self.config, launch_id="launch-b"
+        ):
+          self.fail("a second writer acquired the same resume tag")
+    lease = json.loads((root / "resume_lease.json").read_text())
+    self.assertEqual(lease["state"], "released")
+
+    changed = dataclasses.replace(self.config, source_commit="8" * 40)
+    with self.assertRaisesRegex(ValueError, "differs from exact payload"):
+      artifacts.ensure_resume_contract(root, config=changed)
+
+  def test_resume_tag_rejects_paths_and_uppercase(self):
+    for value in ("../escape", "UPPER", "a" * 64, "dash-"):
+      with self.subTest(value=value):
+        with self.assertRaisesRegex(ValueError, "resume_tag"):
+          dataclasses.replace(self.config, resume_tag=value).validate()
+
+  def test_frozen_legacy_v5_snapshot_imports_once_with_full_provenance(self):
+    config = dataclasses.replace(
+        self.config,
+        source_commit="5" * 40,
+        harness_commit="6" * 40,
+        resume_tag="adopt-old-run",
+    )
+    entry = {"docker_image": "img-a", "instance_id": "task-a"}
+    record = artifacts.trajectory_record(
+        config,
+        entry=entry,
+        sample_index=3,
+        trajectory={"status": "SUCCEEDED", "reward": 1.0, "steps": []},
+        elapsed_secs=2.0,
+    )
+    record.update({
+        "schema": artifacts.LEGACY_TRAJECTORY_SCHEMA,
+        "config_fingerprint": artifacts.legacy_v5_fingerprint(config),
+        "run_tag": artifacts.legacy_v5_run_tag(config),
+    })
+    record.pop("resume_tag")
+    record.pop("harness_commit")
+
+    snapshot = Path(self.temporary.name) / "imports" / "old-run"
+    trajectory = snapshot / "trajectories" / "wave.jsonl"
+    trajectory.parent.mkdir(parents=True)
+    payload = (
+        json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    trajectory.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    (snapshot / "SHA256SUMS").write_text(
+        f"{digest}  trajectories/wave.jsonl\n", encoding="utf-8"
+    )
+
+    output = Path(self.temporary.name) / "resume" / "outputs"
+    first = artifacts.import_legacy_v5_snapshot(
+        snapshot, output, config=config, allowed_task_keys={"img-a"}
+    )
+    second = artifacts.import_legacy_v5_snapshot(
+        snapshot, output, config=config, allowed_task_keys={"img-a"}
+    )
+    self.assertEqual(first["outputs"], second["outputs"])
+    self.assertEqual(first["records"], 1)
+    output_path = first["outputs"][0]["path"]
+    self.assertTrue(Path(output_path).name.startswith(config.run_tag))
+    loaded = artifacts.load_records(
+        [output_path], config=config, allowed_task_keys={"img-a"}
+    )
+    self.assertEqual(len(loaded), 1)
+    self.assertEqual(loaded[0]["schema"], artifacts.TRAJECTORY_SCHEMA)
+    self.assertEqual(loaded[0]["resume_tag"], "adopt-old-run")
+    self.assertEqual(loaded[0]["harness_commit"], "6" * 40)
+    self.assertEqual(
+        loaded[0]["imported_from"]["legacy_config_fingerprint"],
+        artifacts.legacy_v5_fingerprint(config),
+    )
+    receipt = json.loads(Path(first["receipt_path"]).read_text())
+    self.assertEqual(receipt["source_commit"], "5" * 40)
+    self.assertEqual(receipt["harness_commit"], "6" * 40)
+
+  def test_legacy_import_rejects_live_or_contract_drifted_snapshot(self):
+    config = dataclasses.replace(
+        self.config,
+        source_commit="5" * 40,
+        harness_commit="6" * 40,
+        resume_tag="reject-old-run",
+    )
+    entry = {"docker_image": "img-a"}
+    record = artifacts.trajectory_record(
+        config,
+        entry=entry,
+        sample_index=0,
+        trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
+        elapsed_secs=1.0,
+    )
+    record.update({
+        "schema": artifacts.LEGACY_TRAJECTORY_SCHEMA,
+        "config_fingerprint": artifacts.legacy_v5_fingerprint(config),
+        "run_tag": artifacts.legacy_v5_run_tag(config),
+    })
+    record.pop("resume_tag")
+    record.pop("harness_commit")
+    snapshot = Path(self.temporary.name) / "imports" / "old-run-bad"
+    trajectory = snapshot / "trajectories" / "wave.jsonl"
+    trajectory.parent.mkdir(parents=True)
+    payload = (json.dumps(record) + "\n").encode()
+    trajectory.write_bytes(payload)
+    (snapshot / "SHA256SUMS").write_text(
+        f"{'0' * 64}  trajectories/wave.jsonl\n", encoding="utf-8"
+    )
+    with self.assertRaisesRegex(ValueError, "digest mismatch"):
+      artifacts.import_legacy_v5_snapshot(
+          snapshot,
+          Path(self.temporary.name) / "resume-bad" / "outputs",
+          config=config,
+          allowed_task_keys={"img-a"},
+      )
+
+    digest = hashlib.sha256(payload).hexdigest()
+    (snapshot / "SHA256SUMS").write_text(
+        f"{digest}  trajectories/wave.jsonl\n", encoding="utf-8"
+    )
+    drifted = dataclasses.replace(config, source_commit="4" * 40)
+    with self.assertRaisesRegex(ValueError, "contract mismatch"):
+      artifacts.import_legacy_v5_snapshot(
+          snapshot,
+          Path(self.temporary.name) / "resume-drift" / "outputs",
+          config=drifted,
+          allowed_task_keys={"img-a"},
+      )
+
+  def test_legacy_import_preserves_per_logical_shard_fingerprints(self):
+    config = dataclasses.replace(
+        self.config,
+        source_commit="5" * 40,
+        harness_commit="6" * 40,
+        resume_tag="multi-logical-import",
+    )
+    keys = [f"img-{index:02d}" for index in range(33)]
+    legacy_records = []
+    for key_index in (0, 32):
+      logical_index = key_index // config.logical_tasks
+      logical_config = dataclasses.replace(config, shard_index=logical_index)
+      record = artifacts.trajectory_record(
+          logical_config,
+          entry={"docker_image": keys[key_index]},
+          sample_index=0,
+          trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
+          elapsed_secs=1.0,
+      )
+      record.update({
+          "schema": artifacts.LEGACY_TRAJECTORY_SCHEMA,
+          "config_fingerprint": artifacts.legacy_v5_fingerprint(logical_config),
+          "run_tag": artifacts.legacy_v5_run_tag(logical_config),
+      })
+      record.pop("resume_tag")
+      record.pop("harness_commit")
+      legacy_records.append(record)
+
+    snapshot = Path(self.temporary.name) / "imports" / "multi-old-run"
+    trajectory = snapshot / "trajectories" / "waves.jsonl"
+    trajectory.parent.mkdir(parents=True)
+    payload = b"".join(
+        (json.dumps(record, sort_keys=True) + "\n").encode()
+        for record in legacy_records
+    )
+    trajectory.write_bytes(payload)
+    (snapshot / "SHA256SUMS").write_text(
+        f"{hashlib.sha256(payload).hexdigest()}  trajectories/waves.jsonl\n",
+        encoding="utf-8",
+    )
+    receipt = artifacts.import_legacy_v5_snapshot(
+        snapshot,
+        Path(self.temporary.name) / "multi-resume" / "outputs",
+        config=config,
+        allowed_task_keys=keys,
+    )
+    self.assertEqual(receipt["records"], 2)
+    self.assertEqual(
+        [item["logical_shard_index"] for item in receipt["outputs"]], [0, 1]
+    )
+    for item in receipt["outputs"]:
+      logical_config = dataclasses.replace(
+          config, shard_index=item["logical_shard_index"]
+      )
+      loaded = artifacts.load_records(
+          [item["path"]], config=logical_config, allowed_task_keys=keys
+      )
+      self.assertEqual(len(loaded), 1)
 
   def test_exact_n_classification_and_q32_hard_tier(self):
     entries = [

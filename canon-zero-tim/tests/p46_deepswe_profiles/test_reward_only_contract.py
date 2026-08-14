@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT / "examples" / "deepswe"))
 
 import eval_deepswe  # pylint: disable=wrong-import-position
 import deepswe_eval_artifacts as artifacts  # pylint: disable=wrong-import-position
+import r2egym_runtime_patch  # pylint: disable=wrong-import-position
 
 
 class RewardOnlyContractTest(unittest.TestCase):
@@ -49,6 +51,50 @@ class RewardOnlyContractTest(unittest.TestCase):
     )
     finalizer = (ROOT / "examples/deepswe/finalize_deepswe_eval.py").read_text()
     self.assertIn("P46_EVAL_CAMPAIGN_PASS", finalizer)
+
+  def test_resume_cleanup_deletes_only_same_tag_sandboxes(self):
+    class FakeCore:
+
+      def __init__(self):
+        self.list_calls = []
+        self.deleted = []
+
+      def list_namespaced_pod(self, **kwargs):
+        self.list_calls.append(kwargs)
+        items = (
+            [
+                types.SimpleNamespace(
+                    metadata=types.SimpleNamespace(name="sandbox-a")
+                ),
+                types.SimpleNamespace(
+                    metadata=types.SimpleNamespace(name="sandbox-b")
+                ),
+            ]
+            if len(self.list_calls) == 1
+            else []
+        )
+        return types.SimpleNamespace(items=items)
+
+      def delete_namespaced_pod(self, **kwargs):
+        self.deleted.append(kwargs)
+
+    core = FakeCore()
+    deleted = r2egym_runtime_patch._cleanup_orphaned_kubernetes_pods(  # pylint: disable=protected-access
+        core,
+        namespace="default",
+        resume_tag="wash-q4-001",
+        api_exception_type=RuntimeError,
+    )
+    self.assertEqual(deleted, 2)
+    self.assertEqual(
+        core.list_calls[0]["label_selector"],
+        "app.kubernetes.io/managed-by=tunix-deepswe,"
+        "canon.zero-tim/resume-tag=wash-q4-001",
+    )
+    self.assertEqual(
+        [item["name"] for item in core.deleted],
+        ["sandbox-a", "sandbox-b"],
+    )
 
   def test_q32_agent_path_keeps_strict_parser_default(self):
     agent = (ROOT / "examples/deepswe/swe_agent.py").read_text(
@@ -91,8 +137,10 @@ class RewardOnlyContractTest(unittest.TestCase):
           whitelist_sha256="2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7",
           whitelist_rows=1851,
           source_commit="6" * 40,
+          harness_commit="6" * 40,
           client_image="example.invalid/tunix@sha256:" + "7" * 64,
           topology="64",
+          resume_tag="full-campaign-test",
       )
       entries = [
           {"docker_image": f"image-{index:04d}"}
@@ -177,6 +225,113 @@ class RewardOnlyContractTest(unittest.TestCase):
       self.assertEqual(sum(wave_sizes), 29616)
       self.assertEqual(wave_sizes[-1], 48)
       self.assertTrue(all(size == 64 for size in wave_sizes[:-1]))
+
+  def test_full_campaign_restart_picks_up_only_missing_wave_identities(self):
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text)
+      config = artifacts.EvalConfig(
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          model_path=str(root / "model"),
+          dataset_name="R2E-Gym/R2E-Gym-Subset",
+          dataset_revision="2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+          dataset_split="train",
+          dataset_rows=4578,
+          whitelist_path=str(root / "clean.jsonl"),
+          whitelist_sha256="2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7",
+          whitelist_rows=1851,
+          source_commit="6" * 40,
+          harness_commit="6" * 40,
+          client_image="example.invalid/tunix@sha256:" + "7" * 64,
+          topology="64",
+          resume_tag="restart-wave-test",
+      )
+      entries = [{"docker_image": f"image-{index}"} for index in range(4)]
+      durable = []
+      wave_sizes = []
+      runtime_instances = []
+
+      def fake_runtime(_):
+        runtime = object()
+        runtime_instances.append(runtime)
+        return runtime
+
+      def fake_load(unused_config, unused_entries, unused_dir):
+        del unused_config, unused_entries, unused_dir
+        return list(durable)
+
+      async def fake_run(
+          unused_config,
+          unused_entries,
+          pending,
+          unused_path,
+          *,
+          runtime,
+          timeout_secs,
+      ):
+        del unused_config, unused_entries, unused_path, runtime, timeout_secs
+        wave_sizes.append(len(pending))
+        selected = pending[:17] if len(wave_sizes) == 1 else pending
+        for entry, sample_index, attempt_index in selected:
+          durable.append({
+              "task_key": entry["docker_image"],
+              "sample_index": sample_index,
+              "attempt_index": attempt_index,
+              "valid": True,
+              "solved": False,
+              "status": "SUCCEEDED",
+          })
+        return len(selected), len(wave_sizes) == 1
+
+      def fake_aggregate(logical_entries, unused_records, *, config):
+        del unused_records, config
+        return [
+            {"category": "all_fail", "task_key": entry["docker_image"]}
+            for entry in logical_entries
+        ]
+
+      with (
+          mock.patch.object(eval_deepswe, "_Runtime", side_effect=fake_runtime),
+          mock.patch.object(
+              eval_deepswe, "_load_logical_records", side_effect=fake_load
+          ),
+          mock.patch.object(
+              eval_deepswe, "_run_evaluation", side_effect=fake_run
+          ),
+          mock.patch.object(
+              eval_deepswe, "aggregate_tasks", side_effect=fake_aggregate
+          ),
+          mock.patch.object(
+              eval_deepswe,
+              "write_reports",
+              return_value={
+                  "summary_path": str(root / "summary.json"),
+                  "tasks": 4,
+                  "valid_trajectories": 64,
+              },
+          ),
+          mock.patch.object(
+              eval_deepswe,
+              "finalize_campaign",
+              return_value={
+                  "tasks": 1851,
+                  "n_sample": 16,
+                  "valid_trajectories": 29616,
+                  "logical_shards": 58,
+                  "summary_sha256": "8" * 64,
+              },
+          ),
+      ):
+        first = asyncio.run(
+            eval_deepswe._run_full_campaign(config, entries, root / "out")
+        )
+        second = asyncio.run(
+            eval_deepswe._run_full_campaign(config, entries, root / "out")
+        )
+      self.assertEqual(first, 2)
+      self.assertEqual(second, 0)
+      self.assertEqual(wave_sizes, [64, 47])
+      self.assertEqual(len(durable), 64)
+      self.assertEqual(len(runtime_instances), 2)
 
   def test_entrypoint_skips_only_canonical_overlay_not_lifecycle(self):
     entrypoint = (ROOT / "canon-zero-tim/cluster/entrypoint.sh").read_text(

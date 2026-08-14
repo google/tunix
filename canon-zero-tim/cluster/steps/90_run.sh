@@ -129,9 +129,18 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   p38_live_pid=$!
   echo "[P38.GCS] LIVE_WORKER_LAUNCHED pid=$p38_live_pid"
 fi
+LOG_BASE="$LOG"
+mkdir -p "$(dirname "$LOG_BASE")"
+if [ "${CANON_P46_EVALUATION:-0}" = "1" ] && \
+   [ "${CANON_P46_FULL_CAMPAIGN:-0}" = "1" ]; then
+  # A resume must retain the prior failure/timeout log, while postflight must
+  # inspect only this launch (an appended old timeout would poison success).
+  log_stem="$(basename "${LOG_BASE%.log}")"
+  LOG="$(mktemp "$(dirname "$LOG_BASE")/${log_stem}.attempt-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX.log")"
+  echo "[P46.RESUME] ATTEMPT_LOG path=$LOG base=$LOG_BASE resume_tag=${CANON_P46_RESUME_TAG:-missing} launch_id=${CANON_RUN_ID:-missing}"
+fi
 echo "[run] cmd: $CANON_RUN_CMD"
 echo "[run] log: $LOG"
-mkdir -p "$(dirname "$LOG")"
 cd "${CANON_RUN_CWD:-$CANON_PKG/..}"
 set +e
 set -o pipefail
@@ -154,15 +163,29 @@ fi
 if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   n_eval_subshard=$(grep -ac '^P46_EVAL_SUBSHARD_PASS ' "$LOG" || true)
   n_eval_report=$(grep -ac '^P46_EVAL_LOGICAL_REPORT_PASS ' "$LOG" || true)
-  n_eval_timeout=$(grep -ac 'P46_EVAL_SHARD_TIMEOUT' "$LOG" || true)
-  echo "[P46.EVAL.POSTFLIGHT] rc=$rc subshard=$n_eval_subshard report=$n_eval_report timeout=$n_eval_timeout"
+  n_eval_campaign=$(grep -ac '^P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58 ' "$LOG" || true)
+  n_eval_campaign_logical=$(grep -ac '^P46_EVAL_CAMPAIGN_LOGICAL_PASS ' "$LOG" || true)
+  n_eval_timeout=$(grep -aEc 'P46_EVAL_(SHARD|CAMPAIGN_WAVE)_TIMEOUT' "$LOG" || true)
+  echo "[P46.EVAL.POSTFLIGHT] rc=$rc transport_rc=$tee_rc subshard=$n_eval_subshard report=$n_eval_report campaign=$n_eval_campaign campaign_logical=$n_eval_campaign_logical timeout=$n_eval_timeout log=$LOG"
   if [ "$rc" -ne 0 ]; then
     exit "$rc"
   fi
-  if [ "$((n_eval_subshard + n_eval_report))" -ne 1 ] || \
-     [ "$n_eval_timeout" -ne 0 ]; then
-    echo "[run] FATAL: P46 evaluation completion marker contract failed" >&2
+  if [ "$tee_rc" -ne 0 ]; then
+    echo "[run] FATAL: P46 evaluation log transport failed: rc=$tee_rc" >&2
     exit 1
+  fi
+  if [ "${CANON_P46_FULL_CAMPAIGN:-0}" = "1" ]; then
+    if [ "$n_eval_campaign" -ne 1 ] || \
+       [ "$n_eval_campaign_logical" -ne 58 ] || \
+       [ "$n_eval_subshard" -ne 0 ] || [ "$n_eval_report" -ne 0 ] || \
+       [ "$n_eval_timeout" -ne 0 ]; then
+      echo "[run] FATAL: P46 full-campaign completion marker contract failed" >&2
+      exit 1
+    fi
+  elif [ "$((n_eval_subshard + n_eval_report))" -ne 1 ] || \
+       [ "$n_eval_campaign" -ne 0 ] || [ "$n_eval_timeout" -ne 0 ]; then
+      echo "[run] FATAL: P46 evaluation completion marker contract failed" >&2
+      exit 1
   fi
   echo "[P46.EVAL.POSTFLIGHT] PASS"
   exit 0

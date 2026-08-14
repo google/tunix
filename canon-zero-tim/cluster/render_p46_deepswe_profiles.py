@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import shlex
 from typing import Any, Mapping
 
@@ -29,6 +30,8 @@ WORKLOAD_TOPOLOGIES = {
     "q4-clean-eval": ("64", "128"),
     "q32-train": ("64", "256"),
 }
+_RESUME_TAG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 def _services(document: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -262,6 +265,9 @@ def render_q4_eval(
     source_branch: str,
     client_image: str,
     run_id: str,
+    resume_tag: str,
+    sampling_source_commit: str,
+    legacy_import_id: str | None,
     topology: str,
     cpu_nodepool: str,
     worker_nodepool: str,
@@ -284,6 +290,24 @@ def render_q4_eval(
     raise ValueError("P46 full campaign cannot be a parity canary")
   if full_campaign and (logical_shard_index or physical_shard_index):
     raise ValueError("P46 full campaign owns all shard indices")
+  if not _RESUME_TAG.fullmatch(run_id):
+    raise ValueError(
+        "P46 launch run id must be lowercase and Kubernetes-safe"
+    )
+  if not _RESUME_TAG.fullmatch(resume_tag):
+    raise ValueError(
+        "P46 resume tag must be lowercase, Kubernetes-safe, and at most "
+        "63 characters"
+    )
+  if not _SHA.fullmatch(sampling_source_commit):
+    raise ValueError("P46 sampling source commit must be a lowercase SHA")
+  if legacy_import_id is not None:
+    if not full_campaign:
+      raise ValueError("P46 legacy import requires a full campaign")
+    if not _RESUME_TAG.fullmatch(legacy_import_id):
+      raise ValueError(
+          "P46 legacy import id must be lowercase and Kubernetes-safe"
+      )
   document = _base_render(
       base,
       source_commit=source_commit,
@@ -323,7 +347,7 @@ def render_q4_eval(
     )
   if len(name) > 36:
     raise ValueError("rendered P46 evaluation JobSet name exceeds 36 characters")
-  run_root = f"/mnt/disks/linchai_data/deepswe_eval/{run_id}"
+  run_root = f"/mnt/disks/linchai_data/deepswe_eval/{resume_tag}"
   if parity_canary:
     run_root = f"{run_root}/parity/{evaluation_mode}"
   document["metadata"]["name"] = name
@@ -334,7 +358,12 @@ def render_q4_eval(
       "canon.zero-tim/evaluation-mode": evaluation_mode,
       "canon.zero-tim/parity-canary": "1" if parity_canary else "0",
       "canon.zero-tim/full-campaign": "1" if full_campaign else "0",
+      "canon.zero-tim/resume-tag": resume_tag,
   })
+  if legacy_import_id is not None:
+    document["metadata"]["labels"][
+        "canon.zero-tim/legacy-import-id"
+    ] = legacy_import_id
   _configure_topology(
       document,
       name=name,
@@ -349,11 +378,14 @@ def render_q4_eval(
       ),
       "CANON_MODE": "run",
       "CANON_STATE": (
-          f"{run_root}/state-campaign"
+          f"{run_root}/state-launches/{run_id}"
           if full_campaign
           else f"{run_root}/state-l{logical_shard_index}-p{physical_shard_index}"
       ),
       "CANON_RUN_ID": run_id,
+      "CANON_P46_RESUME_TAG": resume_tag,
+      "CANON_P46_SAMPLING_SOURCE_COMMIT": sampling_source_commit,
+      "CANON_P46_LEGACY_IMPORT_ID": legacy_import_id or "",
       "CANON_CLIENT_IMAGE": client_image,
       "CANON_P46_DEEPSWE_TRAIN": "0",
       "CANON_P46_EVALUATION": "1",
@@ -412,6 +444,9 @@ def render_q4_eval(
       source_commit=source_commit,
       client_image=client_image,
       topology=topology,
+      resume_tag=resume_tag,
+      sampling_source_commit=sampling_source_commit,
+      legacy_import_id=legacy_import_id,
       evaluation_mode=evaluation_mode,
       parity_canary=parity_canary,
       full_campaign=full_campaign,
@@ -490,6 +525,9 @@ def validate_eval(
     source_commit: str,
     client_image: str,
     topology: str,
+    resume_tag: str,
+    sampling_source_commit: str,
+    legacy_import_id: str | None,
     evaluation_mode: str,
     parity_canary: bool,
     full_campaign: bool,
@@ -503,6 +541,9 @@ def validate_eval(
       "CANON_P46_EVALUATION": "1",
       "CANON_P46_DEEPSWE_TRAIN": "0",
       "CANON_P46_TOPOLOGY": topology,
+      "CANON_P46_RESUME_TAG": resume_tag,
+      "CANON_P46_SAMPLING_SOURCE_COMMIT": sampling_source_commit,
+      "CANON_P46_LEGACY_IMPORT_ID": legacy_import_id or "",
       "CANON_P46_EVALUATION_MODE": evaluation_mode,
       "CANON_P46_PARITY_CANARY": "1" if parity_canary else "0",
       "CANON_P46_FULL_CAMPAIGN": "1" if full_campaign else "0",
@@ -545,6 +586,9 @@ def render(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    resume_tag: str | None = None,
+    sampling_source_commit: str | None = None,
+    legacy_import_id: str | None = None,
     logical_shard_index: int = 0,
     physical_shard_index: int = 0,
     evaluation_mode: str = "reward_only",
@@ -560,9 +604,12 @@ def render(
     )
   if workload != "q4-clean-eval" and (
       evaluation_mode != "reward_only" or parity_canary
-      or full_campaign
+      or full_campaign or resume_tag is not None
+      or sampling_source_commit is not None or legacy_import_id is not None
   ):
     raise ValueError("evaluation-only controls cannot modify a training workload")
+  if workload == "q4-clean-eval" and full_campaign and resume_tag is None:
+    raise ValueError("P46 full campaign requires an explicit resume tag")
   common = dict(
       source_commit=source_commit,
       source_branch=source_branch,
@@ -581,6 +628,9 @@ def render(
     return render_q32_train(base, **common)
   return render_q4_eval(
       base,
+      resume_tag=resume_tag or run_id,
+      sampling_source_commit=sampling_source_commit or source_commit,
+      legacy_import_id=legacy_import_id,
       logical_shard_index=logical_shard_index,
       physical_shard_index=physical_shard_index,
       evaluation_mode=evaluation_mode,
@@ -600,6 +650,26 @@ def main() -> None:
   parser.add_argument("--source-branch", default=p34.DEFAULT_SOURCE_BRANCH)
   parser.add_argument("--client-image", required=True)
   parser.add_argument("--run-id", required=True)
+  parser.add_argument(
+      "--resume-tag",
+      help=(
+          "stable PVC campaign identity; reuse it with a new --run-id to "
+          "continue only missing trajectories"
+      ),
+  )
+  parser.add_argument(
+      "--sampling-source-commit",
+      help=(
+          "sampling lineage SHA; defaults to --source-commit and differs only "
+          "for a reviewed legacy-v5 adoption"
+      ),
+  )
+  parser.add_argument(
+      "--legacy-import-id",
+      help=(
+          "frozen snapshot under <resume-root>/imports/<id>; full campaign only"
+      ),
+  )
   parser.add_argument("--cpu-nodepool", required=True)
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--model-pvc", required=True)
@@ -625,6 +695,9 @@ def main() -> None:
       source_branch=args.source_branch,
       client_image=args.client_image,
       run_id=args.run_id,
+      resume_tag=args.resume_tag,
+      sampling_source_commit=args.sampling_source_commit,
+      legacy_import_id=args.legacy_import_id,
       cpu_nodepool=args.cpu_nodepool,
       worker_nodepool=args.worker_nodepool,
       model_pvc=args.model_pvc,

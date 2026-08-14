@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import dataclasses
 import enum
+import fcntl
 import hashlib
 import json
 import math
@@ -37,11 +39,16 @@ except ImportError:
   from r2egym_action_compat import canonicalize_r2egym_action
 
 
-CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v3"
-TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v5"
-REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v3"
-SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v3"
-CAMPAIGN_SCHEMA = "canon.p46.deepswe-eval.campaign-summary.v1"
+CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v4"
+TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v6"
+REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v4"
+SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v4"
+CAMPAIGN_SCHEMA = "canon.p46.deepswe-eval.campaign-summary.v2"
+RESUME_SCHEMA = "canon.p46.deepswe-eval.resume-contract.v1"
+LEASE_SCHEMA = "canon.p46.deepswe-eval.resume-lease.v1"
+IMPORT_SCHEMA = "canon.p46.deepswe-eval.resume-import.v1"
+LEGACY_CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v3"
+LEGACY_TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v5"
 REWARD_ONLY = "reward_only"
 REWARD_ONLY_TRAJECTORY_MODE = "reward_only_no_logprobs"
 LOGPROB_OBSERVER = "logprob_observer"
@@ -78,6 +85,7 @@ _MODEL_ACTION_SYNTAX = re.compile(
 _SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DIGEST_IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
+_RESUME_TAG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|auth|credential|password|secret|token)$", re.I
 )
@@ -100,9 +108,14 @@ class EvalConfig:
   whitelist_path: str
   whitelist_sha256: str
   whitelist_rows: int
+  # source_commit pins the sampling contract. It normally equals
+  # harness_commit. A reviewed v5->v6 adoption keeps source_commit at the
+  # legacy sampler SHA while harness_commit pins the resume-capable checkout.
   source_commit: str
+  harness_commit: str
   client_image: str
   topology: str
+  resume_tag: str
   evaluation_mode: str = REWARD_ONLY
   onehost_probe: bool = False
   parity_canary: bool = False
@@ -190,10 +203,17 @@ class EvalConfig:
       raise ValueError("dataset_revision must be a lowercase 40-character SHA")
     if not _SHA.fullmatch(self.source_commit):
       raise ValueError("source_commit must be a lowercase 40-character SHA")
+    if not _SHA.fullmatch(self.harness_commit):
+      raise ValueError("harness_commit must be a lowercase 40-character SHA")
     if not _SHA256.fullmatch(self.whitelist_sha256):
       raise ValueError("whitelist_sha256 must be a lowercase SHA-256 digest")
     if not _DIGEST_IMAGE.fullmatch(self.client_image):
       raise ValueError("client_image must be pinned by sha256 digest")
+    if not _RESUME_TAG.fullmatch(self.resume_tag):
+      raise ValueError(
+          "resume_tag must be a lowercase Kubernetes-safe name of at most "
+          "63 characters"
+      )
     admitted_topologies = (
         ("4",)
         if self.onehost_probe
@@ -297,6 +317,389 @@ def sha256_file(path: str | os.PathLike[str]) -> str:
     for chunk in iter(lambda: source.read(1024 * 1024), b""):
       digest.update(chunk)
   return digest.hexdigest()
+
+
+def legacy_v5_fingerprint(config: EvalConfig) -> str:
+  """Returns the exact pre-resume fingerprint for a reviewed v5 adoption."""
+  config.validate()
+  legacy = dataclasses.asdict(config)
+  legacy.pop("resume_tag")
+  legacy.pop("harness_commit")
+  record = {
+      "schema": LEGACY_CONFIG_SCHEMA,
+      **legacy,
+      "trajectory_mode": config.trajectory_mode,
+      "sampled_by": config.sampled_by,
+      "sampling_rng_mode": config.sampling_rng_mode,
+  }
+  payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
+      "utf-8"
+  )
+  return hashlib.sha256(payload).hexdigest()
+
+
+def legacy_v5_run_tag(config: EvalConfig) -> str:
+  fingerprint = legacy_v5_fingerprint(config)
+  if config.onehost_probe:
+    prefix = "q4i512-n1-onehost"
+  elif config.parity_canary:
+    prefix = f"q4i16k-n16-parity-{config.evaluation_mode}"
+  else:
+    prefix = "q4i16k-n16"
+  return f"{prefix}-{config.topology}-{fingerprint[:16]}"
+
+
+def _fsync_directory(path: Path) -> None:
+  descriptor = os.open(path, os.O_RDONLY)
+  try:
+    os.fsync(descriptor)
+  finally:
+    os.close(descriptor)
+
+
+def _write_exact_file(path: Path, payload: bytes) -> None:
+  """Creates immutable evidence, accepting only an identical prior value."""
+  path.parent.mkdir(parents=True, exist_ok=True)
+  try:
+    with path.open("xb") as output:
+      output.write(payload)
+      output.flush()
+      os.fsync(output.fileno())
+    _fsync_directory(path.parent)
+  except FileExistsError:
+    if path.read_bytes() != payload:
+      raise ValueError(
+          f"existing evaluation evidence differs from exact payload: {path}"
+      )
+
+
+def _snapshot_manifest(snapshot_dir: Path) -> tuple[list[tuple[Path, str]], str]:
+  """Validates one frozen legacy snapshot and returns its exact input files."""
+  if not snapshot_dir.is_absolute():
+    raise ValueError("legacy import snapshot must be absolute")
+  manifest_path = snapshot_dir / "SHA256SUMS"
+  if manifest_path.is_symlink() or not manifest_path.is_file():
+    raise ValueError("legacy snapshot requires a regular SHA256SUMS file")
+  manifest = manifest_path.read_bytes()
+  manifest_sha256 = hashlib.sha256(manifest).hexdigest()
+  trajectory_root = (snapshot_dir / "trajectories").resolve()
+  entries: list[tuple[Path, str]] = []
+  seen: set[str] = set()
+  for line_number, raw_line in enumerate(
+      manifest.decode("utf-8").splitlines(), 1
+  ):
+    if not raw_line:
+      continue
+    match = re.fullmatch(r"([0-9a-f]{64})  (trajectories/.+\.jsonl)", raw_line)
+    if match is None:
+      raise ValueError(
+          f"malformed legacy SHA256SUMS line {line_number}"
+      )
+    expected_digest, relative = match.groups()
+    if ".." in Path(relative).parts:
+      raise ValueError("legacy snapshot path traversal is forbidden")
+    if relative in seen:
+      raise ValueError(f"duplicate legacy snapshot path: {relative}")
+    seen.add(relative)
+    path = snapshot_dir / relative
+    if path.is_symlink() or not path.is_file():
+      raise ValueError(f"legacy snapshot input is not a regular file: {relative}")
+    try:
+      path.resolve().relative_to(trajectory_root)
+    except ValueError as error:
+      raise ValueError(
+          "legacy trajectory must remain below trajectories/"
+      ) from error
+    if sha256_file(path) != expected_digest:
+      raise ValueError(f"legacy snapshot digest mismatch: {relative}")
+    entries.append((path, expected_digest))
+  discovered = {
+      str(path.relative_to(snapshot_dir))
+      for path in (snapshot_dir / "trajectories").rglob("*.jsonl")
+      if path.is_file()
+  }
+  if not entries or discovered != seen:
+    raise ValueError(
+        "legacy snapshot manifest must cover every trajectory JSONL exactly"
+    )
+  return entries, manifest_sha256
+
+
+def import_legacy_v5_snapshot(
+    snapshot_dir: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
+    *,
+    config: EvalConfig,
+    allowed_task_keys: Iterable[str],
+) -> dict[str, Any]:
+  """Adopts a frozen exact-contract v5 snapshot into a new v6 resume tag.
+
+  The live legacy output directory is deliberately not accepted. Operators
+  must first copy a terminal job's trajectories into ``imports/<import-id>``
+  and seal that snapshot with ``SHA256SUMS``. The import is immutable and may
+  only create the first trajectory file in a resume tag.
+  """
+  config.validate()
+  snapshot = Path(snapshot_dir).resolve()
+  import_id = snapshot.name
+  if not _RESUME_TAG.fullmatch(import_id):
+    raise ValueError("legacy import id must be lowercase and Kubernetes-safe")
+  entries, manifest_sha256 = _snapshot_manifest(snapshot)
+  target_root = Path(output_dir).resolve()
+  trajectory_dir = target_root / "trajectories"
+  receipt_path = target_root / "imports" / f"{import_id}.receipt.json"
+
+  ordered_keys = list(allowed_task_keys)
+  if len(ordered_keys) != len(set(ordered_keys)):
+    raise ValueError("legacy import task order contains duplicate identities")
+  task_index = {key: index for index, key in enumerate(ordered_keys)}
+  attempts: dict[tuple[str, int], list[dict[str, Any]]] = (
+      collections.defaultdict(list)
+  )
+  imported: dict[int, list[dict[str, Any]]] = collections.defaultdict(list)
+  input_evidence = []
+  for path, digest in entries:
+    relative = str(path.relative_to(snapshot))
+    input_evidence.append({"path": relative, "sha256": digest})
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line_number, line in enumerate(lines, 1):
+      if not line.strip():
+        continue
+      try:
+        record = json.loads(line)
+      except json.JSONDecodeError:
+        if line_number == len(lines):
+          continue
+        raise ValueError(f"invalid JSON before trailing line in {path}")
+      if not isinstance(record, dict):
+        raise ValueError(f"legacy trajectory is not an object: {path}")
+      key = record.get("task_key")
+      sample_index = record.get("sample_index")
+      attempt_index = record.get("attempt_index", 0)
+      if (
+          not isinstance(key, str)
+          or key not in task_index
+          or not isinstance(sample_index, int)
+          or not 0 <= sample_index < config.n_sample
+          or record.get("sample_nonce")
+          != config.sample_nonce(key, sample_index)
+      ):
+        raise ValueError(f"legacy trajectory identity mismatch in {path}")
+      logical_index = task_index[key] // config.logical_tasks
+      logical_config = dataclasses.replace(config, shard_index=logical_index)
+      expected_fingerprint = legacy_v5_fingerprint(logical_config)
+      expected_run_tag = legacy_v5_run_tag(logical_config)
+      expected_fields = {
+          "schema": LEGACY_TRAJECTORY_SCHEMA,
+          "config_fingerprint": expected_fingerprint,
+          "run_tag": expected_run_tag,
+          "trajectory_mode": logical_config.trajectory_mode,
+          "action_compat_mode": logical_config.action_compat_mode,
+          "sampled_by": logical_config.sampled_by,
+          "sampling_rng_mode": logical_config.sampling_rng_mode,
+          "engine_seed": logical_config.seed_base,
+      }
+      wrong = {
+          field: record.get(field)
+          for field, value in expected_fields.items()
+          if record.get(field) != value
+      }
+      if wrong:
+        raise ValueError(
+            f"legacy trajectory contract mismatch in {path}: {wrong}"
+        )
+      identity = (key, sample_index)
+      prior = attempts[identity]
+      if (
+          not isinstance(attempt_index, int)
+          or attempt_index != len(prior)
+          or (prior and prior[-1].get("valid") is True)
+      ):
+        raise ValueError(
+            f"legacy trajectory attempt sequence is ambiguous: {identity}"
+        )
+      trajectory = record.get("trajectory")
+      if not isinstance(trajectory, Mapping):
+        raise ValueError(f"legacy trajectory payload is malformed in {path}")
+      if config.evaluation_mode == REWARD_ONLY:
+        reward_only_trajectory(trajectory)
+      reward = record.get("reward")
+      valid = record.get("valid")
+      if (
+          isinstance(reward, bool)
+          or not isinstance(reward, (int, float))
+          or not math.isfinite(float(reward))
+          or not isinstance(valid, bool)
+          or record.get("solved") is not (valid and float(reward) == 1.0)
+      ):
+        raise ValueError(f"legacy trajectory outcome is malformed in {path}")
+      adopted = dict(record)
+      adopted.update({
+          "schema": TRAJECTORY_SCHEMA,
+          "config_fingerprint": logical_config.fingerprint,
+          "run_tag": logical_config.run_tag,
+          "resume_tag": logical_config.resume_tag,
+          "harness_commit": logical_config.harness_commit,
+          "imported_from": {
+              "schema": IMPORT_SCHEMA,
+              "legacy_schema": LEGACY_TRAJECTORY_SCHEMA,
+              "legacy_config_fingerprint": expected_fingerprint,
+              "legacy_run_tag": expected_run_tag,
+              "snapshot_manifest_sha256": manifest_sha256,
+              "path": relative,
+              "line": line_number,
+          },
+      })
+      prior.append(adopted)
+      imported[logical_index].append(adopted)
+
+  if not imported:
+    raise ValueError("legacy snapshot contains no complete trajectory records")
+  outputs = []
+  output_payloads: list[tuple[Path, bytes]] = []
+  for logical_index in sorted(imported):
+    logical_config = dataclasses.replace(config, shard_index=logical_index)
+    payload = b"".join(
+        (
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        for record in imported[logical_index]
+    )
+    output_path = trajectory_dir / (
+        f"{logical_config.run_tag}.legacy-{import_id}-"
+        f"{manifest_sha256[:16]}.jsonl"
+    )
+    output_payloads.append((output_path, payload))
+    outputs.append({
+        "logical_shard_index": logical_index,
+        "path": str(output_path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "records": len(imported[logical_index]),
+    })
+  imported_records = sum(len(records) for records in imported.values())
+  receipt = {
+      "schema": IMPORT_SCHEMA,
+      "resume_tag": config.resume_tag,
+      "import_id": import_id,
+      "source_commit": config.source_commit,
+      "harness_commit": config.harness_commit,
+      "base_legacy_config_fingerprint": legacy_v5_fingerprint(config),
+      "base_config_fingerprint": config.fingerprint,
+      "snapshot_manifest_sha256": manifest_sha256,
+      "input_evidence": input_evidence,
+      "records": imported_records,
+      "valid_records": sum(
+          item.get("valid") is True
+          for records in imported.values()
+          for item in records
+      ),
+      "outputs": outputs,
+  }
+  receipt_payload = (
+      json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+  ).encode("utf-8")
+
+  expected_paths = {path for path, _ in output_payloads}
+  if receipt_path.exists() or any(path.exists() for path in expected_paths):
+    for output_path, payload in output_payloads:
+      _write_exact_file(output_path, payload)
+    _write_exact_file(receipt_path, receipt_payload)
+    receipt["receipt_path"] = str(receipt_path)
+    return receipt
+  existing = list(trajectory_dir.glob("*.jsonl")) if trajectory_dir.exists() else []
+  if any(path not in expected_paths for path in existing):
+    raise ValueError(
+        "legacy import must be the first trajectory evidence in a resume tag"
+    )
+  for output_path, payload in output_payloads:
+    _write_exact_file(output_path, payload)
+  _write_exact_file(receipt_path, receipt_payload)
+  receipt["receipt_path"] = str(receipt_path)
+  return receipt
+
+
+def ensure_resume_contract(
+    output_dir: str | os.PathLike[str],
+    *,
+    config: EvalConfig,
+) -> dict[str, Any]:
+  """Pins one resume tag to one exact campaign contract before TPU startup."""
+  config.validate()
+  if config.shard_index != 0:
+    raise ValueError("campaign resume contract requires base shard_index=0")
+  contract = {
+      "schema": RESUME_SCHEMA,
+      "resume_tag": config.resume_tag,
+      "config": config.canonical_record(),
+      "config_fingerprint": config.fingerprint,
+      "expected_tasks": config.whitelist_rows,
+      "expected_samples_per_task": config.n_sample,
+      "expected_sample_identities": config.whitelist_rows * config.n_sample,
+  }
+  payload = (json.dumps(contract, indent=2, sort_keys=True) + "\n").encode(
+      "utf-8"
+  )
+  path = Path(output_dir) / "resume_contract.json"
+  _write_exact_file(path, payload)
+  contract["path"] = str(path)
+  contract["sha256"] = hashlib.sha256(payload).hexdigest()
+  return contract
+
+
+@contextlib.contextmanager
+def campaign_lease(
+    output_dir: str | os.PathLike[str],
+    *,
+    config: EvalConfig,
+    launch_id: str,
+):
+  """Holds a process-scoped exclusive lease for one resumable campaign.
+
+  ``flock`` is released by the kernel if the coordinator is killed. The small
+  JSON lease remains as incident metadata; it is not used to decide ownership.
+  """
+  contract = ensure_resume_contract(output_dir, config=config)
+  root = Path(output_dir)
+  lock_path = root / "resume.lock"
+  lease_path = root / "resume_lease.json"
+  lock_file = lock_path.open("a+b")
+  try:
+    try:
+      fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+      raise RuntimeError(
+          f"resume tag {config.resume_tag!r} already has an active writer"
+      ) from error
+
+    def write_lease(state: str) -> None:
+      value = {
+          "schema": LEASE_SCHEMA,
+          "resume_tag": config.resume_tag,
+          "launch_id": launch_id,
+          "pid": os.getpid(),
+          "state": state,
+          "contract_sha256": contract["sha256"],
+      }
+      payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode(
+          "utf-8"
+      )
+      with lease_path.open("wb") as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+
+    write_lease("active")
+    yield {
+        "contract": contract,
+        "lock_path": str(lock_path),
+        "lease_path": str(lease_path),
+    }
+    write_lease("released")
+  finally:
+    try:
+      fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+      lock_file.close()
 
 
 def task_key(entry: Mapping[str, Any]) -> str:
@@ -444,6 +847,8 @@ def trajectory_record(
       "schema": TRAJECTORY_SCHEMA,
       "config_fingerprint": config.fingerprint,
       "run_tag": config.run_tag,
+      "resume_tag": config.resume_tag,
+      "harness_commit": config.harness_commit,
       "trajectory_mode": config.trajectory_mode,
       "action_compat_mode": config.action_compat_mode,
       "action_compat_repairs": action_compat_repairs,
@@ -470,6 +875,7 @@ def trajectory_record(
 def append_record(path: str | os.PathLike[str], record: Mapping[str, Any]) -> None:
   target = Path(path)
   target.parent.mkdir(parents=True, exist_ok=True)
+  created = not target.exists()
   payload = (
       json.dumps(serializable(record), sort_keys=True, separators=(",", ":"))
       + "\n"
@@ -478,6 +884,8 @@ def append_record(path: str | os.PathLike[str], record: Mapping[str, Any]) -> No
     output.write(payload)
     output.flush()
     os.fsync(output.fileno())
+  if created:
+    _fsync_directory(target.parent)
 
 
 def load_records(
@@ -515,6 +923,21 @@ def load_records(
         raise ValueError(f"unexpected evaluation schema in {path}")
       if record.get("config_fingerprint") != config.fingerprint:
         raise ValueError(f"evaluation resume fingerprint mismatch in {path}")
+      expected_provenance = {
+          "run_tag": config.run_tag,
+          "resume_tag": config.resume_tag,
+          "harness_commit": config.harness_commit,
+          "trajectory_mode": config.trajectory_mode,
+          "action_compat_mode": config.action_compat_mode,
+          "sampled_by": config.sampled_by,
+          "sampling_rng_mode": config.sampling_rng_mode,
+          "engine_seed": config.seed_base,
+      }
+      if any(
+          record.get(key) != value
+          for key, value in expected_provenance.items()
+      ):
+        raise ValueError(f"evaluation resume provenance mismatch in {path}")
       key = str(record.get("task_key", ""))
       sample_index = record.get("sample_index")
       if not key or not isinstance(sample_index, int):

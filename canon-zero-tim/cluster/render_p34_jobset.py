@@ -289,7 +289,15 @@ git config --global --add safe.directory "$(pwd)"
 git init -q
 git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
 git fetch -q origin "$CANON_SOURCE_BRANCH"
-git reset -q --hard FETCH_HEAD
+# The branch is allowed to advance after a campaign starts. Resume must still
+# check out the immutable SHA recorded in the original manifest, while proving
+# that SHA belongs to the fetched branch history.
+git cat-file -e "$CANON_EXPECT_COMMIT^{commit}"
+git merge-base --is-ancestor "$CANON_EXPECT_COMMIT" FETCH_HEAD || {
+  echo "expected source commit is not an ancestor of fetched branch" >&2
+  exit 1
+}
+git reset -q --hard "$CANON_EXPECT_COMMIT"
 actual="$(git rev-parse HEAD)"
 [ "$actual" = "$CANON_EXPECT_COMMIT" ] || { echo "source commit mismatch: $actual" >&2; exit 1; }
 exec bash canon-zero-tim/cluster/entrypoint.sh

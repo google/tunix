@@ -14,6 +14,87 @@ def _kubernetes_label(value: str, *, fallback: str) -> str:
   return (normalized[:63].rstrip("-_.") or fallback)
 
 
+def _cleanup_orphaned_kubernetes_pods(
+    core,
+    *,
+    namespace: str,
+    resume_tag: str,
+    api_exception_type: type[BaseException],
+) -> int:
+  """Deletes and confirms a preconfigured client's same-tag sandboxes."""
+  normalized = _kubernetes_label(resume_tag, fallback="unknown")
+  selector = (
+      "app.kubernetes.io/managed-by=tunix-deepswe,"
+      f"canon.zero-tim/resume-tag={normalized}"
+  )
+  pods = core.list_namespaced_pod(
+      namespace=namespace,
+      label_selector=selector,
+      _request_timeout=60,
+  ).items
+  names = sorted(
+      str(getattr(getattr(pod, "metadata", None), "name", "") or "")
+      for pod in pods
+  )
+  names = [name for name in names if name]
+  for name in names:
+    try:
+      core.delete_namespaced_pod(
+          name=name,
+          namespace=namespace,
+          grace_period_seconds=0,
+          propagation_policy="Background",
+          _request_timeout=60,
+      )
+    except api_exception_type as error:
+      if getattr(error, "status", None) != 404:
+        raise
+  timeout = int(os.environ.get("R2E_POD_DELETE_TIMEOUT_SECONDS", "300"))
+  deadline = time.monotonic() + timeout
+  while names and time.monotonic() < deadline:
+    remaining = core.list_namespaced_pod(
+        namespace=namespace,
+        label_selector=selector,
+        _request_timeout=60,
+    ).items
+    names = [
+        str(getattr(getattr(pod, "metadata", None), "name", "") or "")
+        for pod in remaining
+        if getattr(getattr(pod, "metadata", None), "name", "")
+    ]
+    if names:
+      time.sleep(2)
+  if names:
+    raise TimeoutError(
+        "stale R2E sandboxes survived resume cleanup: "
+        + ",".join(sorted(names))
+    )
+  print(
+      "[P46.RESUME] ORPHAN_SANDBOX_CLEANUP_PASS "
+      f"resume_tag={normalized} deleted={len(pods)} remaining=0",
+      flush=True,
+  )
+  return len(pods)
+
+
+def cleanup_orphaned_kubernetes_pods(resume_tag: str) -> int:
+  """Deletes only stale R2E sandboxes owned by one resume lineage."""
+  from kubernetes import client
+  from kubernetes import config as k8s_config
+  from r2egym.agenthub.runtime import docker as docker_mod
+
+  try:
+    k8s_config.load_incluster_config()
+  except k8s_config.config_exception.ConfigException:
+    k8s_config.load_kube_config()
+  return _cleanup_orphaned_kubernetes_pods(
+      client.CoreV1Api(),
+      namespace=docker_mod.DEFAULT_NAMESPACE,
+      resume_tag=resume_tag,
+      api_exception_type=client.ApiException,
+  )
+
+
 def ensure_huggingface_hub_compat() -> bool:
   """Provides the removed HfFolder API required by older R2E-Gym builds."""
   import huggingface_hub
@@ -141,6 +222,13 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
         "app.kubernetes.io/managed-by": "tunix-deepswe",
         "canon.zero-tim/run-id": _kubernetes_label(
             os.environ.get("CANON_RUN_ID", ""), fallback="unknown"
+        ),
+        "canon.zero-tim/resume-tag": _kubernetes_label(
+            os.environ.get(
+                "CANON_P46_RESUME_TAG",
+                os.environ.get("CANON_RUN_ID", ""),
+            ),
+            fallback="unknown",
         ),
     }
     pod_spec = {

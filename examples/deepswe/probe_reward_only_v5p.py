@@ -167,6 +167,7 @@ def main() -> int:
   report = {
       "schema": "canon.p46.deepswe-eval.reward-only-onehost.v1",
       "source_commit": config.source_commit,
+      "harness_commit": config.harness_commit,
       "trajectory_mode": config.trajectory_mode,
       "sampled_by": config.sampled_by,
       "sampling_rng_mode": config.sampling_rng_mode,

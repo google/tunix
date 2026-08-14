@@ -25,7 +25,9 @@ from typing import Any, Mapping, Sequence
 from deepswe_eval_artifacts import EvalConfig
 from deepswe_eval_artifacts import aggregate_tasks
 from deepswe_eval_artifacts import append_record
+from deepswe_eval_artifacts import campaign_lease
 from deepswe_eval_artifacts import finalize_campaign
+from deepswe_eval_artifacts import import_legacy_v5_snapshot
 from deepswe_eval_artifacts import load_records
 from deepswe_eval_artifacts import remaining_samples
 from deepswe_eval_artifacts import sha256_file
@@ -86,6 +88,7 @@ def _build_config() -> tuple[EvalConfig, int, Path]:
   output_dir = Path(
       _required("OUTPUT_DIR", "CANON_P46_OUTPUT_DIR")
   ).resolve()
+  harness_commit = _required("CANON_EXPECT_COMMIT")
   config = EvalConfig(
       model_id=model_id,
       model_path=str(model_path.resolve()),
@@ -102,9 +105,13 @@ def _build_config() -> tuple[EvalConfig, int, Path]:
           "GOLD_JSONL_SHA256", "CANON_P46_GOLD_JSONL_SHA256"
       ),
       whitelist_rows=_int("EXPECTED_CLEAN_ROWS", 1851),
-      source_commit=_required("CANON_EXPECT_COMMIT"),
+      source_commit=os.environ.get(
+          "CANON_P46_SAMPLING_SOURCE_COMMIT", harness_commit
+      ),
+      harness_commit=harness_commit,
       client_image=_required("CANON_CLIENT_IMAGE"),
       topology=_required("CANON_P46_TOPOLOGY"),
+      resume_tag=_required("CANON_P46_RESUME_TAG"),
       evaluation_mode=_required("CANON_P46_EVALUATION_MODE"),
       onehost_probe=onehost_probe,
       parity_canary=parity_canary,
@@ -165,6 +172,31 @@ def _full_campaign_requested() -> bool:
   ):
     raise ValueError("full campaign is incompatible with probe/parity modes")
   return requested
+
+
+def _prepare_r2egym_runtime(
+    config: EvalConfig, *, cleanup_orphans: bool
+) -> None:
+  """Installs bounded sandbox lifecycle hooks before any RepoEnv is made."""
+  if config.onehost_probe:
+    return
+  from r2egym_runtime_patch import apply_repoenv_kubernetes_poll_patch
+  from r2egym_runtime_patch import cleanup_orphaned_kubernetes_pods
+
+  apply_repoenv_kubernetes_poll_patch()
+  if cleanup_orphans:
+    cleanup_orphaned_kubernetes_pods(config.resume_tag)
+
+
+def _trajectory_output_path(
+    trajectory_dir: Path, *, config: EvalConfig, physical_shard: int
+) -> Path:
+  """Returns a process-unique file so a torn tail is never appended to."""
+  return trajectory_dir / (
+      f"{config.run_tag}.p{physical_shard}."
+      f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}."
+      f"{time.time_ns()}.{os.getpid()}.jsonl"
+  )
 
 
 def _load_clean_entries(config: EvalConfig) -> list[dict[str, Any]]:
@@ -639,13 +671,15 @@ async def _run_full_campaign(
               "P46_EVAL_CAMPAIGN_WAVE_TIMEOUT "
               f"logical_shard={logical_index} "
               f"physical_shard={physical_shard} "
-              f"pending={len(pending)} resume_same_run_id=1",
+              f"pending={len(pending)} resume_tag={config.resume_tag} "
+              "resume_same_tag=1",
               flush=True,
           )
           return 2
-        output_path = trajectory_dir / (
-            f"{config.run_tag}.p{physical_shard}."
-            f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.jsonl"
+        output_path = _trajectory_output_path(
+            trajectory_dir,
+            config=config,
+            physical_shard=physical_shard,
         )
         logger.info(
             "P46_EVAL_CAMPAIGN_WAVE_START logical_shard=%d/%d "
@@ -668,7 +702,8 @@ async def _run_full_campaign(
           print(
               "P46_EVAL_CAMPAIGN_WAVE_TIMEOUT "
               f"logical_shard={logical_index} "
-              f"physical_shard={physical_shard} resume_same_run_id=1",
+              f"physical_shard={physical_shard} "
+              f"resume_tag={config.resume_tag} resume_same_tag=1",
               flush=True,
           )
           return 2
@@ -713,9 +748,40 @@ def main() -> int:
       format="%(asctime)s %(levelname)s %(message)s",
   )
   config, physical_shard, output_dir = _build_config()
+  full_campaign = _full_campaign_requested()
+  if full_campaign:
+    launch_id = _required("CANON_RUN_ID")
+    with campaign_lease(
+        output_dir, config=config, launch_id=launch_id
+    ) as lease:
+      print(
+          "[P46.RESUME] LEASE_ACQUIRED "
+          f"resume_tag={config.resume_tag} launch_id={launch_id} "
+          f"contract_sha256={lease['contract']['sha256']}",
+          flush=True,
+      )
+      all_entries = _load_clean_entries(config)
+      legacy_import_id = os.environ.get("CANON_P46_LEGACY_IMPORT_ID", "")
+      if legacy_import_id:
+        snapshot = output_dir.parent / "imports" / legacy_import_id
+        receipt = import_legacy_v5_snapshot(
+            snapshot,
+            output_dir,
+            config=config,
+            allowed_task_keys=(task_key(entry) for entry in all_entries),
+        )
+        print(
+            "[P46.RESUME] LEGACY_IMPORT_PASS "
+            f"import_id={legacy_import_id} records={receipt['records']} "
+            f"valid_records={receipt['valid_records']} "
+            f"manifest_sha256={receipt['snapshot_manifest_sha256']} "
+            f"receipt={receipt['receipt_path']}",
+            flush=True,
+        )
+      _prepare_r2egym_runtime(config, cleanup_orphans=True)
+      return asyncio.run(_run_full_campaign(config, all_entries, output_dir))
+  _prepare_r2egym_runtime(config, cleanup_orphans=False)
   all_entries = _load_clean_entries(config)
-  if _full_campaign_requested():
-    return asyncio.run(_run_full_campaign(config, all_entries, output_dir))
   logical_entries, physical_entries = _select_shards(
       all_entries, config, physical_shard
   )
@@ -741,9 +807,10 @@ def main() -> int:
   timed_out = False
   if pending:
     trajectory_dir.mkdir(parents=True, exist_ok=True)
-    output_path = trajectory_dir / (
-        f"{config.run_tag}.p{physical_shard}."
-        f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.jsonl"
+    output_path = _trajectory_output_path(
+        trajectory_dir,
+        config=config,
+        physical_shard=physical_shard,
     )
     _, timed_out = asyncio.run(
         _run_evaluation(config, physical_entries, pending, output_path)

@@ -31,6 +31,9 @@ class P46RendererTest(unittest.TestCase):
   def _render(self, workload: str, topology: str, **overrides):
     logical_shard_index = overrides.pop("logical_shard_index", 0)
     physical_shard_index = overrides.pop("physical_shard_index", 0)
+    run_id = overrides.pop("run_id", f"t{topology}")
+    if overrides.get("full_campaign") and "resume_tag" not in overrides:
+      overrides["resume_tag"] = f"t{topology}"
     return renderer.render(
         self._base(topology),
         workload=workload,
@@ -38,7 +41,7 @@ class P46RendererTest(unittest.TestCase):
         source_commit=SOURCE,
         source_branch=p34.DEFAULT_SOURCE_BRANCH,
         client_image=IMAGE,
-        run_id=f"t{topology}",
+        run_id=run_id,
         cpu_nodepool="deepswe-cpu-pool",
         worker_nodepool=f"v5p-{topology}",
         model_pvc="models-pvc",
@@ -104,6 +107,8 @@ class P46RendererTest(unittest.TestCase):
       )
       self.assertEqual(env["CANON_P46_EVALUATION"], "1")
       self.assertEqual(env["CANON_P46_EVALUATION_MODE"], "reward_only")
+      self.assertEqual(env["CANON_P46_SAMPLING_SOURCE_COMMIT"], SOURCE)
+      self.assertEqual(env["CANON_P46_LEGACY_IMPORT_ID"], "")
       self.assertEqual(env["CANON_P46_DEEPSWE_TRAIN"], "0")
       self.assertEqual(env["CANON_P32_TRAIN_ADMITTED"], "0")
       self.assertEqual(env["CANON_P33_WORKLOAD_LAUNCH_ADMITTED"], "0")
@@ -122,6 +127,17 @@ class P46RendererTest(unittest.TestCase):
       ):
         self.assertEqual(env[key], "0", key)
 
+  def test_launch_checks_out_pinned_sha_after_branch_fetch(self):
+    document = self._render("q4-clean-eval", "128", full_campaign=True)
+    main = p34._container(p34._head(document)["containers"], "jax-tpu")
+    command = main["command"][2]
+    self.assertIn(
+        'git merge-base --is-ancestor "$CANON_EXPECT_COMMIT" FETCH_HEAD',
+        command,
+    )
+    self.assertIn('git reset -q --hard "$CANON_EXPECT_COMMIT"', command)
+    self.assertNotIn("git reset -q --hard FETCH_HEAD", command)
+
   def test_full_eval_campaign_is_one_resumable_runtime(self):
     for topology in renderer.WORKLOAD_TOPOLOGIES["q4-clean-eval"]:
       document = self._render(
@@ -131,12 +147,15 @@ class P46RendererTest(unittest.TestCase):
       self.assertEqual(env["CANON_P46_FULL_CAMPAIGN"], "1")
       self.assertEqual(env["CANON_P46_EVALUATION_MODE"], "reward_only")
       self.assertEqual(env["CANON_P46_PARITY_CANARY"], "0")
-      self.assertTrue(env["CANON_STATE"].endswith("/state-campaign"))
+      self.assertTrue(
+          env["CANON_STATE"].endswith(f"/state-launches/t{topology}")
+      )
       self.assertTrue(env["CANON_RUN_LOG"].endswith("/logs/campaign.log"))
       self.assertEqual(
           document["metadata"]["labels"]["canon.zero-tim/full-campaign"],
           "1",
       )
+      self.assertEqual(env["CANON_P46_RESUME_TAG"], f"t{topology}")
     with self.assertRaisesRegex(ValueError, "cannot be a parity"):
       self._render(
           "q4-clean-eval",
@@ -151,6 +170,94 @@ class P46RendererTest(unittest.TestCase):
           "128",
           full_campaign=True,
           physical_shard_index=1,
+      )
+
+  def test_resume_tag_is_stable_across_distinct_launch_ids(self):
+    first = self._render(
+        "q4-clean-eval",
+        "128",
+        full_campaign=True,
+        run_id="launch-a",
+        resume_tag="wash-q4-001",
+    )
+    second = self._render(
+        "q4-clean-eval",
+        "128",
+        full_campaign=True,
+        run_id="launch-b",
+        resume_tag="wash-q4-001",
+    )
+    first_env = p34._env(first)
+    second_env = p34._env(second)
+    self.assertNotEqual(first["metadata"]["name"], second["metadata"]["name"])
+    self.assertEqual(first_env["CANON_RUN_ID"], "launch-a")
+    self.assertEqual(second_env["CANON_RUN_ID"], "launch-b")
+    self.assertEqual(
+        first_env["CANON_P46_OUTPUT_DIR"], second_env["CANON_P46_OUTPUT_DIR"]
+    )
+    self.assertIn("/wash-q4-001/outputs", first_env["CANON_P46_OUTPUT_DIR"])
+    for document in (first, second):
+      self.assertEqual(
+          document["metadata"]["labels"]["canon.zero-tim/resume-tag"],
+          "wash-q4-001",
+      )
+
+  def test_frozen_legacy_snapshot_is_explicit_and_full_campaign_only(self):
+    document = self._render(
+        "q4-clean-eval",
+        "128",
+        full_campaign=True,
+        run_id="impa",
+        resume_tag="wash-q4-import",
+        sampling_source_commit="5" * 40,
+        legacy_import_id="old-run",
+    )
+    env = p34._env(document)
+    self.assertEqual(env["CANON_EXPECT_COMMIT"], SOURCE)
+    self.assertEqual(env["CANON_P46_SAMPLING_SOURCE_COMMIT"], "5" * 40)
+    self.assertEqual(env["CANON_P46_LEGACY_IMPORT_ID"], "old-run")
+    self.assertEqual(
+        document["metadata"]["labels"]["canon.zero-tim/legacy-import-id"],
+        "old-run",
+    )
+    self.assertIn("/wash-q4-import/outputs", env["CANON_P46_OUTPUT_DIR"])
+    with self.assertRaisesRegex(ValueError, "requires a full campaign"):
+      self._render(
+          "q4-clean-eval", "128", legacy_import_id="old-run"
+      )
+    with self.assertRaisesRegex(ValueError, "legacy import id"):
+      self._render(
+          "q4-clean-eval",
+          "128",
+          full_campaign=True,
+          legacy_import_id="../old-run",
+      )
+
+  def test_resume_tag_rejects_unsafe_paths(self):
+    for value in ("../escape", "UPPER", "a" * 64, "dash-"):
+      with self.subTest(value=value):
+        with self.assertRaisesRegex(ValueError, "resume tag"):
+          self._render(
+              "q4-clean-eval", "128", full_campaign=True, resume_tag=value
+          )
+    common = dict(
+        source_commit=SOURCE,
+        source_branch=p34.DEFAULT_SOURCE_BRANCH,
+        client_image=IMAGE,
+        run_id="missing-tag",
+        cpu_nodepool="cpu",
+        worker_nodepool="worker",
+        model_pvc="pvc",
+        whitelist=p34.P34_CLEAN_WHITELIST,
+        whitelist_sha256=p34.P34_CLEAN_WHITELIST_SHA256,
+    )
+    with self.assertRaisesRegex(ValueError, "explicit resume tag"):
+      renderer.render(
+          self._base("128"),
+          workload="q4-clean-eval",
+          topology="128",
+          full_campaign=True,
+          **common,
       )
 
   def test_64chip_parity_canary_renders_exact_observer_and_reward_arms(self):
@@ -200,6 +307,14 @@ class P46RendererTest(unittest.TestCase):
       )
     with self.assertRaisesRegex(ValueError, "q32-train topology"):
       renderer.render(self._base("128"), workload="q32-train", topology="128", **common)
+    with self.assertRaisesRegex(ValueError, "evaluation-only controls"):
+      renderer.render(
+          self._base("64"),
+          workload="q32-train",
+          topology="64",
+          resume_tag="eval-only",
+          **common,
+      )
     with self.assertRaisesRegex(ValueError, "shard"):
       renderer.render(
           self._base("64"),
