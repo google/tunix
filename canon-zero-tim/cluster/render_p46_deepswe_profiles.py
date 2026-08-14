@@ -313,7 +313,7 @@ def render_q4_eval(
   lane = (
       f"parity-{'obs' if evaluation_mode == 'logprob_observer' else 'reward'}"
       if parity_canary
-      else ("eval-campaign" if full_campaign else "eval")
+      else ("eval-camp" if full_campaign else "eval")
   )
   name = f"canon-p46-{lane}-{topology}-{run_id}"
   if not full_campaign:
@@ -321,8 +321,8 @@ def render_q4_eval(
         f"canon-p46-{lane}-{topology}-{logical_shard_index}-"
         f"{physical_shard_index}-{run_id}"
     )
-  if len(name) > 63:
-    raise ValueError("rendered P46 evaluation JobSet name exceeds 63 characters")
+  if len(name) > 36:
+    raise ValueError("rendered P46 evaluation JobSet name exceeds 36 characters")
   run_root = f"/mnt/disks/linchai_data/deepswe_eval/{run_id}"
   if parity_canary:
     run_root = f"{run_root}/parity/{evaluation_mode}"
