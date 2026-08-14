@@ -6,15 +6,24 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2m fixed-M single-active discriminator. P38s15 completed
-  from source `58a0ed847770`; its existing DP1/batch-size-one replay is now
-  explicitly E0-lite, not strict E0. The next target acquisition must preserve
-  the production padded aval while recording a naturally single-active call.
+- Active phase: P38.2m fixed-M single-active discriminator completed with P38s16
+  from source `4101f752667b`. Patch 15 fixed-M compile-geometry attestation and
+  exact-token single-active records successfully captured across 3 frozen rounds.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
 
+- P38s16/source `4101f752` successfully executed all 3 Frozen-Weight
+  diagnostic rounds (768 trajectories total, 148,916 action tokens across 3
+  rounds: 48,556 / 47,313 / 53,047) on 64 TPU (`DP16xTP4`, concurrency 256)
+  with zero backward, zero optimizer commits, and controlled exit 42.
+  - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 on all 3 rounds.
+  - A-B boundary (`S_decode` vs `S_prefill`): Round 1 had 52 differing bytes
+    (32 elements), Round 2 had 27 differing bytes, Round 3 had 18 differing bytes.
+  - Incident ledger: 3,669 records / 4,217 calls / 91.7 MB, successfully
+    recording fixed-M compile geometry and exact tokens for natural single-active calls.
+  - Evidence archived under `evidence/p38s16/`.
 - P38s15/source `58a0ed84` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 51,330 action tokens) with zero backward and zero
   optimizer commits, exiting with controlled code 42. It measured exact B-C

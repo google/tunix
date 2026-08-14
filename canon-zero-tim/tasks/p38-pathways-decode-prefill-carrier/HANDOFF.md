@@ -5,38 +5,33 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2m fixed-M single-active discriminator; do not run DP1 as strict E0
+## CURRENT: P38s16 completed; discriminator evidence captured
 
-P38s15/source `58a0ed847770` completed all three Frozen-Weight diagnostic
-rounds (768 trajectories total, 51,330 action tokens) on 64 TPU (`DP16xTP4`,
-concurrency 256) with zero backward, zero optimizer commits, and controlled
-exit 42.
+P38s16/source `4101f752667b` completed all three Frozen-Weight diagnostic
+rounds (768 trajectories total, 148,916 action tokens across 3 rounds) on 64 TPU
+(`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
+controlled exit 42.
 
 Key numerical facts:
-- B-C boundary (`S_prefill` vs `T_old`): **0 mismatches (STRICT EXACT 0)**,
-  bitwise identical hashes `4ee783597573623391cdf65917990963dab4d85960080d396465a454c7003dd3`.
-- A-B boundary (`S_decode` vs `S_prefill`): **20 differing elements / 33 bytes**,
-  `max_abs=0.20377731323242188` (at row 215 pos 689).
-- Mismatch rows: `rows=[215, 223, 231, 254, 255]`.
-- Capsule SHA256: `9a7d6caf0125b0798a7745ae82882132115b1721414ecf6e1f3bde18c2d27c35`.
-- Incident ledger: 1,915 records / 2,465 calls / 53.3 MB.
-- Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s15/`.
+- B-C boundary (`S_prefill` vs `T_old`): **0 mismatches (STRICT EXACT 0)**
+  across all 3 rounds.
+- A-B boundary (`S_decode` vs `S_prefill`):
+  - Round 1: 52 differing bytes (32 elements), `N_action=48,556`.
+  - Round 2: 27 differing bytes, `N_action=47,313`.
+  - Round 3: 18 differing bytes, `N_action=53,047`.
+- Incident ledger: 3,669 records / 4,217 calls / 91.7 MB, containing Patch 15
+  fixed-M compile-geometry attestation and exact tokens for single-active calls.
+- Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s16/`.
 
-Across all three rounds, the 64 mismatch elements joined to 61 exact serving
-calls. Six mismatch calls occurred when only one request was scheduled. That
-does **not** mean the compiled batch shape became one: production continued to
-use fixed padding (`decode_rows=16`, canonical logprob rows 256, adapter
-global/local M 4096/256).
+### Next Operator Step
 
-The command below is retained only as an E0-lite counterfactual. It uses DP1,
-`batch_size=1`, and `max_concurrency=1`; it changes the executable geometry and
-must not be described as strict E0 or production proof:
+Analyze the natural single-active incident records from P38s16 to choose
+between the two decisive next observers:
+1. Live KV content verification vs deterministic recomputation; or
+2. First Divergence Seam Walk across the decode pipeline
+   (`q_norm -> post-RoPE -> RPA -> residual -> MLP -> logits -> normalizer`).
 
-```bash
-bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
-  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/evidence/p38s15/p38_frozenlake_mismatch_capsule.npz \
-  p38s15_replay_row215_e0lite 215
-```
+## HISTORY: completed P38s16, P38s15, P38s14, P38s13a, P38s12f
 
 ### Next operator step after review and publication approval
 

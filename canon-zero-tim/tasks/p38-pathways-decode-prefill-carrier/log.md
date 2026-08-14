@@ -1235,3 +1235,24 @@
   withheld until explicit approval after all gates passed. Root cause remains
   open; the next decisive observer must compare live KV content neutrally or
   localize the first divergent decode seam.
+
+## 2026-08-14 UTC — P38s16 diagnostic run completed on 64 TPU with controlled exit 42
+
+- Type: target execution and verification
+- Fact: P38s16 was launched from source `4101f752667b` with `--stock-only` and
+  `--max-concurrency 256` on 64 TPU (`DP16xTP4`).
+- Fact: all three frozen-weight diagnostic rounds (768 trajectories total,
+  148,916 action tokens across 3 rounds: 48,556 / 47,313 / 53,047) ran
+  successfully with 0 backward and 0 optimizer commits.
+- Fact: B-C boundary (`S_prefill` vs `T_old`) measured STRICT EXACT 0 on all 3 rounds.
+- Fact: A-B boundary (`S_decode` vs `S_prefill`) measured 52 differing bytes (32 elements)
+  on Round 1, 27 differing bytes on Round 2, and 18 differing bytes on Round 3.
+- Fact: Patch 15 fixed-M compile geometry and exact single-active token records
+  were successfully captured into `incident-ledger.jsonl` (3,669 records /
+  4,217 calls / 91.7 MB).
+- Fact: Head process exited with controlled code 42.
+- Files/artifacts: `evidence/p38s16/` (`head.full.log`, `pre-alignment.jsonl`,
+  `pre_alignment.json`, `p38_frozenlake_mismatch_capsule.npz`, `incident-ledger.jsonl`,
+  `request-journal.jsonl`, `source_commit.txt`, `SHA256SUMS`).
+- Next: Analyze single-active incident records to choose decisive next observer.
+
