@@ -17,139 +17,48 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
+import pickle
 import sys
-from typing import Any
 
-os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
-os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
+import jax
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh
+from transformers import AutoTokenizer
+from tunix.experimental.rollout import legacy_vllm_sampler_adapter
+from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import rollout_worker
+from tunix.generate import mappings as mappings_lib
+from tunix.generate import tokenizer_adapter as tokenizer_adapter_lib
+from tunix.generate import vllm_sampler
+from tunix.models.qwen3 import mapping_vllm_jax
+from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.agents import base_agent
+from tunix.rl.agentic.environments import base_environment
+from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+
+REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+)
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
   parser.add_argument("--port", type=int, default=20001)
-  parser.add_argument("--tpu_chips", type=str, default="2,3")
-  parser.add_argument(
-      "--tpu_chips_per_host_bounds",
-      type=str,
-      default=os.getenv("TPU_CHIPS_PER_HOST_BOUNDS", ""),
-      help="Optional 3D TPU chip bounds for this worker, e.g. 1,2,1.",
-  )
-  parser.add_argument(
-      "--tpu_host_bounds",
-      type=str,
-      default=os.getenv("TPU_HOST_BOUNDS", "1,1,1"),
-      help="Optional 3D TPU host bounds for this worker.",
-  )
+  parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
-  parser.add_argument("--model_dir", type=str, default=os.getenv("MODEL_DIR", ""))
+  parser.add_argument(
+      "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
+  )
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=16)
   parser.add_argument("--lora_alpha", type=float, default=16.0)
-  return parser.parse_args()
-
-
-def _parse_tpu_chips(tpu_chips: str) -> list[str]:
-  chips = [chip.strip() for chip in tpu_chips.split(",") if chip.strip()]
-  if not chips:
-    raise ValueError("--tpu_chips must contain at least one chip id.")
-  return chips
-
-
-def _default_chips_per_host_bounds(num_chips: int) -> str:
-  if num_chips == 1:
-    return "1,1,1"
-  if num_chips == 2:
-    return "1,2,1"
-  return ""
-
-
-def _set_libtpu_init_arg(name: str, value: str) -> None:
-  prefix = f"--{name}="
-  existing_args = [
-      arg
-      for arg in os.environ.get("LIBTPU_INIT_ARGS", "").split()
-      if not arg.startswith(prefix)
-  ]
-  existing_args.append(f"{prefix}{value}")
-  os.environ["LIBTPU_INIT_ARGS"] = " ".join(existing_args).strip()
-
-
-def _configure_logging() -> None:
-  logging.basicConfig(
-      level=logging.INFO,
-      format="%(asctime)s - [RolloutNode] %(message)s",
-      force=True,
-  )
-
-
-def _configure_tpu_visibility(parsed_args: argparse.Namespace) -> None:
-  chips = _parse_tpu_chips(parsed_args.tpu_chips)
-  visible_devices = ",".join(chips)
-  os.environ.setdefault("JAX_PLATFORMS", "tpu")
-  os.environ["TPU_VISIBLE_DEVICES"] = visible_devices
-  os.environ["TPU_VISIBLE_CHIPS"] = visible_devices
-
-  chips_per_host_bounds = (
-      parsed_args.tpu_chips_per_host_bounds
-      or _default_chips_per_host_bounds(len(chips))
-  )
-  if not chips_per_host_bounds:
-    return
-  host_bounds = parsed_args.tpu_host_bounds or "1,1,1"
-  os.environ["TPU_CHIPS_PER_HOST_BOUNDS"] = chips_per_host_bounds
-  os.environ["TPU_HOST_BOUNDS"] = host_bounds
-  _set_libtpu_init_arg(
-      "deepsea_chips_per_host_bounds", chips_per_host_bounds
-  )
-  _set_libtpu_init_arg("deepsea_host_bounds", host_bounds)
-
-
-args = _parse_args()
-_configure_tpu_visibility(args)
-_configure_logging()
-logging.info("Parsed args: %s", args)
-logging.info("Pre-import JAX_PLATFORMS=%s", os.getenv("JAX_PLATFORMS"))
-logging.info(
-    "Pre-import TPU_VISIBLE_DEVICES=%s", os.getenv("TPU_VISIBLE_DEVICES")
-)
-logging.info(
-    "Pre-import TPU_CHIPS_PER_HOST_BOUNDS=%s",
-    os.getenv("TPU_CHIPS_PER_HOST_BOUNDS"),
-)
-logging.info("Pre-import TPU_HOST_BOUNDS=%s", os.getenv("TPU_HOST_BOUNDS"))
-logging.info("Pre-import LIBTPU_INIT_ARGS=%s", os.getenv("LIBTPU_INIT_ARGS"))
-
-REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-)
-if REPO_ROOT not in sys.path:
-  sys.path.insert(0, REPO_ROOT)
-logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
-
-logging.info("Importing JAX and rollout dependencies...")
-import jax  # pylint: disable=g-import-not-at-top
-from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
-from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
-from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
-
-from tunix.experimental.rollout import legacy_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
-from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
-from tunix.experimental.worker import rollout_worker  # pylint: disable=g-import-not-at-top
-from tunix.generate import mappings as mappings_lib  # pylint: disable=g-import-not-at-top
-from tunix.generate import tokenizer_adapter as tokenizer_adapter_lib  # pylint: disable=g-import-not-at-top
-from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
-from tunix.models.qwen3 import mapping_vllm_jax  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic.agents import base_agent  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic.environments import base_environment  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib  # pylint: disable=g-import-not-at-top
-logging.info("Finished importing rollout dependencies.")
+  return parser.parse_args(argv)
 
 
 def _create_rollout_mesh() -> Mesh:
@@ -234,7 +143,7 @@ class _GSM8KDemoAgent(base_agent.ConversationAgentBase):
     return action
 
 
-def _create_vllm_worker(tokenizer):
+def _create_vllm_worker(args, tokenizer):
   logging.info("Creating vLLM mapping config...")
   mapping_config = mappings_lib.MappingConfig(
       lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
@@ -270,7 +179,7 @@ def _create_vllm_worker(tokenizer):
       },
   )
   sampler_adapter = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(
-      server_id="vllm-rollout-0",
+      server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
   )
@@ -289,7 +198,7 @@ def _create_vllm_worker(tokenizer):
       rollout_vllm_model_version=vllm_model,
   )
   return rollout_worker.RolloutWorker(
-      worker_id="vllm-rollout-0",
+      worker_id=args.worker_id,
       config=config,
       sampler=sampler_adapter,
       env_pool=_GSM8KDemoEnvPool(),
@@ -300,15 +209,32 @@ def _create_vllm_worker(tokenizer):
   )
 
 
-def main() -> None:
-  logging.info("Initializing JAX on TPU chips: %s using vLLM.", args.tpu_chips)
-  logging.info("TPU_VISIBLE_DEVICES=%s", os.getenv("TPU_VISIBLE_DEVICES"))
-  logging.info(
-      "TPU_CHIPS_PER_HOST_BOUNDS=%s", os.getenv("TPU_CHIPS_PER_HOST_BOUNDS")
+def main(argv: list[str], context: Any = None) -> None:
+  if context and context.ipc and context.ipc.discovery:
+    pass
+  else:
+    raise RuntimeError(
+        "Require discovery API, but process context doesn't support."
+    )
+
+  logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s - [RolloutNode] %(message)s",
+      force=True,
   )
-  logging.info("TPU_HOST_BOUNDS=%s", os.getenv("TPU_HOST_BOUNDS"))
-  logging.info("LIBTPU_INIT_ARGS=%s", os.getenv("LIBTPU_INIT_ARGS"))
-  logging.info("Visible devices: %s", jax.devices())
+
+  args = _parse_args(argv)
+  logging.info("Parsed args: %s", args)
+
+  if context:
+    context.jax.initialize()
+  os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+  os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
+  os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
+  if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+  logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
+
 
   tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
   logging.info("Loading tokenizer from %s...", tokenizer_path)
@@ -316,13 +242,34 @@ def main() -> None:
   if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
     tokenizer.pad_token = tokenizer.eos_token
 
-  logging.info("Creating rollout worker service...")
-  worker_service = _create_vllm_worker(tokenizer)
-  logging.info("Creating rollout gRPC server...")
-  server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-  logging.info("Serving vLLM rollout worker on port %d.", args.port)
-  server.start_serving(args.port)
+  async def grpc_server_main() -> None:
+    logging.info("Creating rollout worker service...")
+    worker_service = _create_vllm_worker(args, tokenizer)
+
+    logging.info("Creating rollout gRPC server...")
+    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
+    await server.start_serving_async(args.port)
+    logging.info("Serving vLLM rollout worker on port %d.", args.port)
+
+    context.ipc.discovery.register(
+        metadata=pickle.dumps({
+            "service_type": "rollout",
+            "service_port": args.port,
+            "worker_id": args.worker_id,
+        })
+    )
+    logging.info("Rollout worker is registered.")
+
+    try:
+      while True:
+        await asyncio.sleep(1)
+    except asyncio.CancelledError:
+      pass
+    finally:
+      await server.stop_serving()
+
+  asyncio.run(grpc_server_main())
 
 
 if __name__ == "__main__":
-  main()
+  main(sys.argv[1:])
