@@ -75,6 +75,7 @@ class ClusterOrchestrator:
         self.registry
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
+    self.rollout_router = rollout_router
     self._remote_worker_handles: dict[
         str, list[remote_execution.ActorHandle]
     ] = collections.defaultdict(list)
@@ -408,6 +409,7 @@ class ClusterOrchestrator:
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
+        router=self.rollout_router,
         weight_sync_coordinator=coordinator,
     )
 
