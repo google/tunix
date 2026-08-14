@@ -891,10 +891,15 @@ class RoutingActorPool(ActorPool):
   def add_actor(self, actor: Union[str, ActorHandle]) -> None:
     if isinstance(actor, str):
       self._actors.append(ActorHandle.from_address(actor))
-    elif isinstance(actor, ActorHandle):
+    elif callable(getattr(actor, "submit", None)) and callable(
+        getattr(actor, "asubmit", None)
+    ):
+      # Duck-typed handle (e.g. registry Worker adapters wrapping a handle).
       self._actors.append(actor)
     else:
-      raise TypeError(f"Expected str or ActorHandle, got {type(actor)}")
+      raise TypeError(
+          f"Expected str or ActorHandle-like object, got {type(actor)}"
+      )
 
   def _get_next_actor(
       self,

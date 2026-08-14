@@ -25,6 +25,17 @@ ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 INFERENCE_PORT=${INFERENCE_PORT:-20002}
+# Comma-separated gRPC ports, one rollout node per port (e.g. "20001,20003,20004").
+ROLLOUT_PORTS=${ROLLOUT_PORTS:-$ROLLOUT_PORT}
+# Optional py-inference-scheduler sidecar. Either point SCHEDULER_URL at an
+# externally managed sidecar (e.g. a k8s sidecar container), or set
+# START_SCHEDULER=1 with SCHEDULER_REPO pointing at a py-rl-scheduler checkout
+# to have this script launch one locally.
+SCHEDULER_URL=${SCHEDULER_URL:-}
+START_SCHEDULER=${START_SCHEDULER:-0}
+SCHEDULER_REPO=${SCHEDULER_REPO:-}
+SCHEDULER_PORT=${SCHEDULER_PORT:-8100}
+SCHEDULER_CONFIG=${SCHEDULER_CONFIG:-integration/tunix/examples/scheduler.yaml}
 RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
 INFERENCE_ADDR=${INFERENCE_ADDR:-}
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
@@ -103,6 +114,9 @@ fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
+# Semicolon-separated chip groups aligned with ROLLOUT_PORTS (e.g. "2;3;4" for
+# three 1-chip rollout nodes). Defaults to a single node on ROLLOUT_TPU_CHIPS.
+ROLLOUT_TPU_CHIPS_LIST=${ROLLOUT_TPU_CHIPS_LIST:-$ROLLOUT_TPU_CHIPS}
 INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
@@ -121,6 +135,20 @@ TRAINER_LOG="${LOG_ROOT}/trainer.log"
 ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
 INFERENCE_LOG="${LOG_ROOT}/inference.log"
 ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
+SCHEDULER_LOG="${LOG_ROOT}/scheduler.log"
+
+IFS=',' read -r -a ROLLOUT_PORT_ARR <<< "$ROLLOUT_PORTS"
+IFS=';' read -r -a ROLLOUT_CHIPS_ARR <<< "$ROLLOUT_TPU_CHIPS_LIST"
+if (( ${#ROLLOUT_PORT_ARR[@]} != ${#ROLLOUT_CHIPS_ARR[@]} )); then
+  echo "Error: ROLLOUT_PORTS has ${#ROLLOUT_PORT_ARR[@]} entries but" \
+       "ROLLOUT_TPU_CHIPS_LIST has ${#ROLLOUT_CHIPS_ARR[@]} (must match)."
+  exit 1
+fi
+ROLLOUT_PIDS=()
+ROLLOUT_LOGS=()
+for i in "${!ROLLOUT_PORT_ARR[@]}"; do
+  ROLLOUT_LOGS+=("${LOG_ROOT}/rollout_${i}.log")
+done
 
 print_section() {
   echo
@@ -178,20 +206,24 @@ dump_debug_snapshot() {
   if [[ -n "${TRAINER_PID:-}" ]]; then
     print_process_debug "trainer" "$TRAINER_PID"
   fi
-  if [[ -n "${ROLLOUT_PID:-}" ]]; then
-    print_process_debug "rollout" "$ROLLOUT_PID"
-  fi
+  for i in "${!ROLLOUT_PIDS[@]}"; do
+    print_process_debug "rollout${i}" "${ROLLOUT_PIDS[$i]}"
+  done
   if [[ -n "${INFERENCE_PID:-}" ]]; then
     print_process_debug "inference" "$INFERENCE_PID"
   fi
   print_related_processes
   print_section "port snapshot"
   print_port_debug "$TRAINER_PORT"
-  print_port_debug "$ROLLOUT_PORT"
+  for port in "${ROLLOUT_PORT_ARR[@]}"; do
+    print_port_debug "$port"
+  done
   print_port_debug "$INFERENCE_PORT"
   print_section "log snapshot"
   print_file_debug "trainer" "$TRAINER_LOG"
-  print_file_debug "rollout" "$ROLLOUT_LOG"
+  for i in "${!ROLLOUT_LOGS[@]}"; do
+    print_file_debug "rollout${i}" "${ROLLOUT_LOGS[$i]}"
+  done
   print_file_debug "inference" "$INFERENCE_LOG"
   print_file_debug "orchestrator" "$ORCHESTRATOR_LOG"
 }
@@ -273,8 +305,10 @@ ensure_model_dir() {
 dump_logs() {
   print_section "trainer.log tail"
   tail -n 200 "$TRAINER_LOG" 2>/dev/null || true
-  print_section "rollout.log tail"
-  tail -n 200 "$ROLLOUT_LOG" 2>/dev/null || true
+  for i in "${!ROLLOUT_LOGS[@]}"; do
+    print_section "rollout_${i}.log tail"
+    tail -n 200 "${ROLLOUT_LOGS[$i]}" 2>/dev/null || true
+  done
   print_section "inference.log tail"
   tail -n 200 "$INFERENCE_LOG" 2>/dev/null || true
   print_section "orchestrator.log tail"
@@ -366,9 +400,7 @@ echo "  trainer backend:$TRAINER_BACKEND"
 echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
 echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
-echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
-echo "  rollout mesh:   fsdp=$ROLLOUT_FSDP tp=$ROLLOUT_TP"
 echo "  inference:      $RUN_INFERENCE_NODE"
 echo "  inference addr: ${INFERENCE_ADDR:-<none>}"
 echo "  inference chips:${INFERENCE_TPU_CHIPS:-<unset>}"
@@ -380,7 +412,7 @@ echo "  log tail lines: $WAIT_LOG_TAIL_LINES"
 echo "  wandb project:  ${WANDB_PROJECT:-<none>}"
 echo "  wandb run name: ${WANDB_RUN_NAME:-<auto>}"
 echo "  trainer log:    $TRAINER_LOG"
-echo "  rollout log:    $ROLLOUT_LOG"
+echo "  rollout logs:   ${ROLLOUT_LOGS[*]}"
 echo "  orch log:       $ORCHESTRATOR_LOG"
 echo "=================================================="
 
@@ -399,8 +431,11 @@ ensure_model_dir
 mkdir -p "${LOG_ROOT}"
 
 : > "$TRAINER_LOG"
-: > "$ROLLOUT_LOG"
+for log in "${ROLLOUT_LOGS[@]}"; do
+  : > "$log"
+done
 : > "$INFERENCE_LOG"
+: > "$SCHEDULER_LOG"
 : > "$ORCHESTRATOR_LOG"
 
 print_section "runtime context"
@@ -414,7 +449,9 @@ echo "TOKENIZER_PATH exists? $(if [[ -d "$TOKENIZER_PATH" ]]; then echo yes; els
 echo "Initial LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}"
 print_related_processes
 print_port_debug "$TRAINER_PORT"
-print_port_debug "$ROLLOUT_PORT"
+for port in "${ROLLOUT_PORT_ARR[@]}"; do
+  print_port_debug "$port"
+done
 print_port_debug "$INFERENCE_PORT"
 
 echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
@@ -525,97 +562,14 @@ ROLLOUT_PID=$!
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
-
-on_shutdown_signal() {
-  SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
-  if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
-    DRAIN_START_SECONDS=$seconds
-    print_setion "graceful shutdown"
-    echo "Received $1. Draining workers so the trainer can finalize its"
-    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
-    echo "the in-flight checkpoint and kill workers immediately."
-    exit 130
-  elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
-    echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
-    echo "Press Ctrl+C again if you really want to abandon the checkpoint."
-  else
-    echo "Received $1. Killing workers immediately."
-    FORCE_KILL=1
-  fi
-}
-
 cleanup() {
-  trap - EXIT ERR
-  local trainer_pids=()
-  local worker_pids=()
-  local all_pids=()
-
-  if [[ -n "${TRAINER_PID:-}" ]]; then
-    trainer_pids+=("$TRAINER_PID")
-    all_pids+=("$TRAINER_PID")
-  fi
-  for pid in "${ROLLOUT_PID:-}" "${INFERENCE_PID:-}"; do
-    if [[ -n "$pid" ]]; then
-      worker_pids+=("$pid")
-      all_pids+=("$pid")
-    fi
-  done
-
-  if (( ${#all_pids[@]} == 0 )); then
-    return
-  fi
-
-  echo "Cleaning up worker processes: ${all_pids[*]}"
-  echo "Waiting worker processes shutdown (grace period: ${TRAINER_SHUTDOWN_GRACE_SECS} seconds)"
-  # SIGTERM only: the trainer installs a SIGTERM handler that finalizes any
-  # in-flight checkpoint before exiting. Wait (without a hard timeout, capped by
-  # TRAINER_SHUTDOWN_GRACE_SECS) so the checkpoint can be finalized.
-  # Non-trainer workers (rollout, inference) do not perform checkpoint
-  # finalization and are forcefully killed after WORKER_SHUTDOWN_GRACE_SECS if
-  # they fail to exit promptly.
-  kill "${all_pids[@]}" 2>/dev/null || true
-  local waited=0
-  local poll_interval=2
-  while true; do
-    if (( FORCE_KILL == 1 )); then
-      echo "Aborting after ${waited}s at user request."
-      break
-    fi
-    local alive=0
-    for pid in "${worker_pids[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then
-        if (( waited >= WORKER_SHUTDOWN_GRACE_SECS )); then
-          kill -9 "$pid" 2>/dev/null || true
-        else
-          alive=1
-        fi
-      fi
-    done
-    for pid in "${trainer_pids[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then
-        if (( waited >= TRAINER_SHUTDOWN_GRACE_SECS )); then
-          kill -9 "$pid" 2>/dev/null || true
-        else
-          alive=1
-        fi
-      fi
-    done
-    if (( alive == 0 )); then
-      break
-    fi
-    sleep "$poll_interval" || true
-    waited=$((waited + poll_interval))
-  done
-  for pid in "${all_pids[@]}"; do
-    kill -9 "$pid" 2>/dev/null || true
-  done
-  wait "${all_pids[@]}" 2>/dev/null || true
-  echo "Workers stopped after ${waited}s of graceful drain."
+  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID, ${INFERENCE_PID:-})..."
+  kill "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
+  wait "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
+  echo "Workers stopped."
 }
 trap on_error ERR
 trap cleanup EXIT
-trap 'on_shutdown_signal SIGINT' INT
-trap 'on_shutdown_signal SIGTERM' TERM
 
 if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
   if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
@@ -658,19 +612,29 @@ fi
 
 echo "Waiting for gRPC servers to bind..."
 wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
-wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+for i in "${!ROLLOUT_PORT_ARR[@]}"; do
+  wait_for_port "rollout${i}" "${ROLLOUT_PORT_ARR[$i]}" "${ROLLOUT_PIDS[$i]}" "${ROLLOUT_LOGS[$i]}"
+done
 if [[ -n "${INFERENCE_PID:-}" ]]; then
   wait_for_port "inference" "$INFERENCE_PORT" "$INFERENCE_PID" "$INFERENCE_LOG"
+fi
+if [[ -n "${SCHEDULER_PID:-}" ]]; then
+  wait_for_port "scheduler" "$SCHEDULER_PORT" "$SCHEDULER_PID" "$SCHEDULER_LOG"
 fi
 dump_debug_snapshot
 
 echo "Launching CPU orchestrator..."
+ROLLOUT_ADDRS=""
+for port in "${ROLLOUT_PORT_ARR[@]}"; do
+  ROLLOUT_ADDRS+="${ROLLOUT_ADDRS:+,}localhost:${port}"
+done
 (
   ORCHESTRATOR_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_id="${ORCHESTRATOR_ID}"
     --discovery_port="${ORCHESTRATOR_PORT}"
     --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main
+    --rollout_addr="$ROLLOUT_ADDRS"
 
     --model_id="$MODEL_ID"
     --tokenizer_path="$TOKENIZER_PATH"
@@ -697,6 +661,9 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+  fi
+  if [[ -n "$SCHEDULER_URL" ]]; then
+  ORCHESTRATOR_CMD+=(--scheduler_url="$SCHEDULER_URL")
   fi
 
   export JAX_PLATFORMS=cpu

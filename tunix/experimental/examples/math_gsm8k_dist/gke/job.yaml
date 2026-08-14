@@ -1,0 +1,126 @@
+# GKE Job: 6-rollout-worker GSM8K GRPO demo with the py-inference-scheduler
+# sidecar, on a single ct5lp-hightpu-8t (TPU v5e 2x4, 8 chips) node.
+#
+# Chip layout inside the pod (one host, partitioned by launcher.sh):
+#   trainer: chips 0,1   rollout workers 0..5: chips 2..7 (1 chip each)
+#
+# The scheduler runs as a NATIVE SIDECAR (initContainer with
+# restartPolicy: Always, needs GKE >= 1.29): it starts before the main
+# container and does not block Job completion.
+#
+# Replace PROJECT_ID / repo names with your Artifact Registry paths.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tunix-gsm8k-grpo-6w
+  labels:
+    app: tunix-gsm8k-grpo
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: tunix-gsm8k-grpo
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+        # The TPU pool runs on Spot capacity (cheaper, preemptible).
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      initContainers:
+        - name: scheduler
+          image: us-central1-docker.pkg.dev/PROJECT_ID/tunix-rl/py-rl-scheduler:latest
+          restartPolicy: Always  # native sidecar
+          args:
+            - --host=0.0.0.0
+            - --port=8100
+            - --config=integration/tunix/examples/scheduler.yaml
+          ports:
+            - containerPort: 8100
+              name: http
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+      containers:
+        - name: tunix
+          image: us-central1-docker.pkg.dev/PROJECT_ID/tunix-rl/tunix-tpu:latest
+          workingDir: /app
+          command:
+            - bash
+            - tunix/experimental/examples/math_gsm8k_dist/launcher.sh
+          env:
+            - name: MODEL_ID
+              value: Qwen/Qwen3-1.7B
+            - name: MODEL_NAME
+              value: Qwen3-1.7B
+            - name: ARTIFACT_ROOT
+              value: /artifacts
+            - name: MODEL_DIR
+              value: /artifacts/models
+            - name: TOKENIZER_PATH
+              value: /artifacts/models
+            # --- chip partitioning: 2 trainer + 6x1 rollout on a 2x4 host ---
+            - name: TRAINER_TPU_CHIPS
+              value: "0,1"
+            - name: ROLLOUT_PORTS
+              value: "20001,20003,20004,20005,20006,20007"
+            - name: ROLLOUT_TPU_CHIPS_LIST
+              value: "2;3;4;5;6;7"
+            - name: TPU_CHIPS_PER_HOST_BOUNDS
+              value: "2,4,1"
+            - name: TPU_HOST_BOUNDS
+              value: "1,1,1"
+            # Full fine-tune of 1.7B on 2 v5e chips is HBM-tight; LoRA keeps
+            # the trainer comfortably inside 32GB.
+            - name: USE_LORA
+              value: "1"
+            # Enough per-step requests (4x4=16) to make 6-worker routing visible.
+            - name: BATCH_SIZE
+              value: "4"
+            - name: NUM_GENERATIONS
+              value: "4"
+            - name: MAX_STEPS
+              value: "3"
+            # Decision sidecar (same pod -> localhost).
+            - name: SCHEDULER_URL
+              value: http://localhost:8100
+            # Qwen3-1.7B is public; uncomment for gated models.
+            # - name: HF_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: hf-token
+            #       key: token
+          resources:
+            requests:
+              google.com/tpu: "8"
+              cpu: "48"
+              memory: 200Gi
+            limits:
+              google.com/tpu: "8"
+          volumeMounts:
+            - name: artifacts
+              mountPath: /artifacts
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: artifacts
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

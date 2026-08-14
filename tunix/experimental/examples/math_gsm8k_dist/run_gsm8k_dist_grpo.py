@@ -51,6 +51,7 @@ from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import remote_scheduler_router  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
@@ -73,6 +74,32 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
+  parser.add_argument("--trainer_addr", type=str, default="localhost:20000")
+  parser.add_argument(
+      "--rollout_addr",
+      type=str,
+      default="localhost:20001",
+      help="Comma-separated RolloutWorker addresses (one worker per address).",
+  )
+  parser.add_argument(
+      "--scheduler_url",
+      type=str,
+      default="",
+      help=(
+          "Optional py-inference-scheduler sidecar URL (e.g."
+          " http://localhost:8100). When set, rollout requests are routed by"
+          " the sidecar instead of prefix-hash/round-robin."
+      ),
+  )
+  parser.add_argument(
+      "--inference_addr",
+      type=str,
+      default="",
+      help=(
+          "Optional reference InferenceWorker address. Required when --beta is "
+          "non-zero because KL scoring needs a reference worker."
+      ),
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
@@ -379,6 +406,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         bring_up=False,
     )
   finally:
+    if rollout_router is not None:
+      rollout_router.stop()
     program.close()
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
