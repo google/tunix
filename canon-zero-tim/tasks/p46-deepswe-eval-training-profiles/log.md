@@ -543,3 +543,19 @@
 - Next: commit the synchronized runbook/handoff, push both commits only to
   `yuxzhang/canon-zero-tim`, and read back the exact remote SHA. Leave
   `p46e12805` untouched until natural termination.
+
+## 2026-08-14T09:26:55Z — P46.6 publication read-back
+
+- Type: publication checkpoint under explicit user commit/push approval.
+- Pushed implementation `c3a960acdc94173440144559bb95f1de36d31537`
+  and synchronized handoff `dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf`
+  only to `origin/yuxzhang/canon-zero-tim`; `main` was neither checked out nor
+  targeted.
+- Fresh remote read-back resolved exactly to
+  `dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf`, both commits passed ancestry
+  checks, and local/remote divergence was `0/0`.
+- No Kubernetes, JobSet, pod, PVC or cloud mutation occurred. The existing
+  `p46e12805` producer remains untouched and must run to natural termination.
+- Next: after terminal-state and no-producer proof, make a copied,
+  digest-sealed, read-only legacy snapshot; never move or import the live
+  directory. Require `LEGACY_IMPORT_PASS` before any resumed TPU model init.

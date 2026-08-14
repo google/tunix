@@ -4,9 +4,12 @@
 
 The next Q4 target run is the complete data-washing campaign, not another
 standalone `l0/p0` smoke. Resume-tag hardening and frozen legacy-v5 adoption
-are committed as `c3a960acdc94173440144559bb95f1de36d31537`. A remote executor
-must not launch until that commit is an ancestor of an exact read-back of
-`origin/yuxzhang/canon-zero-tim`. Never modify or push `main`.
+are published as implementation commit
+`c3a960acdc94173440144559bb95f1de36d31537`. Publication checkpoint
+`dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf` was read back from
+`origin/yuxzhang/canon-zero-tim` with that commit in its ancestry. A remote
+executor must resolve the exact current branch HEAD and repeat the ancestry
+gate before rendering. Never modify or push `main`.
 
 No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
 within the operator's explicit instruction.

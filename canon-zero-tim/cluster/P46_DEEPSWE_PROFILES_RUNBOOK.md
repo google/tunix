@@ -38,9 +38,12 @@ summaries, all referenced digests, postflight cleanup, and the global
 `P46_EVAL_CAMPAIGN_PASS` marker.
 
 Resume-tag hardening and frozen legacy-v5 adoption are implemented by
-`c3a960acdc94173440144559bb95f1de36d31537`. Do not launch until this commit is
-present in an exact read-back of `origin/yuxzhang/canon-zero-tim`. Never launch
-from a dirty worktree and never modify or push `main`.
+`c3a960acdc94173440144559bb95f1de36d31537`. Publication checkpoint
+`dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf` was read back from
+`origin/yuxzhang/canon-zero-tim` with that implementation in its ancestry.
+Because the branch may advance, every executor must still resolve the exact
+current HEAD and repeat the ancestry gate. Never launch from a dirty worktree
+and never modify or push `main`.
 
 This package has local CPU, direct one-host development evidence, and returned
 256-chip evaluation attempts. Neither returned attempt is a physical-shard

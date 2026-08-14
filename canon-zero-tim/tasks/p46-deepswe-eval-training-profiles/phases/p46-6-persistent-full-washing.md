@@ -55,7 +55,10 @@ and one model initialization/JIT cycle was paid for only 64 trajectories.
   a concurrent writer fail closed, and full-campaign postflight accepts only
   58 logical markers plus the exact 29,616-identity campaign marker.
 - Publication: an operator-approved commit is pushed to
-  `yuxzhang/canon-zero-tim` and read back exactly.
+  `yuxzhang/canon-zero-tim` and read back exactly. Implementation
+  `c3a960acdc94173440144559bb95f1de36d31537` satisfies this gate at verified
+  publication checkpoint `dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf`;
+  executors repeat the ancestry check against the current branch HEAD.
 - Transition: the old JobSet is left running. After its natural terminal state,
   one frozen `p46e12805` snapshot imports with `LEGACY_IMPORT_PASS`; any live,
   unsealed, drifted, duplicate or cross-contract input fails closed.

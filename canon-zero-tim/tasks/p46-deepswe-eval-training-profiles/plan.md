@@ -94,6 +94,8 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   `c33ba5f50d606210ca9f2c94fca003b63ea6e326`. Remote execution requires this
   implementation commit in the exact read-back operator ancestry.
 - Publication status: crash-safe resume and reviewed frozen-v5 adoption are
-  committed locally as `c3a960acdc94173440144559bb95f1de36d31537` on base
-  `2ec1cb768c7454c7d0ecf798ff1a5aff890ceae7`. Push/read-back is pending; no
-  remote executor may use it yet.
+  published as `c3a960acdc94173440144559bb95f1de36d31537` on base
+  `2ec1cb768c7454c7d0ecf798ff1a5aff890ceae7`. Operator-branch checkpoint
+  `dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf` was read back with both the
+  implementation and synchronized handoff in its ancestry. Executors still
+  resolve the current branch HEAD dynamically and repeat the ancestry gate.
