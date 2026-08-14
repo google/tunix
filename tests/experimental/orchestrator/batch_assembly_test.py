@@ -209,8 +209,8 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     )
 
   def test_partially_present_optional_field_is_rejected(self):
-    # Zero is not a neutral log-probability (exp(0) == 1), so a half-populated
-    # field must fail loudly rather than be silently zero-filled.
+    # Zero is not a neutral log-probability (exp(0) == 1), and dropping the
+    # field would deactivate the KL term, so mixed presence must fail loudly.
     items = [
         _make_payload(2, 3),
         _make_payload(2, 3, old_logps=np.full(3, -0.7, dtype=np.float32)),
@@ -218,6 +218,21 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "old_per_token_logps"):
       self._assembler().pack(items)
+
+  def test_uniformly_present_optional_field_is_emitted(self):
+    items = [
+        _make_payload(2, 3, old_logps=np.full(3, -0.7, dtype=np.float32)),
+        _make_payload(2, 3, old_logps=np.full(3, -0.4, dtype=np.float32)),
+    ]
+    payload = self._assembler().pack(items)[0]
+
+    self.assertEqual(payload.old_per_token_logps.shape, (2, 5))
+    np.testing.assert_allclose(
+        payload.old_per_token_logps[0], [-0.7, -0.7, -0.7, 0.0, 0.0]
+    )
+    np.testing.assert_allclose(
+        payload.old_per_token_logps[1], [-0.4, -0.4, -0.4, 0.0, 0.0]
+    )
 
   def test_optional_fields_absent_everywhere_stay_none(self):
     payload = self._assembler().pack([_make_payload(2, 3)])[0]

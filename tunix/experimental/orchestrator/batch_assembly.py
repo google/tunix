@@ -494,8 +494,9 @@ class PaddedBatchAssembler:
 
   Optional per-token fields (`ref_per_token_logps`, `old_per_token_logps`,
   `returns`, `old_values`, `sampler_is_weights`) are all-or-nothing per
-  microbatch: left as `None` when no item carries them, and rejected when only
-  some items do. Nothing is materialised for an algorithm that does not use it.
+  microbatch: emitted when every row carries them, left as `None` when no row
+  does, and rejected when only some rows do. Nothing is materialised for an
+  algorithm that does not use the field.
 
   Memory note: `prompt_ids` / `completion_ids` are views into `token_ids`, and
   `prompt_mask` / `completion_mask` are views into `token_mask` / `loss_mask`.
@@ -549,16 +550,21 @@ class PaddedBatchAssembler:
   ) -> tuple[str, ...]:
     """Returns the optional per-token fields carried by every row of a chunk.
 
-    Optional fields are all-or-nothing within a microbatch. A field absent from
-    every row stays `None` on the output payload rather than being materialised
-    as a dense zero tensor, so a GRPO batch never allocates (or ships to the
-    accelerator) `returns` / `old_values` / `old_per_token_logps` buffers it has
-    no use for.
+    Optional fields are all-or-nothing within a microbatch:
 
-    A field present on only *some* rows is rejected instead of zero-filled.
-    Zero is not a neutral value for the quantities involved: a zero
-    log-probability means `exp(0) == 1`, so a fabricated row would silently
-    distort the KL and importance-ratio terms rather than drop out of them.
+    - set on every row: emitted as a dense `[B, C]` tensor;
+    - set on no row: left as `None`, so nothing is allocated or shipped to the
+      accelerator for an algorithm that does not use the field (a GRPO batch
+      carries no `returns` / `old_values` / `old_per_token_logps` buffers);
+    - set on only some rows: rejected.
+
+    The last case is an error rather than a zero-fill because zero is not a
+    neutral value for the quantities involved — a zero log-probability means
+    `exp(0) == 1`, so a fabricated row would distort the KL and
+    importance-ratio terms instead of dropping out of them. It is also not
+    silently dropped, since that would deactivate the consuming loss term for
+    the whole microbatch. These fields come from batched scoring passes, so
+    partial presence indicates a caller bug.
 
     Args:
       chunk: The items about to be packed into one microbatch.
@@ -579,8 +585,9 @@ class PaddedBatchAssembler:
         raise ValueError(
             f"'{name}' is set on some but not all items of a microbatch"
             f" (missing on rows {missing}). Optional per-token fields must be"
-            " supplied for every item or for none; zero-filling the gaps would"
-            " silently corrupt the loss."
+            " supplied for every item or for none: zero-filling the gaps would"
+            " corrupt the loss, and dropping the field would silently"
+            " deactivate the loss term that consumes it."
         )
     return tuple(carried)
 

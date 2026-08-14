@@ -453,7 +453,15 @@ class PaddedBatchAssembler:
 
 `segment_ids` / `segment_positions` stay `None`: they describe 1D packing segments and carry no meaning for rectangular batches.
 
-**Optional per-token fields are all-or-nothing.** A field no item carries stays `None`, so a GRPO batch never allocates — or ships to the accelerator — the PPO-only `returns` / `old_values` / `old_per_token_logps` buffers. A field only *some* items carry raises `ValueError` instead of being zero-filled: zero is not a neutral value for these quantities (a zero log-prob means `exp(0) == 1`), so a fabricated row would distort the KL and importance-ratio terms rather than drop out of them. These fields come from batched scoring passes, so partial presence indicates a caller bug.
+**Optional per-token fields are all-or-nothing per microbatch:**
+
+| Presence across the rows | Result |
+| --- | --- |
+| every row | dense `[B, C]` tensor |
+| no row | `None` — nothing allocated or shipped to the accelerator, so a GRPO batch carries no PPO-only `returns` / `old_values` / `old_per_token_logps` buffers |
+| some rows | `ValueError` |
+
+Mixed presence is an error rather than a zero-fill because zero is not a neutral value for these quantities (a zero log-prob means `exp(0) == 1`), so a fabricated row would distort the KL and importance-ratio terms rather than drop out of them. It is not silently dropped either, since that would deactivate the consuming loss term for the whole microbatch. These fields come from batched scoring passes, so partial presence indicates a caller bug.
 
 **Buffer aliasing.** A packed row is backed by three `[B, P + C]` buffers (`token_ids`, `token_mask`, `loss_mask`); `prompt_*` and `completion_*` are returned as views into them. This is one allocation per token-space tensor rather than one per segment plus a stack and a concat, and it makes trailing-row padding free — the buffers already hold `pad_id` / `0`. Treat packed payloads as read-only: mutating a view mutates the buffer it aliases.
 
