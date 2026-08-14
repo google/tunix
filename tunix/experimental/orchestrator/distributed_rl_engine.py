@@ -104,16 +104,35 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       inference_workers: (
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
+      *,
+      health_monitor: Any = None,
+      router: Any = None,
       weight_sync_coordinator: Any = None,
   ):
     self._rollout_workers = list(rollout_workers)
+    self._health_monitor = health_monitor
+    self._router = router
     self._rollout_pool = remote_execution.RoutingActorPool(
-        self._rollout_workers
+        self._rollout_workers,
+        router=router,
     )
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+
+  @property
+  def health_monitor(self) -> Any:
+    """Returns the attached health monitor instance, if any."""
+    return self._health_monitor
+
+  def get_health_reports(self) -> dict[str, datatypes.HealthReport]:
+    """Returns the latest health reports from the attached health monitor."""
+    if self._health_monitor is not None and hasattr(
+        self._health_monitor, "latest_reports"
+    ):
+      return self._health_monitor.latest_reports
+    return {}
 
   async def _invoke_worker(
       self,
@@ -162,13 +181,20 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             )
         )
 
+    health_reports = self.get_health_reports()
     for req in rollout_reqs:
       metadata = req.metadata or {}
       route_key = metadata.get("prefix_hash")
       if route_key is None:
         route_key = req.prompt_id
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
+          method_name="generate",
+          args=([req],),
+          kwargs={
+              "route_key": route_key,
+              "health_reports": health_reports,
+              "request": req,
+          },
       )
 
       res = worker.dispatch_task(method_name="generate", requests=[req])
@@ -234,6 +260,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
         collections.defaultdict(list)
     )
+    health_reports = self.get_health_reports()
     for p in prompts:
       if isinstance(p, datatypes.RolloutRequest):
         request_metadata = dict(p.metadata or {})
@@ -241,7 +268,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         if route_key is None:
           route_key = p.prompt_id
         worker = self._rollout_pool._get_next_actor(
-            kwargs={"route_key": route_key}
+            method_name="generate",
+            args=([p],),
+            kwargs={
+                "route_key": route_key,
+                "health_reports": health_reports,
+                "request": p,
+            },
         )
         worker_to_requests[worker].append(p)
         continue
@@ -250,7 +283,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if route_key is None:
         route_key = route_metadata_map.get("prompt_id")
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
+          method_name="generate",
+          args=([p],),
+          kwargs={
+              "route_key": route_key,
+              "health_reports": health_reports,
+              "prompt": p,
+          },
       )
       worker_to_prompts[worker].append(p)
 

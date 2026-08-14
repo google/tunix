@@ -265,6 +265,30 @@ class RolloutWorkerTest(parameterized.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_rollout_worker_heartbeat_load_info(self):
+    """Verifies that heartbeat captures load info from sampler."""
+    report = self.service.heartbeat()
+    self.assertIsInstance(report, datatypes.HealthReport)
+    self.assertEqual(report.state, datatypes.WorkerState.READY)
+    self.assertIsNotNone(report.load_info)
+    self.assertEqual(report.load_info.num_requests_waiting, 0)
+    self.assertEqual(report.load_info.num_requests_running, 0)
+    self.assertEqual(report.load_info.kv_cache_usage_perc, 0.0)
+
+    # Mock sampler with non-zero load info
+    mock_sampler = mock.MagicMock()
+    mock_sampler.get_load_info_sync.return_value = {
+        "num_requests_waiting": 3,
+        "num_requests_running": 1,
+        "kv_cache_usage_perc": 0.42,
+    }
+    self.service.manager.sampler = mock_sampler
+    report2 = self.service.heartbeat()
+    self.assertIsNotNone(report2.load_info)
+    self.assertEqual(report2.load_info.num_requests_waiting, 3)
+    self.assertEqual(report2.load_info.num_requests_running, 1)
+    self.assertAlmostEqual(report2.load_info.kv_cache_usage_perc, 0.42)
+
 
 if __name__ == "__main__":
   absltest.main()

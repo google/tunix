@@ -45,7 +45,34 @@ class _DummyRequestOutput:
     self.metrics = None
 
 
+class _StubSchedulerStats:
+
+  def __init__(
+      self,
+      num_running_reqs: int = 2,
+      num_waiting_reqs: int = 1,
+      num_skipped_waiting_reqs: int = 1,
+      kv_cache_usage: float = 0.65,
+  ):
+    self.num_running_reqs = num_running_reqs
+    self.num_waiting_reqs = num_waiting_reqs
+    self.num_skipped_waiting_reqs = num_skipped_waiting_reqs
+    self.kv_cache_usage = kv_cache_usage
+
+
+class _StubScheduler:
+
+  def __init__(self):
+    self.stats = _StubSchedulerStats()
+
+  def make_stats(self):
+    return self.stats
+
+
 class _StubEngineCore:
+
+  def __init__(self):
+    self.scheduler = _StubScheduler()
 
   def shutdown(self):
     pass
@@ -304,6 +331,17 @@ class VllmDriverAsyncTest(absltest.TestCase):
           submission_timeout_s=-1.0,
           auto_start=False,
       )
+
+  def test_get_load_info(self):
+    engine = _FakeLLMEngine([])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+
+    load_info = driver.get_load_info()
+    self.assertEqual(load_info["num_requests_running"], 2)
+    # 1 waiting + 1 skipped waiting + 0 in submission queue
+    self.assertEqual(load_info["num_requests_waiting"], 2)
+    self.assertAlmostEqual(load_info["kv_cache_usage_perc"], 0.65)
 
 
 if __name__ == "__main__":

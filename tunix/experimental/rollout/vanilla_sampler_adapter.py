@@ -320,10 +320,14 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
     del req_id, kwargs
     return "SUCCESS"
 
+  def get_load_info_sync(self) -> base_sampler_lib.LoadInfo:
+    """Returns best-effort local sampler load information synchronously."""
+    return base_sampler_lib.LoadInfo()
+
   async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
     """Returns best-effort local sampler load information."""
     del kwargs
-    return base_sampler_lib.LoadInfo()
+    return self.get_load_info_sync()
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Finalizes and switches active policy weights after transfer completion."""

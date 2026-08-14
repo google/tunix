@@ -161,6 +161,21 @@ _ALLOWED_TRANSITIONS: dict[WorkerState, set[WorkerState]] = {
 
 
 @dataclasses.dataclass(kw_only=True)
+class LoadInfo:
+  """Load and capacity metrics from the inference/sampling engine.
+
+  Attributes:
+    num_requests_waiting: Number of requests queued/waiting in the engine.
+    num_requests_running: Number of requests actively executing in the engine.
+    kv_cache_usage_perc: Fraction of KV-cache currently occupied (0.0 to 1.0).
+  """
+
+  num_requests_waiting: int = 0
+  num_requests_running: int = 0
+  kv_cache_usage_perc: float = 0.0
+
+
+@dataclasses.dataclass(kw_only=True)
 class HealthReport:
   """A snapshot of a worker's health and readiness state.
 
@@ -171,6 +186,7 @@ class HealthReport:
     policy_version: The version of the weights currently loaded.
     last_error: A string summarizing the most recent error, if any.
     heartbeat_unix_s: The unix timestamp when this report was generated.
+    load_info: Real-time load and KV cache metrics reported by the engine.
   """
 
   state: WorkerState
@@ -179,6 +195,7 @@ class HealthReport:
   policy_version: int = 0
   last_error: str | None = None
   heartbeat_unix_s: float = dataclasses.field(default_factory=time.time)
+  load_info: LoadInfo | None = None
 
 
 @dataclasses.dataclass(kw_only=True)
