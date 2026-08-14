@@ -35,8 +35,50 @@ elif command -v gsutil >/dev/null 2>&1; then
   gcs_cp() { gsutil -q cp "$1" "$2"; }
   gcs_exists() { gsutil -q stat "$1" >/dev/null 2>&1; }
 else
-  echo "[P38.GCS] REFUSING: neither gcloud nor gsutil is installed" >&2
-  exit 1
+  if ! python3 -c "import google.cloud.storage" >/dev/null 2>&1; then
+    python3 -m pip install -q google-cloud-storage || true
+  fi
+  if python3 -c "import google.cloud.storage" >/dev/null 2>&1; then
+    gcs_cp() {
+      python3 - "$1" "$2" <<'PY'
+import sys
+from google.cloud import storage
+
+src, dst = sys.argv[1], sys.argv[2]
+client = storage.Client()
+def parse_gs(url):
+  assert url.startswith("gs://")
+  parts = url[5:].split("/", 1)
+  return parts[0], parts[1] if len(parts) > 1 else ""
+
+if src.startswith("gs://"):
+  b_name, o_name = parse_gs(src)
+  client.bucket(b_name).blob(o_name).download_to_filename(dst)
+elif dst.startswith("gs://"):
+  b_name, o_name = parse_gs(dst)
+  client.bucket(b_name).blob(o_name).upload_from_filename(src)
+PY
+    }
+    gcs_exists() {
+      python3 - "$1" <<'PY'
+import sys
+from google.cloud import storage
+
+url = sys.argv[1]
+client = storage.Client()
+assert url.startswith("gs://")
+parts = url[5:].split("/", 1)
+b_name = parts[0]
+o_name = parts[1] if len(parts) > 1 else ""
+blob = client.bucket(b_name).blob(o_name)
+if not blob.exists():
+  sys.exit(1)
+PY
+    }
+  else
+    echo "[P38.GCS] REFUSING: neither gcloud, gsutil, nor google-cloud-storage is installed" >&2
+    exit 1
+  fi
 fi
 
 stage="$CANON_STATE/p38_gcs_stage"
