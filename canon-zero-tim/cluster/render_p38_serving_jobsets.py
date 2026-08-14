@@ -28,8 +28,13 @@ _NUM_GENERATIONS = 8
 _ENGINE_DATA_SIZE = 16
 _DIAGNOSTIC_UNITS = 8
 _COVERED_PROMPTS = _DIAGNOSTIC_PROMPTS * _DIAGNOSTIC_UNITS
-_CAPSULE_MAX_ROWS = 16
+_CAPSULE_MAX_ROWS = 256
 _MIN_ACTION_KV = 1686
+_DIAGNOSTIC_ROUNDS = 3
+_LIVE_SNAPSHOT_INTERVAL_SECONDS = 30
+_INCIDENT_MIN_PREFIX = 1400
+_INCIDENT_MAX_PREFIX = 3072
+_INCIDENT_MAX_BYTES = 128 * 1024 * 1024
 _ADMITTED_MAX_CONCURRENCY = (32, 256)
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 
@@ -69,12 +74,25 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
       "CANON_KV_UNIFIED": "1" if unified else "0",
       "CANON_P38_PRECHECK_ONLY": "1",
       "CANON_P38_CONTROLLED_EXIT": "1",
+      "CANON_P38_DIAGNOSTIC_ROUNDS": str(_DIAGNOSTIC_ROUNDS),
+      "CANON_P38_DIAGNOSTIC_ROUND_FILE": f"{state}/p38_diagnostic_round",
       "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": str(_CAPSULE_MAX_ROWS),
       "CANON_P38_MIN_ACTION_KV": str(_MIN_ACTION_KV),
       "CANON_P38_SERVING_CAPTURE_DIR": f"{state}/p38_serving_capture",
       "CANON_P38_REQUEST_JOURNAL": (
           f"{state}/p38_serving_capture/p38_request_journal.jsonl"
       ),
+      "CANON_P38_INCIDENT_LEDGER": (
+          f"{state}/p38_serving_capture/p38_incident_ledger.jsonl"
+      ),
+      "CANON_P38_INCIDENT_MIN_PREFIX": str(_INCIDENT_MIN_PREFIX),
+      "CANON_P38_INCIDENT_MAX_PREFIX": str(_INCIDENT_MAX_PREFIX),
+      "CANON_P38_INCIDENT_MAX_BYTES": str(_INCIDENT_MAX_BYTES),
+      "CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS": str(
+          _LIVE_SNAPSHOT_INTERVAL_SECONDS
+      ),
+      "CANON_P38_LIVE_SNAPSHOT_STOP_FILE": f"{state}/p38_live.stop",
+      "CANON_P38_LIVE_SNAPSHOT_WORKER_LOG": f"{state}/p38_live_worker.log",
       "CANON_P38_SERVING_CAPTURE_MAX_CALLS": str(_CAPTURE_RECORDS),
       "CANON_P38_SERVING_CAPTURE_MIN_PREFIX": str(
           _CAPTURE_PREFIX_BOUNDS[0]
@@ -113,6 +131,22 @@ def validate_capture_jobset(
       f"{capture_dir}/p38_request_journal.jsonl"
   ):
     raise ValueError("P38 request journal must live in the capture directory")
+  if env["CANON_P38_INCIDENT_LEDGER"] != (
+      f"{capture_dir}/p38_incident_ledger.jsonl"
+  ):
+    raise ValueError("P38 incident ledger must live in the capture directory")
+  if env["CANON_P38_LIVE_SNAPSHOT_STOP_FILE"] != (
+      f"{env['CANON_STATE']}/p38_live.stop"
+  ):
+    raise ValueError("P38 live snapshot stop path drifted")
+  if env["CANON_P38_LIVE_SNAPSHOT_WORKER_LOG"] != (
+      f"{env['CANON_STATE']}/p38_live_worker.log"
+  ):
+    raise ValueError("P38 live snapshot worker log path drifted")
+  if env["CANON_P38_DIAGNOSTIC_ROUND_FILE"] != (
+      f"{env['CANON_STATE']}/p38_diagnostic_round"
+  ):
+    raise ValueError("P38 diagnostic round path drifted")
   labels = document["metadata"].get("labels", {})
   if labels.get("canon.zero-tim/diagnostic") != "p38-serving-capture":
     raise ValueError("P38 serving-capture label is missing")

@@ -301,6 +301,60 @@ class AlignmentTest(absltest.TestCase):
         stdout.getvalue(),
     )
 
+  def test_p38_diagnostic_precheck_collects_bounded_frozen_rounds(self):
+    record = {
+        "verdict": "FAIL",
+        "step": 0,
+        "N_action": 17,
+        "boundaries": {
+            "S_decode_vs_S_prefill": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 3,
+            },
+            "S_prefill_vs_T_old": {
+                "valid": True,
+                "finite": True,
+                "differing_bytes": 0,
+            },
+        },
+    }
+    stdout = io.StringIO()
+    with mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRECHECK_ONLY_ENV: "1",
+            alignment.P38_DIAGNOSTIC_ROUNDS_ENV: "3",
+            alignment.P38_CONTROLLED_EXIT_ENV: "0",
+        },
+        clear=False,
+    ), mock.patch.object(
+        alignment, "_P38_DIAGNOSTIC_ROUNDS_COMPLETED", 0
+    ), mock.patch.object(
+        alignment, "_publish_p38_diagnostic_round"
+    ), contextlib.redirect_stdout(stdout):
+      for expected_completed in (1, 2):
+        with self.assertRaises(alignment.P38DiagnosticRoundComplete):
+          alignment.stop_after_diagnostic_precheck(record)
+        self.assertEqual(
+            alignment.p38_diagnostic_round_index(), expected_completed
+        )
+      with self.assertRaises(alignment.PreAlignmentProbeComplete):
+        alignment.stop_after_diagnostic_precheck(record)
+    output = stdout.getvalue()
+    self.assertEqual(output.count("PRECHECK_ROUND_COMPLETE"), 3)
+    self.assertIn("round=3/3", output)
+    self.assertIn("PRECHECK_COMPLETE STOP_BEFORE_BACKWARD rounds=3", output)
+
+  def test_p38_diagnostic_round_bound_is_fail_closed(self):
+    for value in ("0", "9", "bad"):
+      with self.subTest(value=value), mock.patch.dict(
+          os.environ,
+          {alignment.P38_DIAGNOSTIC_ROUNDS_ENV: value},
+          clear=False,
+      ), self.assertRaises(alignment.AlignmentGateError):
+        alignment.p38_diagnostic_rounds()
+
   def test_p38_diagnostic_precheck_rejects_bc_red(self):
     record = {
         "verdict": "FAIL",
@@ -1092,6 +1146,9 @@ class AlignmentTest(absltest.TestCase):
                 tmpdir, "capsule.npz"
             ),
             alignment.P38_MISMATCH_CAPSULE_MAX_ROWS_ENV: "16",
+            alignment.P38_DIAGNOSTIC_ROUND_FILE_ENV: os.path.join(
+                tmpdir, "round"
+            ),
             "CANON_NUM_GENERATIONS": "8",
         },
         clear=False,
@@ -1109,6 +1166,55 @@ class AlignmentTest(absltest.TestCase):
     self.assertGreaterEqual(
         result["action_geometry"]["max_logical_kv_prefix_length"], 2
     )
+
+  def test_p38_frozen_round_capsules_preserve_all_red_rounds(self):
+    wrapped = self._wrapped(rows=1)
+    wrapped = wrapped.replace(
+        s_decode=wrapped.s_decode + np.float32(0.125)
+    )
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.PRECHECK_ONLY_ENV: "1",
+            alignment.P38_DIAGNOSTIC_ROUNDS_ENV: "3",
+            alignment.PRE_GATE_ENV: "1",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+            alignment.P38_MISMATCH_CAPSULE_ENV: os.path.join(
+                tmpdir, "capsule.npz"
+            ),
+            alignment.P38_MISMATCH_CAPSULE_MAX_ROWS_ENV: "16",
+            alignment.P38_DIAGNOSTIC_ROUND_FILE_ENV: os.path.join(
+                tmpdir, "round"
+            ),
+            "CANON_NUM_GENERATIONS": "8",
+        },
+        clear=False,
+    ), mock.patch.object(
+        alignment, "_P38_DIAGNOSTIC_ROUNDS_COMPLETED", 0
+    ):
+      first = alignment.check_pre_backward(
+          wrapped, step=0, fail_closed=False
+      )
+      with self.assertRaises(alignment.P38DiagnosticRoundComplete):
+        alignment.stop_after_diagnostic_precheck(first)
+      second = alignment.check_pre_backward(
+          wrapped, step=0, fail_closed=False
+      )
+      with self.assertRaises(alignment.P38DiagnosticRoundComplete):
+        alignment.stop_after_diagnostic_precheck(second)
+
+      round_zero = os.path.join(tmpdir, "capsule.round-000000.npz")
+      round_one = os.path.join(tmpdir, "capsule.round-000001.npz")
+      round_file = os.path.join(tmpdir, "round")
+      latest = os.path.join(tmpdir, "capsule.npz")
+      self.assertTrue(os.path.isfile(round_zero))
+      self.assertTrue(os.path.isfile(round_one))
+      with open(round_file, encoding="utf-8") as stream:
+        self.assertEqual(stream.read(), "2\n")
+      with np.load(latest, allow_pickle=False) as capsule:
+        metadata = json.loads(capsule["metadata_json"].tobytes())
+      self.assertEqual(metadata["diagnostic_round"], 1)
+      self.assertEqual(os.stat(latest).st_ino, os.stat(round_one).st_ino)
 
   def test_p38_mismatch_capsule_rejects_collision(self):
     wrapped = self._wrapped(rows=1)

@@ -1,4 +1,4 @@
-# P38 FrozenLake: P38s13a HOLD pending P38.2l instrument freeze
+# P38 FrozenLake: P38s13a ready from a clean P38.2l source
 
 This runbook is diagnostic-only. It never launches FrozenLake full training,
 evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a
@@ -12,10 +12,11 @@ sufficient depth. Do not run concurrency 32 again. Its replay artifacts were
 not committed, so the current action is one stock concurrency-256 P38s13a with
 the same numerical path and new GCS durability only.
 
-P38.2k final-artifact GCS transport is locally green, but it uploads after the
-workload returns. Do not execute the operator sequence below until
-`phases/p38-2l-terminal-incident-capture.md` passes its mid-run snapshot and
-one-host dress-rehearsal gates.
+P38.2l is locally green. It adds immutable live GCS snapshots, three
+frozen-weight diagnostic rounds, all-red-row capsules, and a round-scoped
+exact-call incident ledger. A real Qwen3-8B DP1xTP4 capture-on/off rehearsal
+proved observer neutrality and no backward/optimizer commit. Execute the
+operator sequence below only from a clean immutable source containing P38.2l.
 
 The frozen source must render this exact attempt-0 prefix:
 
@@ -23,16 +24,20 @@ The frozen source must render this exact attempt-0 prefix:
 gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/<jobset>/attempt-0
 ```
 
-Require `PREFLIGHT.json` before rollout. After the pod terminates, recover
-`COLLECTED.json`, `SHA256SUMS`, `mismatch-capsule.npz`, and
-`serving-capture.tar` directly from GCS. `COMPLETE.json` is written last and is
-the only GCS completion marker. This supersedes the P38s12f launch instructions
-below, which remain as historical provenance.
+Require `PREFLIGHT.json` before rollout. While it runs, immutable
+`live/NNNNNN/LIVE.json` snapshots preserve changed host evidence every 30
+seconds. After termination, recover `COLLECTED.json`, `SHA256SUMS`, the stable
+and per-round mismatch capsules, classification, and serving archive directly
+from GCS. `COMPLETE.json` is written last and is the only completion marker.
+This supersedes the P38s12f launch instructions below, which remain as
+historical provenance.
 
 ## Current P38s13a operator sequence
 
-Run this only after P38.2l is locally complete, committed, and pushed. Do not
-edit the rendered YAML.
+Run this only from a clean source containing P38.2l. It performs three
+rollout/alignment rounds with frozen weights: 768 trajectories total,
+zero backward, zero optimizer commits, then controlled exit 42. Do not edit the
+rendered YAML.
 
 ```bash
 set -euo pipefail
@@ -95,8 +100,10 @@ fi
 Always collect the exact JobSet/pod YAML and events as a separate Kubernetes
 bundle. `COLLECTED_ONLY` is valuable failure evidence but is not target
 admission. A complete bundle must contain exact B-C, a successful journal
-join, sufficient depth, full trajectory coverage, and the controlled-exit
-contract before strict E0 begins.
+and round-scoped incident-ledger join for every selected red row, sufficient
+depth, three pre-alignment rows, three round markers, full trajectory coverage,
+and the controlled-exit contract before strict E0 begins. Return all files;
+do not send only a UI excerpt or the final JSON line.
 
 ## Historical P38s12f instructions
 

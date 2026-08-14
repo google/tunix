@@ -152,12 +152,21 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
            CANON_P38_SERVING_CAPTURE_EXPECTED_PATH \
            CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS \
            CANON_P38_REQUEST_JOURNAL \
+           CANON_P38_INCIDENT_LEDGER \
+           CANON_P38_INCIDENT_MIN_PREFIX \
+           CANON_P38_INCIDENT_MAX_PREFIX \
+           CANON_P38_INCIDENT_MAX_BYTES \
+           CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS \
+           CANON_P38_LIVE_SNAPSHOT_STOP_FILE \
+           CANON_P38_LIVE_SNAPSHOT_WORKER_LOG \
            CANON_P38_SERVING_CAPTURE_CLASSIFICATION \
            CANON_P38_SERVING_CAPTURE_ARCHIVE \
            CANON_P38_GCS_PREFIX \
            CANON_P38_MISMATCH_CAPSULE \
            CANON_P38_PRECHECK_ONLY \
            CANON_P38_CONTROLLED_EXIT \
+           CANON_P38_DIAGNOSTIC_ROUNDS \
+           CANON_P38_DIAGNOSTIC_ROUND_FILE \
            CANON_P38_MIN_ACTION_KV; do
     req "$k"
   done
@@ -181,6 +190,19 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   }
   [ "${CANON_P38_CONTROLLED_EXIT:-}" = "1" ] || {
     echo "[env] P38 serving capture requires controlled diagnostic exit" >&2
+    fail=1
+  }
+  [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "3" ] || {
+    echo "[env] P38 terminal capture requires three frozen-weight rounds" >&2
+    fail=1
+  }
+  [ "${CANON_P38_ONEHOST_REHEARSAL:-0}" = "0" ] || {
+    echo "[env] P38 one-host rehearsal flag is forbidden on target" >&2
+    fail=1
+  }
+  [ "${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}" = \
+      "${CANON_STATE%/}/p38_diagnostic_round" ] || {
+    echo "[env] P38 diagnostic round path drifted" >&2
     fail=1
   }
   expected_p38_gcs_prefix="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/${CANON_STATE##*/}/attempt-0"
@@ -215,11 +237,36 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 request journal must live in the capture directory" >&2
     fail=1
   }
+  [ "${CANON_P38_INCIDENT_LEDGER:-}" = \
+      "${CANON_P38_SERVING_CAPTURE_DIR%/}/p38_incident_ledger.jsonl" ] || {
+    echo "[env] P38 incident ledger must live in the capture directory" >&2
+    fail=1
+  }
+  [ "${CANON_P38_INCIDENT_MIN_PREFIX:-}" = "1400" ] && \
+  [ "${CANON_P38_INCIDENT_MAX_PREFIX:-}" = "3072" ] && \
+  [ "${CANON_P38_INCIDENT_MAX_BYTES:-}" = "134217728" ] || {
+    echo "[env] P38 incident ledger bounds drifted" >&2
+    fail=1
+  }
+  [ "${CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS:-}" = "30" ] || {
+    echo "[env] P38 live snapshot interval drifted" >&2
+    fail=1
+  }
+  [ "${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:-}" = \
+      "${CANON_STATE%/}/p38_live.stop" ] || {
+    echo "[env] P38 live snapshot stop path drifted" >&2
+    fail=1
+  }
+  [ "${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:-}" = \
+      "${CANON_STATE%/}/p38_live_worker.log" ] || {
+    echo "[env] P38 live snapshot worker log path drifted" >&2
+    fail=1
+  }
   echo "[env] P38 serving capture enabled: kv_unified=${CANON_KV_UNIFIED:-0} path=${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-missing}"
 elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
   echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
   fail=1
-elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_GCS_PREFIX:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_MIN_ACTION_KV:-}" ]; then
+elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_INCIDENT_LEDGER:-}${CANON_P38_INCIDENT_MIN_PREFIX:-}${CANON_P38_INCIDENT_MAX_PREFIX:-}${CANON_P38_INCIDENT_MAX_BYTES:-}${CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS:-}${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:-}${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_GCS_PREFIX:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}${CANON_P38_ONEHOST_REHEARSAL:-}${CANON_P38_MIN_ACTION_KV:-}" ]; then
   echo "[env] partial P38 serving-capture configuration is not admitted" >&2
   fail=1
 fi
@@ -1061,7 +1108,7 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         req CANON_P38_MISMATCH_CAPSULE
         expected_p38_capsule_rows=2
         if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
-          expected_p38_capsule_rows=16
+          expected_p38_capsule_rows=256
         fi
         [ "${CANON_P38_MISMATCH_CAPSULE_MAX_ROWS:-}" = \
           "$expected_p38_capsule_rows" ] || {

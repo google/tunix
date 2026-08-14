@@ -48,6 +48,7 @@ def main() -> int:
   parser.add_argument("--directory", required=True, type=Path)
   parser.add_argument("--mismatch-capsule", required=True, type=Path)
   parser.add_argument("--omit-request-journal", action="store_true")
+  parser.add_argument("--omit-incident-ledger", action="store_true")
   args = parser.parse_args()
   args.directory.mkdir(parents=True, exist_ok=False)
   names = {
@@ -237,6 +238,44 @@ def main() -> int:
     (args.directory / "p38_request_journal.jsonl").write_text(
         json.dumps(journal, sort_keys=True) + "\n", encoding="utf-8"
     )
+  incident_request = {
+      "request_id": "request-0",
+      "request_index": 0,
+      "dp_rank": 0,
+      "local_scheduler_slot": 0,
+      "num_computed_tokens": journal_prefix,
+      "num_tokens": len(journal_tokens),
+      "token_history_sha256": journal["token_history_sha256"],
+      "block_size": 256,
+      "logical_blocks": len(journal_pages),
+      "physical_pages": journal_pages,
+      "page_generations": [
+          {
+              "physical_page": physical_page,
+              "logical_page": logical_page,
+              "observation_generation": 0,
+              "observed_request_id": "request-0",
+              "observed_logical_page": logical_page,
+          }
+          for logical_page, physical_page in enumerate(journal_pages)
+      ],
+  }
+  incident = {
+      "schema": "p38-incident-ledger-v1",
+      "call_index": 1,
+      "diagnostic_round": 0,
+      "program_path": "standard",
+      "scheduled_request_count": 1,
+      "co_batch_request_ids": ["request-0"],
+      "one_token_decode_request_count": 1,
+      "incident_min_prefix": 1400,
+      "incident_max_prefix": 3072,
+      "requests": [incident_request],
+  }
+  if not args.omit_incident_ledger:
+    (args.directory / "p38_incident_ledger.jsonl").write_text(
+        json.dumps(incident, sort_keys=True) + "\n", encoding="utf-8"
+    )
   prompt_ids = np.array([[101, 102]], dtype=np.int32)
   prompt_mask = np.array([[True, True]])
   completion_ids = np.asarray(full_history[2:], dtype=np.int32)[None, :]
@@ -251,8 +290,13 @@ def main() -> int:
       "s_prefill": np.zeros_like(completion_ids, dtype=np.float32),
       "t_old": np.zeros_like(completion_ids, dtype=np.float32),
   }
+  mismatch_position = journal_prefix - int(prompt_mask.sum())
+  capsule_arrays["s_prefill"][0, mismatch_position] = np.nextafter(
+      np.float32(0.0), np.float32(1.0)
+  )
   capsule_meta = {
       "schema": "p38-frozenlake-mismatch-capsule-v1",
+      "diagnostic_round": 0,
       "arrays": {
           name: {
               "shape": list(value.shape),

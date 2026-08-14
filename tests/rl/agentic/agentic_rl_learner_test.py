@@ -95,6 +95,20 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         (3, False, 0),
     )
 
+  def test_p38_diagnostic_consumer_admits_onehost_rehearsal(self):
+    self.assertEqual(
+        agentic_rl_learner._p38_diagnostic_consumer_contract(
+            enabled=True,
+            full_batch_size=2,
+            mini_batch_size=2,
+            train_micro_batch_size=4,
+            num_generations=2,
+            process_in_consumer=True,
+            onehost_rehearsal=True,
+        ),
+        (2, True, 1),
+    )
+
   def test_p38_diagnostic_consumer_rejects_subset_geometry(self):
     with self.assertRaisesRegex(ValueError, "coverage geometry changed"):
       agentic_rl_learner._p38_diagnostic_consumer_contract(

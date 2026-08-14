@@ -184,8 +184,12 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
       "s_prefill": np.arange(12, dtype=np.float32)[None, :],
       "t_old": np.arange(12, dtype=np.float32)[None, :],
   }
+  capsule_arrays["s_prefill"][0, 0] = np.nextafter(
+      capsule_arrays["s_prefill"][0, 0], np.float32(np.inf)
+  )
   metadata = {
       "schema": "p38-frozenlake-mismatch-capsule-v1",
+      "diagnostic_round": 0,
       "arrays": {
           name: {
               "shape": list(value.shape),
@@ -241,6 +245,41 @@ def _valid_directory() -> tempfile.TemporaryDirectory:
   (directory / "p38_request_journal.jsonl").write_text(
       json.dumps(journal, sort_keys=True) + "\n"
   )
+  incident = {
+      "schema": "p38-incident-ledger-v1",
+      "call_index": 1,
+      "diagnostic_round": 0,
+      "program_path": "standard",
+      "scheduled_request_count": 1,
+      "co_batch_request_ids": ["request-0"],
+      "one_token_decode_request_count": 1,
+      "incident_min_prefix": 0,
+      "incident_max_prefix": 1 << 30,
+      "requests": [{
+          "request_id": "request-0",
+          "request_index": 0,
+          "dp_rank": 0,
+          "local_scheduler_slot": 1,
+          "num_computed_tokens": 2,
+          "num_tokens": 3,
+          "token_history_sha256": MODULE._token_history_sha256(
+              [101, 102, 103]
+          ),
+          "block_size": 256,
+          "logical_blocks": 1,
+          "physical_pages": [7],
+          "page_generations": [{
+              "physical_page": 7,
+              "logical_page": 0,
+              "observation_generation": 0,
+              "observed_request_id": "request-0",
+              "observed_logical_page": 0,
+          }],
+      }],
+  }
+  (directory / "p38_incident_ledger.jsonl").write_text(
+      json.dumps(incident, sort_keys=True) + "\n"
+  )
   return holder
 
 
@@ -272,12 +311,77 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     )
     self.assertEqual(report["joined_source_rows"], [191])
     self.assertEqual(report["request_journal_joined_source_rows"], [191])
+    self.assertEqual(len(report["incident_exact_joins"]), 1)
+    self.assertEqual(
+        report["incident_exact_joins"][0]["num_computed_tokens"], 2
+    )
 
   def test_rejects_missing_request_journal(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)
     (Path(holder.name) / "p38_request_journal.jsonl").unlink()
     with self.assertRaisesRegex(MODULE.CaptureError, "journal is absent"):
+      _classify(holder)
+
+  def test_rejects_missing_incident_ledger(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    (Path(holder.name) / "p38_incident_ledger.jsonl").unlink()
+    with self.assertRaisesRegex(MODULE.CaptureError, "incident ledger is absent"):
+      _classify(holder)
+
+  def test_rejects_incident_without_exact_mismatch_call(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name) / "p38_incident_ledger.jsonl"
+    record = json.loads(path.read_text())
+    record["requests"][0]["num_computed_tokens"] = 3
+    record["requests"][0]["num_tokens"] = 4
+    record["requests"][0]["token_history_sha256"] = (
+        MODULE._token_history_sha256([101, 102, 103, 104])
+    )
+    path.write_text(json.dumps(record) + "\n")
+    with self.assertRaisesRegex(MODULE.CaptureError, "did not join every"):
+      _classify(holder)
+
+  def test_exact_incident_join_is_scoped_to_capsule_round(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name) / "p38_incident_ledger.jsonl"
+    first = json.loads(path.read_text())
+    second = json.loads(json.dumps(first))
+    second["call_index"] = 2
+    second["diagnostic_round"] = 1
+    second["requests"][0]["request_id"] = "request-round-1"
+    second["requests"][0]["page_generations"][0][
+        "observed_request_id"
+    ] = "request-round-1"
+    second["co_batch_request_ids"] = ["request-round-1"]
+    path.write_text(
+        json.dumps(first, sort_keys=True) + "\n"
+        + json.dumps(second, sort_keys=True) + "\n"
+    )
+    report = _classify(holder)
+    self.assertEqual(len(report["incident_exact_joins"]), 1)
+    self.assertEqual(
+        report["incident_exact_joins"][0]["request_id"], "request-0"
+    )
+
+  def test_rejects_capsule_without_diagnostic_round(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    path = Path(holder.name) / "mismatch.npz"
+    with np.load(path, allow_pickle=False) as archive:
+      arrays = {name: np.array(archive[name]) for name in archive.files}
+    metadata = json.loads(arrays["metadata_json"].tobytes())
+    metadata.pop("diagnostic_round")
+    arrays["metadata_json"] = np.frombuffer(
+        json.dumps(metadata, sort_keys=True).encode(), dtype=np.uint8
+    )
+    path.unlink()
+    with path.open("xb") as stream:
+      np.savez_compressed(stream, **arrays)
+    with self.assertRaisesRegex(MODULE.CaptureError, "diagnostic round"):
       _classify(holder)
 
   def test_accepts_flattened_production_block_table(self):
@@ -593,7 +697,7 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     with self.assertRaisesRegex(MODULE.CaptureError, "metadata page mismatch"):
       _classify(holder)
 
-  def test_rejects_missing_mismatch_join(self):
+  def test_exact_incident_join_supersedes_coarse_anchor_selection(self):
     holder = _valid_directory()
     self.addCleanup(holder.cleanup)
     for seq in range(4):
@@ -606,8 +710,9 @@ class ClassifyServingCaptureTest(unittest.TestCase):
           MODULE._token_history_sha256(replacement)
       )
       path.write_text(json.dumps(record))
-    with self.assertRaisesRegex(MODULE.CaptureError, "no serving record joins"):
-      _classify(holder)
+    report = _classify(holder)
+    self.assertEqual(report["successful_mismatch_joins"], 0)
+    self.assertEqual(len(report["incident_exact_joins"]), 1)
 
   def test_rejects_missing_required_mismatch_capsule(self):
     holder = _valid_directory()

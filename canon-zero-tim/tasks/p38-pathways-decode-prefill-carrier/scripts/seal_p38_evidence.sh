@@ -41,6 +41,7 @@ archive_listing="$(mktemp)"
 trap 'rm -f "$archive_listing"' EXIT
 tar -tf "$evidence/${run_id}-serving-capture.tar" > "$archive_listing"
 grep -qx './p38_request_journal.jsonl' "$archive_listing"
+grep -qx './p38_incident_ledger.jsonl' "$archive_listing"
 
 manifest="$evidence/SHA256SUMS"
 if [ -e "$manifest" ]; then

@@ -114,15 +114,43 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[run] FATAL: P38 GCS write/read preflight failed" >&2
       exit 1
     }
+  : "${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:?}"
+  : "${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:?}"
+  : "${CANON_P38_DIAGNOSTIC_ROUND_FILE:?}"
+  if [ -e "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE" ] || \
+     [ -e "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" ] || \
+     [ -e "$CANON_P38_DIAGNOSTIC_ROUND_FILE" ]; then
+    echo "[run] FATAL: P38 live snapshot state already exists" >&2
+    exit 1
+  fi
+  (umask 077; printf '0\n' > "$CANON_P38_DIAGNOSTIC_ROUND_FILE")
+  bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+    > "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" 2>&1 &
+  p38_live_pid=$!
+  echo "[P38.GCS] LIVE_WORKER_LAUNCHED pid=$p38_live_pid"
 fi
 echo "[run] cmd: $CANON_RUN_CMD"
 echo "[run] log: $LOG"
 mkdir -p "$(dirname "$LOG")"
 cd "${CANON_RUN_CWD:-$CANON_PKG/..}"
+set +e
 set -o pipefail
 bash -c "$CANON_RUN_CMD" 2>&1 | tee "$LOG"
-rc=${PIPESTATUS[0]}
+pipeline_status=("${PIPESTATUS[@]}")
+rc="${pipeline_status[0]}"
+tee_rc="${pipeline_status[1]:-1}"
+# Keep postflight explicitly non-errexit. P38 exit 42 and classifier failures
+# are data that must be persisted before the final fail-closed verdict.
+set +e
 echo "[run] exit=$rc"
+echo "[run] transport_rc=$tee_rc"
+if [ -n "${p38_live_pid:-}" ]; then
+  touch "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE"
+  p38_live_rc=0
+  wait "$p38_live_pid" || p38_live_rc=$?
+  cat "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG"
+  echo "[P38.GCS] LIVE_WORKER_JOINED rc=$p38_live_rc"
+fi
 if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   n_eval_subshard=$(grep -ac '^P46_EVAL_SUBSHARD_PASS ' "$LOG" || true)
   n_eval_report=$(grep -ac '^P46_EVAL_LOGICAL_REPORT_PASS ' "$LOG" || true)
@@ -171,6 +199,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       --expected-records "$CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS" \
       --expected-program-path "$CANON_P38_SERVING_CAPTURE_EXPECTED_PATH" \
       --prefix-bounds "$CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS" \
+      --incident-min-prefix "$CANON_P38_INCIDENT_MIN_PREFIX" \
+      --incident-max-prefix "$CANON_P38_INCIDENT_MAX_PREFIX" \
       --mismatch-capsule "$CANON_P38_MISMATCH_CAPSULE" \
       "${p38_join_args[@]}" \
       --output "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
@@ -214,16 +244,18 @@ n_p35_stage_begin=$(grep -ac '^\[CANON_P35.3C\] STAGE_BEGIN' "$LOG" || true)
 n_p35_stage_ready=$(grep -ac '^\[CANON_P35.3C\] STAGE_READY' "$LOG" || true)
 n_p35_stage_complete=$(grep -ac '^\[CANON_P35.3C\] STAGE_PROBE_COMPLETE .*NO_NUMERICAL_VERDICT' "$LOG" || true)
 n_p38_precheck=$(grep -ac '^\[CANON_P38\] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD' "$LOG" || true)
+n_p38_rounds=$(grep -ac '^\[CANON_P38\] PRECHECK_ROUND_COMPLETE ' "$LOG" || true)
 n_p38_controlled_exit=$(grep -ac '^\[CANON_P38\] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0' "$LOG" || true)
 n_p38_kv_unified=$(grep -ac 'KV_UNIFIED_two_pass' "$LOG" || true)
 n_p38_capture_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\]' "$LOG" || true)
 n_p38_capture_observe=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\]' "$LOG" || true)
 n_p38_capture_error=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_ERROR\]' "$LOG" || true)
 n_p38_request_journal=$(grep -ac '^\[CANON_P38_REQUEST_JOURNAL\]' "$LOG" || true)
+n_p38_incident_ledger=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER\]' "$LOG" || true)
 n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_coverage=$n_p38_coverage"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_coverage=$n_p38_coverage"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
@@ -241,13 +273,38 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[run] FATAL: P38 GCS evidence collection failed: rc=${p38_persist_rc:-unset}" >&2
     exit 1
   fi
+  if [ "${p38_live_rc:-1}" -ne 0 ]; then
+    echo "[run] FATAL: P38 live snapshot worker failed: rc=${p38_live_rc:-unset}" >&2
+    exit 1
+  fi
+  if [ "${tee_rc:-1}" -ne 0 ]; then
+    echo "[run] FATAL: P38 workload log transport failed: rc=${tee_rc:-unset}" >&2
+    exit 1
+  fi
   if [ "$n_p38_request_journal" -le 0 ] || \
      [ ! -s "${CANON_P38_REQUEST_JOURNAL:-}" ]; then
     echo "[run] FATAL: P38 request journal is absent: markers=$n_p38_request_journal" >&2
     exit 1
   fi
+  if [ "$n_p38_incident_ledger" -le 0 ] || \
+     [ ! -s "${CANON_P38_INCIDENT_LEDGER:-}" ]; then
+    echo "[run] FATAL: P38 incident ledger is absent: markers=$n_p38_incident_ledger" >&2
+    exit 1
+  fi
   if [ "$n_p38_coverage" -ne 1 ]; then
     echo "[run] FATAL: P38 diagnostic did not attest full 32-prompt coverage: $n_p38_coverage" >&2
+    exit 1
+  fi
+  if [ "$n_p38_precheck" -gt 0 ] && \
+     [ "$n_p38_rounds" -ne "${CANON_P38_DIAGNOSTIC_ROUNDS:-1}" ]; then
+    echo "[run] FATAL: P38 frozen-weight round contract failed: observed=$n_p38_rounds expected=${CANON_P38_DIAGNOSTIC_ROUNDS:-1}" >&2
+    exit 1
+  fi
+  expected_p38_round=$((CANON_P38_DIAGNOSTIC_ROUNDS - 1))
+  actual_p38_round="$(tr -d '[:space:]' < "$CANON_P38_DIAGNOSTIC_ROUND_FILE")"
+  if [ "$n_p38_precheck" -gt 0 ] && \
+     [ "$actual_p38_round" != "$expected_p38_round" ]; then
+    echo "[run] FATAL: P38 diagnostic round publication drifted: observed=$actual_p38_round expected=$expected_p38_round" >&2
     exit 1
   fi
   if [ "$n_p38_precheck" -gt 0 ] && \

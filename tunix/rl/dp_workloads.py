@@ -354,6 +354,7 @@ def validate_frozenlake_max_concurrency(
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
       "CANON_P38_PRECHECK_ONLY": "1",
       "CANON_P38_CONTROLLED_EXIT": "1",
+      "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
       "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
       "CANON_KV_UNIFIED": "0",
   }
@@ -365,6 +366,8 @@ def validate_frozenlake_max_concurrency(
   for name in (
       "CANON_P38_SERVING_CAPTURE_DIR",
       "CANON_P38_REQUEST_JOURNAL",
+      "CANON_P38_INCIDENT_LEDGER",
+      "CANON_P38_DIAGNOSTIC_ROUND_FILE",
   ):
     if not values.get(name):
       wrong[name] = values.get(name)

@@ -43,6 +43,8 @@ PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
 PRECHECK_ONLY_ENV = "CANON_P38_PRECHECK_ONLY"
 P38_CONTROLLED_EXIT_ENV = "CANON_P38_CONTROLLED_EXIT"
 P38_CONTROLLED_EXIT_CODE = 42
+P38_DIAGNOSTIC_ROUNDS_ENV = "CANON_P38_DIAGNOSTIC_ROUNDS"
+P38_DIAGNOSTIC_ROUND_FILE_ENV = "CANON_P38_DIAGNOSTIC_ROUND_FILE"
 P38_MISMATCH_CAPSULE_ENV = "CANON_P38_MISMATCH_CAPSULE"
 P38_MISMATCH_CAPSULE_MAX_ROWS_ENV = "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"
 GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
@@ -66,6 +68,51 @@ class AlignmentGateError(RuntimeError):
 
 class PreAlignmentProbeComplete(RuntimeError):
   """Raised after an exact P38 precheck to stop before backward."""
+
+
+class P38DiagnosticRoundComplete(RuntimeError):
+  """Raised after a nonterminal frozen-weight P38 diagnostic round."""
+
+
+_P38_DIAGNOSTIC_ROUNDS_COMPLETED = 0
+
+
+def p38_diagnostic_rounds() -> int:
+  """Return the bounded number of frozen-weight P38 rollout rounds."""
+  raw = os.environ.get(P38_DIAGNOSTIC_ROUNDS_ENV, "1")
+  try:
+    rounds = int(raw)
+  except ValueError as exc:
+    raise AlignmentGateError(
+        f"{P38_DIAGNOSTIC_ROUNDS_ENV} must be an integer"
+    ) from exc
+  if rounds < 1 or rounds > 8:
+    raise AlignmentGateError(
+        f"{P38_DIAGNOSTIC_ROUNDS_ENV} must be in [1, 8]"
+    )
+  return rounds
+
+
+def p38_diagnostic_round_index() -> int:
+  """Return the zero-based round currently being materialized."""
+  return int(_P38_DIAGNOSTIC_ROUNDS_COMPLETED)
+
+
+def _publish_p38_diagnostic_round(round_index: int) -> None:
+  """Atomically publish the active host-only incident-ledger round."""
+  path = os.environ.get(P38_DIAGNOSTIC_ROUND_FILE_ENV, "")
+  if not path:
+    raise AlignmentGateError(
+        f"{P38_DIAGNOSTIC_ROUND_FILE_ENV} is required for multi-round P38"
+    )
+  directory = os.path.dirname(path)
+  os.makedirs(directory, exist_ok=True)
+  temporary = f"{path}.tmp"
+  with open(temporary, "x", encoding="utf-8") as stream:
+    stream.write(f"{round_index}\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+  os.replace(temporary, path)
 
 
 def _finish_p38_precheck(message: str) -> None:
@@ -186,10 +233,32 @@ def stop_after_diagnostic_precheck(record: dict[str, Any]) -> None:
     raise AlignmentGateError(
         "P38 diagnostic precheck requires finite A/B evidence and exact B/C"
     )
+  global _P38_DIAGNOSTIC_ROUNDS_COMPLETED
+  rounds = p38_diagnostic_rounds()
+  round_index = p38_diagnostic_round_index()
+  if round_index >= rounds:
+    raise AlignmentGateError(
+        "P38 diagnostic round counter exceeded its registered bound"
+    )
   print(
-      "[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD "
+      "[CANON_P38] PRECHECK_ROUND_COMPLETE "
+      f"round={round_index + 1}/{rounds} "
       f"step={record.get('step')} N_action={record.get('N_action')} "
       f"verdict={record.get('verdict')} "
+      f"a_b_differing_bytes={a_b.get('differing_bytes')} "
+      "backward=0 optimizer_commits=0",
+      flush=True,
+  )
+  if round_index + 1 < rounds:
+    _P38_DIAGNOSTIC_ROUNDS_COMPLETED += 1
+    _publish_p38_diagnostic_round(_P38_DIAGNOSTIC_ROUNDS_COMPLETED)
+    raise P38DiagnosticRoundComplete(
+        f"P38 frozen-weight diagnostic round {round_index + 1} completed"
+    )
+  print(
+      "[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD "
+      f"rounds={rounds} step={record.get('step')} "
+      f"N_action={record.get('N_action')} verdict={record.get('verdict')} "
       f"a_b_differing_bytes={a_b.get('differing_bytes')}",
       flush=True,
   )
@@ -836,13 +905,20 @@ def _persist_p38_mismatch_capsule(
     record: dict[str, Any],
 ) -> dict[str, Any] | None:
   """Persists a bounded, replayable pre-backward mismatch capsule."""
-  path = os.environ.get(P38_MISMATCH_CAPSULE_ENV, "")
-  if not path or not record.get("blocking_reds"):
+  base_path = os.environ.get(P38_MISMATCH_CAPSULE_ENV, "")
+  if not base_path or not record.get("blocking_reds"):
     return None
-  if not path.endswith(".npz"):
+  if not base_path.endswith(".npz"):
     raise AlignmentGateError(
         f"{P38_MISMATCH_CAPSULE_ENV} must end in .npz"
     )
+  rounds = p38_diagnostic_rounds() if precheck_only_enabled() else 1
+  round_index = p38_diagnostic_round_index() if rounds > 1 else 0
+  path = (
+      base_path
+      if rounds == 1
+      else f"{base_path[:-4]}.round-{round_index:06d}.npz"
+  )
   try:
     max_rows = int(
         os.environ.get(P38_MISMATCH_CAPSULE_MAX_ROWS_ENV, "2")
@@ -851,9 +927,9 @@ def _persist_p38_mismatch_capsule(
     raise AlignmentGateError(
         f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be an integer"
     ) from exc
-  if max_rows < 1 or max_rows > 16:
+  if max_rows < 1 or max_rows > 256:
     raise AlignmentGateError(
-        f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be in [1, 16]"
+        f"{P38_MISMATCH_CAPSULE_MAX_ROWS_ENV} must be in [1, 256]"
     )
   rows = _p38_capsule_rows(record, max_rows)
   if not rows:
@@ -910,6 +986,8 @@ def _persist_p38_mismatch_capsule(
   metadata = {
       "schema": "p38-frozenlake-mismatch-capsule-v1",
       "step": int(record["step"]),
+      "diagnostic_round": round_index,
+      "diagnostic_rounds": rounds,
       "selected_rows": rows,
       "num_generations": num_generations,
       "row_identity": [
@@ -959,11 +1037,28 @@ def _persist_p38_mismatch_capsule(
       capsule_file.flush()
       os.fsync(capsule_file.fileno())
     os.replace(temporary, path)
+    if rounds > 1:
+      # Keep every red round immutable while maintaining the legacy/base path
+      # as an atomic alias to the most recent red round.  A later exact round
+      # therefore cannot erase an earlier incident, and outer postflight can
+      # keep one stable input path without guessing which round was red.
+      latest_temporary = f"{base_path}.latest.tmp"
+      if os.path.exists(latest_temporary):
+        raise AlignmentGateError(
+            f"P38 mismatch latest-link path already exists: {latest_temporary}"
+        )
+      try:
+        os.link(path, latest_temporary)
+        os.replace(latest_temporary, base_path)
+      finally:
+        if os.path.exists(latest_temporary):
+          os.unlink(latest_temporary)
   finally:
     if os.path.exists(temporary):
       os.unlink(temporary)
   result = {
       "path": path,
+      "latest_path": base_path,
       "sha256": _report_sha256(path),
       "selected_rows": rows,
       "logical_bytes": sum(value.nbytes for value in captured.values()),

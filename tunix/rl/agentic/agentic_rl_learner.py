@@ -36,6 +36,7 @@ from jax import typing
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
+from tunix.rl import alignment
 from tunix.rl import common
 from tunix.rl import deepswe_contract
 from tunix.rl import deepswe_debug
@@ -69,6 +70,7 @@ def _p38_diagnostic_consumer_contract(
     train_micro_batch_size: int,
     num_generations: int,
     process_in_consumer: bool,
+    onehost_rehearsal: bool = False,
 ) -> tuple[int, bool, int]:
   """Return the P38 full-coverage consumer geometry.
 
@@ -80,7 +82,7 @@ def _p38_diagnostic_consumer_contract(
   """
   if not enabled:
     return train_micro_batch_size, False, 0
-  expected = (32, 4, 8)
+  expected = (2, 2, 2) if onehost_rehearsal else (32, 4, 8)
   observed = (full_batch_size, mini_batch_size, num_generations)
   if observed != expected:
     raise ValueError(
@@ -2104,6 +2106,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         train_micro_batch_size=train_micro_batch_size,
         num_generations=self._num_generations(),
         process_in_consumer=self._process_in_consumer,
+        onehost_rehearsal=(
+            os.environ.get("CANON_P38_ONEHOST_REHEARSAL", "0") == "1"
+        ),
     )
     if p38_precheck_only:
       print(
@@ -2162,10 +2167,32 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if self._process_in_consumer:
         # train_micro_batch is a list of lists of trajectories.
         all_trajectories = [t for group in train_micro_batch for t in group]
-        train_examples = self._batch_to_train_example(
-            batch_results=all_trajectories,
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
+        try:
+          train_examples = self._batch_to_train_example(
+              batch_results=all_trajectories,
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+        except alignment.P38DiagnosticRoundComplete:
+          if not p38_precheck_only:
+            raise
+          completed = alignment.p38_diagnostic_round_index()
+          total = alignment.p38_diagnostic_rounds()
+          try:
+            next_prompts = next(full_dataset_iterator)
+          except StopIteration as exc:
+            prompt_queue.put(None)
+            raise RuntimeError(
+                "P38 frozen-weight diagnostic exhausted the dataset after "
+                f"{completed}/{total} rounds"
+            ) from exc
+          self._put_prompts_to_queue(prompt_queue, next_prompts)
+          print(
+              "[CANON_P38] DIAGNOSTIC_ROUND_SKIPPED_UPDATE "
+              f"completed={completed}/{total} backward=0 "
+              "optimizer_commits=0 weights=frozen next_round=queued",
+              flush=True,
+          )
+          continue
         # GRPO returns a list with a single TrainExample.
         merged_train_micro_batch = train_examples[0]
       else:

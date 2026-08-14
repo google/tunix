@@ -1145,3 +1145,30 @@
   without printing or persisting the token.
 - P38s13a remains NOT ADMITTED. The next executable work is P38.2l mid-run
   snapshots and the pinned Qwen3-8B dress rehearsal; no target run occurred.
+
+## 2026-08-14 UTC — P38.2l locally complete; P38s13a awaits publication
+
+- Added immutable changed-content GCS live snapshots for run log, request
+  journal, exact-call ledger, diagnostic round, pre-alignment report, and
+  per-round capsules. Final `COLLECTED`/`COMPLETE` semantics remain fail-closed.
+- Added patch 14's default-off host-only exact-call incident ledger and
+  round-scoped classifier joins. Target bounds are `[1400,3072)` and 128 MiB;
+  every selected red capsule row must join an exact serving call.
+- Added three frozen-weight diagnostic rounds. Nonterminal rounds queue new
+  prompts and skip update; the final round exits 42. Target capsule capacity is
+  256 rows and red round files are immutable.
+- Ran real Qwen3-8B DP1xTP4 capture-on/off rehearsals. Both passed three rounds
+  with zero backward/commit; all per-round numerical fields/hashes matched.
+  The on arm produced 729 ledger records / 2,118,899 bytes. Local KV reached
+  only 1577, so the result proves instrumentation neutrality, not carrier
+  removal. Detailed SHAs are in
+  `artifacts/p38_2l_onehost_rehearsal_0814.md`.
+- The rehearsal found and fixed controlled-exit cleanup and read-only-overlay
+  permission mistakes. Full gates then found and fixed stale P38 capsule-row
+  expectations in both the shared renderer validator and `00_env.sh`.
+- Final gates: classifier 34/34, renderer 9/9, persistence/postflight/seal
+  negatives PASS, complete pinned-image CPU/adjacent gate PASS, exact-image
+  Qwen3-1.7B/Qwen3-8B 23/23 each with 29/29 manifest identity, shell/Python
+  syntax and `git diff --check` PASS.
+- No cluster launch, backward, optimizer commit, commit, or push occurred.
+  P38s13a is the next target only after explicit review and publication.

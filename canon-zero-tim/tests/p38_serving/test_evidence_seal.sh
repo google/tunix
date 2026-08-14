@@ -23,6 +23,7 @@ make_fixture() {
   done
   archive_dir="$(mktemp -d)"
   printf '{}\n' > "$archive_dir/p38_request_journal.jsonl"
+  printf '{}\n' > "$archive_dir/p38_incident_ledger.jsonl"
   tar -C "$archive_dir" -cf "$directory/${run_id}-serving-capture.tar" .
   rm -r "$archive_dir"
 }

@@ -61,9 +61,14 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
             "1536,1664,1792,1920,2048",
         )
         self.assertEqual(
-            env["CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"], "16"
+            env["CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"], "256"
         )
         self.assertEqual(env["CANON_P38_CONTROLLED_EXIT"], "1")
+        self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
+        self.assertEqual(
+            env["CANON_P38_DIAGNOSTIC_ROUND_FILE"],
+            f"{env['CANON_STATE']}/p38_diagnostic_round",
+        )
         self.assertEqual(env["CANON_P38_MIN_ACTION_KV"], "1686")
         self.assertEqual(
             env["CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER"], "5"
@@ -75,6 +80,25 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
             env["CANON_P38_REQUEST_JOURNAL"],
             env["CANON_P38_SERVING_CAPTURE_DIR"]
             + "/p38_request_journal.jsonl",
+        )
+        self.assertEqual(
+            env["CANON_P38_INCIDENT_LEDGER"],
+            env["CANON_P38_SERVING_CAPTURE_DIR"]
+            + "/p38_incident_ledger.jsonl",
+        )
+        self.assertEqual(env["CANON_P38_INCIDENT_MIN_PREFIX"], "1400")
+        self.assertEqual(env["CANON_P38_INCIDENT_MAX_PREFIX"], "3072")
+        self.assertEqual(env["CANON_P38_INCIDENT_MAX_BYTES"], "134217728")
+        self.assertEqual(
+            env["CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS"], "30"
+        )
+        self.assertEqual(
+            env["CANON_P38_LIVE_SNAPSHOT_STOP_FILE"],
+            env["CANON_STATE"] + "/p38_live.stop",
+        )
+        self.assertEqual(
+            env["CANON_P38_LIVE_SNAPSHOT_WORKER_LOG"],
+            env["CANON_STATE"] + "/p38_live_worker.log",
         )
         self.assertEqual(
             env["CANON_P38_GCS_PREFIX"],

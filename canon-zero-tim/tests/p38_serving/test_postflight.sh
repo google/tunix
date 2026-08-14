@@ -7,6 +7,7 @@ WORKTREE="$(cd "$ROOT/.." && pwd)"
 run_case() (
   set -euo pipefail
   local mode="$1" state command rc
+  echo "[P38.SERVING] CASE mode=$mode"
   state="$(mktemp -d)"
   trap 'rm -r "$state"' EXIT
   mkdir -p "$state/bin" "$state/fake-gcs"
@@ -22,9 +23,18 @@ run_case() (
   export CANON_P32_TRAIN_ADMITTED=0
   export CANON_P38_PRECHECK_ONLY=1
   export CANON_P38_CONTROLLED_EXIT=1
+  export CANON_P38_DIAGNOSTIC_ROUNDS=1
+  export CANON_P38_DIAGNOSTIC_ROUND_FILE="$state/p38_diagnostic_round"
   export CANON_P38_MIN_ACTION_KV=1686
   export CANON_P38_SERVING_CAPTURE_DIR="$state/capture"
   export CANON_P38_REQUEST_JOURNAL="$state/capture/p38_request_journal.jsonl"
+  export CANON_P38_INCIDENT_LEDGER="$state/capture/p38_incident_ledger.jsonl"
+  export CANON_P38_INCIDENT_MIN_PREFIX=1400
+  export CANON_P38_INCIDENT_MAX_PREFIX=3072
+  export CANON_P38_INCIDENT_MAX_BYTES=134217728
+  export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=1
+  export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$state/p38_live.stop"
+  export CANON_P38_LIVE_SNAPSHOT_WORKER_LOG="$state/p38_live_worker.log"
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
   export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
@@ -37,6 +47,8 @@ run_case() (
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
   if [ "$mode" = missing-journal ]; then
     command+=" --omit-request-journal"
+  elif [ "$mode" = missing-incident ]; then
+    command+=" --omit-incident-ledger"
   fi
   depth=1700
   if [ "$mode" = shallow ]; then
@@ -46,12 +58,14 @@ run_case() (
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 expected_path=standard'"
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
   command+="; printf '%s\\n' '[CANON_P38_REQUEST_JOURNAL] record=1 request=request-0 prefix=1600 stratum=0 dp=0'"
+  command+="; printf '%s\\n' '[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=1'"
   if [ "$mode" != missing-coverage ]; then
     command+="; printf '%s\\n' '[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT prompt_groups=32 unit_prompts=4 units=8 generations=8 trajectories=256 partial_tail=reject verdict=PASS'"
   fi
   command+="; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
   if [ "$mode" = exact ] || [ "$mode" = shallow ]; then
+    command+="; printf '%s\\n' '[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/1 step=0 N_action=1 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   elif [ "$mode" = stock-hit ]; then
     command+="; printf '%s\\n' '[PATHTRACE] KV_UNIFIED_two_pass'"
@@ -60,11 +74,14 @@ run_case() (
   elif [ "$mode" = unified-exact ]; then
     export CANON_KV_UNIFIED=1
     command+="; printf '%s\\n' '[PATHTRACE] KV_UNIFIED_two_pass'"
+    command+="; printf '%s\\n' '[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/1 step=0 N_action=1 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   elif [ "$mode" = capture-error ]; then
     command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_ERROR] stage=begin error=TypeError: injected'"
+    command+="; printf '%s\\n' '[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/1 step=0 N_action=1 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   elif [ "$mode" = missing-coverage ]; then
+    command+="; printf '%s\\n' '[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/1 step=0 N_action=1 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   fi
   case "$mode" in
@@ -83,6 +100,8 @@ run_case() (
     grep -q '\[CANON_P38\] DEPTH_SUFFICIENCY min=1686 observed=1700 verdict=PASS' "$state/driver.log"
     grep -q '"verdict": "PASS"' "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
     test -s "$CANON_P38_SERVING_CAPTURE_ARCHIVE"
+    grep -q '\[P38.GCS\] LIVE_WORKER_JOINED rc=0' "$state/driver.log"
+    find "$FAKE_GCS_ROOT" -path '*/live/*/LIVE.json' -type f | grep -q .
   else
     [ "$rc" -ne 0 ]
     if grep -q 'P38 serving controlled precheck accepted' "$state/driver.log"; then
@@ -99,6 +118,8 @@ run_case() (
       grep -q 'P38 diagnostic did not attest full 32-prompt coverage: 0' "$state/driver.log"
     elif [ "$mode" = missing-journal ]; then
       grep -q 'P38 request journal is absent: markers=1' "$state/driver.log"
+    elif [ "$mode" = missing-incident ]; then
+      grep -q 'P38 incident ledger is absent: markers=1' "$state/driver.log"
     elif [ "$mode" = shallow ]; then
       grep -q 'P38 depth sufficiency failed: min=1686 observed=1600' "$state/driver.log"
     fi
@@ -113,5 +134,6 @@ run_case unified-exact
 run_case capture-error
 run_case missing-coverage
 run_case missing-journal
+run_case missing-incident
 run_case shallow
-echo "[P38.SERVING] POSTFLIGHT_PASS controlled_exact=accepted shallow=rejected red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected"
+echo "[P38.SERVING] POSTFLIGHT_PASS controlled_exact=accepted shallow=rejected red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected missing_incident=rejected"

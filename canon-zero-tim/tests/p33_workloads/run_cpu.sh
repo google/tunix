@@ -22,6 +22,9 @@ bash -n \
   canon-zero-tim/cluster/steps/90_run.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_aval_onehost.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_incident_onehost.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
   canon-zero-tim/tests/p38_serving/fake_gcloud.sh \
   canon-zero-tim/tests/p38_serving/test_evidence_seal.sh \
@@ -292,9 +295,17 @@ validate_p38_serving_preflight() (
   export CANON_ALIGN_REPORT="$state/alignment.jsonl"
   export CANON_UPDATE_REPORT="$state/updates.jsonl"
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
-  export CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=16
+  export CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=256
   export CANON_P38_SERVING_CAPTURE_DIR="$state/serving"
   export CANON_P38_REQUEST_JOURNAL="$state/serving/p38_request_journal.jsonl"
+  export CANON_P38_INCIDENT_LEDGER="$state/serving/p38_incident_ledger.jsonl"
+  export CANON_P38_DIAGNOSTIC_ROUND_FILE="$state/p38_diagnostic_round"
+  export CANON_P38_INCIDENT_MIN_PREFIX=1400
+  export CANON_P38_INCIDENT_MAX_PREFIX=3072
+  export CANON_P38_INCIDENT_MAX_BYTES=134217728
+  export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=30
+  export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$state/p38_live.stop"
+  export CANON_P38_LIVE_SNAPSHOT_WORKER_LOG="$state/p38_live_worker.log"
   export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
   export CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
   export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
@@ -306,6 +317,7 @@ validate_p38_serving_preflight() (
   export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/$(basename "$state")/attempt-0"
   export CANON_P38_PRECHECK_ONLY=1
   export CANON_P38_CONTROLLED_EXIT=1
+  export CANON_P38_DIAGNOSTIC_ROUNDS=3
   export CANON_P38_MIN_ACTION_KV=1686
   export CANON_KV_UNIFIED=1
   export INJECTED_WANDB_API_KEY=test-key-not-a-credential
@@ -316,6 +328,7 @@ validate_p38_serving_preflight() (
   grep -q 'export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5' "$state/env.sh"
   grep -q 'export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard' "$state/env.sh"
   grep -q 'export CANON_P38_CONTROLLED_EXIT=1' "$state/env.sh"
+  grep -q 'export CANON_P38_DIAGNOSTIC_ROUNDS=3' "$state/env.sh"
   grep -q 'export CANON_P38_MIN_ACTION_KV=1686' "$state/env.sh"
   grep -Fq "export CANON_P38_GCS_PREFIX=$CANON_P38_GCS_PREFIX" "$state/env.sh"
 
@@ -327,6 +340,9 @@ validate_p38_serving_preflight() (
   fi
   export CANON_P38_GCS_PREFIX="$valid_p38_gcs_prefix"
   grep -Fq "export CANON_P38_REQUEST_JOURNAL=$state/serving/p38_request_journal.jsonl" "$state/env.sh"
+  grep -Fq "export CANON_P38_INCIDENT_LEDGER=$state/serving/p38_incident_ledger.jsonl" "$state/env.sh"
+  grep -Fq "export CANON_P38_LIVE_SNAPSHOT_STOP_FILE=$state/p38_live.stop" "$state/env.sh"
+  grep -Fq "export CANON_P38_LIVE_SNAPSHOT_WORKER_LOG=$state/p38_live_worker.log" "$state/env.sh"
 
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=continue_decode
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then

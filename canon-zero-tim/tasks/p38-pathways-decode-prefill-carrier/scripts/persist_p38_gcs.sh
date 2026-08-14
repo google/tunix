@@ -2,11 +2,24 @@
 # Persist the in-pod P38 evidence before a controlled diagnostic exit.
 set -euo pipefail
 
-mode="${1:?usage: persist_p38_gcs.sh probe|collect|complete}"
+mode="${1:?usage: persist_p38_gcs.sh probe|snapshot|collect|complete [sequence]}"
 case "$mode" in
-  probe|collect|complete) ;;
+  probe|snapshot|collect|complete) ;;
   *) echo "[P38.GCS] REFUSING: invalid mode: $mode" >&2; exit 2 ;;
 esac
+snapshot_sequence="${2:-}"
+if [ "$mode" = snapshot ]; then
+  case "$snapshot_sequence" in
+    [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *)
+      echo "[P38.GCS] REFUSING: snapshot sequence must be six digits" >&2
+      exit 2
+      ;;
+  esac
+elif [ -n "$snapshot_sequence" ]; then
+  echo "[P38.GCS] REFUSING: unexpected sequence for mode $mode" >&2
+  exit 2
+fi
 
 : "${CANON_STATE:?CANON_STATE unset}"
 : "${CANON_P38_GCS_PREFIX:?CANON_P38_GCS_PREFIX unset}"
@@ -135,6 +148,98 @@ PY
   exit 0
 fi
 
+if [ "$mode" = snapshot ]; then
+  live_prefix="$CANON_P38_GCS_PREFIX/live/$snapshot_sequence"
+  live_stage="$CANON_STATE/p38_gcs_live/$snapshot_sequence"
+  if [ -e "$live_stage" ]; then
+    echo "[P38.GCS] REFUSING: local live snapshot already exists: $snapshot_sequence" >&2
+    exit 1
+  fi
+  if gcs_exists "$live_prefix/LIVE.json"; then
+    echo "[P38.GCS] REFUSING: remote live snapshot already exists: $snapshot_sequence" >&2
+    exit 1
+  fi
+  mkdir -p "$live_stage"
+  live_files=()
+  if [ -s "${CANON_RUN_LOG:-}" ]; then
+    cp -- "$CANON_RUN_LOG" "$live_stage/run.log"
+    live_files+=(run.log)
+  fi
+  if [ -s "${CANON_P38_REQUEST_JOURNAL:-}" ]; then
+    cp -- "$CANON_P38_REQUEST_JOURNAL" "$live_stage/request-journal.jsonl"
+    live_files+=(request-journal.jsonl)
+  fi
+  if [ -s "${CANON_P38_INCIDENT_LEDGER:-}" ]; then
+    cp -- "$CANON_P38_INCIDENT_LEDGER" "$live_stage/incident-ledger.jsonl"
+    live_files+=(incident-ledger.jsonl)
+  fi
+  if [ -s "${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}" ]; then
+    cp -- "$CANON_P38_DIAGNOSTIC_ROUND_FILE" "$live_stage/diagnostic-round.txt"
+    live_files+=(diagnostic-round.txt)
+  fi
+  if [ -s "${CANON_PRE_ALIGN_REPORT:-}" ]; then
+    cp -- "$CANON_PRE_ALIGN_REPORT" "$live_stage/pre-alignment.jsonl"
+    live_files+=(pre-alignment.jsonl)
+  fi
+  if [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
+    shopt -s nullglob
+    capsule_sources=(
+      "${CANON_P38_MISMATCH_CAPSULE%.npz}".round-*.npz
+      "$CANON_P38_MISMATCH_CAPSULE"
+    )
+    shopt -u nullglob
+    for capsule_source in "${capsule_sources[@]}"; do
+      [ -s "$capsule_source" ] || continue
+      capsule_name="$(basename "$capsule_source")"
+      cp -- "$capsule_source" "$live_stage/$capsule_name"
+      live_files+=("$capsule_name")
+    done
+  fi
+  if [ "${#live_files[@]}" -eq 0 ]; then
+    echo "[P38.GCS] SNAPSHOT_SKIPPED sequence=$snapshot_sequence reason=no-host-evidence"
+    rmdir "$live_stage"
+    exit 3
+  fi
+  (
+    cd "$live_stage"
+    sha256sum "${live_files[@]}" > SHA256SUMS
+    sha256sum -c SHA256SUMS --quiet
+  )
+  python3 - "$live_stage/LIVE.json.partial" "$snapshot_sequence" \
+    "${live_files[@]}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+record = {
+    "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
+    "files": sys.argv[3:],
+    "jobset": os.environ["CANON_P38_GCS_PREFIX"].split("/")[-2],
+    "pod": os.environ.get("CANON_POD_NAME", "unknown"),
+    "prefix": os.environ["CANON_P38_GCS_PREFIX"],
+    "schema": "canon-p38-gcs-live-v1",
+    "sequence": int(sys.argv[2]),
+    "source_commit": os.environ.get("CANON_EXPECT_COMMIT", "unknown"),
+    "status": "live-snapshot",
+}
+target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  mv -- "$live_stage/LIVE.json.partial" "$live_stage/LIVE.json"
+  for name in "${live_files[@]}" SHA256SUMS; do
+    gcs_cp "$live_stage/$name" "$live_prefix/$name"
+    echo "[P38.GCS] LIVE_UPLOADED sequence=$snapshot_sequence name=$name bytes=$(wc -c < "$live_stage/$name" | tr -d '[:space:]')"
+  done
+  gcs_cp "$live_stage/LIVE.json" "$live_prefix/LIVE.json"
+  verify="$(mktemp)"
+  trap 'rm -f "$verify"' EXIT
+  gcs_cp "$live_prefix/LIVE.json" "$verify"
+  cmp -- "$live_stage/LIVE.json" "$verify"
+  echo "[P38.GCS] LIVE sequence=$snapshot_sequence prefix=$live_prefix files=${live_files[*]}"
+  exit 0
+fi
+
 if [ "$mode" = collect ]; then
   if [ -e "$stage/COLLECTED.json" ]; then
     echo "[P38.GCS] REFUSING: local collection marker already exists" >&2
@@ -151,10 +256,23 @@ if [ "$mode" = collect ]; then
   copy_required "${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:?}" serving-classification.json
   copy_required "${CANON_P38_SERVING_CAPTURE_ARCHIVE:?}" serving-capture.tar
 
+  collected_files=(
+    run.log pre-alignment.jsonl mismatch-capsule.npz
+    serving-classification.json serving-capture.tar
+  )
+  shopt -s nullglob
+  round_capsules=("${CANON_P38_MISMATCH_CAPSULE%.npz}".round-*.npz)
+  shopt -u nullglob
+  for round_capsule in "${round_capsules[@]}"; do
+    round_suffix="${round_capsule#"${CANON_P38_MISMATCH_CAPSULE%.npz}."}"
+    round_name="mismatch-capsule.$round_suffix"
+    copy_required "$round_capsule" "$round_name"
+    collected_files+=("$round_name")
+  done
+
   (
     cd "$stage"
-    sha256sum run.log pre-alignment.jsonl mismatch-capsule.npz \
-      serving-classification.json serving-capture.tar > SHA256SUMS
+    sha256sum "${collected_files[@]}" > SHA256SUMS
     sha256sum -c SHA256SUMS --quiet
   )
   python3 - "$stage/COLLECTED.json.partial" <<'PY'
@@ -177,8 +295,7 @@ target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
 PY
   mv -- "$stage/COLLECTED.json.partial" "$stage/COLLECTED.json"
 
-  for name in run.log pre-alignment.jsonl mismatch-capsule.npz \
-      serving-classification.json serving-capture.tar SHA256SUMS; do
+  for name in "${collected_files[@]}" SHA256SUMS; do
     upload "$stage/$name" "$name"
   done
   upload "$stage/COLLECTED.json" COLLECTED.json

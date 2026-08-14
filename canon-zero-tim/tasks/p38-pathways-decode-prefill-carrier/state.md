@@ -6,9 +6,9 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2l incident-durable terminal capture. P38.2k final-artifact
-  GCS durability is locally complete, but current P38s13a is held until
-  mid-run snapshots and the frozen incident schema pass locally.
+- Active phase: P38.2l incident-durable terminal capture is complete.
+  P38s13a is the next target action and must use a clean source-pinned render;
+  no target run has occurred from this implementation.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -73,11 +73,13 @@
   `SHA256SUMS` are uploaded before `COLLECTED.json`; `COMPLETE.json` is written
   only after the existing P38 postflight is accepted. Upload failures are
   fail-closed.
-- This change is GCS durability only. No P38 PVC is mounted because the actual
-  claim name has not been supplied.
-- The current uploader collects core artifacts only after `CANON_RUN_CMD`
-  returns. It does not yet preserve an in-progress journal/log if the pod dies
-  during rollout. P38.2l owns that remaining durability gap.
+- No P38 PVC is mounted. GCS is the sole durable evidence transport for this
+  phase; adding a second storage system remains out of scope.
+- A live worker now uploads immutable, SHA-sealed host evidence every 30
+  seconds when log/journal/ledger/round/report/capsule state changes, and once
+  more after the workload stops. `LIVE.json` is written last. A live snapshot
+  is crash evidence only; `COLLECTED` and postflight-only `COMPLETE` retain
+  their prior meanings.
 
 - Row 231 E0-lite is complete. REF reproduced production B/T-old exactly, but
   mask-derived R0/R1 missed production A at 470 / 566 action values. Verdict:
@@ -86,8 +88,14 @@
 - Target P38 diagnostics terminate with explicit exit 42 after the durable
   pre-alignment record and terminal marker. Outer postflight accepts only that
   exit and still rejects missing evidence or a shallow workload.
-- The capsule cap is 16, and every report records host-derived action-depth
-  geometry. P38 postflight requires logical KV at least 1686.
+- The target capsule cap is 256, and every red round is immutable. The stable
+  capsule path aliases the most recent red round, so a later exact round cannot
+  erase earlier evidence. Every report records host-derived action-depth
+  geometry, and P38 postflight still requires logical KV at least 1686.
+- The diagnostic performs three frozen-weight rollout/alignment rounds. Each
+  nonterminal round queues new prompts and skips backward/optimizer; the final
+  round exits through controlled code 42. The target therefore samples 768
+  trajectories without changing weights.
 - The evidence sealer requires the complete Kubernetes/Pathways package,
   excludes `SHA256SUMS` from itself, and immediately validates every digest.
 - The renderer admits concurrency 256 or 32 explicitly. The intent-diff gate
@@ -98,7 +106,7 @@
   and accepts multiple unique row joins in one snapshot while rejecting an
   ambiguous request-to-row mapping.
 - The bounded mismatch capsule records prompt-group/generation identity and
-  now permits 16 selected red rows, covering the nine-row observed population.
+  now permits all 256 target rows.
 - P38 prefix bands are now `[1536,1664)`, `[1664,1792)`, `[1792,1920)`, and
   `[1920,2048)`, all reached by the known carrier domain.
 - Patch 13 adds a default-off host-only request journal. It records token
@@ -108,50 +116,67 @@
   append/fsync.
 - Renderer `--stock-only` emits only the known-red arm. The legacy default
   paired render remains available for regression tests.
-- The postflight requires a nonempty journal and requires every capsule row to
-  have a journal join. The journal is archived with the serving records.
+- Patch 14 adds a bounded host-only exact-call incident ledger. It records all
+  scheduled requests in `[1400,3072)`, keyed by diagnostic round, call,
+  request/token-history identity, logical position, physical pages, observed
+  generations, and exact co-batch. The classifier requires every selected red
+  row to join this ledger; coarse journal records retain provenance only.
+- The postflight requires nonempty journal and incident ledger, three round
+  markers, the final published round, full coverage, controlled exit, and
+  successful transport/persistence before acceptance.
 
 ## Local gates at this checkpoint
+
+- Real Qwen3-8B DP1xTP4 three-round rehearsal: capture-on and capture-off both
+  PASS with no backward/commit. Per-round token, action-mask, S_decode,
+  S_prefill, T_old, geometry, boundary, and verdict fields are identical. The
+  on arm produced 729 incident records / 2,118,899 bytes. Local KV reached
+  1577, so this is a neutrality/reachability gate, not a carrier result.
+- Complete pinned-image P33 CPU/adjacent gate: PASS after synchronizing the
+  target 256-row capsule contract in the dedicated and shared validators.
+- Exact-image Qwen3-1.7B/Qwen3-8B overlays: 23/23 each, all 29 manifest entries
+  match, terminal `P33_EXACT_IMAGE_PASS`.
+- Detailed P38.2l evidence is in
+  `artifacts/p38_2l_onehost_rehearsal_0814.md`.
 
 - Row-231 one-host Qwen3-8B DP1xTP4 E0-lite completed with repeat-exact arms,
   a detected one-bit negative control, exact 399-leaf weight attestation, no
   backward, and zero optimizer commits.
 - Actual same-source concurrency-256 versus concurrency-32 manifest intent
   diff: PASS; no change outside `--max_concurrency` and its label.
-- Complete pinned-image P33 CPU/adjacent gate: PASS (85 workload tests, 34
-  alignment tests, 15 adjacent tests, all focused P38 tests, and terminal
+- Complete pinned-image P33 CPU/adjacent gate: PASS (85 workload tests, 37
+  alignment tests, all adjacent/focused P38 tests, and terminal
   marker `[P33.WORKLOAD] CPU_GATE PASS`).
 - Exact-image Qwen3-1.7B and Qwen3-8B overlays: 23/23 each; all 29 manifest
   entries match; terminal marker `P33_EXACT_IMAGE_PASS`.
 
-- Classifier: 30 tests PASS.
+- Classifier: 34 tests PASS.
 - Renderer: 9 tests PASS.
 - Outer serving postflight: PASS, including red/U/error/coverage controls and
-  a marker-present but journal-file-missing negative control.
-- Patch 13 applies to both pinned Qwen3-1.7B and Qwen3-8B overlays; each passes
+  missing-journal and missing-incident negative controls.
+- Patch 14 applies to both pinned Qwen3-1.7B and Qwen3-8B overlays; each passes
   23 exact-image tests and all 29 manifest entries. Installed runner SHA-256 is
-  `3a219b251020894ade2002e480aa8b3fef90ea62a70794116b143bad89b36b17`;
+  `f6ea2ad526a2924b16e85ba804e52f4dc628194712cafc5d02569b04ed2421c4`;
   the installed runner compiles.
 - Complete pinned-image P33 CPU/adjacent gate: PASS, including the new journal
   negative control and terminal marker `[P33.WORKLOAD] CPU_GATE PASS`.
 - Shell syntax, Python compilation, executable-source ASCII scan,
   credential-pattern scan, ordinary-source whitespace scan, and patch
-  application: PASS. Patch 13 necessarily retains unified-diff blank-context
+  application: PASS. Patch 14 necessarily retains unified-diff blank-context
   prefix spaces and passes exact-image manifest identity.
-- Detailed local evidence is in `artifacts/p38_2i_local_gate_0813.md`.
+- Historical P38.2i evidence remains in
+  `artifacts/p38_2i_local_gate_0813.md`.
 - Local fake-GCS persistence and P38 postflight suites pass. The complete
   pinned-image CPU gate and exact-image Qwen3-1.7B/Qwen3-8B overlay gate also
   pass. P38.2k is published at `246eeb87`.
 
 ## Next action
 
-1. Implement P38.2l immutable mid-run log/journal snapshots and the bounded
-   exact-call incident schema.
-2. Run the complete pinned Qwen3-8B one-host dress rehearsal and freeze the
-   instrumentation surface. Do not require the carrier to reproduce locally.
-3. Only then execute one Attempt-0 stock P38s13a at concurrency 256 and use
-   its real capsule/archive for strict E0. Do not repeat concurrency 32,
-   E0-lite, or the KV-unified arm.
+1. Render from the exact clean source containing P38.2l. Do not mutate the
+   instrumentation except to fix a failing gate.
+2. Execute one Attempt-0 stock P38s13a at concurrency 256. Retrieve live and
+   final GCS artifacts and use its round-scoped capsule/incident ledger for
+   strict E0. Do not repeat concurrency 32, E0-lite, or KV-unified.
 
 ## Claim ceiling and blockers
 
@@ -173,5 +198,5 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 default-off and does not change training, evaluation, prefix cache, precision,
 optimizer placement, or canonical kernels.
 
-- Updated: 2026-08-14 UTC; P38.2k is published at `246eeb87`; P38.2l is active
-  and P38s13a remains NOT ADMITTED.
+- Updated: 2026-08-14 UTC; P38.2k is published at `246eeb87`; P38.2l is
+  complete, and P38s13a remains NOT RUN.

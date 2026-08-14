@@ -154,6 +154,11 @@ def _load_mismatch_capsule(path: Path) -> dict[str, Any]:
   except (UnicodeDecodeError, json.JSONDecodeError) as error:
     raise CaptureError("mismatch capsule metadata is invalid") from error
   _require(metadata.get("schema") == "p38-frozenlake-mismatch-capsule-v1", "mismatch capsule schema is invalid")
+  diagnostic_round = metadata.get("diagnostic_round")
+  _require(
+      isinstance(diagnostic_round, int) and 0 <= diagnostic_round < 8,
+      "mismatch capsule diagnostic round is invalid",
+  )
   selected_rows = np.asarray(arrays["selected_rows"]).reshape(-1)
   _require(selected_rows.size > 0, "mismatch capsule selected no rows")
   _require(len(set(int(row) for row in selected_rows)) == selected_rows.size, "mismatch capsule selected duplicate rows")
@@ -443,6 +448,227 @@ def _join_journal_to_capsule(
   return joins
 
 
+def _load_incident_ledger(
+    directory: Path,
+    expected_program_path: str,
+    incident_min_prefix: int,
+    incident_max_prefix: int,
+) -> list[dict[str, Any]]:
+  """Load the bounded per-call host ledger and validate every join field."""
+  _require(
+      0 <= incident_min_prefix < incident_max_prefix,
+      "incident prefix bounds are invalid",
+  )
+  path = directory / "p38_incident_ledger.jsonl"
+  _require(
+      path.is_file() and path.stat().st_size > 0,
+      "P38 incident ledger is absent or empty",
+  )
+  entries = []
+  previous_call = 0
+  previous_round = -1
+  for line_number, line in enumerate(
+      path.read_text(encoding="utf-8").splitlines(), start=1
+  ):
+    _require(line.strip(), f"incident ledger line {line_number} is empty")
+    try:
+      record = json.loads(line)
+    except json.JSONDecodeError as error:
+      raise CaptureError(
+          f"incident ledger line {line_number} is not JSON"
+      ) from error
+    _require(
+        record.get("schema") == "p38-incident-ledger-v1",
+        f"incident ledger line {line_number} has an invalid schema",
+    )
+    _require(
+        record.get("program_path") == expected_program_path,
+        f"incident ledger line {line_number} changed program path",
+    )
+    _require(
+        int(record.get("incident_min_prefix", -1)) == incident_min_prefix
+        and int(record.get("incident_max_prefix", -1))
+        == incident_max_prefix,
+        f"incident ledger line {line_number} changed prefix bounds",
+    )
+    call_index = int(record.get("call_index", 0))
+    _require(
+        call_index > previous_call,
+        f"incident ledger line {line_number} has a nonmonotonic call index",
+    )
+    previous_call = call_index
+    diagnostic_round = int(record.get("diagnostic_round", -1))
+    _require(
+        0 <= diagnostic_round < 8 and diagnostic_round >= previous_round,
+        f"incident ledger line {line_number} has an invalid diagnostic round",
+    )
+    previous_round = diagnostic_round
+    co_batch = record.get("co_batch_request_ids")
+    _require(
+        isinstance(co_batch, list)
+        and len(co_batch)
+        == int(record.get("scheduled_request_count", -1))
+        and len(co_batch) == len(set(co_batch)),
+        f"incident ledger line {line_number} has an invalid co-batch",
+    )
+    requests = record.get("requests")
+    _require(
+        isinstance(requests, list) and requests,
+        f"incident ledger line {line_number} has no incident requests",
+    )
+    seen_requests = set()
+    for request in requests:
+      request_id = request.get("request_id")
+      _require(
+          isinstance(request_id, str)
+          and request_id
+          and request_id in co_batch
+          and request_id not in seen_requests,
+          f"incident ledger line {line_number} has an invalid request ID",
+      )
+      seen_requests.add(request_id)
+      prefix = int(request.get("num_computed_tokens", -1))
+      num_tokens = int(request.get("num_tokens", -1))
+      _require(
+          incident_min_prefix <= prefix < incident_max_prefix
+          and num_tokens == prefix + 1,
+          f"incident ledger line {line_number} request geometry drifted",
+      )
+      token_sha = request.get("token_history_sha256")
+      _require(
+          isinstance(token_sha, str)
+          and len(token_sha) == 64
+          and all(character in "0123456789abcdef" for character in token_sha),
+          f"incident ledger line {line_number} token SHA is invalid",
+      )
+      block_size = int(request.get("block_size", 0))
+      logical_blocks = int(request.get("logical_blocks", 0))
+      pages = request.get("physical_pages")
+      generations = request.get("page_generations")
+      _require(
+          block_size > 0
+          and logical_blocks == (prefix + 1 + block_size - 1) // block_size
+          and isinstance(pages, list)
+          and len(pages) == logical_blocks
+          and all(isinstance(page, int) for page in pages)
+          and isinstance(generations, list)
+          and len(generations) == logical_blocks,
+          f"incident ledger line {line_number} page geometry drifted",
+      )
+      for logical_page, (physical_page, generation) in enumerate(
+          zip(pages, generations, strict=True)
+      ):
+        _require(
+            generation.get("logical_page") == logical_page
+            and generation.get("physical_page") == physical_page
+            and generation.get("observed_request_id") == request_id
+            and generation.get("observed_logical_page") == logical_page
+            and int(generation.get("observation_generation", -1)) >= 0,
+            f"incident ledger line {line_number} page ownership drifted",
+        )
+      entries.append({
+          **request,
+          "call_index": call_index,
+          "diagnostic_round": diagnostic_round,
+          "co_batch_request_ids": co_batch,
+          "scheduled_request_count": len(co_batch),
+      })
+  return entries
+
+
+def _join_incident_to_capsule(
+    entries: list[dict[str, Any]], capsule: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, int]]]:
+  """Join every selected A/B mismatch to its exact serving decode call."""
+  arrays = capsule["arrays"]
+  diagnostic_round = int(capsule["metadata"]["diagnostic_round"])
+  selected_rows = np.asarray(arrays["selected_rows"]).reshape(-1)
+  expected = []
+  histories = {}
+  for capsule_index, source_row_raw in enumerate(selected_rows):
+    source_row = int(source_row_raw)
+    prompt = np.asarray(arrays["prompt_ids"][capsule_index])[
+        np.asarray(arrays["prompt_mask"][capsule_index], dtype=np.bool_)
+    ]
+    completion = np.asarray(arrays["completion_ids"][capsule_index])[
+        np.asarray(
+            arrays["completion_valid_mask"][capsule_index], dtype=np.bool_
+        )
+    ]
+    history = np.concatenate((prompt, completion)).astype(
+        np.int64, copy=False
+    )
+    histories[source_row] = history
+    action = np.asarray(arrays["action_mask"][capsule_index], dtype=np.bool_)
+    a = np.asarray(arrays["s_decode"][capsule_index])
+    b = np.asarray(arrays["s_prefill"][capsule_index])
+    _require(
+        action.shape == a.shape == b.shape,
+        f"incident join source row {source_row} shape drifted",
+    )
+    bytes_differ = (
+        np.ascontiguousarray(a).view(np.uint8)
+        != np.ascontiguousarray(b).view(np.uint8)
+    ).reshape(a.size, a.dtype.itemsize).any(axis=1).reshape(a.shape)
+    mismatch_positions = np.flatnonzero(action & bytes_differ)
+    _require(
+        mismatch_positions.size > 0,
+        f"incident join source row {source_row} has no A/B mismatch",
+    )
+    prompt_length = int(np.asarray(
+        arrays["prompt_mask"][capsule_index], dtype=np.bool_
+    ).sum())
+    for position in mismatch_positions:
+      expected.append({
+          "source_row": source_row,
+          "completion_position": int(position),
+          "num_computed_tokens": prompt_length + int(position),
+      })
+
+  joins = []
+  missing = []
+  for target in expected:
+    source_row = target["source_row"]
+    prefix = target["num_computed_tokens"]
+    history = histories[source_row]
+    expected_tokens = prefix + 1
+    _require(
+        expected_tokens <= history.size,
+        f"incident join source row {source_row} exceeds token history",
+    )
+    expected_sha = _token_history_sha256(history[:expected_tokens])
+    candidates = [
+        entry for entry in entries
+        if int(entry["diagnostic_round"]) == diagnostic_round
+        and int(entry["num_computed_tokens"]) == prefix
+        and int(entry["num_tokens"]) == expected_tokens
+        and entry["token_history_sha256"] == expected_sha
+    ]
+    if not candidates:
+      missing.append(target)
+      continue
+    _require(
+        len(candidates) == 1,
+        "incident ledger ambiguously joins source row "
+        f"{source_row} prefix {prefix}: {len(candidates)} candidates",
+    )
+    entry = candidates[0]
+    joins.append({
+        **target,
+        "request_id": entry["request_id"],
+        "call_index": int(entry["call_index"]),
+        "diagnostic_round": diagnostic_round,
+        "dp_rank": int(entry["dp_rank"]),
+        "local_scheduler_slot": int(entry["local_scheduler_slot"]),
+        "token_history_sha256": expected_sha,
+        "physical_pages": entry["physical_pages"],
+        "page_generations": entry["page_generations"],
+        "scheduled_request_count": int(entry["scheduled_request_count"]),
+        "co_batch_request_ids": entry["co_batch_request_ids"],
+    })
+  return joins, missing
+
+
 def _load_stage(directory: Path, seq: int, stage: str) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
   base = directory / f"p38_serving_{seq:04d}_{stage}"
   json_path = Path(str(base) + ".json")
@@ -479,6 +705,8 @@ def classify(
     expected_program_path: str,
     *,
     require_mismatch_join: bool = True,
+    incident_min_prefix: int = 0,
+    incident_max_prefix: int = 1 << 30,
 ) -> dict[str, Any]:
   _require(expected_records > 0, "expected_records must be positive")
   _require(expected_program_path in ("standard", "continue_decode"),
@@ -504,6 +732,12 @@ def classify(
   request_journal = _load_request_journal(
       directory, prefix_bounds, expected_program_path
   )
+  incident_entries = _load_incident_ledger(
+      directory,
+      expected_program_path,
+      incident_min_prefix,
+      incident_max_prefix,
+  )
   journal_joins = (
       _join_journal_to_capsule(request_journal, capsule)
       if capsule is not None else []
@@ -519,11 +753,18 @@ def classify(
   journal_joined_source_rows = {
       int(join["source_row"]) for join in journal_joins
   }
+  # The bounded request journal is a coarse path/shape witness and may not
+  # coincide with a red row. Exact all-mismatch attribution belongs solely to
+  # the per-call incident ledger below; requiring a journal coincidence would
+  # reintroduce the selection bias this phase removes.
+  incident_joins, missing_incident_joins = (
+      _join_incident_to_capsule(incident_entries, capsule)
+      if capsule is not None else ([], [])
+  )
   _require(
-      not require_mismatch_join or
-      selected_source_rows <= journal_joined_source_rows,
-      "request journal did not join every selected mismatch row: missing "
-      f"{sorted(selected_source_rows - journal_joined_source_rows)}",
+      not require_mismatch_join or not missing_incident_joins,
+      "incident ledger did not join every selected A/B mismatch: missing "
+      f"{missing_incident_joins[:16]}",
   )
   summaries = []
   captured_strata: set[int] = set()
@@ -644,8 +885,14 @@ def classify(
 
   _require(captured_strata == set(range(expected_records)),
            "capture strata are incomplete")
-  _require(not require_mismatch_join or successful_joins > 0,
-           "no serving record joins the mismatch capsule")
+  # The four coarse serving records prove path/shape/implementation identity.
+  # Exact mismatch-call attribution is now owned by the incident ledger, so a
+  # mismatch is not required to coincide with one of the four old anchors.
+  # Requiring such a coincidence recreated the selection bias P38.2l removes.
+  _require(
+      not require_mismatch_join or bool(incident_joins),
+      "no exact incident call joins the mismatch capsule",
+  )
   return {
       "schema_version": 1,
       "verdict": "PASS",
@@ -658,6 +905,9 @@ def classify(
       "request_journal_joined_source_rows": sorted(
           journal_joined_source_rows
       ),
+      "incident_ledger_records": len(incident_entries),
+      "incident_exact_joins": incident_joins,
+      "incident_missing_joins": missing_incident_joins,
       "joined_source_rows": sorted({
           int(join["source_row"])
           for record in summaries
@@ -676,6 +926,8 @@ def main() -> None:
   parser.add_argument("--mismatch-capsule", required=True, type=Path)
   parser.add_argument("--prefix-bounds", required=True)
   parser.add_argument("--require-mismatch-join", action="store_true")
+  parser.add_argument("--incident-min-prefix", required=True, type=int)
+  parser.add_argument("--incident-max-prefix", required=True, type=int)
   parser.add_argument("--output", type=Path)
   args = parser.parse_args()
   try:
@@ -686,6 +938,8 @@ def main() -> None:
         _parse_prefix_bounds(args.prefix_bounds),
         args.expected_program_path,
         require_mismatch_join=args.require_mismatch_join,
+        incident_min_prefix=args.incident_min_prefix,
+        incident_max_prefix=args.incident_max_prefix,
     )
   except CaptureError as error:
     report = {

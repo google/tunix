@@ -49,6 +49,32 @@ contracts below pass locally.
 4. Freeze the instrumentation after this rehearsal. A target run must not be
    used to discover another missing field.
 
+## Implemented acquisition envelope
+
+- The target runs three frozen-weight rollout/alignment rounds. These are not
+  training steps: every nonterminal round raises a dedicated control-flow
+  signal, queues the next prompt batch, and records `backward=0` and
+  `optimizer_commits=0`. The final round uses the existing controlled exit 42.
+- The round count is bounded to `[1, 8]` in code and pinned to three by the
+  target profile. Three rounds provide 768 target trajectories without adding
+  weight evolution as a confounder or allowing unbounded evidence growth.
+- Every A-B red sequence row can be retained (target cap 256). Red capsules are
+  immutable per round; the legacy capsule path is an atomic alias to the most
+  recent red round, so a later exact round cannot erase an earlier incident.
+- Patch 14 records a host-only exact-call ledger for every scheduled request in
+  the registered prefix interval `[1400, 3072)`. Joins are round-scoped and use
+  token-history SHA, logical position, token count, request/DP/slot identity,
+  physical pages, observed generations, and the exact scheduled co-batch.
+- The live worker snapshots changed host evidence every 30 seconds and after
+  the workload stops. Each `live/NNNNNN/` prefix is immutable and receives
+  `LIVE.json` last. Final `COLLECTED` and postflight-only `COMPLETE` semantics
+  remain unchanged.
+- `90_run.sh` intentionally captures both workload and `tee` statuses before
+  postflight. Its postflight is explicit and fail-closed: nonzero classifier,
+  persistence, live-worker, transport, round, journal, ledger, coverage, or
+  marker checks still reject the run after preserving available evidence.
+  This is not a blanket error suppression policy.
+
 ## Device-content observer gate
 
 Device KV evidence is optional until it independently passes this gate. A hash
@@ -76,6 +102,15 @@ run and interpret the return only as strict-E0 input, not as proof of stale KV.
 - the pinned Qwen3-8B dress rehearsal passes and records its artifact sizes;
 - rendered target intent remains stock, concurrency 256, Attempt 0, no
   backward, no optimizer commit, and one unique GCS prefix.
+
+Local implementation status: PASS on 2026-08-14. The real Qwen3-8B DP1xTP4
+capture-on and capture-off arms each completed three rounds with no backward or
+optimizer commit. All per-round numerical fields and hashes were identical.
+The on arm produced 729 exact-call ledger records (2,118,899 bytes). Complete
+results and SHAs are in
+`../artifacts/p38_2l_onehost_rehearsal_0814.md`. The local maximum KV was 1577,
+so this gate proves instrumentation reachability/neutrality, not carrier
+reproduction.
 
 ## Target gate
 

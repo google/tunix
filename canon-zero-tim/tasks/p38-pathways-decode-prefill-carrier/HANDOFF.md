@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2k published; finish P38.2l before any target run
+## CURRENT: P38.2l complete; P38s13a is next
 
 P38s12f is complete. It was a real concurrency-32 run, reached logical KV
 1972, kept B-C exact, and reproduced A-B red at 11 / 46,390 elements with
@@ -25,19 +25,21 @@ core files plus SHA manifest before `COLLECTED.json`, and writes
 `COMPLETE.json` only after full local postflight acceptance. Never interpret
 `PREFLIGHT` as a numerical run or `COLLECTED` as a completed run.
 
-P38.2k is published at `246eeb87`.
+P38.2k is published at `246eeb87`. P38.2l adds immutable mid-run snapshots,
+three frozen-weight rounds, all-red-row capsules, and a round-scoped exact-call
+incident ledger. Real Qwen3-8B capture-on/off rehearsals were bitwise identical;
+the on arm produced 729 ledger records / 2,118,899 bytes. Evidence is in
+`artifacts/p38_2l_onehost_rehearsal_0814.md`.
 
-Do not launch P38s13a from the current source. P38.2k uploads the final bundle
-after the workload returns, so a mid-rollout pod death can still leave only
-`PREFLIGHT.json`. P38.2l must first add immutable mid-run log/journal snapshots,
-an all-red-row exact-call incident schema, and a pinned Qwen3-8B dress rehearsal.
-The active phase is:
+Do not launch from a dirty worktree. Render from the exact clean commit that
+contains P38.2l. The controlling phase is:
 
 `phases/p38-2l-terminal-incident-capture.md`
 
-After that phase freezes the instrumentation, use a new run id, `p38s13a`,
-stock only, concurrency 256. This is the known-red capture carrier, not another
-concurrency experiment:
+After publication, use a new run id, `p38s13a`, stock only, concurrency 256.
+This is the known-red capture carrier, not another concurrency experiment. It
+runs three frozen-weight rollout/alignment rounds (768 trajectories total),
+never backward or optimizer, and exits with controlled code 42:
 
 ```bash
 python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
@@ -61,11 +63,15 @@ test -s "$EVIDENCE/gcs/COLLECTED.json"
 (cd "$EVIDENCE/gcs" && sha256sum -c SHA256SUMS --quiet)
 ```
 
-`COMPLETE.json` is required for target admission. If only `COLLECTED.json`
+`COMPLETE.json` is required for target admission. The bucket also contains
+immutable `live/NNNNNN/LIVE.json` snapshots; they preserve partial evidence but
+never substitute for `COMPLETE`. If only `COLLECTED.json`
 exists, retain and analyze the raw failure evidence but do not claim a
-complete run. Use `mismatch-capsule.npz` plus `serving-capture.tar` to build
-strict E0; do not return to mask-derived E0-lite, KV-unified, or concurrency
-32.
+complete run. Return `run.log`, all three pre-alignment rows, every per-round
+capsule, the stable capsule alias, `serving-classification.json`,
+`serving-capture.tar`, the incident ledger, `SHA256SUMS`, `COLLECTED.json`, and
+`COMPLETE.json`. Use the round-scoped capsule/ledger joins to build strict E0;
+do not return to mask-derived E0-lite, KV-unified, or concurrency 32.
 
 The current P38 JobSet still uses node-local `/tmp` during execution. P38.2k
 protects completed postflight artifacts; P38.2l adds immutable live snapshots.

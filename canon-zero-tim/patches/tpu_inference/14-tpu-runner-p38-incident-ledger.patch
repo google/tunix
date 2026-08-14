@@ -1,0 +1,202 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -967,6 +967,16 @@
+ _P38_REQUEST_JOURNALED_BANDS = set()
+ _P38_REQUEST_JOURNAL_STATE = {"calls": 0, "records": 0}
+ _P38_PAGE_OWNERSHIP = {}
++_P38_INCIDENT_LEDGER = os.environ.get("CANON_P38_INCIDENT_LEDGER", "")
++_P38_INCIDENT_MIN_PREFIX = int(os.environ.get(
++    "CANON_P38_INCIDENT_MIN_PREFIX", "1400"))
++_P38_INCIDENT_MAX_PREFIX = int(os.environ.get(
++    "CANON_P38_INCIDENT_MAX_PREFIX", "3072"))
++_P38_INCIDENT_MAX_BYTES = int(os.environ.get(
++    "CANON_P38_INCIDENT_MAX_BYTES", str(128 * 1024 * 1024)))
++_P38_DIAGNOSTIC_ROUND_FILE = os.environ.get(
++    "CANON_P38_DIAGNOSTIC_ROUND_FILE", "")
++_P38_INCIDENT_STATE = {"records": 0, "bytes": 0}
+ 
+ if _P38_SERVING_CAPTURE_DIR and _P38_SERVING_CAPTURE_MAX_CALLS < 1:
+     raise RuntimeError(
+@@ -985,6 +995,25 @@
+     if journal_parent != capture_root:
+         raise RuntimeError(
+             "P38 request journal must live directly in the capture directory")
++    if not _P38_INCIDENT_LEDGER:
++        raise RuntimeError(
++            "P38 serving capture requires CANON_P38_INCIDENT_LEDGER")
++    incident_parent = os.path.realpath(os.path.dirname(_P38_INCIDENT_LEDGER))
++    if incident_parent != capture_root:
++        raise RuntimeError(
++            "P38 incident ledger must live directly in the capture directory")
++    if not (0 <= _P38_INCIDENT_MIN_PREFIX < _P38_INCIDENT_MAX_PREFIX):
++        raise RuntimeError("P38 incident prefix bounds are invalid")
++    if not (1024 * 1024 <= _P38_INCIDENT_MAX_BYTES <= 256 * 1024 * 1024):
++        raise RuntimeError("P38 incident ledger byte bound is invalid")
++    if not _P38_DIAGNOSTIC_ROUND_FILE:
++        raise RuntimeError(
++            "P38 serving capture requires CANON_P38_DIAGNOSTIC_ROUND_FILE")
++    round_parent = os.path.realpath(os.path.dirname(
++        _P38_DIAGNOSTIC_ROUND_FILE))
++    if round_parent != os.path.realpath(os.path.dirname(capture_root)):
++        raise RuntimeError(
++            "P38 diagnostic round file must live in the capture parent")
+     if _P38_SERVING_CAPTURE_EXPECTED_PATH not in (
+             "standard", "continue_decode"):
+         raise RuntimeError(
+@@ -1368,6 +1397,143 @@
+                 f"stratum={record['stratum_index']} dp={record['dp_rank']}",
+                 flush=True,
+             )
++    return call_index
++
++
++def _p38_incident_ledger(
++        runner, scheduler_output, req_ids_dp, prefixes, program_path,
++        call_index):
++    """Append one bounded exact-call record using host scheduler metadata."""
++    import json as _json
++    import os as _os
++    from pathlib import Path as _Path
++    round_file = _Path(_P38_DIAGNOSTIC_ROUND_FILE)
++    if not round_file.is_file():
++        raise RuntimeError("P38 diagnostic round file is absent")
++    round_text = round_file.read_text(encoding="utf-8").strip()
++    if not round_text.isdigit():
++        raise RuntimeError("P38 diagnostic round file is invalid")
++    diagnostic_round = int(round_text)
++    if not (0 <= diagnostic_round < 8):
++        raise RuntimeError("P38 diagnostic round is out of range")
++
++    incidents = [
++        item for item in prefixes
++        if (_P38_INCIDENT_MIN_PREFIX <= int(item["num_computed_tokens"])
++            < _P38_INCIDENT_MAX_PREFIX)
++    ]
++    if not incidents:
++        return
++    dp_slots = {
++        request_id: (int(dp_rank), int(local_slot))
++        for dp_rank, request_ids in req_ids_dp.items()
++        for local_slot, request_id in enumerate(request_ids)
++    }
++    co_batch = sorted(
++        str(request_id)
++        for request_id, scheduled_tokens in
++        scheduler_output.num_scheduled_tokens.items()
++        if int(scheduled_tokens) > 0
++    )
++    request_records = []
++    for item in incidents:
++        request_id = str(item["request_id"])
++        if request_id not in dp_slots:
++            raise RuntimeError(
++                f"P38 incident request has no DP slot: {request_id}")
++        dp_rank, local_slot = dp_slots[request_id]
++        request_index = int(item["request_index"])
++        prefix = int(item["num_computed_tokens"])
++        request_state = runner.requests.get(request_id)
++        pages = _p38_primary_pages(getattr(request_state, "block_ids", None))
++        logical_blocks = (
++            prefix + 1 + runner.block_size - 1) // runner.block_size
++        pages = pages[:logical_blocks]
++        num_tokens = int(runner.input_batch.num_tokens[request_index])
++        token_ids = [
++            int(token_id) for token_id in np.asarray(
++                runner.input_batch.token_ids_cpu[request_index, :num_tokens])
++        ]
++        page_generations = []
++        for logical_page, physical_page in enumerate(pages):
++            owner_key = (dp_rank, int(physical_page))
++            prior = _P38_PAGE_OWNERSHIP.get(owner_key)
++            changed = (
++                prior is None
++                or prior["request_id"] != request_id
++                or int(prior["logical_page"]) != logical_page
++            )
++            generation = (
++                0 if prior is None
++                else int(prior["observation_generation"]) + int(changed)
++            )
++            owner = {
++                "request_id": request_id,
++                "logical_page": logical_page,
++                "observation_generation": generation,
++                "last_seen_call": call_index,
++            }
++            _P38_PAGE_OWNERSHIP[owner_key] = owner
++            page_generations.append({
++                "logical_page": logical_page,
++                "physical_page": int(physical_page),
++                "observation_generation": int(
++                    owner["observation_generation"]),
++                "observed_request_id": str(owner["request_id"]),
++                "observed_logical_page": int(owner["logical_page"]),
++            })
++        request_records.append({
++            "request_id": request_id,
++            "request_index": request_index,
++            "dp_rank": dp_rank,
++            "local_scheduler_slot": local_slot,
++            "num_computed_tokens": prefix,
++            "num_tokens": num_tokens,
++            "token_history_sha256": _p38_token_history_sha256(token_ids),
++            "block_size": int(runner.block_size),
++            "logical_blocks": logical_blocks,
++            "physical_pages": pages,
++            "page_generations": page_generations,
++        })
++    record = {
++        "schema": "p38-incident-ledger-v1",
++        "diagnostic_round": diagnostic_round,
++        "call_index": int(call_index),
++        "program_path": program_path,
++        "scheduled_request_count": len(co_batch),
++        "co_batch_request_ids": co_batch,
++        "one_token_decode_request_count": len(prefixes),
++        "incident_min_prefix": _P38_INCIDENT_MIN_PREFIX,
++        "incident_max_prefix": _P38_INCIDENT_MAX_PREFIX,
++        "requests": request_records,
++    }
++    encoded = (_json.dumps(record, sort_keys=True) + "\n").encode()
++    state = _P38_INCIDENT_STATE
++    ledger = _Path(_P38_INCIDENT_LEDGER)
++    current_bytes = ledger.stat().st_size if ledger.exists() else 0
++    if current_bytes != int(state["bytes"]):
++        raise RuntimeError("P38 incident ledger size changed out of band")
++    if current_bytes + len(encoded) > _P38_INCIDENT_MAX_BYTES:
++        raise RuntimeError(
++            "P38 incident ledger exceeded its registered byte bound")
++    ledger.parent.mkdir(parents=True, exist_ok=True)
++    descriptor = _os.open(
++        ledger, _os.O_APPEND | _os.O_CREAT | _os.O_WRONLY, 0o600)
++    try:
++        written = _os.write(descriptor, encoded)
++        if written != len(encoded):
++            raise RuntimeError("P38 incident ledger append was incomplete")
++        _os.fsync(descriptor)
++    finally:
++        _os.close(descriptor)
++    state["records"] += 1
++    state["bytes"] += len(encoded)
++    print(
++        "[CANON_P38_INCIDENT_LEDGER] "
++        f"record={state['records']} call={call_index} "
++        f"requests={len(request_records)} bytes={state['bytes']}",
++        flush=True,
++    )
+ 
+ 
+ def _p38_observe_scheduled_prefixes(prefixes, program_path):
+@@ -1676,8 +1842,11 @@
+     scheduled_prefixes = _p38_scheduled_decode_prefixes(
+         runner, scheduler_output)
+     _p38_observe_scheduled_prefixes(scheduled_prefixes, program_path)
+-    _p38_request_journal(
++    call_index = _p38_request_journal(
+         runner, scheduler_output, req_ids_dp, scheduled_prefixes, program_path)
++    _p38_incident_ledger(
++        runner, scheduler_output, req_ids_dp, scheduled_prefixes, program_path,
++        call_index)
+     if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
+         return None
+     candidate_strata = []
