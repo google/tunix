@@ -1172,3 +1172,18 @@
   syntax and `git diff --check` PASS.
 - No cluster launch, backward, optimizer commit, commit, or push occurred.
   P38s13a is the next target only after explicit review and publication.
+
+## 2026-08-14 UTC — P38s13a/s14 rejected as pre-P38.2l acquisitions
+
+- P38.2l was published at `bd309015`. Remote tip `dc529871d765` contains that
+  implementation; its two later commits add only archived evidence.
+- P38s13a used source `d3e6c1b0` and P38s14 used `ac2c31bc`. Both reproduced
+  sparse A-B red with exact B-C, but each ran only one round and omitted the
+  P38.2l exact-call ledger, immutable live snapshots, and complete GCS bundle.
+- P38s14 measured 26 / 47,076 A-B differing elements (`42` bytes,
+  `max_abs=0.2532196044921875`) and exact B-C. This is numerical evidence, not
+  strict-E0 input.
+- Decision: consume a new run id `p38s15`; pin source
+  `dc529871d7654ad1ec2cdefe1e4d50e07824393c`; reject launch unless the log
+  attests the pinned source, live worker, incident ledger, three frozen rounds,
+  and completion-last GCS contract.

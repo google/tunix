@@ -5,12 +5,15 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2l complete; P38s13a is next
+## CURRENT: run P38s15 from pinned source `dc529871d765`
 
-P38s12f is complete. It was a real concurrency-32 run, reached logical KV
-1972, kept B-C exact, and reproduced A-B red at 11 / 46,390 elements with
-`max_abs=0.16271209716796875`. Do not repeat concurrency 32: it is insufficient
-as a repair.
+P38s13a and P38s14 both reproduced the carrier but used pre-P38.2l sources.
+P38s13a/source `d3e6c1b0` measured A-B red at 39 / 48,043 elements with
+`max_abs=0.281883`; P38s14/source `ac2c31bc` measured 26 / 47,076 with
+`max_abs=0.253220`. Both kept B-C exact. Both were single-round runs without
+the exact-call incident ledger, immutable live snapshots, or a complete GCS
+bundle, so neither can construct strict E0. Do not reuse either run id or
+source.
 
 The remaining defect is evidence transport. P38s12f's stdout ended before the
 pre-align timestamp and its committed bundle omitted the mismatch capsule and
@@ -25,25 +28,26 @@ core files plus SHA manifest before `COLLECTED.json`, and writes
 `COMPLETE.json` only after full local postflight acceptance. Never interpret
 `PREFLIGHT` as a numerical run or `COLLECTED` as a completed run.
 
-P38.2k is published at `246eeb87`. P38.2l adds immutable mid-run snapshots,
+P38.2k is published at `246eeb87`. P38.2l is published at `bd309015`. It adds immutable mid-run snapshots,
 three frozen-weight rounds, all-red-row capsules, and a round-scoped exact-call
 incident ledger. Real Qwen3-8B capture-on/off rehearsals were bitwise identical;
 the on arm produced 729 ledger records / 2,118,899 bytes. Evidence is in
 `artifacts/p38_2l_onehost_rehearsal_0814.md`.
 
-Do not launch from a dirty worktree. Render from the exact clean commit that
-contains P38.2l. The controlling phase is:
+Do not launch from a dirty worktree. The next run pins source
+`dc529871d7654ad1ec2cdefe1e4d50e07824393c`, whose only changes after
+`bd309015` are archived evidence. The controlling phase is:
 
 `phases/p38-2l-terminal-incident-capture.md`
 
-After publication, use a new run id, `p38s13a`, stock only, concurrency 256.
+Use run id `p38s15`, stock only, concurrency 256.
 This is the known-red capture carrier, not another concurrency experiment. It
 runs three frozen-weight rollout/alignment rounds (768 trajectories total),
 never backward or optimizer, and exits with controlled code 42:
 
 ```bash
 python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
-  --source-commit "$SOURCE_COMMIT" --run-id p38s13a \
+  --source-commit "$SOURCE_COMMIT" --run-id p38s15 \
   --output-dir "$OUT" --stock-only --max-concurrency 256
 ```
 
@@ -80,7 +84,7 @@ PVC integration is intentionally out of scope.
 ## HISTORY: discarded P38s12e and completed P38s12f
 
 This section is retained for provenance only. The current executable operator
-protocol is the P38s13a section at the top of
+protocol is the P38s15 section at the top of
 `cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
 
 ### P38s12d is void; do not rerun its source

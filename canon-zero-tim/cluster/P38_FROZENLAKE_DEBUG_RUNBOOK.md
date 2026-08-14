@@ -1,4 +1,4 @@
-# P38 FrozenLake: P38s13a ready from a clean P38.2l source
+# P38 FrozenLake: run P38s15 from pinned P38.2l source
 
 This runbook is diagnostic-only. It never launches FrozenLake full training,
 evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a
@@ -6,11 +6,12 @@ separate workstream and waits for its DP16 resources.
 
 ## Current fact
 
-P38s12f completed the concurrency discriminator: concurrency 32 remained red
-at 11 / 46,390 elements (`max_abs=0.16271209716796875`) with exact B-C and
-sufficient depth. Do not run concurrency 32 again. Its replay artifacts were
-not committed, so the current action is one stock concurrency-256 P38s13a with
-the same numerical path and new GCS durability only.
+P38s13a/source `d3e6c1b0` and P38s14/source `ac2c31bc` both reproduced A-B red
+with exact B-C, but both predate P38.2l. They ran one round, emitted no
+exact-call incident ledger or immutable live snapshots, and returned no
+complete GCS bundle. They are numerical evidence only and cannot construct
+strict E0. Do not reuse those sources or run ids. Do not run concurrency 32 or
+KV-unified again.
 
 P38.2l is locally green. It adds immutable live GCS snapshots, three
 frozen-weight diagnostic rounds, all-red-row capsules, and a round-scoped
@@ -32,7 +33,7 @@ from GCS. `COMPLETE.json` is written last and is the only completion marker.
 This supersedes the P38s12f launch instructions below, which remain as
 historical provenance.
 
-## Current P38s13a operator sequence
+## Current P38s15 operator sequence
 
 Run this only from a clean source containing P38.2l. It performs three
 rollout/alignment rounds with frozen weights: 768 trajectories total,
@@ -41,9 +42,14 @@ rendered YAML.
 
 ```bash
 set -euo pipefail
+SOURCE_COMMIT=dc529871d7654ad1ec2cdefe1e4d50e07824393c
+P38_2L_COMMIT=bd3090154ee894354e5c09e88b3a76825488aa3d
 git fetch origin yuxzhang/canon-zero-tim
-SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID=p38s13a
+git cat-file -e "$SOURCE_COMMIT^{commit}"
+git merge-base --is-ancestor "$P38_2L_COMMIT" "$SOURCE_COMMIT"
+test -z "$(git diff --name-only "$P38_2L_COMMIT..$SOURCE_COMMIT" -- \
+  ':(exclude)canon-zero-tim/tasks/**/evidence/**')"
+RUN_ID=p38s15
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
 OUT="/tmp/p38-serving-$RUN_ID"
 EVIDENCE="/tmp/p38-return-$RUN_ID"
@@ -54,6 +60,7 @@ git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
 cd "$WORKTREE"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain)"
+git merge-base --is-ancestor "$P38_2L_COMMIT" HEAD
 mkdir -p "$EVIDENCE"
 printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
 
@@ -69,6 +76,18 @@ kubectl apply --dry-run=server -f "$STOCK" | \
   tee "$EVIDENCE/dry-run-stock.txt"
 kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
 ```
+
+Before treating the run as started, the head log must report the exact pinned
+source and the P38.2l live worker:
+
+```text
+[sync] HEAD=dc529871d7654ad1ec2cdefe1e4d50e07824393c
+[P38.GCS] LIVE_WORKER_LAUNCHED
+```
+
+After requests enter the registered prefix interval, require at least one
+`[CANON_P38_INCIDENT_LEDGER]` marker. If any of these markers is absent, stop
+and classify the launch as wrong-source/instrumentation-inconclusive.
 
 Prove GCS access before waiting for the expensive rollout:
 
