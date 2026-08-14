@@ -14,7 +14,7 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
 import functools
@@ -51,7 +51,7 @@ P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 _MetricValue = ArrayLike | utils.WeightedMetric
-_MetricReducer = Callable[[Any], ArrayLike]
+_MetricReducer = Callable[[Any], Any]
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -113,7 +113,7 @@ class TrainingInput:
   images: jax.Array | np.ndarray | None = None
 
 
-def _weighted_metric_mean(values: Iterable[utils.WeightedMetric]) -> float:
+def _weighted_metric_mean(values: Iterable[Any]) -> float:
   """Aggregates unreduced metrics without microbatch-mean bias."""
   values = list(values)
   if not values:
@@ -384,6 +384,7 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+    self._align_opt_state_dtypes(wrt_target)
     # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
     # Depth-1 non-packing fast path never reads the accumulator; skip its
@@ -458,6 +459,39 @@ class PeftTrainer:
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
+
+  def _align_opt_state_dtypes(self, wrt: type[nnx.Variable]) -> None:
+    """Aligns the dtypes of the optimizer state to the model parameters.
+
+    Args:
+      wrt: The target variable type (e.g., `nnx.Param` or `nnx.LoRAParam`).
+    """
+    is_var = lambda x: isinstance(x, nnx.Variable)
+    unwrap = lambda t: jax.tree.map(
+        lambda x: x[...] if is_var(x) else x, t, is_leaf=is_var
+    )
+    pure_params = unwrap(nnx.state(self.model, wrt))
+    pure_opt_state = unwrap(self.optimizer.opt_state)
+    try:
+      _, probed = jax.eval_shape(
+          self.optimizer.tx.update, pure_params, pure_opt_state, pure_params
+      )
+    except (TypeError, ValueError, AttributeError):
+      return
+    if jax.tree.structure(probed) != jax.tree.structure(pure_opt_state):
+      return
+
+    def _maybe_cast(var, probe_leaf):
+      if is_var(var) and var[...].dtype != probe_leaf.dtype:
+        var.set_value(var[...].astype(probe_leaf.dtype))
+      return var
+
+    jax.tree.map(
+        _maybe_cast,
+        self.optimizer.opt_state,
+        probed,
+        is_leaf=is_var,
+    )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -795,7 +829,7 @@ class PeftTrainer:
       loss: _MetricValue,
       step: int,
       additional_metrics: (
-          dict[str, Tuple[_MetricValue, _MetricReducer]] | None
+          Mapping[str, Tuple[_MetricValue, _MetricReducer]] | None
       ) = None,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
@@ -916,22 +950,7 @@ class PeftTrainer:
       *,
       cache_nnx_graph: bool = True,
   ) -> None:
-    """Training loop.
-
-    Args:
-      train_ds: Training dataset.
-      eval_ds: Optional evaluation dataset.
-      skip_jit: If True, the step functions are not JITed.
-      cache_nnx_graph: Wrap the step function with `nnx.cached_partial`, which
-        caches the split state of the bound modules so nnx does not re-flatten
-        them on every call. This trades HBM for trace time, and the trade is
-        not small: the cache holds Python references to the parameter and
-        optimizer arrays, which makes those buffers non-donatable, so the
-        updated values cannot alias onto the inputs and both versions stay
-        resident. Measured on gemma-2b (2.506B params, bfloat16, fsdp=2 x tp=2,
-        one parameter tree = 1.17 GiB per device), turning it on cost 2.35 GiB
-        of heap -- exactly two parameter trees. Leave it off when memory-bound.
-    """
+    """Training loop."""
     logging.log_first_n(
         logging.INFO,
         f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
@@ -1089,7 +1108,9 @@ class PeftTrainer:
             if isinstance(aux, utils.LossOutput)
             else train_loss
         )
-        additional_metrics = {"grad_norm": (grad_norm, np.mean)}
+        additional_metrics: dict[str, tuple[_MetricValue, _MetricReducer]] = {
+            "grad_norm": (grad_norm, np.mean)
+        }
         post_process_aux = aux
         if isinstance(aux, utils.LossOutput):
           additional_metrics.update({
@@ -1208,7 +1229,9 @@ class PeftTrainer:
         buffered_loss = (
             aux.primary_loss if isinstance(aux, utils.LossOutput) else loss
         )
-        additional_metrics = None
+        additional_metrics: (
+            dict[str, tuple[_MetricValue, _MetricReducer]] | None
+        ) = None
         post_process_aux = aux
         if isinstance(aux, utils.LossOutput):
           uses_weighted_loss = True
