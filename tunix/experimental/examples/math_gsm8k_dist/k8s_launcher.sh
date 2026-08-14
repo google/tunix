@@ -112,9 +112,9 @@ stop_rollout() {
 
 start_rollout() {
   python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
+    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
     --jobset_name="${ROLLOUT_ID}" \
-    --tpu_slice=tpuv5:2x2x2 \
+    --tpu_slice=tpuv5:2x2x1 \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
