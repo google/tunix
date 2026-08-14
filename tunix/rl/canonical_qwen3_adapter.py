@@ -31,6 +31,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import time
 from typing import Any, Mapping, Sequence
 
@@ -896,6 +897,7 @@ class _P28SegmentedEngineForward:
 
     layer_fns = []
     local_layer_fns = []
+    local_layer_defs = []
     local_layer_vjp_fns = []
     local_layer_pullback_fns = []
     local_layer_leaves = []
@@ -963,6 +965,7 @@ class _P28SegmentedEngineForward:
       )
       local_layer_pullback_fns.append(jax.jit(block_pullback))
       local_layer_leaves.append(layer_leaves)
+      local_layer_defs.append((layer_graphdef, layer_treedef))
       local_layer_contracts.append(
           SegmentedBlockVjpContract(
               layer_index=layer_index,
@@ -1014,6 +1017,13 @@ class _P28SegmentedEngineForward:
     self._embed_fn = jax.jit(embed)
     self._layer_fns = tuple(layer_fns)
     self._local_layer_fns = tuple(local_layer_fns)
+    self._local_layer_defs = tuple(local_layer_defs)
+    self._layer_scan_fn = None
+    self._layer_tape_scan_fn = None
+    self._layer_rev_scan_fn = None
+    self._layer_unstack_fn = None
+    self._layer_acc_fn = None
+    self._layer_scan_stack = None
     self._local_layer_vjp_fns = tuple(local_layer_vjp_fns)
     self._local_layer_pullback_fns = tuple(local_layer_pullback_fns)
     self._local_layer_leaves = tuple(local_layer_leaves)
@@ -1232,6 +1242,239 @@ class _P28SegmentedEngineForward:
     return self._local_layer_fns[layer_index](
         local_leaves, cache, hidden, attention_metadata
     )
+
+  def layer_scan_mode(self):
+    """Returns the CANON_P28_LAYER_SCAN mode.
+
+    '' (off) | '1' (tape/forward scan + loop pullbacks; byte-preserving) |
+    'verify' (loop authoritative, bitwise-compare the pieces mode 1 uses) |
+    'verify_rev' (verify plus the full reverse scan comparison -- expected
+    RED: r3/r4 proved the scanned reverse reorders one norm-scale gradient
+    reduction; kept as the reproducible THIRDPROG demonstration).
+    """
+    mode = os.environ.get("CANON_P28_LAYER_SCAN", "")
+    if mode not in ("", "0", "1", "verify", "verify_rev"):
+      raise FunctionalMappingError(
+          "CANON_P28_LAYER_SCAN must be unset/0/1/verify/verify_rev, "
+          f"got {mode!r}"
+      )
+    return "" if mode == "0" else mode
+
+  def _ensure_layer_scan(self, engine_leaves):
+    """Builds the shared scan body once and the leaf stack per leaves object.
+
+    The scan body reuses run_local_layer's exact composition (unflatten ->
+    nnx.merge -> layer(...)) with layer 0's graphdef/treedef; a non-uniform
+    stack fails closed rather than silently falling back.
+    """
+    if self._layer_scan_fn is None:
+      from flax import nnx  # pylint: disable=g-import-not-at-top
+
+      graphdef0, treedef0 = self._local_layer_defs[0]
+
+      def normalized_graphdef_repr(graphdef):
+        # Layer graphdefs are allowed to differ ONLY by object identity of
+        # per-layer init closures (init-time-only statics) and by layer-index
+        # naming; erase both, keep every other Static value verbatim.
+        text = repr(graphdef)
+        text = re.sub(r" at 0x[0-9a-fA-F]+", " at 0xX", text)
+        return re.sub(r"layers\.\d+", "layers.N", text)
+
+      norm0 = None
+      for index, (graphdef, treedef) in enumerate(
+          self._local_layer_defs[1:], 1
+      ):
+        if treedef != treedef0:
+          raise FunctionalMappingError(
+              "P50 layer scan requires a uniform layer stack; layer "
+              f"{index} treedef differs from layer 0"
+          )
+        if graphdef == graphdef0:
+          continue
+        if norm0 is None:
+          norm0 = normalized_graphdef_repr(graphdef0)
+        norm = normalized_graphdef_repr(graphdef)
+        if norm != norm0:
+          cut = next(
+              (k for k in range(min(len(norm), len(norm0)))
+               if norm[k] != norm0[k]),
+              min(len(norm), len(norm0)),
+          )
+          raise FunctionalMappingError(
+              "P50 layer scan requires a uniform layer stack; layer "
+              f"{index} graphdef differs from layer 0 beyond closure "
+              f"identity/naming at char {cut}: "
+              f"...{norm0[max(0, cut - 120):cut + 120]!r} vs "
+              f"...{norm[max(0, cut - 120):cut + 120]!r}"
+          )
+      if norm0 is not None:
+        print(
+            "[P50] layer graphdefs differ only by init-closure identity/"
+            "layer naming; scan merges every layer with layer 0's graphdef "
+            "(verify mode is the byte-level judge)",
+            flush=True,
+        )
+
+      def scan_layers(stacked_leaves, stacked_caches, hidden, metadata):
+        def body(h, xs):
+          leaves, cache = xs
+          state = jax.tree_util.tree_unflatten(treedef0, tuple(leaves))
+          layer = nnx.merge(graphdef0, state)
+          new_cache, new_h = layer(cache, h, metadata)
+          return new_h, new_cache
+
+        hidden_out, new_caches = jax.lax.scan(
+            body, hidden, (list(stacked_leaves), stacked_caches)
+        )
+        return new_caches, hidden_out
+
+      self._layer_scan_fn = jax.jit(scan_layers)
+
+      def tape_scan_layers(stacked_leaves, stacked_caches, hidden, metadata):
+        def body(h, xs):
+          leaves, cache = xs
+          state = jax.tree_util.tree_unflatten(treedef0, tuple(leaves))
+          layer = nnx.merge(graphdef0, state)
+          new_cache, new_h = layer(cache, h, metadata)
+          return new_h, (h, new_cache)
+
+        hidden_out, (hidden_ins, new_caches) = jax.lax.scan(
+            body, hidden, (list(stacked_leaves), stacked_caches)
+        )
+        # new_caches is returned (not dropped inside the jit) so the scanned
+        # tape keeps the loop path's materialization obligations.
+        return hidden_ins, new_caches, hidden_out
+
+      self._layer_tape_scan_fn = jax.jit(tape_scan_layers)
+
+      def rev_scan_layers(
+          stacked_leaves,
+          stacked_cache_ins,
+          stacked_hidden_ins,
+          metadata,
+          stacked_dcaches,
+          dhidden,
+      ):
+        def body(dh, xs):
+          leaves, cache_in, hidden_in, dcache = xs
+
+          def primal(p, c, h):
+            state = jax.tree_util.tree_unflatten(treedef0, tuple(p))
+            layer = nnx.merge(graphdef0, state)
+            return layer(c, h, metadata)
+
+          _, pullback = jax.vjp(primal, tuple(leaves), cache_in, hidden_in)
+          dleaves, dcache_in, dh_prev = pullback((dcache, dh))
+          return dh_prev, (dleaves, dcache_in)
+
+        dh_out, (stacked_dleaves, stacked_dcache_ins) = jax.lax.scan(
+            body,
+            dhidden,
+            (
+                list(stacked_leaves),
+                stacked_cache_ins,
+                stacked_hidden_ins,
+                stacked_dcaches,
+            ),
+            reverse=True,
+        )
+        return stacked_dleaves, stacked_dcache_ins, dh_out
+
+      self._layer_rev_scan_fn = jax.jit(rev_scan_layers)
+
+      layer_total = len(self._local_layer_defs)
+
+      def unstack_hiddens(stacked):
+        return tuple(stacked[index] for index in range(layer_total))
+
+      self._layer_unstack_fn = jax.jit(unstack_hiddens)
+
+      def accumulate_grads(acc, delta):
+        return jax.tree.map(lambda a, b: a + b, acc, delta)
+
+      self._layer_acc_fn = jax.jit(accumulate_grads)
+    if (
+        self._layer_scan_stack is None
+        or self._layer_scan_stack[0] is not engine_leaves
+    ):
+      per_layer = [
+          tuple(engine_leaves[index] for index in indices)
+          for indices in self._local_layer_full_indices
+      ]
+      width = len(per_layer[0])
+      if any(len(leaves) != width for leaves in per_layer[1:]):
+        raise FunctionalMappingError(
+            "P50 layer scan requires equal leaf counts per layer"
+        )
+      stacked = tuple(
+          jnp.stack([leaves[k] for leaves in per_layer])
+          for k in range(width)
+      )
+      if self._layer_scan_stack is None:
+        print(
+            "[P50] stacked leaf shardings: "
+            + "; ".join(
+                f"{tuple(x.shape)}:{x.sharding}"
+                for x in (stacked[0], per_layer[0][0])
+            ),
+            flush=True,
+        )
+      self._layer_scan_stack = (engine_leaves, stacked)
+    return self._layer_scan_stack[1]
+
+  def run_layers_scan(self, engine_leaves, caches, hidden, metadata):
+    """Runs the whole layer stack as one scanned program."""
+    stacked_leaves = self._ensure_layer_scan(engine_leaves)
+    stacked_caches = jax.tree.map(lambda *xs: jnp.stack(xs), *caches)
+    new_stacked, hidden_out = self._layer_scan_fn(
+        stacked_leaves, stacked_caches, hidden, metadata
+    )
+    layer_count = len(self._local_layer_fns)
+    new_caches = tuple(
+        jax.tree.map(lambda x, _i=i: x[_i], new_stacked)
+        for i in range(layer_count)
+    )
+    return new_caches, hidden_out
+
+  def run_layers_tape_scan(self, engine_leaves, caches, hidden, metadata):
+    """Rebuilds the layer tape as one scanned program."""
+    stacked_leaves = self._ensure_layer_scan(engine_leaves)
+    stacked_cache_ins = jax.tree.map(lambda *xs: jnp.stack(xs), *caches)
+    hidden_ins, new_caches, hidden_out = self._layer_tape_scan_fn(
+        stacked_leaves, stacked_cache_ins, hidden, metadata
+    )
+    del new_caches
+    return stacked_cache_ins, hidden_ins, hidden_out
+
+  def run_layers_rev_scan(
+      self,
+      engine_leaves,
+      stacked_cache_ins,
+      stacked_hidden_ins,
+      metadata,
+      stacked_dcaches,
+      dhidden,
+  ):
+    """Applies the whole layer pullback stack as one reverse scan."""
+    stacked_leaves = self._ensure_layer_scan(engine_leaves)
+    return self._layer_rev_scan_fn(
+        stacked_leaves,
+        stacked_cache_ins,
+        stacked_hidden_ins,
+        metadata,
+        stacked_dcaches,
+        dhidden,
+    )
+
+  def unstack_hidden_ins(self, engine_leaves, stacked_hidden_ins):
+    """Splits the scanned tape hiddens into per-layer arrays in one call."""
+    self._ensure_layer_scan(engine_leaves)
+    return self._layer_unstack_fn(stacked_hidden_ins)
+
+  def accumulate_layer_grads(self, engine_leaves, layer_grads, chunk_grads):
+    """Adds one chunk's per-layer gradients in a single elementwise call."""
+    self._ensure_layer_scan(engine_leaves)
+    return self._layer_acc_fn(layer_grads, chunk_grads)
 
   def run_block_pullback(
       self,
@@ -2687,6 +2930,114 @@ class Qwen3EngineForwardAdapter:
         )
     return pullback(engine_cotangents)[0]
 
+  def _batched_report_adjoint(self, trainer_state, engine_cotangents):
+    """One-dispatch mapping adjoint + f32 cast (data movement + cast only).
+
+    The eager path re-traces jax.vjp over the whole trainer->engine mapping
+    per trajectory; this compiles the identical composition once. The
+    per-call shape contract stays host-side and fail-closed.
+    """
+    _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
+        trainer_state, engine_cotangents
+    )
+    if os.environ.get("CANON_P28_SEGMENTED_TRAIN", "") != "1":
+      raise FunctionalMappingError(
+          "P28 mapping adjoint requires CANON_P28_SEGMENTED_TRAIN=1"
+      )
+    engine_cotangents = tuple(engine_cotangents)
+    if getattr(self, "_p50_adjoint_fn", None) is None:
+      model_config = self._runner.model_config
+
+      def mapping(state):
+        return map_trainer_state_to_engine_leaves(
+            trainer_state=state,
+            engine_state_contract=self._engine_state_contract,
+            key_mappings=self._key_mappings,
+            transpose_keys=self._transpose_keys,
+            key_mapping_hook_fns=self._hook_fns,
+            num_kv_heads=model_config.get_total_num_kv_heads(),
+            head_dim=model_config.get_head_size(),
+            tp_size=self._tp_size,
+        ).leaves
+
+      def adjoint(state, cotangents):
+        _, pullback = jax.vjp(mapping, state)
+        gradient = pullback(tuple(cotangents))[0]
+        return jax.tree.map(
+            lambda value: value.astype(jnp.float32), gradient
+        )
+
+      self._p50_adjoint_shapes = tuple(
+          value.shape for value in jax.eval_shape(mapping, trainer_state)
+      )
+      self._p50_adjoint_fn = jax.jit(adjoint)
+    expected = self._p50_adjoint_shapes
+    if len(expected) != len(engine_cotangents):
+      raise FunctionalMappingError(
+          "P28 mapping-adjoint cotangent count changed: "
+          f"{len(engine_cotangents)} != {len(expected)}"
+      )
+    for index, (shape, cotangent) in enumerate(
+        zip(expected, engine_cotangents, strict=True)
+    ):
+      if shape != cotangent.shape:
+        raise FunctionalMappingError(
+            "P28 mapping-adjoint cotangent shape changed at leaf "
+            f"{index}: {cotangent.shape} != {shape}"
+        )
+    return self._p50_adjoint_fn(trainer_state, engine_cotangents)
+
+  def _batched_report_add(self, total_tree, delta_tree):
+    """One-dispatch elementwise tree add (no reduction freedom)."""
+    if getattr(self, "_p50_acc_fn", None) is None:
+      self._p50_acc_fn = jax.jit(
+          lambda total, delta: jax.tree.map(
+              lambda a, b: a + b, total, delta
+          )
+      )
+    return self._p50_acc_fn(total_tree, delta_tree)
+
+  def _batched_report_evidence(
+      self, engine_groups, trainer_leaves, engine_gradients, cache_leaves
+  ):
+    """One-dispatch evidence predicates (exact bool/int reductions)."""
+    if getattr(self, "_p50_evidence_fn", None) is None:
+      group_index_items = tuple(
+          (label, tuple(indices))
+          for label, indices in engine_groups.items()
+      )
+
+      def stacked_finite(leaves):
+        if not leaves:
+          return jnp.ones((0,), jnp.bool_)
+        return jnp.stack([jnp.all(jnp.isfinite(value)) for value in leaves])
+
+      def stacked_nonzero(leaves):
+        if not leaves:
+          return jnp.zeros((0,), jnp.int32)
+        return jnp.stack([jnp.count_nonzero(value) for value in leaves])
+
+      def evidence(trainer_lv, engine_lv, cache_lv):
+        groups = {
+            label: (
+                stacked_finite(tuple(engine_lv[i] for i in indices)),
+                stacked_nonzero(tuple(engine_lv[i] for i in indices)),
+            )
+            for label, indices in group_index_items
+        }
+        return {
+            "trainer": (
+                stacked_finite(trainer_lv), stacked_nonzero(trainer_lv)
+            ),
+            "groups": groups,
+            "cache": (stacked_finite(cache_lv), stacked_nonzero(cache_lv)),
+        }
+
+      self._p50_evidence_fn = jax.jit(evidence)
+    return self._p50_evidence_fn(
+        tuple(trainer_leaves), tuple(engine_gradients), tuple(cache_leaves)
+    )
+
   def _p28_sequence_spec(
       self,
       prompt,
@@ -2789,6 +3140,72 @@ class Qwen3EngineForwardAdapter:
         metadata,
     )
 
+  @staticmethod
+  def _p50_scan_verify(loop_hidden, scan_hidden, loop_caches, scan_caches,
+                       chunk_index):
+    """Bitwise gate between the per-layer loop and the scanned program."""
+    hidden_same = bool(np.asarray(jnp.array_equal(loop_hidden, scan_hidden)))
+    cache_same = all(
+        bool(np.asarray(jnp.array_equal(a, b)))
+        for a, b in zip(
+            jax.tree.leaves(loop_caches), jax.tree.leaves(scan_caches)
+        )
+    )
+    if not (hidden_same and cache_same):
+      raise FunctionalMappingError(
+          "P50 layer-scan verify mismatch at chunk "
+          f"{chunk_index}: hidden_same={hidden_same} cache_same={cache_same}"
+      )
+
+  @staticmethod
+  def _p50_rev_verify(label, chunk_index, loop_tree, scan_tree):
+    """Bitwise gate between the loop reverse and the scanned reverse.
+
+    Returns None when every leaf matches; otherwise a diagnostic string
+    naming each mismatching leaf (index, shape/dtype, differing-element
+    count, max abs difference, and which stacked rows differ when the
+    leading axis looks like the layer axis).
+    """
+    loop_leaves = jax.tree.leaves(loop_tree)
+    scan_leaves = jax.tree.leaves(scan_tree)
+    if len(loop_leaves) != len(scan_leaves):
+      raise FunctionalMappingError(
+          "P50 reverse-scan verify leaf-count mismatch at chunk "
+          f"{chunk_index}: {label} {len(loop_leaves)} != {len(scan_leaves)}"
+      )
+    details = []
+    for leaf_index, (a, b) in enumerate(zip(loop_leaves, scan_leaves)):
+      if bool(np.asarray(jnp.array_equal(a, b))):
+        continue
+      differing = int(np.asarray(jnp.sum(a != b)))
+      max_abs = float(
+          np.asarray(
+              jnp.max(jnp.abs(a.astype(jnp.float32) - b.astype(jnp.float32)))
+          )
+      )
+      row_note = ""
+      if a.ndim >= 1 and a.shape[0] <= 64:
+        row_equal = np.asarray(
+            jnp.all(
+                (a != b).reshape(a.shape[0], -1) == False,  # noqa: E712
+                axis=1,
+            )
+        )
+        bad_rows = [int(i) for i in np.nonzero(~row_equal)[0]]
+        row_note = f" rows={bad_rows}"
+      details.append(
+          f"leaf[{leaf_index}] shape={tuple(a.shape)} dtype={a.dtype} "
+          f"n_diff={differing}/{a.size} max_abs_diff={max_abs:.3e}{row_note}"
+      )
+    if not details:
+      return None
+    detail_text = "; ".join(details)
+    print(
+        f"[P50DIAG] chunk={chunk_index} {label}: {detail_text}",
+        flush=True,
+    )
+    return f"{label}: {detail_text}"
+
   def _p28_forward_sequence(
       self, segmented, engine_leaves, spec, *, keep_cache_inputs
   ):
@@ -2811,18 +3228,33 @@ class Qwen3EngineForwardAdapter:
             input_ids, state_leaves=engine_leaves
         )
         counts["embed_forward"] += 1
-        next_caches = []
-        for layer_index, cache in enumerate(caches):
-          cache, hidden = segmented.run_layer_forward(
-              layer_index,
-              engine_leaves,
-              cache,
-              hidden,
-              metadata,
+        layer_scan_mode = segmented.layer_scan_mode()
+        scan_caches = scan_hidden = None
+        if layer_scan_mode:
+          scan_caches, scan_hidden = segmented.run_layers_scan(
+              engine_leaves, caches, hidden, metadata
           )
-          next_caches.append(cache)
-          counts["layer_forward"] += 1
-        caches = tuple(next_caches)
+        if layer_scan_mode == "1":
+          caches = scan_caches
+          hidden = scan_hidden
+          counts["layer_forward"] += len(caches)
+        else:
+          next_caches = []
+          for layer_index, cache in enumerate(caches):
+            cache, hidden = segmented.run_layer_forward(
+                layer_index,
+                engine_leaves,
+                cache,
+                hidden,
+                metadata,
+            )
+            next_caches.append(cache)
+            counts["layer_forward"] += 1
+          caches = tuple(next_caches)
+          if layer_scan_mode in ("verify", "verify_rev"):
+            self._p50_scan_verify(
+                hidden, scan_hidden, caches, scan_caches, chunk_index
+            )
         normalized = segmented.run_norm_forward(
             hidden, state_leaves=engine_leaves
         )
@@ -2889,6 +3321,8 @@ class Qwen3EngineForwardAdapter:
     dcache_carry = tuple(
         tree_zeros(cache) for cache in replay["final_caches"]
     )
+    layer_scan_mode = segmented.layer_scan_mode()
+    layer_count = len(segmented._local_layer_leaves)  # pylint: disable=protected-access
     counts = dict(replay["counts"])
     counts.update({
         "embed_pullback": 0,
@@ -2908,17 +3342,52 @@ class Qwen3EngineForwardAdapter:
             input_ids, state_leaves=engine_leaves
         )
         counts["embed_forward"] += 1
-        layer_tape = []
-        for layer_index, cache in enumerate(caches):
-          layer_tape.append((cache, hidden))
-          _, hidden = segmented.run_layer_forward(
-              layer_index,
-              engine_leaves,
-              cache,
-              hidden,
-              metadata,
+        scan_tape = None
+        if layer_scan_mode:
+          scan_tape = segmented.run_layers_tape_scan(
+              engine_leaves, caches, hidden, metadata
           )
-          counts["layer_forward"] += 1
+        if layer_scan_mode == "1":
+          stacked_cache_ins, stacked_hidden_ins, hidden = scan_tape
+          hidden_ins = segmented.unstack_hidden_ins(
+              engine_leaves, stacked_hidden_ins
+          )
+          layer_tape = list(zip(caches, hidden_ins))
+          counts["layer_forward"] += layer_count
+        else:
+          layer_tape = []
+          for layer_index, cache in enumerate(caches):
+            layer_tape.append((cache, hidden))
+            _, hidden = segmented.run_layer_forward(
+                layer_index,
+                engine_leaves,
+                cache,
+                hidden,
+                metadata,
+            )
+            counts["layer_forward"] += 1
+          if layer_scan_mode in ("verify", "verify_rev"):
+            stacked_cache_ins, stacked_hidden_ins, scan_hidden_out = scan_tape
+            tape_faults = [
+                fault
+                for fault in (
+                    self._p50_rev_verify(
+                        "tape hidden_ins",
+                        chunk_index,
+                        jnp.stack([entry[1] for entry in layer_tape]),
+                        stacked_hidden_ins,
+                    ),
+                    self._p50_rev_verify(
+                        "tape hidden_out", chunk_index, hidden, scan_hidden_out
+                    ),
+                )
+                if fault is not None
+            ]
+            if tape_faults:
+              raise FunctionalMappingError(
+                  "P50 tape-scan verify mismatch at chunk "
+                  f"{chunk_index}: {'; '.join(tape_faults)}"
+              )
         pre_norm = hidden
         normalized = segmented.run_norm_forward(
             pre_norm, state_leaves=engine_leaves
@@ -2954,24 +3423,101 @@ class Qwen3EngineForwardAdapter:
         counts["norm_pullback"] += 1
         norm_grad = tree_add(norm_grad, local_norm_grad)
 
-        previous_cache_carry = [None] * len(layer_tape)
-        for layer_index in reversed(range(len(layer_tape))):
-          cache_in, hidden_in = layer_tape[layer_index]
-          local_grad, dcache, dhidden = segmented.run_block_pullback(
-              layer_index,
-              cache_in,
-              hidden_in,
-              metadata,
-              dcache_carry[layer_index],
-              dhidden,
-              state_leaves=engine_leaves,
+        if layer_scan_mode == "1":
+          chunk_grads = []
+          previous_cache_carry = [None] * layer_count
+          for layer_index in reversed(range(layer_count)):
+            cache_in, hidden_in = layer_tape[layer_index]
+            local_grad, dcache, dhidden = segmented.run_block_pullback(
+                layer_index,
+                cache_in,
+                hidden_in,
+                metadata,
+                dcache_carry[layer_index],
+                dhidden,
+                state_leaves=engine_leaves,
+            )
+            chunk_grads.append(local_grad)
+            previous_cache_carry[layer_index] = dcache
+            counts["layer_pullback"] += 1
+          dcache_carry = tuple(previous_cache_carry)
+          layer_grads = list(
+              segmented.accumulate_layer_grads(
+                  engine_leaves,
+                  layer_grads,
+                  list(reversed(chunk_grads)),
+              )
           )
-          layer_grads[layer_index] = tree_add(
-              layer_grads[layer_index], local_grad
-          )
-          previous_cache_carry[layer_index] = dcache
-          counts["layer_pullback"] += 1
-        dcache_carry = tuple(previous_cache_carry)
+        else:
+          verify_dcaches_in = verify_dhidden_in = None
+          verify_local_grads = None
+          if layer_scan_mode == "verify_rev":
+            verify_dcaches_in = jax.tree.map(
+                lambda *xs: jnp.stack(xs), *dcache_carry
+            )
+            verify_dhidden_in = dhidden
+            verify_local_grads = []
+          previous_cache_carry = [None] * len(layer_tape)
+          for layer_index in reversed(range(len(layer_tape))):
+            cache_in, hidden_in = layer_tape[layer_index]
+            local_grad, dcache, dhidden = segmented.run_block_pullback(
+                layer_index,
+                cache_in,
+                hidden_in,
+                metadata,
+                dcache_carry[layer_index],
+                dhidden,
+                state_leaves=engine_leaves,
+            )
+            layer_grads[layer_index] = tree_add(
+                layer_grads[layer_index], local_grad
+            )
+            if verify_local_grads is not None:
+              verify_local_grads.append(local_grad)
+            previous_cache_carry[layer_index] = dcache
+            counts["layer_pullback"] += 1
+          dcache_carry = tuple(previous_cache_carry)
+          if layer_scan_mode == "verify_rev":
+            # The loop above walked layers high->low; restack in layer order.
+            verify_local_grads = list(reversed(verify_local_grads))
+            scan_dleaves, scan_dcache_ins, scan_dh = (
+                segmented.run_layers_rev_scan(
+                    engine_leaves,
+                    stacked_cache_ins,
+                    stacked_hidden_ins,
+                    metadata,
+                    verify_dcaches_in,
+                    verify_dhidden_in,
+                )
+            )
+            rev_faults = [
+                fault
+                for fault in (
+                    self._p50_rev_verify(
+                        "rev dleaves",
+                        chunk_index,
+                        jax.tree.map(
+                            lambda *xs: jnp.stack(xs), *verify_local_grads
+                        ),
+                        scan_dleaves,
+                    ),
+                    self._p50_rev_verify(
+                        "rev dcache",
+                        chunk_index,
+                        jax.tree.map(lambda *xs: jnp.stack(xs), *dcache_carry),
+                        scan_dcache_ins,
+                    ),
+                    self._p50_rev_verify(
+                        "rev dhidden", chunk_index, dhidden, scan_dh
+                    ),
+                )
+                if fault is not None
+            ]
+            if rev_faults:
+              raise FunctionalMappingError(
+                  "P50 reverse-scan verify mismatch at chunk "
+                  f"{chunk_index}: {'; '.join(f.split(':')[0] for f in rev_faults)}"
+              )
         local_embed_grad = segmented.run_embed_pullback(
             input_ids, dhidden, state_leaves=engine_leaves
         )
@@ -3171,18 +3717,33 @@ class Qwen3EngineForwardAdapter:
             input_ids, state_leaves=engine_leaves
         )
         counts["embed_forward"] += 1
-        next_caches = []
-        for layer_index, cache in enumerate(caches):
-          cache, hidden = segmented.run_layer_forward(
-              layer_index,
-              engine_leaves,
-              cache,
-              hidden,
-              metadata,
+        layer_scan_mode = segmented.layer_scan_mode()
+        scan_caches = scan_hidden = None
+        if layer_scan_mode:
+          scan_caches, scan_hidden = segmented.run_layers_scan(
+              engine_leaves, caches, hidden, metadata
           )
-          next_caches.append(cache)
-          counts["layer_forward"] += 1
-        caches = tuple(next_caches)
+        if layer_scan_mode == "1":
+          caches = scan_caches
+          hidden = scan_hidden
+          counts["layer_forward"] += len(caches)
+        else:
+          next_caches = []
+          for layer_index, cache in enumerate(caches):
+            cache, hidden = segmented.run_layer_forward(
+                layer_index,
+                engine_leaves,
+                cache,
+                hidden,
+                metadata,
+            )
+            next_caches.append(cache)
+            counts["layer_forward"] += 1
+          caches = tuple(next_caches)
+          if layer_scan_mode in ("verify", "verify_rev"):
+            self._p50_scan_verify(
+                hidden, scan_hidden, caches, scan_caches, chunk_index
+            )
         normalized = segmented.run_norm_forward(
             hidden, state_leaves=engine_leaves
         )
@@ -3536,12 +4097,24 @@ class Qwen3EngineForwardAdapter:
         )
         for index in range(contract.local_trajectories)
     )
+    report_mode = os.environ.get("CANON_P28_BATCHED_REPORT", "")
+    if report_mode not in ("", "0", "1", "verify"):
+      raise FunctionalMappingError(
+          "CANON_P28_BATCHED_REPORT must be unset/0/1/verify, "
+          f"got {report_mode!r}"
+      )
+    batched_report = report_mode == "1"
+    report_verify = report_mode == "verify"
+    p32_forward_start = time.perf_counter()
+    p32_forward_durations = []
     forwards = []
     for index, spec in enumerate(specs):
+      p32_group_start = time.perf_counter()
       forward = self._p32_forward_group(
           segmented, engine_leaves, spec, keep_cache_inputs=False
       )
       forward["logps"].block_until_ready()
+      p32_forward_durations.append(time.perf_counter() - p32_group_start)
       forwards.append(forward)
       print(
           f"[P32.DP{contract.dp_size}] forward_group_done "
@@ -3551,6 +4124,18 @@ class Qwen3EngineForwardAdapter:
           flush=True,
       )
     forwards = tuple(forwards)
+    if os.environ.get("CANON_PERF_LOG", "1") != "0" and p32_forward_durations:
+      print(
+          "[PERF] stage=p32_vag_forward seconds=%.3f groups=%d"
+          " mean=%.3f max=%.3f"
+          % (
+              time.perf_counter() - p32_forward_start,
+              len(p32_forward_durations),
+              sum(p32_forward_durations) / len(p32_forward_durations),
+              max(p32_forward_durations),
+          ),
+          flush=True,
+      )
     grouped_logps = jnp.stack(
         tuple(result["logps"] for result in forwards), axis=0
     ).astype(jnp.float32)
@@ -3604,12 +4189,32 @@ class Qwen3EngineForwardAdapter:
           raise FunctionalMappingError(
               f"P33 group {index} rank {rank} replay logprobs changed"
           )
-        rank_gradient = self.map_engine_cotangents_to_trainer_state(
-            trainer_state, reverse["engine_gradients"]
-        )
-        rank_gradient = jax.tree.map(
-            lambda value: value.astype(jnp.float32), rank_gradient
-        )
+        adjoint_start = time.perf_counter()
+        if batched_report:
+          rank_gradient = self._batched_report_adjoint(
+              trainer_state, reverse["engine_gradients"]
+          )
+        else:
+          rank_gradient = self.map_engine_cotangents_to_trainer_state(
+              trainer_state, reverse["engine_gradients"]
+          )
+          rank_gradient = jax.tree.map(
+              lambda value: value.astype(jnp.float32), rank_gradient
+          )
+          if report_verify:
+            fault = self._p50_rev_verify(
+                "p32 report adjoint",
+                index,
+                rank_gradient,
+                self._batched_report_adjoint(
+                    trainer_state, reverse["engine_gradients"]
+                ),
+            )
+            if fault is not None:
+              raise FunctionalMappingError(
+                  f"P50 batched-report verify mismatch: {fault}"
+              )
+        adjoint_seconds[0] += time.perf_counter() - adjoint_start
         if reducer is None:
           reducer_factory = getattr(
               self,
@@ -3670,8 +4275,13 @@ class Qwen3EngineForwardAdapter:
 
     trainer_gradients = None
     reports = []
+    adjoint_seconds = [0.0]
+    p32_reverse_start = time.perf_counter()
+    p32_reverse_durations = []
     for index, spec in enumerate(specs):
+      p32_group_start = time.perf_counter()
       one_gradient, report = reverse_reduce_group(index, spec)
+      p32_reverse_durations.append(time.perf_counter() - p32_group_start)
       if deterministic_repeat:
         repeated_gradient, repeated_report = reverse_reduce_group(index, spec)
         exact_flags = tuple(
@@ -3700,6 +4310,22 @@ class Qwen3EngineForwardAdapter:
               f"P34 group {index} repeated gradient is not array-exact"
           )
       reports.append(report)
+      if (
+          os.environ.get("CANON_PERF_LOG", "1") != "0"
+          and index == len(specs) - 1
+      ):
+        print(
+            "[PERF] stage=p32_vag_reverse seconds=%.3f groups=%d"
+            " mean=%.3f max=%.3f adjoint=%.3f"
+            % (
+                time.perf_counter() - p32_reverse_start,
+                len(p32_reverse_durations),
+                sum(p32_reverse_durations) / len(p32_reverse_durations),
+                max(p32_reverse_durations),
+                adjoint_seconds[0],
+            ),
+            flush=True,
+        )
       print(
           f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] reverse_group_done "
           f"group={index + 1}/{contract.local_trajectories} "
@@ -3988,6 +4614,14 @@ class Qwen3EngineForwardAdapter:
     batched_evidence = (
         os.environ.get("CANON_BATCHED_EVIDENCE", "") == "1"
     )
+    report_mode = os.environ.get("CANON_P28_BATCHED_REPORT", "")
+    if report_mode not in ("", "0", "1", "verify"):
+      raise FunctionalMappingError(
+          "CANON_P28_BATCHED_REPORT must be unset/0/1/verify, "
+          f"got {report_mode!r}"
+      )
+    batched_report = report_mode == "1"
+    report_verify = report_mode == "verify"
 
     def _stacked_finite(leaves):
       if not leaves:
@@ -4039,14 +4673,36 @@ class Qwen3EngineForwardAdapter:
       vag_pre_sum += vag_pre_done - vag_iter_start
       vag_issue_sum += vag_call_done - vag_pre_done
       vag_drain_sum += vag_drain_done - vag_call_done
-      one_trainer_gradient = self.map_engine_cotangents_to_trainer_state(
-          trainer_state, reverse["engine_gradients"]
-      )
-      one_trainer_gradient = jax.tree.map(
-          lambda value: value.astype(jnp.float32), one_trainer_gradient
-      )
+      if batched_report:
+        one_trainer_gradient = self._batched_report_adjoint(
+            trainer_state, reverse["engine_gradients"]
+        )
+      else:
+        one_trainer_gradient = self.map_engine_cotangents_to_trainer_state(
+            trainer_state, reverse["engine_gradients"]
+        )
+        one_trainer_gradient = jax.tree.map(
+            lambda value: value.astype(jnp.float32), one_trainer_gradient
+        )
+        if report_verify:
+          fault = self._p50_rev_verify(
+              "report adjoint",
+              index,
+              one_trainer_gradient,
+              self._batched_report_adjoint(
+                  trainer_state, reverse["engine_gradients"]
+              ),
+          )
+          if fault is not None:
+            raise FunctionalMappingError(
+                f"P50 batched-report verify mismatch: {fault}"
+            )
       trainer_leaves = jax.tree.leaves(one_trainer_gradient)
-      if batched_evidence:
+      report_pending = None
+      if batched_evidence and batched_report:
+        trainer_finite = None
+        trainer_nonzero = None
+      elif batched_evidence:
         trainer_pending = (
             _stacked_finite(trainer_leaves),
             _stacked_nonzero(trainer_leaves),
@@ -4075,36 +4731,93 @@ class Qwen3EngineForwardAdapter:
       })
       group_health = {}
       group_pending = {}
-      for label, indices in engine_groups.items():
-        leaves = tuple(reverse["engine_gradients"][i] for i in indices)
-        if batched_evidence:
-          group_pending[label] = (
-              _stacked_finite(leaves), _stacked_nonzero(leaves)
+      if batched_evidence and batched_report:
+        report_pending = self._batched_report_evidence(
+            engine_groups,
+            trainer_leaves,
+            reverse["engine_gradients"],
+            jax.tree.leaves(reverse["initial_cache_cotangents"]),
+        )
+      else:
+        if batched_evidence and report_verify:
+          unified = self._batched_report_evidence(
+              engine_groups,
+              trainer_leaves,
+              reverse["engine_gradients"],
+              jax.tree.leaves(reverse["initial_cache_cotangents"]),
           )
-        else:
-          group_health[label] = {
-              "finite": all(
-                  bool(np.asarray(jnp.all(jnp.isfinite(value))))
-                  for value in leaves
-              ),
-              "nonzero": sum(
-                  int(np.asarray(jnp.count_nonzero(value)))
-                  for value in leaves
-              ),
+          eager_trainer = (
+              _stacked_finite(trainer_leaves),
+              _stacked_nonzero(trainer_leaves),
+          )
+          eager_groups = {
+              label: (
+                  _stacked_finite(
+                      tuple(reverse["engine_gradients"][i] for i in indices)
+                  ),
+                  _stacked_nonzero(
+                      tuple(reverse["engine_gradients"][i] for i in indices)
+                  ),
+              )
+              for label, indices in engine_groups.items()
           }
+          eager_cache_leaves = jax.tree.leaves(
+              reverse["initial_cache_cotangents"]
+          )
+          eager_cache = (
+              _stacked_finite(eager_cache_leaves),
+              _stacked_nonzero(eager_cache_leaves),
+          )
+          fault = self._p50_rev_verify(
+              "report evidence",
+              index,
+              {"trainer": eager_trainer, "groups": eager_groups,
+               "cache": eager_cache},
+              {"trainer": unified["trainer"], "groups": unified["groups"],
+               "cache": unified["cache"]},
+          )
+          if fault is not None:
+            raise FunctionalMappingError(
+                f"P50 batched-report verify mismatch: {fault}"
+            )
+        for label, indices in engine_groups.items():
+          leaves = tuple(reverse["engine_gradients"][i] for i in indices)
+          if batched_evidence:
+            group_pending[label] = (
+                _stacked_finite(leaves), _stacked_nonzero(leaves)
+            )
+          else:
+            group_health[label] = {
+                "finite": all(
+                    bool(np.asarray(jnp.all(jnp.isfinite(value))))
+                    for value in leaves
+                ),
+                "nonzero": sum(
+                    int(np.asarray(jnp.count_nonzero(value)))
+                    for value in leaves
+                ),
+            }
       cache_leaves = jax.tree.leaves(
           reverse["initial_cache_cotangents"]
       )
       if batched_evidence:
-        fetched = jax.device_get({
-            "loss": loss_cotangent_pending,
-            "trainer": trainer_pending,
-            "groups": group_pending,
-            "cache": (
-                _stacked_finite(cache_leaves),
-                _stacked_nonzero(cache_leaves),
-            ),
-        })
+        if report_pending is not None:
+          fetched = jax.device_get({
+              "loss": loss_cotangent_pending,
+              "trainer": report_pending["trainer"],
+              "groups": report_pending["groups"],
+              "cache": report_pending["cache"],
+          })
+        else:
+          fetched = jax.device_get({
+              "loss": loss_cotangent_pending,
+              "trainer": trainer_pending,
+              "groups": group_pending,
+              "cache": (
+                  _stacked_finite(cache_leaves),
+                  _stacked_nonzero(cache_leaves),
+              ),
+          })
         loss_cotangent_finite = bool(np.all(fetched["loss"][0]))
         loss_cotangent_nonzero = int(
             np.sum(fetched["loss"][1], dtype=np.int64)
@@ -4130,15 +4843,33 @@ class Qwen3EngineForwardAdapter:
             for value in cache_leaves
         )
       if gradient_microbatch_sink is None and gradient_pair_sink is None:
-        trainer_gradients = (
-            one_trainer_gradient
-            if trainer_gradients is None
-            else jax.tree.map(
-                lambda total, value: total + value,
-                trainer_gradients,
-                one_trainer_gradient,
+        if trainer_gradients is None:
+          trainer_gradients = one_trainer_gradient
+        elif batched_report:
+          trainer_gradients = self._batched_report_add(
+              trainer_gradients, one_trainer_gradient
+          )
+        else:
+          jitted_total = (
+              self._batched_report_add(
+                  trainer_gradients, one_trainer_gradient
+              )
+              if report_verify
+              else None
+          )
+          trainer_gradients = jax.tree.map(
+              lambda total, value: total + value,
+              trainer_gradients,
+              one_trainer_gradient,
+          )
+          if jitted_total is not None:
+            fault = self._p50_rev_verify(
+                "report accumulate", index, trainer_gradients, jitted_total
             )
-        )
+            if fault is not None:
+              raise FunctionalMappingError(
+                  f"P50 batched-report verify mismatch: {fault}"
+              )
       else:
         if pair_gradient is None:
           pair_gradient = one_trainer_gradient
@@ -4154,11 +4885,31 @@ class Qwen3EngineForwardAdapter:
                 scale * jnp.asarray(float(gradient_microbatches), scale.dtype),
             )
           else:
-            pair_gradient = jax.tree.map(
-                lambda total, value: total + value,
-                pair_gradient,
-                one_trainer_gradient,
-            )
+            if batched_report:
+              pair_gradient = self._batched_report_add(
+                  pair_gradient, one_trainer_gradient
+              )
+            else:
+              jitted_pair = (
+                  self._batched_report_add(
+                      pair_gradient, one_trainer_gradient
+                  )
+                  if report_verify
+                  else None
+              )
+              pair_gradient = jax.tree.map(
+                  lambda total, value: total + value,
+                  pair_gradient,
+                  one_trainer_gradient,
+              )
+              if jitted_pair is not None:
+                fault = self._p50_rev_verify(
+                    "report pair-accumulate", index, pair_gradient, jitted_pair
+                )
+                if fault is not None:
+                  raise FunctionalMappingError(
+                      f"P50 batched-report verify mismatch: {fault}"
+                  )
             micro_gradient = jax.tree.map(
                 lambda value: value * scale * jnp.asarray(
                     float(gradient_microbatches), value.dtype

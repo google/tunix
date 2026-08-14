@@ -196,3 +196,15 @@ of the old `=0` quirk — so its `native_A_observed` attestation goes **false-re
 post-P47a capture. The B rescore path still requests `=0` and is untouched. Adapt the probe's
 A-identification (see `tasks/p35-envelope-discriminator/PRECONDITIONS.md`) before the next
 P35 envelope run; a red from this cause is a stale heuristic, not a boundary finding.
+
+### 20. The L3 canary pair cannot gate segmented-VJP changes
+
+`tasks/p41-optimizer-residency/scripts/run_onehost_pair.sh` runs
+`CANON_P28_SEGMENTED_VJP=0`: the segmented value-and-grad (and everything
+behind `CANON_P28_LAYER_SCAN` / `CANON_P28_BATCHED_REPORT`) never executes
+in that vehicle. A green pair with those envs set is a vacuous gate — the
+code under test did not run (mirror of "no line printed = not tested").
+Byte gates for segmented-VJP changes must be in-run dual-compute verify
+modes (`CANON_P28_LAYER_SCAN=verify`, `CANON_P28_BATCHED_REPORT=verify`),
+which also dodge step-0 sampling nondeterminism; the pair remains valid
+only as a default-off neutrality regression.
