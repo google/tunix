@@ -682,13 +682,13 @@ class TrajectoryTest(parameterized.TestCase):
         extra={"custom_extra": "custom_val"},
     )
 
-    # 2. Add the first step to it via calling create_task_step
+    # 2. Add the first step to it via calling create_task_step (step_id = 0)
     step_0 = converter.create_task_step("Solve task step by step")
     self.assertIsNotNone(step_0)
     self.assertEqual(step_0.step_id, 0)
     self.assertEqual(step_0.source, trajectory.Source.USER)
 
-    # 3. Add the next step via create_agent_step()
+    # 3. Add Tunix turn 0 (tunix_step_id=0) agent step -> converted step_id = 1
     mock_agent_step_1 = agent_types.Step(
         model_response="Action 1 response",
         thought="Thought 1",
@@ -705,11 +705,11 @@ class TrajectoryTest(parameterized.TestCase):
         mc_return=1.0,
         info={"trace_1": "abc"},
     )
-    step_1 = converter.create_agent_step(mock_agent_step_1, step_id=0)
+    step_1 = converter.create_agent_step(mock_agent_step_1, tunix_step_id=0)
     self.assertIsNotNone(step_1)
     self.assertEqual(step_1.step_id, 1)
 
-    # 4. Add next step via create_env_step()
+    # 4. Add Tunix turn 0 (tunix_step_id=0) env step -> converted step_id = 2
     mock_env_step_1 = agent_types.Step(
         observation="Observation 1 result",
         reward=0.5,
@@ -718,11 +718,11 @@ class TrajectoryTest(parameterized.TestCase):
         env_masks=np.array([1]),
         info={"env_meta_1": "val1"},
     )
-    step_2 = converter.create_env_step(mock_env_step_1, step_id=1)
+    step_2 = converter.create_env_step(mock_env_step_1, tunix_step_id=0)
     self.assertIsNotNone(step_2)
     self.assertEqual(step_2.step_id, 2)
 
-    # 5. Now add again create_agent_step()
+    # 5. Add Tunix turn 1 (tunix_step_id=1) agent step -> converted step_id = 3
     mock_agent_step_2 = agent_types.Step(
         model_response="Action 2 response",
         thought="Thought 2",
@@ -739,11 +739,11 @@ class TrajectoryTest(parameterized.TestCase):
         mc_return=2.0,
         info={"trace_2": "def"},
     )
-    step_3 = converter.create_agent_step(mock_agent_step_2, step_id=2)
+    step_3 = converter.create_agent_step(mock_agent_step_2, tunix_step_id=1)
     self.assertIsNotNone(step_3)
     self.assertEqual(step_3.step_id, 3)
 
-    # 6. Add next step via create_env_step()
+    # 6. Add Tunix turn 1 (tunix_step_id=1) env step -> converted step_id = 4
     mock_env_step_2 = agent_types.Step(
         observation="Observation 2 result",
         reward=1.0,
@@ -752,11 +752,11 @@ class TrajectoryTest(parameterized.TestCase):
         env_masks=np.array([1]),
         info={"env_meta_2": "val2"},
     )
-    step_4 = converter.create_env_step(mock_env_step_2, step_id=3)
+    step_4 = converter.create_env_step(mock_env_step_2, tunix_step_id=1)
     self.assertIsNotNone(step_4)
     self.assertEqual(step_4.step_id, 4)
 
-    # 7. Now add again create_agent_step()
+    # 7. Add Tunix turn 2 (tunix_step_id=2) agent step -> converted step_id = 5
     mock_agent_step_3 = agent_types.Step(
         model_response="Action 3 response",
         thought="Thought 3",
@@ -767,11 +767,11 @@ class TrajectoryTest(parameterized.TestCase):
         mc_return=3.0,
         info={"trace_3": "ghi"},
     )
-    step_5 = converter.create_agent_step(mock_agent_step_3, step_id=4)
+    step_5 = converter.create_agent_step(mock_agent_step_3, tunix_step_id=2)
     self.assertIsNotNone(step_5)
     self.assertEqual(step_5.step_id, 5)
 
-    # 8. Add next step via create_env_step()
+    # 8. Add Tunix turn 2 (tunix_step_id=2) env step -> converted step_id = 6
     mock_env_step_3 = agent_types.Step(
         observation="Observation 3 result",
         reward=3.0,
@@ -780,7 +780,7 @@ class TrajectoryTest(parameterized.TestCase):
         env_masks=np.array([1]),
         info={"env_meta_3": "val3"},
     )
-    step_6 = converter.create_env_step(mock_env_step_3, step_id=5)
+    step_6 = converter.create_env_step(mock_env_step_3, tunix_step_id=2)
     self.assertIsNotNone(step_6)
     self.assertEqual(step_6.step_id, 6)
 

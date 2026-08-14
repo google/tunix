@@ -60,7 +60,7 @@ def _extract_metrics(
 
 
 def _extract_observation(obs_val: Any) -> trajectory_lib.Observation | None:
-  """Extracts an ATIF Observation container from an observation value."""
+  """Extracts an Observation container from an observation value."""
   if obs_val is None:
     return None
   items = obs_val if isinstance(obs_val, list) else [obs_val]
@@ -72,13 +72,13 @@ def _extract_observation(obs_val: Any) -> trajectory_lib.Observation | None:
 def create_task_step(
     task: Any,
 ) -> trajectory_lib.TunixStep | None:
-  """Creates an initial ATIF user task Step from a task prompt or object.
+  """Creates an initial user task Step from a task prompt or object.
 
   Args:
     task: The task prompt string, dictionary with 'prompts', or None.
 
   Returns:
-    An ATIF Step with step_id=0 and source=USER containing the task prompt,
+    A Tunix Step with step_id=0 and source=USER containing the task prompt,
     or None if task is None or empty.
   """
   if task is None:
@@ -106,17 +106,21 @@ def create_task_step(
 
 def create_agent_step(
     step: agent_types.Step | None,
-    step_id: int = 0,
+    tunix_step_id: int,
 ) -> trajectory_lib.TunixStep | None:
-  """Converts a Tunix agent_types.Step into an ATIF agent turn Step.
+  """Converts a Tunix agent_types.Step into an agent turn Step.
+
+  Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
+  converted step ID: `converted_step_id = 2 * tunix_step_id + 1`.
+  (e.g., Tunix turn 0 -> step 1, Tunix turn 1 -> step 3).
 
   Args:
     step: The Tunix RL step to convert, or None.
-    step_id: 0-based index of the step.
+    tunix_step_id: 0-based turn index of the step in the Tunix trajectory.
 
   Returns:
-    The converted Trajectory Step (with 1-based step_id), or None if step is
-    None.
+    The converted Step (with step_id = 2 * tunix_step_id + 1), or None if step
+    is None.
 
   Raises:
     ValueError: If assistant_tokens and logprobs lengths do not match.
@@ -134,8 +138,9 @@ def create_agent_step(
     if raw_action is not None:
       extra["raw_action"] = raw_action
 
+  converted_step_id = 2 * tunix_step_id + 1
   return trajectory_lib.TunixStep(
-      step_id=step_id + 1,
+      step_id=converted_step_id,
       source=trajectory_lib.Source.AGENT,
       message=step.model_response,
       reasoning_content=step.thought or None,
@@ -151,24 +156,29 @@ def create_agent_step(
 
 def create_env_step(
     step: agent_types.Step | None,
-    step_id: int = 0,
+    tunix_step_id: int,
 ) -> trajectory_lib.TunixStep | None:
-  """Converts a Tunix agent_types.Step into an ATIF environment turn Step.
+  """Converts a Tunix agent_types.Step into an environment turn Step.
+
+  Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
+  converted step ID: `converted_step_id = 2 * tunix_step_id + 2`.
+  (e.g., Tunix turn 0 -> step 2, Tunix turn 1 -> step 4).
 
   Args:
     step: The Tunix RL step to convert, or None.
-    step_id: 0-based index of the step.
+    tunix_step_id: 0-based turn index of the step in the Tunix trajectory.
 
   Returns:
-    The converted Trajectory Step (with 1-based step_id), or None if step is
-    None.
+    The converted Step (with step_id = 2 * tunix_step_id + 2), or None if step
+    is None.
   """
   if step is None:
     return None
 
   obs_str = str(step.observation) if step.observation is not None else ""
+  converted_step_id = 2 * tunix_step_id + 2
   return trajectory_lib.TunixStep(
-      step_id=step_id + 1,
+      step_id=converted_step_id,
       source=trajectory_lib.Source.SYSTEM,
       message=obs_str,
       observation=_extract_observation(step.observation),
@@ -301,6 +311,11 @@ def to_tunix_trajectory(
 ) -> agent_types.Trajectory:
   """Converts a Trajectory into a Tunix agent_types.Trajectory.
 
+  Reconstructs Tunix RL interaction steps from sequential converted steps:
+  - Step 0 (source USER or SYSTEM) -> Tunix task prompt dictionary.
+  - Subsequent steps (Agent step at 2i+1, Env step at 2i+2) -> Paired into
+    Tunix `agent_types.Step` instances for turn i.
+
   Args:
     traj: Trajectory or dictionary representation.
 
@@ -313,34 +328,36 @@ def to_tunix_trajectory(
     traj_obj = traj
 
   dto_steps: list[agent_types.Step] = []
-  step_idx = 0
-  num_steps = len(traj_obj.steps)
+  converted_step_idx = 0
+  num_converted_steps = len(traj_obj.steps)
 
   task_val = None
   # If step 0 is the initial prompt (source USER or SYSTEM), extract it.
-  if num_steps > 0 and traj_obj.steps[0].source in (
+  if num_converted_steps > 0 and traj_obj.steps[0].source in (
       trajectory_lib.Source.USER,
       trajectory_lib.Source.SYSTEM,
   ):
     task_val = {"prompts": [traj_obj.steps[0].message]}
-    step_idx = 1
+    converted_step_idx = 1
 
-  while step_idx < num_steps:
-    curr_step = traj_obj.steps[step_idx]
+  # Iterate through steps and pair AGENT + ENV steps into Tunix turns.
+  while converted_step_idx < num_converted_steps:
+    curr_step = traj_obj.steps[converted_step_idx]
     if curr_step.source == trajectory_lib.Source.AGENT:
       next_step = None
       if (
-          step_idx + 1 < num_steps
-          and traj_obj.steps[step_idx + 1].source != trajectory_lib.Source.AGENT
+          converted_step_idx + 1 < num_converted_steps
+          and traj_obj.steps[converted_step_idx + 1].source
+          != trajectory_lib.Source.AGENT
       ):
-        next_step = traj_obj.steps[step_idx + 1]
+        next_step = traj_obj.steps[converted_step_idx + 1]
       dto_step = to_tunix_step(agent_step=curr_step, env_step=next_step)
       dto_steps.append(dto_step)
-      step_idx += 2 if next_step is not None else 1
+      converted_step_idx += 2 if next_step is not None else 1
     else:
       dto_step = to_tunix_step(agent_step=None, env_step=curr_step)
       dto_steps.append(dto_step)
-      step_idx += 1
+      converted_step_idx += 1
 
   total_reward = getattr(traj_obj, "total_reward", None)
   reward = float(total_reward) if total_reward is not None else 0.0
