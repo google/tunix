@@ -453,11 +453,7 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-<<<<<<< HEAD
-<<<<<<< HEAD
     self._align_opt_state_dtypes(wrt_target)
-=======
->>>>>>> 77f25797 (snapshot)
     # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
     # Depth-1 non-packing fast path never reads the accumulator; skip its
