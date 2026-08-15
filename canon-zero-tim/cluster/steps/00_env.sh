@@ -42,6 +42,7 @@ unset _canon_p46_key
 
 # shellcheck disable=SC1090
 set -a
+export ENABLE_PATHWAYS_PERSISTENCE="${ENABLE_PATHWAYS_PERSISTENCE:-1}"
 source "$CANON_PKG/cluster/profiles/_canonical_engine.env"
 source "$PROFILE_ABS"
 set +a

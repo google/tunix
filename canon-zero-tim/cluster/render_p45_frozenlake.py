@@ -110,6 +110,7 @@ def render_all(
         "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
         "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
         "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+        "ENABLE_PATHWAYS_PERSISTENCE": "1",
     }
     env_by_name = {entry["name"]: entry for entry in main["env"]}
     for name, value in checkpoint_values.items():
