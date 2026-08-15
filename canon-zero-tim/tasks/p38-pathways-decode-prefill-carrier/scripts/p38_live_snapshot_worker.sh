@@ -45,7 +45,7 @@ last_observer_signature=""
 
 snapshot_if_changed() {
   local run_size=0 journal_size=0 incident_size=0 report_size=0 capsule_signature=""
-  local signature sequence_text rc capsule_path observer_path
+  local signature sequence_text rc capsule_path observer_path observer_dir
   local observer_signature="" observer_changed=0 round_value=missing
   [ ! -e "$CANON_RUN_LOG" ] || run_size="$(wc -c < "$CANON_RUN_LOG" | tr -d '[:space:]')"
   [ ! -e "$CANON_P38_REQUEST_JOURNAL" ] || journal_size="$(wc -c < "$CANON_P38_REQUEST_JOURNAL" | tr -d '[:space:]')"
@@ -60,12 +60,14 @@ snapshot_if_changed() {
     capsule_signature+="$(basename "$capsule_path"):$(wc -c < "$capsule_path" | tr -d '[:space:]'),"
   done
   shopt -u nullglob
-  if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ] && \
-     [ -d "$CANON_P38_KV_OBSERVER_DIR" ]; then
+  observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-}}"
+  if [ -n "$observer_dir" ] && [ -d "$observer_dir" ]; then
     shopt -s nullglob
     for observer_path in \
-        "$CANON_P38_KV_OBSERVER_DIR"/p38_kv_observer_*.json \
-        "$CANON_P38_KV_OBSERVER_DIR"/p38_kv_observer_*.npz; do
+        "$observer_dir"/p38_kv_observer_*.json \
+        "$observer_dir"/p38_kv_observer_*.npz \
+        "$observer_dir"/p38_seam_*.json \
+        "$observer_dir"/p38_seam_*.npz; do
       observer_signature+="$(basename "$observer_path"):$(wc -c < "$observer_path" | tr -d '[:space:]'),"
     done
     shopt -u nullglob

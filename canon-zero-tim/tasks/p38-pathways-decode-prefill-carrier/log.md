@@ -1341,7 +1341,11 @@
   only after review/commit/push. No target launch, backward, optimizer commit,
   commit, or push occurred in this worktree.
 
-## 2026-08-15 UTC — P38s17 live vs clean KV cache drift confirmed
+## 2026-08-15 UTC — [SUPERSEDED] P38s17 live vs clean KV drift claim
+
+This checkpoint records the originally archived interpretation. The following
+checkpoint supersedes its classification and numerical totals after direct
+reclassification from the committed NPZ inputs.
 
 - Type: target hardware observation and classification
 - Command: `canon-p38-fl-stock-p38s17-baac38bc` on 64 TPU (`DP16xTP4`, concurrency 256).
@@ -1357,3 +1361,44 @@
   and valid extents. Bit-level aggregate and sample fingerprint differences
   were observed between live serving KV cache and clean rescored KV cache.
 - Evidence archived under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s17/`.
+
+## 2026-08-15 UTC — P38s17 classification corrected; P38.2o opened
+
+- Re-ran the current official KV observer classifier from the six committed
+  observer records and exactly the three immutable round capsules. The result
+  is `live_kv_fingerprint_equal_on_red_row`, with zero valid-region aggregate
+  and sample differences in all three pairs. Row 255 joins 6 / 1 / 2 covered
+  A-B mismatch positions in rounds 0 / 1 / 2.
+- The previous `differs_on_red_row` JSON joins rows 207 / 223 / 223 at position
+  1 and is not reproducible from the committed inputs. The production shell
+  also enumerated the stable latest-round alias beside immutable rounds; the
+  official classifier rejects that exact input set as duplicate round 2.
+- Corrected the numerical account to 94 / 19 / 44 differing bytes and
+  46,507 / 46,237 / 50,767 actions. B-C remains exact in every round.
+- The committed directory is live snapshot 58, not a terminal bundle:
+  `COLLECTED.json` and `COMPLETE.json` are absent, and the old manifest included
+  its own checksum. Its claim level is analysis-only.
+- Opened P38.2o. The preregistered next branch is an observer-neutral ordered
+  decode seam walk. No operator repair or new target run is admitted yet.
+
+## 2026-08-15 UTC — P38.2o O0/O1 locally complete
+
+- Made immutable round capsules authoritative, corrected P38s17 to
+  `live_kv_fingerprint_equal_on_red_row`, and added full observer/capsule SHA
+  provenance plus valid-tail controls.
+- Added a default-off hierarchical seam observer. `layer` mode records all 36
+  layer input/output fingerprints; `full` mode records 15 internal checkpoints
+  for exactly one selected layer. The two modes cannot coexist with the KV
+  observer or unified-KV arm.
+- Real Qwen3-8B DP1xTP4 observer-off/on completed three frozen rounds with
+  endpoint bitwise equality. The on run emitted 130 bounded seam records.
+- Added target classification, immutable-capsule selection, controlled-exit
+  fail-closed checks, and terminal GCS persistence for the seam classification.
+- O2a is the next target only after review/commit/push: stock
+  `p38s18-layer`, DP16xTP4, concurrency 256, three frozen rounds, backward 0,
+  optimizer commits 0. No target run, commit, or push occurred here.
+- Final fail-closed audit rejects seam mode without `--stock-only`, seam mode
+  at concurrency 32, an orphan `--seam-layer`, and Qwen3-8B layer indices
+  outside 0..35. The complete pinned-image CPU gate, shell syntax, Python
+  compilation, `git diff --check`, and both exact-image overlays pass after
+  the observer wiring; the target remains unlaunched.

@@ -6,105 +6,79 @@
     "Only a candidate joined to an A/B-red capsule row can choose the mechanism branch."
   ],
   "claim_level": "bit-level-diagnostic-fingerprint-not-full-kv-bytes",
-  "classification": "live_kv_fingerprint_differs_on_red_row",
+  "classification": "live_kv_fingerprint_equal_on_red_row",
   "comparisons": [
     {
       "aggregate_prefix_cells_differing": 0,
       "clean_b_record_index": 1,
       "clean_b_request_id": "892-9c2d2390",
       "diagnostic_round": 0,
-      "differing_layers": [
-        0,
-        1,
-        2
-      ],
-      "differing_logical_pages": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8
-      ],
-      "fingerprint_equal": false,
-      "first_difference": {
-        "aggregate_diff": false,
-        "layer": 0,
-        "logical_page": 0,
-        "page_prefix_extent": 142,
-        "sample_diff": true
-      },
-      "sample_prefix_cells_differing": 510,
+      "differing_layers": [],
+      "differing_logical_pages": [],
+      "fingerprint_equal": true,
+      "first_difference": null,
+      "sample_prefix_cells_differing": 0,
       "source_a_record_index": 0,
       "source_a_request_id": "635-84c52c33",
-      "target_seq_len": 2262
+      "target_seq_len": 2262,
+      "valid_tokens": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        214
+      ]
     },
     {
       "aggregate_prefix_cells_differing": 0,
       "clean_b_record_index": 3,
       "clean_b_request_id": "1793-a874b39f",
       "diagnostic_round": 1,
-      "differing_layers": [
-        0,
-        1,
-        2
-      ],
-      "differing_logical_pages": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6
-      ],
-      "fingerprint_equal": false,
-      "first_difference": {
-        "aggregate_diff": false,
-        "layer": 0,
-        "logical_page": 0,
-        "page_prefix_extent": 108,
-        "sample_diff": true
-      },
-      "sample_prefix_cells_differing": 850,
+      "differing_layers": [],
+      "differing_logical_pages": [],
+      "fingerprint_equal": true,
+      "first_difference": null,
+      "sample_prefix_cells_differing": 0,
       "source_a_record_index": 2,
       "source_a_request_id": "1529-9f69deea",
-      "target_seq_len": 1723
+      "target_seq_len": 1723,
+      "valid_tokens": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        187
+      ]
     },
     {
       "aggregate_prefix_cells_differing": 0,
       "clean_b_record_index": 5,
       "clean_b_request_id": "2740-bd3b2b64",
       "diagnostic_round": 2,
-      "differing_layers": [
-        0,
-        1,
-        2
-      ],
-      "differing_logical_pages": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6
-      ],
-      "fingerprint_equal": false,
-      "first_difference": {
-        "aggregate_diff": false,
-        "layer": 0,
-        "logical_page": 0,
-        "page_prefix_extent": 118,
-        "sample_diff": true
-      },
-      "sample_prefix_cells_differing": 1782,
+      "differing_layers": [],
+      "differing_logical_pages": [],
+      "fingerprint_equal": true,
+      "first_difference": null,
+      "sample_prefix_cells_differing": 0,
       "source_a_record_index": 4,
       "source_a_request_id": "2483-a234d3fe",
-      "target_seq_len": 1872
+      "target_seq_len": 1872,
+      "valid_tokens": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        80
+      ]
     }
   ],
   "pairs": 3,
@@ -113,12 +87,17 @@
     {
       "capsule": "p38_frozenlake_mismatch_capsule.round-000000.npz",
       "diagnostic_round": 0,
-      "mismatch_count": 1,
+      "mismatch_count": 6,
       "mismatch_positions": [
-        1
+        542,
+        679,
+        680,
+        685,
+        750,
+        1201
       ],
       "source_a_record_index": 0,
-      "source_row": 207,
+      "source_row": 255,
       "target_seq_len": 2262
     },
     {
@@ -126,24 +105,155 @@
       "diagnostic_round": 1,
       "mismatch_count": 1,
       "mismatch_positions": [
-        1
+        720
       ],
       "source_a_record_index": 2,
-      "source_row": 223,
+      "source_row": 255,
       "target_seq_len": 1723
     },
     {
       "capsule": "p38_frozenlake_mismatch_capsule.round-000002.npz",
       "diagnostic_round": 2,
-      "mismatch_count": 1,
+      "mismatch_count": 2,
       "mismatch_positions": [
-        1
+        634,
+        779
       ],
       "source_a_record_index": 4,
-      "source_row": 223,
+      "source_row": 255,
       "target_seq_len": 1872
     }
   ],
-  "schema": "p38-live-kv-classification-v1",
+  "schema": "p38-live-kv-classification-v2",
+  "source_inputs": {
+    "capsules": [
+      {
+        "path": "p38_frozenlake_mismatch_capsule.round-000000.npz",
+        "sha256": "7fb2ad1535b72ce550ed1144e4a8d096cb0a086c6f421f776b1dde8d0663a5cf"
+      },
+      {
+        "path": "p38_frozenlake_mismatch_capsule.round-000001.npz",
+        "sha256": "69f0f352f5977ff1bc87d420d82c6e999987ee14b09e475a30890d608fdf0d70"
+      },
+      {
+        "path": "p38_frozenlake_mismatch_capsule.round-000002.npz",
+        "sha256": "dcb97f81f590958e5a8847477b51bdfb6401f99318f9c20fc37614436da45ad6"
+      }
+    ],
+    "classifier": {
+      "path": "classify_p38_kv_observer.py",
+      "sha256": "da0ed98f33e3c96382250c942b0aad6a13aa797696f291acdfdde8eef703fa3d"
+    },
+    "observer_records": [
+      {
+        "arm": "A",
+        "json": "p38_kv_observer_0000_a.json",
+        "json_sha256": "c8a2ffb01541aa65505b89c1f41f659888203261c11a995a8e8213039e1cd8da",
+        "npz": "p38_kv_observer_0000_a.npz",
+        "npz_sha256": "05a79c59633409603b511608edb727f9da7bdd341189e80aecc83e9bf49efb98",
+        "record_index": 0,
+        "valid_tokens": [
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          214
+        ]
+      },
+      {
+        "arm": "B",
+        "json": "p38_kv_observer_0001_b.json",
+        "json_sha256": "f32de98793cea5beefdc6ecb9350fe1d798b61dcc71b460fc91b83d2bf663b52",
+        "npz": "p38_kv_observer_0001_b.npz",
+        "npz_sha256": "dc2873c42347b83b5b00a77cef3f7e2522904bfe2fa6e9a1d3f1ca64c915198e",
+        "record_index": 1,
+        "valid_tokens": [
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          214
+        ]
+      },
+      {
+        "arm": "A",
+        "json": "p38_kv_observer_0002_a.json",
+        "json_sha256": "4ae45e71f47ec8f4c56e48c6bf48c74a023042d7f3c54779a85ba8860cee6e7b",
+        "npz": "p38_kv_observer_0002_a.npz",
+        "npz_sha256": "dff71bce35eed55eb3b7488f097c490975a7c0139cb15f316fd6e7cda71466ab",
+        "record_index": 2,
+        "valid_tokens": [
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          187
+        ]
+      },
+      {
+        "arm": "B",
+        "json": "p38_kv_observer_0003_b.json",
+        "json_sha256": "97fab095656bd49b9b56a3ac2ee6ceedfad8926abb6fdc220288dcb2b169013d",
+        "npz": "p38_kv_observer_0003_b.npz",
+        "npz_sha256": "8d841967a85132ea9aea7d207c90c2a6599413efb268091ebc094fa437af99ae",
+        "record_index": 3,
+        "valid_tokens": [
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          187
+        ]
+      },
+      {
+        "arm": "A",
+        "json": "p38_kv_observer_0004_a.json",
+        "json_sha256": "a4442434f72e70f7ca6784215ed4ddb6323c6ca494a438eb88021de0dd65d5d5",
+        "npz": "p38_kv_observer_0004_a.npz",
+        "npz_sha256": "bbb0ccfd799009bd6361637d7aacebbfcbd0daa8e6f0ffd7cb87dec068c2e99e",
+        "record_index": 4,
+        "valid_tokens": [
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          80
+        ]
+      },
+      {
+        "arm": "B",
+        "json": "p38_kv_observer_0005_b.json",
+        "json_sha256": "a16340b979b4b1083244f61cb696718492ef91be780a7158cb83ae3a744f6e7d",
+        "npz": "p38_kv_observer_0005_b.npz",
+        "npz_sha256": "36bc04d321d2995b73551ed421bf9b347d245477891311c9e154cad11f5bf52c",
+        "record_index": 5,
+        "valid_tokens": [
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          80
+        ]
+      }
+    ]
+  },
   "status": "PASS"
 }

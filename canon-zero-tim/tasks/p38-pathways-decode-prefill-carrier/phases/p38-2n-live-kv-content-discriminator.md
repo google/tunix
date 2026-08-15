@@ -1,7 +1,8 @@
 # P38.2n — Live-KV content discriminator
 
-Status: active. N3 is locally complete; one stock N4 target launch is
-**ADMITTED AFTER THE CURRENT WORKTREE IS REVIEWED, COMMITTED, AND PUSHED**.
+Status: complete at analysis level. N3 completed and P38s17 ran, but the
+originally archived N4 classification was not reproducible. Correct
+reclassification selects the equal-fingerprint/program-envelope branch.
 
 ## Goal
 
@@ -175,3 +176,13 @@ clean fingerprints:
   source publication. Repair, backward, optimizer commit, and strict
   full-training admission remain forbidden until N4 selects and validates a
   mechanism branch.
+
+## Corrected N4 result
+
+P38s17 produced three A-B-red/B-C-exact rounds. Reclassification from the six
+observer records and exactly the three immutable round capsules reports
+`live_kv_fingerprint_equal_on_red_row`: zero valid-region aggregate and sample
+differences, with a red row joined in every round. The committed directory is
+only a live snapshot and has no terminal `COLLECTED`/`COMPLETE` markers, so the
+result is analysis-level. P38.2o owns evidence-chain repair and the ordered
+decode seam walk. No cache-writer repair is selected by this phase.

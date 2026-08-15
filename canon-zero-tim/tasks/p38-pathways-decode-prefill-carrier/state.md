@@ -6,26 +6,35 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2n live-KV content discriminator completed with P38s17/source
-  `baac38bc4034`. Live vs clean KV cache content drift is confirmed
-  (`classification=live_kv_fingerprint_differs_on_red_row`). Next phase focuses on
-  vLLM / Pathways PagedAttention KV cache block lifecycle and writeback on TPU.
+- Active phase: P38.2o evidence reconciliation and decode seam walk. P38s17's
+  committed classification was not reproducible from its committed inputs.
+  Correct reclassification reports
+  `live_kv_fingerprint_equal_on_red_row`; the next mechanism phase is the
+  observer-neutral decode-envelope seam walk, not a KV writer repair.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
 
 - P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
-  (768 trajectories total, 149,436 action tokens across 3 rounds) on 64 TPU
+  (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
   (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
-  controlled exit 42.
+  a workload-level controlled exit 42.
   - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 on all 3 rounds.
-  - A-B boundary (`S_decode` vs `S_prefill`): 44 differing bytes on all 3 rounds.
-  - Incident ledger: 2,523 records / 3,069 calls / 66.3 MB.
-  - Live-KV Observer classification: `live_kv_fingerprint_differs_on_red_row`.
-    Across all 3 paired A/B records, token sequences were byte-identical while
-    integer aggregates and fixed samples differed between live and clean KV.
-  - Evidence archived under `evidence/p38s17/`.
+  - A-B boundary (`S_decode` vs `S_prefill`): respectively 94 / 19 / 44
+    differing bytes and 58 / 14 / 28 differing elements, with `N_action`
+    46,507 / 46,237 / 50,767.
+  - Incident ledger: 2,523 records spanning serving call indices through 3,069.
+  - Reclassification from all 6 A/B observer records and exactly the 3
+    immutable round capsules returns
+    `live_kv_fingerprint_equal_on_red_row`. Valid-region aggregate and sample
+    differences are zero in all three pairs; row 255 joins 6 / 1 / 2 covered
+    A-B mismatch positions.
+  - The earlier `live_kv_fingerprint_differs_on_red_row` JSON joined rows
+    207/223/223 at position 1 and cannot be derived from the committed inputs.
+  - `evidence/p38s17/` contains only `LIVE.json`; `COLLECTED.json` and
+    `COMPLETE.json` are absent. It is analysis-level, not terminal-admitted,
+    evidence. Fingerprint equality is not a full-byte KV proof.
 - P38s16/source `4101f752` successfully executed all 3 Frozen-Weight
   diagnostic rounds (768 trajectories total, 148,916 action tokens across 3
   rounds: 48,556 / 47,313 / 53,047) on 64 TPU (`DP16xTP4`, concurrency 256)
@@ -261,17 +270,16 @@
 
 ## Next action
 
-1. Review, commit, and push the current worktree. No target may render from an
-   uncommitted tree.
-2. Render exactly one new `p38s17` stock-only production discriminator at
-   DP16xTP4, concurrency 256. Do not apply a unified or concurrency arm.
-3. Require three A/B observer pairs, complete red-row join, worker-owned
-   COLLECTED/COMPLETE markers, exact B-C, no backward, and zero optimizer
-   commits.
-4. If a joined red row has differing live/clean KV fingerprints, localize the
-   first dirty layer/page and repair its writer/lifecycle path. If every
-   covered red-row fingerprint is equal, reject KV content for that incident
-   and begin the ordered in-situ q_norm/post-RoPE/RPA/residual/logits seam walk.
+1. Review the locally complete P38.2o O0/O1 payload and gates. Do not launch
+   from this dirty worktree.
+2. After explicit commit/push approval, render O2a only: stock `layer` mode at
+   DP16xTP4/concurrency 256, three frozen rounds, prefix cache off, backward 0,
+   optimizer commits 0.
+3. Read `p38_seam.classification.json`. Only if it joins all red actions and
+   names a first divergent layer may O2b render `full` mode for that one layer.
+4. If O2b localizes an internal checkpoint, repair only that checkpoint. If
+   hidden/final norm stays exact, add a bounded tail observer. RoPE remains a
+   candidate, not a conclusion.
 
 ## Claim ceiling and blockers
 
@@ -299,5 +307,8 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 training, evaluation, prefix cache, precision, optimizer placement, or
 canonical kernels.
 
-- Updated: 2026-08-15 UTC; P38.2n N3 is locally complete. No target N4 run,
-  backward, optimizer commit, commit, or push occurred in this worktree.
+- Updated: 2026-08-15 UTC; P38.2o O0/O1 are locally complete. P38s17's
+  classification is corrected to equal valid-region fingerprints; the real
+  Qwen3-8B one-host layer observer is endpoint-neutral. O2a is target-pending.
+  No new target run, backward, optimizer commit, commit, or push occurred in
+  this worktree.

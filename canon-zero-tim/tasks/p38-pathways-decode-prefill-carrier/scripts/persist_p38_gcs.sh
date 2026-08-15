@@ -196,15 +196,17 @@ if [ "$mode" = snapshot ]; then
     done
   fi
   if [ "${CANON_P38_LIVE_INCLUDE_OBSERVER:-0}" = "1" ]; then
-    if [ -z "${CANON_P38_KV_OBSERVER_DIR:-}" ] || \
-       [ ! -d "$CANON_P38_KV_OBSERVER_DIR" ]; then
+    observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-}}"
+    if [ -z "$observer_dir" ] || [ ! -d "$observer_dir" ]; then
       echo "[P38.GCS] REFUSING: observer snapshot requested without a directory" >&2
       exit 1
     fi
     shopt -s nullglob
     observer_sources=(
-      "$CANON_P38_KV_OBSERVER_DIR"/p38_kv_observer_*.json
-      "$CANON_P38_KV_OBSERVER_DIR"/p38_kv_observer_*.npz
+      "$observer_dir"/p38_kv_observer_*.json
+      "$observer_dir"/p38_kv_observer_*.npz
+      "$observer_dir"/p38_seam_*.json
+      "$observer_dir"/p38_seam_*.npz
     )
     shopt -u nullglob
     if [ "${#observer_sources[@]}" -eq 0 ]; then
@@ -286,6 +288,11 @@ if [ "$mode" = collect ]; then
     copy_required "$CANON_P38_KV_OBSERVER_CLASSIFICATION" \
       kv-observer-classification.json
     collected_files+=(kv-observer-classification.json)
+  fi
+  if [ -n "${CANON_P38_SEAM_CLASSIFICATION:-}" ]; then
+    copy_required "$CANON_P38_SEAM_CLASSIFICATION" \
+      seam-classification.json
+    collected_files+=(seam-classification.json)
   fi
   shopt -s nullglob
   round_capsules=("${CANON_P38_MISMATCH_CAPSULE%.npz}".round-*.npz)

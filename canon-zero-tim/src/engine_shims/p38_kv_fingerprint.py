@@ -14,6 +14,62 @@ import jax.numpy as jnp
 import numpy as np
 
 
+P38_SEAM_FINGERPRINT_FIELDS = (
+    "xor",
+    "sum",
+    "weighted_sum",
+    "sample_first",
+    "sample_quarter",
+    "sample_middle",
+    "sample_three_quarters",
+    "sample_last",
+)
+
+
+def fingerprint_tensor_rows(value):
+  """Return a compact exact-integer diagnostic fingerprint per token row.
+
+  The leading dimension is the token/program row. Every remaining dimension
+  belongs to that row and is flattened. The aggregate operations are uint32
+  XOR and modular addition, so the observer itself has no floating-point
+  reduction freedom. Five fixed samples make the one-bit negative control
+  independent of aggregate cancellation.
+
+  This remains a diagnostic fingerprint rather than a collision-free proof.
+  Callers must retain that claim ceiling and must separately prove that
+  enabling the observer leaves the authoritative endpoint bitwise unchanged.
+  """
+  shape = tuple(int(item) for item in value.shape)
+  if len(shape) < 2 or shape[0] <= 0 or any(item <= 0 for item in shape[1:]):
+    raise ValueError(
+        f"P38 seam fingerprint requires [token, ...] positive shape: {shape}"
+    )
+  dtype = jnp.dtype(value.dtype)
+  if dtype in (jnp.dtype(jnp.bfloat16), jnp.dtype(jnp.float16)):
+    bits = jax.lax.bitcast_convert_type(value, jnp.uint16).astype(jnp.uint32)
+  elif dtype == jnp.dtype(jnp.float32):
+    bits = jax.lax.bitcast_convert_type(value, jnp.uint32)
+  else:
+    raise ValueError(
+        "P38 seam fingerprint supports bfloat16/float16/float32, "
+        f"got {value.dtype}"
+    )
+
+  flat = bits.reshape((shape[0], -1))
+  width = int(flat.shape[1])
+  weights = jnp.arange(1, width + 1, dtype=jnp.uint32)[None, :]
+  sample_indices = (0, width // 4, width // 2, (3 * width) // 4, width - 1)
+  return jnp.stack(
+      (
+          jnp.bitwise_xor.reduce(flat, axis=1),
+          jnp.sum(flat, axis=1, dtype=jnp.uint32),
+          jnp.sum(flat * weights, axis=1, dtype=jnp.uint32),
+          *(flat[:, index] for index in sample_indices),
+      ),
+      axis=1,
+  )
+
+
 def validate_kv_fingerprint_contract(
     cache_shape: Sequence[int], cache_dtype, valid_tokens: Sequence[int]
 ) -> np.ndarray:

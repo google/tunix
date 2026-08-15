@@ -107,12 +107,53 @@ def _write_kv_observer_pair(
     )
 
 
+def _write_seam_pair(
+    directory: Path, token_ids: np.ndarray, source_position: int
+) -> None:
+  prefix_sha = hashlib.sha256(
+      np.ascontiguousarray(
+          token_ids[:source_position + 1], dtype="<i8"
+      ).tobytes()
+  ).hexdigest().encode()
+  for record_index, arm in enumerate(("A", "B")):
+    layer = np.zeros((1, 2, 2, 8), dtype=np.uint32)
+    if arm == "B":
+      layer[0, 1, 1, 3] = 1
+    arrays = {
+        "row_indices": np.asarray([255], dtype=np.int32),
+        "positions": np.asarray([source_position], dtype=np.int32),
+        "token_ids": np.asarray([token_ids[source_position]], dtype=np.int32),
+        "request_ordinals": np.asarray([0], dtype=np.int32),
+        "token_prefix_sha256": np.asarray([prefix_sha], dtype="S64"),
+        "layer_fingerprints": layer,
+        "final_norm_fingerprints": np.zeros((1, 8), dtype=np.uint32),
+    }
+    npz_path = directory / f"p38_seam_{record_index:06d}.npz"
+    with npz_path.open("xb") as stream:
+      np.savez(stream, **arrays)
+    record = {
+        "schema": "p38-seam-fingerprint-v1",
+        "record_index": record_index,
+        "arm": arm,
+        "diagnostic_round": 0,
+        "observer_mode": "layer",
+        "checkpoint_names": ["layer_input", "layer_output"],
+        "layer_indices": [0, 1],
+        "array_keys": sorted(arrays),
+        "npz_sha256": hashlib.sha256(npz_path.read_bytes()).hexdigest(),
+    }
+    (directory / f"p38_seam_{record_index:06d}.json").write_text(
+        json.dumps(record, sort_keys=True), encoding="utf-8"
+    )
+
+
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--directory", required=True, type=Path)
   parser.add_argument("--mismatch-capsule", required=True, type=Path)
   parser.add_argument("--omit-request-journal", action="store_true")
   parser.add_argument("--omit-incident-ledger", action="store_true")
+  parser.add_argument("--seam", action="store_true")
   args = parser.parse_args()
   args.directory.mkdir(parents=True, exist_ok=False)
   names = {
@@ -383,8 +424,14 @@ def main() -> int:
         **capsule_arrays,
     )
   observer_tokens = np.asarray(full_history[:1601], dtype=np.int32)
-  for pair_index in range(3):
-    _write_kv_observer_pair(args.directory, pair_index, observer_tokens)
+  if args.seam:
+    _write_seam_pair(
+        args.directory, np.asarray(full_history, dtype=np.int32),
+        journal_prefix - 1,
+    )
+  else:
+    for pair_index in range(3):
+      _write_kv_observer_pair(args.directory, pair_index, observer_tokens)
   return 0
 
 

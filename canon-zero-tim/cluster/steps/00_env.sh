@@ -253,7 +253,61 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 incident ledger bounds drifted" >&2
     fail=1
   }
-  if [ "${CANON_KV_UNIFIED:-0}" = "0" ]; then
+  if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
+    for k in CANON_P38_SEAM_OBSERVER_DIR \
+             CANON_P38_SEAM_MIN_POSITION \
+             CANON_P38_SEAM_MAX_POSITION \
+             CANON_P38_SEAM_MAX_BYTES \
+             CANON_P38_SEAM_CLASSIFICATION; do
+      req "$k"
+    done
+    [ "${CANON_KV_UNIFIED:-0}" = "0" ] || {
+      echo "[env] P38 seam observer requires the stock arm" >&2
+      fail=1
+    }
+    [ "${CANON_P38_SEAM_OBSERVER_DIR%/}" = \
+        "${CANON_P38_SERVING_CAPTURE_DIR%/}" ] || {
+      echo "[env] P38 seam observer must share the capture directory" >&2
+      fail=1
+    }
+    [ "${CANON_P38_SEAM_OBSERVER:-}" = "layer" ] || \
+    [ "${CANON_P38_SEAM_OBSERVER:-}" = "full" ] || {
+      echo "[env] P38 seam observer mode must be layer or full" >&2
+      fail=1
+    }
+    [ "${CANON_P38_SEAM_MIN_POSITION:-}" = "1400" ] && \
+    [ "${CANON_P38_SEAM_MAX_POSITION:-}" = "3072" ] && \
+    [ "${CANON_P38_SEAM_MAX_BYTES:-}" = "4294967296" ] || {
+      echo "[env] P38 seam observer bounds drifted" >&2
+      fail=1
+    }
+    if [ "${CANON_P38_SEAM_OBSERVER:-}" = "full" ]; then
+      case "${CANON_P38_SEAM_LAYER:-}" in
+        ''|*[!0-9]*) echo "[env] P38 full seam observer requires a numeric layer" >&2; fail=1;;
+      esac
+      if [[ "${CANON_P38_SEAM_LAYER:-}" =~ ^[0-9]+$ ]] && \
+         [ "$CANON_P38_SEAM_LAYER" -ge 36 ]; then
+        echo "[env] P38 seam layer is outside Qwen3-8B" >&2
+        fail=1
+      fi
+    elif [ -n "${CANON_P38_SEAM_LAYER:-}" ]; then
+      echo "[env] P38 seam layer is valid only in full mode" >&2
+      fail=1
+    fi
+    if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
+      echo "[env] P38 seam and KV observers may not share one target run" >&2
+      fail=1
+    fi
+    case " ${CANON_RUN_CMD:-} " in
+      *" --max_concurrency=256 "*) ;;
+      *) echo "[env] P38 seam observer requires max concurrency 256" >&2; fail=1;;
+    esac
+    [ "${CANON_P38_SEAM_CLASSIFICATION:-}" = \
+        "${CANON_STATE%/}/p38_seam.classification.json" ] || {
+      echo "[env] P38 seam classification path drifted" >&2
+      fail=1
+    }
+  elif [ "${CANON_KV_UNIFIED:-0}" = "0" ]; then
     for k in CANON_P38_KV_OBSERVER_DIR \
              CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
              CANON_P38_KV_OBSERVER_MAX_PAGES \
@@ -310,7 +364,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
 elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
   echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
   fail=1
-elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_INCIDENT_LEDGER:-}${CANON_P38_INCIDENT_MIN_PREFIX:-}${CANON_P38_INCIDENT_MAX_PREFIX:-}${CANON_P38_INCIDENT_MAX_BYTES:-}${CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS:-}${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:-}${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:-}${CANON_P38_LIVE_COLLECT_REQUEST_FILE:-}${CANON_P38_LIVE_COLLECT_ACK_FILE:-}${CANON_P38_LIVE_COMPLETE_REQUEST_FILE:-}${CANON_P38_LIVE_COMPLETE_ACK_FILE:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_GCS_PREFIX:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}${CANON_P38_ONEHOST_REHEARSAL:-}${CANON_P38_MIN_ACTION_KV:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_MAX_CANDIDATES:-}${CANON_P38_KV_OBSERVER_MAX_PAGES:-}${CANON_P38_KV_OBSERVER_MAX_BYTES:-}${CANON_P38_KV_OBSERVER_MAX_READ_BYTES:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}" ]; then
+elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_INCIDENT_LEDGER:-}${CANON_P38_INCIDENT_MIN_PREFIX:-}${CANON_P38_INCIDENT_MAX_PREFIX:-}${CANON_P38_INCIDENT_MAX_BYTES:-}${CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS:-}${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:-}${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:-}${CANON_P38_LIVE_COLLECT_REQUEST_FILE:-}${CANON_P38_LIVE_COLLECT_ACK_FILE:-}${CANON_P38_LIVE_COMPLETE_REQUEST_FILE:-}${CANON_P38_LIVE_COMPLETE_ACK_FILE:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_GCS_PREFIX:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}${CANON_P38_ONEHOST_REHEARSAL:-}${CANON_P38_MIN_ACTION_KV:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_MAX_CANDIDATES:-}${CANON_P38_KV_OBSERVER_MAX_PAGES:-}${CANON_P38_KV_OBSERVER_MAX_BYTES:-}${CANON_P38_KV_OBSERVER_MAX_READ_BYTES:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_SEAM_OBSERVER_DIR:-}${CANON_P38_SEAM_MIN_POSITION:-}${CANON_P38_SEAM_MAX_POSITION:-}${CANON_P38_SEAM_MAX_BYTES:-}${CANON_P38_SEAM_LAYER:-}${CANON_P38_SEAM_CLASSIFICATION:-}" ]; then
   echo "[env] partial P38 serving-capture configuration is not admitted" >&2
   fail=1
 fi

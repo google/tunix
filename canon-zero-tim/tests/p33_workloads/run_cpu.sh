@@ -289,7 +289,7 @@ validate_p38_serving_preflight() (
   export CANON_P33_SHARED_MESH=16,4
   export CANON_P33_RUN_STAGE=backward-no-commit
   export CANON_P33_NO_COMMIT=1
-  export CANON_RUN_CMD="printf p38-serving-preflight-only"
+  export CANON_RUN_CMD="printf p38-serving-preflight-only --max_concurrency=256"
   export CANON_RUN_LOG="$state/run.log"
   export CANON_PRE_ALIGN_REPORT="$state/pre_alignment.jsonl"
   export CANON_ALIGN_REPORT="$state/alignment.jsonl"
@@ -368,6 +368,39 @@ validate_p38_serving_preflight() (
     exit 1
   fi
   export CANON_P38_KV_OBSERVER_MAX_PAGES=16
+
+  unset CANON_P38_KV_OBSERVER_DIR \
+        CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
+        CANON_P38_KV_OBSERVER_MAX_PAGES \
+        CANON_P38_KV_OBSERVER_MAX_BYTES \
+        CANON_P38_KV_OBSERVER_MAX_READ_BYTES \
+        CANON_P38_KV_OBSERVER_CLASSIFICATION
+  export CANON_P38_SEAM_OBSERVER=layer
+  export CANON_P38_SEAM_OBSERVER_DIR="$state/serving"
+  export CANON_P38_SEAM_MIN_POSITION=1400
+  export CANON_P38_SEAM_MAX_POSITION=3072
+  export CANON_P38_SEAM_MAX_BYTES=4294967296
+  export CANON_P38_SEAM_CLASSIFICATION="$state/p38_seam.classification.json"
+  bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
+  grep -q 'export CANON_P38_SEAM_OBSERVER=layer' "$state/env.sh"
+  grep -q 'export CANON_P38_SEAM_MAX_BYTES=4294967296' "$state/env.sh"
+  export CANON_P38_SEAM_OBSERVER=full
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted full seam mode without a layer" >&2
+    exit 1
+  fi
+  export CANON_P38_SEAM_LAYER=17
+  bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
+  export CANON_P38_SEAM_LAYER=36
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted an out-of-range seam layer" >&2
+    exit 1
+  fi
+  export CANON_P38_SEAM_LAYER=17
+  unset CANON_P38_SEAM_OBSERVER CANON_P38_SEAM_OBSERVER_DIR \
+        CANON_P38_SEAM_MIN_POSITION CANON_P38_SEAM_MAX_POSITION \
+        CANON_P38_SEAM_MAX_BYTES CANON_P38_SEAM_LAYER \
+        CANON_P38_SEAM_CLASSIFICATION
 
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=continue_decode
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then

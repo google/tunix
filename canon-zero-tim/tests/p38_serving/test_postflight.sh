@@ -59,10 +59,28 @@ run_case() (
   export CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
   export CANON_P38_KV_OBSERVER_CLASSIFICATION="$state/kv-observer.json"
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
+  if [ "$mode" = seam-layer ]; then
+    unset CANON_P38_KV_OBSERVER_DIR \
+      CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
+      CANON_P38_KV_OBSERVER_MAX_PAGES \
+      CANON_P38_KV_OBSERVER_MAX_BYTES \
+      CANON_P38_KV_OBSERVER_MAX_READ_BYTES \
+      CANON_P38_KV_OBSERVER_CLASSIFICATION
+    export CANON_P38_SEAM_OBSERVER=layer
+    export CANON_P38_SEAM_OBSERVER_DIR="$state/capture"
+    export CANON_P38_SEAM_MIN_POSITION=1400
+    export CANON_P38_SEAM_MAX_POSITION=3072
+    export CANON_P38_SEAM_MAX_BYTES=4294967296
+    export CANON_P38_SEAM_CLASSIFICATION="$state/seam-classification.json"
+    command+=" --seam"
+  fi
   if [ "$mode" = missing-journal ]; then
     command+=" --omit-request-journal"
   elif [ "$mode" = missing-incident ]; then
     command+=" --omit-incident-ledger"
+  fi
+  if [ "$mode" != exact-stable ]; then
+    command+="; cp '$CANON_P38_MISMATCH_CAPSULE' '${CANON_P38_MISMATCH_CAPSULE%.npz}.round-000000.npz'"
   fi
   depth=1700
   if [ "$mode" = shallow ]; then
@@ -73,7 +91,11 @@ run_case() (
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
   command+="; printf '%s\\n' '[CANON_P38_REQUEST_JOURNAL] record=1 request=request-0 prefix=1600 stratum=0 dp=0'"
   command+="; printf '%s\\n' '[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=1'"
-  if [[ "$mode" != unified-* ]]; then
+  if [ "$mode" = seam-layer ]; then
+    command+="; printf '%s\\n' '[CANON_P38_SEAM_OBSERVER_INIT] mode=layer min_position=1400 max_position=3072 max_bytes=4294967296'"
+    command+="; printf '%s\\n' '[CANON_P38_SEAM_OBSERVER_RECORD] arm=A record=0 rows=1 bytes=1'"
+    command+="; printf '%s\\n' '[CANON_P38_SEAM_OBSERVER_RECORD] arm=B record=1 rows=1 bytes=1'"
+  elif [[ "$mode" != unified-* ]]; then
     command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_INIT] enabled=1 candidates=3 pages=16 max_output_bytes=134217728 max_read_bytes=671088640'"
     command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_CANDIDATE] round=0 request=decode-0 call=1 prefix=1600'"
     command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_CANDIDATE] round=1 request=decode-1 call=2 prefix=1600'"
@@ -88,7 +110,8 @@ run_case() (
   fi
   command+="; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
-  if [ "$mode" = exact ] || [ "$mode" = shallow ]; then
+  if [ "$mode" = exact ] || [ "$mode" = exact-stable ] || \
+     [ "$mode" = shallow ] || [ "$mode" = seam-layer ]; then
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/1 step=0 N_action=1 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   elif [ "$mode" = stock-hit ]; then
@@ -121,7 +144,7 @@ run_case() (
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   fi
   case "$mode" in
-    exact|shallow|unified-exact|capture-error|missing-coverage)
+    exact|exact-stable|shallow|seam-layer|unified-exact|capture-error|missing-coverage)
       command+="; printf '%s\\n' '[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0'; exit 42"
       ;;
     *) command+="; exit 1" ;;
@@ -130,14 +153,28 @@ run_case() (
   export -p > "$state/env.sh"
   rc=0
   bash "$ROOT/cluster/steps/90_run.sh" > "$state/driver.log" 2>&1 || rc=$?
-  if [ "$mode" = exact ] || [ "$mode" = unified-exact ]; then
+  if [ "$mode" = exact ] || [ "$mode" = exact-stable ] || \
+     [ "$mode" = seam-layer ] || [ "$mode" = unified-exact ]; then
     [ "$rc" -eq 0 ]
     grep -q 'P38 serving controlled precheck accepted exit=42' "$state/driver.log"
     grep -q '\[CANON_P38\] DEPTH_SUFFICIENCY min=1686 observed=1700 verdict=PASS' "$state/driver.log"
     grep -q '"verdict": "PASS"' "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
-    if [ "$mode" = exact ]; then
+    if [ "$mode" = seam-layer ]; then
+      grep -q '"classification": "decode_seam_first_difference_measured"' \
+        "$CANON_P38_SEAM_CLASSIFICATION"
+      grep -q '^\[CANON_P38_SEAM_INPUTS\] source=immutable-rounds capsules=1 mode=layer$' \
+        "$state/driver.log"
+      find "$FAKE_GCS_ROOT" -name seam-classification.json -type f | grep -q .
+    elif [ "$mode" = exact ] || [ "$mode" = exact-stable ]; then
       grep -q '"classification": "live_kv_fingerprint_equal_on_red_row"' \
         "$CANON_P38_KV_OBSERVER_CLASSIFICATION"
+      if [ "$mode" = exact ]; then
+        grep -q '^\[CANON_P38_KV_OBSERVER_INPUTS\] source=immutable-rounds capsules=1$' \
+          "$state/driver.log"
+      else
+        grep -q '^\[CANON_P38_KV_OBSERVER_INPUTS\] source=stable-fallback capsules=1$' \
+          "$state/driver.log"
+      fi
     fi
     test -s "$CANON_P38_SERVING_CAPTURE_ARCHIVE"
     grep -q '\[P38.GCS\] LIVE_WORKER_JOINED rc=0' "$state/driver.log"
@@ -171,6 +208,8 @@ run_case() (
 )
 
 run_case exact
+run_case exact-stable
+run_case seam-layer
 run_case red
 run_case stock-hit
 run_case unified-missing
@@ -180,4 +219,4 @@ run_case missing-coverage
 run_case missing-journal
 run_case missing-incident
 run_case shallow
-echo "[P38.SERVING] POSTFLIGHT_PASS controlled_exact=accepted shallow=rejected red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected missing_incident=rejected"
+echo "[P38.SERVING] POSTFLIGHT_PASS controlled_exact=accepted seam_layer=classified immutable_rounds=preferred stable_fallback=accepted shallow=rejected red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected missing_incident=rejected"

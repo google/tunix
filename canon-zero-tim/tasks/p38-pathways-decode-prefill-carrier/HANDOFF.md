@@ -5,38 +5,69 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s17 completed; live vs clean KV cache drift confirmed
+## CURRENT: P38s17 reclassified; valid live/clean KV fingerprints are equal
 
 P38s17/source `baac38bc4034` completed all three Frozen-Weight diagnostic
-rounds (768 trajectories total, 149,436 action tokens across 3 rounds) on 64 TPU
+rounds (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
 (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
-controlled exit 42.
+a workload-level controlled exit 42. Its committed directory is snapshot 58,
+not the terminal bundle: `COLLECTED.json` and `COMPLETE.json` are absent.
 
 Key numerical facts:
 - B-C boundary (`S_prefill` vs `T_old`): **0 mismatches (STRICT EXACT 0)**
   across all 3 rounds.
 - A-B boundary (`S_decode` vs `S_prefill`):
-  - Round 1: 44 differing bytes, `N_action=50,767`.
-  - Round 2: 44 differing bytes, `N_action=48,912`.
-  - Round 3: 44 differing bytes, `N_action=49,757`.
-- Incident ledger: 2,523 records / 3,069 calls / 66.3 MB, recording fixed-M
-  compile geometry and exact token IDs for natural single-active deep calls.
-- Live-KV Observer classification: **`live_kv_fingerprint_differs_on_red_row`**
-  (`p38_kv_observer.classification.json` PASS).
-  - All 3 diagnostic rounds (Round 0, Round 1, Round 2) produced paired Live Arm A
-    and Clean Arm B records (6 total) with byte-identical token sequences and valid
-    extents.
-  - Across all 3 pairs, the integer aggregates and fixed samples exhibited
-    reproducible bit-level differences between live serving KV cache and freshly
-    rescored clean KV cache.
+  - Round 0: 94 differing bytes / 58 elements, `N_action=46,507`.
+  - Round 1: 19 differing bytes / 14 elements, `N_action=46,237`.
+  - Round 2: 44 differing bytes / 28 elements, `N_action=50,767`.
+- Incident ledger: 2,523 records spanning serving call indices through 3,069.
+- Recomputed Live-KV Observer classification:
+  **`live_kv_fingerprint_equal_on_red_row`**.
+  - All 3 rounds produced paired live A and clean B records with identical token
+    prefixes and valid extents.
+  - Every valid aggregate/sample comparison is zero-diff. Row 255 joins 6 / 1 /
+    2 covered A-B mismatch positions across rounds 0 / 1 / 2.
+  - Equality is a diagnostic fingerprint result, not a full-byte KV proof.
+- The previously committed `differs_on_red_row` JSON is rejected: it joins
+  different rows/coordinates and cannot be regenerated from the committed
+  inputs. The old manifest also hashed itself and therefore could not verify.
 - Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s17/`.
 
 ### Next Operator Step
 
-With live-KV content drift now proven (`live_kv_fingerprint_differs_on_red_row`),
-the root-cause search shifts to the vLLM / Pathways PagedAttention KV cache writer
-and lifecycle management on TPU (block table page allocation, write-back, and
-cross-step state pollution).
+P38.2o O0/O1 are locally complete. Do not rerun P38s17, KV-unified,
+concurrency, or another KV-only observer. After review, commit, and push, run
+only the hierarchical layer pass from a clean immutable source:
+
+```bash
+set -euo pipefail
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
+RUN_ID=p38s18-layer
+OUT="/tmp/p38-serving-$RUN_ID"
+test ! -e "$OUT"
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --output-dir "$OUT" \
+  --stock-only \
+  --max-concurrency 256 \
+  --seam-mode layer
+STOCK="$OUT/jobset-p38-serving-stock.yaml"
+grep -Fq 'name: CANON_P38_SEAM_OBSERVER' "$STOCK"
+grep -Fq 'value: layer' "$STOCK"
+grep -Fq 'name: CANON_P38_SEAM_CLASSIFICATION' "$STOCK"
+! grep -Fq 'name: CANON_P38_KV_OBSERVER_DIR' "$STOCK"
+kubectl apply --dry-run=server -f "$STOCK"
+kubectl apply -f "$STOCK"
+```
+
+Require `p38_seam.classification.json` status PASS, immutable capsule inputs,
+all red actions joined, three-round B-C exact, backward 0, optimizer commits 0,
+and terminal `COLLECTED.json` plus `COMPLETE.json`. The layer result selects a
+single O2b `--seam-mode full --seam-layer <N>` run. Do not preselect RoPE or a
+layer. If the hidden chain is exact, add a separate bounded tail observer;
+current code does not claim raw-logit/normalizer coverage.
 
 ## HISTORY: completed P38s17, P38s16, P38s15, P38s14, P38s13a, P38s12f
 
@@ -54,14 +85,13 @@ cross-step state pollution).
 4. Do not rerun concurrency 32, KV-unified, or the DP1 E0-lite arm.
 
 Historical status at P38.2m: no target launch was then authorized. P38.2n has
-since completed the live/clean observer gate; use only the CURRENT section
-above and the P38s17 runbook now.
+since completed the live/clean observer gate; use only the CURRENT P38.2o
+section above. The P38s17 launch block in the runbook is historical.
 
 ## HISTORY: completed P38s15, P38s14, P38s13a, P38s12f
 
-This section is retained for provenance only. The current executable operator
-protocol is the P38s17 section at the top of
-`cluster/P38_FROZENLAKE_DEBUG_RUNBOOK.md`.
+This section is retained for provenance only. No new target command is admitted
+until P38.2o's local evidence and observer-neutrality gates pass.
 
 ### P38s12d is void; do not rerun its source
 

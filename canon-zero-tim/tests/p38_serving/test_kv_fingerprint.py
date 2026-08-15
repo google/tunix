@@ -42,6 +42,37 @@ class KvFingerprintTest(unittest.TestCase):
     changed = jax.device_get(self.fn(poisoned, jnp.asarray(self.extents)))
     self.assertFalse(np.array_equal(first[0][0], changed[0][0]))
 
+  def test_seam_rows_repeat_and_detect_one_bit(self):
+    values = jnp.arange(3 * 2 * 8, dtype=jnp.float32).reshape(3, 2, 8)
+    tensor = values.astype(jnp.bfloat16)
+    observe = jax.jit(fingerprint.fingerprint_tensor_rows)
+    first = np.asarray(jax.device_get(observe(tensor)))
+    repeat = np.asarray(jax.device_get(observe(tensor)))
+    self.assertTrue(np.array_equal(first, repeat))
+    self.assertEqual(
+        first.shape,
+        (3, len(fingerprint.P38_SEAM_FINGERPRINT_FIELDS)),
+    )
+
+    bits = jax.lax.bitcast_convert_type(tensor, jnp.uint16)
+    poisoned_bits = bits.at[1, 0, 0].set(bits[1, 0, 0] ^ 1)
+    poisoned = jax.lax.bitcast_convert_type(poisoned_bits, jnp.bfloat16)
+    changed = np.asarray(jax.device_get(observe(poisoned)))
+    self.assertTrue(np.array_equal(first[0], changed[0]))
+    self.assertFalse(np.array_equal(first[1], changed[1]))
+
+  def test_seam_rows_support_float32_and_reject_non_float(self):
+    value = jnp.arange(16, dtype=jnp.float32).reshape(2, 8)
+    observed = fingerprint.fingerprint_tensor_rows(value)
+    self.assertEqual(
+        observed.shape,
+        (2, len(fingerprint.P38_SEAM_FINGERPRINT_FIELDS)),
+    )
+    with self.assertRaisesRegex(ValueError, "supports"):
+      fingerprint.fingerprint_tensor_rows(value.astype(jnp.int32))
+    with self.assertRaisesRegex(ValueError, "positive shape"):
+      fingerprint.fingerprint_tensor_rows(jnp.ones((8,), dtype=jnp.float32))
+
   def test_invalid_tail_is_masked(self):
     base = jax.device_get(self.fn(self.pages, jnp.asarray(self.extents)))
     bits = jax.lax.bitcast_convert_type(self.pages, jnp.uint16)

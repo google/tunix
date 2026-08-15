@@ -39,6 +39,10 @@ _KV_OBSERVER_CANDIDATES = 3
 _KV_OBSERVER_PAGES = 16
 _KV_OBSERVER_MAX_BYTES = 128 * 1024 * 1024
 _KV_OBSERVER_MAX_READ_BYTES = 640 * 1024 * 1024
+_SEAM_MIN_POSITION = 1400
+_SEAM_MAX_POSITION = 3072
+_SEAM_MAX_BYTES = 4 * 1024 * 1024 * 1024
+_SEAM_LAYER_COUNT = 36
 _ADMITTED_MAX_CONCURRENCY = (32, 256)
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 
@@ -70,7 +74,10 @@ def _main_container(document: Mapping[str, Any]) -> dict[str, Any]:
   return p33._container(p33._head_pod(document)["containers"], "jax-tpu")
 
 
-def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, str]:
+def _capture_values(
+    document: Mapping[str, Any], *, unified: bool,
+    seam_mode: str = "", seam_layer: int | None = None,
+) -> dict[str, str]:
   env = p33._env_values(document)
   state = env["CANON_STATE"]
   jobset = document["metadata"]["name"]
@@ -120,7 +127,30 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
   # P38.2n is a single stock discriminator.  The already-falsified U arm is
   # still renderable as historical infrastructure, but it must not silently
   # masquerade as the live-vs-clean KV experiment.
-  if not unified:
+  if seam_mode:
+    if unified:
+      raise ValueError("P38 seam observer is admitted only on the stock arm")
+    if seam_mode not in ("layer", "full"):
+      raise ValueError(f"P38 seam mode is invalid: {seam_mode}")
+    if (seam_mode == "full") != (seam_layer is not None):
+      raise ValueError("P38 full seam mode requires exactly one layer")
+    if seam_layer is not None and not 0 <= seam_layer < _SEAM_LAYER_COUNT:
+      raise ValueError(
+          f"P38 seam layer is outside Qwen3-8B: {seam_layer}"
+      )
+    values.update({
+        "CANON_P38_SEAM_OBSERVER": seam_mode,
+        "CANON_P38_SEAM_OBSERVER_DIR": f"{state}/p38_serving_capture",
+        "CANON_P38_SEAM_MIN_POSITION": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_MAX_POSITION": str(_SEAM_MAX_POSITION),
+        "CANON_P38_SEAM_MAX_BYTES": str(_SEAM_MAX_BYTES),
+        "CANON_P38_SEAM_CLASSIFICATION": (
+            f"{state}/p38_seam.classification.json"
+        ),
+    })
+    if seam_layer is not None:
+      values["CANON_P38_SEAM_LAYER"] = str(seam_layer)
+  elif not unified:
     values.update({
         "CANON_P38_KV_OBSERVER_DIR": (
             f"{state}/p38_serving_capture"
@@ -143,10 +173,13 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
 
 
 def validate_capture_jobset(
-    document: Mapping[str, Any], *, unified: bool, max_concurrency: int = 256
+    document: Mapping[str, Any], *, unified: bool, max_concurrency: int = 256,
+    seam_mode: str = "", seam_layer: int | None = None,
 ) -> None:
   env = p33._env_values(document)
-  expected = _capture_values(document, unified=unified)
+  expected = _capture_values(
+      document, unified=unified, seam_mode=seam_mode, seam_layer=seam_layer
+  )
   expected_gcs = (
       f"{_ARTIFACT_BUCKET}/{document['metadata']['name']}/attempt-0"
   )
@@ -166,7 +199,20 @@ def validate_capture_jobset(
       f"{capture_dir}/p38_incident_ledger.jsonl"
   ):
     raise ValueError("P38 incident ledger must live in the capture directory")
-  if not unified:
+  if seam_mode:
+    if env["CANON_P38_SEAM_OBSERVER_DIR"].rstrip("/") != capture_dir:
+      raise ValueError("P38 seam observer must live in the capture directory")
+    if "CANON_P38_KV_OBSERVER_DIR" in env:
+      raise ValueError("P38 seam and KV observers may not share one target run")
+    if not env["CANON_P38_SEAM_CLASSIFICATION"].endswith(
+        "p38_seam.classification.json"
+    ):
+      raise ValueError("P38 seam classification path drifted")
+    if (env.get("CANON_P38_SEAM_LAYER") is not None) != (
+        seam_mode == "full"
+    ):
+      raise ValueError("P38 seam layer contract drifted")
+  elif not unified:
     if env["CANON_P38_KV_OBSERVER_DIR"].rstrip("/") != capture_dir:
       raise ValueError("P38 KV observer must live in the capture directory")
     if not env["CANON_P38_KV_OBSERVER_CLASSIFICATION"].endswith(
@@ -199,6 +245,8 @@ def validate_capture_jobset(
     raise ValueError("P38 serving-capture label is missing")
   if labels.get("canon.zero-tim/kv-unified") != ("1" if unified else "0"):
     raise ValueError("P38 KV-unified label drifted")
+  if labels.get("canon.zero-tim/seam-observer") != (seam_mode or "0"):
+    raise ValueError("P38 seam-observer label drifted")
   if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
     raise ValueError("P38 serving-capture JobSet must not restart")
   command = shlex.split(env.get("CANON_RUN_CMD", ""))
@@ -263,6 +311,7 @@ def validate_capture_jobset(
 def render_jobset(
     base: Mapping[str, Any], spec: Any, source_commit: str, run_id: str,
     *, unified: bool, max_concurrency: int = 256,
+    seam_mode: str = "", seam_layer: int | None = None,
 ) -> dict[str, Any]:
   command = list(spec.command)
   target = "--max_concurrency=256"
@@ -276,15 +325,20 @@ def render_jobset(
   document = p33.render_jobset(base, effective_spec, source_commit, run_id)
   main = _main_container(document)
   p33._set_named_env(
-      main["env"], _capture_values(document, unified=unified), remove=()
+      main["env"], _capture_values(
+          document, unified=unified, seam_mode=seam_mode,
+          seam_layer=seam_layer,
+      ), remove=()
   )
   labels = document["metadata"].setdefault("labels", {})
   labels["canon.zero-tim/diagnostic"] = "p38-serving-capture"
   labels["canon.zero-tim/kv-unified"] = "1" if unified else "0"
   labels["canon.zero-tim/max-concurrency"] = str(max_concurrency)
+  labels["canon.zero-tim/seam-observer"] = seam_mode or "0"
   p33.validate_jobset(document, effective_spec, source_commit, run_id)
   validate_capture_jobset(
-      document, unified=unified, max_concurrency=max_concurrency
+      document, unified=unified, max_concurrency=max_concurrency,
+      seam_mode=seam_mode, seam_layer=seam_layer,
   )
   return document
 
@@ -292,9 +346,16 @@ def render_jobset(
 def render_all(
     *, base_path: Path, output_dir: Path, source_commit: str, run_id: str,
     stock_only: bool = False, max_concurrency: int = 256,
+    seam_mode: str = "", seam_layer: int | None = None,
 ) -> tuple[Path, ...]:
   base = p33.load_base(base_path)
   output_dir.mkdir(parents=True, exist_ok=True)
+  if seam_mode and not stock_only:
+    raise ValueError("P38 seam observer requires --stock-only")
+  if seam_mode and max_concurrency != 256:
+    raise ValueError("P38 seam observer requires max concurrency 256")
+  if seam_layer is not None and seam_mode != "full":
+    raise ValueError("P38 seam layer requires --seam-mode=full")
   specs = _SPECS[:1] if stock_only else _SPECS
   outputs = tuple(
       output_dir / f"jobset-p38-serving-{'unified' if unified else 'stock'}.yaml"
@@ -310,6 +371,8 @@ def render_all(
     document = render_jobset(
         base, spec, source_commit, run_id, unified=unified,
         max_concurrency=max_concurrency,
+        seam_mode=seam_mode,
+        seam_layer=seam_layer,
     )
     header = (
         "# Generated by canon-zero-tim/cluster/render_p38_serving_jobsets.py.\n"
@@ -322,6 +385,7 @@ def render_all(
         "[P38.SERVING.JOBSET] RENDERED "
         f"arm={'unified' if unified else 'stock'} path={path}"
         f" max_concurrency={max_concurrency}"
+        f" seam_mode={seam_mode or 'off'}"
     )
   return outputs
 
@@ -334,6 +398,14 @@ def main() -> int:
   parser.add_argument(
       "--stock-only", action="store_true",
       help="render only the known-red stock arm; U was already falsified",
+  )
+  parser.add_argument(
+      "--seam-mode", choices=("layer", "full"), default="",
+      help="default-off hierarchical seam observer; requires --stock-only",
+  )
+  parser.add_argument(
+      "--seam-layer", type=int,
+      help="global layer index required only by --seam-mode=full",
   )
   parser.add_argument(
       "--max-concurrency",
@@ -355,6 +427,8 @@ def main() -> int:
       run_id=args.run_id,
       stock_only=args.stock_only,
       max_concurrency=args.max_concurrency,
+      seam_mode=args.seam_mode,
+      seam_layer=args.seam_layer,
   )
   print(
       "[P38.SERVING.JOBSET] VERDICT PASS "

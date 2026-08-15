@@ -1,0 +1,237 @@
+--- qwen3.py
++++ qwen3.py
+@@ -12,6 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import os
+ from typing import List, Optional, Tuple
+ 
+ import jax
+@@ -44,10 +45,53 @@
+ from tpu_inference.models.jax.qwen2 import Qwen2Model
+ from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+ 
++from p38_kv_fingerprint import fingerprint_tensor_rows
++
+ logger = init_logger(__name__)
+ 
+ init_fn = nnx.initializers.uniform()
+ 
++_P38_SEAM_OBSERVER = os.environ.get("CANON_P38_SEAM_OBSERVER", "")
++if _P38_SEAM_OBSERVER not in ("", "layer", "full"):
++    raise RuntimeError(
++        "CANON_P38_SEAM_OBSERVER must be unset, layer, or full, got "
++        f"{_P38_SEAM_OBSERVER!r}"
++    )
++if _P38_SEAM_OBSERVER and os.environ.get("CANON_CUT", ""):
++    raise RuntimeError("P38 seam observer is incompatible with CANON_CUT")
++
++_P38_SEAM_LAYER_TEXT = os.environ.get("CANON_P38_SEAM_LAYER", "")
++if _P38_SEAM_OBSERVER == "full":
++    if not _P38_SEAM_LAYER_TEXT.isdigit():
++        raise RuntimeError("P38 full seam observer requires CANON_P38_SEAM_LAYER")
++    _P38_SEAM_LAYER = int(_P38_SEAM_LAYER_TEXT)
++else:
++    if _P38_SEAM_LAYER_TEXT:
++        raise RuntimeError(
++            "CANON_P38_SEAM_LAYER is valid only with full seam observation"
++        )
++    _P38_SEAM_LAYER = None
++
++P38_LAYER_CHECKPOINTS = ("layer_input", "layer_output")
++
++P38_SEAM_CHECKPOINTS = (
++    "layer_input",
++    "input_norm",
++    "q_proj",
++    "k_proj",
++    "v_proj",
++    "q_norm",
++    "k_norm",
++    "q_post_rope",
++    "k_post_rope",
++    "rpa_output",
++    "o_proj",
++    "attention_residual",
++    "post_attention_norm",
++    "mlp_output",
++    "layer_output",
++)
++
+ 
+ class Qwen3Attention(JaxModule):
+ 
+@@ -166,25 +210,33 @@
+         kv_cache: Optional[jax.Array],
+         x: jax.Array,
+         attention_metadata: AttentionMetadata,
++        p38_observe: bool = False,
+     ) -> Tuple[jax.Array, jax.Array]:
+         md = attention_metadata
+         _cut_x = x                                     # P19.R4: cut points along the q chain
+         # q: (T, N, H)
+         q = self.q_proj(x)
+         _cut_qproj = q
++        _seam_q_proj = q
+         q = self.q_norm(q)
+         _cut_qnorm = q
++        _seam_q_norm = q
+         q = apply_rope(q, md.input_positions, self.head_dim_original,
+                        self.rope_theta, self.rope_scaling)
++        _seam_q_post_rope = q
+ 
+         # k: (T, K, H)
+         k = self.k_proj(x)
++        _seam_k_proj = k
+         k = self.k_norm(k)
++        _seam_k_norm = k
+         k = apply_rope(k, md.input_positions, self.head_dim_original,
+                        self.rope_theta, self.rope_scaling)
++        _seam_k_post_rope = k
+ 
+         # v: (T, K, H)
+         v = self.v_proj(x)
++        _seam_v_proj = v
+         # o: (T, N, H)
+         q_scale = k_scale = v_scale = None
+         if self.kv_cache_quantized_dtype:
+@@ -229,6 +281,21 @@
+         # (T, D)
+         o = self.o_proj(outputs)
+ 
++        if p38_observe:
++            seam = tuple(fingerprint_tensor_rows(value) for value in (
++                _seam_q_proj,
++                _seam_k_proj,
++                _seam_v_proj,
++                _seam_q_norm,
++                _seam_k_norm,
++                _seam_q_post_rope,
++                _seam_k_post_rope,
++                outputs,
++                o,
++            ))
++        else:
++            seam = ()
++
+         # P19.R4 -- cut-point instrument (CANON_CUT, default off).  Replaces the attention block's
+         # returned output with an intermediate, so the vehicle's existing bitwise hidden-row
+         # comparison becomes a comparison AT THAT CUT, with zero signature changes.  Valid because
+@@ -280,6 +347,8 @@
+                 self._canon_cut_announced = True
+                 print(f"[PATHTRACE] CANON_CUT={_cut} (attention output replaced at the cut)",
+                       flush=True)
++        if p38_observe:
++            return new_kv_cache, o, seam
+         return new_kv_cache, o
+ 
+ 
+@@ -331,6 +400,38 @@
+             prefix=prefix + ".mlp",
+         )
+ 
++    def observe(self, kv_cache, x, attention_metadata):
++        layer_input = x
++        hidden_states = self.input_layernorm(x)
++        kv_cache, attn_projected, attention_seams = self.self_attn(
++            kv_cache,
++            hidden_states,
++            attention_metadata,
++            p38_observe=True,
++        )
++        attention_residual = attn_projected + x
++        residual = attention_residual
++        post_attention_norm = self.post_attention_layernorm(
++            attention_residual
++        )
++        mlp_output = self.mlp(post_attention_norm)
++        layer_output = residual + mlp_output
++        checkpoints = (
++            fingerprint_tensor_rows(layer_input),
++            fingerprint_tensor_rows(hidden_states),
++            *attention_seams,
++            fingerprint_tensor_rows(attention_residual),
++            fingerprint_tensor_rows(post_attention_norm),
++            fingerprint_tensor_rows(mlp_output),
++            fingerprint_tensor_rows(layer_output),
++        )
++        if len(checkpoints) != len(P38_SEAM_CHECKPOINTS):
++            raise RuntimeError(
++                "P38 seam checkpoint count drifted: "
++                f"{len(checkpoints)} != {len(P38_SEAM_CHECKPOINTS)}"
++            )
++        return kv_cache, layer_output, jnp.stack(checkpoints, axis=1)
++
+ 
+ class Qwen3Model(Qwen2Model):
+ 
+@@ -413,6 +514,23 @@
+         if spec_config and spec_config.method == "dflash":
+             self.aux_hidden_state_layers = self.get_dflash_aux_hidden_state_layers(
+                 vllm_config)
++        if _P38_SEAM_OBSERVER:
++            if self.aux_hidden_state_layers:
++                raise RuntimeError(
++                    "P38 seam observer does not support speculative aux states"
++                )
++            if (_P38_SEAM_OBSERVER == "full" and
++                    not self.start_layer <= _P38_SEAM_LAYER < self.end_layer):
++                raise RuntimeError(
++                    "P38 seam layer is outside the local model range: "
++                    f"{_P38_SEAM_LAYER} not in "
++                    f"[{self.start_layer}, {self.end_layer})"
++                )
++            print(
++                "[PATHTRACE] CANON_P38_SEAM_OBSERVER="
++                f"{_P38_SEAM_OBSERVER} layer={_P38_SEAM_LAYER}",
++                flush=True,
++            )
+ 
+     def get_dflash_aux_hidden_state_layers(self, vllm_config):
+         spec_config = getattr(vllm_config, "speculative_config", None)
+@@ -446,15 +564,38 @@
+         for i, layer in enumerate(
+                 islice(self.layers, self.start_layer, self.end_layer)):
+             kv_cache = kv_caches[i]
+-            kv_cache, x = layer(
+-                kv_cache,
+-                x,
+-                attention_metadata,
+-            )
++            global_layer = self.start_layer + i
++            layer_input = x
++            if (_P38_SEAM_OBSERVER == "full" and
++                    global_layer == _P38_SEAM_LAYER):
++                kv_cache, x, layer_seams = layer.observe(
++                    kv_cache,
++                    x,
++                    attention_metadata,
++                )
++                aux_hidden_states.append(layer_seams)
++            else:
++                kv_cache, x = layer(
++                    kv_cache,
++                    x,
++                    attention_metadata,
++                )
++                if _P38_SEAM_OBSERVER == "layer":
++                    aux_hidden_states.append(jnp.stack((
++                        fingerprint_tensor_rows(layer_input),
++                        fingerprint_tensor_rows(x),
++                    ), axis=1))
+             kv_caches[i] = kv_cache
+-            if i in self.aux_hidden_state_layers:
++            if not _P38_SEAM_OBSERVER and i in self.aux_hidden_state_layers:
+                 aux_hidden_states.append(x)
+         x = self.norm(x)
++        if _P38_SEAM_OBSERVER:
++            if not aux_hidden_states:
++                raise RuntimeError("P38 seam observer selected no model layers")
++            aux_hidden_states = [
++                jnp.stack(aux_hidden_states, axis=1),
++                fingerprint_tensor_rows(x),
++            ]
+         return kv_caches, x, aux_hidden_states
+ 
+ 

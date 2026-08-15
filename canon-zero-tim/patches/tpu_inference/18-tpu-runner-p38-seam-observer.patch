@@ -1,0 +1,256 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -101,6 +101,13 @@
+     fingerprint_kv_cache_layer_prefixes,
+     global_page_indices,
+ )
++from p38_seam_capture import (
++    P38_LAYER_CHECKPOINTS,
++    P38_SEAM_CHECKPOINTS,
++    next_power_of_two as _p38_seam_next_power_of_two,
++    select_standard_seam_rows,
++    write_seam_record,
++)
+ 
+ # Patch to classify specific non-LoRA keys as base weights. Without this, vLLM's `add_lora`
+ # crashes with "unsupported LoRA weight" on base model parameters like `lm_head.weight`
+@@ -1000,6 +1007,33 @@
+ _P38_KV_OBSERVER_MATCHED_A = set()
+ _P38_KV_OBSERVER_STATE = {"records": 0, "bytes": 0}
+ _P38_KV_OBSERVER_FN = None
++_P38_SEAM_OBSERVER = os.environ.get("CANON_P38_SEAM_OBSERVER", "")
++_P38_SEAM_OBSERVER_DIR = os.environ.get("CANON_P38_SEAM_OBSERVER_DIR", "")
++_P38_SEAM_MIN_POSITION = int(os.environ.get(
++    "CANON_P38_SEAM_MIN_POSITION", "1400") or "1400")
++_P38_SEAM_MAX_POSITION = int(os.environ.get(
++    "CANON_P38_SEAM_MAX_POSITION", "3072") or "3072")
++_P38_SEAM_MAX_BYTES = int(os.environ.get(
++    "CANON_P38_SEAM_MAX_BYTES", str(4 * 1024 * 1024 * 1024)) or
++    str(4 * 1024 * 1024 * 1024))
++_P38_SEAM_STATE = {"records": 0, "bytes": 0}
++_P38_SEAM_GATHER_FNS = {}
++
++if _P38_SEAM_OBSERVER not in ("", "layer", "full"):
++    raise RuntimeError(
++        "CANON_P38_SEAM_OBSERVER must be unset, layer, or full, got "
++        f"{_P38_SEAM_OBSERVER!r}")
++_P38_SEAM_LAYER_TEXT = os.environ.get("CANON_P38_SEAM_LAYER", "")
++if _P38_SEAM_OBSERVER == "full":
++    if not _P38_SEAM_LAYER_TEXT.isdigit():
++        raise RuntimeError(
++            "P38 full seam observer requires CANON_P38_SEAM_LAYER")
++    _P38_SEAM_LAYER = int(_P38_SEAM_LAYER_TEXT)
++else:
++    if _P38_SEAM_LAYER_TEXT:
++        raise RuntimeError(
++            "CANON_P38_SEAM_LAYER is valid only with full seam observation")
++    _P38_SEAM_LAYER = None
+ 
+ if _P38_SERVING_CAPTURE_DIR and _P38_SERVING_CAPTURE_MAX_CALLS < 1:
+     raise RuntimeError(
+@@ -1094,6 +1128,31 @@
+         flush=True,
+     )
+ 
++if bool(_P38_SEAM_OBSERVER) != bool(_P38_SEAM_OBSERVER_DIR):
++    raise RuntimeError(
++        "P38 seam observer flag and output directory must be set together")
++if _P38_SEAM_OBSERVER_DIR:
++    if not _P38_SERVING_CAPTURE_DIR:
++        raise RuntimeError("P38 seam observer requires serving capture")
++    if os.path.realpath(_P38_SEAM_OBSERVER_DIR) != os.path.realpath(
++            _P38_SERVING_CAPTURE_DIR):
++        raise RuntimeError(
++            "P38 seam observer must write into the serving capture directory")
++    if _P38_SERVING_CAPTURE_EXPECTED_PATH != "standard":
++        raise RuntimeError("P38 seam observer requires the standard path")
++    if not (0 <= _P38_SEAM_MIN_POSITION < _P38_SEAM_MAX_POSITION):
++        raise RuntimeError("P38 seam observer position bounds are invalid")
++    if not (1024 * 1024 <= _P38_SEAM_MAX_BYTES <= 8 * 1024**3):
++        raise RuntimeError("P38 seam observer output byte bound is invalid")
++    print(
++        "[CANON_P38_SEAM_OBSERVER_INIT] "
++        f"enabled=1 mode={_P38_SEAM_OBSERVER} "
++        f"layer={_P38_SEAM_LAYER} min_position={_P38_SEAM_MIN_POSITION} "
++        f"max_position={_P38_SEAM_MAX_POSITION} "
++        f"max_bytes={_P38_SEAM_MAX_BYTES}",
++        flush=True,
++    )
++
+ 
+ def _p18_leaf(x):
+     """Materialise one leaf to numpy plus its sharding/dtype, or a plain scalar."""
+@@ -1995,6 +2054,156 @@
+             _P38_KV_OBSERVER_MATCHED_A.add(candidate_index)
+ 
+ 
++def _p38_seam_round():
++    from pathlib import Path as _Path
++
++    round_path = _Path(_P38_DIAGNOSTIC_ROUND_FILE)
++    if not round_path.is_file():
++        raise RuntimeError("P38 seam observer diagnostic round file is absent")
++    value = round_path.read_text(encoding="utf-8").strip()
++    if not value.isdigit() or not 0 <= int(value) < 8:
++        raise RuntimeError("P38 seam observer diagnostic round is invalid")
++    return int(value)
++
++
++def _p38_seam_gather(layer_fingerprints, final_fingerprints, row_indices):
++    count = int(row_indices.size)
++    if count <= 0:
++        raise RuntimeError("P38 seam gather received no rows")
++    bucket = _p38_seam_next_power_of_two(count)
++    if bucket > int(layer_fingerprints.shape[0]):
++        raise RuntimeError(
++            f"P38 seam gather bucket exceeds token rows: {bucket}")
++    padded = np.full((bucket,), int(row_indices[-1]), dtype=np.int32)
++    padded[:count] = row_indices
++    gather_fn = _P38_SEAM_GATHER_FNS.get(bucket)
++    if gather_fn is None:
++        @jax.jit
++        def gather_fn(layer_values, final_values, indices):
++            return (
++                jnp.take(layer_values, indices, axis=0),
++                jnp.take(final_values, indices, axis=0),
++            )
++        _P38_SEAM_GATHER_FNS[bucket] = gather_fn
++    layer_rows, final_rows = jax.device_get(gather_fn(
++        layer_fingerprints,
++        final_fingerprints,
++        jnp.asarray(padded, dtype=jnp.int32),
++    ))
++    return np.asarray(layer_rows)[:count], np.asarray(final_rows)[:count], bucket
++
++
++def _p38_seam_after_model(
++        runner, scheduler_output, req_ids_dp, input_ids, input_positions,
++        aux_hidden_states, padded_rows_per_dp):
++    """Persist compact seam fingerprints for every real deep-band token."""
++    if not _P38_SEAM_OBSERVER_DIR:
++        return
++    if not isinstance(aux_hidden_states, (tuple, list)) or len(
++            aux_hidden_states) != 2:
++        raise RuntimeError(
++            "P38 seam observer requires [layer fingerprints, final norm]")
++    layer_fingerprints, final_fingerprints = aux_hidden_states
++    layer_shape = tuple(int(value) for value in layer_fingerprints.shape)
++    final_shape = tuple(int(value) for value in final_fingerprints.shape)
++    checkpoint_names = (
++        P38_LAYER_CHECKPOINTS
++        if _P38_SEAM_OBSERVER == "layer"
++        else P38_SEAM_CHECKPOINTS
++    )
++    expected_layers = (
++        len(runner.kv_caches)
++        if _P38_SEAM_OBSERVER == "layer"
++        else 1
++    )
++    if (len(layer_shape) != 4 or len(final_shape) != 2
++            or layer_shape[0] != int(input_ids.shape[0])
++            or final_shape[0] != int(input_ids.shape[0])
++            or layer_shape[1] != expected_layers
++            or layer_shape[2] != len(checkpoint_names)
++            or layer_shape[3] != final_shape[1]):
++        raise RuntimeError(
++            "P38 seam observer aux geometry drifted: "
++            f"layer={layer_shape} final={final_shape} tokens={input_ids.shape}")
++    row_indices, row_arrays, requests = select_standard_seam_rows(
++        req_ids_dp=req_ids_dp,
++        scheduled_tokens=scheduler_output.num_scheduled_tokens,
++        req_id_to_index=runner.input_batch.req_id_to_index,
++        num_computed_tokens=runner.input_batch.num_computed_tokens_cpu,
++        num_tokens=runner.input_batch.num_tokens,
++        token_ids_cpu=runner.input_batch.token_ids_cpu,
++        padded_rows_per_dp=int(padded_rows_per_dp),
++        total_rows=int(input_ids.shape[0]),
++        min_position=_P38_SEAM_MIN_POSITION,
++        max_position=_P38_SEAM_MAX_POSITION,
++    )
++    if not row_indices.size:
++        return
++    observed_ids, observed_positions = jax.device_get((
++        jnp.take(input_ids, jnp.asarray(row_indices), axis=0),
++        jnp.take(input_positions, jnp.asarray(row_indices), axis=0),
++    ))
++    if not np.array_equal(
++            np.asarray(observed_ids, dtype=np.int32), row_arrays["token_ids"]):
++        raise RuntimeError("P38 seam token-ID row mapping drifted")
++    if not np.array_equal(
++            np.asarray(observed_positions, dtype=np.int32),
++            row_arrays["positions"]):
++        raise RuntimeError("P38 seam position row mapping drifted")
++    layer_rows, final_rows, gather_bucket = _p38_seam_gather(
++        layer_fingerprints, final_fingerprints, row_indices)
++    arrays = {
++        **row_arrays,
++        "layer_fingerprints": layer_rows,
++        "final_norm_fingerprints": final_rows,
++    }
++    arm = "B" if runner.input_batch.num_prompt_logprobs else "A"
++    call_index = int(_P38_REQUEST_JOURNAL_STATE["calls"])
++    record_index, npz_sha256 = write_seam_record(
++        _P38_SEAM_OBSERVER_DIR,
++        _P38_SEAM_STATE,
++        arrays,
++        {
++            "arm": arm,
++            "diagnostic_round": _p38_seam_round(),
++            "call_index": call_index,
++            "program_path": "standard",
++            "checkpoint_names": checkpoint_names,
++            "observer_mode": _P38_SEAM_OBSERVER,
++            "observed_layer": _P38_SEAM_LAYER,
++            "layer_indices": (
++                list(range(expected_layers))
++                if _P38_SEAM_OBSERVER == "layer"
++                else [_P38_SEAM_LAYER]
++            ),
++            "fingerprint_fields": (
++                "xor", "sum", "weighted_sum", "sample_first",
++                "sample_quarter", "sample_middle",
++                "sample_three_quarters", "sample_last",
++            ),
++            "selected_rows": int(row_indices.size),
++            "gather_bucket": int(gather_bucket),
++            "layer_count": int(layer_shape[1]),
++            "layer_fingerprint_shape": list(layer_shape),
++            "final_fingerprint_shape": list(final_shape),
++            "layer_fingerprint_sharding": str(getattr(
++                layer_fingerprints, "sharding", None)),
++            "final_fingerprint_sharding": str(getattr(
++                final_fingerprints, "sharding", None)),
++            "requests": requests,
++            "claim": "diagnostic_non_cryptographic_fingerprint",
++        },
++        _P38_SEAM_MAX_BYTES,
++    )
++    print(
++        "[CANON_P38_SEAM_OBSERVER_RECORD] "
++        f"record={record_index} arm={arm} call={call_index} "
++        f"rows={row_indices.size} bucket={gather_bucket} "
++        f"npz_sha256={npz_sha256}",
++        flush=True,
++    )
++
++
+ def _p38_observe_scheduled_prefixes(prefixes, program_path):
+     """Emit bounded evidence that the runtime hook ran, even on a miss."""
+     import json as _json
+@@ -3551,6 +3760,16 @@
+                 hidden_states.expert_indices = expert_indices
+                 return hidden_states
+ 
++        _p38_seam_after_model(
++            self,
++            scheduler_output,
++            req_ids_dp,
++            input_ids,
++            input_positions,
++            aux_hidden_states,
++            padded_num_scheduled_tokens_per_dp_rank,
++        )
++
+         # Capture clean B after model_fn has materialized the final prompt
+         # chunk into KV and after maybe_forbid_compile has exited.  The
+         # observer owns a separate bounded JIT and must never compile inside

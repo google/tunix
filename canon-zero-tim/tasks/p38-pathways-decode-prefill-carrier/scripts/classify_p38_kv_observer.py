@@ -107,7 +107,13 @@ def _load_records(directory: Path) -> list[dict[str, Any]]:
         np.ascontiguousarray(token_ids, dtype="<i8").tobytes()).hexdigest()
     _require(token_sha == record.get("token_history_sha256"),
              f"observer token SHA drifted: {expected_npz}")
-    records.append({**record, "arrays": arrays, "path": path.name})
+    records.append({
+        **record,
+        "arrays": arrays,
+        "path": path.name,
+        "json_sha256": _sha256(path),
+        "npz_path": npz_path.name,
+    })
   indices = [int(record["record_index"]) for record in records]
   _require(indices == list(range(len(indices))),
            "observer record indices are not contiguous")
@@ -184,6 +190,9 @@ def _compare_pair(live: dict[str, Any], clean: dict[str, Any]) -> dict[str, Any]
       "clean_b_request_id": clean["request_id"],
       "diagnostic_round": int(live["diagnostic_round"]),
       "target_seq_len": int(live["target_seq_len"]),
+      "valid_tokens": [
+          int(value) for value in np.asarray(a["valid_tokens"]).reshape(-1)
+      ],
       "aggregate_prefix_cells_differing": aggregate_cells,
       "sample_prefix_cells_differing": sample_cells,
       "differing_layers": sorted(differing_layers),
@@ -287,6 +296,15 @@ def classify(
     _require(capsules, "red-join classification requires mismatch capsules")
     _require(red_joins, "no paired observer candidate joined a red capsule row")
   joined_indices = {int(join["source_a_record_index"]) for join in red_joins}
+  if require_red_join:
+    expected_indices = {
+        int(live["record_index"]) for live, _clean in pairs
+    }
+    _require(
+        joined_indices == expected_indices,
+        "not every observer pair joined a red capsule row: "
+        f"joined={sorted(joined_indices)} expected={sorted(expected_indices)}",
+    )
   joined_comparisons = [
       item for item in comparisons
       if int(item["source_a_record_index"]) in joined_indices
@@ -298,14 +316,45 @@ def classify(
     classification = "live_kv_fingerprint_equal_on_red_row"
   else:
     classification = "observer_pairs_valid_red_join_pending"
+  source_inputs = {
+      "classifier": {
+          "path": Path(__file__).name,
+          "sha256": _sha256(Path(__file__)),
+      },
+      "observer_records": [
+          {
+              "arm": record["arm"],
+              "record_index": int(record["record_index"]),
+              "json": record["path"],
+              "json_sha256": record["json_sha256"],
+              "npz": record["npz_path"],
+              "npz_sha256": record["npz_sha256"],
+              "valid_tokens": [
+                  int(value)
+                  for value in np.asarray(
+                      record["arrays"]["valid_tokens"]
+                  ).reshape(-1)
+              ],
+          }
+          for record in records
+      ],
+      "capsules": [
+          {
+              "path": path.name,
+              "sha256": _sha256(path),
+          }
+          for path in capsules
+      ],
+  }
   return {
-      "schema": "p38-live-kv-classification-v1",
+      "schema": "p38-live-kv-classification-v2",
       "status": "PASS",
       "classification": classification,
       "records": len(records),
       "pairs": len(pairs),
       "comparisons": comparisons,
       "red_joins": red_joins,
+      "source_inputs": source_inputs,
       "claim_level": "bit-level-diagnostic-fingerprint-not-full-kv-bytes",
       "claim_ceiling": [
           "A/B token prefixes and valid extents are exact.",

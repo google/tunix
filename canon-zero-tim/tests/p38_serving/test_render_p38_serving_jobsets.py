@@ -188,6 +188,72 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
           "0",
       )
 
+  def test_renders_hierarchical_seam_modes_fail_closed(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      paths = renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tmp),
+          source_commit=_SOURCE,
+          run_id="p38-seam-layer",
+          stock_only=True,
+          seam_mode="layer",
+      )
+      document = yaml.safe_load(paths[0].read_text())
+      env = _env(document)
+      self.assertEqual(env["CANON_P38_SEAM_OBSERVER"], "layer")
+      self.assertEqual(env["CANON_P38_SEAM_MIN_POSITION"], "1400")
+      self.assertEqual(env["CANON_P38_SEAM_MAX_POSITION"], "3072")
+      self.assertTrue(
+          env["CANON_P38_SEAM_CLASSIFICATION"].endswith(
+              "p38_seam.classification.json"
+          )
+      )
+      self.assertNotIn("CANON_P38_SEAM_LAYER", env)
+      self.assertNotIn("CANON_P38_KV_OBSERVER_DIR", env)
+      self.assertEqual(
+          document["metadata"]["labels"]["canon.zero-tim/seam-observer"],
+          "layer",
+      )
+    with self.assertRaisesRegex(ValueError, "requires --stock-only"):
+      renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tempfile.mkdtemp()),
+          source_commit=_SOURCE,
+          run_id="invalid-seam",
+          seam_mode="layer",
+      )
+    base = renderer.p33.load_base(_BASE)
+    spec, unified = renderer._SPECS[0]
+    with self.assertRaisesRegex(ValueError, "requires exactly one layer"):
+      renderer.render_jobset(
+          base, spec, _SOURCE, "invalid-full", unified=unified,
+          seam_mode="full",
+      )
+    with self.assertRaisesRegex(ValueError, "requires --seam-mode=full"):
+      renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tempfile.mkdtemp()),
+          source_commit=_SOURCE,
+          run_id="orphan-layer",
+          stock_only=True,
+          seam_layer=17,
+      )
+    with self.assertRaisesRegex(ValueError, "max concurrency 256"):
+      renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tempfile.mkdtemp()),
+          source_commit=_SOURCE,
+          run_id="invalid-concurrency",
+          stock_only=True,
+          max_concurrency=32,
+          seam_mode="layer",
+      )
+    with self.assertRaisesRegex(ValueError, "outside Qwen3-8B"):
+      renderer.render_jobset(
+          base, spec, _SOURCE, "invalid-layer", unified=unified,
+          seam_mode="full", seam_layer=36,
+      )
+
   def test_rejects_capture_contract_drift(self):
     base = renderer.p33.load_base(_BASE)
     spec, unified = renderer._SPECS[0]

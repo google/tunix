@@ -23,12 +23,22 @@ SPEC.loader.exec_module(classifier)
 
 class KvObserverClassifierTest(unittest.TestCase):
 
-  def _record(self, root: Path, index: int, arm: str, *, changed=False):
+  def _record(
+      self,
+      root: Path,
+      index: int,
+      arm: str,
+      *,
+      changed=False,
+      invalid_tail_changed=False,
+  ):
     token_ids = np.array([1, 2, 3], dtype=np.int32)
     aggregates = np.zeros((1, 2, 4, 4), dtype=np.uint32)
     samples = np.zeros((1, 2, 4, 3, 2), dtype=np.uint16)
     if changed:
       aggregates[0, 0, 1, 0] = 1
+    if invalid_tail_changed:
+      samples[0, 0, 3, 0, 0] = 1
     arrays = {
         "aggregates": aggregates,
         "samples": samples,
@@ -93,6 +103,28 @@ class KvObserverClassifierTest(unittest.TestCase):
       self.assertEqual(
           report["classification"], "observer_pairs_valid_red_join_pending")
       self.assertTrue(report["comparisons"][0]["fingerprint_equal"])
+      self.assertEqual(report["schema"], "p38-live-kv-classification-v2")
+      self.assertEqual(report["comparisons"][0]["valid_tokens"], [3])
+      self.assertEqual(len(report["source_inputs"]["observer_records"]), 2)
+      self.assertEqual(report["source_inputs"]["capsules"], [])
+      self.assertEqual(
+          len(report["source_inputs"]["classifier"]["sha256"]), 64
+      )
+
+  def test_invalid_page_tail_difference_is_masked(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      self._record(root, 0, "A", invalid_tail_changed=True)
+      self._record(root, 1, "B")
+      report = classifier.classify(root, [self._capsule(root)], True)
+      self.assertEqual(
+          report["classification"],
+          "live_kv_fingerprint_equal_on_red_row",
+      )
+      self.assertTrue(report["comparisons"][0]["fingerprint_equal"])
+      self.assertEqual(
+          report["comparisons"][0]["sample_prefix_cells_differing"], 0
+      )
 
   def test_red_join_with_changed_prefix_cell_localizes_first_difference(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -115,6 +147,34 @@ class KvObserverClassifierTest(unittest.TestCase):
               "sample_diff": False,
           },
       )
+      self.assertEqual(
+          report["source_inputs"]["capsules"][0]["path"],
+          "p38_frozenlake_mismatch_capsule.round-0.npz",
+      )
+      self.assertEqual(
+          len(report["source_inputs"]["capsules"][0]["sha256"]), 64
+      )
+
+  def test_require_red_join_rejects_an_unjoined_observer_pair(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      self._record(root, 0, "A")
+      self._record(root, 1, "B")
+      self._record(root, 2, "A")
+      self._record(root, 3, "B")
+      second_json = root / "p38_kv_observer_0002_a.json"
+      second = json.loads(second_json.read_text())
+      second["diagnostic_round"] = 1
+      second_json.write_text(json.dumps(second))
+      clean_json = root / "p38_kv_observer_0003_b.json"
+      clean = json.loads(clean_json.read_text())
+      clean["diagnostic_round"] = 1
+      clean["source_a_record_index"] = 2
+      clean_json.write_text(json.dumps(clean))
+      with self.assertRaisesRegex(
+          classifier.ObserverError, "not every observer pair joined"
+      ):
+        classifier.classify(root, [self._capsule(root)], True)
 
   def test_missing_clean_pair_is_rejected(self):
     with tempfile.TemporaryDirectory() as tmp:

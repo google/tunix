@@ -2,9 +2,9 @@
 # Rehearse the P38 multi-round incident hook on real Qwen3-8B DP1xTP4.
 set -euo pipefail
 
-mode="${1:?usage: run_p38_incident_onehost.sh off|on <unique-label>}"
-label="${2:?usage: run_p38_incident_onehost.sh off|on <unique-label>}"
-case "$mode" in off|on) ;; *) echo "invalid mode: $mode" >&2; exit 2 ;; esac
+mode="${1:?usage: run_p38_incident_onehost.sh off|on|seam-layer <unique-label>}"
+label="${2:?usage: run_p38_incident_onehost.sh off|on|seam-layer <unique-label>}"
+case "$mode" in off|on|seam-layer) ;; *) echo "invalid mode: $mode" >&2; exit 2 ;; esac
 case "$label" in *[!a-zA-Z0-9_-]*|'') echo "invalid label: $label" >&2; exit 2 ;; esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -60,7 +60,7 @@ bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model qwen8b \
   >> "$raw" 2>&1
 
 capture_env=()
-if [ "$mode" = on ]; then
+if [ "$mode" != off ]; then
   mkdir -p "$capture"
   capture_env+=(
     -e CANON_P38_SERVING_CAPTURE_DIR="$capture"
@@ -75,11 +75,23 @@ if [ "$mode" = on ]; then
     -e CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=0,512,1024,1536,3072
     -e CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
     -e CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
+  )
+fi
+if [ "$mode" = on ]; then
+  capture_env+=(
     -e CANON_P38_KV_OBSERVER_DIR="$capture"
     -e CANON_P38_KV_OBSERVER_MAX_CANDIDATES=3
     -e CANON_P38_KV_OBSERVER_MAX_PAGES=16
     -e CANON_P38_KV_OBSERVER_MAX_BYTES=134217728
     -e CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
+  )
+elif [ "$mode" = seam-layer ]; then
+  capture_env+=(
+    -e CANON_P38_SEAM_OBSERVER=layer
+    -e CANON_P38_SEAM_OBSERVER_DIR="$capture"
+    -e CANON_P38_SEAM_MIN_POSITION=1400
+    -e CANON_P38_SEAM_MAX_POSITION=1600
+    -e CANON_P38_SEAM_MAX_BYTES=536870912
   )
 fi
 
@@ -211,6 +223,35 @@ PY
     --output "$state/p38_kv_observer.classification.json"
   grep -q '"classification": "observer_pairs_valid_red_join_pending"' \
     "$state/p38_kv_observer.classification.json"
+elif [ "$mode" = seam-layer ]; then
+  grep -q '^\[CANON_P38_SEAM_OBSERVER_INIT\] enabled=1 mode=layer ' "$raw"
+  grep -q '^\[CANON_P38_SEAM_OBSERVER_RECORD\] ' "$raw"
+  python3 - "$capture" <<'PY'
+import hashlib, json, pathlib, sys
+import numpy as np
+
+root = pathlib.Path(sys.argv[1])
+records = [json.loads(path.read_text()) for path in sorted(
+    root.glob("p38_seam_*.json"))]
+assert records, "P38 one-host seam observer produced no records"
+rounds = {record["diagnostic_round"] for record in records}
+assert rounds and rounds <= {0, 1, 2}, rounds
+for record in records:
+  assert record["observer_mode"] == "layer"
+  assert record["checkpoint_names"] == ["layer_input", "layer_output"]
+  assert record["observed_layer"] is None
+  npz = root / f"p38_seam_{record['record_index']:06d}.npz"
+  assert hashlib.sha256(npz.read_bytes()).hexdigest() == record["npz_sha256"]
+  with np.load(npz) as arrays:
+    assert set(arrays.files) == set(record["array_keys"])
+    values = arrays["layer_fingerprints"]
+    assert values.ndim == 4
+    assert values.shape[1:] == (36, 2, 8), values.shape
+print(
+    "[P38.INCIDENT.ONEHOST] SEAM_LAYER_PASS "
+    f"records={len(records)} observed_rounds={sorted(rounds)} endpoint_rounds=3"
+)
+PY
 fi
 sha256sum "$raw" "$pre_report" "$round_file" "$0"
 echo "[P38.INCIDENT.ONEHOST] PASS mode=$mode rounds=3 backward=0 optimizer_commits=0"

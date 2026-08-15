@@ -1,10 +1,37 @@
-# P38 FrozenLake: P38.2n live-KV discriminator
+# P38 FrozenLake: P38.2o decode seam localization
 
 This runbook is diagnostic-only. It never launches FrozenLake full training,
 evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a
 separate workstream and waits for its DP16 resources.
 
-## Current fact and admitted next run
+## Current fact and run admission
+
+P38s17 has already run. Do not execute the historical P38s17 operator sequence
+below. Reclassification from the six observer records and three immutable
+round capsules returns `live_kv_fingerprint_equal_on_red_row` over every valid
+extent. The committed directory lacks `COLLECTED.json` and `COMPLETE.json`, so
+it is analysis-level evidence, not a terminal bundle.
+
+The P38.2o local gates are complete:
+
+1. immutable-round-only capsule selection and input-SHA provenance;
+2. invalid-tail and valid-bit negative controls;
+3. corrected P38s17 evidence and a verifying manifest; and
+4. one-host endpoint-neutrality for the ordered decode seam observer.
+
+The real Qwen3-8B DP1xTP4 layer rehearsal is endpoint-neutral and produced 130
+bounded seam records. After review and source publication, render O2a with the
+command in the CURRENT handoff: one stock DP16xTP4 `--seam-mode layer`
+diagnostic, new run id `p38s18-layer`, concurrency 256, prefix cache off, three
+frozen rounds, backward zero, and optimizer commits zero. No U, concurrency,
+batch-size, E0-lite, full-training, or repair arm is allowed.
+
+O2a finds the first divergent layer. Only then does O2b use
+`--seam-mode full --seam-layer <N>` to find the internal checkpoint. The first
+measured checkpoint chooses the repair. See
+`phases/p38-2o-evidence-reconciliation-and-seam-walk.md`.
+
+## Historical P38s17 operator sequence — do not rerun
 
 P38s16 is complete and must not be rerun. The exact host audit joins all 60
 mismatch elements and identifies one natural single-active red call (4223) at
@@ -34,7 +61,7 @@ worktree is committed and pushed. Do not run from an uncommitted tree. Do not
 render unified KV, concurrency 32, E0-lite, backward, full training, or any
 repair arm.
 
-## P38s17 operator sequence — stock live-KV discriminator
+## P38s17 operator sequence — historical stock live-KV discriminator
 
 Run from a clean clone after publication:
 
