@@ -360,9 +360,11 @@ class CheckpointManagerTest(parameterized.TestCase):
     self.assertEqual(
         new_optimizer.opt_state.hyperparams['learning_rate'].value, 1e-5
     )
+    self.assertFalse(ckpt_manager.last_restore_had_optimizer)
     restored_step, restored_metadata = ckpt_manager.maybe_restore(
         model, new_optimizer
     )
+    self.assertTrue(ckpt_manager.last_restore_had_optimizer)
     self.assertEqual(restored_step, 1)
     self.assertEqual(restored_metadata, custom_metadata)
     jax.tree.map_with_path(
@@ -449,6 +451,7 @@ class CheckpointManagerTest(parameterized.TestCase):
     assert ckpt_manager._checkpointer is not None
     ckpt_manager._checkpointer.wait()
     ckpt_manager.maybe_restore(model)
+    self.assertFalse(ckpt_manager.last_restore_had_optimizer)
 
   @parameterized.parameters(['test_data/checkpoints'])
   def test_restore_with_backward_compatibility(self, ckpt_path):
@@ -515,6 +518,16 @@ class CheckpointManagerTest(parameterized.TestCase):
     assert cp_manager._checkpointer is not None
     cp_manager._checkpointer.wait()
     self.assertEqual(cp_manager.latest_step(), 1)
+
+  def test_interval_only_options_disable_forced_close_save(self):
+    options = checkpoint_options.TunixCheckpointingOptions(save_on_close=False)
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}', options=options
+    )
+    self.assertFalse(cp_manager.save_on_close)
+
+    default_manager = checkpoint_manager.CheckpointManager(None)
+    self.assertTrue(default_manager.save_on_close)
 
   def test_context_timeout_secs(self):
     options = checkpoint_options.TunixCheckpointingOptions(

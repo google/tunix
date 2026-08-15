@@ -21,7 +21,7 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import optax
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 import qwix
 
 # ====== Logging Configuration ======
@@ -47,7 +47,10 @@ from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import dp_workloads
+from tunix.rl import frozenlake_checkpoint
 from tunix.rl.rollout import base_rollout
+from tunix.sft import checkpoint_manager as checkpoint_manager_lib
+from tunix.sft import checkpoint_options as checkpoint_options_lib
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
 # The A1b/A2 contract and A3 adapter preflights exit before constructing the
@@ -559,8 +562,63 @@ WARMUP_STEPS = 0
 MAX_GRAD_NORM = 100.0
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 10**9  # effectively disabled; set CKPT_DIR + lower this to enable
-MAX_TO_KEEP = 1
+P45_CHECKPOINT = frozenlake_checkpoint.from_env(os.environ)
+if _P32_WORKLOAD_NAME == "frozenlake-dp8-tp8":
+  frozenlake_checkpoint.require_p45(P45_CHECKPOINT, os.environ)
+elif P45_CHECKPOINT.enabled:
+  raise ValueError(
+      "the GCS FrozenLake checkpoint contract is isolated to P45 DP8xTP8"
+  )
+SAVE_INTERVAL_STEPS = P45_CHECKPOINT.interval or 10**9
+MAX_TO_KEEP = P45_CHECKPOINT.max_to_keep or 1
+
+if P45_CHECKPOINT.enabled:
+  P45_CHECKPOINT_CONTRACT = frozenlake_checkpoint.build_contract(
+      P45_CHECKPOINT,
+      {
+          "source_commit": os.getenv("CANON_EXPECT_COMMIT", ""),
+          "profile": os.getenv("CANON_PROFILE", ""),
+          "workload": _P32_WORKLOAD_NAME,
+          "model_version": "Qwen/Qwen3-8B",
+          "model_dir_name": os.getenv("CANON_MODEL_DIR_NAME", ""),
+          "mesh_dp": SHARED_MESH_SHAPE[0],
+          "mesh_tp": SHARED_MESH_SHAPE[1],
+          "batch_size": BATCH_SIZE,
+          "mini_batch_size": MINI_BATCH_SIZE,
+          "trajectory_mini_batch_size": TRAJECTORY_MINI_BATCH_SIZE,
+          "train_trajectory_micro_batch_size": (
+              TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
+          ),
+          "num_generations": NUM_GENERATIONS,
+          "num_iterations": NUM_ITERATIONS,
+          "max_prompt_length": MAX_PROMPT_LENGTH,
+          "max_response_length": MAX_RESPONSE_LENGTH,
+          "max_concurrency": MAX_CONCURRENCY,
+          "env_max_steps": args.env_max_steps,
+          "learning_rate": LEARNING_RATE,
+          "b1": B1,
+          "b2": B2,
+          "weight_decay": WEIGHT_DECAY,
+          "beta": BETA,
+          "epsilon": EPSILON,
+          "epsilon_high": EPSILON_HIGH,
+          "loss_algo": args.loss_algo,
+          "loss_agg_mode": args.loss_agg_mode,
+          "kl_loss_mode": args.kl_loss_mode,
+          "advantage_estimator": args.advantage_estimator,
+          "seed": SEED,
+          "shuffle_data": bool(args.shuffle_data),
+          "eval_enabled": CANON_P33_ENABLE_EVAL,
+          "eval_every_n_steps": EVAL_EVERY_N_STEPS,
+          "max_steps": MAX_STEPS,
+          "optimizer_placement": CANON_OPTIMIZER_PLACEMENT,
+      },
+  )
+  os.environ["CANON_CHECKPOINT_CONTRACT_JSON"] = (
+      frozenlake_checkpoint.contract_json(P45_CHECKPOINT_CONTRACT)
+  )
+else:
+  P45_CHECKPOINT_CONTRACT = {}
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
@@ -630,9 +688,41 @@ MODEL_VERSION = "Qwen/Qwen3-8B"
 MODEL_DOWNLOAD_DIR = os.getenv("MODEL_DOWNLOAD_DIR", "/tmp/models/Qwen3-8B")
 DATA_DIR = os.getenv("FROZENLAKE_DATA_DIR", "/tmp/data/frozenlake")
 
-# Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
-CKPT_DIR = None
+# P45 uses a stable GCS campaign path. Other FrozenLake carriers retain the
+# historical checkpoint-disabled default.
+CKPT_DIR = P45_CHECKPOINT.directory
 TB_LOG_DIR = "/tmp/tunix-tb/frozenlake"
+
+if CKPT_DIR:
+  checkpointing_options = checkpoint_options_lib.TunixCheckpointingOptions(
+      save_decision_policy=(
+          ocp.training.save_decision_policies.FixedIntervalPolicy(
+              SAVE_INTERVAL_STEPS
+          )
+      ),
+      preservation_policy=ocp.training.preservation_policies.LatestN(
+          MAX_TO_KEEP
+      ),
+      save_on_close=False,
+  )
+  checkpoint_probe = checkpoint_manager_lib.CheckpointManager(
+      root_directory=os.path.join(CKPT_DIR, "actor"),
+      options=checkpointing_options,
+  )
+  latest_checkpoint_step = checkpoint_probe.latest_step()
+  checkpoint_probe.close()
+  frozenlake_checkpoint.validate_latest(
+      P45_CHECKPOINT, latest_checkpoint_step
+  )
+  print(
+      "[P45.CHECKPOINT] PREFLIGHT "
+      f"mode={P45_CHECKPOINT.mode} root={CKPT_DIR} "
+      f"latest={latest_checkpoint_step if latest_checkpoint_step is not None else 'none'} "
+      f"interval={SAVE_INTERVAL_STEPS} max_to_keep={MAX_TO_KEEP}",
+      flush=True,
+  )
+else:
+  checkpointing_options = None
 
 
 # ====== Build the single shared mesh ======
@@ -822,13 +912,6 @@ qwen_actor = params_lib.create_model_from_safe_tensors(
 show_hbm_usage("after loading qwen_actor")
 
 # ====== Checkpoint + metrics + optimizer ======
-if CKPT_DIR:
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
-  )
-else:
-  checkpointing_options = None
-
 wandb_config = vars(args)
 wandb_config.update({
     "WARMUP_STEPS": WARMUP_STEPS,
@@ -1015,6 +1098,34 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 show_hbm_usage("after RLCluster creation")
+if P45_CHECKPOINT.enabled:
+  restored_checkpoint_step = rl_cluster.actor_trainer.restored_global_step()
+  restored_optimizer = (
+      rl_cluster.actor_trainer.checkpoint_manager.last_restore_had_optimizer
+  )
+  restored_metadata = rl_cluster.actor_trainer._restored_custom_metadata
+  frozenlake_checkpoint.validate_restored(
+      P45_CHECKPOINT,
+      restored_step=restored_checkpoint_step,
+      optimizer_restored=restored_optimizer,
+      metadata=restored_metadata,
+      expected_contract=P45_CHECKPOINT_CONTRACT,
+  )
+  if rl_cluster.actor_trainer.train_steps != restored_checkpoint_step:
+    raise ValueError(
+        "P45 trainer/global checkpoint step mismatch: "
+        f"trainer={rl_cluster.actor_trainer.train_steps} "
+        f"global={restored_checkpoint_step}"
+    )
+  if P45_CHECKPOINT.mode == "new":
+    print("[P45.CHECKPOINT] NEW_PASS latest=none", flush=True)
+  else:
+    print(
+        "[P45.CHECKPOINT] RESTORE_PASS "
+        f"step={restored_checkpoint_step} optimizer_state=1 "
+        "contract_match=1",
+        flush=True,
+    )
 if CANON_P32_WORKLOAD:
   wandb_attestation = dp_workloads.require_online_wandb_run(P32_WORKLOAD)
   print(
@@ -1136,6 +1247,28 @@ grpo_trainer = GRPOLearner(
     metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
+
+if P45_CHECKPOINT.mode == "resume":
+  if grpo_trainer.rl_cluster.global_steps != restored_checkpoint_step:
+    raise ValueError(
+        "P45 learner did not adopt the restored global step: "
+        f"learner={grpo_trainer.rl_cluster.global_steps} "
+        f"restored={restored_checkpoint_step}"
+    )
+  if not grpo_trainer.should_sync_weights:
+    raise ValueError("P45 vLLM resume requires an explicit rollout weight sync")
+  rl_cluster.sync_weights_for_resume()
+  resume_weight_attestation = rl_cluster.attest_actor_anchor_matches_engine()
+  if resume_weight_attestation.get("equal") is not True:
+    raise ValueError(
+        "P45 restored actor did not match vLLM after resume sync: "
+        f"{resume_weight_attestation}"
+    )
+  print(
+      "[P45.CHECKPOINT] ROLLOUT_SYNC_PASS "
+      f"step={restored_checkpoint_step} weights_equal=1",
+      flush=True,
+  )
 
 if CANON_P32_WORKLOAD:
   if CANON_P33_ENABLE_EVAL:

@@ -47,6 +47,8 @@ set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 RUN_ID="p45r4"
+CHECKPOINT_TAG="fl-prod-001"
+CHECKPOINT_MODE="new"
 WORKTREE="/tmp/canon-zero-tim-${RUN_ID}"
 OUT="/tmp/p45-render-${RUN_ID}"
 EVIDENCE="/tmp/p45-evidence-${RUN_ID}"
@@ -78,6 +80,8 @@ bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh \
 python3 canon-zero-tim/cluster/render_p45_frozenlake.py \
   --source-commit "$SOURCE_COMMIT" \
   --run-id "$RUN_ID" \
+  --checkpoint-tag "$CHECKPOINT_TAG" \
+  --checkpoint-mode "$CHECKPOINT_MODE" \
   --output-dir "$OUT" | tee "$EVIDENCE/render.txt"
 
 FULL="$OUT/jobset-p45-frozenlake-full-dp8-tp8-resident.yaml"
@@ -105,6 +109,11 @@ MIN_TOKEN_BUCKET=2048
 CANON_OPT_STATE_RESIDENT=1
 CANON_P30_OPT_STATE_OFFLOAD=0
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
+CANON_FROZENLAKE_CKPT_MODE=new
+CANON_FROZENLAKE_CKPT_ROOT=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake
+CANON_FROZENLAKE_CKPT_TAG=fl-prod-001
+CANON_FROZENLAKE_CKPT_INTERVAL=10
+CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
 --train_trajectory_micro_batch_size=8
 --vllm_max_num_seqs=32
 --vllm_max_num_batched_tokens=256
@@ -136,10 +145,9 @@ At runtime, before model loading, require:
 Do not apply both variants on the same slice. The user requested evaluation,
 so `$EVAL` is the default choice unless current priority is pure throughput.
 
-The first P45 evidence run is deliberately `maxRestarts: 0`. With no training
-checkpoint, an automatic restart begins again at step 0 and can hide whether
-the first attempt OOMed. After target capacity is proven, restart policy can be
-changed in a separate reviewed CL; do not edit the rendered YAML in place.
+P45 remains `maxRestarts: 0`. Recovery is explicit: a fresh JobSet/run ID,
+the identical immutable source and checkpoint tag, and mode `resume`. This
+keeps infrastructure attempts auditable; do not edit the rendered YAML.
 
 ```bash
 TARGET="$EVAL"  # use "$FULL" only for the throughput-only variant
@@ -201,6 +209,37 @@ The first update is admitted only if all of the following are present:
 10. finite HBM snapshots at before-reverse, after-accumulation, and
     after-commit with no TPU OOM.
 
+## Checkpoint/resume gate
+
+Fresh mode must print:
+
+```text
+[P45.CHECKPOINT] PREFLIGHT mode=new ... interval=10 max_to_keep=1
+[P45.CHECKPOINT] NEW_PASS latest=none
+```
+
+At step 10 require one complete checkpoint under
+`gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake/$CHECKPOINT_TAG/actor/10`
+and continued execution into step 11. Only multiples of 10 are eligible and
+only the newest complete step is retained; close-time forced saves are disabled
+so a partial interval cannot evict the last resumable boundary.
+
+For an explicit resume, keep `SOURCE_COMMIT` and `CHECKPOINT_TAG`, choose a new
+`RUN_ID`, set `CHECKPOINT_MODE=resume`, rerun the renderer/local and server-side
+dry-run gates, then apply exactly one manifest. Require, before any rollout:
+
+```text
+[P45.CHECKPOINT] PREFLIGHT mode=resume ... latest=<10*N>
+[P45.CHECKPOINT] RESTORE_PASS step=<10*N> optimizer_state=1 contract_match=1
+[P45.CHECKPOINT] ROLLOUT_SYNC_PASS step=<10*N> weights_equal=1
+```
+
+Then require the next committed update to be `<10*N+1>`. A resume is invalid
+if actor weights, Adam state, global step, source/config contract, or vLLM
+weight attestation is missing. It resumes committed training state only; it
+does not restore in-flight rollouts, environment/vLLM RNG, or W&B run identity,
+and up to nine post-checkpoint updates can be replayed.
+
 Throughput must be measured rather than assumed. P45 removes the optimizer
 host round trip, but it also executes 32 ordered local gradient groups per
 update instead of the old DP16 path's 16. Return both optimizer timing and the
@@ -244,6 +283,8 @@ log, step-0 update/alignment snapshots, final JobSet/pod YAML, describe/events,
 Pathways proxy/RM logs, previous log if any, and SHA256SUMS. Also report the
 final JobSet condition, pod exit code/reason, and whether evaluation was
 enabled.
+Include a GCS listing of the campaign `actor/` prefix showing the one retained
+complete checkpoint and, for resume, the three `P45.CHECKPOINT` markers above.
 
 ## Rollback
 

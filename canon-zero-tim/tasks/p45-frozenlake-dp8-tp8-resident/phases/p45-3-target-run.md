@@ -1,6 +1,6 @@
 # P45.3 — 64-chip target run
 
-- Status: active
+- Status: pending on P45.3a checkpoint/resume admission
 
 ## Objective
 
@@ -19,6 +19,9 @@ Before rendering, the exact-image gate must end with
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. At runtime, stop immediately if
 the resolved environment does not print
 `profile=qwen3-8b-dp8-tp8-frozenlake-resident model_dir=qwen8b_tp8`.
+
+The target manifest must also carry the reviewed P45.3a checkpoint contract.
+Do not launch the old checkpoint-disabled P45 manifest after P45.3a begins.
 
 ## Stop conditions
 

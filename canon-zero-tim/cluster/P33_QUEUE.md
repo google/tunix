@@ -269,7 +269,7 @@ already persisted.
 | Step-1 readout | 16/16 reports: all boundaries 0 bytes incl. `T_old_vs_T_current` (first flag-on check of the production value-and-grad primal); `w=r=w*r=1`; clip/TIS 0; finite nonzero gradient; commit=sync=1 | same |
 | Step-10 readout | commits/syncs exactly `1..10`; 10 distinct policy hashes; zero red reports | same |
 | Completion claim ceiling | stable training loop + reward/solve trend; **not convergence** | same |
-| Artifacts | W&B (`zero-tim-gsm8k-dp16-tp4`), alignment JSONL, raw log, classifier verdict; evidence-only, no checkpoint | same W&B via profile env; **`CKPT_DIR = None` is hardcoded (train_frozenlake_qwen3.py:580): no model artifact exists at any step count.** Success may not be described as producing a model |
+| Artifacts | W&B (`zero-tim-gsm8k-dp16-tp4`), alignment JSONL, raw log, classifier verdict; evidence-only, no checkpoint | same W&B via profile env; this historical P33 DP16xTP4 renderer leaves the isolated P45 checkpoint contract disabled, so it produces no model artifact. The separate P45 DP8xTP8 runbook owns GCS checkpoint/resume |
 | Wall-clock expectation (UNVERIFIED, from r17/r19 extrapolation) | first step +~40 min JIT; warm 3-5 min/step; ~10-17 h total | warm 8-10 min/step; **~2.5-3 days total** |
 | On red | gate stops the run; archive raw log + alignment JSONL + classification before any code change; classify infra failures INCONCLUSIVE, not numerical red |
 

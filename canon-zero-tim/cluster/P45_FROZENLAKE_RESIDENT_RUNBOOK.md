@@ -39,6 +39,8 @@ set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
 RUN_ID="p45r4"
+CHECKPOINT_TAG="fl-prod-001"  # stable across all attempts of this campaign
+CHECKPOINT_MODE="new"        # change only to resume after actor/10 exists
 WORKTREE="/tmp/canon-zero-tim-${RUN_ID}"
 OUT="/mnt/disks/linchai_data/launch_manifests/${RUN_ID}"
 EVIDENCE="/mnt/disks/linchai_data/launch_evidence/${RUN_ID}"
@@ -73,6 +75,8 @@ bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh \
 python3 canon-zero-tim/cluster/render_p45_frozenlake.py \
   --source-commit "$SOURCE_COMMIT" \
   --run-id "$RUN_ID" \
+  --checkpoint-tag "$CHECKPOINT_TAG" \
+  --checkpoint-mode "$CHECKPOINT_MODE" \
   --output-dir "$OUT" | tee "$EVIDENCE/render.txt"
 
 FULL="$OUT/jobset-p45-frozenlake-full-dp8-tp8-resident.yaml"
@@ -115,6 +119,11 @@ MIN_TOKEN_BUCKET=2048
 CANON_OPT_STATE_RESIDENT=1
 CANON_P30_OPT_STATE_OFFLOAD=0
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
+CANON_FROZENLAKE_CKPT_MODE=new
+CANON_FROZENLAKE_CKPT_ROOT=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake
+CANON_FROZENLAKE_CKPT_TAG=fl-prod-001
+CANON_FROZENLAKE_CKPT_INTERVAL=10
+CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
 --train_trajectory_micro_batch_size=8
 --vllm_max_num_seqs=32
 --vllm_max_num_batched_tokens=256
@@ -144,9 +153,10 @@ TARGET="$EVAL"
 kubectl apply -f "$TARGET" | tee "$EVIDENCE/apply.txt"
 ```
 
-The first P45 capacity run deliberately keeps `maxRestarts: 0`: without a
-checkpoint, a restart begins again at step 0 and can hide the first-attempt OOM.
-Do not change this in the rendered YAML.
+P45 deliberately keeps `maxRestarts: 0`. Recovery is an explicit new JobSet
+with a new run ID and `--checkpoint-mode resume`; Kubernetes must not
+automatically turn an attempt-0 failure into an unattributed attempt. Do not
+change this in the rendered YAML.
 
 ## 5. Prove device residency on the first update
 
@@ -157,6 +167,8 @@ The complete log must show:
 [P41.OPTIMIZER] before_reverse placement=device-resident memory_kind=device
 [P41.OPTIMIZER] after_commit placement=device-resident memory_kind=device
 [CANON_P33_DP8] update_step_committed train_steps=1
+[P45.CHECKPOINT] PREFLIGHT mode=new ... interval=10 max_to_keep=1
+[P45.CHECKPOINT] NEW_PASS latest=none
 ```
 
 The update record must additionally contain:
@@ -180,13 +192,61 @@ For `$EVAL`, require exactly one evaluation enablement marker and finite
 [CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 held_out_rows=100 generations=8
 ```
 
-## 6. Return evidence
+## 6. Checkpoint and explicit resume
+
+The actor checkpoint lives at:
+
+```text
+gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake/<CHECKPOINT_TAG>/actor/<STEP>
+```
+
+Only committed multiples of 10 are saved, and `LatestN(1)` removes the older
+complete checkpoint after the newer one is durable. The trainer's forced
+close-time checkpoint is disabled, so an off-interval shutdown cannot replace
+the newest 10-step boundary. Expect a large checkpoint: full fp32 actor plus
+resident Adam state. Do not reuse a tag for an unrelated campaign.
+
+Before claiming recovery, require a complete `actor/10`, continued execution
+into step 11, and no checkpoint OOM/timeout. To resume after an interruption,
+fetch the exact same `SOURCE_COMMIT`, choose a fresh `RUN_ID` and empty local
+render/evidence directories, preserve `CHECKPOINT_TAG`, and render with:
+
+```bash
+CHECKPOINT_MODE="resume"
+python3 canon-zero-tim/cluster/render_p45_frozenlake.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --checkpoint-tag "$CHECKPOINT_TAG" \
+  --checkpoint-mode "$CHECKPOINT_MODE" \
+  --output-dir "$OUT"
+```
+
+The resumed log is admitted only with:
+
+```text
+[P45.CHECKPOINT] PREFLIGHT mode=resume ... latest=<10*N>
+[P45.CHECKPOINT] RESTORE_PASS step=<10*N> optimizer_state=1 contract_match=1
+[P45.CHECKPOINT] ROLLOUT_SYNC_PASS step=<10*N> weights_equal=1
+```
+
+The first resumed rollout must occur only after `ROLLOUT_SYNC_PASS`; the next
+committed update must be `<10*N+1>`. `new` intentionally refuses an existing
+tag, while `resume` refuses an empty tag, missing optimizer state, wrong source
+or configuration, or an off-interval latest step.
+
+## 7. Return evidence
 
 Before deleting the JobSet or Pods, preserve the complete head log, rendered
 YAML, source SHA, JobSet and Pod YAML, Pod describe/events, Pathways proxy/RM
 logs, first-update JSON, alignment JSONL, evaluation summaries, and SHA-256
 manifest. The exact commands and full return checklist are maintained in
 [`../tasks/p45-frozenlake-dp8-tp8-resident/HANDOFF.md`](../tasks/p45-frozenlake-dp8-tp8-resident/HANDOFF.md).
+
+Also preserve a GCS listing of the campaign's `actor/` prefix proving that
+exactly one complete step is retained. Resume is committed-step continuation,
+not exact trajectory continuation: up to nine updates after the newest saved
+boundary may be replayed, and rollout/environment RNG plus W&B run identity are
+not restored.
 
 ## Rollback
 

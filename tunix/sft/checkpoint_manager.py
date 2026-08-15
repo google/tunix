@@ -86,6 +86,7 @@ class CheckpointManager:
       options: The options for the checkpoint manager.
     """
     self._checkpointer: ocp.training.Checkpointer | None = None
+    self._last_restore_had_optimizer = False
     self._options = checkpoint_options.resolve_checkpointing_defaults(
         options
     )
@@ -166,6 +167,16 @@ class CheckpointManager:
       return None
     return self._checkpointer.latest.step
 
+  @property
+  def last_restore_had_optimizer(self) -> bool:
+    """Whether the most recent successful restore included optimizer state."""
+    return self._last_restore_had_optimizer
+
+  @property
+  def save_on_close(self) -> bool:
+    """Whether trainer close should force a final checkpoint."""
+    return self._options.save_on_close is not False
+
   def save(
       self,
       step: int,
@@ -238,6 +249,7 @@ class CheckpointManager:
       RuntimeError: If the checkpoint cannot be restored.
     """
     restore_start = time.time()
+    self._last_restore_had_optimizer = False
     if self._checkpointer is None:
       return 0, {}
     if step is None:
@@ -286,6 +298,7 @@ class CheckpointManager:
 
     if optimizer is not None and 'optimizer_state' in restored_checkpointables:  # pyrefly: ignore[not-iterable]
       nnx.update(optimizer, restored_checkpointables['optimizer_state'])  # pyrefly: ignore[missing-attribute]
+      self._last_restore_had_optimizer = True
 
     # Update the model state with params from the restored checkpoint.
     nnx.update(model, restored_checkpointables['model_params'])  # pyrefly: ignore[missing-attribute]

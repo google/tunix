@@ -72,7 +72,6 @@ class CheckpointingOptions(Protocol):
     """Returns the options for async operations."""
     ...
 
-
 @dataclasses.dataclass(frozen=True)
 class TunixCheckpointingOptions:
   """Concrete implementation of checkpointing options for Tunix."""
@@ -81,6 +80,7 @@ class TunixCheckpointingOptions:
   step_name_format: StepNameFormatType | None = None
   enable_async_checkpointing: bool | None = None
   async_options: AsyncOptionsType | None = None
+  save_on_close: bool | None = True
 
 
 # Default checkpointing options for Tunix:
@@ -107,6 +107,7 @@ def create_checkpointing_options(
     step_name_format: StepNameFormatType | None = None,
     enable_async_checkpointing: bool | None = None,
     async_options: AsyncOptionsType | None = None,
+    save_on_close: bool | None = None,
 ) -> TunixCheckpointingOptions:
   """Creates a TunixCheckpointingOptions instance."""
   return TunixCheckpointingOptions(
@@ -115,6 +116,7 @@ def create_checkpointing_options(
       step_name_format=step_name_format,
       enable_async_checkpointing=enable_async_checkpointing,
       async_options=async_options,
+      save_on_close=save_on_close,
   )
 
 
@@ -190,10 +192,15 @@ def resolve_checkpointing_defaults(
   else:
     async_options = DEFAULT_CHECKPOINTING_OPTIONS.async_options
 
+  save_on_close = getattr(options, "save_on_close", None)
+  if save_on_close is None:
+    save_on_close = DEFAULT_CHECKPOINTING_OPTIONS.save_on_close
+
   return create_checkpointing_options(
       save_decision_policy=save_policy,
       preservation_policy=preserve_policy,
       step_name_format=step_name_format,
       enable_async_checkpointing=enable_async,
       async_options=async_options,
+      save_on_close=save_on_close,
   )

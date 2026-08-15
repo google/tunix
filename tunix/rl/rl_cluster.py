@@ -22,6 +22,7 @@ import enum
 import functools
 import gc
 import itertools
+import json
 import operator
 import os
 from typing import Any, Callable, Mapping
@@ -595,10 +596,9 @@ class RLCluster:
             model=self.critic,
             optimizer=self.cluster_config.training_config.critic_optimizer,  # pyrefly: ignore[bad-argument-type]
             training_config=critic_config,
-            custom_checkpoint_metadata_fn=lambda: {
-                "global_step": self.global_steps + 1,
-                "role": Role.CRITIC.value,
-            },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+            custom_checkpoint_metadata_fn=lambda: self._custom_checkpoint_metadata(
+                Role.CRITIC
+            ),  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
             metrics_logger=self._rl_metrics_logger,
             perf_tracer=self._perf,
             perf_tracer_v2=self._perf_v2,
@@ -619,10 +619,9 @@ class RLCluster:
           model=self.train_actor,
           optimizer=self.cluster_config.training_config.actor_optimizer,
           training_config=actor_config,
-          custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1,
-              "role": Role.ACTOR.value,
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          custom_checkpoint_metadata_fn=lambda: self._custom_checkpoint_metadata(
+              Role.ACTOR
+          ),  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
           metrics_logger=self._rl_metrics_logger,
           perf_tracer=self._perf,
           perf_tracer_v2=self._perf_v2,
@@ -1358,8 +1357,8 @@ class RLCluster:
         )
       return actor_per_token_logps
 
-  def sync_weights(self):
-    """Syncs the weights of between the sampler model and trainer model."""
+  def _sync_weights_without_advancing_step(self) -> None:
+    """Copies actor weights to rollout without changing training progress."""
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
@@ -1380,6 +1379,13 @@ class RLCluster:
           nnx.state(self.actor_trainer.model), "pinned_host"
       )
 
+  def sync_weights_for_resume(self) -> None:
+    """Synchronizes a restored actor before its first resumed rollout."""
+    self._sync_weights_without_advancing_step()
+
+  def sync_weights(self):
+    """Syncs actor weights after a committed batch and advances its step."""
+    self._sync_weights_without_advancing_step()
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1
 
@@ -1441,3 +1447,20 @@ class RLCluster:
           stack.enter_context(self.cluster_config.role_to_mesh[role]),
           stack.enter_context(logical_axis_rule_ctx),
       )
+
+  def _custom_checkpoint_metadata(self, role: Role) -> dict[str, Any]:
+    """Builds checkpoint metadata plus an optional exact resume contract."""
+    metadata: dict[str, Any] = {
+        "global_step": self.global_steps + 1,
+        "role": role.value,
+    }
+    raw_contract = os.environ.get("CANON_CHECKPOINT_CONTRACT_JSON", "")
+    if raw_contract:
+      try:
+        contract = json.loads(raw_contract)
+      except json.JSONDecodeError as exc:
+        raise ValueError("invalid CANON_CHECKPOINT_CONTRACT_JSON") from exc
+      if not isinstance(contract, dict):
+        raise ValueError("checkpoint resume contract must be a JSON object")
+      metadata["canon_resume_contract"] = contract
+    return metadata

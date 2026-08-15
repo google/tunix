@@ -1876,6 +1876,11 @@ class PeftTrainer:
           "Skipping final checkpoint for DeepSWE one-host no-commit smoke."
       )
       return
+    if not self.checkpoint_manager.save_on_close:
+      logging.info(
+          "Skipping forced final checkpoint; interval-only policy is active."
+      )
+      return
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(

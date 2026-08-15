@@ -7,6 +7,10 @@ cd "$WORKTREE"
 
 python3 -c "import ast,pathlib; files=(\
 'tunix/rl/dp_workloads.py',\
+'tunix/rl/frozenlake_checkpoint.py',\
+'tunix/sft/checkpoint_options.py',\
+'tunix/sft/checkpoint_manager.py',\
+'tunix/sft/peft_trainer.py',\
 'tunix/rl/agentic/agentic_rl_learner.py',\
 'tunix/rl/canonical_qwen3_adapter.py',\
 'examples/frozenlake/train_frozenlake_qwen3.py',\
@@ -14,6 +18,7 @@ python3 -c "import ast,pathlib; files=(\
 'canon-zero-tim/cluster/render_p45_frozenlake.py',\
 'canon-zero-tim/src/engine_shims/models/qwen8b_tp8/p22xf_contract.py',\
 'canon-zero-tim/tests/p33_workloads/classify_run.py',\
+'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_checkpoint_contract.py',\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_renderer.py',\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_qwen8b_tp8.py',\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_overlay_import.py',\
@@ -29,6 +34,7 @@ JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
   canon-zero-tim/tests/p33_workloads/test_classify_run.py \
   canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py \
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_checkpoint_contract.py \
   canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_renderer.py \
   canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_qwen8b_tp8.py
 JAX_PLATFORMS=cpu python3 -m unittest discover \
@@ -54,6 +60,12 @@ validate_p45_profile() (
   export CANON_OPT_STATE_RESIDENT=1
   export CANON_P30_OPT_STATE_OFFLOAD=0
   export CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
+  export CANON_FROZENLAKE_CKPT_MODE=new
+  export CANON_FROZENLAKE_CKPT_ROOT=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake
+  export CANON_FROZENLAKE_CKPT_TAG=fl-local-gate
+  export CANON_FROZENLAKE_CKPT_INTERVAL=10
+  export CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
+  export ENABLE_PATHWAYS_PERSISTENCE=1
   export CANON_RUN_CMD="printf p45-preflight"
   export CANON_RUN_LOG="$state/run.log"
   export CANON_PRE_ALIGN_REPORT="$state/pre_alignment.jsonl"
@@ -70,8 +82,10 @@ validate_p45_profile() (
   [ "$CANON_OPT_STATE_RESIDENT:$CANON_P30_OPT_STATE_OFFLOAD" = 1:0 ]
   [ "$CANON_P33_ENABLE_EVAL:$CANON_P31_ENABLE_EVAL" = 1:1 ]
   [ "$CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY" = 1 ]
-  echo "[P45.PROFILE] ADMITTED_PREFLIGHT_PASS topology=DP8xTP8 model_dir=qwen8b_tp8 local_trajectories=32 global_m=2048 optimizer=device-resident eval=on warning_only=on"
+  [ "$CANON_FROZENLAKE_CKPT_MODE:$CANON_FROZENLAKE_CKPT_INTERVAL:$CANON_FROZENLAKE_CKPT_MAX_TO_KEEP" = new:10:1 ]
+  [ "$CANON_FROZENLAKE_CKPT_TAG" = fl-local-gate ]
+  echo "[P45.PROFILE] ADMITTED_PREFLIGHT_PASS topology=DP8xTP8 model_dir=qwen8b_tp8 local_trajectories=32 global_m=2048 optimizer=device-resident eval=on warning_only=on checkpoint=new/10/latest1"
 )
 
 validate_p45_profile
-echo "[P45.FROZENLAKE] CPU_GATE PASS topology=DP8xTP8 optimizer=device-resident"
+echo "[P45.FROZENLAKE] CPU_GATE PASS topology=DP8xTP8 optimizer=device-resident checkpoint=every10/latest1"

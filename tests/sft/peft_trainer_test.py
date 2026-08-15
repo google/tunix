@@ -702,6 +702,15 @@ class PeftTrainerTest(parameterized.TestCase):
         any_order=False,
     )
 
+  def test_interval_only_policy_skips_forced_checkpoint_on_close(self):
+    trainer = object.__new__(peft_trainer.PeftTrainer)
+    trainer.checkpoint_manager = mock.MagicMock(save_on_close=False)
+
+    trainer._save_last_checkpoint()
+
+    trainer.checkpoint_manager.latest_step.assert_not_called()
+    trainer.checkpoint_manager.save.assert_not_called()
+
   def test_loss_fn_with_aux(self):
     def custom_loss_fn(
         model: nnx.Module,

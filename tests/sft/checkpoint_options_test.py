@@ -84,6 +84,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
     options.preservation_policy = None
     options.step_name_format = None
     options.enable_async_checkpointing = None
+    options.save_on_close = None
 
     opts = checkpoint_options.resolve_checkpointing_defaults(options)
     self.assertIsNotNone(opts.async_options)
@@ -97,6 +98,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         ),
         preservation_policy=ocp.training.preservation_policies.LatestN(10),
         enable_async_checkpointing=False,
+        save_on_close=False,
     )
     opts = checkpoint_options.resolve_checkpointing_defaults(
         modern_opts
@@ -108,6 +110,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         opts.preservation_policy, modern_opts.preservation_policy
     )
     self.assertFalse(opts.enable_async_checkpointing)
+    self.assertFalse(opts.save_on_close)
 
   def test_create_checkpointing_options(self):
     opts = checkpoint_options.create_checkpointing_options(
@@ -116,6 +119,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         ),
         preservation_policy=ocp.training.preservation_policies.LatestN(10),
         enable_async_checkpointing=False,
+        save_on_close=False,
     )
     self.assertIsInstance(opts, checkpoint_options.TunixCheckpointingOptions)
     self.assertEqual(
@@ -127,6 +131,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         ocp.training.preservation_policies.LatestN(10),
     )
     self.assertFalse(opts.enable_async_checkpointing)
+    self.assertFalse(opts.save_on_close)
 
 if __name__ == '__main__':
   absltest.main()

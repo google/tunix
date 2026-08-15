@@ -81,3 +81,14 @@
 - Termination: pod terminated at `Sat, 15 Aug 2026 06:03:58 UTC` with `Exit Code: 137 (OOMKilled)` on `jax-tpu` container.
 - Root Cause: Linux host memory cgroup limit `memory: 200G` exceeded due to multi-day accumulation of trajectory objects, JAX compilation cache, and logging buffers. TPU HBM remained fully healthy.
 - Recommendation: for future continuous multi-day runs, increase head pod memory limit to 350GiB+ and introduce periodic Python GC in the training step loop.
+
+## 2026-08-15 UTC — P45.3a checkpoint/resume locally admitted
+
+- Type: implementation and local validation
+- Fact: the FrozenLake recipe had checkpointing disabled, while vLLM was initialized before actor restore and the ordinary weight-sync API also advanced `global_steps`. Tunix additionally forced a final checkpoint on close, which could let an off-interval step evict the last valid boundary under one-checkpoint retention.
+- Action: added an isolated P45 GCS campaign contract with explicit `new`/`resume`, interval 10, `LatestN(1)`, exact source/config metadata, optimizer-restore detection, a no-step-advance resume sync plus exact engine-weight attestation, and interval-only close semantics. Updated the renderer/profile, tests, runbook and handoff.
+- Commands: pinned-image `canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`; pinned-image focused `pytest` for `checkpoint_options_test.py` and `checkpoint_manager_test.py`; host pure checkpoint/renderer tests; syntax and `git diff --check`.
+- Result: pinned P45 gate PASS with 97 workload/renderer tests, 37 alignment tests, merged checkpoint profile, seven TP8 sites and exact forward/VJP; Orbax option/manager tests PASS 29/29. No 64-chip job or GCS write occurred, so checkpoint HBM, latency, durability, retention and target restore remain pending.
+- Claim ceiling: this proves local wiring and fail-closed contracts only. Resume continues committed actor/Adam/global-step state; it does not restore in-flight rollout/environment state, vLLM RNG or W&B identity, and can replay up to nine updates.
+- Rollback: stop selecting the P45 renderer or revert the checkpoint CL; historical P33 DP16xTP4 remains checkpoint-disabled.
+- Next: launch `new` through step 10/11, verify exactly one durable `actor/10`, then explicitly relaunch `resume` from the same immutable source/tag and require step 11 commit.

@@ -1,0 +1,208 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Fail-closed checkpoint contract for the P45 FrozenLake carrier."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+import dataclasses
+import json
+import re
+from typing import Any
+
+
+GCS_ROOT = (
+    "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
+)
+SCHEMA = "p45-frozenlake-checkpoint-v1"
+_TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_ENV_KEYS = (
+    "CANON_FROZENLAKE_CKPT_ROOT",
+    "CANON_FROZENLAKE_CKPT_TAG",
+    "CANON_FROZENLAKE_CKPT_INTERVAL",
+    "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP",
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Config:
+  """Resolved P45 checkpoint configuration."""
+
+  mode: str
+  root: str = ""
+  tag: str = ""
+  interval: int = 0
+  max_to_keep: int = 0
+
+  @property
+  def enabled(self) -> bool:
+    return self.mode != "disabled"
+
+  @property
+  def directory(self) -> str | None:
+    if not self.enabled:
+      return None
+    return f"{self.root}/{self.tag}"
+
+
+def from_env(env: Mapping[str, str]) -> Config:
+  """Resolves the explicit checkpoint mode and rejects partial contracts."""
+  mode = env.get("CANON_FROZENLAKE_CKPT_MODE", "").strip() or "disabled"
+  if mode == "disabled":
+    residual = {key: env.get(key, "") for key in _ENV_KEYS if env.get(key, "")}
+    if residual:
+      raise ValueError(
+          "FrozenLake checkpoint fields require an explicit new/resume mode: "
+          f"{sorted(residual)}"
+      )
+    return Config(mode="disabled")
+  if mode not in ("new", "resume"):
+    raise ValueError(
+        "CANON_FROZENLAKE_CKPT_MODE must be disabled, new, or resume"
+    )
+
+  root = env.get("CANON_FROZENLAKE_CKPT_ROOT", "").rstrip("/")
+  tag = env.get("CANON_FROZENLAKE_CKPT_TAG", "")
+  if root != GCS_ROOT:
+    raise ValueError(
+        "FrozenLake checkpoint root drifted: "
+        f"expected {GCS_ROOT!r}, got {root!r}"
+    )
+  if not _TAG_RE.fullmatch(tag):
+    raise ValueError(
+        "FrozenLake checkpoint tag must be lowercase, Kubernetes-safe, and "
+        "at most 63 characters"
+    )
+  try:
+    interval = int(env.get("CANON_FROZENLAKE_CKPT_INTERVAL", ""))
+    max_to_keep = int(env.get("CANON_FROZENLAKE_CKPT_MAX_TO_KEEP", ""))
+  except ValueError as exc:
+    raise ValueError("FrozenLake checkpoint bounds must be integers") from exc
+  if interval != 10:
+    raise ValueError("P45 checkpoint interval must be exactly 10 updates")
+  if max_to_keep != 1:
+    raise ValueError("P45 checkpoint retention must be exactly one")
+  if env.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
+    raise ValueError("P45 checkpointing requires Pathways persistence")
+  return Config(
+      mode=mode,
+      root=root,
+      tag=tag,
+      interval=interval,
+      max_to_keep=max_to_keep,
+  )
+
+
+def require_p45(config: Config, env: Mapping[str, str]) -> None:
+  """Restricts the GCS contract to committed P45 DP8xTP8 full training."""
+  if not config.enabled:
+    raise ValueError("P45 full training requires checkpointing enabled")
+  required = {
+      "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+      "CANON_P33_RUN_STAGE": "full",
+      "CANON_P33_NO_COMMIT": "0",
+      "CANON_OPT_STATE_RESIDENT": "1",
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+  }
+  wrong = {
+      key: env.get(key, "")
+      for key, expected in required.items()
+      if env.get(key, "") != expected
+  }
+  if wrong:
+    raise ValueError(f"P45 checkpoint workload contract drifted: {wrong}")
+
+
+def build_contract(config: Config, values: Mapping[str, Any]) -> dict[str, Any]:
+  """Builds the exact metadata stored with every P45 actor checkpoint."""
+  if not config.enabled:
+    raise ValueError("cannot build a disabled checkpoint contract")
+  contract = {
+      "schema": SCHEMA,
+      "checkpoint_root": config.root,
+      "checkpoint_tag": config.tag,
+      "checkpoint_interval": config.interval,
+      "checkpoint_max_to_keep": config.max_to_keep,
+      **dict(values),
+  }
+  # Checkpoint custom metadata must remain portable JSON. Round-tripping also
+  # rejects arrays and other objects whose equality would be ambiguous.
+  return json.loads(json.dumps(contract, sort_keys=True))
+
+
+def contract_json(contract: Mapping[str, Any]) -> str:
+  return json.dumps(dict(contract), sort_keys=True, separators=(",", ":"))
+
+
+def validate_latest(config: Config, latest_step: int | None) -> None:
+  """Validates the durable prefix before allocating the model."""
+  if not config.enabled:
+    return
+  if config.mode == "new":
+    if latest_step is not None:
+      raise ValueError(
+          "new P45 campaign refuses an existing complete checkpoint: "
+          f"step={latest_step}"
+      )
+    return
+  if latest_step is None:
+    raise ValueError("P45 resume requires an existing complete checkpoint")
+  if latest_step <= 0 or latest_step % config.interval:
+    raise ValueError(
+        "P45 latest checkpoint is not a registered committed boundary: "
+        f"step={latest_step} interval={config.interval}"
+    )
+
+
+def validate_restored(
+    config: Config,
+    *,
+    restored_step: int,
+    optimizer_restored: bool,
+    metadata: Mapping[str, Any],
+    expected_contract: Mapping[str, Any],
+) -> None:
+  """Checks the post-restore actor, optimizer, step, and provenance contract."""
+  if not config.enabled:
+    return
+  if config.mode == "new":
+    if restored_step != 0 or metadata:
+      raise ValueError(
+          "new P45 campaign unexpectedly restored checkpoint state: "
+          f"step={restored_step} metadata={dict(metadata)}"
+      )
+    if optimizer_restored:
+      raise ValueError("new P45 campaign unexpectedly restored optimizer state")
+    return
+
+  if restored_step <= 0 or restored_step % config.interval:
+    raise ValueError(
+        "P45 restored step is not a registered checkpoint boundary: "
+        f"step={restored_step}"
+    )
+  if not optimizer_restored:
+    raise ValueError("P45 resume did not restore optimizer state")
+  if metadata.get("global_step") != restored_step:
+    raise ValueError(
+        "P45 restored global step mismatch: "
+        f"metadata={metadata.get('global_step')!r} restored={restored_step}"
+    )
+  if metadata.get("role") != "actor":
+    raise ValueError(
+        f"P45 checkpoint role mismatch: {metadata.get('role')!r}"
+    )
+  actual_contract = metadata.get("canon_resume_contract")
+  if actual_contract != dict(expected_contract):
+    raise ValueError("P45 checkpoint resume contract mismatch")
