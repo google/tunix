@@ -44,91 +44,6 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
-_UNSHARDED = ("<unsharded>",)
-_UNKNOWN = ("<unknown>",)
-
-
-def _placement_key(x) -> Tuple[Any, ...]:
-  """Comparable identity of the devices and spec behind an array.
-
-  Returns the exact device-id tuple rather than the rendered `[first..last]`
-  span used in logs: the span compares equal for different device sets (e.g.
-  (0, 3, 5, 7) and (0, 1, 6, 7) both render as `[0..7](4)`), which would let a
-  reshard that never crossed meshes pass the placement check. Never raises --
-  this runs inside a weight sync, so an unreadable sharding degrades to
-  `_UNKNOWN` rather than aborting the run.
-  """
-  arr = getattr(x, "value", x)
-  sharding = getattr(arr, "sharding", None)
-  if sharding is None:
-    return _UNSHARDED
-  mesh = getattr(sharding, "mesh", None)
-  try:
-    devices = (
-        np.asarray(mesh.devices).flatten().tolist()
-        if mesh is not None
-        else list(getattr(sharding, "device_set", ()))
-    )
-    ids = tuple(sorted(int(d.id) for d in devices))
-    spec = str(getattr(sharding, "spec", None))
-  except Exception:  # pylint: disable=broad-except
-    return _UNKNOWN
-  if not ids:
-    return _UNKNOWN
-  return (ids, spec)
-
-
-def _format_placement(key: Tuple[Any, ...]) -> str:
-  """Renders a `_placement_key` as a device-id span, for log messages."""
-  if len(key) == 1:
-    return cast(str, key[0])
-  ids, spec = key
-  return f"[{ids[0]}..{ids[-1]}]({len(ids)}) spec={spec}"
-
-
-def _log_reshard_placement(resharded_flat, spec_flat) -> None:
-  """Reports whether the reshard actually moved weights onto the target mesh.
-
-  Conversion legitimately produces trainer-mesh arrays; the reshard is what
-  crosses onto the rollout mesh. If a resharded array still reports the source
-  mesh here, the crossing silently did not happen and the rollout will later
-  execute against buffers its own client cannot address.
-  """
-  stale = []
-  unreadable = 0
-  for key, value in resharded_flat.items():
-    want = _placement_key(spec_flat[key])
-    got = _placement_key(value)
-    if want == _UNKNOWN or got == _UNKNOWN:
-      unreadable += 1
-    if want != got:
-      stale.append((
-          ".".join(map(str, key)),
-          _format_placement(got),
-          _format_placement(want),
-      ))
-  if stale:
-    logging.error(
-        "weight_sync_debug: %d/%d resharded params did NOT land on the target "
-        "sharding. First 10 (name, got, want): %s",
-        len(stale), len(resharded_flat), stale[:10],
-    )
-  else:
-    logging.info(
-        "weight_sync_debug: all %d resharded params match their target "
-        "sharding.", len(resharded_flat),
-    )
-  if unreadable:
-    # Two unreadable shardings compare equal, so these params are counted as
-    # matching above. Surface them rather than let the check report clean on
-    # params it could not actually inspect.
-    logging.warning(
-        "weight_sync_debug: could not read the sharding of %d/%d params; the "
-        "placement check does not cover them.",
-        unreadable, len(resharded_flat),
-    )
-
-
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -316,7 +231,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
 
     if debug:
-      _log_reshard_placement(resharded_flat, spec_flat)
+      utils.log_reshard_placement(resharded_flat, spec_flat)
 
     resharded = traverse_util.unflatten_dict(resharded_flat)
     if isinstance(state, nnx.State):
