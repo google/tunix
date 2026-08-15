@@ -44,12 +44,24 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
-def _placement(x) -> str:
-  """Device-id span behind an array, for weight-sync debugging."""
+_UNSHARDED = ("<unsharded>",)
+_UNKNOWN = ("<unknown>",)
+
+
+def _placement_key(x) -> Tuple[Any, ...]:
+  """Comparable identity of the devices and spec behind an array.
+
+  Returns the exact device-id tuple rather than the rendered `[first..last]`
+  span used in logs: the span compares equal for different device sets (e.g.
+  (0, 3, 5, 7) and (0, 1, 6, 7) both render as `[0..7](4)`), which would let a
+  reshard that never crossed meshes pass the placement check. Never raises --
+  this runs inside a weight sync, so an unreadable sharding degrades to
+  `_UNKNOWN` rather than aborting the run.
+  """
   arr = getattr(x, "value", x)
   sharding = getattr(arr, "sharding", None)
   if sharding is None:
-    return "<unsharded>"
+    return _UNSHARDED
   mesh = getattr(sharding, "mesh", None)
   try:
     devices = (
@@ -57,12 +69,21 @@ def _placement(x) -> str:
         if mesh is not None
         else list(getattr(sharding, "device_set", ()))
     )
-    ids = sorted(int(d.id) for d in devices)
+    ids = tuple(sorted(int(d.id) for d in devices))
+    spec = str(getattr(sharding, "spec", None))
   except Exception:  # pylint: disable=broad-except
-    return "<unknown>"
+    return _UNKNOWN
   if not ids:
-    return "<unknown>"
-  return f"[{ids[0]}..{ids[-1]}]({len(ids)}) spec={getattr(sharding, 'spec', None)}"
+    return _UNKNOWN
+  return (ids, spec)
+
+
+def _format_placement(key: Tuple[Any, ...]) -> str:
+  """Renders a `_placement_key` as a device-id span, for log messages."""
+  if len(key) == 1:
+    return cast(str, key[0])
+  ids, spec = key
+  return f"[{ids[0]}..{ids[-1]}]({len(ids)}) spec={spec}"
 
 
 def _log_reshard_placement(resharded_flat, spec_flat) -> None:
@@ -74,11 +95,18 @@ def _log_reshard_placement(resharded_flat, spec_flat) -> None:
   execute against buffers its own client cannot address.
   """
   stale = []
+  unreadable = 0
   for key, value in resharded_flat.items():
-    want = _placement(spec_flat[key])
-    got = _placement(value)
+    want = _placement_key(spec_flat[key])
+    got = _placement_key(value)
+    if want == _UNKNOWN or got == _UNKNOWN:
+      unreadable += 1
     if want != got:
-      stale.append((".".join(map(str, key)), got, want))
+      stale.append((
+          ".".join(map(str, key)),
+          _format_placement(got),
+          _format_placement(want),
+      ))
   if stale:
     logging.error(
         "weight_sync_debug: %d/%d resharded params did NOT land on the target "
@@ -89,6 +117,15 @@ def _log_reshard_placement(resharded_flat, spec_flat) -> None:
     logging.info(
         "weight_sync_debug: all %d resharded params match their target "
         "sharding.", len(resharded_flat),
+    )
+  if unreadable:
+    # Two unreadable shardings compare equal, so these params are counted as
+    # matching above. Surface them rather than let the check report clean on
+    # params it could not actually inspect.
+    logging.warning(
+        "weight_sync_debug: could not read the sharding of %d/%d params; the "
+        "placement check does not cover them.",
+        unreadable, len(resharded_flat),
     )
 
 
@@ -491,14 +528,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         # trainer-side concatenation miss `<|im_end|>` at every turn boundary
         # and produced 30+ nat sampler-trainer logp diffs.
 
-        out_tokens[idx].append(
-            np.array(single_output.token_ids, dtype=np.int32)
-        )
-        decoded_outputs[idx].append(
-            self.tokenizer.decode(single_output.token_ids)
-        )
+        # Snapshot once: vLLM types `token_ids` as `Sequence[int]` and does not
+        # always hand back a plain list, so every consumer below gets the same
+        # concrete, non-live copy.
+        token_ids = list(single_output.token_ids)
+        out_tokens[idx].append(np.array(token_ids, dtype=np.int32))
+        decoded_outputs[idx].append(self.tokenizer.decode(token_ids))
         logprobs = utils.get_logprobs_from_vllm_output(
-            list(single_output.token_ids), single_output.logprobs
+            token_ids, single_output.logprobs
         )
         out_logprobs[idx].append(logprobs)
         logging.debug(
